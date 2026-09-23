@@ -1760,8 +1760,11 @@ selection, never an implicit base-model fallback or a renewed source lease. Thes
 are local recovery, not publisher bans, semantic rogue-agent detection or network-wide erasure.
 The runtime compiles and its targeted tests pass, including interrupted-validation recovery and
 withdrawal during the broker's initial-base window. The new `agent-active-recovery` disposable
-scenario is being assembled to prove actual adoption, damage, rollback and continued useful
-work. Full B07 remains open.
+scenario follows actual P training, peer Q training from P and independent Q approval, then
+damages only the local Q extraction and requires restored P inference, restart and continued
+training. A signed catalog supplies the next source without changing the original enrollment;
+public-cache provisioning is explicitly fixture-owned, not autonomous learner discovery. The
+scenario still needs passing KVM evidence. Full B07 remains open.
 
 Network-wide quarantine/replacement follows the automatic decision protocol, with bounded
 evidence, expiry and re-evaluation. A peer cannot erase another user's files or repair their

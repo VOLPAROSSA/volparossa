@@ -846,8 +846,13 @@ than retried against retired bytes or reinterpreted against the restored model. 
 withdrawal also blocks the initial-base admission window before the next scheduled broker copy.
 The affected training-loop, snapshot and broker paths have 60 passing targeted Rust tests,
 including the two interrupted-validation checks and initial-base withdrawal check; scoped strict
-CLI Clippy passes. The new real-model `agent-active-recovery` disposable scenario is being built;
-automatic active recovery and full B07 are not yet claimed as live-proven.
+CLI Clippy passes. The new `agent-active-recovery` disposable scenario exercises real 135M
+training P, a distinct node's warm-started Q, independent Q-versus-P approval, corruption of only
+the local Q extraction, automatic restoration of original P, protected inference, restart and
+continued P-based training. Its signed source catalog admits the next training source only after
+recovery; the original enrollment, approvals, expiry and completed job receipts remain intact.
+Explicit same-owner public-cache provisioning is not autonomous learner source discovery. This
+new fixture still requires a passing KVM run: active recovery and full B07 are not live-proven.
 
 Public-document synthesis: `compute peer document --synthesize` chains
 real peer inference over the checked fragment answers until one answer remains. A separate

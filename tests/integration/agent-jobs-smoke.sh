@@ -78,7 +78,7 @@ agent_jobs_broker() {
         # Explicit owner opt-in; no other fixture advertises structured principle inference.
         set -- "$@" --principle-inference-v4
     fi
-    if [ "${agent_successor_serving:-no}" = yes ] && [ "$jobs_node" = "$provider_node_a" ]; then
+    if { [ "${agent_successor_serving:-no}" = yes ] || [ "${agent_active_recovery:-no}" = yes ]; } && [ "$jobs_node" = "$provider_node_a" ]; then
         install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$jobs_private/serving"
         set -- "$@" --serving-directory "$jobs_private/serving"
     fi
@@ -188,12 +188,22 @@ agent_jobs_stop() {
         wait "$jobs_batch_pid" || true
         jobs_batch_pid=
     fi
+    if [ "${agent_active_recovery:-no}" = yes ] && [ -n "${recovery_submit_pid:-}" ]; then
+        if kill -0 "$recovery_submit_pid" 2>/dev/null; then
+            kill -INT "$recovery_submit_pid" || return 1
+            wait "$recovery_submit_pid" || true
+        fi
+        recovery_submit_pid=
+    fi
     for jobs_stop_unit in ${jobs_units:-}; do
         agent_jobs_stop_unit "$jobs_stop_unit" || return 1
     done
     jobs_units=
     if [ "${agent_successor_serving:-no}" = yes ]; then
         python3 -B "$source_directory/tests/integration/agent-successor-serving-smoke.py" cleanup-workers "$WORK" || return 1
+    fi
+    if [ "${agent_active_recovery:-no}" = yes ]; then
+        agent_active_recovery_python cleanup-workers "$WORK" || return 1
     fi
     [ "$jobs_dag_pressure_cleanup_failed" = no ]
 }
@@ -266,6 +276,10 @@ agent_jobs_setup() {
 
 agent_jobs_run() {
     agent_jobs_setup
+    if [ "${agent_active_recovery:-no}" = yes ]; then
+        agent_active_recovery_run
+        return
+    fi
     if [ "${agent_policy_assessment:-no}" = yes ]; then
         agent_policy_assessment_run
         return
@@ -385,6 +399,10 @@ agent_jobs_finalize_report() {
         [ ! -f "$jobs_log" ] || [ -L "$jobs_log" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$jobs_log" "$output_directory/$(basename -- "$jobs_log")"
     done
+    if [ "${agent_active_recovery:-no}" = yes ]; then
+        agent_active_recovery_finalize_report "$jobs_status"
+        return
+    fi
     if [ "${agent_policy_assessment:-no}" = yes ]; then
         agent_policy_assessment_finalize_report "$jobs_status"
         return

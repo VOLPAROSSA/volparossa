@@ -59,6 +59,13 @@ for script in "$GUEST" "$HOST"; do
         | grep -Ei 'model.planning' >/dev/null; then exit 1; fi
     if "$script" --preview --scenario agent-task-graph --scenario agent-model-planning \
         | grep -Ei 'explicit public task graph|Agent-task-graph:' >/dev/null; then exit 1; fi
+    "$script" --preview --scenario agent-active-recovery | grep -Fi 'active-recovery' >/dev/null
+    if "$script" --preview --scenario agent-active-recovery --scenario agent-successor-serving \
+        | grep -Fi 'active-recovery' >/dev/null; then exit 1; fi
+    if "$script" --preview --scenario agent-successor-serving --scenario agent-active-recovery \
+        | grep -Fi 'successor-serving' >/dev/null; then exit 1; fi
+    if "$script" --preview --scenario agent-active-recovery --scenario agent-policy-assessment \
+        | grep -Fi 'active-recovery' >/dev/null; then exit 1; fi
     "$script" --preview --scenario agent-successor-serving | grep -Fi 'successor-serving' >/dev/null
     if "$script" --preview --scenario agent-successor-serving --scenario agent-public-collection \
         | grep -Fi 'successor-serving' >/dev/null; then exit 1; fi
@@ -152,7 +159,7 @@ grep -F '. "$source_directory/tests/integration/agent-task-graph-smoke.sh"' "$GU
 grep -F 'agent-task-graph-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py' "$GUEST" >/dev/null
 grep -F '[ "$scenario" != agent-task-graph ] || driver_time_bound=3600s' "$HOST" >/dev/null
 grep -F 'root.glob("agent-task-graph-*")' "$HOST" >/dev/null
-grep -F 'file_count_limit = 128 if scenario in ("agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-policy-assessment") else FILE_COUNT_LIMIT' "$HOST" >/dev/null
+grep -F 'file_count_limit = 128 if scenario in ("agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-policy-assessment") else FILE_COUNT_LIMIT' "$HOST" >/dev/null
 grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-task-graph'" "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/agent-task-graph-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/agent-task-graph-smoke.py self-test' "$WORKFLOW" >/dev/null
@@ -240,6 +247,49 @@ grep -F 'python3 -B tests/integration/agent-successor-serving-smoke.py report "$
 grep -F 'python3 -B tests/integration/agent-successor-serving-smoke.py self-test' "$WORKFLOW" >/dev/null
 grep -F 'agent_successor_serving_run' "$HERE/agent-jobs-smoke.sh" >/dev/null
 grep -F 'agent_successor_serving_finalize_report "$jobs_status"' "$HERE/agent-jobs-smoke.sh" >/dev/null
+grep -F 'agent-active-recovery) scenario=agent-jobs; agent_active_recovery=yes; wifi_link=no; uplink_link=no ;;' "$GUEST" >/dev/null
+grep -F '. "$source_directory/tests/integration/agent-active-recovery-smoke.sh"' "$GUEST" >/dev/null
+grep -F 'install -o root -g root -m 0555 "$source_directory/tests/integration/agent-active-recovery-smoke.py" "$WORK/bin/agent-active-recovery-smoke.py"' "$GUEST" >/dev/null
+grep -F '[ "$scenario" != agent-active-recovery ] || driver_time_bound=3600s' "$HOST" >/dev/null
+grep -F 'root.glob("agent-active-recovery-*")' "$HOST" >/dev/null
+grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-active-recovery'" "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-active-recovery-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-active-recovery-smoke.py self-test' "$WORKFLOW" >/dev/null
+grep -F 'agent_active_recovery_run' "$HERE/agent-jobs-smoke.sh" >/dev/null
+grep -F 'agent_active_recovery_finalize_report "$jobs_status"' "$HERE/agent-jobs-smoke.sh" >/dev/null
+"$HOST" --preview --scenario agent-active-recovery | grep -F 'Guest resources: 4 vCPUs, 4096 MiB RAM;' >/dev/null
+python3 -B - "$HERE" <<'PYTHON_ACTIVE_RECOVERY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+guest = (root / "kvm-alpha-topology.sh").read_text()
+host = (root / "run-alpha-topology-vm.sh").read_text()
+workflow = (root / "../../.github/workflows/alpha-topology.yml").resolve().read_text()
+assert guest.count("agent_active_recovery=no") == 2
+assert 'if { [ "$agent_successor_serving" = yes ] || [ "$agent_active_recovery" = yes ]; } && [ "$node" = relay4 ]; then' in guest
+assert 'if [ "$agent_active_recovery" = yes ] && [ "$node" = relay5 ]; then' in guest
+assert '''if [ "$agent_active_recovery" = yes ]; then
+    grep -Fx 'client: true' "$WORK/roles-relay5.txt" >/dev/null || fail RELAY5_CLIENT_ROLE_INVALID
+else
+    grep -Fx 'client: false' "$WORK/roles-relay5.txt" >/dev/null || fail RELAY5_CLIENT_ROLE_INVALID
+fi''' in guest
+fixture = (root / "agent-active-recovery-smoke.sh").read_text()
+assert '--cache "$recovery_source/catalog-$recovery_catalog_revision-cache"' in fixture
+assert '--min-revision "$recovery_cache_revision"' in fixture
+assert '"learner-catalog-$recovery_catalog_revision" "$recovery_catalog_revision"' in fixture
+for line in guest.splitlines():
+    if line.startswith('if [ "$agent_model_planning" = yes ]') or line.startswith('if [ "$agent_model_task_graph" = yes ]'):
+        assert "agent_active_recovery" not in line, "135M recovery must not stage 360M/decoder"
+for line in workflow.splitlines():
+    if "VOLPAROSSA_ALPHA_SCENARIO != 'agent-successor-serving'" in line:
+        assert "VOLPAROSSA_ALPHA_SCENARIO != 'agent-active-recovery'" in line
+    if 'test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-successor-serving' in line:
+        assert 'test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-active-recovery' in line
+for line in host.splitlines():
+    if "|agent-successor-serving|" in line:
+        assert "|agent-successor-serving|agent-active-recovery|" in line
+PYTHON_ACTIVE_RECOVERY
 grep -Fx '  workflow_dispatch:' "$WORKFLOW" >/dev/null
 grep -Fx '  pull_request:' "$WORKFLOW" >/dev/null
 grep -F 'github.event.pull_request.head.repo.full_name == github.repository' "$WORKFLOW" \
