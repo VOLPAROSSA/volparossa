@@ -139,17 +139,23 @@ pub(super) fn reserve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::SigningKey;
+    use rand_core::{OsRng, RngCore as _};
     use volparossa_policy::object::{ObjectDecision, ObjectOutcome, ObjectSubject};
 
-    fn proposal(revision: u64, nonce: u8) -> SignedObjectDecision {
+    fn nonce() -> [u8; 32] {
+        let mut bytes = [0; 32];
+        OsRng.fill_bytes(&mut bytes);
+        bytes
+    }
+
+    fn proposal() -> SignedObjectDecision {
         SignedObjectDecision::new(ObjectDecision {
             policy_hash: [1; 32],
             policy_version: 1,
-            decision_revision: revision,
+            decision_revision: 1,
             subject: ObjectSubject {
-                publisher_key: ed25519_dalek::SigningKey::from_bytes(&[2; 32])
-                    .verifying_key()
-                    .to_bytes(),
+                publisher_key: SigningKey::generate(&mut OsRng).verifying_key().to_bytes(),
                 manifest_id: [3; 32],
                 object_sha256: [4; 32],
             },
@@ -158,7 +164,7 @@ mod tests {
             outcome: ObjectOutcome::Undetermined,
             issued_at_ms: 1000,
             expires_at_ms: 2000,
-            nonce: [nonce; 32],
+            nonce: nonce(),
         })
         .unwrap()
     }
@@ -170,13 +176,22 @@ mod tests {
             authority_key: String::new(),
             records: vec![],
         };
-        state.record(&proposal(1, 1), 1500).unwrap();
-        state.record(&proposal(1, 1), 1500).unwrap();
+        let original = proposal();
+        state.record(&original, 1500).unwrap();
+        state.record(&original, 1500).unwrap();
         assert_eq!(state.records.len(), 1);
-        assert!(state.record(&proposal(1, 2), 1500).is_err());
-        state.record(&proposal(2, 2), 1500).unwrap();
-        assert!(state.record(&proposal(1, 1), 1500).is_err());
-        assert!(state.record(&proposal(2, 2), 2000).is_err());
+        let mut changed = original.body().clone();
+        changed.nonce = nonce();
+        assert!(
+            state
+                .record(&SignedObjectDecision::new(changed.clone()).unwrap(), 1500)
+                .is_err()
+        );
+        changed.decision_revision = 2;
+        let advanced = SignedObjectDecision::new(changed).unwrap();
+        state.record(&advanced, 1500).unwrap();
+        assert!(state.record(&original, 1500).is_err());
+        assert!(state.record(&advanced, 2000).is_err());
     }
 
     #[test]
@@ -185,12 +200,23 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let identity = root.path().join("authority.key");
-        let key = ed25519_dalek::SigningKey::from_bytes(&[8; 32]).verifying_key();
-        reserve(&identity, &key, &proposal(1, 1), 1500).unwrap();
-        reserve(&identity, &key, &proposal(1, 1), 1500).unwrap();
-        assert!(reserve(&identity, &key, &proposal(1, 2), 1500).is_err());
-        let different = ed25519_dalek::SigningKey::from_bytes(&[9; 32]).verifying_key();
-        assert!(reserve(&identity, &different, &proposal(1, 1), 1500).is_err());
+        let key = SigningKey::generate(&mut OsRng).verifying_key();
+        let original = proposal();
+        reserve(&identity, &key, &original, 1500).unwrap();
+        reserve(&identity, &key, &original, 1500).unwrap();
+        let mut changed = original.body().clone();
+        changed.nonce = nonce();
+        assert!(
+            reserve(
+                &identity,
+                &key,
+                &SignedObjectDecision::new(changed).unwrap(),
+                1500
+            )
+            .is_err()
+        );
+        let different = SigningKey::generate(&mut OsRng).verifying_key();
+        assert!(reserve(&identity, &different, &original, 1500).is_err());
     }
 
     #[test]
@@ -200,12 +226,15 @@ mod tests {
             authority_key: String::new(),
             records: vec![],
         };
-        state.record(&proposal(1, 1), 1500).unwrap();
-        let mut body = proposal(2, 2).body().clone();
+        let original = proposal();
+        state.record(&original, 1500).unwrap();
+        let mut body = original.body().clone();
+        body.decision_revision = 2;
+        body.nonce = nonce();
         body.expires_at_ms = 1700;
         state
             .record(&SignedObjectDecision::new(body).unwrap(), 1500)
             .unwrap();
-        assert!(state.record(&proposal(1, 1), 1800).is_err());
+        assert!(state.record(&original, 1800).is_err());
     }
 }
