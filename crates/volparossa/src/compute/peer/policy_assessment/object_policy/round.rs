@@ -32,13 +32,15 @@ use crate::{
 };
 
 #[derive(Clone, Debug)]
-struct Authority {
-    key: VerifyingKey,
-    publisher: VerifyingKey,
-    reply_name: String,
+pub(in crate::compute::peer::policy_assessment) struct Authority {
+    pub(in crate::compute::peer::policy_assessment) key: VerifyingKey,
+    pub(in crate::compute::peer::policy_assessment) publisher: VerifyingKey,
+    pub(in crate::compute::peer::policy_assessment) reply_name: String,
 }
 
-fn parse_authority(value: &str) -> Result<Authority, String> {
+pub(in crate::compute::peer::policy_assessment) fn parse_authority(
+    value: &str,
+) -> Result<Authority, String> {
     let mut fields = value.split(':');
     let key = parse_key(fields.next().ok_or("policy_round_authority_binding")?)?;
     let publisher = parse_key(fields.next().ok_or("policy_round_authority_binding")?)?;
@@ -57,39 +59,39 @@ fn parse_authority(value: &str) -> Result<Authority, String> {
 #[derive(Debug, Args)]
 pub(crate) struct Options {
     #[command(flatten)]
-    selection: Selection,
+    pub(in crate::compute::peer::policy_assessment) selection: Selection,
     /// `POLICY_KEY:TRANSPORT_PUBLISHER:REPLY_NAME`, selected separately from content discovery.
     #[arg(long, required=true, value_parser=parse_authority)]
-    authority: Vec<Authority>,
+    pub(in crate::compute::peer::policy_assessment) authority: Vec<Authority>,
     /// Only the original request and completed quorum are signed with this content identity.
     #[arg(long, value_parser=parse_key)]
-    publication_key: VerifyingKey,
+    pub(in crate::compute::peer::policy_assessment) publication_key: VerifyingKey,
     #[arg(long)]
-    identity: PathBuf,
+    pub(in crate::compute::peer::policy_assessment) identity: PathBuf,
     #[arg(long)]
-    passphrase_file: PathBuf,
+    pub(in crate::compute::peer::policy_assessment) passphrase_file: PathBuf,
     #[arg(long, value_parser=content::parse_content_name)]
-    request_name: String,
+    pub(in crate::compute::peer::policy_assessment) request_name: String,
     #[arg(long, value_parser=content::parse_content_name)]
-    publish_name: String,
+    pub(in crate::compute::peer::policy_assessment) publish_name: String,
     /// Optional explicit peers to retain the original final wrapper instead of local serving.
     #[arg(long, value_parser=parse_key)]
-    publication_provider_key: Vec<VerifyingKey>,
+    pub(in crate::compute::peer::policy_assessment) publication_provider_key: Vec<VerifyingKey>,
     #[arg(long, value_parser=clap::value_parser!(u64).range(1..))]
-    decision_revision: u64,
+    pub(in crate::compute::peer::policy_assessment) decision_revision: u64,
     #[arg(long)]
-    directory: PathBuf,
+    pub(in crate::compute::peer::policy_assessment) directory: PathBuf,
     /// Original finite round budget; resuming does not extend it or any signed expiry.
     #[arg(long, default_value_t=600, value_parser=clap::value_parser!(u16).range(1..=3600))]
-    max_seconds: u16,
+    pub(in crate::compute::peer::policy_assessment) max_seconds: u16,
     #[arg(long, default_value_t=5, value_parser=clap::value_parser!(u16).range(1..=3600))]
-    poll_seconds: u16,
+    pub(in crate::compute::peer::policy_assessment) poll_seconds: u16,
     #[arg(long)]
-    execute: bool,
+    pub(in crate::compute::peer::policy_assessment) execute: bool,
     #[arg(long, requires = "execute")]
-    resume: bool,
+    pub(in crate::compute::peer::policy_assessment) resume: bool,
     #[command(flatten)]
-    limits: content::Limits,
+    pub(in crate::compute::peer::policy_assessment) limits: content::Limits,
 }
 
 fn bindings(authorities: &[Authority]) -> Result<()> {
@@ -205,6 +207,14 @@ fn status(args: &Options, phase: &str, verified: usize) -> Result<()> {
 }
 
 pub(in crate::compute::peer) async fn run(args: &Options, socket: &Path) -> Result<()> {
+    println!("{}", run_value(args, socket).await?);
+    Ok(())
+}
+
+pub(in crate::compute::peer::policy_assessment) async fn run_value(
+    args: &Options,
+    socket: &Path,
+) -> Result<Value> {
     bindings(&args.authority)?;
     ensure!(
         args.publication_provider_key.len() <= 32
@@ -238,8 +248,7 @@ pub(in crate::compute::peer) async fn run(args: &Options, socket: &Path) -> Resu
         planned["assessment_started"] = false.into();
         planned["authority_private_keys_loaded"] = false.into();
         planned["selected_authorities"] = args.authority.len().into();
-        println!("{planned}");
-        return Ok(());
+        return Ok(planned);
     }
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;
@@ -280,8 +289,7 @@ pub(in crate::compute::peer) async fn run(args: &Options, socket: &Path) -> Resu
                         .context("policy_round_result_count")?,
                 )?,
             )?;
-            println!("{result}");
-            Ok(())
+            Ok(result)
         }
         Err(error) => {
             status(args, "incomplete_retained", 0)?;
@@ -582,8 +590,17 @@ async fn quorum(
     }
 }
 
+/// Reject an unusable locally configured quorum before a composing caller starts model work.
+/// No assessment file, private authority key or remote service is read here.
+pub(in crate::compute::peer::policy_assessment) fn preflight_authorities(
+    args: &Options,
+) -> Result<usize> {
+    bindings(&args.authority)?;
+    threshold(args, &policy_context(&args.selection, milliseconds()?)?)
+}
+
 async fn execute(args: &Options, socket: &Path) -> Result<Value> {
-    let required = threshold(args, &policy_context(&args.selection, milliseconds()?)?)?;
+    let required = preflight_authorities(args)?;
     status(args, "preparing_request", 0)?;
     propose_value(&Propose {
         selection: selection(args),

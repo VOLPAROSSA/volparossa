@@ -144,9 +144,7 @@ mod tests {
     use volparossa_policy::object::{ObjectDecision, ObjectOutcome, ObjectSubject};
 
     fn nonce() -> [u8; 32] {
-        let mut bytes = [0; 32];
-        OsRng.fill_bytes(&mut bytes);
-        bytes
+        std::array::from_fn(|_| OsRng.next_u32().to_le_bytes()[0])
     }
 
     fn proposal() -> SignedObjectDecision {
