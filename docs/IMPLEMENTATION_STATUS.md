@@ -7,8 +7,41 @@ Last updated: 2026-09-23
 The completed development milestone is integrated into `main` by
 [PR #150](https://github.com/VOLPAROSSA/volparossa/pull/150), merge `322c45b9`, after the
 unchanged normal Quality/CodeQL checks and source-exact provider/recovery audits passed.
-The new exact-object policy work below is a subsequent development candidate, not part of
-that merged checkpoint. Neither integration nor execution proves reliable model reasoning.
+The exact-object policy and explicit peer-distribution milestone is also integrated by
+[PR #151](https://github.com/VOLPAROSSA/volparossa/pull/151), normal merge `2761b9da`.
+The automatic-follow milestone is integrated by
+[PR #153](https://github.com/VOLPAROSSA/volparossa/pull/153), normal merge `54c382c0`.
+Neither integration nor execution proves reliable model reasoning.
+
+The next isolated integration candidate adds automatic public-copy maintenance with
+`content retain`. An owner enrolls one original public object, desired copies and a finite
+lifetime/upload budget, rather than hand-selecting every provider key. Protected discovery
+returns signed route-distinct service hints; fresh signed Inspect/Deposit exchanges establish
+observations. The controller can seek another holder after a loss while its owner runs.
+Every attempted upload reserves the full object budget durably. Resume preserves the original
+deadline and budget, and re-inspects known holders instead of counting historical receipts.
+Background discovery/transfers use configured quiet admission, per-chunk cooldown and
+foreground cancellation. No storage-capacity promise, owner-offline maintenance, global
+placement fairness or permanent availability is implied.
+
+The [original source-exact `2a431c1` trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35916493141)
+passes its unchanged checker over all 174 retained files: holders R5/R3 are selected without
+provider-key arguments, R5's actual service is stopped, and fresh original signed exchanges
+establish R3 plus replacement R4. After the publisher owner is reaped and its source removed,
+a fresh named download reconstructs 2,097,275 logical bytes from two providers with zero
+origin payload bytes. Deduplication accounts for the 1,048,699 unique peer bytes. Original
+expiry/window and cumulative upload reservations remain intact. All 52,559 captured privacy
+frames, complete cleanup and unchanged host state pass. The publisher application, not the
+whole Client node, was stopped; this does not establish owner-offline maintenance.
+
+This candidate ports only that custody slice onto `54c382c0`; it does not import the separate
+authority-round/cycle or later model work. It adds the small explicit identity-unlock helper
+and retains custody discovery's IPC tag 37 without occupying reserved tag 36. The original
+trial proves the original source, not this adapted candidate. Strict Clippy for the CLI,
+agent, content and local-control crates passes here, together with eight custody/storage,
+three custody-protocol, two background-admission and 48 CLI content tests. The seven retention
+and four custody fixture checks, scoped formatting and shell checks also pass. A fresh
+protected loss/replacement trial on the integration candidate remains pending.
 
 A new node-local policy candidate connects the original four signed assessment/review
 transcripts to `compute peer policy-propose`, `policy-endorse` and `policy-combine --execute --apply`.

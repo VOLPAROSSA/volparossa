@@ -86,8 +86,17 @@ the protected content route and obtains provider-signed observations only after 
 verification, durable journal admission and ready serving. Inspect revalidates stored bytes
 without uploading; restart does not renew the original expiry. The ordinary CLI preserves
 partial successes across independent providers. Local storage, typed-stream and real CLI-process
-tests pass; those duplex tests are not a protected-network acceptance result. Automatic holder
-selection, availability repair and general uptime remain outstanding. See the
+tests pass; those duplex tests are not a protected-network acceptance result. The separate
+`content retain` controller discovers eligible holders, requests fresh signed observations
+and places missing public copies without hand-picking provider keys. Its owner enrollment
+fixes the original object, desired copy count, lifetime and cumulative upload budget. It can
+replace an unavailable holder while that owner runs; restart preserves the budget/deadline
+and rechecks availability rather than counting old receipts. Transfers yield to foreground
+work through configured quiet admission and per-chunk budgets. The
+[original `2a431c1` loss/replacement trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35916493141)
+passes with a fresh named download after the publisher's owner process and source are removed.
+The isolated port onto `main` requires its own source-exact integration proof. This is not
+globally fair placement, owner-offline maintenance or guaranteed uptime. See the
 [development commands](OPERATIONS.md#depositing-a-public-copy-with-other-participants).
 
 ### Private messages and optional mail interoperability

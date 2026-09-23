@@ -286,6 +286,9 @@ def validate_path(phase, peers, layout, name, payload_minimum=UNIQUE_BYTES):
 
 
 def validate_evidence(evidence):
+    if evidence.get("automatic_provider_selection") is True:
+        runpy.run_path(str(Path(__file__).with_name("content-retain-smoke.py")))["validate_evidence"](evidence)
+        return
     publish, layout, peers = evidence["publish"], evidence["layout"], evidence["expected_peers"]
     nodes, keys = layout["provider_nodes"], layout["provider_keys"]
     require(evidence["success"] is True and len(nodes) == len(set(nodes)) == 2
@@ -378,6 +381,7 @@ def validate_report(report, revision):
             and report["phase"] == "content-custody-complete" and report["observed_blocker"] is None
             and report["cleanup"]["complete"] is True and report["cleanup"]["remaining_owned_objects"] == 0
             and report["host_state"]["unchanged"] is True
+            and report["custody"].get("automatic_provider_selection") is True
             and all(report[key] is False for key in ("independent_publisher_node_offline_claimed",
                 "future_availability_guaranteed", "full_alpha_acceptance_claimed")),
             "exact-source successful custody report or complete host cleanup unavailable")

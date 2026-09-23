@@ -16,7 +16,7 @@ use ed25519_dalek::SigningKey;
 use crate::{ChunkStore, SignedManifest, VerifiedManifest};
 
 pub use protocol::{CustodyAuthorization, CustodyChallenge, CustodyOperation, CustodyReceipt};
-pub use session::{begin, bridge, execute};
+pub use session::{begin, bridge, bridge_with_admission, execute};
 
 /// Additive selector version; no older protocol or direct socket fallback is implied.
 pub const SELECTOR_VERSION: u32 = 1;

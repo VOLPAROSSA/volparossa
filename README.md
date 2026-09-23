@@ -177,6 +177,9 @@ the diagram does not imply that every source must be contacted.*
   and opportunistically pick up other eligible chunks without taking over foreground resources.
 - **Public sites and files:** publish signed native objects and static sites; retained copies can
   serve requests after the original source disappears, while valid holders remain available.
+- **Keeping public copies available:** an enrolled publisher can automatically find holders,
+  check copies and replace a lost holder within its original lifetime and sharing budget.
+  The maintenance loop needs its owner online; existing copies can still serve without it.
 - **Offline messages:** known-contact mailboxes retain recipient-encrypted messages. Cache holders
   receive ciphertext, not the recipient's decryption key.
 - **Shared DNS:** reuse independently validated positive DNSSEC evidence, preserving original

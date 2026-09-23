@@ -787,7 +787,7 @@ if [ "$scenario" = content-repair ]; then
         || { printf '%s\n' 'content repair executable unavailable' >&2; exit 69; }
 fi
 if [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
-    for custody_fixture in content-custody-smoke.sh content-custody-smoke.py \
+    for custody_fixture in content-custody-smoke.sh content-custody-smoke.py content-retain-smoke.py \
         content-provider-smoke.sh content-provider-smoke.py content-provider-https-smoke.py content-network-smoke.py; do
         if [ ! -f "$source_directory/tests/integration/$custody_fixture" ] \
             || [ -L "$source_directory/tests/integration/$custody_fixture" ]; then
@@ -795,7 +795,7 @@ if [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$
             exit 69
         fi
     done
-    for custody_tool in head base64; do
+    for custody_tool in head base64 openssl; do
         command -v "$custody_tool" >/dev/null 2>&1 || exit 69
     done
 fi
@@ -1855,7 +1855,7 @@ cleanup() {
         done
     fi
     for cleanup_unit in $AGENT_UNITS; do retire_unit "$cleanup_unit" || true; done
-    if [ "$scenario" = content-provider ] \
+    if { [ "$scenario" = content-provider ] || [ "$scenario" = content-custody ]; } \
         && ip netns exec "$CLIENT" nft list table inet vpa_content_adaptive_client_control >/dev/null 2>&1; then
         ip netns exec "$CLIENT" nft delete table inet vpa_content_adaptive_client_control || original_status=1
     fi
@@ -2380,7 +2380,7 @@ if [ "$scenario" = content-https ] || [ "$scenario" = content-provider ]; then
         "$WORK/bin/examples/https-content-acceptance-fixture"
 fi
 if [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
-    for custody_script in content-custody-smoke.py content-provider-smoke.py content-provider-https-smoke.py content-network-smoke.py; do
+    for custody_script in content-custody-smoke.py content-retain-smoke.py content-provider-smoke.py content-provider-https-smoke.py content-network-smoke.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$custody_script" "$WORK/bin/$custody_script"
     done
 fi
@@ -2651,7 +2651,7 @@ for forbidden in 10.241.20.2 10.241.21.2 10.241.22.2 10.241.23.2 \
     fi
 done
 CLIENT_EXIT_ROUTE_ABSENT=true
-if [ "$scenario" = content-provider ]; then
+if [ "$scenario" = content-provider ] || [ "$scenario" = content-custody ]; then
     # Fixture reachability, not selection injection: the original actor starts with this
     # network already in place. Providers remain reachable via the Exit and actual broker.
     ip netns exec "$CLIENT" nft -f - <<'CONTENT_ADAPTIVE_FILTER'
@@ -5498,6 +5498,8 @@ start_privacy_observers() {
             [ "$scenario" = content-mailbox ] || return 1 ;;
         content-custody-deposit-privacy|content-custody-inspect-privacy|content-custody-fetch-privacy)
             [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ] || return 1 ;;
+        content-custody-initial-privacy|content-custody-replacement-privacy)
+            [ "$scenario" = content-custody ] || return 1 ;;
         content-custody-executor-discovery-privacy)
             [ "$scenario" = agent-jobs ] && [ "$agent_public_document" = yes ] || return 1 ;;
         content-custody-peer-initial-privacy|content-custody-peer-replacement-privacy)
