@@ -65,6 +65,7 @@ fn local(state: &mut State, sequence: u64, phase: Phase) {
         snapshot: None,
         training: None,
         publication: None,
+        retirement: None,
         next_publication_attempt: 0,
     });
     state.next_sequence = sequence + 1;
@@ -298,4 +299,49 @@ fn drain_waits_for_both_kinds_and_preserves_expired_terminal_outcome() {
     assert_eq!(super::super::settled(&state), None);
     state.cycles[0].phase = Phase::Complete;
     assert_eq!(super::super::settled(&state), Some(DrainOutcome::Expired));
+}
+
+#[tokio::test]
+async fn retired_targets_never_publish_or_recycle_their_assigned_revisions() {
+    let (_temporary, args, store, mut state, _enrollment) = setup();
+    aggregate(&mut state, 1, "pending");
+    local(&mut state, 1, Phase::PublishPending);
+    let before = assign(&args, &store, &mut state).unwrap();
+    assert_eq!(before, [(Target::Aggregate(1), 17), (Target::Local(1), 18)]);
+    // This deliberately inert marker tests queue exclusion only. It cannot pass
+    // retirement's separate original-approval/snapshot verifier.
+    let marker = json!({"version":1,"scope":"inert-queue-filter-not-approval",
+        "observed_at":1,"original_snapshot_sha256":"a".repeat(64),
+        "observed_adapter_files":{},"restored_origin":{},"restored_expires":2});
+    let mut encoded = serde_json::to_value(&state).unwrap();
+    encoded["aggregate_updates"]["rounds"][0]["retirement"] = marker.clone();
+    let mut local_marker = marker;
+    local_marker["sequence"] = 1.into();
+    encoded["cycles"][0]["retirement"] = local_marker;
+    state = serde_json::from_value(encoded).unwrap();
+    assert_eq!(assign(&args, &store, &mut state).unwrap(), before);
+    assert_eq!(super::super::settled(&state), Some(DrainOutcome::Retired));
+    let (_activity, receiver) = watch::channel(true);
+    // No identity, model or socket exists: either handoff would be an error.
+    pending(
+        &args,
+        Path::new("/absent-retired-fixture.sock"),
+        &store,
+        &mut state,
+        &receiver,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(assign(&args, &store, &mut state).unwrap(), before);
+    local(&mut state, 2, Phase::Trained);
+    assert_eq!(
+        assign(&args, &store, &mut state).unwrap(),
+        [
+            (Target::Aggregate(1), 17),
+            (Target::Local(1), 18),
+            (Target::Local(2), 19)
+        ]
+    );
+    no_signing_or_worker_files(&args);
 }

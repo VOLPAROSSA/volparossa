@@ -76,7 +76,9 @@ fn assign(args: &Options, store: &Store, state: &mut State) -> Result<Vec<(Targe
         }
     }
     for cycle in &state.cycles {
-        if matches!(cycle.phase, Phase::Trained | Phase::PublishPending) {
+        if cycle.retirement.is_none()
+            && matches!(cycle.phase, Phase::Trained | Phase::PublishPending)
+        {
             order.allocate(Target::Local(cycle.sequence))?;
         }
     }
@@ -145,7 +147,10 @@ async fn local(
         .position(|cycle| cycle.sequence == sequence)
         .context("train_publication_order_local_missing")?;
     let cycle = &mut state.cycles[index];
-    if !matches!(cycle.phase, Phase::Trained | Phase::PublishPending) {
+    // A retired target keeps its already allocated revision forever until normal
+    // bounded pruning. Never hand it off again or recycle that revision.
+    if cycle.retirement.is_some() || !matches!(cycle.phase, Phase::Trained | Phase::PublishPending)
+    {
         return Ok(true);
     }
     if !retry_due(cycle, store, now()?)? {

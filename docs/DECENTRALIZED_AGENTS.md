@@ -199,8 +199,14 @@ client-address reason, but omits Route B's violation and the requested performan
 The overall trial fails because its observer rejected the address-space row; the original row
 was not retained, so that run does not prove the actual 10-GiB limit. The observer now accepts
 kernel column padding while retaining original limits and exact PID/start-time identity;
-the numerical requirement is unchanged. A complete execution and generally useful reasoning
-remain unproved. Original source, question and answer remain distinct from quality claims.
+the numerical requirement is unchanged. The subsequent
+[single-worker trial on `3d57f418`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35883858055)
+passes full execution, raw 10-GiB soft/hard limit, isolation and cleanup checks. It produces
+190 EOS tokens in 83.956 seconds with 4,073,488,384 bytes supervisor-observed peak RSS.
+The answer names the missing performance measurements but then repeatedly treats exposure of
+the client's public address to the exit as a capability to investigate, contradicting the
+privacy requirement. Generally useful reasoning remains unproved. Original source, question
+and answer remain distinct from quality claims.
 
 New public answers and source-grounded synthesis now use the explicit
 `public-source-parts-v1` instruction: address every requested part, treat supplied text as
@@ -748,11 +754,20 @@ it and inherits the original authority expiry; fresh training data cannot renew 
 The same three manifest IDs are processed once, not on every poll. Revision rollback and
 same-revision equivocation are refused. A completed result can be reopened after restart;
 an interrupted incomplete round is retained as failed rather than silently rerunning the model.
-The journal retains at most eight rounds and protects the active round and pending publications
-from reclamation.
-Expired selections are no longer used; ambiguous/corrupted retained evidence fails closed,
-not as an accusation or automatic ban of the three publishers. Automatic rollback after
-aggregate corruption remains to extend beyond the existing individual-peer recovery path.
+The journal retains at most eight rounds and protects the active round, its direct approved
+predecessor, the selected local successor's aggregate baseline and pending publications from
+reclamation. Expired selections are no longer used.
+
+The integrity-recovery candidate also covers combined adapters and approved local successors.
+Only proven changes confined to the three extracted adapter files qualify: original bundles,
+cohort and approval receipts must still match. The old serving selection is withdrawn before
+returning to its exact still-approved, unexpired predecessor; no valid predecessor means no
+base-model fallback. Interrupted comparisons against the retired version are not reinterpreted.
+Original authority deadlines and training counters remain unchanged; retired versions cannot
+retry publication or recycle an allocated revision. Ambiguous evidence still fails closed,
+not as an accusation or automatic ban of publishers. Focused tests cover inert local rollback,
+withdrawal and historical validation, but real aggregate/successor recovery remains to be
+proved in the disposable VM.
 
 This opt-in mode is mutually exclusive with `--peer-updates`; resume cannot grant an old
 enrollment new publishers or adoption authority. Add the existing `--publish-name`,

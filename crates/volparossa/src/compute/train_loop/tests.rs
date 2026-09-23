@@ -153,9 +153,32 @@ fn add_cycle(store: &Store, state: &mut State, sequence: u64, phase: Phase) {
         training: None,
         publication: (phase == Phase::PublishPending)
             .then(|| json!({"opaque_publication_fixture":true})),
+        retirement: None,
         next_publication_attempt: 0,
     });
     state.next_sequence = sequence + 1;
+}
+
+#[test]
+fn retired_local_selection_cannot_fall_back_to_base_after_restored_aggregate_expires() {
+    let (_root, args) = fixture();
+    let (plan, enrollment) = enrollment(&args).unwrap();
+    let store = Store::open(&args.directory, &enrollment, false).unwrap();
+    let mut state = State::new(plan.sources.len());
+    assert_eq!(
+        current_adapter(&args, &store, &state).unwrap().origin["kind"],
+        "pinned_base"
+    );
+    state.completed = 1;
+    state.promoted = 1;
+    state.next_sequence = 2;
+    let failure = current_adapter(&args, &store, &state).err().unwrap();
+    assert_eq!(
+        failure.to_string(),
+        "train_loop_restored_authority_unavailable"
+    );
+    // Historical counters alone cannot authorize an absent local selection.
+    assert!(recover(&store, &mut state, plan.sources.len()).is_err());
 }
 
 #[test]
@@ -352,6 +375,7 @@ fn completed_training_survives_pending_evaluation_and_saved_decision_without_ret
         snapshot: None,
         training: Some(store.snapshot_training(1).unwrap()),
         publication: None,
+        retirement: None,
         next_publication_attempt: 0,
     });
     // The decision was saved immediately before interruption; recovery must
@@ -576,6 +600,7 @@ fn rejected_successor_preserves_latest_and_never_enters_publication_before_recla
             snapshot: None,
             training: None,
             publication: None,
+            retirement: None,
             next_publication_attempt: 0,
         });
         state.next_sequence = sequence + 1;

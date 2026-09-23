@@ -157,6 +157,24 @@ pub(super) fn verify(store: &Store, sequence: u64) -> Result<Record> {
     Ok(actual)
 }
 
+/// Historical integrity recovery only: reconstruct the three original extraction
+/// files from the unchanged canonical bundle, never repair them on disk or rerun a worker.
+pub(super) fn verify_original(
+    store: &Store,
+    sequence: u64,
+    snapshot: &super::Snapshot,
+) -> Result<Record> {
+    let saved: Record =
+        serde_json::from_value(store.read_cycle_json(sequence, "evaluation.json")?)?;
+    let evidence = Evidence::load_original(store, sequence, snapshot)?;
+    let actual = recompute_evidence(store, sequence, saved.predecessor, evidence, Some(snapshot))?;
+    ensure!(
+        saved == actual,
+        "train_evaluation_original_checkpoint_changed"
+    );
+    Ok(actual)
+}
+
 struct Evidence {
     bytes: BTreeMap<String, Vec<u8>>,
     files: Identities,
@@ -306,6 +324,37 @@ impl Evidence {
         }
         Ok(Self { bytes, files })
     }
+    fn load_original(store: &Store, sequence: u64, snapshot: &super::Snapshot) -> Result<Self> {
+        let root = store.cycle_path(sequence)?;
+        let bundle_bytes = read_file(&root.join("adapter.bundle"), 4 * 1024 * 1024)?;
+        ensure!(
+            snapshot.get("adapter.bundle") == Some(&identity(&bundle_bytes)),
+            "train_evaluation_original_bundle_changed"
+        );
+        let bundle = AdapterBundle::decode(bundle_bytes)?;
+        let mut bytes = BTreeMap::new();
+        let mut files = Identities::new();
+        for (name, limit) in FILES {
+            let raw = match name {
+                "training/adapter/README.md" => bundle.readme().to_vec(),
+                "training/adapter/adapter_config.json" => bundle.config().to_vec(),
+                "training/adapter/adapter_model.safetensors" => bundle.weights().to_vec(),
+                _ => {
+                    let path = root.join(name);
+                    private_directory(path.parent().context("train_evaluation_parent")?)?;
+                    read_file(&path, limit)?
+                }
+            };
+            let actual = identity(&raw);
+            ensure!(
+                !raw.is_empty() && snapshot.get(name) == Some(&actual),
+                "train_evaluation_original_file_changed"
+            );
+            files.insert(name.into(), actual);
+            bytes.insert(name.into(), raw);
+        }
+        Ok(Self { bytes, files })
+    }
     fn json(&self, name: &str) -> Result<Value> {
         Ok(serde_json::from_slice(&self.bytes[name])?)
     }
@@ -316,11 +365,30 @@ impl Evidence {
     reason = "Recompute one complete original cycle approval without changing its lineage"
 )]
 fn recompute(store: &Store, sequence: u64, predecessor: Option<u64>) -> Result<Record> {
+    recompute_evidence(
+        store,
+        sequence,
+        predecessor,
+        Evidence::load(store, sequence)?,
+        None,
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "Same full approval check for live or original bundle-backed files"
+)]
+fn recompute_evidence(
+    store: &Store,
+    sequence: u64,
+    predecessor: Option<u64>,
+    evidence: Evidence,
+    original: Option<&super::Snapshot>,
+) -> Result<Record> {
     ensure!(
         sequence > 0 && predecessor.is_none_or(|p| p > 0 && p < sequence),
         "train_evaluation_lineage"
     );
-    let evidence = Evidence::load(store, sequence)?;
     let report = evidence.json("training-report.json")?;
     let result = evidence.json("result.json")?;
     let selection = evidence.json("selection.json")?;
@@ -368,7 +436,11 @@ fn recompute(store: &Store, sequence: u64, predecessor: Option<u64>) -> Result<R
         .join("validation.json")
         .try_exists()?
     {
-        Some(super::validation::verify(store, sequence)?)
+        Some(if let Some(original) = original {
+            super::validation::verify_original(store, sequence, original)?
+        } else {
+            super::validation::verify(store, sequence)?
+        })
     } else {
         None
     };

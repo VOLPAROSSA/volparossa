@@ -354,7 +354,28 @@ pub(super) fn verify(store: &Store, sequence: u64) -> Result<Record> {
     Ok(actual)
 }
 
+/// Only the historical evaluator may substitute bundle-verified extraction identities.
+pub(super) fn verify_original(
+    store: &Store,
+    sequence: u64,
+    original: &super::Snapshot,
+) -> Result<Record> {
+    let saved: Record =
+        serde_json::from_value(store.read_cycle_json(sequence, "validation.json")?)?;
+    let actual = recompute_original(store, sequence, Some(original))?;
+    ensure!(saved == actual, "train_validation_original_record_changed");
+    Ok(actual)
+}
+
 fn recompute(store: &Store, sequence: u64) -> Result<Record> {
+    recompute_original(store, sequence, None)
+}
+
+fn recompute_original(
+    store: &Store,
+    sequence: u64,
+    original: Option<&super::Snapshot>,
+) -> Result<Record> {
     ensure!(sequence > 0, "train_validation_sequence");
     let cycle = store.cycle_path(sequence)?;
     let input = load_input(&cycle.join("validation"))?;
@@ -365,8 +386,8 @@ fn recompute(store: &Store, sequence: u64) -> Result<Record> {
             && result["dataset_sha256"] != input.provenance.dataset.sha256,
         "train_validation_training_source_reused"
     );
-    let baseline = check_stage(&cycle, &input, training_expires, "baseline")?;
-    let candidate = check_stage(&cycle, &input, training_expires, "candidate")?;
+    let baseline = check_stage_original(&cycle, &input, training_expires, "baseline", original)?;
+    let candidate = check_stage_original(&cycle, &input, training_expires, "candidate", original)?;
     let old = metric(&baseline.report["baseline_evaluation"])?;
     let new = metric(&candidate.report["baseline_evaluation"])?;
     ensure!(
@@ -399,7 +420,13 @@ fn recompute(store: &Store, sequence: u64) -> Result<Record> {
         let path = format!("training/adapter/{name}");
         files.insert(
             path.clone(),
-            identity(&read_owned(&cycle.join(path), limit)?),
+            match original {
+                Some(original) => original
+                    .get(&path)
+                    .context("train_validation_original_adapter_missing")?
+                    .clone(),
+                None => identity(&read_owned(&cycle.join(path), limit)?),
+            },
         );
     }
     Ok(Record {
@@ -429,11 +456,21 @@ fn check_stage(
     training_expires: u64,
     name: &str,
 ) -> Result<Stage> {
+    check_stage_original(cycle, input, training_expires, name, None)
+}
+
+fn check_stage_original(
+    cycle: &Path,
+    input: &PublicInput,
+    training_expires: u64,
+    name: &str,
+    original: Option<&super::Snapshot>,
+) -> Result<Stage> {
     let stage: Stage = serde_json::from_slice(&read_owned(
         &cycle.join(format!("{name}-report.json")),
         64 * 1024,
     )?)?;
-    validate_stage(&stage, cycle, input, training_expires, name)?;
+    validate_stage_original(&stage, cycle, input, training_expires, name, original)?;
     Ok(stage)
 }
 
@@ -443,6 +480,17 @@ fn validate_stage(
     input: &PublicInput,
     training_expires: u64,
     name: &str,
+) -> Result<()> {
+    validate_stage_original(stage, cycle, input, training_expires, name, None)
+}
+
+fn validate_stage_original(
+    stage: &Stage,
+    cycle: &Path,
+    input: &PublicInput,
+    training_expires: u64,
+    name: &str,
+    original: Option<&super::Snapshot>,
 ) -> Result<()> {
     ensure!(
         matches!(name, "baseline" | "candidate"),
@@ -508,10 +556,15 @@ fn validate_stage(
         "train_validation_report_binding"
     );
     metric(&report["baseline_evaluation"])?;
-    validate_adapter(cycle, report, name)
+    validate_adapter(cycle, report, name, original)
 }
 
-fn validate_adapter(cycle: &Path, report: &Value, name: &str) -> Result<()> {
+fn validate_adapter(
+    cycle: &Path,
+    report: &Value,
+    name: &str,
+    original: Option<&super::Snapshot>,
+) -> Result<()> {
     let training: Value =
         serde_json::from_slice(&read_owned(&cycle.join("training-report.json"), 32 * 1024)?)?;
     let selected: Value =
@@ -553,10 +606,16 @@ fn validate_adapter(cycle: &Path, report: &Value, name: &str) -> Result<()> {
             .map(|(file, limit)| {
                 Ok((
                     file.into(),
-                    identity(&read_owned(
-                        &cycle.join("training/adapter").join(file),
-                        limit,
-                    )?),
+                    match original {
+                        Some(original) => original
+                            .get(&format!("training/adapter/{file}"))
+                            .context("train_validation_original_adapter_missing")?
+                            .clone(),
+                        None => identity(&read_owned(
+                            &cycle.join("training/adapter").join(file),
+                            limit,
+                        )?),
+                    },
                 ))
             })
             .collect::<Result<_>>()?;

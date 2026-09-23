@@ -25,6 +25,8 @@ const MAX_TREE_BYTES: u64 = 48 * 1024 * 1024;
 const MAX_ENTRIES: usize = 256;
 
 pub(super) mod publication;
+mod retirement;
+pub(super) use retirement::recover_active;
 
 #[cfg(test)]
 #[path = "aggregate_updates/tests.rs"]
@@ -93,6 +95,8 @@ struct Round {
     snapshot: Option<Snapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     publication: Option<publication::Record>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retirement: Option<retirement::Record>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -114,6 +118,44 @@ pub(super) fn active_sequence(registry: &Registry) -> Option<u64> {
 }
 pub(super) fn clear_active(registry: &mut Registry) {
     registry.active = None;
+}
+
+/// The owner-local predecessor of the active aggregate remains available for rollback.
+pub(super) fn pinned_local_predecessor(registry: &Registry) -> Option<u64> {
+    let round = registry
+        .rounds
+        .iter()
+        .find(|round| Some(round.sequence) == registry.active)?;
+    (round.retirement.is_none() && round.baseline_origin["kind"] == "local_cycle")
+        .then(|| round.baseline_origin["sequence"].as_u64())
+        .flatten()
+}
+
+pub(super) fn select_for_recovery(registry: &mut Registry, sequence: u64) -> Result<()> {
+    ensure!(
+        registry
+            .rounds
+            .iter()
+            .any(|round| round.sequence == sequence
+                && round.phase == Phase::Approved
+                && round.retirement.is_none()),
+        "aggregate_updates_recovery_selection"
+    );
+    registry.active = Some(sequence);
+    Ok(())
+}
+
+/// Retain an interrupted attempt whose original local baseline was withdrawn.
+pub(super) fn invalidate_local_baseline(
+    args: &Options,
+    registry: &mut Registry,
+    sequence: u64,
+) -> Result<()> {
+    retirement::invalidate_pending(
+        args,
+        registry,
+        &json!({"kind":"local_cycle","sequence":sequence}),
+    )
 }
 
 pub(super) fn retained_sequences(registry: &Registry) -> impl Iterator<Item = u64> + '_ {
@@ -155,7 +197,8 @@ fn validate(registry: &Registry, selection: &Value) -> Result<()> {
                 && sequences.insert(round.sequence)
                 && round.expires > round.observed_at
                 && (round.phase == Phase::Running || round.snapshot.is_some())
-                && (round.phase != Phase::Approved || round.approval.is_some()),
+                && (round.phase != Phase::Approved || round.approval.is_some())
+                && (round.retirement.is_none() || round.phase == Phase::Approved),
             "aggregate_updates_round"
         );
         if round.phase == Phase::Running {
@@ -186,10 +229,9 @@ fn validate(registry: &Registry, selection: &Value) -> Result<()> {
     }
     if let Some(sequence) = registry.active {
         ensure!(
-            registry
-                .rounds
-                .iter()
-                .any(|r| r.sequence == sequence && r.phase == Phase::Approved),
+            registry.rounds.iter().any(|r| r.sequence == sequence
+                && r.phase == Phase::Approved
+                && r.retirement.is_none()),
             "aggregate_updates_active_round"
         );
     }
@@ -235,6 +277,10 @@ pub(super) fn restore(
     }
     registry.garbage.clear();
     for round in &registry.rounds {
+        if round.retirement.is_some() {
+            retirement::verify(args, &registry, round)?;
+            continue;
+        }
         if let Some(expected) = &round.snapshot {
             ensure!(
                 &snapshot(&root(args, round.sequence)?)? == expected,
@@ -295,6 +341,29 @@ pub(super) fn active(
     if round.local_predecessor != local || now()? >= round.expires {
         return Ok(None);
     }
+    Ok(Some(selected_for_sequence(
+        args, registry, sequence, local,
+    )?))
+}
+
+/// Reopen exactly one retained original approval for a locally verified rollback.
+pub(super) fn selected_for_sequence(
+    args: &Options,
+    registry: &Registry,
+    sequence: u64,
+    local_predecessor: Option<u64>,
+) -> Result<CurrentAdapter> {
+    let round = registry
+        .rounds
+        .iter()
+        .find(|round| round.sequence == sequence)
+        .context("aggregate_updates_recovery_missing")?;
+    ensure!(
+        round.local_predecessor == local_predecessor
+            && now()? < round.expires
+            && round.retirement.is_none(),
+        "aggregate_updates_recovery_authority"
+    );
     let directory = root(args, sequence)?;
     ensure!(
         round.phase == Phase::Approved && round.snapshot.as_ref() == Some(&snapshot(&directory)?),
@@ -312,11 +381,11 @@ pub(super) fn active(
         "comparison_sha256":approved.identity["comparison_sha256"],
         "result_sha256":approved.identity["result_sha256"],
         "adapter_files":approved.identity["adapter_files"],"expires_unix_seconds":round.expires});
-    Ok(Some(CurrentAdapter {
+    Ok(CurrentAdapter {
         adapter_root: Some(directory.join("candidate/import/adapter")),
         authority_expires: Some(round.expires),
         origin,
-    }))
+    })
 }
 
 pub(super) fn serving_candidate(
@@ -413,6 +482,7 @@ pub(super) async fn tick(
         approval: None,
         snapshot: None,
         publication: None,
+        retirement: None,
     });
     checkpoint(&registry, store, state)?;
     // Do not drop a running worker future. Its existing supervisor must reap on cancellation.
@@ -518,13 +588,15 @@ fn make_room(
     if registry.rounds.len() < RETAINED {
         return Ok(true);
     }
+    let pinned = retirement::pinned_sequences(registry, store, state.latest)?;
     let Some(index) = registry.rounds.iter().position(|round| {
-        Some(round.sequence) != registry.active
+        !pinned.contains(&round.sequence)
             && round.phase != Phase::Running
-            && round
-                .publication
-                .as_ref()
-                .is_none_or(publication::Record::settled)
+            && (round.retirement.is_some()
+                || round
+                    .publication
+                    .as_ref()
+                    .is_none_or(publication::Record::settled))
     }) else {
         return Ok(false);
     };
@@ -796,6 +868,7 @@ mod tests {
                 approval: None,
                 snapshot: None,
                 publication: None,
+                retirement: None,
             }],
         };
         validate(&registry, &selection).unwrap();

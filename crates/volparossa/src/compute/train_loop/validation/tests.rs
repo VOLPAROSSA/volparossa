@@ -185,6 +185,38 @@ fn signed_second_source_and_exact_inference_receipts_survive_store_reopen() {
     assert!(verify(&reopened, 1).is_err());
 }
 
+#[test]
+fn original_bundle_identities_preserve_second_source_approval_without_reusing_damaged_files() {
+    let (_root, args, store) = owner();
+    super::super::evaluation::fixture(&store, 1, true);
+    let cycle = store.cycle_path(1).unwrap();
+    let input = source_fixture(&cycle.join("validation"));
+    stage_fixture(&cycle, &input, "baseline", 2.0);
+    stage_fixture(&cycle, &input, "candidate", 1.5);
+    let record = recompute(&store, 1).unwrap();
+    store
+        .write_cycle_json(
+            1,
+            "validation.json",
+            &serde_json::to_value(&record).unwrap(),
+        )
+        .unwrap();
+    let original = store.snapshot_cycle(1).unwrap();
+    fs::write(
+        cycle.join("training/adapter/adapter_model.safetensors"),
+        b"damaged extraction",
+    )
+    .unwrap();
+    assert!(verify(&store, 1).is_err());
+    assert_eq!(verify_original(&store, 1, &original).unwrap(), record);
+    // Historical verification still hashes the original validation inputs/receipts.
+    let mut source: Value = serde_json::from_slice(&input.raw_provenance).unwrap();
+    source["source_receipt"] = serde_json::json!({"changed":true});
+    overwrite(&cycle.join("validation/provenance.json"), &source);
+    assert!(verify_original(&store, 1, &original).is_err());
+    assert!(!args.runtime_root.exists() && !args.model_root.exists());
+}
+
 #[tokio::test]
 async fn completed_stage_is_reused_without_runtime_and_partial_stage_is_retained() {
     let (_root, args, store) = owner();

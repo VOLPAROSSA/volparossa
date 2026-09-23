@@ -31,8 +31,13 @@ proved. Isolation/input checks, final owned-object cleanup and unchanged host by
 The observer's parser incorrectly rejected padded kernel columns, and it did not retain the
 original row: no retrospective claim about the actual 10-GiB limit is possible. A follow-up
 now retains the raw limits, parsed numbers and PID/start-time binding, while preserving exact
-10-GiB soft/hard validation. The failed run remains failed. Larger-model peer/policy execution,
-general answer quality and a complete live execution proof remain open; no model or backend
+10-GiB soft/hard validation. The failed run remains failed. The follow-up
+[exact-source VM trial on `3d57f418`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35883858055)
+passes its full single-worker execution checker: original raw limits prove 10-GiB soft/hard,
+170 CPU observations are retained, the BF16 worker completes in 83.956 seconds with 190 EOS
+tokens, and supervisor peak sampled RSS is 4,073,488,384 bytes under the 5-GiB limit. Original
+weights remain unchanged, the child is reaped, cleanup is complete and host hashes match.
+Larger-model peer/policy execution and general answer quality remain open; no model or backend
 ran on the development host.
 
 A small functional follow-up adds the `public-source-parts-v1` instruction to new public
@@ -42,7 +47,10 @@ the exact supplied source/question and existing token/time budgets. Tokenizer pl
 the same prompt; optimizer/heldout-loss, private, policy and historical source-free synthesis
 prompts remain unchanged. Completed resume results are not rewritten. New reports identify
 the instruction revision without pretending that model-weight fingerprints attest prompts.
-Focused inert tests pass; actual answer-quality improvement awaits real inference.
+Focused inert tests pass. The real follow-up answer now identifies missing throughput, latency
+and failure measurements, but repeatedly asks whether the exit can handle the client's public
+address, contradicting the source boundary. It also omits Route B's violation. Complete
+correctness and controlled quality improvement are not proved; the original answer is retained.
 
 An owner-enrolled `compute train-loop --aggregate-plan` candidate now connects automatic
 three-publisher discovery, frozen-cohort aggregation and held-out comparison to local adoption,
@@ -81,6 +89,18 @@ serving answered "One path uses 1 relay." These different retained answers do no
 weight-transfer evidence, but neither EOS nor improved tiny heldout losses prove sound reasoning.
 Standalone `compute publish-aggregate` remains available. General quality, robust corruption
 rollback for aggregate selections and full B05 remain open.
+
+An integrity-recovery candidate now handles a damaged selected aggregate or approved local
+successor before restart validation, serving de-duplication and subsequent warmstarts. Only
+changes confined to the three extracted adapter files qualify; original bundles, approvals,
+signed sources and snapshots remain immutable. Serving admission is withdrawn before selecting
+the exact still-approved, unexpired predecessor. No predecessor means no base fallback or new
+lease. Retirement survives restart, invalidates unfinished comparisons against the damaged
+baseline, preserves historical counters, pins direct predecessors within bounded retention,
+and removes retired selections from publication retries without recycling revisions. All 97
+focused train-loop tests and strict CLI Clippy pass. These include a complete inert local-to-local
+rollback/withdrawal and historical second-source verification, not real model execution.
+Aggregate recovery still needs the full runtime proof; no completed B05/B07 claim is made.
 
 A source-grounded synthesis candidate now addresses the observed loss of original evidence
 between model-graph tasks. New 360M `--plan-task-graph --grounded-synthesis` workflows retain
