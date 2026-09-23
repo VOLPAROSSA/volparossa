@@ -901,6 +901,56 @@ agent_active_recovery_first_job_and_seed
                          "disconnect:client:agent-active-recovery-q-seed"]
         assert observed.returncode == (0 if outcome == "accept" else 92), observed.stderr
         assert observed.stdout.splitlines() == expected
+    # Restart-state readiness does not imply that an agent-side catalogue route
+    # bootstrap finished. Establish the real route before the short observer,
+    # and confirm cleanup only after its coordinator has been reaped. These are
+    # shell-only doubles: no model, service, route or namespace is touched.
+    observe_probe = r'''
+probe_result=$2
+. "$1"
+provider_node_a=relay4
+jobs_batch_pid=
+PRIVACY_CLIENT_PID=; PRIVACY_RELAY0_PID=; PRIVACY_RELAY1_PID=
+PRIVACY_RELAY2_PID=; PRIVACY_EXIT_PID=; PROVIDER_CONTROL_PID=
+[ "$probe_result" != worker-active ] || jobs_batch_pid=123
+[ "$probe_result" != capture-active ] || PRIVACY_CLIENT_PID=456
+fail() { printf 'fail:%s\n' "$1"; exit 91; }
+content_replication_select() {
+    printf 'select:%s:%s\n' "$1" "$2"
+    [ "$probe_result" != select-reject ]
+}
+agent_active_recovery_loop_start() {
+    printf 'start:%s:%s:%s\n' "$1" "$2" "$3"
+    jobs_batch_pid=123
+}
+agent_active_recovery_loop_stop() {
+    printf 'reap:%s\n' "$jobs_batch_pid"
+    [ "$probe_result" != reap-reject ] || fail RECOVERY_COORDINATOR_REAP_FAILED
+    jobs_batch_pid=
+}
+content_replication_disconnect() {
+    [ -z "$jobs_batch_pid" ] || exit 92
+    printf 'disconnect:%s:%s\n' "$1" "$2"
+    [ "$probe_result" != disconnect-reject ]
+}
+agent_active_recovery_observe_start restart
+agent_active_recovery_observe_stop
+'''
+    prefix = "agent-active-recovery-path-restart-observe"
+    accepted = [f"select:relay4:{prefix}", "start:relay4:restart:observe",
+                "reap:123", f"disconnect:relay4:{prefix}"]
+    for outcome, expected in (
+            ("accept", accepted),
+            ("select-reject", accepted[:1] + ["fail:RECOVERY_OBSERVATION_ROUTE_UNAVAILABLE"]),
+            ("reap-reject", accepted[:3] + ["fail:RECOVERY_COORDINATOR_REAP_FAILED"]),
+            ("disconnect-reject", accepted + ["fail:RECOVERY_OBSERVATION_ROUTE_CLEANUP_FAILED"]),
+            ("worker-active", ["fail:RECOVERY_NETWORK_PHASE_WORKER_ACTIVE"]),
+            ("capture-active", ["fail:RECOVERY_CAPTURE_OVERLAP"])):
+        observed = subprocess.run(["/bin/sh", "-c", observe_probe, "recovery-observer-probe",
+                                   str(HERE / "agent-active-recovery-smoke.sh"), outcome],
+                                  capture_output=True, text=True, timeout=5, check=False)
+        assert observed.returncode == (0 if outcome == "accept" else 91), observed.stderr
+        assert observed.stdout.splitlines() == expected
     # Exercise the exact launch argument construction with inert subprocess
     # doubles, never namespace/mount operations on the development host.
     launch_calls = []

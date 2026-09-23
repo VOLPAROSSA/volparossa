@@ -135,6 +135,26 @@ agent_active_recovery_loop_stop() {
     jobs_batch_pid=
 }
 
+agent_active_recovery_observe_start() {
+    recovery_observe_label=$1
+    [ -z "${jobs_batch_pid:-}" ] || fail RECOVERY_NETWORK_PHASE_WORKER_ACTIVE
+    [ -z "$PRIVACY_CLIENT_PID$PRIVACY_RELAY0_PID$PRIVACY_RELAY1_PID$PRIVACY_RELAY2_PID$PRIVACY_EXIT_PID$PROVIDER_CONTROL_PID" ] \
+        || fail RECOVERY_CAPTURE_OVERLAP
+    # The durable-state observation can finish before a catalogue refresh.
+    # Establish its real route before starting the coordinator: stopping that
+    # coordinator does not cancel an agent-side route bootstrap already begun.
+    # These short observations are not packet-proof phases.
+    content_replication_select "$provider_node_a" "agent-active-recovery-path-$recovery_observe_label-observe" \
+        || fail RECOVERY_OBSERVATION_ROUTE_UNAVAILABLE
+    agent_active_recovery_loop_start "$provider_node_a" "$recovery_observe_label" observe
+}
+
+agent_active_recovery_observe_stop() {
+    agent_active_recovery_loop_stop
+    content_replication_disconnect "$provider_node_a" "agent-active-recovery-path-$recovery_observe_label-observe" \
+        || fail RECOVERY_OBSERVATION_ROUTE_CLEANUP_FAILED
+}
+
 agent_active_recovery_job() {
     recovery_job_label=$1
     agent_active_recovery_python wait-ready "$WORK" "$recovery_job_label" "$binary_directory/volparossa" \
@@ -236,17 +256,17 @@ agent_active_recovery_run() {
     # Resume the same durable Q approval before injecting the fault. This
     # keeps Client inference and learner fetching in separate measured phases;
     # no worker is frozen and no approval or deadline is regenerated.
-    agent_active_recovery_loop_start "$provider_node_a" recovery observe
+    agent_active_recovery_observe_start recovery
     agent_active_recovery_python await "$WORK" armed "$jobs_batch_pid" || fail RECOVERY_Q_RESTART_CHANGED
     agent_active_recovery_python inject "$WORK" || fail RECOVERY_LOCAL_EXTRACTION_FAULT_FAILED
     agent_active_recovery_python await "$WORK" restored "$jobs_batch_pid" || fail RECOVERY_AUTOMATIC_ROLLBACK_MISSING
-    agent_active_recovery_loop_stop
+    agent_active_recovery_observe_stop
     agent_active_recovery_network_start client job-restored
     agent_active_recovery_job restored
     agent_active_recovery_network_finish
-    agent_active_recovery_loop_start "$provider_node_a" restart observe
+    agent_active_recovery_observe_start restart
     agent_active_recovery_python await "$WORK" restarted "$jobs_batch_pid" || fail RECOVERY_RESTART_NOT_IDEMPOTENT
-    agent_active_recovery_loop_stop
+    agent_active_recovery_observe_stop
     agent_active_recovery_publish next
     agent_active_recovery_catalog 2
     agent_active_recovery_network_start relay4 continued
