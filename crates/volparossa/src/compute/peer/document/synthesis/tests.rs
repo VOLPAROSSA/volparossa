@@ -39,7 +39,8 @@ fn output() -> Value {
         "provider_key":hex::encode(ed25519_dalek::SigningKey::from_bytes(&[19;32]).verifying_key().as_bytes()),
         "job_id":"1".repeat(32),"report_sha256":"2".repeat(64),
         "model_fingerprint":"3".repeat(64),"output_index":0,
-        "generated_tokens":64,"text_truncated":false})
+        "generated_tokens":64,"text_truncated":false,
+        "generation":{"version":1,"stop_reason":"eos","max_new_tokens":64}})
 }
 
 #[test]
@@ -48,6 +49,10 @@ fn execution_limits_are_retained_without_fabricating_answer_quality() {
     let answer = Answer::from_output(&row, &"4".repeat(64), 0, 123).unwrap();
     assert_eq!(answer.generated_tokens, 64);
     assert_eq!(unusable(std::slice::from_ref(&answer)), None);
+    row["generation"]["stop_reason"] = "token_limit".into();
+    let limited = Answer::from_output(&row, &"4".repeat(64), 0, 123).unwrap();
+    assert_eq!(unusable(&[limited]), Some("worker_output_hit_token_limit"));
+    row["generation"]["stop_reason"] = "eos".into();
     row["text_truncated"] = true.into();
     let truncated = Answer::from_output(&row, &"4".repeat(64), 0, 123).unwrap();
     assert_eq!(
@@ -63,6 +68,27 @@ fn execution_limits_are_retained_without_fabricating_answer_quality() {
     row = output();
     row["generated_tokens"] = 65.into();
     assert!(Answer::from_output(&row, &"4".repeat(64), 0, 123).is_err());
+}
+
+#[test]
+fn historical_parent_shape_is_preserved_without_inventing_eos() {
+    let mut row = output();
+    row.as_object_mut().unwrap().remove("generation");
+    let original = Answer::from_output(&row, &"4".repeat(64), 0, 123).unwrap();
+    assert_eq!(
+        unusable(std::slice::from_ref(&original)),
+        Some("legacy_generation_end_unknown")
+    );
+    let bytes = serde_json::to_vec(&original).unwrap();
+    assert!(
+        !serde_json::from_slice::<Value>(&bytes)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("generation")
+    );
+    let restored: Answer = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(serde_json::to_vec(&restored).unwrap(), bytes);
 }
 
 #[test]

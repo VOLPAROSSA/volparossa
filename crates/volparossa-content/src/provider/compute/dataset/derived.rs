@@ -4,13 +4,18 @@
 //! nor a provider key makes those assertions a portable executor attestation. Source ranges
 //! describe what earlier work covered; model text is never authenticated as original text.
 
+use crate::model_profile::ModelProfile;
 use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use super::{ComputeError, MAX_DATASET_BYTES, document::decode_source_manifest, text};
+use crate::{CHUNK_BYTES, ChunkId};
 
 /// Distinct from original document excerpts and from training datasets.
 pub const DERIVED_CONTENT_TYPE: &str = "application/vnd.volparossa.agent-derived.v3+json";
+/// Inference-only synthesis retaining the complete authenticated original public source.
+pub const GROUNDED_DERIVED_CONTENT_TYPE: &str = "application/vnd.volparossa.agent-derived.v5+json";
 /// Exact limited meaning of the coordinator's signed lineage claims.
 pub const DERIVED_CLAIM_SCOPE: &str =
     "coordinator_verified_local_rpc_status_not_portable_execution_attestation";
@@ -19,7 +24,7 @@ pub const DERIVED_CLAIM_SCOPE: &str =
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DerivedDataset {
-    /// Exactly 3.
+    /// Exactly 3 for parent-only synthesis, or 5 for complete-original-source synthesis.
     pub version: u32,
     /// Exactly public; private intermediate answers are not eligible.
     pub visibility: String,
@@ -27,10 +32,17 @@ pub struct DerivedDataset {
     pub license: String,
     /// Original canonical text/plain source manifest, not a synthesized-text manifest.
     pub source_manifest_hex: String,
+    /// Complete original UTF-8 source for v5 only, at most 4096 bytes; never model text.
+    /// Absence preserves the original v3 serialized bytes and parent-only prompt contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_source: Option<String>,
     /// Bounded synthesis level, 1 through 16.
     pub level: u16,
     /// Exactly `DERIVED_CLAIM_SCOPE`; no independently portable execution proof is claimed.
     pub claim_scope: String,
+    /// Explicit synthesis profile; absence preserves the original 135M contract and bytes.
+    #[serde(default, skip_serializing_if = "ModelProfile::is_default")]
+    pub model_profile: ModelProfile,
     /// One to four independently bounded synthesis rows; never training/heldout records.
     pub inference: Vec<DerivedQuestion>,
 }
@@ -51,7 +63,7 @@ pub struct DerivedQuestion {
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DerivedInput {
-    /// Full unmodified parent output, at most 1024 UTF-8 bytes, including unselected pieces.
+    /// Full unmodified parent output, bounded by the dataset profile (1024 or 4096 UTF-8 bytes).
     pub text: String,
     /// Lowercase hexadecimal nonzero Ed25519 provider key reported by the coordinator.
     pub provider_key: String,
@@ -78,13 +90,31 @@ pub struct DerivedInput {
 }
 
 impl DerivedDataset {
+    /// Exact content type for this version; source/row validation remains mandatory.
+    ///
+    /// # Errors
+    /// Rejects versions other than the existing v3 and complete-source v5 profiles.
+    pub fn content_type(&self) -> Result<&'static str, ComputeError> {
+        match self.version {
+            3 => Ok(DERIVED_CONTENT_TYPE),
+            5 => Ok(GROUNDED_DERIVED_CONTENT_TYPE),
+            _ => Err(ComputeError::Invalid),
+        }
+    }
+
     /// Validate strict shape and exact piece reconstruction, without establishing publisher trust.
     ///
     /// # Errors
     /// Rejects unsupported profiles/claims, invalid identities/ranges and changed context bytes.
     pub fn validate_shape(&self) -> Result<(), ComputeError> {
-        if self.version != 3
-            || self.visibility != "public"
+        match (self.version, &self.original_source) {
+            (3, None) => {}
+            (5, Some(original)) if self.model_profile == ModelProfile::Smol360 => {
+                text(original, 4096)?;
+            }
+            _ => return Err(ComputeError::Invalid),
+        }
+        if self.visibility != "public"
             || !matches!(
                 self.license.as_str(),
                 "GPL-3.0-only" | "CC0-1.0" | "CC-BY-4.0" | "CC-BY-SA-4.0"
@@ -97,7 +127,7 @@ impl DerivedDataset {
         }
         decode_source_manifest(&self.source_manifest_hex)?;
         for row in &self.inference {
-            row.validate()?;
+            row.validate(self.model_profile)?;
         }
         Ok(())
     }
@@ -122,6 +152,22 @@ impl DerivedDataset {
                 .any(|input| input.source_end > source.length())
         {
             return Err(ComputeError::Authentication);
+        }
+        if let Some(original) = &self.original_source {
+            let bytes = original.as_bytes();
+            if source.length() != bytes.len() as u64
+                || source.object_sha256() != &<[u8; 32]>::from(Sha256::digest(bytes))
+                || source.chunks().len() != bytes.chunks(CHUNK_BYTES).len()
+                || bytes
+                    .chunks(CHUNK_BYTES)
+                    .zip(source.chunks())
+                    .any(|(actual, expected)| {
+                        expected.id() != &ChunkId::digest(actual)
+                            || expected.length() as usize != actual.len()
+                    })
+            {
+                return Err(ComputeError::Authentication);
+            }
         }
         Ok(())
     }
@@ -151,7 +197,7 @@ impl DerivedDataset {
 }
 
 impl DerivedQuestion {
-    fn validate(&self) -> Result<(), ComputeError> {
+    fn validate(&self, profile: ModelProfile) -> Result<(), ComputeError> {
         text(&self.question, 512)?;
         text(&self.context, 4096)?;
         if self.question.trim().is_empty() || !(1..=64).contains(&self.inputs.len()) {
@@ -159,7 +205,7 @@ impl DerivedQuestion {
         }
         let mut assembled = String::new();
         for input in &self.inputs {
-            input.validate()?;
+            input.validate(profile)?;
             let segment = format!("{}\n", input.text);
             let start = usize::try_from(input.piece_start).map_err(|_| ComputeError::Invalid)?;
             let end = usize::try_from(input.piece_end).map_err(|_| ComputeError::Invalid)?;
@@ -177,8 +223,8 @@ impl DerivedQuestion {
 }
 
 impl DerivedInput {
-    fn validate(&self) -> Result<(), ComputeError> {
-        text(&self.text, 1024)?;
+    fn validate(&self, profile: ModelProfile) -> Result<(), ComputeError> {
+        text(&self.text, profile.spec().max_output_bytes)?;
         let provider = hex_identity::<32>(&self.provider_key)?;
         VerifyingKey::from_bytes(&provider).map_err(|_| ComputeError::Invalid)?;
         hex_identity::<16>(&self.job_id)?;

@@ -1,0 +1,990 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+"""Adapter contract tests with tiny core doubles; no LMFE/model execution claim."""
+
+import contextlib
+import copy
+import importlib.util
+import io
+import itertools
+import json
+from pathlib import Path
+from types import SimpleNamespace
+import unittest
+from unittest import mock
+
+
+SPEC = importlib.util.spec_from_file_location("graph_decoder", Path(__file__).with_name("task_graph_decoder.py"))
+DECODER = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(DECODER)
+RAW = b'{ "version":3, "tasks":[{"question":"Which limit applies?","depends_on":[]}] }'
+PRINCIPLES = ("Humilitas", "Humanitas", "Mansuetudo", "Diligentia", "Liberalitas", "Temperantia", "Castitas",
+              "Superbia", "Invidia", "Ira", "Acedia", "Avaritia", "Gula", "Luxuria")
+
+
+class Tokenizer:
+    eos_token_id = 2
+    all_special_ids = [0, 2]
+    pieces = ["<start>", "0", "<end>", "{", "}", " ", "?", RAW.decode(), "\ufffd", "\ufffd", "word", "!"]
+
+    def __init__(self):
+        self.calls = 0
+
+    def __len__(self):
+        return len(self.pieces)
+
+    def encode(self, text):
+        assert text == "0"
+        return [1]
+
+    def decode(self, tokens, **options):
+        assert options == {"skip_special_tokens": False, "clean_up_tokenization_spaces": False}
+        self.calls += 1
+        text, index = "", 0
+        while index < len(tokens):
+            token = tokens[index]
+            if tokens[index:index + 2] == [8, 9]:
+                text += "é"
+                index += 2
+            else:
+                text += (" " if token == 10 and index > 0 else "") + self.pieces[token]
+                index += 1
+        return text
+
+
+class TokenList:
+    def __init__(self, bitmask, _size):
+        assert not bitmask
+        self.allowed_tokens = []
+
+    def append(self, token):
+        self.allowed_tokens.append(token)
+
+    def extend(self, tokens):
+        self.allowed_tokens.extend(tokens)
+
+
+class Data:
+    def __init__(self, regular, decoder, eos, bitmask, size):
+        self.regular_tokens, self.decoder, self.eos_token_id = regular, decoder, eos
+        self.use_bitmask, self.vocab_size = bitmask, size
+        self.tokenizer_tree = SimpleNamespace(root=object(),
+            new_word_tokens={token for token, _text, newword in regular if newword},
+            tokens_to_strs={token: text for token, text, _newword in regular})
+
+
+class Parser:
+    def __init__(self, schema, text="", config=None):
+        self.schema, self.text, self.config = schema, text, config
+
+    def add_character(self, character):
+        if character == "!":
+            raise ValueError("PRIVATE PARSER CONTENT")
+        return Parser(self.schema, self.text + character, self.config)
+
+    def can_end(self):
+        try:
+            return isinstance(json.loads(self.text), dict)
+        except ValueError:
+            return False
+
+    def cache_key(self):
+        return None
+
+    def shortcut_key(self):
+        return None
+
+
+class StringState:
+    """Pinned StringParsingState initialization shape, not its enum algorithm."""
+
+    def __init__(self, root, allowed_strings, require_opening_quote):
+        self.root, self.allowed_strings = root, allowed_strings
+        self.seen_opening_quote, self.seen_closing_quote = not require_opening_quote, False
+        self.parsed_string = ""
+
+
+class ScalarRoot:
+    """Only pinned root stack/config/whitespace behavior around one scalar."""
+
+    def __init__(self):
+        self.object_stack = []
+        self.config = SimpleNamespace(force_json_field_order=False, alphabet=' abc"')
+        self.context = SimpleNamespace(alphabet_without_quotes=" abc")
+        self.num_consecutive_whitespaces = 0
+
+    def add_character(self, character):
+        updated = copy.copy(self)
+        updated.object_stack = [self.object_stack[0].add_character(character)]
+        updated.num_consecutive_whitespaces = self.num_consecutive_whitespaces + 1 if character in " \t\r\n" else 0
+        return updated
+
+    def get_allowed_characters(self):
+        result = self.object_stack[0].get_allowed_characters()
+        return "".join(c for c in result if c not in " \t\r\n") if self.num_consecutive_whitespaces >= 12 else result
+
+    def can_end(self):
+        return self.object_stack[0].can_end()
+
+    def cache_key(self):
+        return None
+
+    def shortcut_key(self):
+        return None
+
+
+class GraphSyntaxDouble:
+    """Broad alphabet plus whole-JSON completion, deliberately no graph semantics."""
+
+    def __init__(self, text=""):
+        self.text = text
+        self.config = None
+
+    def add_character(self, character):
+        return GraphSyntaxDouble(self.text + character)
+
+    def get_allowed_characters(self):
+        return "".join(chr(value) for value in range(128)) + 'é🙂漢字\U0010ffff'
+
+    def can_end(self):
+        try:
+            return isinstance(json.loads(self.text), dict)
+        except ValueError:
+            return False
+
+    def shortcut_key(self):
+        return ('json_freetext', 0, 1, 512)
+
+
+class PrincipleSyntaxDouble(ScalarRoot):
+    """Pinned object-stack/value-stage shape; not a substitute JSON backend."""
+
+    def __init__(self, field="principle", prefix="", stage="PARSING_VALUE", parent="reasoning"):
+        super().__init__()
+        value = StringState(self, list(PRINCIPLES) if field == "principle" else None, False)
+        value.parsed_string = prefix
+        self.object_stack = [SimpleNamespace(current_key=parent), SimpleNamespace(),
+                             SimpleNamespace(current_key=field, current_stage=SimpleNamespace(name=stage)), value]
+
+    def add_character(self, character):
+        updated = copy.copy(self)
+        value = copy.copy(self.object_stack[-1])
+        if character == '"':
+            value.seen_closing_quote = True
+        else:
+            value.parsed_string += character
+        updated.object_stack = self.object_stack[:-1] + [value]
+        return updated
+
+    def get_allowed_characters(self):
+        return ''.join(chr(code) for code in range(32, 127))
+
+    def can_end(self):
+        return self.object_stack[-1].seen_closing_quote
+
+    def shortcut_key(self):
+        return ('json_freetext', len(self.object_stack[-1].parsed_string), 1, 192)
+
+
+class Core:
+    """Only LMFE's state-dispatch interface; deliberately not a schema parser."""
+
+    class OutputTensorState:
+        def __init__(self, parser):
+            self.parser, self.current_word_tokens, self.allowed_tokens = parser, [], None
+
+    def __init__(self, data, parser):
+        self.__dict__.update(vars(data))
+        self.root_parser = parser
+        self.prefix_states, self.allowed_token_cache = {}, {}
+
+    def get_allowed_tokens(self, sequence):
+        key = tuple(sequence)
+        if key not in self.prefix_states:
+            previous = self.prefix_states.get(key[:-1])
+            state = (self.OutputTensorState(self.root_parser) if previous is None
+                     else self._apply_new_characters(previous, sequence))
+            self.prefix_states[key] = state
+            self._compute_allowed_tokens(key, state)
+        return self.prefix_states[key].allowed_tokens
+
+    def _collect_allowed_tokens(self, _parser, _node, allowed, _shortcut):
+        allowed.extend(token for token, _text, _newword in self.regular_tokens)
+
+    def _compute_allowed_tokens(self, *_args):
+        raise AssertionError("unsafe upstream fallback called")
+
+    def _apply_new_characters(self, *_args):
+        raise AssertionError("unsafe upstream fallback called")
+
+
+class Tensor:
+    def __init__(self, *tokens):
+        self.tokens = list(tokens)
+
+    def tolist(self):
+        return self.tokens[:]
+
+
+def decoder(check=lambda: None, accepts=lambda raw: raw == RAW, tokenizer=None):
+    with mock.patch.object(DECODER, "_load_backend", return_value=(Parser, Data, Core, TokenList)):
+        return DECODER.GraphDecoder(tokenizer or Tokenizer(), check, accepts)
+
+
+class DecoderTests(unittest.TestCase):
+    def graph_parser(self, tasks, requirement=None, goal="Main goal?", ascii_only=False):
+        raw = json.dumps({"version": 3, "tasks": tasks}, ensure_ascii=ascii_only, separators=(",", ":"))
+        parser = DECODER._GraphJsonParser(GraphSyntaxDouble(), DECODER._GraphRules(goal, requirement))
+        for character in raw:
+            previous, text = parser.rules, parser.inner.text
+            self.assertIn(character, parser.get_allowed_characters())
+            parser = parser.add_character(character)
+            self.assertEqual(previous.phase == "done", False)
+            self.assertEqual(parser.inner.text, text + character)
+        self.assertTrue(parser.can_end())
+        self.assertEqual(parser.inner.text, raw)
+        self.assertIsNone(parser.shortcut_key())
+        self.assertIsNone(parser.cache_key())
+        return parser
+
+    def test_guarded_graph_accepts_model_selected_counts_and_arbitrary_valid_branches(self):
+        def task(question, parents=()):
+            return {"question": question, "depends_on": list(parents)}
+        alternatives = [
+            [task("Which source fact applies?")],
+            [task("Which fact applies?"), task("What remains unknown?")],
+            [task("Which fact applies?"), task("What follows?", [0]), task("What else?", [0])],
+            [task('What does "é🙂" imply?'), task("What follows?", [0]),
+             task("Which assumption remains?"), task("How do these results compare?", [2, 0])],
+        ]
+        for tasks in alternatives:
+            self.graph_parser(tasks)
+        for tasks in alternatives[2:]:
+            self.graph_parser(tasks, "dependent_analysis_v1")
+        # Alternate legal JSON escaping remains untouched, not rewritten.
+        self.graph_parser([task('  What about "é🙂" and \\ paths?  ')], ascii_only=True)
+
+    def test_guarded_graph_masks_bad_questions_and_dependency_edges_before_completion(self):
+        def task(question, parents=()):
+            return {"question": question, "depends_on": list(parents)}
+        invalid = [
+            [task("Main goal?")], [task("  Main goal?  ")], [task("Not a question")],
+            [task("Same?"), task(" Same? ")], [task("Null\0?")],
+            [task("First?", [0])], [task("First?"), task("Second?", [1])],
+            [task("First?"), task("Second?", [2])],
+            [task("First?"), task("Second?"), task("Third?", [0, 0])],
+            [task("First?"), task("Second?", [True])],
+        ]
+        for tasks in invalid:
+            raw = json.dumps({"version": 3, "tasks": tasks}, separators=(",", ":"))
+            parser = DECODER._GraphJsonParser(GraphSyntaxDouble(), DECODER._GraphRules("Main goal?", None))
+            rejected = False
+            for index, character in enumerate(raw):
+                if character not in parser.get_allowed_characters():
+                    with self.assertRaisesRegex(DECODER.DecoderError, '^TASK_GRAPH_DECODER_PARSER_FAILED$'):
+                        parser.add_character(character)
+                    self.assertLess(index, len(raw) - 1)
+                    rejected = True
+                    break
+                parser = parser.add_character(character)
+            self.assertTrue(rejected, repr(tasks))
+        # Escaping does not hide a duplicate or a copy of the original question.
+        for raw in ('{"version":3,"tasks":[{"question":"\\u004dain goal?","depends_on":[]}]}',
+                    '{"version":3,"tasks":[{"question":"Same?","depends_on":[]},'
+                    '{"question":"\\u0053ame?","depends_on":[]}]}'):
+            rules = DECODER._GraphRules("Main goal?", None)
+            for character in raw:
+                following = rules.advance(character)
+                if following is None:
+                    break
+                rules = following
+            else:
+                self.fail("escaped duplicate/copy reached the completed graph")
+
+    def test_guarded_dependency_requirement_keeps_edge_choice_with_model(self):
+        prefix = '{"version":3,"tasks":[{"question":"First?","depends_on":[]}'
+        rules = DECODER._GraphRules("Main goal?", "dependent_analysis_v1")
+        for character in prefix:
+            rules = rules.advance(character)
+            self.assertIsNotNone(rules)
+        self.assertIsNone(rules.advance("]"))
+        self.assertIsNotNone(rules.advance(","))
+        # With no earlier edge, the final task must choose one, not receive one.
+        for suffix in (',{"question":"Second?","depends_on":[]}',
+                       ',{"question":"Third?","depends_on":[]}',
+                       ',{"question":"Fourth?","depends_on":['):
+            for character in suffix:
+                rules = rules.advance(character)
+                self.assertIsNotNone(rules)
+        self.assertIsNone(rules.advance("]"))
+        for index in ("0", "1", "2"):
+            self.assertEqual(rules.advance(index).parents, (int(index),))
+        self.assertEqual(rules.parents, ())
+        self.assertFalse(rules.has_dependency)
+
+    def test_guarded_questions_obey_utf8_bound_and_surrogate_pair_identity(self):
+        self.graph_parser([{"question": "é" * 255 + "?", "depends_on": []}], ascii_only=True)
+        self.graph_parser([{"question": "x" * 511 + "?", "depends_on": []}])
+        opening = '{"version":3,"tasks":[{"question":"'
+        for content in ("x" * 512, "é" * 256, "\\ud800?", "\\udc00", "\\u0000"):
+            rules = DECODER._GraphRules("Main goal?", None)
+            for character in opening + content:
+                following = rules.advance(character)
+                if following is None:
+                    break
+                rules = following
+            else:
+                self.fail("irrecoverable question prefix remained admissible")
+
+    def test_guarded_options_bind_goal_requirement_schema_and_original_budgets(self):
+        module = SimpleNamespace(CharacterLevelParserConfig=mock.Mock(return_value=object()), StringParsingState=StringState)
+        with mock.patch.object(DECODER, "_load_backend", return_value=(Parser, Data, Core, TokenList)), \
+                mock.patch.object(DECODER.importlib, "import_module", return_value=module):
+            value = DECODER.GraphDecoder(Tokenizer(), lambda: None, lambda _raw: True,
+                graph_goal="Main goal?", graph_requirement="dependent_analysis_v1")
+        first, second = value.new_attempt([0], 384), value.new_attempt([0], 12)
+        self.assertIsInstance(first.enforcer.root_parser, DECODER._GraphJsonParser)
+        self.assertIsNot(first.enforcer.root_parser.rules, second.enforcer.root_parser.rules)
+        self.assertEqual(first.enforcer.root_parser.rules.questions, ())
+        self.assertEqual(value.schema["properties"]["tasks"]["minItems"], 2)
+        self.assertEqual((value.prompt_limit, value.generation_limit), (512, 384))
+        self.assertNotIsInstance(decoder().new_attempt([0], 384).enforcer.root_parser, DECODER._GraphJsonParser)
+        for options in ({"graph_goal": " "}, {"graph_goal": "x" * 513}, {"graph_goal": "\ud800"},
+                        {"graph_requirement": "dependent_analysis_v1"},
+                        {"graph_goal": "Main?", "graph_requirement": "arbitrary"},
+                        {"graph_goal": "Main?", "generation_limit": 512},
+                        {"graph_goal": "Main?", "prompt_limit": 1024},
+                        {"graph_goal": "Main?", "schema": {"type": "object"}}):
+            with mock.patch.object(DECODER, "_load_backend") as loading:
+                with self.assertRaisesRegex(DECODER.DecoderError, '^TASK_GRAPH_DECODER_ATTEMPT_INVALID$'):
+                    DECODER.GraphDecoder(Tokenizer(), lambda: None, lambda _raw: True, **options)
+                loading.assert_not_called()
+
+    def test_unicode_prefix_rejects_dead_branches_before_the_last_hex_digit(self):
+        opening = '{"version":3,"tasks":[{"question":"'
+        for content in ("\\uDFF", "x" * 511 + "?\\u000", "x" * 511 + "\\u004",
+                        "x" * 508 + "\\ud83", "\\ud83d\\u004"):
+            rules = DECODER._GraphRules("Main goal?", None)
+            for character in opening + content:
+                following = rules.advance(character)
+                self.assertEqual(rules.allows(character), following is not None)
+                if following is None:
+                    break
+                rules = following
+            else:
+                self.fail("admitted an escape prefix with no scalar/question completion")
+        # Rejection neither alters the existing question nor forces its closing
+        # quote/EOS. The original complete 512-byte question remains closable.
+        rules = DECODER._GraphRules("Main goal?", None)
+        for character in opening + "x" * 511 + "?":
+            rules = rules.advance(character)
+        self.assertTrue(rules.allows('"'))
+        self.assertFalse(rules.allows("\\"))
+        self.assertIsNone(rules.advance("\\"))
+        self.assertEqual((rules.text_bytes, rules.escape), (512, ""))
+
+    def test_generation_question_cap_keeps_unicode_and_forbidden_completion_rules(self):
+        cap = 192
+        opening = '{"version":3,"tasks":[{"question":"'
+        def walk(raw, goal="Main goal?", requirement=None):
+            rules = DECODER._GraphRules(goal, requirement, question_max_bytes=cap)
+            for character in raw:
+                following = rules.advance(character)
+                self.assertEqual(rules.allows(character), following is not None)
+                if following is None:
+                    return None
+                rules = following
+            return rules
+        for content in ("x" * (cap - 1) + "\\u003f", "x" * (cap - 5) + "\\ud83d\\ude42?",
+                        "x" * (cap - 4) + "?\\u2003", "é" * 95 + "x?"):
+            rules = walk(opening + content + '","depends_on":[]}]}')
+            self.assertIsNotNone(rules)
+            self.assertEqual(rules.phase, "done")
+            self.assertEqual(rules.questions, (json.loads('"' + content + '"').strip(),))
+        for content in ("x" * cap, "\\uDFF", "x" * (cap - 1) + "?\\u000",
+                        "x" * (cap - 1) + "\\u004", "x" * (cap - 4) + "\\ud83",
+                        "\\ud83d\\u004", "é" * 96):
+            self.assertIsNone(walk(opening + content), repr(content))
+        for kind in ("goal", "previous"):
+            head = "x" * (cap - 4)
+            forbidden = head + "漢?"
+            goal = forbidden if kind == "goal" else "Main goal?"
+            prefix = opening
+            if kind == "previous":
+                prefix += forbidden + '","depends_on":[]},{"question":"'
+            rules = walk(prefix + head, goal)
+            self.assertIsNotNone(rules)
+            for spelling in ("漢", "\\u6f22"):
+                self.assertIsNone(walk(prefix + head + spelling, goal))
+            alternative = walk(prefix + head + 'z?","depends_on":[]}]}', goal)
+            self.assertIsNotNone(alternative)
+            self.assertEqual(alternative.questions[-1], head + "z?")
+        # Escaping does not conceal a copied goal under the smaller generation cap.
+        self.assertIsNone(walk(opening + '\\u004dain goal?","depends_on":[]}]}'))
+        for count in (2, 3, 4):
+            tasks = [{"question": chr(65 + index) * (cap - 1) + "?", "depends_on": list(range(index))}
+                     for index in range(count)]
+            raw = json.dumps({"version": 3, "tasks": tasks}, separators=(",", ":"))
+            complete = walk(raw, requirement="dependent_analysis_v1")
+            self.assertIsNotNone(complete)
+            self.assertEqual(complete.phase, "done")
+            self.assertEqual(complete.questions, tuple(task["question"] for task in tasks))
+            self.assertTrue(complete.has_dependency)
+        alphabet = ''.join(chr(code) for code in range(128)) + 'é漢🙂\ud800\udfff'
+        for length in range(cap - 7, cap):
+            rules = walk(opening + "x" * length)
+            self.assertIsNotNone(rules)
+            for character in alphabet:
+                self.assertEqual(rules.allows(character), rules.advance(character) is not None)
+
+    def test_generation_cap_binds_schema_and_each_attempt_without_changing_budgets(self):
+        module = SimpleNamespace(CharacterLevelParserConfig=mock.Mock(return_value=object()), StringParsingState=StringState)
+        with mock.patch.object(DECODER, "_load_backend", return_value=(Parser, Data, Core, TokenList)), \
+                mock.patch.object(DECODER.importlib, "import_module", return_value=module):
+            value = DECODER.GraphDecoder(Tokenizer(), lambda: None, lambda _raw: True,
+                graph_goal="g" * 511 + "?", graph_requirement="dependent_analysis_v1",
+                graph_question_max_bytes=192)
+        self.assertEqual(value.schema["properties"]["tasks"]["items"]["properties"]["question"]["maxLength"], 192)
+        self.assertEqual(value.schema["properties"]["tasks"]["minItems"], 2)
+        self.assertEqual(value.schema["properties"]["tasks"]["maxItems"], 4)
+        self.assertEqual((value.prompt_limit, value.generation_limit, value.output_limit), (512, 384, 16384))
+        first, sibling = value.new_attempt([0], 384), value.new_attempt([0], 16)
+        self.assertEqual(first.enforcer.root_parser.rules.question_max_bytes, 192)
+        self.assertEqual(sibling.enforcer.root_parser.rules.question_max_bytes, 192)
+        self.assertIsNot(first.enforcer.root_parser.rules, sibling.enforcer.root_parser.rules)
+        for options in ({"graph_goal": "Main?", "graph_question_max_bytes": bad}
+                        for bad in (0, 513, True, None, "192")):
+            with mock.patch.object(DECODER, "_load_backend") as loading, \
+                    self.assertRaisesRegex(DECODER.DecoderError, '^TASK_GRAPH_DECODER_ATTEMPT_INVALID$'):
+                DECODER.GraphDecoder(Tokenizer(), lambda: None, lambda _raw: True, **options)
+            loading.assert_not_called()
+        for options in ({"graph_question_max_bytes": 192},
+                        {"graph_goal": "Main?", "graph_question_max_bytes": 192, "schema": DECODER.graph_schema()}):
+            with self.assertRaisesRegex(DECODER.DecoderError, '^TASK_GRAPH_DECODER_ATTEMPT_INVALID$'):
+                DECODER.GraphDecoder(Tokenizer(), lambda: None, lambda _raw: True, **options)
+
+    def test_unicode_liveness_preserves_escaped_question_surrogate_and_whitespace_endings(self):
+        opening = '{"version":3,"tasks":[{"question":"'
+        endings = ("x" * 511 + "\\u003f", "x" * 507 + "\\ud83d\\ude42?",
+                   "x" * 508 + "?\\u2003", "What about \\ud83d\\ude42?")
+        for content in endings:
+            rules = DECODER._GraphRules("Main goal?", None)
+            for character in opening + content + '","depends_on":[]}]}':
+                self.assertEqual(rules.allows(character), rules.advance(character) is not None)
+                rules = rules.advance(character)
+                self.assertIsNotNone(rules, repr(content))
+            self.assertEqual(rules.phase, "done")
+            self.assertEqual(rules.questions, (json.loads('"' + content + '"').strip(),))
+
+    def test_question_byte_edge_rejects_prefix_whose_only_completion_is_forbidden(self):
+        opening = '{"version":3,"tasks":[{"question":"'
+        cases = [("x" * 510, "x", ("x", "\\u0078")),
+                 ("x" * 510, "\n", ("\\n", "\\u000a")),
+                 ("x" * 510, '"', ('\\"', "\\u0022")),
+                 ("x" * 509, "é", ("é", "\\u00e9")),
+                 ("x" * 508, "漢", ("漢", "\\u6f22")),
+                 ("x" * 507, "🙂", ("🙂", "\\ud83d\\ude42"))]
+        for kind in ("goal", "previous"):
+            for head, last, spellings in cases:
+                forbidden = head + last + "?"
+                self.assertEqual(len(forbidden.encode()), 512)
+                rules = DECODER._GraphRules(forbidden if kind == "goal" else "Main goal?", None)
+                prefix = opening
+                if kind == "previous":
+                    prefix += json.dumps(forbidden, ensure_ascii=False)[1:-1]
+                    prefix += '","depends_on":[]},{"question":"'
+                for character in prefix + head:
+                    rules = rules.advance(character)
+                    self.assertIsNotNone(rules)
+                before = (rules.text, rules.text_bytes, rules.questions)
+                for spelling in spellings:
+                    with self.subTest(kind=kind, last=last, spelling=spelling):
+                        branch = rules
+                        for character in spelling:
+                            following = branch.advance(character)
+                            self.assertEqual(branch.allows(character), following is not None)
+                            if following is None:
+                                break
+                            branch = following
+                        else:
+                            self.fail("admitted a prefix with only a forbidden question completion")
+                        self.assertEqual((rules.text, rules.text_bytes, rules.questions), before)
+                # A different model-selected ending stays available from the
+                # same original state; no question is inserted or rewritten.
+                sibling = rules
+                for character in 'z?","depends_on":[]}]}':
+                    self.assertTrue(sibling.allows(character))
+                    sibling = sibling.advance(character)
+                    self.assertIsNotNone(sibling)
+                self.assertEqual(sibling.phase, "done")
+                self.assertEqual(sibling.questions[-1], head + "z?")
+
+    def test_graph_alphabet_probe_matches_transitions_without_cloning_ordinary_text(self):
+        alphabet = ''.join(chr(code) for code in range(128)) + 'é漢🙂\ud800\udfff'
+        prefixes = [
+            '{"version":3,"tasks":[{"question":"Which constraint matters?',
+            '{"version":3,"tasks":[{"question":"Which fact?","depends_on":[]},'
+            '{"question":"What follows?","depends_on":[0]}]}',
+            '{"version":3,"tasks":[{"question":"' + 'x' * 510 + '? ',
+            '{"version":3,"tasks":[{"question":"What about \\u00e9 or \\ud83d\\ude42?',
+        ]
+        for prefix in prefixes:
+            rules = DECODER._GraphRules("Main goal?", "dependent_analysis_v1")
+            for character in prefix:
+                for candidate in alphabet:
+                    self.assertEqual(rules.allows(candidate), rules.advance(candidate) is not None,
+                                     (rules.phase, rules.text_bytes, repr(candidate)))
+                rules = rules.advance(character)
+                self.assertIsNotNone(rules)
+        rules = DECODER._GraphRules("Main goal?", None)
+        for character in '{"version":3,"tasks":[{"question":"Which ':
+            rules = rules.advance(character)
+        parser = DECODER._GraphJsonParser(GraphSyntaxDouble(), rules)
+        with mock.patch.object(DECODER._GraphRules, "advance", side_effect=AssertionError("alphabet clone")):
+            allowed = parser.get_allowed_characters()
+            self.assertIn('x', allowed)
+            self.assertNotIn('"', allowed)
+            self.assertEqual(parser.get_allowed_characters(), allowed)
+
+    @staticmethod
+    def token_trie(pieces):
+        root = SimpleNamespace(tokens=[], children={})
+        for token, piece in enumerate(pieces):
+            node = root
+            for character in piece:
+                node = node.children.setdefault(character, SimpleNamespace(tokens=[], children={}))
+            node.tokens.append(token)
+        return root
+
+    @staticmethod
+    def reference_graph_collect(parser, node, allowed):
+        # Pinned LMFE traversal with no shortcut (the graph contract always
+        # disables it). This is a pure interface double, not backend execution.
+        allowed.extend(node.tokens)
+        for character in set(node.children).intersection(parser.get_allowed_characters()):
+            DecoderTests.reference_graph_collect(parser.add_character(character), node.children[character], allowed)
+
+    def test_graph_child_first_traversal_preserves_all_token_branches_and_eos(self):
+        opening = '{"version":3,"tasks":[{"question":"'
+        first = opening + 'First question?","depends_on":[]}'
+        prefixes = ('', '{"version":', opening, opening + 'Main goal?', opening + 'Valid question?',
+                    opening + 'x' * 510, opening + 'x' * 511, opening + 'x' * 511 + '?',
+                    opening + '\\', opening + '\\u00', opening + '\\ud83d', opening + '\\ud83d\\ude',
+                    first + ',{"question":"First question?',
+                    first + ',{"question":"Next question?","depends_on":[',
+                    first + ',{"question":"Next question?","depends_on":[0',
+                    first + ',{"question":"Next question?","depends_on":[0]}]}')
+        pieces = ('', '3', ' ', 'word', '?', '"', '\\', '\\u003f', 'u003f', '3f', '42?', '\\ude42?',
+                  'é', '🙂', '\ud800', '\0', '\n', '?","depends_on":[]}', '","depends_on":[0]}]}',
+                  '0', '1', '2', '0,0', ',0', ']}', ']}]}', '"}]}')
+        root = self.token_trie(pieces)
+        strict = DECODER._strict_enforcer(Core, TokenList)
+        for prefix in prefixes:
+            rules = DECODER._GraphRules('Main goal?', 'dependent_analysis_v1')
+            for character in prefix:
+                rules = rules.advance(character)
+                self.assertIsNotNone(rules, repr(prefix))
+            parser = DECODER._GraphJsonParser(GraphSyntaxDouble(prefix), rules)
+            expected, actual = [], TokenList(False, len(pieces) + 1)
+            self.reference_graph_collect(parser, root, expected)
+            enforcer = strict(SimpleNamespace(), parser)
+            enforcer._collect_allowed_tokens(parser, root, actual, None)
+            self.assertEqual(set(actual.allowed_tokens), set(expected), repr(prefix))
+            self.assertEqual(len(actual.allowed_tokens), len(expected))
+            # The existing EOS gate remains a complete-parser check, not a
+            # synthetic close or a choice among model-generated questions.
+            enforcer.use_bitmask, enforcer.vocab_size, enforcer.eos_token_id = False, len(pieces) + 1, len(pieces)
+            enforcer.tokenizer_tree = SimpleNamespace(root=root)
+            state = Core.OutputTensorState(parser)
+            enforcer._compute_allowed_tokens((), state)
+            self.assertEqual(enforcer.eos_token_id in state.allowed_tokens.allowed_tokens, rules.phase == 'done')
+
+    def test_graph_child_first_checks_edges_not_whole_alphabet_at_every_node(self):
+        pieces = tuple(''.join(chars) for chars in itertools.product('abcdefgh', repeat=3))
+        root = self.token_trie(pieces)
+        original = DECODER._GraphRules.allows
+        observations = []
+        for reference in (True, False):
+            rules = DECODER._GraphRules('Main goal?', None)
+            for character in '{"version":3,"tasks":[{"question":"Which ':
+                rules = rules.advance(character)
+            parser = DECODER._GraphJsonParser(GraphSyntaxDouble(), rules)
+            calls = [0]
+
+            def counted(state, character):
+                calls[0] += 1
+                return original(state, character)
+
+            with mock.patch.object(DECODER._GraphRules, 'allows', counted):
+                if reference:
+                    allowed = []
+                    self.reference_graph_collect(parser, root, allowed)
+                else:
+                    result = TokenList(False, len(pieces))
+                    DECODER._strict_enforcer(Core, TokenList)(SimpleNamespace(), parser)._collect_allowed_tokens(
+                        parser, root, result, None)
+                    allowed = result.allowed_tokens
+            self.assertEqual(set(allowed), set(range(len(pieces))))
+            observations.append(calls[0])
+        self.assertEqual(observations[1], 8 + 8 ** 2 + 8 ** 3)
+        self.assertGreater(observations[0], observations[1] * 50)
+
+    def test_graph_traversal_does_not_replace_non_graph_shortcuts(self):
+        parser, node, shortcut = Parser({}), object(), ('json_freetext', 2, 1, 512)
+        allowed = TokenList(False, 12)
+        enforcer = DECODER._strict_enforcer(Core, TokenList)(SimpleNamespace(), parser)
+        with mock.patch.object(Core, '_collect_allowed_tokens') as upstream:
+            enforcer._collect_allowed_tokens(parser, node, allowed, shortcut)
+        upstream.assert_called_once_with(parser, node, allowed, shortcut)
+
+    def test_explicit_ordered_principle_budget_does_not_change_graph_defaults(self):
+        module = SimpleNamespace(CharacterLevelParserConfig=mock.Mock(return_value=object()), StringParsingState=StringState)
+        with mock.patch.object(DECODER, "_load_backend", return_value=(Parser, Data, Core, TokenList)), \
+                mock.patch.object(DECODER.importlib, "import_module", return_value=module) as importing:
+            value = DECODER.GraphDecoder(Tokenizer(), lambda: None, lambda raw: raw == RAW,
+                schema={"type": "object"}, prompt_limit=1024, output_limit=1024,
+                generation_limit=512, ordered_json=True)
+        self.assertEqual(importing.call_args_list, [mock.call("lmformatenforcer.characterlevelparser"),
+                                                   mock.call("lmformatenforcer.jsonschemaparser")])
+        module.CharacterLevelParserConfig.assert_called_once_with(force_json_field_order=True)
+        callback = value.new_attempt([0], 512)
+        self.assertIs(callback.enforcer.root_parser.config, module.CharacterLevelParserConfig.return_value)
+        self.assertIsNone(decoder().new_attempt([0], 384).enforcer.root_parser.config)
+
+    def principle_parser(self, **options):
+        used = options.pop("used", frozenset())
+        return DECODER._UniquePrinciplesJsonParser(
+            DECODER._CompactJsonParser(PrincipleSyntaxDouble(**options), StringState), StringState, PRINCIPLES, used)
+
+    def test_unique_principles_keep_all_initial_choices_and_fork_siblings_independently(self):
+        root = self.principle_parser()
+        for name in PRINCIPLES:
+            selected = root
+            for character in name + '"':
+                self.assertIn(character, selected.get_allowed_characters())
+                selected = selected.add_character(character)
+            self.assertEqual(selected.used, {name})
+            self.assertEqual(root.used, frozenset())
+            other_row = self.principle_parser(used=selected.used)
+            for available in PRINCIPLES:
+                current = other_row
+                for character in available + '"':
+                    if character not in current.get_allowed_characters():
+                        self.assertEqual(available, name)
+                        with self.assertRaises(DECODER.DecoderError):
+                            current.add_character(character)
+                        break
+                    current = current.add_character(character)
+                else:
+                    self.assertNotEqual(available, name)
+                    self.assertEqual(current.used, {name, available})
+            self.assertIsNone(selected.cache_key())
+        self.assertIsNone(root.shortcut_key())
+
+    def test_unique_principles_do_not_treat_quotes_reasons_or_keys_as_selections(self):
+        for options in ({"field": "quote"}, {"field": "reason"}, {"field": "counterargument", "parent": None},
+                        {"field": "reason", "parent": "uncertainty"},
+                        {"field": "principle", "stage": "PARSING_KEY_VALUE_SEPARATOR"}):
+            parser = self.principle_parser(used=frozenset({"Humanitas"}), **options)
+            shortcut = parser.shortcut_key()
+            self.assertEqual(shortcut[0], "json_freetext")
+            # Including a complete quoted JSON-looking fragment in public prose
+            # must not be searched for a principle choice.
+            for character in 'Humanitas Humanitas principle':
+                self.assertIn(character, parser.get_allowed_characters())
+                parser = parser.add_character(character)
+            self.assertEqual(parser.used, {"Humanitas"})
+
+    def test_unique_principles_cannot_be_bypassed_by_escaped_equivalent_name(self):
+        # The pinned enum's literal-name grammar does not offer backslash. Do
+        # not add an alternate escape grammar; if a syntax state already holds
+        # the decoded equivalent, it must still reject the duplicate at closing.
+        escaped = json.loads('"\\u0048umanitas"')
+        self.assertEqual(escaped, "Humanitas")
+        parser = self.principle_parser(prefix=escaped, used=frozenset({"Humanitas"}))
+        self.assertNotIn('"', parser.get_allowed_characters())
+        with self.assertRaises(DECODER.DecoderError):
+            parser.add_character('"')
+        parser = self.principle_parser()
+        self.assertNotIn("\\", parser.get_allowed_characters())
+        with self.assertRaises(DECODER.DecoderError):
+            parser.add_character("\\")
+
+    def test_unique_principles_are_explicit_fixed_schema_opt_in_and_reset_per_attempt(self):
+        schema = {"type": "object", "properties": {"reasoning": {"type": "array", "items": {"type": "object",
+            "properties": {"principle": {"type": "string", "enum": list(PRINCIPLES)}}}}}}
+        module = SimpleNamespace(CharacterLevelParserConfig=mock.Mock(return_value=object()), StringParsingState=StringState)
+        for choices in (list(PRINCIPLES), PRINCIPLES):
+            with mock.patch.object(DECODER, "_load_backend", return_value=(Parser, Data, Core, TokenList)), \
+                    mock.patch.object(DECODER.importlib, "import_module", return_value=module):
+                value = DECODER.GraphDecoder(Tokenizer(), lambda: None, lambda _raw: True, schema=schema,
+                                            ordered_json=True, unique_principles=choices)
+                first, second = value.new_attempt([0], 20), value.new_attempt([0], 20)
+            self.assertIsInstance(first.enforcer.root_parser, DECODER._UniquePrinciplesJsonParser)
+            self.assertIsNot(first.enforcer.root_parser, second.enforcer.root_parser)
+            self.assertEqual(first.enforcer.root_parser.used, frozenset())
+            self.assertEqual(second.enforcer.root_parser.used, frozenset())
+        for options in ({"unique_principles": list(PRINCIPLES[:-1])},
+                        {"unique_principles": [PRINCIPLES[0]] * 14},
+                        {"unique_principles": list(reversed(PRINCIPLES))},
+                        {"unique_principles": "Humanitas"},
+                        {"unique_principles": list(PRINCIPLES), "ordered_json": False},
+                        {"unique_principles": list(PRINCIPLES), "schema": {"type": "object"}},
+                        {"unique_principles": list(PRINCIPLES), "graph_goal": "Main?"}):
+            selected = dict(schema=schema, ordered_json=True, **{})
+            selected.update(options)
+            with mock.patch.object(DECODER, "_load_backend") as loading:
+                with self.assertRaisesRegex(DECODER.DecoderError, '^TASK_GRAPH_DECODER_ATTEMPT_INVALID$'):
+                    DECODER.GraphDecoder(Tokenizer(), lambda: None, lambda _raw: True, **selected)
+                loading.assert_not_called()
+        for instance, limit in ((value, 513), (decoder(), 385)):
+            with self.assertRaisesRegex(DECODER.DecoderError, "ATTEMPT_INVALID"):
+                instance.new_attempt([0], limit)
+
+    def test_source_literal_roundtrips_escapes_unicode_and_long_literal_whitespace(self):
+        values = ['a"b', 'a\\b', 'a\nb', 'a\tb', 'a\rb', 'a\fb', 'a\bb', 'a\x01b',
+                  'é🙂漢字', '\U0010ffffz', ' ' * 20 + 'leading', 'trailing' + ' ' * 20, 'a', 'ab']
+        table = DECODER._SourceQuoteTable(values, lambda: None)
+        state_type = DECODER._source_quote_state(StringState)
+        for value in values:
+            with self.subTest(value=repr(value)):
+                root = ScalarRoot()
+                root.object_stack = [state_type(root, table)]
+                parser = DECODER._CompactJsonParser(root, StringState)
+                self.assertEqual(parser.get_allowed_characters(), '"')
+                for character in json.dumps(value, ensure_ascii=False):
+                    previous = parser.inner.object_stack[0]
+                    prefix = previous.prefix
+                    self.assertIn(character, parser.get_allowed_characters())
+                    parser = parser.add_character(character)
+                    self.assertEqual(previous.prefix, prefix)  # Immutable branching state.
+                self.assertTrue(parser.can_end())
+                self.assertEqual(parser.inner.object_stack[0].parsed_string, value)
+                self.assertEqual(parser.get_allowed_characters(), "")
+
+    def test_source_literal_rejects_wrong_escape_and_raw_control_without_repair(self):
+        state_type = DECODER._source_quote_state(StringState)
+        for value, wrong, prefix in [('a"b', '"', '"a'), ('a\\b', 'n', '"a\\'),
+                                     ('a\nb', '\n', '"a'), ('é', '\\', '"')]:
+            table = DECODER._SourceQuoteTable([value], lambda: None)
+            state = state_type(ScalarRoot(), table)
+            for character in prefix:
+                state = state.add_character(character)
+            self.assertNotIn(wrong, state.get_allowed_characters())
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                with self.assertRaisesRegex(DECODER.DecoderError, '^TASK_GRAPH_DECODER_PARSER_FAILED$'):
+                    state.add_character(wrong)
+            self.assertEqual(output.getvalue(), "")
+
+    def test_quote_hook_is_marker_only_and_keeps_original_string_class(self):
+        original = mock.Mock(return_value=object())
+        original._volparossa_original = original
+        module = SimpleNamespace(get_parser=original, StringParsingState=StringState)
+        schema = {"type": "object", "properties": {"quote": {"type": "string", "enum": ['say "yes"'],
+                  "x-volparossa-source-quotes": True}}}
+        tables = DECODER._source_quote_tables(schema, lambda: None)
+        DECODER._install_source_quote_parser(module, tables)
+        unmarked = SimpleNamespace(type="string", extras={}, enum=['say "yes"'])
+        root = ScalarRoot()
+        self.assertIs(module.get_parser(root, unmarked), original.return_value)
+        original.assert_called_once_with(root, unmarked)
+        marked = SimpleNamespace(type="string", extras={"x-volparossa-source-quotes": True}, enum=['say "yes"'])
+        state = module.get_parser(root, marked)
+        self.assertIsInstance(state, StringState)
+        self.assertIs(module.StringParsingState, StringState)
+        self.assertIs(module.get_parser(root, marked).table, state.table)
+        for bad in (SimpleNamespace(type="string", extras={"x-volparossa-source-quotes": False}, enum=marked.enum),
+                    SimpleNamespace(type="string", extras=marked.extras, enum=["not the compiled source"])):
+            with self.assertRaisesRegex(DECODER.DecoderError, '^TASK_GRAPH_DECODER_PARSER_FAILED$'):
+                module.get_parser(root, bad)
+
+    def test_compact_wrapper_preserves_open_key_escape_and_value_spaces_and_order(self):
+        root = ScalarRoot()
+        root.get_allowed_characters = lambda: ' \t\r\n"}x'
+        wrapper = DECODER._CompactJsonParser(root, StringState)
+        self.assertEqual(wrapper.get_allowed_characters(), '"}x')
+        state = StringState(root, [], require_opening_quote=False)
+        root.object_stack = [state, object()]  # Escape subparser above an open string.
+        self.assertEqual(wrapper.get_allowed_characters(), ' \t\r\n"}x')
+        state.seen_closing_quote = True
+        self.assertEqual(wrapper.get_allowed_characters(), '"}x')
+        replacement = SimpleNamespace(force_json_field_order=False, alphabet='é "')
+        wrapper.config = replacement  # Actual TokenEnforcer constructor does this.
+        self.assertTrue(wrapper.config.force_json_field_order)
+        self.assertFalse(replacement.force_json_field_order)
+        self.assertEqual(wrapper.config.alphabet, replacement.alphabet)
+        self.assertEqual(root.context.alphabet_without_quotes, 'é ')
+
+    def test_source_table_bounds_and_owner_cancellation_before_backend_work(self):
+        for values in ([], [' '], ['\0'], ['é' * 65], ['\ud800'], [True], ['a'] * 65537):
+            with self.assertRaisesRegex(DECODER.DecoderError, '^TASK_GRAPH_DECODER_PARSER_FAILED$'):
+                DECODER._SourceQuoteTable(values, lambda: None)
+        class Cancelled(Exception):
+            pass
+        calls = []
+        def check():
+            calls.append(True)
+            if len(calls) == 2:
+                raise Cancelled('JOB_CANCELLED')
+        with self.assertRaises(Cancelled):
+            DECODER._SourceQuoteTable(['a', 'b', 'c'], check)
+        self.assertEqual(len(calls), 2)
+
+    def test_compiled_policy_schema_uses_same_strict_core_with_explicit_prompt_bound(self):
+        schema = {"type": "object", "properties": {"outcome": {"enum": ["allow", "deny", "undetermined"]}}}
+        with mock.patch.object(DECODER, "_load_backend", return_value=(Parser, Data, Core, TokenList)):
+            value = DECODER.GraphDecoder(Tokenizer(), lambda: None, lambda raw: raw == RAW,
+                schema=schema, prompt_limit=1024, output_limit=1024)
+        callback = value.new_attempt([0] * 1024, 256)
+        self.assertEqual(callback.enforcer.root_parser.schema, schema)
+        self.assertIsNot(callback.enforcer.root_parser.schema, schema)
+        self.assertNotIn(2, callback(0, Tensor(*([0] * 1024))))
+        self.assertIn(2, callback(0, Tensor(*([0] * 1024 + [7]))))
+        with self.assertRaisesRegex(DECODER.DecoderError, "ATTEMPT_INVALID"):
+            value.new_attempt([0] * 1025, 256)
+        with self.assertRaisesRegex(DECODER.DecoderError, "ATTEMPT_INVALID"):
+            decoder().new_attempt([0] * 513, 256)
+
+    def test_metadata_and_schema_do_not_choose_tasks(self):
+        value = decoder()
+        self.assertEqual(value.metadata, DECODER.decoder_metadata())
+        schema = DECODER.graph_schema()
+        self.assertEqual(schema["properties"]["version"], {"type": "integer", "enum": [3]})
+        tasks = schema["properties"]["tasks"]
+        self.assertEqual((tasks["minItems"], tasks["maxItems"]), (1, 4))
+        question = tasks["items"]["properties"]["question"]
+        self.assertEqual(question, {"type": "string", "minLength": 1, "maxLength": 512})
+
+    def test_actual_dependency_versions_required_before_import(self):
+        versions = {"lm-format-enforcer": "0.11.3", "interegular": "0.3.3", "pydantic": "1.10.24"}
+        for name in versions:
+            wrong = dict(versions, **{name: "0.0"})
+            with self.subTest(name=name), mock.patch.object(DECODER.importlib.metadata, "version", side_effect=wrong.get), \
+                    mock.patch.object(DECODER.importlib, "import_module") as importing:
+                with self.assertRaisesRegex(DECODER.DecoderError, "^TASK_GRAPH_DECODER_VERSION_MISMATCH$"):
+                    DECODER._load_backend(lambda: None)
+                importing.assert_not_called()
+        with mock.patch.object(DECODER.importlib.metadata, "version", side_effect=ValueError("PRIVATE PATH")):
+            with self.assertRaisesRegex(DECODER.DecoderError, "^TASK_GRAPH_DECODER_UNAVAILABLE$"):
+                DECODER._load_backend(lambda: None)
+
+    def test_missing_core_has_fixed_failure(self):
+        versions = {"lm-format-enforcer": "0.11.3", "interegular": "0.3.3", "pydantic": "1.10.24"}
+        with mock.patch.object(DECODER.importlib.metadata, "version", side_effect=versions.get), \
+                mock.patch.object(DECODER.importlib, "import_module", side_effect=ImportError("PRIVATE PATH")):
+            with self.assertRaisesRegex(DECODER.DecoderError, "^TASK_GRAPH_DECODER_UNAVAILABLE$"):
+                DECODER._load_backend(lambda: None)
+
+    def test_vocabulary_once_fresh_parser_each_attempt(self):
+        tokenizer = Tokenizer()
+        value = decoder(tokenizer=tokenizer)
+        calls = tokenizer.calls
+        first, second = value.new_attempt([0], 384), value.new_attempt([0], 21)
+        self.assertEqual(tokenizer.calls, calls)
+        self.assertIsNot(first.enforcer.root_parser, second.enforcer.root_parser)
+        self.assertIs(first.enforcer.tokenizer_tree, second.enforcer.tokenizer_tree)
+        self.assertEqual(first.enforcer.prefix_states, {})
+        self.assertEqual(second.enforcer.prefix_states, {})
+
+    def test_whole_original_bytes_required_for_eos(self):
+        observed = []
+        value = decoder(accepts=lambda raw: observed.append(raw) is None and raw == RAW)
+        callback = value.new_attempt([0], 384)
+        self.assertNotIn(2, callback(0, Tensor(0)))
+        self.assertIn(2, callback(0, Tensor(0, 7)))
+        self.assertEqual(observed, [RAW])
+        self.assertEqual(callback.enforcer.prefix_states[(0, 7)].parser.text.encode(), RAW)
+        # Syntactically complete is insufficient; independent validation rejects
+        # the graph without repairing text or replacing it by an EOS.
+        rejected = decoder(accepts=lambda _raw: False).new_attempt([0], 384)
+        rejected(0, Tensor(0))
+        self.assertNotIn(2, rejected(0, Tensor(0, 7)))
+
+    def test_partial_utf8_and_new_word_semantics(self):
+        value = decoder()
+        callback = value.new_attempt([0], 384)
+        callback(0, Tensor(0))
+        callback(0, Tensor(0, 8))
+        self.assertEqual(callback.enforcer.prefix_states[(0, 8)].parser.text, "")
+        callback(0, Tensor(0, 8, 9))
+        self.assertEqual(callback.enforcer.prefix_states[(0, 8, 9)].parser.text, "é")
+        callback(0, Tensor(0, 8, 9, 10))
+        state = callback.enforcer.prefix_states[(0, 8, 9, 10)]
+        self.assertEqual(state.parser.text, "é word")
+        self.assertEqual(state.current_word_tokens, [10])
+        # Only the incremental parser view strips an unfinished replacement.
+        self.assertEqual(value._decode([8]), "\ufffd")
+
+    def test_parser_exceptions_never_log_or_force_eos(self):
+        for failing in ("apply", "compute"):
+            with self.subTest(failing=failing):
+                callback = decoder().new_attempt([0], 384)
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                    if failing == "apply":
+                        callback(0, Tensor(0))
+                        call = lambda: callback(0, Tensor(0, 11))
+                    else:
+                        callback.enforcer._collect_allowed_tokens = mock.Mock(side_effect=ValueError("PRIVATE PREFIX"))
+                        call = lambda: callback(0, Tensor(0))
+                    with self.assertRaisesRegex(DECODER.DecoderError, "^TASK_GRAPH_DECODER_PARSER_FAILED$"):
+                        call()
+                self.assertEqual(output.getvalue(), "")
+
+    def test_empty_allowed_set_does_not_invent_eos(self):
+        callback = decoder().new_attempt([0], 384)
+        callback.enforcer._collect_allowed_tokens = lambda *_args: None
+        with self.assertRaisesRegex(DECODER.DecoderError, "^TASK_GRAPH_DECODER_NO_ALLOWED_TOKENS$"):
+            callback(0, Tensor(0))
+
+    def test_rejected_eos_only_set_has_distinct_content_free_failure(self):
+        callback = decoder(accepts=lambda _raw: False).new_attempt([0], 384)
+        callback(0, Tensor(0))
+        callback.enforcer.get_allowed_tokens = mock.Mock(return_value=SimpleNamespace(allowed_tokens=[2]))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with self.assertRaisesRegex(DECODER.DecoderError, "^TASK_GRAPH_DECODER_REJECTED_EOS$"):
+                callback(0, Tensor(0, 7))
+        self.assertEqual(output.getvalue(), "")
+
+    def test_prefix_budget_and_special_tokens_stay_exact(self):
+        for tokens, batch in (([0, 7], 0), ([1], 0), ([0], 1), ([0, 2], 0)):
+            with self.subTest(tokens=tokens, batch=batch):
+                callback = decoder().new_attempt([0], 384)
+                with self.assertRaisesRegex(DECODER.DecoderError, "^TASK_GRAPH_DECODER_PREFIX_CHANGED$"):
+                    callback(batch, Tensor(*tokens))
+        callback = decoder().new_attempt([0], 1)
+        callback(0, Tensor(0))
+        with self.assertRaisesRegex(DECODER.DecoderError, "^TASK_GRAPH_DECODER_PREFIX_CHANGED$"):
+            callback(0, Tensor(0, 7))
+        for prompt, limit in (([0] * 513, 1), ([0], 385), ([0], 0), ([True], 1)):
+            with self.assertRaisesRegex(DECODER.DecoderError, "^TASK_GRAPH_DECODER_ATTEMPT_INVALID$"):
+                decoder().new_attempt(prompt, limit)
+
+    def test_owner_cancellation_during_setup_and_each_callback_propagates(self):
+        class Cancelled(Exception):
+            pass
+        calls = []
+
+        def check():
+            calls.append(True)
+            if len(calls) == 5:
+                raise Cancelled("JOB_CANCELLED")
+
+        with self.assertRaises(Cancelled):
+            decoder(check=check)
+        self.assertEqual(len(calls), 5)
+        control = mock.Mock()
+        callback = decoder(check=control).new_attempt([0], 384)
+        before = control.call_count
+        callback(0, Tensor(0))
+        self.assertEqual(control.call_count, before + 2)
+        control.side_effect = Cancelled("JOB_CANCELLED")
+        with self.assertRaises(Cancelled):
+            callback(0, Tensor(0, 7))
+        self.assertNotIn((0, 7), callback.enforcer.prefix_states)
+
+
+if __name__ == "__main__":
+    unittest.main()

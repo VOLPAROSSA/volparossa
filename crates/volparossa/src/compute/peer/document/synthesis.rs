@@ -1,6 +1,9 @@
 //! Hierarchical public peer inference. Intermediate answers are not original excerpts.
 
+mod frontier;
 mod storage;
+
+pub(super) use frontier::{prepare, prepare_frontier};
 
 use anyhow::{Context as _, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -9,6 +12,7 @@ use tokio::sync::watch;
 
 use super::storage as document_storage;
 use super::{Options, now, parse_key, private_directory, rpc, workflow};
+use crate::compute::inference_output::Generation;
 use std::path::Path;
 
 const MAX_LEVELS: u16 = 16;
@@ -28,22 +32,30 @@ pub(super) struct Answer {
     source_end: u64,
     generated_tokens: u16,
     text_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation: Option<Generation>,
 }
 
 impl Answer {
     fn from_output(output: &Value, manifest: &str, start: u64, end: u64) -> Result<Self> {
-        let answer: Self = serde_json::from_value(json!({
+        let mut answer: Self = serde_json::from_value(json!({
             "text":output["text"],"provider_key":output["provider_key"],
             "job_id":output["job_id"],"report_sha256":output["report_sha256"],
             "package_manifest_id":manifest,"model_fingerprint":output["model_fingerprint"],
             "output_index":output["output_index"],"source_start":start,"source_end":end,
             "generated_tokens":output["generated_tokens"],"text_truncated":output["text_truncated"]
         }))?;
+        answer.generation = Generation::from_output(output, false)?;
+        let profile = answer
+            .generation
+            .map(|generation| generation.model_profile)
+            .unwrap_or_default()
+            .spec();
         ensure!(
             start < end
-                && answer.text.len() <= 1024
+                && answer.text.len() <= profile.max_output_bytes
                 && !answer.text.contains('\0')
-                && answer.generated_tokens <= 64
+                && answer.generated_tokens <= profile.max_new_tokens
                 && rpc::nonzero_hex(&answer.job_id, 32)
                 && [
                     &answer.report_sha256,
@@ -65,11 +77,27 @@ fn leaf_answers(
     input: &super::Input,
     plan: &super::Plan,
 ) -> Result<Vec<Answer>> {
+    leaf_answers_with_snapshot(
+        root,
+        enrollment,
+        input,
+        plan,
+        &workflow::task_snapshot_detailed,
+    )
+}
+
+fn leaf_answers_with_snapshot(
+    root: &Path,
+    enrollment: &document_storage::Enrollment,
+    input: &super::Input,
+    plan: &super::Plan,
+    snapshot: &dyn Fn(&Path, &workflow::ExpectedTask) -> Result<Value>,
+) -> Result<Vec<Answer>> {
     let mut answers = Vec::new();
     for (index, package) in enrollment.packages.iter().enumerate() {
         let directory = root.join(format!("package-{index:04}"));
         let expected = document_storage::expected(&directory, enrollment, package, input, plan)?;
-        let snapshot = workflow::task_snapshot_detailed(&directory.join("work"), &expected)?;
+        let snapshot = snapshot(&directory.join("work"), &expected)?;
         ensure!(
             snapshot["complete"] == true,
             "compute_synthesis_incomplete_source"
@@ -103,9 +131,16 @@ fn leaf_answers(
 }
 
 fn unfinished(reason: &str, levels: &[Value], result: &mut Value) {
+    result["version"] = 2.into();
     result["complete"] = false.into();
+    result["answer_complete"] = false.into();
+    result["semantic_completeness_proven"] = false.into();
+    if let Some(object) = result.as_object_mut() {
+        object.remove("synthesized_answer");
+    }
     result["joining"] = "hierarchical_peer_synthesis_incomplete".into();
     result["synthesis"] = json!({"complete":false,"reason":reason,"levels":levels,
+        "generation_limit_reached":reason=="worker_output_hit_token_limit",
         "claim_scope":"coordinator_verified_local_rpc_status_not_portable_execution_attestation",
         "model_answer_correctness_proven":false});
 }
@@ -115,9 +150,92 @@ fn unusable(answers: &[Answer]) -> Option<&'static str> {
         Some("worker_output_was_wire_truncated")
     } else if answers.iter().any(|answer| answer.text.trim().is_empty()) {
         Some("worker_produced_empty_answer")
+    } else if answers.iter().any(|answer| answer.generation.is_none()) {
+        Some("legacy_generation_end_unknown")
+    } else if answers.iter().any(|answer| {
+        answer
+            .generation
+            .as_ref()
+            .is_some_and(|generation| !generation.is_eos())
+    }) {
+        Some("worker_output_hit_token_limit")
     } else {
         None
     }
+}
+
+fn check_parent_profiles(input: &super::Input, parents: &[Answer]) -> Result<()> {
+    ensure!(
+        parents.iter().all(|parent| parent
+            .generation
+            .is_some_and(|generation| generation.model_profile == input.model_profile)),
+        "compute_synthesis_parent_profile"
+    );
+    Ok(())
+}
+
+fn complete_answer(answer: &Answer, levels: &[Value], result: &mut Value) -> Result<()> {
+    ensure!(
+        unusable(std::slice::from_ref(answer)).is_none(),
+        "compute_synthesis_answer_incomplete"
+    );
+    result["version"] = 2.into();
+    result["complete"] = true.into();
+    result["execution_complete"] = true.into();
+    result["answer_complete"] = true.into();
+    result["semantic_completeness_proven"] = false.into();
+    result["joining"] = if levels.is_empty() {
+        "single_source_answer"
+    } else {
+        "hierarchical_peer_synthesis"
+    }
+    .into();
+    result["synthesized_answer"] = serde_json::to_value(answer)?;
+    result["synthesis"] = json!({"complete":true,"levels":levels,
+        "generation_limit_reached":answer.generation.as_ref().is_some_and(|generation| !generation.is_eos()),
+        "claim_scope":"coordinator_verified_local_rpc_status_not_portable_execution_attestation",
+        "model_answer_correctness_proven":false,"semantic_completeness_proven":false});
+    Ok(())
+}
+
+fn reduction_answers(
+    snapshot: &Value,
+    manifest: &str,
+    dataset: &volparossa_content::provider::compute::dataset::DerivedDataset,
+) -> Result<Vec<Answer>> {
+    ensure!(
+        snapshot["complete"] == true,
+        "compute_synthesis_incomplete_reduction"
+    );
+    let outputs = snapshot["outputs"]
+        .as_array()
+        .context("compute_synthesis_outputs")?;
+    ensure!(
+        outputs.len() == dataset.inference.len(),
+        "compute_synthesis_reduction_rows"
+    );
+    outputs
+        .iter()
+        .enumerate()
+        .map(|(row, output)| {
+            ensure!(
+                output["sample_index"] == row,
+                "compute_synthesis_reduction_order"
+            );
+            let inputs = &dataset.inference[row].inputs;
+            let start = inputs
+                .iter()
+                .map(|i| i.source_start)
+                .min()
+                .context("compute_synthesis_ancestry")?;
+            let end = inputs
+                .iter()
+                .map(|i| i.source_end)
+                .max()
+                .context("compute_synthesis_ancestry")?;
+            Answer::from_output(output, manifest, start, end)
+        })
+        .collect()
 }
 
 #[allow(
@@ -163,6 +281,13 @@ pub(super) async fn advance_frontier(
         .as_u64()
         .context("compute_synthesis_rounds")?;
     let mut levels = Vec::new();
+    // A historical or partial output is readable, but cannot authorize new
+    // derived work or even new retention directories during offline replay.
+    if let Some(reason) = unusable(&frontier) {
+        unfinished(reason, &levels, result);
+        return Ok(());
+    }
+    check_parent_profiles(input, &frontier)?;
     let root = args.directory.join("synthesis");
     if !document_storage::present(&root)? {
         storage::directory(&root)?;
@@ -173,20 +298,9 @@ pub(super) async fn advance_frontier(
             unfinished(reason, &levels, result);
             return Ok(());
         }
+        check_parent_profiles(input, &frontier)?;
         if frontier.len() == 1 && (!force_first || level > 1) {
-            let answer = &frontier[0];
-            result["complete"] = true.into();
-            result["joining"] = if levels.is_empty() {
-                "single_source_answer"
-            } else {
-                "hierarchical_peer_synthesis"
-            }
-            .into();
-            result["synthesized_answer"] = serde_json::to_value(answer)?;
-            result["synthesis"] = json!({"complete":true,"levels":levels,
-                "generation_limit_reached":answer.generated_tokens == 64,
-                "claim_scope":"coordinator_verified_local_rpc_status_not_portable_execution_attestation",
-                "model_answer_correctness_proven":false,"semantic_completeness_proven":false});
+            complete_answer(&frontier[0], &levels, result)?;
             return Ok(());
         }
         if *cancelled.borrow() {
@@ -199,6 +313,7 @@ pub(super) async fn advance_frontier(
         }
         let mut next = Vec::new();
         let mut groups = Vec::new();
+        result["execution_complete"] = false.into();
         for (group, parents) in frontier.chunks(PARENTS_PER_GROUP).enumerate() {
             let directory = root.join(format!("level-{level:02}-group-{group:04}"));
             if !args.follow.follow
@@ -290,36 +405,11 @@ pub(super) async fn advance_frontier(
                             .and_then(|p| p.iter().find_map(|p| p.get("failure_code")))}));
                     break;
                 };
-                let outputs = snapshot["outputs"]
-                    .as_array()
-                    .context("compute_synthesis_outputs")?;
-                ensure!(
-                    outputs.len() == dataset.inference.len(),
-                    "compute_synthesis_reduction_rows"
-                );
-                for (row, output) in outputs.iter().enumerate() {
-                    ensure!(
-                        output["sample_index"] == row,
-                        "compute_synthesis_reduction_order"
-                    );
-                    let inputs = &dataset.inference[row].inputs;
-                    let start = inputs
-                        .iter()
-                        .map(|i| i.source_start)
-                        .min()
-                        .context("compute_synthesis_ancestry")?;
-                    let end = inputs
-                        .iter()
-                        .map(|i| i.source_end)
-                        .max()
-                        .context("compute_synthesis_ancestry")?;
-                    next.push(Answer::from_output(
-                        output,
-                        &expected.manifest_id,
-                        start,
-                        end,
-                    )?);
-                }
+                next.extend(reduction_answers(
+                    &snapshot,
+                    &expected.manifest_id,
+                    dataset,
+                )?);
             }
             groups.push(
                 json!({"group":group,"parents":parents.len(),"complete":group_complete,
@@ -341,11 +431,18 @@ pub(super) async fn advance_frontier(
                 return Ok(());
             }
         }
-        let record = json!({"level":level,"complete":true,"parents":frontier.len(),
+        result["execution_complete"] = true.into();
+        let reason = unusable(&next);
+        let record = json!({"level":level,"complete":reason.is_none(),"execution_complete":true,
+            "answer_complete":reason.is_none(),"parents":frontier.len(),
             "outputs":next.len(),"groups":groups,"answers":next,
-            "generation_limit_reached":next.iter().any(|answer| answer.generated_tokens == 64)});
+            "generation_limit_reached":next.iter().any(|answer| answer.generation.as_ref().is_some_and(|generation| !generation.is_eos()))});
         storage::retain_json(&root, &format!("level-{level:02}-result.json"), &record)?;
         levels.push(record);
+        if let Some(reason) = reason {
+            unfinished(reason, &levels, result);
+            return Ok(());
+        }
         // The first graph stage applies a different instruction and may split its
         // inputs by token budget. Subsequent same-instruction reductions must shrink.
         if next.len() >= frontier.len() && !(force_first && level == 1) {

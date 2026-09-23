@@ -123,6 +123,22 @@ async fn initial_base_waits_for_successful_empty_observation_and_is_never_reenab
 }
 
 #[tokio::test]
+async fn initial_base_admission_observes_withdrawal_before_the_next_copy_refresh() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut broker, publisher, adapter) = configured(root.path());
+    let time = now().unwrap();
+    assert!(accepting(&mut broker, time).await);
+    assert_eq!(broker.initial_base, InitialBase::NeverSelected);
+    assert!(broker.successor.is_none());
+    let scheduled = broker.next_successor_check;
+    publish(&publisher, &adapter, "first", time + 300, time);
+    publisher.withdraw_current().unwrap();
+    assert!(!accepting(&mut broker, time).await);
+    assert_eq!(broker.next_successor_check, scheduled);
+    assert!(broker.successor.is_none());
+}
+
+#[tokio::test]
 async fn restarted_expired_corrupt_or_missing_selection_never_advertises_base_work() {
     let root = tempfile::tempdir().unwrap();
     let (broker, publisher, adapter) = configured(root.path());
@@ -282,4 +298,48 @@ async fn live_execution_keeps_its_snapshot_until_settled_without_changing_lease(
     assert_eq!(broker.jobs[0].status.binding, original);
     assert_eq!(broker.jobs[0].status.state, JobState::Cancelled);
     assert!(!original_path.exists());
+}
+
+#[tokio::test]
+async fn owner_withdrawal_stops_owned_copy_admission_and_preserves_original_receipts() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut broker, publisher, adapter) = configured(root.path());
+    let time = now().unwrap();
+    let first = publish(&publisher, &adapter, "first", time + 300, time);
+    assert!(accepting(&mut broker, time).await);
+    let path = broker.successor.as_ref().unwrap().adapter_path().to_owned();
+    let mut old = fixtures::terminal_job(0);
+    old.status.binding.expires_unix_seconds = time + 600;
+    old.terminal_retain_until = Some(time + 600);
+    let receipt = old.status.clone();
+    broker.jobs.push_back(old);
+    publisher.withdraw_current().unwrap();
+    // Admission observes explicit withdrawal even between scheduled copy refreshes.
+    assert!(!accepting(&mut broker, time).await);
+    assert_eq!(broker.successor.as_ref().unwrap().selection.id, first.id);
+    assert!(path.exists());
+    assert_eq!(
+        broker.observe(&"b".repeat(64), &receipt.binding, false),
+        Outcome::Job(receipt.clone())
+    );
+    let mut restarted = restart(&broker);
+    assert!(!accepting(&mut restarted, time).await);
+    assert!(restarted.successor.is_none());
+    let approved = publish(
+        &publisher,
+        &adapter,
+        "approved-predecessor",
+        time + 200,
+        time,
+    );
+    // The accepted old copy stays withheld until the checked replacement is copied.
+    assert!(!broker.successor_valid(time));
+    broker.next_successor_check = tokio::time::Instant::now();
+    assert!(accepting(&mut broker, time).await);
+    assert_eq!(broker.successor.as_ref().unwrap().selection.id, approved.id);
+    assert_eq!(
+        broker.observe(&"b".repeat(64), &receipt.binding, false),
+        Outcome::Job(receipt)
+    );
+    assert!(!broker.successor_valid(time + 200));
 }

@@ -271,6 +271,10 @@ content_replication_isolation() {
 content_replication_capture() {
     cr_phase=$1
     cr_capture_prefix=${2:-content-replication-$cr_phase}
+    cr_capture_seconds=${4:-1800}
+    case $cr_capture_seconds in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#cr_capture_seconds}" -le 4 ] && [ "$cr_capture_seconds" -ge 1 ] \
+        && [ "$cr_capture_seconds" -le 4200 ] || return 1
     if [ "$cr_phase" = uptake ]; then
         cr_client=relay4; cr_client_ip=49.165.5.1; cr_client_ns=$R4
         cr_provider=relay5; cr_provider_ip=50.166.6.1; cr_provider_ns=$R5
@@ -321,6 +325,7 @@ content_replication_capture() {
             "$WORK/$cr_capture_prefix-layout.json" \
             "$WORK/$cr_capture_prefix-$cr_role.json" \
             "$WORK/$cr_capture_prefix-$cr_role.ready" "$cr_capture_node" \
+            --max-seconds "$cr_capture_seconds" \
             $cr_interfaces >"$WORK/$cr_capture_prefix-$cr_role.log" 2>&1 &
         cr_capture_pid=$!
         case $cr_role in

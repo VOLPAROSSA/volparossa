@@ -7,7 +7,10 @@ use volparossa_content::provider::compute::dataset::VerifiedPublicDataset;
 
 use super::*;
 
+pub(super) mod output;
 mod ready_queue;
+
+pub(super) use ready_queue::cohort::ReadyCohort;
 
 #[derive(Clone, Debug)]
 pub(super) struct ReadyPending {
@@ -17,6 +20,7 @@ pub(super) struct ReadyPending {
 
 /// The owning workflow supplies only rows that have never acquired a retained handle.
 /// Previously attempted rows remain exact pending handles, never fresh queue entries.
+#[derive(Clone)]
 pub(super) struct ReadyOptions {
     pub(super) source: Source,
     pub(super) providers: Vec<VerifyingKey>,
@@ -314,10 +318,11 @@ pub(super) async fn report_with_activity(
                         outputs[usize::from(*original)].is_none(),
                         "compute_distribute_duplicate_row"
                     );
-                    outputs[usize::from(*original)] =
-                        Some(serde_json::json!({"sample_index":original,
+                    let mut joined = serde_json::json!({"sample_index":original,
                         "provider_key":handle.provider_key,"job_id":handle.binding.job_id,
-                        "text":rows[local_index]["text"]}));
+                        "text":rows[local_index]["text"]});
+                    output::retain(&rows[local_index], &mut joined)?;
+                    outputs[usize::from(*original)] = Some(joined);
                 }
                 parts.push(serde_json::json!({"handle":handle,"state":status.state,"report_sha256":status.report_sha256}));
             }
@@ -335,7 +340,10 @@ pub(super) async fn report_with_activity(
         }
     }
     complete &= outputs.iter().all(Option::is_some);
+    let answer_complete =
+        complete && output::all_complete(&outputs.iter().flatten().cloned().collect::<Vec<_>>())?;
     let report = serde_json::json!({"version":1,"operation":"compute_distribute","complete":complete,
+        "execution_complete":complete,"answer_complete":answer_complete,
         "dataset_manifest_id":hex::encode(source.manifest_id()),"provider_count":args.provider_key.len(),
         "outputs":outputs,"jobs":parts,"private_data_supported":false,"model_layer_sharding":false,
         "result_truthfulness_guaranteed":false,"task":args.task});
@@ -378,7 +386,7 @@ pub(super) async fn execute(
 }
 
 /// Observe a previously persisted job without ever repeating its Submit.
-async fn observe_existing(
+pub(super) async fn observe_existing(
     socket: &Path,
     handle: &JobHandle,
     cancelled: watch::Receiver<bool>,

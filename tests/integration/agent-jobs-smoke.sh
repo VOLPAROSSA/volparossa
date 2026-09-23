@@ -27,9 +27,62 @@ agent_jobs_prepare() {
     jobs_units=
     jobs_batch_pid=
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$jobs_root"
-    agent_jobs_private prepare "$jobs_root" >"$WORK/agent-jobs-provision.log" \
+    set -- "$jobs_root"
+    if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ]; then
+        set -- "$@" smollm2-360m-v1
+    fi
+    if [ "${agent_model_task_graph:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ]; then
+        set -- "$@" --task-graph-decoder
+    fi
+    agent_jobs_private prepare "$@" >"$WORK/agent-jobs-provision.log" \
         2>"$WORK/agent-jobs-provision.err" || fail JOBS_PROVISION_FAILED
     install -m 0600 "$jobs_root/provision/provision-report.json" "$WORK/agent-jobs-provision.json"
+}
+
+agent_jobs_aggregation_backend() {
+    # Reuse this run's 135M provision after the primary recovery evidence is
+    # retained and its workers are stopped, but before private-store cleanup.
+    # This is synthetic kernel arithmetic evidence, not trained-peer/B05 evidence.
+    [ "${agent_active_recovery:-no}" = yes ] || return 1
+    PHASE=agent-aggregation-source
+    python3 -I -B "$source_directory/tests/integration/agent-aggregation-backend-smoke.py" \
+        --stage --work "$WORK" --source-root "$source_directory" --source-commit "$expected_commit" \
+        >"$WORK/agent-jobs-aggregation-source.json" 2>"$WORK/agent-jobs-aggregation-source.err" \
+        || fail AGGREGATION_SOURCE_FAILED
+    aggregation_host_netns=$(readlink /proc/1/ns/net) || fail AGGREGATION_HOST_NETNS_UNAVAILABLE
+    aggregation_unit=volparossa-alpha-aggregation.service
+    [ "$(unit_load_state "$aggregation_unit")" = not-found ] || fail AGGREGATION_UNIT_COLLISION
+    jobs_units="$jobs_units $aggregation_unit"
+    PHASE=agent-aggregation-backend
+    aggregation_status=0
+    # Only six verified public source files are exposed through the private home
+    # mount. The original source/archive need not be readable by volparossa.
+    systemd-run --wait --pipe --unit="$aggregation_unit" --slice=system.slice --service-type=exec \
+        --property=CollectMode=inactive --property=Restart=no \
+        --property=User=volparossa --property=Group=volparossa --property=UMask=0077 \
+        --property=NoNewPrivileges=yes --property=CapabilityBoundingSet= --property=AmbientCapabilities= \
+        --property=PrivateNetwork=yes --property=PrivateTmp=yes --property=PrivateDevices=yes \
+        --property=ProtectSystem=strict --property=ProtectHome=tmpfs \
+        --property="BindReadOnlyPaths=$WORK/bin/aggregation-source:/home/vpci/source" \
+        --property="ReadWritePaths=$jobs_root" --property=CPUQuota=200% \
+        --property=KillMode=control-group --property=RuntimeMaxSec=630s --property=TimeoutStopSec=10s \
+        -- /usr/bin/python3 -I -B /home/vpci/source/tests/integration/agent-aggregation-backend-smoke.py \
+        --execute --work "$WORK" --source-root /home/vpci/source --source-commit "$expected_commit" \
+        --guest-host-netns "$aggregation_host_netns" --threads 2 --max-seconds 600 \
+        >"$WORK/agent-jobs-aggregation-backend.log" 2>"$WORK/agent-jobs-aggregation-backend.err" \
+        || aggregation_status=$?
+    agent_jobs_stop_unit "$aggregation_unit" || fail AGGREGATION_UNIT_CLEANUP_FAILED
+    jq -n --arg unit "$aggregation_unit" --arg host_netns "$aggregation_host_netns" \
+        --argjson status "$aggregation_status" \
+        '{unit:$unit,original_guest_netns:$host_netns,systemd_run_exit_code:$status,
+          owned_unit_stopped:true,owned_cgroup_empty:true,scope:"synthetic kernel proof only"}' \
+        >"$WORK/agent-jobs-aggregation-unit.json"
+    # Retain the original report before normal JOBS cleanup removes its owner tree.
+    if [ -f "$jobs_root/aggregation-backend/report.json" ] && [ ! -L "$jobs_root/aggregation-backend/report.json" ]; then
+        install -m 0600 "$jobs_root/aggregation-backend/report.json" "$WORK/agent-jobs-aggregation-backend.json"
+    fi
+    [ "$aggregation_status" -eq 0 ] && [ -f "$WORK/agent-jobs-aggregation-backend.json" ] \
+        || fail AGGREGATION_BACKEND_FAILED
 }
 
 agent_jobs_broker_startup() {
@@ -64,9 +117,24 @@ agent_jobs_broker() {
     jobs_attempt=0
     jobs_started=$(python3 -c 'import time; print(time.monotonic_ns())') || return 1
     set --
-    if [ "${agent_successor_serving:-no}" = yes ] && [ "$jobs_node" = "$provider_node_a" ]; then
+    if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ]; then
+        set -- --model-profile smollm2-360m-v1
+    fi
+    if [ "${agent_policy_assessment:-no}" = yes ]; then
+        # Explicit owner opt-in; no other fixture advertises structured principle inference.
+        set -- "$@" --principle-inference-v4
+    fi
+    if { [ "${agent_successor_serving:-no}" = yes ] || [ "${agent_active_recovery:-no}" = yes ] || [ "${agent_autonomous_aggregation:-no}" = yes ]; } && [ "$jobs_node" = "$provider_node_a" ]; then
         install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$jobs_private/serving"
-        set -- --serving-directory "$jobs_private/serving"
+        set -- "$@" --serving-directory "$jobs_private/serving"
+    fi
+    # PrivateMounts alone ends in shared/slave mounts in systemd 257. Only the
+    # disposable DAG pressure fixture needs recursive private propagation; all
+    # other scenarios retain systemd's shared default. Keep the live mount guard.
+    # https://github.com/systemd/systemd/blob/v257/man/systemd.exec.xml#L2182
+    jobs_mount_flags=shared
+    if [ "${agent_ready_dag:-no}" = yes ]; then
+        jobs_mount_flags=private
     fi
     systemd-run --no-block --unit="$jobs_unit" --slice=system.slice --service-type=exec \
         --property=CollectMode=inactive --property=Restart=no \
@@ -74,6 +142,7 @@ agent_jobs_broker() {
         --property=NoNewPrivileges=yes --property=CapabilityBoundingSet= --property=AmbientCapabilities= \
         --property="NetworkNamespacePath=/run/netns/$jobs_namespace" \
         --property=PrivateMounts=yes --property=PrivateTmp=yes --property=PrivateDevices=yes \
+        --property="MountFlags=$jobs_mount_flags" \
         --property=ProtectSystem=strict --property=ProtectHome=yes \
         --property="ReadWritePaths=$jobs_private" --property="InaccessiblePaths=$jobs_hidden" \
         --property=KillMode=control-group --property=TimeoutStopSec=20s \
@@ -120,7 +189,7 @@ agent_jobs_cgroup_empty() {
 
 agent_jobs_stop_unit() {
     jobs_stop_unit=$1
-    case $jobs_stop_unit in volparossa-alpha-compute@relay[345].service) ;; *) return 1 ;; esac
+    case $jobs_stop_unit in volparossa-alpha-compute@relay[345].service|volparossa-alpha-aggregation.service) ;; *) return 1 ;; esac
     jobs_load_state=$(systemctl show --property=LoadState --value "$jobs_stop_unit") || return 1
     case $jobs_load_state in
         loaded)
@@ -144,6 +213,13 @@ agent_jobs_stop_unit() {
 }
 
 agent_jobs_stop() {
+    jobs_dag_pressure_cleanup_failed=no
+    if [ "${agent_ready_dag:-no}" = yes ]; then
+        # Preserve the floor-restoration failure, but still stop the original
+        # owner and every broker; a dead B must not prevent ordinary teardown.
+        python3 -B "$source_directory/tests/integration/agent-ready-dag-smoke.py" cleanup-worker "$WORK" \
+            || jobs_dag_pressure_cleanup_failed=yes
+    fi
     if [ "${agent_jobs_package_queue:-no}" = yes ]; then
         python3 -B "$source_directory/tests/integration/agent-jobs-package-queue-smoke.py" cleanup-worker "$WORK" || return 1
     fi
@@ -158,6 +234,13 @@ agent_jobs_stop() {
         wait "$jobs_batch_pid" || true
         jobs_batch_pid=
     fi
+    if [ "${agent_active_recovery:-no}" = yes ] && [ -n "${recovery_submit_pid:-}" ]; then
+        if kill -0 "$recovery_submit_pid" 2>/dev/null; then
+            kill -INT "$recovery_submit_pid" || return 1
+            wait "$recovery_submit_pid" || true
+        fi
+        recovery_submit_pid=
+    fi
     for jobs_stop_unit in ${jobs_units:-}; do
         agent_jobs_stop_unit "$jobs_stop_unit" || return 1
     done
@@ -165,6 +248,16 @@ agent_jobs_stop() {
     if [ "${agent_successor_serving:-no}" = yes ]; then
         python3 -B "$source_directory/tests/integration/agent-successor-serving-smoke.py" cleanup-workers "$WORK" || return 1
     fi
+    if [ "${agent_active_recovery:-no}" = yes ]; then
+        agent_active_recovery_python cleanup-workers "$WORK" || return 1
+    fi
+    if [ "${agent_adapter_aggregation:-no}" = yes ] || [ "${agent_autonomous_aggregation:-no}" = yes ]; then
+        agent_adapter_aggregation_python cleanup-workers "$WORK" || return 1
+    fi
+    if [ "${agent_autonomous_aggregation:-no}" = yes ]; then
+        agent_autonomous_aggregation_python cleanup-workers "$WORK" || return 1
+    fi
+    [ "$jobs_dag_pressure_cleanup_failed" = no ]
 }
 
 agent_jobs_cleanup() {
@@ -203,7 +296,15 @@ agent_jobs_setup() {
         | map(select($p[.] != $control)) | .[:2] | select(length == 2)' "$WORK/a01-expected-peers.json") || fail JOBS_PEERS_INVALID
     provider_node_a=$(printf '%s\n' "$provider_nodes" | jq -er '.[0]')
     provider_node_b=$(printf '%s\n' "$provider_nodes" | jq -er '.[1]')
-    if [ "${agent_jobs_peer_recovery:-no}" = yes ]; then
+    if [ "${agent_active_recovery:-no}" = yes ] || [ "${agent_adapter_aggregation:-no}" = yes ] || [ "${agent_autonomous_aggregation:-no}" = yes ]; then
+        # The pre-start replication graph already connects both providers to
+        # all three candidates. Adding cp links would collide with those /32
+        # routes and replace the learner's actual WireGuard-capable legs.
+        [ "$provider_node_a" = relay4 ] || fail RECOVERY_NODE_LAYOUT_CHANGED
+        [ "$provider_node_b" = relay5 ] || fail RECOVERY_NODE_LAYOUT_CHANGED
+        jq -e --arg control "$provider_control_peer" '[.relay0,.relay1,.relay2] | index($control) != null' \
+            "$WORK/a01-expected-peers.json" >/dev/null || fail RECOVERY_CONTROL_NOT_INDEPENDENT
+    elif [ "${agent_jobs_peer_recovery:-no}" = yes ]; then
         jq -e --arg control "$provider_control_peer" '[.relay0,.relay1,.relay2] | index($control) != null' \
             "$WORK/a01-expected-peers.json" >/dev/null || fail PEER_RECOVERY_CONTROL_NOT_INDEPENDENT
         content_provider_adaptive_control_underlay "$provider_control_peer" || fail PEER_RECOVERY_CONTROL_UNDERLAY_FAILED
@@ -235,6 +336,30 @@ agent_jobs_setup() {
 
 agent_jobs_run() {
     agent_jobs_setup
+    if [ "${agent_autonomous_aggregation:-no}" = yes ]; then
+        agent_autonomous_aggregation_run
+        return
+    fi
+    if [ "${agent_adapter_aggregation:-no}" = yes ]; then
+        agent_adapter_aggregation_run
+        return
+    fi
+    if [ "${agent_active_recovery:-no}" = yes ]; then
+        agent_active_recovery_run
+        return
+    fi
+    if [ "${agent_policy_assessment:-no}" = yes ]; then
+        agent_policy_assessment_run
+        return
+    fi
+    if [ "${agent_ready_dag:-no}" = yes ]; then
+        agent_ready_dag_run
+        return
+    fi
+    if [ "${agent_model_planning:-no}" = yes ]; then
+        agent_model_planning_run
+        return
+    fi
     if [ "${agent_successor_serving:-no}" = yes ]; then
         agent_successor_serving_run
         return
@@ -342,6 +467,30 @@ agent_jobs_finalize_report() {
         [ ! -f "$jobs_log" ] || [ -L "$jobs_log" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$jobs_log" "$output_directory/$(basename -- "$jobs_log")"
     done
+    if [ "${agent_autonomous_aggregation:-no}" = yes ]; then
+        agent_autonomous_aggregation_finalize_report "$jobs_status"
+        return
+    fi
+    if [ "${agent_adapter_aggregation:-no}" = yes ]; then
+        agent_adapter_aggregation_finalize_report "$jobs_status"
+        return
+    fi
+    if [ "${agent_active_recovery:-no}" = yes ]; then
+        agent_active_recovery_finalize_report "$jobs_status"
+        return
+    fi
+    if [ "${agent_policy_assessment:-no}" = yes ]; then
+        agent_policy_assessment_finalize_report "$jobs_status"
+        return
+    fi
+    if [ "${agent_ready_dag:-no}" = yes ]; then
+        agent_ready_dag_finalize_report "$jobs_status"
+        return
+    fi
+    if [ "${agent_model_planning:-no}" = yes ]; then
+        agent_model_planning_finalize_report "$jobs_status"
+        return
+    fi
     if [ "${agent_successor_serving:-no}" = yes ]; then
         agent_successor_serving_finalize_report "$jobs_status"
         return

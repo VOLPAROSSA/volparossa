@@ -4,12 +4,12 @@ use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::{Options, State, Store, evaluation, now, peer_updates, read_file};
+use super::{Options, State, Store, aggregate_updates, evaluation, now, peer_updates, read_file};
 use crate::compute::serving_snapshot::Publisher;
 
 pub(super) struct Serving {
     publisher: Publisher,
-    last: Option<(Option<u64>, Option<u64>)>,
+    last: Option<(Option<u64>, Option<u64>, Option<u64>)>,
 }
 
 impl Serving {
@@ -37,11 +37,17 @@ impl Serving {
             .peer_updates
             .as_ref()
             .and_then(peer_updates::active_sequence);
-        let key = (state.latest, peer);
+        let aggregate = state
+            .aggregate_updates
+            .as_ref()
+            .and_then(aggregate_updates::active_sequence);
+        let key = (state.latest, peer, aggregate);
         if self.last == Some(key) {
             return Ok(());
         }
-        let candidate = if let Some(registry) = &state.peer_updates {
+        let candidate = if let Some(registry) = &state.aggregate_updates {
+            aggregate_updates::serving_candidate(args, registry, state.latest)?
+        } else if let Some(registry) = &state.peer_updates {
             peer_updates::serving_candidate(args, registry, state.latest)?
         } else {
             None
@@ -61,9 +67,17 @@ impl Serving {
         self.last = Some(key);
         Ok(())
     }
+
+    /// Called only after typed, proven active-adapter corruption without a valid
+    /// approved predecessor. Busy, I/O uncertainty and quality differences do not revoke.
+    pub(super) fn withdraw(&mut self) -> Result<()> {
+        self.publisher.withdraw_current()?;
+        self.last = None;
+        Ok(())
+    }
 }
 
-fn local_candidate(
+pub(super) fn local_candidate(
     store: &Store,
     state: &State,
 ) -> Result<Option<(std::path::PathBuf, u64, Value)>> {
@@ -90,6 +104,13 @@ fn local_candidate(
     let mut expires = result["source_expires_unix_seconds"]
         .as_u64()
         .context("serving_loop_source_expiry")?;
+    if let Some(inherited) = result.get("authority_expires_unix_seconds") {
+        expires = expires.min(
+            inherited
+                .as_u64()
+                .context("serving_loop_inherited_expiry")?,
+        );
+    }
     if let Some(catalog) = selection
         .get("source_catalog")
         .filter(|value| !value.is_null())

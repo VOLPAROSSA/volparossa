@@ -206,29 +206,57 @@ trained a successor and published that successor for reuse. Public document frag
 been combined into one answer through four real peer-inference levels. These scoped results
 prove execution, not answer quality, general intelligence or universally better updates.
 
-The next connected step is **learning into live service**: an explicitly enabled training loop
+**Learning into live service** now has a real disposable-network proof: an explicitly enabled training loop
 can publish its approved selection to a running peer executor. The executor changes models
 between jobs; existing jobs and receipts keep their original identity, and approval expiry is
-not renewed. This is a development candidate with focused local checks; the real trained-model
-and protected peer-job transition still needs its disposable-network proof.
+not renewed. The same executor served a base-model job, then a new protected peer job with the
+exact locally trained and approved adapter. This proves the 135M execution chain, not general
+answer quality or automatic network-wide adoption.
 [Use approved successors for new peer jobs →](docs/DECENTRALIZED_AGENTS.md#using-approved-successors-for-new-peer-jobs)
 
 Public work now has verified cross-package peer scheduling: a free worker can take work from
-another signed package while a slower worker continues. A new **source collection** candidate
-adds comparisons across explicitly public local documents and selected signed network publications,
+another signed package while a slower worker continues. **Source collections** now
+add comparisons across explicitly public local documents and selected signed network publications,
 reusing cached bytes and fetching missing sources without changing the selection. It preserves source-byte
-provenance through the existing peer-execution and synthesis pipeline. The local-source proof
-passes. The first native-network-source run verified cache reuse and protected retrieval,
-but stalled when both executors filled their retained-job history. After a targeted fix, the
-next run stopped on an unconfirmed peer submission; this combined workflow is not yet verified.
-A diagnostic run then failed earlier, while resolving the first cache provider's address.
+provenance through the existing peer-execution and synthesis pipeline. Both local-source and
+mixed local/cache/network execution have passed real VM proofs, including offline resume.
+The mixed run observed twenty actual workers. Earlier intermittent address/submission failures
+remain documented; one passing execution does not establish that their causes are resolved.
 Source ranges are not proof that generated statements are true.
 [Compare several public sources →](docs/DECENTRALIZED_AGENTS.md#working-with-several-public-sources)
 
-The next cooperation step is an explicit **public task graph**: different source questions
-can run across peers, then their retained answers feed a new dependent instruction. The
-implementation and its real four-task fork/join and offline-resume VM proof pass.
-This is coordinated execution of an enrolled plan, not yet autonomous planning.
+An explicit **public task graph** lets peers answer different source questions, then feed their
+retained answers into dependent instructions. Its real four-task fork/join and offline-resume
+VM proof passes. A dependency-ready scheduler is now being integrated: a follow-up task can
+use its completed parents while unrelated work continues, sharing the same peer-capacity
+accounting. Focused checks pass; live trials did not preserve the required original worker/owner
+condition. That proof remains pending while cooperative pause/resume replaces the fixture's process stop.
+
+**Model-proposed work** is opt-in. `--plan-tasks` asks for subquestions in a fixed layout;
+`--plan-task-graph` lets the model propose one to four subtasks and their dependencies.
+Add `--plan-structure dependent` for tasks that build on earlier answers. Planning uses an
+exact bounded public source excerpt, records its coverage and retains the original question
+for the final join. Rejected attempts consume the original budget; questions and plans are
+never repaired or supplied after generation. Incomplete answers cannot become completed
+dependencies.
+
+The explicit `smollm2-360m-v1` profile connects the larger pinned model to planning, peer
+selection, inference and synthesis. The existing 135M training/adapters remain separate.
+A real VM proof now passes: a model-generated four-task graph, five observed peer jobs and
+completed answers, followed by offline resume with no new jobs after the brokers stop and
+the original planner input is removed. The original signed results stay unchanged. The generated
+questions and answers still contain factual routing errors. This proves executable cooperation,
+**not yet useful, source-faithful reasoning** or evidence that a larger model is always better.
+An opt-in source-grounded follow-up now keeps the complete original short document beside
+generated answers in dependent tasks. Its real execution and offline resume pass, but its
+answers still contain privacy errors; retaining evidence is not the same as reasoning correctly.
+
+An owner-enrolled automatic training-loop candidate can combine three trusted publishers'
+adapters, compare the result with its active model and use an approved combination for serving
+and further local training. With the owner's existing publishing configuration, approved
+combinations and local successors can now return to the shared cache through one ordered,
+signed publication channel. Automatic combination, further training, approved serving and
+restart have passed a real VM proof; the extended return-sharing proof is still pending.
 [How cooperating tasks fit together →](docs/DECENTRALIZED_AGENTS.md#cooperating-public-tasks)
 
 Public work can be split across selected peers, with retained results and bounded recovery
@@ -240,6 +268,13 @@ Ordinary remote inference exposes inputs to the executing device: encrypted tran
 does not make private offload safe. Current distributed experiments use explicitly public,
 authorized data. The owner's activity has priority, with bounded worker resources, pause/resume
 and cancellation; broader device-activity integration remains incomplete.
+An explicit `compute private-task` candidate keeps a short sensitive question and document
+entirely local: no peer execution, publication, cache admission or training. It uses the same
+isolated model worker and removes its temporary input/report before printing the owner's answer.
+A [disposable real-model proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/35661083371)
+passes for one synthetic private question, including isolation and cleanup before answer output.
+This is a local privacy fallback, not confidential distributed computation or a guarantee of
+answer quality. [Usage and limits →](docs/DECENTRALIZED_AGENTS.md#local-only-private-questions)
 
 [Agent architecture, training and remaining milestones →](docs/DECENTRALIZED_AGENTS.md)
 
@@ -301,6 +336,18 @@ Today, exits enforce a threshold-signed **destination/port whitelist**; this is 
 classifier for everything behind a hostname. The complete governance and agent “immune system”
 are not yet implemented. Filtering cannot guarantee a perfectly clean cache, eliminate legal
 risk, or justify breaking private encryption.
+
+The new `compute peer policy-assess` development candidate fetches one exact public text object,
+asks two selected peers for principle-led judgments, and has each peer examine the other's
+reasoning. It retains the original answers, evidence and disagreements; its concept outcome is
+**allow, deny or undetermined**. The first real-model run fetched the source and executed both
+assessors, but their answers hit the token limit without complete JSON. A later structured run
+also quoted the framework instead of the subject. The next candidate constrains quotes to the
+actual source and separates that source from the framework; cross-review remains unproven.
+An opt-in transfer path now preserves the original provider-signed replies and can
+package/retrieve completed judgments through the shared cache. This verifies who signed each
+answer, not that the answer is correct. These concepts do not change network policy or establish legality.
+[Public assessment workflow →](docs/DECENTRALIZED_AGENTS.md#public-principle-assessments-and-cross-review)
 
 [Principle-led governance and illustrative examples →](docs/DECENTRALIZED_AGENTS.md#principles-guide-rules-not-the-other-way-around) ·
 [Current whitelist enforcement →](docs/WHITELIST.md)

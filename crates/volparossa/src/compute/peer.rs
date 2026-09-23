@@ -5,9 +5,11 @@ mod discovery;
 mod document;
 mod executors;
 mod follow;
+mod policy_assessment;
 mod readiness;
 mod resume;
 mod task;
+mod transcript;
 mod workflow;
 
 use std::{
@@ -51,6 +53,12 @@ pub(crate) enum Command {
     Task(Box<task::Options>),
     /// Tokenize one explicitly public document and execute all its excerpts on selected peers.
     Document(Box<document::Options>),
+    /// Two selected peers assess one public publication and cross-review a local concept verdict.
+    PolicyAssess(Box<policy_assessment::Options>),
+    /// Package complete public assessments with their original provider-signed Poll replies.
+    PolicyPack(Box<policy_assessment::transfer::Pack>),
+    /// Retrieve and independently recheck a selected assessment package without activating policy.
+    PolicyFetch(Box<policy_assessment::transfer::Fetch>),
 }
 
 #[derive(Debug, Args)]
@@ -256,6 +264,11 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Workflow(args) => return workflow::run(&args, socket).await,
         Command::Task(args) => return task::run(&args, socket).await,
         Command::Document(args) => return document::run(&args, socket).await,
+        Command::PolicyAssess(args) => return policy_assessment::run(&args, socket).await,
+        Command::PolicyPack(args) => return policy_assessment::transfer::pack(&args),
+        Command::PolicyFetch(args) => {
+            return policy_assessment::transfer::fetch(&args, socket).await;
+        }
     };
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
@@ -342,7 +355,9 @@ fn supports_source(
     source: &volparossa_content::provider::compute::dataset::VerifiedPublicDataset,
     caps: &rpc::Capabilities,
 ) -> bool {
-    if source.is_derived() {
+    if source.is_principle() {
+        caps.principle_inference_v4
+    } else if source.is_derived() {
         caps.derived_inference_v3
     } else {
         !source.is_document() || caps.document_inference_v2
@@ -406,16 +421,14 @@ async fn capabilities(socket: &Path, provider: &VerifyingKey) -> Result<rpc::Cap
 }
 
 fn validate_profile(caps: &rpc::Capabilities) -> Result<()> {
-    use volparossa_content::agent_artifact::{BASE_MODEL_SHA256, MODEL_ID, MODEL_REVISION};
+    let profile = super::broker::profile_for_model(&caps.model)?;
     ensure!(
         caps.public_inference_only
+            && (!caps.principle_inference_v4 || profile == super::ModelProfile::Smol360)
             && caps.runtime_slots == 1
             && caps.max_threads <= 2
             && (1..=600).contains(&caps.max_job_seconds)
-            && (1..=4).contains(&caps.max_rows)
-            && caps.model.model_id == MODEL_ID
-            && caps.model.model_revision == MODEL_REVISION
-            && caps.model.base_weights.sha256 == hex::encode(BASE_MODEL_SHA256)
+            && (1..=profile.spec().max_rows).contains(&caps.max_rows)
             && caps.model_fingerprint == sha(&serde_json::to_vec(&caps.model)?),
         "compute_peer_profile"
     );
@@ -433,6 +446,7 @@ async fn exchange(
             socket,
             Operation::ComputeRemote(ComputeRemoteRequest {
                 provider_key: provider.to_bytes().to_vec(),
+                retain_transcript: false,
             }),
         )
         .await?;

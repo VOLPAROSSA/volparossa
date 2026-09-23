@@ -2,6 +2,10 @@
 //! A peer publication is never counted as a locally trained cycle. The fixed
 //! worker, not a publisher's quality claim, decides the local comparison.
 
+mod retirement;
+
+pub(super) use retirement::{recover_active, recovery_blocked};
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
@@ -115,6 +119,8 @@ struct Round {
     imported_at: Option<u64>,
     baseline: Option<Baseline>,
     snapshot: Option<Snapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retirement: Option<retirement::Record>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -199,7 +205,20 @@ pub(super) fn restore(
         prune(&round_root(args, sequence)?)?;
     }
     registry.garbage.clear();
+    checkpoint(&registry, store, state)?;
+    // An interruption may leave a previously accepted local extraction damaged.
+    // Recover only from attributable bytes, never from a generic restore error.
+    recover_active(args, store, state)?;
+    registry = state
+        .peer_updates
+        .as_ref()
+        .context("peer_updates_state")?
+        .clone();
     for round in &registry.completed {
+        if round.retirement.is_some() {
+            retirement::verify(args, &registry, round)?;
+            continue;
+        }
         ensure!(
             round.snapshot.as_ref() == Some(&snapshot(&round_root(args, round.sequence)?)?),
             "peer_updates_retained_files_changed"
@@ -289,15 +308,16 @@ impl Registry {
             );
             ensure!(
                 terminal == self.completed.iter().any(|r| r.sequence == round.sequence)
-                    && (!terminal || round.snapshot.is_some()),
+                    && (!terminal || round.snapshot.is_some())
+                    && (round.retirement.is_none() || round.phase == Phase::Approved),
                 "peer_updates_round_phase"
             );
         }
         ensure!(
-            self.active.is_none_or(|id| self
-                .completed
-                .iter()
-                .any(|r| r.sequence == id && r.phase == Phase::Approved)),
+            self.active
+                .is_none_or(|id| self.completed.iter().any(|r| r.sequence == id
+                    && r.phase == Phase::Approved
+                    && r.retirement.is_none())),
             "peer_updates_active_missing"
         );
         for id in &self.garbage {
@@ -363,7 +383,9 @@ pub(super) fn active(
         .as_ref()
         .context("peer_updates_baseline_missing")?;
     ensure!(
-        round.phase == Phase::Approved && baseline.local_predecessor == local_latest,
+        round.phase == Phase::Approved
+            && round.retirement.is_none()
+            && baseline.local_predecessor == local_latest,
         "peer_updates_active_local_history"
     );
     let comparison = verify_round(args, registry, round)?;
@@ -675,6 +697,7 @@ async fn discover(
         imported_at: None,
         baseline: None,
         snapshot: None,
+        retirement: None,
     });
     checkpoint(registry, store, state)?;
     let root = round_root(args, sequence)?;
@@ -806,11 +829,10 @@ fn make_room(
     if registry.completed.len() < RETAINED {
         return Ok(true);
     }
-    let Some(index) = registry
-        .completed
-        .iter()
-        .position(|round| Some(round.sequence) != registry.active)
-    else {
+    let predecessor = retirement::predecessor_sequence(registry);
+    let Some(index) = registry.completed.iter().position(|round| {
+        Some(round.sequence) != registry.active && Some(round.sequence) != predecessor
+    }) else {
         return Ok(false);
     };
     let obsolete = registry.completed.remove(index);

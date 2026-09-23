@@ -8,12 +8,16 @@
 
 mod derived;
 mod document;
+mod principle;
 pub use derived::{
     DERIVED_CLAIM_SCOPE, DERIVED_CONTENT_TYPE, DerivedDataset, DerivedInput, DerivedQuestion,
-    validate_derived_json,
+    GROUNDED_DERIVED_CONTENT_TYPE, validate_derived_json,
 };
 pub use document::{
     DOCUMENT_CONTENT_TYPE, DocumentDataset, DocumentQuestion, validate_document_json,
+};
+pub use principle::{
+    PRINCIPLE_CONTENT_TYPE, PrincipleDataset, PrincipleOutputContract, validate_principle_json,
 };
 
 use ed25519_dalek::VerifyingKey;
@@ -65,6 +69,7 @@ enum Profile {
     Repository(Dataset),
     Document(DocumentDataset),
     Derived(DerivedDataset),
+    Principle(PrincipleDataset),
 }
 
 impl VerifiedPublicDataset {
@@ -84,17 +89,34 @@ impl VerifiedPublicDataset {
             Profile::Repository(dataset) => dataset.inference.len(),
             Profile::Document(dataset) => dataset.inference.len(),
             Profile::Derived(dataset) => dataset.inference.len(),
+            Profile::Principle(dataset) => dataset.inference.len(),
         }
     }
 
     /// Whether this source is a public document package, which must never be used for training.
     pub fn is_document(&self) -> bool {
-        matches!(self.dataset, Profile::Document(_) | Profile::Derived(_))
+        matches!(
+            self.dataset,
+            Profile::Document(_) | Profile::Derived(_) | Profile::Principle(_)
+        )
     }
 
     /// Model-generated public synthesis inputs, not original excerpts or execution attestations.
     pub fn is_derived(&self) -> bool {
         matches!(self.dataset, Profile::Derived(_))
+    }
+
+    /// Explicit structured principle assessment/review, never ordinary free-text inference.
+    pub fn is_principle(&self) -> bool {
+        matches!(self.dataset, Profile::Principle(_))
+    }
+
+    /// Publisher-bound fixed output contract, not permission to activate network policy.
+    pub fn output_contract(&self) -> Option<PrincipleOutputContract> {
+        match &self.dataset {
+            Profile::Principle(dataset) => Some(dataset.output_contract),
+            _ => None,
+        }
     }
 
     /// Deterministically serialize the selected original rows in increasing index order.
@@ -112,10 +134,10 @@ impl VerifiedPublicDataset {
     ///
     /// # Errors
     /// Rejects invalid row selection, empty/whitespace-only, NUL or over-512-byte questions,
-    /// and derived datasets larger than the existing object bound.
+    /// derived datasets larger than the existing object bound, and fixed-contract principle inputs.
     pub fn derive_question(&self, rows: &[u16], question: &str) -> Result<String, ComputeError> {
         text(question, 512)?;
-        if question.trim().is_empty() {
+        if question.trim().is_empty() || self.is_principle() {
             return Err(ComputeError::Invalid);
         }
         self.derive_selected(rows, Some(question))
@@ -150,6 +172,7 @@ impl VerifiedPublicDataset {
             }
             Profile::Document(original) => original.derive_selected(rows, question)?,
             Profile::Derived(original) => original.derive_selected(rows, question)?,
+            Profile::Principle(original) => original.derive_selected(rows)?,
         };
         if json.len() > MAX_DATASET_BYTES {
             return Err(ComputeError::Invalid);
@@ -177,7 +200,11 @@ pub fn verify_source(
         .map_err(|_| ComputeError::Authentication)?;
     if !matches!(
         manifest.metadata().content_type.as_str(),
-        CONTENT_TYPE | DOCUMENT_CONTENT_TYPE | DERIVED_CONTENT_TYPE
+        CONTENT_TYPE
+            | DOCUMENT_CONTENT_TYPE
+            | DERIVED_CONTENT_TYPE
+            | GROUNDED_DERIVED_CONTENT_TYPE
+            | PRINCIPLE_CONTENT_TYPE
     ) || manifest.length() != original_json.len() as u64
         || manifest.object_sha256() != &<[u8; 32]>::from(Sha256::digest(original_json.as_bytes()))
     {
@@ -195,9 +222,20 @@ pub fn verify_source(
     {
         return Err(ComputeError::Authentication);
     }
-    let dataset = if manifest.metadata().content_type == DERIVED_CONTENT_TYPE {
+    let dataset = if manifest.metadata().content_type == PRINCIPLE_CONTENT_TYPE {
+        let principle: PrincipleDataset =
+            serde_json::from_str(original_json).map_err(|_| ComputeError::Invalid)?;
+        principle.verify_source(publisher, now, manifest.validity().expires)?;
+        Profile::Principle(principle)
+    } else if matches!(
+        manifest.metadata().content_type.as_str(),
+        DERIVED_CONTENT_TYPE | GROUNDED_DERIVED_CONTENT_TYPE
+    ) {
         let derived: DerivedDataset =
             serde_json::from_str(original_json).map_err(|_| ComputeError::Invalid)?;
+        if derived.content_type()? != manifest.metadata().content_type {
+            return Err(ComputeError::Authentication);
+        }
         derived.verify_source(publisher, now, manifest.validity().expires)?;
         Profile::Derived(derived)
     } else if manifest.metadata().content_type == DOCUMENT_CONTENT_TYPE {

@@ -1,0 +1,4 @@
+# Explicit optional decoder only; append to, never replace, requirements.lock.
+lm-format-enforcer==0.11.3 --hash=sha256:cf586350875def1ae7a8fba84fcbbfc8371424b6c9d05c1fcba70aa233fbf06f
+interegular==0.3.3 --hash=sha256:b0c07007d48c89d6d19f7204972d369b2a77222722e126b6aa63aa721dc3b19c
+pydantic==1.10.24 --hash=sha256:093768eba26db55a88b12f3073017e3fdee319ef60d3aef5c6c04a4e484db193

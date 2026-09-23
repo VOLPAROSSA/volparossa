@@ -17,6 +17,7 @@ current Debian package; a later distributable ML package still needs complete no
 | Component | Original source / revision | License/provenance scope |
 | --- | --- | --- |
 | SmolLM2-135M-Instruct | [HuggingFaceTB model](https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/tree/83212e1e2b3cfd6958f3707877bb878945dea8ee), `83212e1e2b3cfd6958f3707877bb878945dea8ee` | Apache-2.0; unchanged model LICENSE SHA-256 `59899c6091b540582ed617e8eeaac4919dc985ccfc35459ee9752b699be5205b` |
+| Opt-in SmolLM2-360M-Instruct | [HuggingFaceTB model](https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct/tree/a10cc1512eabd3dde888204e902eca88bddb4951), `a10cc1512eabd3dde888204e902eca88bddb4951` | Apache-2.0 declared by the original model card; this revision has no `LICENSE` file. The explicitly pinned, unchanged Apache-2.0 text from the 135M row is retained separately, not described as a file from the 360M repository. |
 | PyTorch CPU `2.14.0+cpu` | [pytorch/pytorch](https://github.com/pytorch/pytorch/tree/2b3ec34829036a65cd9d1398ea72a0167dc37470), `2b3ec34829036a65cd9d1398ea72a0167dc37470` | Original official CPU wheel; retain its own and bundled dependency notices |
 | Transformers `5.16.1` | [huggingface/transformers](https://github.com/huggingface/transformers/tree/93c8b7b485963a10800c91f55304db6be211c2bd), `93c8b7b485963a10800c91f55304db6be211c2bd` | Apache-2.0; original wheel notices retained |
 | PEFT `0.20.0` | [huggingface/peft](https://github.com/huggingface/peft/tree/a5526d27a9d47d1e8264d5e1b1f96c0fdc79464e), `a5526d27a9d47d1e8264d5e1b1f96c0fdc79464e` | Apache-2.0; original wheel notices retained |
@@ -27,6 +28,47 @@ This is slightly larger than the current native content-object ceiling; the ceil
 been silently raised. The initial trained rank-4 adapter fits a normal content object, while
 full-model distribution needs explicit compatible sharding/parts integration. No trained
 adapter or actual backend execution is claimed until the isolated guest smoke succeeds.
+
+The optional `smollm2-360m-v1` inference/planning profile adds seven original model assets
+in `workers/volparossa-ml/model-pins-360m.json` and the separately attributed license text;
+it reuses the exact 38-wheel runtime lock. Its original weights are 723,674,912 bytes,
+SHA-256 `e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e`.
+Tokenizer SHA-256 `9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c`
+is reused because upstream lists the identical Git blob
+`f922b1797f0c88e71addc8393787831f2477a4bd` at both exact model revisions.
+No weights or tokenizer were downloaded for this metadata check. The 360M profile does
+not enable training or apply 135M adapters, and does not raise the native content-object
+ceiling or establish answer quality.
+
+The separate, explicit `--task-graph-decoder` provisioning option appends three original
+pure-Python wheels; neither the 38-wheel baseline nor its `requirements.lock` is changed.
+`graph-decoder-pins.json` and `graph-decoder-requirements.lock` retain their exact original
+PyPI URLs, byte lengths and SHA-256 values. The optional runtime has 41 wheels, adds
+235,780 download bytes, retains every original wheel including its unchanged MIT notices,
+and validates the actual merged dependency graph before offline installation. The retained
+merged pin file and requirements hashes describe the files actually installed. Installation
+and the optional core-import/version check run only in an explicitly acknowledged disposable
+environment; no model execution or successful constrained generation is implied.
+
+The separate source-bundled `task_graph_decoder.py` adapter also supports explicitly ordered
+principle JSON. Its marked source-quote scalar uses canonical JSON string lexemes: upstream
+0.11.3's [string-enum state](https://github.com/noamgat/lm-format-enforcer/blob/05c7dc3a46305e39c1a67c8622c433d8deda48a2/lmformatenforcer/jsonschemaparser.py#L476)
+does not preserve general escaped source strings as enum values. This is a process-local adapter,
+not an edit to the original wheel or its notices. Original output still requires independent
+source/UTF-8 validation; constrained syntax does not establish sound model reasoning.
+Graph strategy v3 also wraps the pinned parser with per-prefix question/dependency constraints
+and ordered compact JSON. This remains separate source-bundled adapter code; no original wheel,
+notice or model asset is changed.
+Its graph-only traversal adapts the same pinned `TokenEnforcer._collect_allowed_tokens` to
+intersect existing tokenizer-trie edges before checking graph predicates. It retains terminal
+tokens and authoritative per-character transitions; non-graph shortcuts still delegate upstream.
+The original MIT notice remains in the separate adapter.
+
+| Optional decoder component | Exact source / original distribution | License and notice provenance |
+| --- | --- | --- |
+| LM Format Enforcer `0.11.3` | [release source](https://github.com/noamgat/lm-format-enforcer/tree/05c7dc3a46305e39c1a67c8622c433d8deda48a2), commit `05c7dc3a46305e39c1a67c8622c433d8deda48a2`; [original PyPI metadata](https://pypi.org/pypi/lm-format-enforcer/0.11.3/json) | MIT, Copyright (c) 2023 Noam Gat; original source LICENSE SHA-256 `d1c02373f9da54abb40fb9fa5ca6c19136d10da76a1054ff1ee2528221ae1bfe`. Our separate tokenizer adapter retains this notice. |
+| Interegular `0.3.3` | [original release metadata](https://pypi.org/pypi/interegular/0.3.3/json); original source archive SHA-256 `d9b697b21b34884711399ba0f0376914b81899ce670032486d0d048344a76600`, 24,705 bytes, URL retained in decoder pins | MIT as declared by the original distribution; original wheel retained unchanged. No matching `0.3.3` upstream Git tag was found, so no Git-to-wheel equivalence is claimed. The source archive is provenance only, never installed. |
+| Pydantic `1.10.24` (pure Python wheel) | [release source](https://github.com/pydantic/pydantic/tree/ebb3e81419f8a1c0b4976b91a22bfb17a3ddf23c), commit `ebb3e81419f8a1c0b4976b91a22bfb17a3ddf23c`; [original PyPI metadata](https://pypi.org/pypi/pydantic/1.10.24/json) | MIT, Samuel Colvin and other contributors; original source LICENSE SHA-256 `9e3946690ac88b6b73e8f001a0586af13568be8852fd514e4393f39761764387`. The pinned optional artifact is not a compiled extension wheel. |
 
 The fixed Rust supervisor uses Debian's installed Bubblewrap and util-linux resource/priority
 tools as separate executables, not vendored copies. The sandbox argument vector is part of our

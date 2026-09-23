@@ -23,6 +23,8 @@ REPO = HERE.parent.parent
 ML = REPO / "workers/volparossa-ml"
 WEIGHT_HASH = "5af571cbf074e6d21a03528d2330792e532ca608f24ac70a143f6b369968ab8c"
 MODEL_REVISION = "83212e1e2b3cfd6958f3707877bb878945dea8ee"
+DEFAULT_MODEL_PROFILE = "smollm2-135m-v1"
+LARGE_MODEL_PROFILE = "smollm2-360m-v1"
 HASH = re.compile(r"[0-9a-f]{64}")
 SCOPE = "one isolated CPU LoRA worker on explicit public project data; not distributed training or improved answer quality"
 ARTIFACTS = {"adapter/adapter_config.json", "adapter/adapter_model.safetensors", "adapter/README.md"}
@@ -31,6 +33,21 @@ ARTIFACTS = {"adapter/adapter_config.json", "adapter/adapter_model.safetensors",
 def require(condition, message):
     if not condition:
         raise ValueError(message)
+
+
+def inference_profile(name=DEFAULT_MODEL_PROFILE):
+    """Explicit fixture selection, never infer an approved profile from peer output."""
+    require(name in (DEFAULT_MODEL_PROFILE, LARGE_MODEL_PROFILE), "unsupported fixture model profile")
+    large = name == LARGE_MODEL_PROFILE
+    model = dict(model_id="HuggingFaceTB/SmolLM2-360M-Instruct" if large else "HuggingFaceTB/SmolLM2-135M-Instruct",
+        model_revision="a10cc1512eabd3dde888204e902eca88bddb4951" if large else MODEL_REVISION,
+        base_weights=dict(bytes=723674912 if large else 269060552,
+            sha256="e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e" if large else WEIGHT_HASH),
+        adapter_files=None)
+    raw = json.dumps(model, ensure_ascii=False, separators=(",", ":")).encode()
+    return dict(name=name, model=model, fingerprint=hashlib.sha256(raw).hexdigest(),
+        prompt_tokens=1024 if large else 192, new_tokens=256 if large else 64,
+        wire_bytes=4096 if large else 1024, max_rows=1 if large else 4)
 
 
 def write(path, value):
@@ -208,6 +225,26 @@ def observe(cli_pid, output, provision, dataset, canary):
                 continue
         time.sleep(0.1)
     raise ValueError("actual isolated Python worker was not observed")
+
+
+def check_generation(output, require_eos=False, model_profile=DEFAULT_MODEL_PROFILE):
+    """Current-source worker contract; an old report without metadata proves no EOS."""
+    selected = inference_profile(model_profile)
+    limit = selected["new_tokens"]
+    fields = {"version", "stop_reason", "max_new_tokens"}
+    if model_profile != DEFAULT_MODEL_PROFILE:
+        fields.add("model_profile")
+    generation = output.get("generation")
+    require(type(generation) is dict and set(generation) == fields
+            and type(generation["version"]) is int and generation["version"] == 1
+            and generation.get("model_profile", DEFAULT_MODEL_PROFILE) == model_profile
+            and type(generation["max_new_tokens"]) is int and generation["max_new_tokens"] == limit
+            and generation["stop_reason"] in ("eos", "token_limit")
+            and type(output["generated_tokens"]) is int and 1 <= output["generated_tokens"] <= limit
+            and (generation["stop_reason"] != "token_limit" or output["generated_tokens"] == limit),
+            "ordinary generation end metadata is missing or invalid")
+    require(not require_eos or generation["stop_reason"] == "eos", "token-limited answer is not a complete parent")
+    return generation
 
 
 def check_worker(worker, revision):
@@ -410,6 +447,24 @@ def execute(output, revision, owner_priority=False):
 
 def self_test():
     # These are checker tests only, never claimed as model execution evidence.
+    for profile in (DEFAULT_MODEL_PROFILE, LARGE_MODEL_PROFILE):
+        selected = inference_profile(profile)
+        generation = dict(version=1, stop_reason="eos", max_new_tokens=selected["new_tokens"])
+        if profile != DEFAULT_MODEL_PROFILE:
+            generation["model_profile"] = profile
+        output = dict(generated_tokens=selected["new_tokens"], generation=generation)
+        check_generation(output, require_eos=True, model_profile=profile)
+        limited = copy.deepcopy(output)
+        limited["generation"]["stop_reason"] = "token_limit"
+        check_generation(limited, model_profile=profile)
+        for bad, expected in ((limited, profile), (output, LARGE_MODEL_PROFILE if profile == DEFAULT_MODEL_PROFILE else DEFAULT_MODEL_PROFILE)):
+            try: check_generation(bad, require_eos=True, model_profile=expected)
+            except ValueError: pass
+            else: raise AssertionError("incomplete or wrong-profile generation accepted")
+        limited["generated_tokens"] -= 1
+        try: check_generation(limited, model_profile=profile)
+        except ValueError: pass
+        else: raise AssertionError("short token-limit generation accepted")
     data = public_dataset("a" * 40)
     require(data["train"][0]["question"] != data["heldout"][0]["question"], "heldout overlaps training")
     observation = {"observed": True, "network_devices": ["lo"], "ipv4_routes": [], "effective_capabilities": 0,

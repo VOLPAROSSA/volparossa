@@ -348,10 +348,17 @@ pub(crate) async fn fetch(args: &Fetch, socket: &Path) -> Result<Value> {
     let staging = tempfile::Builder::new()
         .prefix(".agent-import-")
         .tempdir_in(parent)?;
-    let adapter = named_download::prepare(
+    // Reuse a complete, unexpired publisher/name match at the requested floor;
+    // a cache miss still performs protected retrieval unless cache-only was explicit.
+    let adapter = named_download::prepare_bounded(
         &args.query(false, args.reuse_cache, staging.path()),
         socket,
         staging.path(),
+        &named_download::Requirement {
+            content_type: ADAPTER_CONTENT_TYPE,
+            maximum_bytes: MAX_ADAPTER_BYTES as u64,
+            manifest_id: None,
+        },
     )
     .await?;
     ensure!(
@@ -361,10 +368,15 @@ pub(crate) async fn fetch(args: &Fetch, socket: &Path) -> Result<Value> {
     );
     let bundle =
         AdapterBundle::decode(read_download(adapter.as_file(), MAX_ADAPTER_BYTES as u64)?)?;
-    let dataset = named_download::prepare(
+    let dataset = named_download::prepare_bounded(
         &args.query(true, true, staging.path()),
         socket,
         staging.path(),
+        &named_download::Requirement {
+            content_type: DATASET_CONTENT_TYPE,
+            maximum_bytes: MAX_DATASET,
+            manifest_id: Some(bundle.dataset_manifest_id()),
+        },
     )
     .await?;
     validate_dataset_binding(dataset.manifest(), &bundle, &args.dataset_publisher())?;

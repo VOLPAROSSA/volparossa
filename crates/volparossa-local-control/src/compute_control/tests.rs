@@ -12,13 +12,78 @@ fn key(seed: u8) -> Vec<u8> {
         .to_vec()
 }
 
+#[test]
+fn transcript_opt_in_uses_tag_two_without_changing_legacy_request_bytes() {
+    let legacy = ComputeRemoteRequest {
+        provider_key: key(4),
+        retain_transcript: false,
+    };
+    let mut original = vec![0x0a, 0x20];
+    original.extend_from_slice(&legacy.provider_key);
+    assert_eq!(legacy.encode_to_vec(), original);
+    assert!(
+        !ComputeRemoteRequest::decode(original.as_slice())
+            .unwrap()
+            .retain_transcript
+    );
+    let selected = ComputeRemoteRequest {
+        retain_transcript: true,
+        ..legacy
+    };
+    original.extend_from_slice(&[0x10, 0x01]);
+    assert_eq!(selected.encode_to_vec(), original);
+    let request = ControlRequest {
+        protocol_version: CONTROL_PROTOCOL_VERSION,
+        request_id: vec![1; 16],
+        operation: Some(Operation::ComputeRemote(selected)),
+    };
+    assert_eq!(
+        decode_request(&encode_request(&request).unwrap()).unwrap(),
+        request
+    );
+}
+
+#[test]
+fn transcript_final_payload_has_a_separate_bounded_frame() {
+    // Framing bytes only; the content verifier separately authenticates the original records.
+    for bytes in [1, 96 * 1024] {
+        let response = ControlResponse {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: vec![1; 16],
+            result: ControlResult::Ok.into(),
+            diagnostic_code: "COMPUTE_RPC_OK".into(),
+            payload: Some(Payload::ComputeTranscript(ComputeTranscript {
+                transcript: vec![7; bytes],
+            })),
+        };
+        assert_eq!(
+            decode_response(&encode_response(&response).unwrap()).unwrap(),
+            response
+        );
+    }
+    for bytes in [0, 96 * 1024 + 1] {
+        let response = ControlResponse {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: vec![1; 16],
+            result: ControlResult::Ok.into(),
+            diagnostic_code: "COMPUTE_RPC_OK".into(),
+            payload: Some(Payload::ComputeTranscript(ComputeTranscript {
+                transcript: vec![7; bytes],
+            })),
+        };
+        assert!(encode_response(&response).is_err());
+    }
+}
+
 fn discovery() -> ComputeDiscoverRequest {
     ComputeDiscoverRequest {
         publisher_keys: vec![key(1), key(2)],
         model_fingerprint: None,
+        model_profile: None,
         require_task_derivation_v1: true,
         require_document_inference_v2: true,
         require_derived_inference_v3: true,
+        require_principle_inference_v4: false,
         maximum: 4,
         minimum: 0,
     }
@@ -82,6 +147,54 @@ fn explicit_single_replacement_does_not_change_legacy_initial_minimum() {
         };
         assert!(rejected.eligibility().is_err());
     }
+}
+
+#[test]
+fn discovery_base_profile_tag_eight_preserves_absent_frames_and_reaches_eligibility() {
+    let legacy = discovery();
+    let legacy_bytes = legacy.encode_to_vec();
+    let decoded = ComputeDiscoverRequest::decode(legacy_bytes.as_slice()).unwrap();
+    assert_eq!(decoded.model_profile, None);
+    assert_eq!(decoded.eligibility().unwrap().model_profile, None);
+    for profile in ["smollm2-135m-v1", "smollm2-360m-v1"] {
+        let mut selected = legacy.clone();
+        selected.model_profile = Some(profile.into());
+        let mut expected = legacy_bytes.clone();
+        expected.extend_from_slice(&[0x42, u8::try_from(profile.len()).unwrap()]);
+        expected.extend_from_slice(profile.as_bytes());
+        assert_eq!(selected.encode_to_vec(), expected);
+        let decoded = ComputeDiscoverRequest::decode(expected.as_slice()).unwrap();
+        assert_eq!(decoded, selected);
+        assert_eq!(
+            decoded.eligibility().unwrap().model_profile.as_deref(),
+            Some(profile)
+        );
+    }
+    for profile in ["", "smollm2-360m", "SMOLLM2-135M-V1"] {
+        let mut invalid = legacy.clone();
+        invalid.model_profile = Some(profile.into());
+        assert!(invalid.eligibility().is_err());
+    }
+}
+
+#[test]
+fn principle_requirement_tag_nine_preserves_legacy_frames_and_reaches_eligibility() {
+    let mut request = discovery();
+    let mut expected = request.encode_to_vec();
+    let legacy = ComputeDiscoverRequest::decode(expected.as_slice()).unwrap();
+    assert!(!legacy.require_principle_inference_v4);
+    assert!(!legacy.eligibility().unwrap().require_principle_inference_v4);
+    request.require_principle_inference_v4 = true;
+    expected.extend_from_slice(&[0x48, 0x01]);
+    assert_eq!(request.encode_to_vec(), expected);
+    let decoded = ComputeDiscoverRequest::decode(expected.as_slice()).unwrap();
+    assert_eq!(decoded, request);
+    assert!(
+        decoded
+            .eligibility()
+            .unwrap()
+            .require_principle_inference_v4
+    );
 }
 
 #[test]

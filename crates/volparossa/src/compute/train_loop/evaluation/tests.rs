@@ -289,6 +289,98 @@ fn peer_warmstart_retains_foreign_origin_separately_from_local_history() {
 }
 
 #[test]
+fn aggregate_warmstart_retains_cohort_and_local_history_without_a_peer_claim() {
+    let (_root, path, store) = owner();
+    fixture(&store, 1, true);
+    let legacy = serde_json::to_value(verify(&store, 1).unwrap()).unwrap();
+    assert!(legacy.get("aggregate_predecessor").is_none());
+    assert!(legacy.get("authority_expires_unix_seconds").is_none());
+    let adapter = path.join("aggregate-update-0000000000000007/candidate/import/adapter");
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&adapter)
+        .unwrap();
+    for (name, _) in ADAPTER_FILES {
+        write(&adapter.join(name), b"inert aggregate receipt fixture");
+    }
+    fixture_input(&store, 2, true, None, Some(&adapter));
+    let before = verify(&store, 2).unwrap();
+    let source = store.read_cycle_json(2, "source-provenance.json").unwrap();
+    let at = source["verified_at_unix_seconds"].as_u64().unwrap();
+    let expires = at + 90;
+    let origin = json!({"kind":"aggregate_update","aggregate_sequence":7,
+        "local_predecessor":1,"manifest_ids":["1".repeat(64),"2".repeat(64),"3".repeat(64)],
+        "dataset_manifest_id":"4".repeat(64),"cohort_sha256":"5".repeat(64),
+        "comparison_sha256":"6".repeat(64),"result_sha256":"7".repeat(64),
+        "adapter_files":before.input_adapter.unwrap().files,"expires_unix_seconds":expires});
+    let mut selected = store.read_cycle_json(2, "selection.json").unwrap();
+    selected["aggregate_predecessor"] = origin.clone();
+    let mut result = store.read_cycle_json(2, "result.json").unwrap();
+    result["authority_expires_unix_seconds"] = expires.into();
+    result["completed_at_unix_seconds"] = at.into();
+    let cycle = store.cycle_path(2).unwrap();
+    write_json(&cycle.join("selection.json"), &selected);
+    write_json(&cycle.join("result.json"), &result);
+    let record = assess(&store, 2, Some(1), Some(&adapter)).unwrap();
+    assert_eq!(record.baseline_kind, BaselineKind::ApprovedAggregate);
+    assert_eq!(record.predecessor, Some(1));
+    assert_eq!(record.aggregate_predecessor, Some(origin));
+    assert!(record.peer_predecessor.is_none());
+    assert_eq!(record.authority_expires_unix_seconds, Some(expires));
+    write_json(
+        &cycle.join("evaluation.json"),
+        &serde_json::to_value(&record).unwrap(),
+    );
+    assert_eq!(verify(&store, 2).unwrap(), record);
+    assert!(assess(&store, 2, None, Some(&adapter)).is_err());
+    for field in ["cohort_sha256", "comparison_sha256", "result_sha256"] {
+        let mut changed = selected.clone();
+        changed["aggregate_predecessor"][field] = "8".repeat(64).into();
+        write_json(&cycle.join("selection.json"), &changed);
+        assert!(verify(&store, 2).is_err(), "{field}");
+    }
+    let mut changed = selected.clone();
+    changed["aggregate_predecessor"]["adapter_files"]["adapter_model.safetensors"]["sha256"] =
+        "9".repeat(64).into();
+    write_json(&cycle.join("selection.json"), &changed);
+    assert!(assess(&store, 2, Some(1), Some(&adapter)).is_err());
+    changed = selected.clone();
+    changed["peer_predecessor"] = json!({"kind":"peer_update"});
+    write_json(&cycle.join("selection.json"), &changed);
+    assert!(assess(&store, 2, Some(1), Some(&adapter)).is_err());
+    write_json(&cycle.join("selection.json"), &selected);
+    result["authority_expires_unix_seconds"] = (expires + 1).into();
+    write_json(&cycle.join("result.json"), &result);
+    assert!(assess(&store, 2, Some(1), Some(&adapter)).is_err());
+}
+
+#[test]
+fn inherited_aggregate_authority_is_not_renewed_by_new_source_or_historical_replay() {
+    let at = now().unwrap();
+    let source = json!({"expires_unix_seconds":at+1200,"verified_at_unix_seconds":at-20});
+    let selection = json!({"adapter_root":"/owned/local-successor","inherited_authority_expires":at-5,
+        "source_catalog":{"catalog_expires_unix_seconds":at+600}});
+    let mut result =
+        json!({"authority_expires_unix_seconds":at-5,"completed_at_unix_seconds":at-10});
+    // Expiry is historical proof, not permission for execution at today's clock.
+    assert_eq!(
+        successor_authority(&selection, &source, &result).unwrap(),
+        Some(at - 5)
+    );
+    result["authority_expires_unix_seconds"] = (at + 600).into();
+    assert!(successor_authority(&selection, &source, &result).is_err());
+    result["authority_expires_unix_seconds"] = (at - 5).into();
+    result["completed_at_unix_seconds"] = (at - 5).into();
+    assert!(successor_authority(&selection, &source, &result).is_err());
+    assert!(successor_authority(&json!({}), &source, &result).is_err());
+    assert_eq!(
+        successor_authority(&json!({}), &source, &json!({})).unwrap(),
+        None
+    );
+}
+
+#[test]
 fn finite_equal_heldout_tokens_and_actual_reloaded_improvement_are_required() {
     let metric = |loss| Metric {
         loss,

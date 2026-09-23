@@ -12,6 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::compute::ModelProfile;
 use anyhow::{Context as _, Result, ensure};
 use clap::Args;
 use ed25519_dalek::VerifyingKey;
@@ -23,11 +24,12 @@ use super::super::{
     document_plan::{Input, MAX_DOCUMENT_BYTES, Plan},
     private_directory,
 };
+use super::batch::output;
 use super::{Cancellation, discovery, now, parse_key, read_file, rpc, task, workflow};
 
 const MAX_SAVED_BYTES: usize = 16 * 1024 * 1024;
-// Up to MAX_PARTS independently checked 1024-byte answers, including worst-case
-// JSON escaping and per-answer provenance. Metadata retains its smaller bound.
+// Up to MAX_PARTS independently checked answers (at most 4096 escaped bytes each),
+// including per-answer provenance. Metadata retains its smaller bound.
 const MAX_RESULT_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Clone, Debug, Args)]
@@ -50,6 +52,23 @@ pub(crate) struct Options {
     /// Explicit public question/dependency graph over the selected sources; not an autonomous planner.
     #[arg(long, conflicts_with_all = ["resume", "public_question", "synthesize", "batch_barrier"])]
     task_plan: Option<PathBuf>,
+    /// Ask the pinned model for bounded public subquestions; preserves the exact question in the final join.
+    #[arg(long, requires = "public_question", conflicts_with_all = ["resume", "task_plan", "plan_task_graph", "synthesize", "batch_barrier"])]
+    plan_tasks: bool,
+    /// Let the pinned model choose bounded public subtasks and dependencies; keeps the exact final question.
+    #[arg(long, requires = "public_question", conflicts_with_all = ["resume", "task_plan", "plan_tasks", "synthesize", "batch_barrier"])]
+    plan_task_graph: bool,
+    /// Keep the complete original public source in each model-graph synthesis prompt (360M, at most 4096 bytes).
+    #[arg(long, requires = "plan_task_graph", conflicts_with = "resume")]
+    grounded_synthesis: bool,
+    /// Require a model-selected dependent analysis, not just independent source questions.
+    #[arg(
+        long,
+        value_enum,
+        requires = "plan_task_graph",
+        conflicts_with_all = ["resume", "plan_tasks", "task_plan", "synthesize", "batch_barrier"]
+    )]
+    plan_structure: Option<crate::compute::task_plan::PlanRequirement>,
     /// UTF-8 text that you are authorized to publish, not automatic browsing/private-file ingestion.
     #[arg(long, required_unless_present_any = ["resume", "source_plan"], conflicts_with_all = ["resume", "source_plan"])]
     input: Option<PathBuf>,
@@ -73,11 +92,14 @@ pub(crate) struct Options {
     #[arg(long, required_unless_present = "resume", conflicts_with = "resume",
           value_parser = ["GPL-3.0-only", "CC0-1.0", "CC-BY-4.0", "CC-BY-SA-4.0"])]
     license: Option<String>,
-    /// Already provisioned local tokenizer runtime. No automatic installation/download.
+    /// Already provisioned local tokenizer/planner runtime. No automatic installation/download.
     #[arg(long, required_unless_present = "resume")]
     runtime_root: Option<PathBuf>,
     #[arg(long, required_unless_present = "resume")]
     model_root: Option<PathBuf>,
+    /// Explicit pinned profile for new planning and the exact peer cohort; resume retains it.
+    #[arg(long, default_value_t = ModelProfile::default(), conflicts_with = "resume")]
+    model_profile: ModelProfile,
     /// Existing encrypted publisher identity; must match --publisher-key.
     #[arg(long, required_unless_present = "resume")]
     identity: Option<PathBuf>,
@@ -104,7 +126,7 @@ pub(crate) struct Options {
     threads: u16,
     #[arg(long)]
     execute: bool,
-    /// Prepare the public source, tokenizer plan and immutable peer selection without submitting jobs.
+    /// Run local planning/tokenization and pin source/peers without submitting peer jobs.
     #[arg(long, requires = "execute", conflicts_with = "resume")]
     enroll_only: bool,
 }
@@ -126,6 +148,23 @@ pub(super) fn save(
 }
 
 pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
+    ensure!(
+        !args.grounded_synthesis
+            || (args.plan_task_graph
+                && !args.resume
+                && args.model_profile == ModelProfile::Smol360),
+        "compute_graph_grounded_synthesis_requires_new_360m_model_graph"
+    );
+    ensure!(
+        args.plan_structure.is_none()
+            || (args.plan_task_graph
+                && !args.plan_tasks
+                && !args.resume
+                && args.task_plan.is_none()
+                && !args.synthesize
+                && !args.batch_barrier),
+        "compute_task_plan_requirement_mode"
+    );
     if !args.execute {
         println!(
             "{}",
@@ -133,7 +172,9 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             "input":args.input,"source_plan":args.source_plan,"source_cache":args.source_cache,
             "directory":args.directory,"resume":args.resume,
             "synthesize":args.synthesize,
-            "task_plan":args.task_plan,
+            "task_plan":args.task_plan,"plan_tasks":args.plan_tasks,"plan_task_graph":args.plan_task_graph,"model_profile":args.model_profile,
+            "plan_structure":args.plan_structure,
+            "grounded_synthesis":args.grounded_synthesis,
             "discover_peers":args.discovery.discover_peers,
             "replace_peers":args.discovery.replace_peers,
             "max_batches":args.max_batches,"maximum_seconds_per_worker":args.max_seconds,"follow":args.follow.follow,
@@ -153,6 +194,8 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     );
     let _lock = task::open_directory(&args.directory, args.resume)?;
     if args.task_plan.is_some()
+        || args.plan_tasks
+        || args.plan_task_graph
         || (args.resume && args.directory.join("graph.json").try_exists()?)
     {
         return graph::run(args, socket, &cancellation.activity).await;
@@ -176,11 +219,25 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         if result["complete"] == true {
             synthesis::advance(args, socket, &cancellation.activity, &mut result).await?;
         } else {
-            result["joining"] = "awaiting_fragments_before_peer_synthesis".into();
+            result["joining"] = if result["execution_complete"] == true {
+                "incomplete_fragment_answers"
+            } else {
+                "awaiting_fragments_before_peer_synthesis"
+            }
+            .into();
         }
     }
     attach_collection(&args.directory, &mut result)?;
-    save(&args.directory, "result.json", &result, true)?;
+    if !output::preserve_legacy_result(
+        &args.directory.join("result.json"),
+        MAX_RESULT_BYTES as u64,
+        result["rounds_this_invocation"]
+            .as_u64()
+            .context("compute_document_rounds")?,
+        &result,
+    )? {
+        save(&args.directory, "result.json", &result, true)?;
+    }
     println!("{}", serde_json::to_string(&result)?);
     ensure!(
         result["complete"] == true,
@@ -195,13 +252,19 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
 )]
 async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool>) -> Result<()> {
     ensure!(
+        args.model_profile.is_default() || !args.batch_barrier,
+        "compute_profile_requires_ready_rows"
+    );
+    ensure!(
         args.public_content,
         "compute_document_public_permission_required"
     );
     let (document, collection, network) = selected_input(args, socket, cancelled).await?;
     let input = Input {
         version: 1,
+        model_profile: args.model_profile,
         synthesis: false,
+        original_source: None,
         visibility: "public".into(),
         license: args.license.clone().context("compute_document_license")?,
         document,
@@ -217,15 +280,20 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
             "compute_discovery_conflicting_providers"
         );
         let publisher = args.publisher_key.context("compute_document_publisher")?;
-        let query = args.discovery.query(
+        let mut query = args.discovery.query(
             [hex::encode(publisher.as_bytes())],
             true,
             true,
             args.synthesize,
         )?;
+        bind_profile_query(&mut query, args.model_profile)?;
         Some(args.discovery.select(socket, query, cancelled).await?)
     } else {
         None
+    };
+    let model_fingerprint = match &selected {
+        Some(selected) => selected.model_fingerprint.clone(),
+        None => manual_fingerprint(args, socket, cancelled).await?,
     };
     let providers = selected
         .as_ref()
@@ -284,7 +352,7 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
         cancelled,
         args.synthesize,
     )?;
-    enrollment.model_fingerprint = selected.map(|selected| selected.model_fingerprint);
+    enrollment.model_fingerprint = Some(model_fingerprint);
     enrollment.replace_peers = args.discovery.replace_peers;
     enrollment.scheduling = workflow::Scheduling::from_batch_barrier(args.batch_barrier);
     enrollment.collection_sha256 = collection
@@ -297,6 +365,62 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
         .transpose()?;
     drop(signer); // No identity/private key is retained during any peer exchange.
     save(&args.directory, "document.json", &enrollment, false)
+}
+
+fn required_fingerprint(profile: ModelProfile) -> Result<Option<String>> {
+    if profile.is_default() {
+        return Ok(None); // Existing default cohorts may use an explicitly approved adapter.
+    }
+    let spec = profile.spec();
+    let model = rpc::ModelIdentity {
+        model_id: spec.model_id.into(),
+        model_revision: spec.revision.into(),
+        base_weights: rpc::FileIdentity {
+            bytes: spec.weights_bytes,
+            sha256: spec.weights_sha256.into(),
+        },
+        adapter_files: None,
+    };
+    Ok(Some(super::sha(&serde_json::to_vec(&model)?)))
+}
+
+fn bind_profile_query(query: &mut rpc::EligibilityQuery, profile: ModelProfile) -> Result<()> {
+    query.model_profile = Some(profile.to_string());
+    if let Some(required) = required_fingerprint(profile)? {
+        ensure!(
+            query
+                .model_fingerprint
+                .as_ref()
+                .is_none_or(|selected| selected == &required),
+            "compute_discovery_profile_conflict"
+        );
+        query.model_fingerprint = Some(required);
+    }
+    Ok(())
+}
+
+async fn manual_fingerprint(
+    args: &Options,
+    socket: &Path,
+    cancelled: &watch::Receiver<bool>,
+) -> Result<String> {
+    let mut fingerprint: Option<String> = None;
+    for provider in &args.provider_key {
+        ensure!(!*cancelled.borrow(), "compute_document_cancelled");
+        let caps = super::capabilities(socket, provider).await?;
+        ensure!(
+            crate::compute::broker::profile_for_model(&caps.model)? == args.model_profile,
+            "compute_document_peer_model_profile"
+        );
+        ensure!(
+            fingerprint
+                .as_ref()
+                .is_none_or(|value| value == &caps.model_fingerprint),
+            "compute_document_mixed_peer_models"
+        );
+        fingerprint = Some(caps.model_fingerprint);
+    }
+    fingerprint.context("compute_document_missing_peer_model")
 }
 
 fn retain_selected_sources(
@@ -452,6 +576,7 @@ async fn tokenize(
     );
     let options = super::super::Options {
         mode: Mode::PlanDocument,
+        model_profile: input.model_profile,
         runtime_root: args
             .runtime_root
             .clone()
@@ -572,10 +697,12 @@ async fn advance(
             "first_part":package.first_part,"parts":package.rows}),
         );
     }
-    let complete =
+    let execution_complete =
         packages.iter().all(|p| p["complete"] == true) && answers.len() == plan.parts.len();
+    let complete = execution_complete && output::all_complete(&answers)?;
     Ok(
-        json!({"version":1,"operation":"compute_public_document","complete":complete,
+        json!({"version":2,"operation":"compute_public_document","complete":complete,
+        "execution_complete":execution_complete,"answer_complete":complete,"semantic_completeness_proven":false,
         "source_manifest_id":enrollment.source_manifest_id,"source_sha256":plan.source_sha256,
         "source_bytes":plan.source_bytes,"public_question":input.question,"license":input.license,
         "total_parts":plan.parts.len(),"packages":packages,"answers":answers,"rounds_this_invocation":rounds,

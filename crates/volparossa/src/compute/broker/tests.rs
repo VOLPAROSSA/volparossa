@@ -3,6 +3,98 @@
 use super::*;
 use tokio::io::AsyncWriteExt as _;
 
+#[test]
+fn execution_failure_diagnostic_preserves_known_typed_and_supervisor_classes() {
+    let worker = super::super::supervise::test_worker_failure("BACKEND_IMPORT_FAILED");
+    assert_eq!(
+        execution_failure_class(&worker),
+        ("worker", "BACKEND_IMPORT_FAILED")
+    );
+    for code in [
+        "compute_sandbox_spawn",
+        "compute_control_ack_deadline",
+        "compute_memory_budget",
+        "compute_deadline",
+    ] {
+        assert_eq!(
+            execution_failure_class(&anyhow::anyhow!(code)),
+            ("supervisor", code)
+        );
+    }
+}
+
+#[test]
+fn execution_failure_diagnostic_redacts_unknown_text_and_unlisted_worker_codes() {
+    let private = anyhow::anyhow!("private /home/example/source.json secret prompt");
+    assert_eq!(
+        execution_failure_class(&private),
+        ("supervisor", "supervisor_unknown")
+    );
+    let disguised = anyhow::anyhow!("compute_backend_failed: BACKEND_IMPORT_FAILED");
+    assert_eq!(
+        execution_failure_class(&disguised),
+        ("supervisor", "supervisor_unknown")
+    );
+    let worker = super::super::supervise::test_worker_failure("PRIVATE_CONTENT_IN_UPPERCASE");
+    assert_eq!(
+        execution_failure_class(&worker),
+        ("worker", "worker_unknown")
+    );
+}
+
+#[test]
+fn execution_failure_diagnostic_preserves_only_literal_principle_and_decoder_codes() {
+    for code in [
+        "TASK_GRAPH_DECODER_UNAVAILABLE",
+        "TASK_GRAPH_DECODER_VERSION_MISMATCH",
+        "TASK_GRAPH_DECODER_NO_ALLOWED_TOKENS",
+        "TASK_GRAPH_DECODER_REJECTED_EOS",
+        "TASK_GRAPH_DECODER_PARSER_FAILED",
+        "TASK_GRAPH_DECODER_TOKENIZATION_CHANGED",
+        "TASK_GRAPH_DECODER_TOKENIZER_INVALID",
+        "TASK_GRAPH_DECODER_ATTEMPT_INVALID",
+        "TASK_GRAPH_DECODER_PREFIX_CHANGED",
+        "TASK_GRAPH_DECODER_ALLOWED_TOKENS_INVALID",
+        "PRINCIPLE_CONTEXT_INVALID",
+        "PRINCIPLE_CONTRACT_INVALID",
+        "PRINCIPLE_DATASET_FIELDS",
+        "PRINCIPLE_GENERATION_FRAMING",
+        "PRINCIPLE_GENERATION_PREFIX_CHANGED",
+        "PRINCIPLE_OUTPUT_BOUND",
+        "PRINCIPLE_OUTPUT_FIELDS",
+        "PRINCIPLE_OUTPUT_INVALID",
+        "PRINCIPLE_OUTPUT_OUTCOME",
+        "PRINCIPLE_OUTPUT_REASONING",
+        "PRINCIPLE_OUTPUT_REASONING_FIELDS",
+        "PRINCIPLE_OUTPUT_PRINCIPLE",
+        "PRINCIPLE_OUTPUT_DUPLICATE_PRINCIPLE",
+        "PRINCIPLE_OUTPUT_SOURCE_QUOTE",
+        "PRINCIPLE_OUTPUT_TEXT",
+        "PRINCIPLE_OUTPUT_UNCERTAINTY",
+        "PRINCIPLE_PROFILE_INFERENCE_ONLY",
+        "PRINCIPLE_QUOTE_BOUND",
+    ] {
+        let worker = super::super::supervise::test_worker_failure(code);
+        assert_eq!(execution_failure_class(&worker), ("worker", code));
+        // Matching text without a correlated, reaped worker reply is not typed evidence.
+        assert_eq!(
+            execution_failure_class(&anyhow::anyhow!(code)),
+            ("supervisor", "supervisor_unknown")
+        );
+    }
+    for code in [
+        "PRINCIPLE_PRIVATE_PAYLOAD",
+        "TASK_GRAPH_DECODER_SECRET_SOURCE",
+        "PRINCIPLE_OUTPUT_INVALID_PRIVATE_TEXT",
+    ] {
+        let worker = super::super::supervise::test_worker_failure(code);
+        assert_eq!(
+            execution_failure_class(&worker),
+            ("worker", "worker_unknown")
+        );
+    }
+}
+
 fn data() -> String {
     serde_json::json!({"version":1,"visibility":"public","license":"GPL-3.0-only",
         "source_revision":"a".repeat(40),"train":[],
@@ -45,6 +137,8 @@ pub(super) fn request(operation: Operation) -> Request {
 pub(super) fn broker(root: &Path) -> Broker {
     Broker {
         options: Serve {
+            model_profile: ModelProfile::default(),
+            principle_inference_v4: false,
             runtime_root: root.join("runtime"),
             model_root: root.join("model"),
             adapter_root: None,
@@ -73,6 +167,7 @@ pub(super) fn broker(root: &Path) -> Broker {
             max_rows: 4,
             task_derivation_v1: true,
             document_inference_v2: false,
+            principle_inference_v4: false,
             derived_inference_v3: false,
             successor_activation_v1: false,
         },
@@ -82,6 +177,56 @@ pub(super) fn broker(root: &Path) -> Broker {
         initial_base: successors::InitialBase::Unknown,
         next_successor_check: tokio::time::Instant::now(),
     }
+}
+
+#[test]
+fn larger_profile_rejects_multiple_rows_before_creating_a_job() {
+    let root = tempfile::tempdir().unwrap();
+    let mut broker = broker(root.path());
+    broker.options.model_profile = ModelProfile::Smol360;
+    broker.capabilities.max_rows = 1;
+    let spec = ModelProfile::Smol360.spec();
+    broker.capabilities.model = ModelIdentity {
+        model_id: spec.model_id.into(),
+        model_revision: spec.revision.into(),
+        base_weights: FileIdentity {
+            bytes: spec.weights_bytes,
+            sha256: spec.weights_sha256.into(),
+        },
+        adapter_files: None,
+    };
+    broker.capabilities.model_fingerprint =
+        sha(&serde_json::to_vec(&broker.capabilities.model).unwrap());
+    let mut submit = Submit {
+        binding: binding(),
+        dataset_json: data(),
+        publication: publication(),
+    };
+    submit.binding.model_fingerprint = broker.capabilities.model_fingerprint.clone();
+    let mut dataset: Value = serde_json::from_str(&submit.dataset_json).unwrap();
+    dataset["inference"].as_array_mut().unwrap().push(serde_json::json!({"question":"Second question?","context":"Another public protocol fixture."}));
+    submit.dataset_json = dataset.to_string();
+    submit.binding.dataset_sha256 = sha(submit.dataset_json.as_bytes());
+    submit.binding.row_indices = vec![0, 1];
+    assert_eq!(
+        broker.submit("b", &submit, 1000),
+        Outcome::Error(ErrorCode::Invalid)
+    );
+    assert!(broker.jobs.is_empty());
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn larger_profile_rejects_135m_successor_directory_before_service_start() {
+    let root = tempfile::tempdir().unwrap();
+    let mut broker = broker(root.path());
+    broker.options.model_profile = ModelProfile::Smol360;
+    broker.options.serving_directory = Some(root.path().join("selected"));
+    assert_eq!(
+        validate_roots(&broker.options).unwrap_err().to_string(),
+        "compute_profile_inference_only"
+    );
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
 }
 
 // Retention fixtures are cancelled protocol jobs, never manufactured model results.

@@ -26,7 +26,9 @@ use tokio::{
     task::JoinHandle,
     time::timeout,
 };
+#[cfg(test)]
 use volparossa_content::agent_artifact::{BASE_MODEL_SHA256, MODEL_ID, MODEL_REVISION};
+use volparossa_content::model_profile::ModelProfile;
 use volparossa_local_control::compute::{
     self, Capabilities, ErrorCode, FileIdentity, JobBinding, JobState, JobStatus, ModelIdentity,
     Operation, Outcome, Request, Response, Submit,
@@ -57,6 +59,12 @@ pub(crate) struct Serve {
     /// Existing private fixed `SmolLM2` model directory; never downloaded by serving.
     #[arg(long)]
     model_root: PathBuf,
+    /// Explicit pinned profile; no model is downloaded or selected by a peer.
+    #[arg(long, default_value_t = ModelProfile::default())]
+    model_profile: ModelProfile,
+    /// Enable fixed principle JSON inference; requires the explicitly provisioned pinned decoder.
+    #[arg(long)]
+    principle_inference_v4: bool,
     /// Optional existing compatible fixed adapter, never selected by an incoming path.
     #[arg(long)]
     adapter_root: Option<PathBuf>,
@@ -126,7 +134,7 @@ pub(super) async fn run(options: Serve) -> Result<()> {
             serde_json::json!({
                 "version": 1, "kind": "volparossa-compute-broker-plan", "execute": false,
                 "socket": options.socket, "runtime_root": options.runtime_root,
-                "model_root": options.model_root, "adapter_root": options.adapter_root,
+                "model_root": options.model_root, "model_profile": options.model_profile, "adapter_root": options.adapter_root,
                 "serving_directory": options.serving_directory,
                 "successor_activation_v1": options.serving_directory.is_some(),
                 "work_root": options.work_root, "mode": "public_inference_only",
@@ -141,6 +149,7 @@ pub(super) async fn run(options: Serve) -> Result<()> {
                 "network_access": false, "remote_execution_proved": false,
                 "task_derivation_v1": true,
                 "document_inference_v2": true,
+                "principle_inference_v4": options.principle_inference_v4,
                 "derived_inference_v3": true
             })
         );
@@ -194,6 +203,15 @@ pub(super) async fn run(options: Serve) -> Result<()> {
 }
 
 fn validate_roots(options: &Serve) -> Result<()> {
+    ensure!(
+        !options.principle_inference_v4 || options.model_profile == ModelProfile::Smol360,
+        "compute_principle_model_profile"
+    );
+    ensure!(
+        options.model_profile.is_default()
+            || (options.adapter_root.is_none() && options.serving_directory.is_none()),
+        "compute_profile_inference_only"
+    );
     for root in [
         &options.runtime_root,
         &options.model_root,
@@ -257,9 +275,14 @@ fn validate_roots(options: &Serve) -> Result<()> {
 }
 
 fn capabilities(options: &Serve) -> Result<Capabilities> {
-    let base_weights = identity(&options.model_root.join("model.safetensors"), 269_060_552)?;
+    let profile = options.model_profile.spec();
+    let base_weights = identity(
+        &options.model_root.join("model.safetensors"),
+        profile.weights_bytes,
+    )?;
     ensure!(
-        base_weights.bytes == 269_060_552 && base_weights.sha256 == hex::encode(BASE_MODEL_SHA256),
+        base_weights.bytes == profile.weights_bytes
+            && base_weights.sha256 == profile.weights_sha256,
         "compute_broker_model_mismatch"
     );
     let adapter_files = options
@@ -289,8 +312,8 @@ fn capabilities(options: &Serve) -> Result<Capabilities> {
         })
         .transpose()?;
     let model = ModelIdentity {
-        model_id: MODEL_ID.into(),
-        model_revision: MODEL_REVISION.into(),
+        model_id: profile.model_id.into(),
+        model_revision: profile.revision.into(),
         base_weights,
         adapter_files,
     };
@@ -304,9 +327,10 @@ fn capabilities(options: &Serve) -> Result<Capabilities> {
         max_threads: 2,
         max_job_seconds: compute::MAX_JOB_SECONDS,
         max_dataset_bytes: compute::MAX_DATASET_BYTES as u64,
-        max_rows: 4,
+        max_rows: profile.max_rows,
         task_derivation_v1: true,
         document_inference_v2: true,
+        principle_inference_v4: options.principle_inference_v4,
         derived_inference_v3: true,
         successor_activation_v1: options.serving_directory.is_some(),
     })
@@ -399,7 +423,15 @@ impl Broker {
             return Outcome::Error(ErrorCode::Expired);
         }
         if sha(submit.dataset_json.as_bytes()) != submit.binding.dataset_sha256
+            || submit.binding.row_indices.len() > usize::from(self.capabilities.max_rows)
             || dataset::validate(&submit.dataset_json, submit.binding.row_indices.len()).is_err()
+            || super::validate_profile_dataset(
+                Mode::Infer,
+                self.options.adapter_root.is_some(),
+                submit.dataset_json.as_bytes(),
+                self.options.model_profile,
+            )
+            .is_err()
             || !self.accepts_task(submit)
         {
             return Outcome::Error(ErrorCode::Invalid);
@@ -441,6 +473,11 @@ impl Broker {
     }
 
     fn accepts_task(&self, submit: &Submit) -> bool {
+        if serde_json::from_str::<Value>(&submit.dataset_json)
+            .is_ok_and(|value| value["version"] == 4)
+        {
+            return self.capabilities.principle_inference_v4 && submit.binding.task.is_none();
+        }
         if !self.capabilities.document_inference_v2
             && serde_json::from_str::<Value>(&submit.dataset_json)
                 .is_ok_and(|value| value["version"] == 2)
@@ -449,7 +486,7 @@ impl Broker {
         }
         if !self.capabilities.derived_inference_v3
             && serde_json::from_str::<Value>(&submit.dataset_json)
-                .is_ok_and(|value| value["version"] == 3)
+                .is_ok_and(|value| matches!(value["version"].as_u64(), Some(3 | 5)))
         {
             return false;
         }
@@ -491,6 +528,7 @@ impl Broker {
         drop(dataset);
         let options = Options {
             mode: Mode::Infer,
+            model_profile: self.options.model_profile,
             runtime_root: self.options.runtime_root.clone(),
             model_root: self.options.model_root.clone(),
             adapter_root: self
@@ -647,6 +685,87 @@ fn retained_job_bytes(job: &Job) -> Result<u64> {
     Ok(bytes)
 }
 
+// Diagnostic-only literals: neither an arbitrary error string nor a merely
+// uppercase worker-provided code is safe to write to the local service log.
+pub(super) fn execution_failure_class(error: &anyhow::Error) -> (&'static str, &'static str) {
+    if let Some(worker) = error.downcast_ref::<super::supervise::WorkerFailure>() {
+        let code = [
+            "BACKEND_NOT_INSTALLED",
+            "BACKEND_VERSION_MISMATCH",
+            "BACKEND_IMPORT_FAILED",
+            "BACKEND_EXECUTION_FAILED",
+            "CPU_BACKEND_REQUIRED",
+            "JOB_INPUT_NOT_FOUND",
+            "JOB_PATH_PERMISSION_DENIED",
+            "JOB_MEMORY_EXHAUSTED",
+            "MODEL_FILES_NOT_PINNED",
+            "UNSUPPORTED_MODEL_FILES",
+            "UNSUPPORTED_MODEL_ARCHITECTURE",
+            "MODEL_TOKENIZER_MISMATCH",
+            "MODEL_TOKENIZER_RETURN_TYPE",
+            "DOCUMENT_TOKEN_LIMIT_EXCEEDED",
+            "INVALID_DATASET_SIZE",
+            "INVALID_DOCUMENT_PROFILE_FIELDS",
+            "INVALID_DOCUMENT_RANGE",
+            "TASK_GRAPH_DECODER_UNAVAILABLE",
+            "TASK_GRAPH_DECODER_VERSION_MISMATCH",
+            "TASK_GRAPH_DECODER_NO_ALLOWED_TOKENS",
+            "TASK_GRAPH_DECODER_REJECTED_EOS",
+            "TASK_GRAPH_DECODER_PARSER_FAILED",
+            "TASK_GRAPH_DECODER_TOKENIZATION_CHANGED",
+            "TASK_GRAPH_DECODER_TOKENIZER_INVALID",
+            "TASK_GRAPH_DECODER_ATTEMPT_INVALID",
+            "TASK_GRAPH_DECODER_PREFIX_CHANGED",
+            "TASK_GRAPH_DECODER_ALLOWED_TOKENS_INVALID",
+            "PRINCIPLE_CONTEXT_INVALID",
+            "PRINCIPLE_CONTRACT_INVALID",
+            "PRINCIPLE_DATASET_FIELDS",
+            "PRINCIPLE_GENERATION_FRAMING",
+            "PRINCIPLE_GENERATION_PREFIX_CHANGED",
+            "PRINCIPLE_OUTPUT_BOUND",
+            "PRINCIPLE_OUTPUT_FIELDS",
+            "PRINCIPLE_OUTPUT_INVALID",
+            "PRINCIPLE_OUTPUT_OUTCOME",
+            "PRINCIPLE_OUTPUT_REASONING",
+            "PRINCIPLE_OUTPUT_REASONING_FIELDS",
+            "PRINCIPLE_OUTPUT_PRINCIPLE",
+            "PRINCIPLE_OUTPUT_DUPLICATE_PRINCIPLE",
+            "PRINCIPLE_OUTPUT_SOURCE_QUOTE",
+            "PRINCIPLE_OUTPUT_TEXT",
+            "PRINCIPLE_OUTPUT_UNCERTAINTY",
+            "PRINCIPLE_PROFILE_INFERENCE_ONLY",
+            "PRINCIPLE_QUOTE_BOUND",
+        ]
+        .into_iter()
+        .find(|code| *code == worker.code())
+        .unwrap_or("worker_unknown");
+        return ("worker", code);
+    }
+    let message = error.to_string();
+    let code = [
+        "compute_sandbox_spawn",
+        "compute_control_ack_deadline",
+        "compute_control_write_deadline",
+        "compute_control_write",
+        "compute_deadline",
+        "compute_owner_busy",
+        "compute_memory_budget",
+        "compute_memory_pressure",
+        "compute_owner_pressure",
+        "compute_process_bound",
+        "compute_thread_bound",
+        "compute_storage_budget",
+        "compute_reap_deadline",
+        "compute_reap",
+        "compute_missing_result_exit_deadline",
+        "compute_worker_exit",
+    ]
+    .into_iter()
+    .find(|code| *code == message)
+    .unwrap_or("supervisor_unknown");
+    ("supervisor", code)
+}
+
 fn finish_job(
     job: &mut Job,
     result: Result<Result<Value>, tokio::task::JoinError>,
@@ -664,10 +783,20 @@ fn finish_job(
         job.status.state = JobState::Cancelled;
         return;
     }
-    let Ok(Ok(report)) = result else {
-        job.status.state = JobState::Failed;
-        job.status.error = Some(ErrorCode::WorkerFailed);
-        return;
+    let report = match result {
+        Ok(Ok(report)) => report,
+        failed => {
+            let (class, code) = match &failed {
+                Ok(Err(error)) => execution_failure_class(error),
+                Err(error) if error.is_cancelled() => ("join", "cancelled"),
+                Err(_) => ("join", "panicked"),
+                Ok(Ok(_)) => unreachable!(),
+            };
+            eprintln!("compute terminal_failure class={class} code={code}");
+            job.status.state = JobState::Failed;
+            job.status.error = Some(ErrorCode::WorkerFailed);
+            return;
+        }
     };
     let checked = checked_report(&report, &job.status.binding, caps);
     if let Ok(report_json) = checked {
@@ -685,6 +814,7 @@ pub(super) fn checked_report(
     binding: &JobBinding,
     caps: &Capabilities,
 ) -> Result<String> {
+    let profile = profile_for_model(&caps.model)?;
     ensure!(
         report["mode"] == "infer"
             && report["status"] == "ok"
@@ -723,9 +853,23 @@ pub(super) fn checked_report(
             output["sample_index"] == index
                 && output["text"]
                     .as_str()
-                    .is_some_and(|text| text.len() <= 1024),
+                    .is_some_and(|text| text.len() <= profile.spec().max_output_bytes),
             "compute_broker_result_row"
         );
+        // The same validator reads retained historical receipts on the requester.
+        // Missing legacy metadata stays unknown; malformed new metadata is rejected.
+        if let Some(generation) =
+            super::inference_output::Generation::from_output(output, !profile.is_default())?
+        {
+            ensure!(
+                output["text_truncated"].is_boolean() && generation.model_profile == profile,
+                "compute_broker_result_truncation"
+            );
+            ensure!(
+                generation.output_contract.is_none() || caps.principle_inference_v4,
+                "compute_broker_unrequested_principle_output"
+            );
+        }
     }
     let json = serde_json::to_string(report)?;
     ensure!(
@@ -733,6 +877,21 @@ pub(super) fn checked_report(
         "compute_broker_result_size"
     );
     Ok(json)
+}
+
+pub(super) fn profile_for_model(model: &ModelIdentity) -> Result<ModelProfile> {
+    let profile = ModelProfile::from_identity(
+        &model.model_id,
+        &model.model_revision,
+        model.base_weights.bytes,
+        &model.base_weights.sha256,
+    )
+    .context("compute_model_profile")?;
+    ensure!(
+        profile.is_default() || model.adapter_files.is_none(),
+        "compute_profile_inference_only"
+    );
+    Ok(profile)
 }
 
 fn sha(bytes: &[u8]) -> String {

@@ -9,6 +9,9 @@ use super::{
     validate_enrollment, validate_expected_task,
 };
 
+mod dynamic;
+pub(crate) use dynamic::ReadyWork;
+
 struct PackageState {
     owner: usize,
     index: usize,
@@ -152,6 +155,17 @@ pub(super) async fn advance(
     socket: &Path,
     cancelled: &tokio::sync::watch::Receiver<bool>,
 ) -> Result<Vec<serde_json::Value>> {
+    advance_reserved(owners, max_batches, &[], socket, cancelled).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn advance_reserved(
+    owners: &[(&Options, &Enrollment)],
+    max_batches: u16,
+    external: &[batch::ReadyPending],
+    socket: &Path,
+    cancelled: &tokio::sync::watch::Receiver<bool>,
+) -> Result<Vec<serde_json::Value>> {
     ensure!(
         !owners.is_empty() && owners.len() <= MAX_PACKAGES && (1..=32).contains(&max_batches),
         "compute_cohort_bound"
@@ -182,7 +196,8 @@ pub(super) async fn advance(
     let mut failure = None;
     if !options.is_empty() {
         let excluded = selected.iter().copied().collect();
-        let reservations = reservations(&states, &excluded, now()?);
+        let mut reservations = reservations(&states, &excluded, now()?);
+        reservations.extend_from_slice(external);
         let results =
             batch::report_ready_many_with_activity(&options, &reservations, socket, cancelled)
                 .await?;
@@ -215,9 +230,11 @@ pub(super) async fn advance(
         {
             continue;
         }
-        let held = reservations(&states, &BTreeSet::from([index]), now()?)
-            .into_iter()
-            .map(|pending| pending.handle.provider_key)
+        let at = now()?;
+        let held = reservations(&states, &BTreeSet::from([index]), at)
+            .iter()
+            .chain(external.iter().filter(|pending| held(pending, at)))
+            .map(|pending| pending.handle.provider_key.clone())
             .collect();
         let (args, enrollment) = owners[state.owner];
         let providers = enrollment
@@ -305,8 +322,11 @@ fn report<'a>(
             }
         }
         let package = &enrollment.packages[state.index];
+        let outputs = state.progress.outputs()?;
+        let answer_complete = complete && batch::output::all_complete(&outputs)?;
         let mut value = serde_json::json!({"package_index":state.index,"dataset_manifest_id":package.manifest_id,
-            "complete":complete,"attempts":state.progress.attempts,"outputs":state.progress.outputs()?,
+            "complete":complete,"execution_complete":complete,"answer_complete":answer_complete,
+            "attempts":state.progress.attempts,"outputs":outputs,
             "pending_handles":state.progress.pending(),"task":package.task,"ready_rows":state.progress.ready_rows()?});
         if let Some(failure) = state.failure {
             value["failure_code"] = failure.into();
@@ -314,6 +334,10 @@ fn report<'a>(
         packages.push(value);
     }
     let complete = completed == enrollment.packages.len();
+    let answer_complete = complete
+        && packages
+            .iter()
+            .all(|package| package["answer_complete"] == true);
     if complete {
         stopped = "complete";
     } else if cancelled {
@@ -322,6 +346,7 @@ fn report<'a>(
     }
     Ok(
         serde_json::json!({"version":1,"operation":"compute_workflow","execute":true,
+        "execution_complete":complete,"answer_complete":answer_complete,
         "scheduling":enrollment.scheduling,"package_scheduling":"shared_provider_round_robin_v1",
         "complete":complete,"completed_packages":completed,"package_count":enrollment.packages.len(),
         "rounds_this_invocation":rounds,"maximum_seconds_per_worker":args.max_seconds,"maximum_rounds_per_window":args.max_batches,

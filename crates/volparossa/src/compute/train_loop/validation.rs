@@ -255,9 +255,7 @@ pub(super) async fn assess(
     let result = store.read_cycle_json(sequence, "result.json")?;
     let selected = store.read_cycle_json(sequence, "selection.json")?;
     let baseline_root: Option<PathBuf> = serde_json::from_value(selected["adapter_root"].clone())?;
-    let training_expires = result["source_expires_unix_seconds"]
-        .as_u64()
-        .context("train_validation_training_expiry")?;
+    let training_expires = super::publication::authority_expiry(&result)?;
     run_stage(
         args,
         &cycle,
@@ -316,6 +314,7 @@ async fn run_stage(
         .context("train_validation_source_expired")?
         .min(u64::from(args.max_seconds));
     let options = super::super::Options {
+        model_profile: super::super::ModelProfile::default(),
         mode: super::super::Mode::Infer,
         runtime_root: args.runtime_root.clone(),
         model_root: args.model_root.clone(),
@@ -360,9 +359,7 @@ fn recompute(store: &Store, sequence: u64) -> Result<Record> {
     let cycle = store.cycle_path(sequence)?;
     let input = load_input(&cycle.join("validation"))?;
     let result = store.read_cycle_json(sequence, "result.json")?;
-    let training_expires = result["source_expires_unix_seconds"]
-        .as_u64()
-        .context("train_validation_training_expiry")?;
+    let training_expires = super::publication::authority_expiry(&result)?;
     ensure!(
         result["dataset_manifest_id"] != input.provenance.manifest_id
             && result["dataset_sha256"] != input.provenance.dataset.sha256,

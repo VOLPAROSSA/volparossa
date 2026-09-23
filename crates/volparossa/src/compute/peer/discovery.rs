@@ -44,6 +44,7 @@ impl Options {
         derived: bool,
     ) -> Result<rpc::EligibilityQuery> {
         let query = rpc::EligibilityQuery {
+            model_profile: None,
             publisher_keys: publishers
                 .into_iter()
                 .collect::<BTreeSet<_>>()
@@ -53,6 +54,7 @@ impl Options {
             require_task_derivation_v1: task,
             require_document_inference_v2: document,
             require_derived_inference_v3: derived,
+            require_principle_inference_v4: false,
         };
         query.validate()?;
         Ok(query)
@@ -93,6 +95,7 @@ async fn select_query(
     ensure!(!*cancelled.borrow(), "compute_discovery_cancelled");
     query.validate()?;
     let request = volparossa_local_control::ComputeDiscoverRequest {
+        model_profile: query.model_profile.clone(),
         publisher_keys: query
             .publisher_keys
             .iter()
@@ -102,6 +105,7 @@ async fn select_query(
         require_task_derivation_v1: query.require_task_derivation_v1,
         require_document_inference_v2: query.require_document_inference_v2,
         require_derived_inference_v3: query.require_derived_inference_v3,
+        require_principle_inference_v4: query.require_principle_inference_v4,
         maximum,
         // Ordinary selection retains the original omitted/default minimum on the wire.
         minimum: if minimum == 2 { 0 } else { minimum },

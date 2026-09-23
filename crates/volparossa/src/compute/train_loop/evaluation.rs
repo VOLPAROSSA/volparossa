@@ -54,6 +54,10 @@ pub(super) struct Record {
     pub(super) predecessor: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     peer_predecessor: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    aggregate_predecessor: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    authority_expires_unix_seconds: Option<u64>,
     baseline_kind: BaselineKind,
     pub(super) approved: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,6 +91,7 @@ enum BaselineKind {
     ConfiguredAdapter,
     ApprovedPredecessor,
     ApprovedPeerUpdate,
+    ApprovedAggregate,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -205,6 +210,87 @@ fn validate_peer_origin(
     Ok(())
 }
 
+fn validate_aggregate_origin(
+    store: &Store,
+    origin: &Value,
+    predecessor: Option<u64>,
+    selected: &Value,
+    input: Option<&InputAdapter>,
+) -> Result<()> {
+    super::super::train_cycle::aggregate_predecessor_expiry(origin)?;
+    let sequence = origin["aggregate_sequence"]
+        .as_u64()
+        .context("train_evaluation_aggregate_sequence")?;
+    let cycle = store.cycle_path(1)?;
+    let directory = cycle
+        .parent()
+        .context("train_evaluation_aggregate_parent")?
+        .join(format!(
+            "aggregate-update-{sequence:016x}/candidate/import/adapter"
+        ));
+    ensure!(
+        selected.get("peer_predecessor").is_none()
+            && origin["local_predecessor"] == serde_json::to_value(predecessor)?
+            && selected["adapter_root"] == serde_json::to_value(directory)?
+            && input.is_some_and(|input| serde_json::to_value(&input.files)
+                .is_ok_and(|files| files == origin["adapter_files"])),
+        "train_evaluation_aggregate_predecessor_binding"
+    );
+    Ok(())
+}
+
+fn successor_authority(selection: &Value, source: &Value, result: &Value) -> Result<Option<u64>> {
+    let aggregate = selection.get("aggregate_predecessor");
+    let inherited = selection.get("inherited_authority_expires");
+    if aggregate.is_none() && inherited.is_none() {
+        ensure!(
+            result.get("authority_expires_unix_seconds").is_none(),
+            "train_evaluation_unrequested_authority"
+        );
+        return Ok(None);
+    }
+    let mut expires = source["expires_unix_seconds"]
+        .as_u64()
+        .context("train_evaluation_source_expiry")?;
+    if let Some(origin) = aggregate {
+        expires = expires.min(super::super::train_cycle::aggregate_predecessor_expiry(
+            origin,
+        )?);
+    }
+    if let Some(inherited) = inherited {
+        let inherited = inherited
+            .as_u64()
+            .filter(|at| *at > 0)
+            .context("train_evaluation_inherited_authority")?;
+        ensure!(
+            !selection["adapter_root"].is_null(),
+            "train_evaluation_inherited_adapter"
+        );
+        expires = expires.min(inherited);
+    }
+    if let Some(catalog) = selection.get("source_catalog") {
+        expires = expires.min(
+            catalog["catalog_expires_unix_seconds"]
+                .as_u64()
+                .context("train_evaluation_catalog_expiry")?,
+        );
+    }
+    let admitted = source["verified_at_unix_seconds"]
+        .as_u64()
+        .context("train_evaluation_source_time")?;
+    let completed = result["completed_at_unix_seconds"]
+        .as_u64()
+        .context("train_evaluation_completion_time")?;
+    ensure!(
+        admitted <= completed
+            && completed < expires
+            && completed <= now()?
+            && result["authority_expires_unix_seconds"] == expires,
+        "train_evaluation_successor_authority"
+    );
+    Ok(Some(expires))
+}
+
 impl Evidence {
     fn load(store: &Store, sequence: u64) -> Result<Self> {
         let root = store.cycle_path(sequence)?;
@@ -225,6 +311,10 @@ impl Evidence {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Recompute one complete original cycle approval without changing its lineage"
+)]
 fn recompute(store: &Store, sequence: u64, predecessor: Option<u64>) -> Result<Record> {
     ensure!(
         sequence > 0 && predecessor.is_none_or(|p| p > 0 && p < sequence),
@@ -239,7 +329,21 @@ fn recompute(store: &Store, sequence: u64, predecessor: Option<u64>) -> Result<R
     let (base_parameters, candidate_parameters) = technical_binding(&evidence, &report, &result)?;
     let input_adapter = input_binding(&report, &result, &selection)?;
     let peer_predecessor = selection.get("peer_predecessor").cloned();
-    if let Some(origin) = &peer_predecessor {
+    let aggregate_predecessor = selection.get("aggregate_predecessor").cloned();
+    let authority_expires_unix_seconds = successor_authority(
+        &selection,
+        &evidence.json("source-provenance.json")?,
+        &result,
+    )?;
+    if let Some(origin) = &aggregate_predecessor {
+        validate_aggregate_origin(
+            store,
+            origin,
+            predecessor,
+            &selection,
+            input_adapter.as_ref(),
+        )?;
+    } else if let Some(origin) = &peer_predecessor {
         validate_peer_origin(
             store,
             origin,
@@ -295,7 +399,9 @@ fn recompute(store: &Store, sequence: u64, predecessor: Option<u64>) -> Result<R
         epsilon: EPSILON,
         sequence,
         predecessor,
-        baseline_kind: if peer_predecessor.is_some() {
+        baseline_kind: if aggregate_predecessor.is_some() {
+            BaselineKind::ApprovedAggregate
+        } else if peer_predecessor.is_some() {
             BaselineKind::ApprovedPeerUpdate
         } else if predecessor.is_some() {
             BaselineKind::ApprovedPredecessor
@@ -305,6 +411,8 @@ fn recompute(store: &Store, sequence: u64, predecessor: Option<u64>) -> Result<R
             BaselineKind::PinnedBase
         },
         peer_predecessor,
+        aggregate_predecessor,
+        authority_expires_unix_seconds,
         approved,
         validation,
         source_manifest_id,

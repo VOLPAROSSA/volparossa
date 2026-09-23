@@ -23,7 +23,7 @@ use tokio::{
     time::timeout,
 };
 use volparossa_content::{
-    agent_artifact::{BASE_MODEL_SHA256, MODEL_ID, MODEL_REVISION},
+    model_profile::ModelProfile,
     provider::{
         ProviderEndpoint, PublicationRegistry,
         compute::{ComputeBackend, ComputeError, ComputeFuture, ComputeService, dataset},
@@ -65,6 +65,7 @@ pub(super) struct Attachment {
     task_derivation_v1: bool,
     document_inference_v2: bool,
     derived_inference_v3: bool,
+    principle_inference_v4: bool,
     successor_activation_v1: bool,
     enabled: AtomicBool,
 }
@@ -144,6 +145,7 @@ impl ContentRuntime {
             task_derivation_v1: capabilities.task_derivation_v1,
             document_inference_v2: capabilities.document_inference_v2,
             derived_inference_v3: capabilities.derived_inference_v3,
+            principle_inference_v4: capabilities.principle_inference_v4,
             successor_activation_v1: capabilities.successor_activation_v1,
             enabled: AtomicBool::new(true),
         });
@@ -337,7 +339,11 @@ impl Attachment {
                 )?;
                 if hex::encode(source.manifest_id()) != submit.binding.dataset_manifest_id
                     || (source.is_derived() && !self.derived_inference_v3)
-                    || (source.is_document() && !source.is_derived() && !self.document_inference_v2)
+                    || (source.is_principle() && !self.principle_inference_v4)
+                    || (source.is_document()
+                        && !source.is_derived()
+                        && !source.is_principle()
+                        && !self.document_inference_v2)
                     || submit.binding.expires_unix_seconds > source.expires()
                     || derive_submission(&source, &submit.binding)? != submit.dataset_json
                     || hex::encode(Sha256::digest(submit.dataset_json.as_bytes()))
@@ -376,6 +382,7 @@ impl Attachment {
                     || capabilities.task_derivation_v1 != self.task_derivation_v1
                     || capabilities.document_inference_v2 != self.document_inference_v2
                     || capabilities.derived_inference_v3 != self.derived_inference_v3
+                    || capabilities.principle_inference_v4 != self.principle_inference_v4
                 {
                     return Err(ComputeError::Authentication);
                 }
@@ -477,16 +484,22 @@ async fn inspect_capabilities(
 }
 
 pub(super) fn validate_capabilities(caps: &Capabilities) -> Result<(), ComputeError> {
+    let profile = ModelProfile::from_identity(
+        &caps.model.model_id,
+        &caps.model.model_revision,
+        caps.model.base_weights.bytes,
+        &caps.model.base_weights.sha256,
+    )
+    .ok_or(ComputeError::Authentication)?;
     if !caps.public_inference_only
         || caps.runtime_slots != 1
         || !(1..=2).contains(&caps.max_threads)
         || !(1..=600).contains(&caps.max_job_seconds)
         || !(1..=1024 * 1024).contains(&caps.max_dataset_bytes)
-        || !(1..=4).contains(&caps.max_rows)
-        || caps.model.model_id != MODEL_ID
-        || caps.model.model_revision != MODEL_REVISION
-        || caps.model.base_weights.bytes != 269_060_552
-        || caps.model.base_weights.sha256 != hex::encode(BASE_MODEL_SHA256)
+        || !(1..=profile.spec().max_rows).contains(&caps.max_rows)
+        || (!profile.is_default()
+            && (caps.model.adapter_files.is_some() || caps.successor_activation_v1))
+        || (caps.principle_inference_v4 && profile != ModelProfile::Smol360)
         || caps.model_fingerprint
             != hex::encode(Sha256::digest(
                 serde_json::to_vec(&caps.model).map_err(|_| ComputeError::Invalid)?,

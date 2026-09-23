@@ -12,6 +12,7 @@ use nix::fcntl::{Flock, FlockArg};
 use serde_json::{Value, json};
 use volparossa_content::{SignedManifest, provider::compute::dataset::VerifiedPublicDataset};
 
+use super::batch::output;
 use super::{
     Args, Cancellation, Deserialize, Path, PathBuf, Result, Serialize, VerifyingKey, discovery,
     ensure, fs, now, parse_key, read_file, rpc, sha, workflow,
@@ -247,7 +248,17 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     // remote execution future and pretend its worker has stopped.
     let work = workflow::report_with_activity(&options, socket, &cancellation.activity).await?;
     let result = joined_result(&args.directory, &selected, &verified, &expected, &work)?;
-    write_json(&args.directory.join("result.json"), &result, true)?;
+    let path = args.directory.join("result.json");
+    if !output::preserve_legacy_result(
+        &path,
+        rpc::MAX_DATASET_BYTES as u64,
+        work["rounds_this_invocation"]
+            .as_u64()
+            .context("compute_task_rounds")?,
+        &result,
+    )? {
+        write_json(&path, &result, true)?;
+    }
     println!("{}", serde_json::to_string(&result)?);
     ensure!(
         result["complete"] == true,
@@ -441,18 +452,21 @@ fn joined_result(
                     .any(|provider| provider == key)),
             "compute_task_result_provider"
         );
-        answers.push(
-            json!({"source_row":index,"context_sha256":sha(context.as_bytes()),
+        let mut answer = json!({"source_row":index,"context_sha256":sha(context.as_bytes()),
             "text":output["text"],"provider_key":output["provider_key"],"job_id":output["job_id"],
-            "report_sha256":output["report_sha256"]}),
-        );
+            "report_sha256":output["report_sha256"]});
+        output::retain(output, &mut answer)?;
+        output::annotate(&mut answer)?;
+        answers.push(answer);
     }
-    let complete = work["complete"] == true
+    let execution_complete = work["complete"] == true
         && package["complete"] == true
         && work["pending_failure"] != true
         && rows.len() == verified.row_count();
+    let complete = execution_complete && output::all_complete(&answers)?;
     Ok(
-        json!({"version":1,"operation":"compute_public_task","complete":complete,
+        json!({"version":2,"operation":"compute_public_task","complete":complete,
+        "execution_complete":execution_complete,"answer_complete":complete,"semantic_completeness_proven":false,
         "task":selected.task,"publisher_key":selected.publisher_key,"dataset_name":selected.dataset_name,
         "dataset_manifest_id":hex::encode(verified.manifest_id()),"answers":answers,
         "joining":"ordered_per_context_answers_not_neural_synthesis","workflow":work,
@@ -683,12 +697,13 @@ mod tests {
     // Full local receipt fixtures exercise parser/hash binding, never successful remote ML.
     fn retained_receipts(fixture: &Fixture) -> Value {
         let source = verified_source(fixture.root.path(), &fixture.selected).unwrap();
+        let profile = crate::compute::ModelProfile::Default135.spec();
         let model = rpc::ModelIdentity {
-            model_id: "local-receipt-fixture".into(),
-            model_revision: "fixture".into(),
+            model_id: profile.model_id.into(),
+            model_revision: profile.revision.into(),
             base_weights: rpc::FileIdentity {
-                bytes: 1,
-                sha256: "a".repeat(64),
+                bytes: profile.weights_bytes,
+                sha256: profile.weights_sha256.into(),
             },
             adapter_files: None,
         };
@@ -704,6 +719,7 @@ mod tests {
             max_rows: 4,
             task_derivation_v1: true,
             document_inference_v2: false,
+            principle_inference_v4: false,
             derived_inference_v3: false,
             successor_activation_v1: false,
         };
@@ -769,7 +785,9 @@ mod tests {
             &work,
         )
         .unwrap();
-        assert_eq!(joined["complete"], true);
+        assert_eq!(joined["execution_complete"], true);
+        assert_eq!(joined["complete"], false);
+        assert_eq!(joined["answers"][0]["answer_status"], "legacy_unknown");
         assert_eq!(
             read_file(&fixture.root.path().join("dataset.manifest"), 64 * 1024).unwrap(),
             original
@@ -876,7 +894,9 @@ mod tests {
             &work,
         )
         .unwrap();
-        assert_eq!(joined["complete"], true);
+        assert_eq!(joined["execution_complete"], true);
+        assert_eq!(joined["complete"], false);
+        assert_eq!(joined["answers"][0]["answer_status"], "legacy_unknown");
         assert_eq!(joined["answers"].as_array().unwrap().len(), 2);
         assert_eq!(
             joined["answers"][0]["report_sha256"],

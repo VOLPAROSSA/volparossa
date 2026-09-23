@@ -9,7 +9,7 @@ use clap::Parser;
 
 use super::*;
 
-fn fixture() -> (tempfile::TempDir, Options) {
+pub(super) fn fixture() -> (tempfile::TempDir, Options) {
     let root = tempfile::tempdir().unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let publisher = ed25519_dalek::SigningKey::from_bytes(&[43; 32]).verifying_key();
@@ -78,6 +78,66 @@ fn cycle_directory(store: &Store, sequence: u64, complete: bool) -> PathBuf {
     root
 }
 
+#[test]
+fn automatic_aggregation_enrollment_is_explicit_frozen_and_exclusive() {
+    let (root, mut args) = fixture();
+    let key = |byte| {
+        hex::encode(
+            ed25519_dalek::SigningKey::from_bytes(&[byte; 32])
+                .verifying_key()
+                .as_bytes(),
+        )
+    };
+    let validation = json!({"publisher_key":key(44),"name":"heldout","min_revision":1,"manifest_id":"b".repeat(64)});
+    let aggregate = json!({"version":1,"dataset":{"publisher_key":key(43),"name":"public-a",
+        "revision":1,"manifest_id":"a".repeat(64)},"adapters":[
+            {"publisher_key":key(45),"name":"a","min_revision":1},
+            {"publisher_key":key(46),"name":"b","min_revision":1},
+            {"publisher_key":key(47),"name":"c","min_revision":1}]});
+    let original = enrollment(&args).unwrap().1;
+    assert!(original.get("aggregate_updates").is_none());
+    let plan = root.path().join("aggregate.json");
+    let validation_path = root.path().join("validation.json");
+    for (path, value) in [(&plan, &aggregate), (&validation_path, &validation)] {
+        fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    args.aggregate_plan = Some(plan);
+    assert!(enrollment(&args).is_err());
+    args.validation_source = Some(validation_path);
+    let selected = enrollment(&args).unwrap().1;
+    assert_eq!(selected["aggregate_updates"]["plan"], aggregate);
+    assert_eq!(
+        selected["aggregate_updates"]["validation_source"],
+        validation
+    );
+    assert!(!args.directory.exists());
+    let store = Store::open(&args.directory, &selected, false).unwrap();
+    let retained = fs::read(args.directory.join("enrollment.json")).unwrap();
+    drop(store);
+    let mut changed = selected;
+    changed["aggregate_updates"]["plan"]["adapters"][0]["publisher_key"] = key(48).into();
+    assert!(Store::open(&args.directory, &changed, true).is_err());
+    assert_eq!(
+        fs::read(args.directory.join("enrollment.json")).unwrap(),
+        retained
+    );
+    args.peer_updates = Some(root.path().join("peer-updates.json"));
+    fs::write(
+        args.peer_updates.as_ref().unwrap(),
+        serde_json::to_vec(&json!({"version":1,
+        "channels":[{"publisher_key":key(48),"name":"individual"}]}))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(
+        args.peer_updates.as_ref().unwrap(),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    assert!(enrollment(&args).is_err());
+}
+
 fn add_cycle(store: &Store, state: &mut State, sequence: u64, phase: Phase) {
     let complete = !matches!(phase, Phase::Running | Phase::Failed);
     if complete {
@@ -96,6 +156,87 @@ fn add_cycle(store: &Store, state: &mut State, sequence: u64, phase: Phase) {
         next_publication_attempt: 0,
     });
     state.next_sequence = sequence + 1;
+}
+
+#[test]
+fn restored_selection_reconciles_serving_and_next_training_without_renewing_authority() {
+    // Exercise the runtime boundary after the durable recovery module selected a
+    // predecessor. These are inert files, not training or model-quality evidence.
+    let (root, mut args) = fixture();
+    args.serving_directory = Some(root.path().join("serving"));
+    for directory in [&args.runtime_root, args.serving_directory.as_ref().unwrap()] {
+        fs::DirBuilder::new().mode(0o700).create(directory).unwrap();
+    }
+    let (plan, enrollment) = enrollment(&args).unwrap();
+    let store = Store::open(&args.directory, &enrollment, false).unwrap();
+    let mut serving = serving::Serving::open(&args, &enrollment).unwrap();
+    let mut state = State::new(plan.sources.len());
+    add_cycle(&store, &mut state, 1, Phase::Complete);
+    add_cycle(&store, &mut state, 2, Phase::Complete);
+    state.completed = 2;
+    state.promoted = 2;
+    state.latest = Some(2);
+    reconcile_selected_adapter(&args, &store, &mut state, &mut serving).unwrap();
+    let directory = args.serving_directory.as_ref().unwrap();
+    let newer = super::super::serving_snapshot::peek(directory, &args.runtime_root)
+        .unwrap()
+        .unwrap();
+    let (predecessor, original_expiry, provenance) = {
+        state.latest = Some(1);
+        serving::local_candidate(&store, &state).unwrap().unwrap()
+    };
+    let before = serde_json::to_value(&state).unwrap();
+    reconcile_selected_adapter(&args, &store, &mut state, &mut serving).unwrap();
+    assert_eq!(serde_json::to_value(&state).unwrap(), before);
+    let restored = super::super::serving_snapshot::peek(directory, &args.runtime_root)
+        .unwrap()
+        .unwrap();
+    assert_ne!(restored.id, newer.id);
+    assert_eq!(restored.expires_unix_seconds, original_expiry);
+    assert_eq!(
+        serde_json::to_value(&restored.adapter_files).unwrap(),
+        provenance["adapter_files"]
+    );
+    let current = current_adapter(&args, &store, &state).unwrap();
+    assert_eq!(current.adapter_root.as_ref(), Some(&predecessor));
+    let next = cycle_options(
+        &args,
+        &plan.sources[0],
+        store.cycle_path(state.next_sequence).unwrap(),
+        Some(3),
+        current.adapter_root,
+    )
+    .unwrap();
+    assert_eq!(next.adapter_root, Some(predecessor));
+    assert_eq!(
+        (next.steps, next.threads, next.max_seconds),
+        (args.steps, args.threads, args.max_seconds)
+    );
+    assert!(next.spare_capacity);
+    assert_eq!(next.dataset_name, plan.sources[0].name);
+    // Reconciliation is idempotent, not a fresh selection lease or training cycle.
+    let retained = fs::read(directory.join("current.json")).unwrap();
+    reconcile_selected_adapter(&args, &store, &mut state, &mut serving).unwrap();
+    assert_eq!(fs::read(directory.join("current.json")).unwrap(), retained);
+    assert_eq!(serde_json::to_value(&state).unwrap(), before);
+    let entries = || {
+        fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>()
+    };
+    let original_entries = entries();
+    for code in [
+        "peer_update_import_busy",
+        "compute_deadline",
+        "source_unavailable",
+    ] {
+        assert!(
+            checked_integrity_recovery::<()>(Err(anyhow::anyhow!(code)), &mut serving).is_err()
+        );
+        assert_eq!(fs::read(directory.join("current.json")).unwrap(), retained);
+        assert_eq!(entries(), original_entries);
+    }
 }
 
 #[test]

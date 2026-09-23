@@ -1,6 +1,7 @@
 //! One explicitly authorized public training cycle; no autonomous source/model downloads.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File},
     io::Write,
     os::unix::fs::{DirBuilderExt, PermissionsExt},
@@ -43,6 +44,12 @@ pub(crate) struct Options {
     /// Locally approved peer warmstart, supplied only by the owning coordinator.
     #[arg(skip)]
     pub(super) peer_predecessor: Option<Value>,
+    /// Locally approved three-publisher aggregate, never a fictitious peer or training cycle.
+    #[arg(skip)]
+    pub(super) aggregate_predecessor: Option<Value>,
+    /// Original authority inherited through later local successors; never renewed by a new source.
+    #[arg(skip)]
+    pub(super) inherited_authority_expires: Option<u64>,
     /// Signed revision floor, not proof of the globally newest publication.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub(super) min_revision: Option<u64>,
@@ -83,6 +90,44 @@ pub(crate) struct Options {
 struct Activity {
     idle: watch::Receiver<bool>,
     listener: tokio::task::JoinHandle<()>,
+}
+
+/// Content-free context retained when a coordinator catches a cycle failure.
+#[derive(Debug, Clone, Copy)]
+enum CycleStage {
+    Admission,
+    Fetch,
+    SourceValidation,
+    WorkerAdmission,
+    Supervisor,
+    Completion,
+}
+
+impl CycleStage {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Admission => "admission",
+            Self::Fetch => "fetch",
+            Self::SourceValidation => "source_validation",
+            Self::WorkerAdmission => "worker_admission",
+            Self::Supervisor => "supervisor",
+            Self::Completion => "completion",
+        }
+    }
+}
+
+impl std::fmt::Display for CycleStage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
+impl std::error::Error for CycleStage {}
+
+pub(super) fn failure_stage(error: &anyhow::Error) -> &'static str {
+    error
+        .downcast_ref::<CycleStage>()
+        .map_or("unknown", |stage| stage.label())
 }
 
 impl Activity {
@@ -146,6 +191,8 @@ pub(super) async fn execute_cycle_guarded(
     mut activity: watch::Receiver<bool>,
     validation: Option<&[u8]>,
 ) -> Result<Value> {
+    let mut stage = CycleStage::Admission;
+    let result = async {
     ensure!(args.execute, "train_cycle_execute_required");
     ensure_active(&activity, "train_cycle_cancelled_before_output")?;
     let selection = selection(args)?;
@@ -157,6 +204,9 @@ pub(super) async fn execute_cycle_guarded(
     private_directory(&args.model_root)?;
     if let Some(adapter) = &args.adapter_root {
         private_directory(adapter)?;
+    }
+    if let Some(origin) = &args.aggregate_predecessor {
+        verify_aggregate_adapter(args.adapter_root.as_deref(), origin)?;
     }
     private_directory(args.output.parent().context("train_cycle_output_parent")?)?;
     ensure_active(&activity, "train_cycle_cancelled_before_output")?;
@@ -177,12 +227,14 @@ pub(super) async fn execute_cycle_guarded(
         reuse_cache: args.reuse_cache,
         limits: args.limits.clone(),
     };
+    stage = CycleStage::Fetch;
     ensure_active(&activity, "train_cycle_cancelled_before_fetch")?;
     let download = tokio::select! {
         biased;
         () = cancelled(&mut activity) => bail!("train_cycle_cancelled_during_fetch_verified_cache_may_remain"),
         result = agent_artifact::fetch_training_source(&selected, socket, &args.output) => result?,
     };
+    stage = CycleStage::SourceValidation;
     let verified = validate_source(args, &download, now()?)?;
     if let Some(validation) = validation {
         guard_overlap(&download.dataset, validation)?;
@@ -192,16 +244,22 @@ pub(super) async fn execute_cycle_guarded(
     let authority_expires = catalog_expiry(args, now()?)?.map_or(verified.expires(), |expires| {
         expires.min(verified.expires())
     });
+    stage = CycleStage::WorkerAdmission;
     let options = worker_options(args, authority_expires, now()?)?;
     options.validate()?;
     // Await the real supervisor through cancellation. Dropping its future would not be a
     // valid claim that a running training worker had been killed and reaped.
+    stage = CycleStage::Supervisor;
     let report = execute(&options, activity.clone()).await?;
+    stage = CycleStage::Completion;
     ensure_active(
         &activity,
         "train_cycle_cancelled_after_training_outputs_retained",
     )?;
     complete(args, &download, &source, &report)
+    }
+    .await;
+    result.map_err(|error: anyhow::Error| error.context(stage))
 }
 
 #[derive(Deserialize)]
@@ -364,7 +422,120 @@ fn selection(args: &Options) -> Result<Value> {
         );
         selected["peer_predecessor"] = origin.clone();
     }
+    if let Some(origin) = &args.aggregate_predecessor {
+        ensure!(
+            args.peer_predecessor.is_none(),
+            "train_cycle_conflicting_predecessors"
+        );
+        aggregate_expiry(args, now()?)?;
+        let expected = args
+            .output
+            .parent()
+            .context("train_cycle_aggregate_parent")?
+            .join(format!(
+                "aggregate-update-{:016x}/candidate/import/adapter",
+                origin["aggregate_sequence"]
+                    .as_u64()
+                    .context("train_cycle_aggregate_sequence")?
+            ));
+        ensure!(
+            args.adapter_root.as_ref() == Some(&expected),
+            "train_cycle_aggregate_adapter_path"
+        );
+        selected["aggregate_predecessor"] = origin.clone();
+    }
+    if let Some(expires) = args.inherited_authority_expires {
+        ensure!(
+            now()? < expires && args.adapter_root.is_some(),
+            "train_cycle_inherited_authority_expired"
+        );
+        selected["inherited_authority_expires"] = expires.into();
+    }
     Ok(selected)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AggregateOrigin {
+    kind: String,
+    aggregate_sequence: u64,
+    local_predecessor: Option<u64>,
+    manifest_ids: [String; 3],
+    dataset_manifest_id: String,
+    cohort_sha256: String,
+    comparison_sha256: String,
+    result_sha256: String,
+    adapter_files: BTreeMap<String, volparossa_local_control::compute::FileIdentity>,
+    expires_unix_seconds: u64,
+}
+
+const AGGREGATE_FILES: [(&str, u64); 3] = [
+    ("README.md", 16 * 1024),
+    ("adapter_config.json", 16 * 1024),
+    ("adapter_model.safetensors", 2 * 1024 * 1024),
+];
+
+/// Validate the retained owner-local approval identity, not a new network attestation.
+/// No wall-clock check here: historical cycle verification must preserve its original lease.
+pub(in crate::compute) fn aggregate_predecessor_expiry(value: &Value) -> Result<u64> {
+    let origin: AggregateOrigin = serde_json::from_value(value.clone())?;
+    ensure!(
+        value.get("local_predecessor").is_some()
+            && origin.kind == "aggregate_update"
+            && origin.aggregate_sequence > 0
+            && origin.local_predecessor.is_none_or(|sequence| sequence > 0)
+            && origin.expires_unix_seconds > 0
+            && origin.manifest_ids.iter().collect::<BTreeSet<_>>().len() == 3
+            && origin
+                .manifest_ids
+                .iter()
+                .all(|id| parse_manifest_id(id).is_ok())
+            && parse_manifest_id(&origin.dataset_manifest_id).is_ok()
+            && [
+                &origin.cohort_sha256,
+                &origin.comparison_sha256,
+                &origin.result_sha256
+            ]
+            .iter()
+            .all(|id| is_hex(id, 64))
+            && origin.adapter_files.len() == AGGREGATE_FILES.len(),
+        "train_cycle_aggregate_origin"
+    );
+    for (name, maximum) in AGGREGATE_FILES {
+        let file = origin
+            .adapter_files
+            .get(name)
+            .context("train_cycle_aggregate_file")?;
+        ensure!(
+            (1..=maximum).contains(&file.bytes) && is_hex(&file.sha256, 64),
+            "train_cycle_aggregate_file_identity"
+        );
+    }
+    Ok(origin.expires_unix_seconds)
+}
+
+fn aggregate_expiry(args: &Options, time: u64) -> Result<Option<u64>> {
+    args.aggregate_predecessor
+        .as_ref()
+        .map(|origin| {
+            let expires = aggregate_predecessor_expiry(origin)?;
+            ensure!(time < expires, "train_cycle_aggregate_expired");
+            Ok(expires)
+        })
+        .transpose()
+}
+
+fn verify_aggregate_adapter(adapter: Option<&Path>, origin: &Value) -> Result<()> {
+    let adapter = adapter.context("train_cycle_aggregate_adapter_missing")?;
+    for (name, maximum) in AGGREGATE_FILES {
+        let bytes = read_file(&adapter.join(name), maximum)?;
+        ensure!(
+            origin["adapter_files"][name]
+                == serde_json::json!({"bytes":bytes.len(),"sha256":sha(&bytes)}),
+            "train_cycle_aggregate_adapter_changed"
+        );
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -497,11 +668,13 @@ fn persist_source(
 }
 
 fn worker_options(args: &Options, expires: u64, time: u64) -> Result<super::Options> {
+    let expires = successor_expiry(args, expires, time)?;
     let remaining = expires
         .checked_sub(time)
         .filter(|remaining| *remaining > 0)
         .context("train_cycle_source_expired")?;
     Ok(super::Options {
+        model_profile: super::ModelProfile::default(),
         mode: Mode::Train,
         runtime_root: args.runtime_root.clone(),
         model_root: args.model_root.clone(),
@@ -514,6 +687,16 @@ fn worker_options(args: &Options, expires: u64, time: u64) -> Result<super::Opti
         execute: true,
         spare_capacity: args.spare_capacity,
     })
+}
+
+fn successor_expiry(args: &Options, expires: u64, time: u64) -> Result<u64> {
+    let expires = aggregate_expiry(args, time)?.map_or(expires, |aggregate| expires.min(aggregate));
+    if let Some(inherited) = args.inherited_authority_expires {
+        ensure!(time < inherited, "train_cycle_inherited_authority_expired");
+        Ok(expires.min(inherited))
+    } else {
+        Ok(expires)
+    }
 }
 
 fn complete(
@@ -552,13 +735,33 @@ fn complete(
         args.publisher_key,
         args.output.join("adapter.bundle"),
     ))?;
-    let result = serde_json::json!({"version":1,"operation":"compute_train_cycle","complete":true,
+    let mut result = serde_json::json!({"version":1,"operation":"compute_train_cycle","complete":true,
         "dataset_manifest_id":hex::encode(verified.manifest_id()),"dataset_sha256":sha(&download.dataset),
         "source_receipt":source["source_receipt"],"source_expires_unix_seconds":verified.expires(),
         "updates_completed":report["updates_completed"],"input_adapter_applied":report["input_adapter"]["applied"] == true,
         "input_adapter":report.get("input_adapter"),"training_report_sha256":sha(&full_report),"bundle":bundle,
         "network_published":false,"private_data_supported":false,"model_quality_proven":false,
         "autonomous_training":false,"model_activated_for_peer_jobs":false,"output":args.output});
+    if args.aggregate_predecessor.is_some() || args.inherited_authority_expires.is_some() {
+        let completed_at = now()?;
+        let expires = successor_expiry(args, verified.expires(), completed_at)?;
+        let expires =
+            catalog_expiry(args, completed_at)?.map_or(expires, |catalog| expires.min(catalog));
+        if let Some(origin) = &args.aggregate_predecessor {
+            verify_aggregate_adapter(args.adapter_root.as_deref(), origin)?;
+            ensure!(
+                report["input_adapter"]["applied"] == true
+                    && report["input_adapter"]["files"] == origin["adapter_files"],
+                "train_cycle_aggregate_worker_input_changed"
+            );
+        }
+        ensure!(
+            completed_at < expires,
+            "train_cycle_successor_authority_expired"
+        );
+        result["authority_expires_unix_seconds"] = expires.into();
+        result["completed_at_unix_seconds"] = completed_at.into();
+    }
     write_new(
         &args.output.join("result.json"),
         &serde_json::to_vec(&result)?,
@@ -737,6 +940,102 @@ mod tests {
         *args
     }
 
+    fn aggregate_origin(expires: u64) -> Value {
+        let files: BTreeMap<_, _> = AGGREGATE_FILES
+            .into_iter()
+            .map(|(name, _)| {
+                (
+                    name,
+                    serde_json::json!({"bytes":7,"sha256":sha(b"fixture")}),
+                )
+            })
+            .collect();
+        serde_json::json!({"kind":"aggregate_update","aggregate_sequence":7,
+            "local_predecessor":null,"manifest_ids":["1".repeat(64),"2".repeat(64),"3".repeat(64)],
+            "dataset_manifest_id":"4".repeat(64),"cohort_sha256":"5".repeat(64),
+            "comparison_sha256":"6".repeat(64),"result_sha256":"7".repeat(64),
+            "adapter_files":files,"expires_unix_seconds":expires})
+    }
+
+    #[test]
+    fn aggregate_warmstart_is_distinct_exact_and_lease_bounded() {
+        let root = tempfile::tempdir().unwrap();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[51; 32]);
+        let mut args = arguments(root.path(), &key.verifying_key());
+        let at = now().unwrap();
+        let legacy = selection(&args).unwrap();
+        assert!(legacy.get("aggregate_predecessor").is_none());
+        assert!(legacy.get("inherited_authority_expires").is_none());
+        let original = aggregate_origin(at + 90);
+        args.aggregate_predecessor = Some(original.clone());
+        let adapter = root
+            .path()
+            .join("aggregate-update-0000000000000007/candidate/import/adapter");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&adapter)
+            .unwrap();
+        for (name, _) in AGGREGATE_FILES {
+            write_new(&adapter.join(name), b"fixture").unwrap();
+        }
+        args.adapter_root = Some(adapter.clone());
+        assert_eq!(selection(&args).unwrap()["aggregate_predecessor"], original);
+        verify_aggregate_adapter(args.adapter_root.as_deref(), &original).unwrap();
+        assert_eq!(
+            worker_options(&args, at + 1200, at).unwrap().max_seconds,
+            90
+        );
+        assert_eq!(worker_options(&args, at + 40, at).unwrap().max_seconds, 40);
+        args.inherited_authority_expires = Some(at + 20);
+        assert_eq!(
+            worker_options(&args, at + 1200, at).unwrap().max_seconds,
+            20
+        );
+        assert!(worker_options(&args, at + 1200, at + 20).is_err());
+        args.inherited_authority_expires = None;
+        args.peer_predecessor = Some(serde_json::json!({"kind":"peer_update"}));
+        assert!(selection(&args).is_err());
+        args.peer_predecessor = None;
+        args.adapter_root = Some(root.path().join("another-adapter"));
+        assert!(selection(&args).is_err());
+        args.adapter_root = Some(adapter.clone());
+        fs::write(adapter.join("README.md"), b"changed").unwrap();
+        assert!(verify_aggregate_adapter(args.adapter_root.as_deref(), &original).is_err());
+        assert!(worker_options(&args, at + 1200, at + 90).is_err());
+    }
+
+    #[test]
+    fn aggregate_origin_rejects_ambiguous_or_incomplete_identity() {
+        let original = aggregate_origin(100);
+        assert_eq!(aggregate_predecessor_expiry(&original).unwrap(), 100);
+        for (field, value) in [
+            ("kind", serde_json::json!("peer_update")),
+            ("aggregate_sequence", serde_json::json!(0)),
+            ("local_predecessor", serde_json::json!(0)),
+            ("manifest_ids", serde_json::json!(vec!["1".repeat(64); 3])),
+            ("dataset_manifest_id", serde_json::json!("0".repeat(64))),
+            ("result_sha256", serde_json::json!("missing")),
+            ("adapter_files", serde_json::json!({})),
+            ("expires_unix_seconds", serde_json::json!(0)),
+            ("unrecognized", serde_json::json!(true)),
+        ] {
+            let mut changed = original.clone();
+            changed[field] = value;
+            assert!(aggregate_predecessor_expiry(&changed).is_err(), "{field}");
+        }
+        for field in [
+            "local_predecessor",
+            "result_sha256",
+            "cohort_sha256",
+            "comparison_sha256",
+        ] {
+            let mut changed = original.clone();
+            changed.as_object_mut().unwrap().remove(field);
+            assert!(aggregate_predecessor_expiry(&changed).is_err(), "{field}");
+        }
+    }
+
     fn fixture() -> (tempfile::TempDir, Options, TrainingDownload) {
         let root = tempfile::tempdir().unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -908,21 +1207,48 @@ mod tests {
         let error = execute_cycle(&args, &socket, activity.clone())
             .await
             .unwrap_err();
-        assert_eq!(error.to_string(), "train_cycle_execute_required");
+        assert_eq!(
+            error.root_cause().to_string(),
+            "train_cycle_execute_required"
+        );
+        assert_eq!(failure_stage(&error), "admission");
         args.execute = true;
         sender.send(false).unwrap();
         let error = execute_cycle(&args, &socket, activity.clone())
             .await
             .unwrap_err();
-        assert_eq!(error.to_string(), "train_cycle_cancelled_before_output");
+        assert_eq!(
+            error.root_cause().to_string(),
+            "train_cycle_cancelled_before_output"
+        );
         sender.send(true).unwrap();
         drop(sender);
         let error = execute_cycle(&args, &socket, activity).await.unwrap_err();
-        assert_eq!(error.to_string(), "train_cycle_cancelled_before_output");
+        assert_eq!(
+            error.root_cause().to_string(),
+            "train_cycle_cancelled_before_output"
+        );
         assert!(!args.output.exists());
         assert!(!args.runtime_root.exists());
         assert!(!args.cache.exists());
         assert!(!socket.exists());
+    }
+
+    #[test]
+    fn failure_stage_uses_only_typed_context_and_preserves_underlying_error() {
+        for stage in [
+            CycleStage::Admission,
+            CycleStage::Fetch,
+            CycleStage::SourceValidation,
+            CycleStage::WorkerAdmission,
+            CycleStage::Supervisor,
+            CycleStage::Completion,
+        ] {
+            let error = anyhow::anyhow!("PRIVATE SOURCE AND PATH").context(stage);
+            assert_eq!(failure_stage(&error), stage.label());
+            assert_eq!(error.root_cause().to_string(), "PRIVATE SOURCE AND PATH");
+        }
+        assert_eq!(failure_stage(&anyhow::anyhow!("fetch")), "unknown");
     }
 
     #[tokio::test]

@@ -8,8 +8,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use volparossa_content::provider::compute::dataset::{
-    DERIVED_CLAIM_SCOPE, DERIVED_CONTENT_TYPE, DerivedDataset, DerivedInput, DerivedQuestion,
-    verify_source,
+    DERIVED_CLAIM_SCOPE, DerivedDataset, DerivedInput, DerivedQuestion, verify_source,
 };
 use volparossa_content::{CacheLimits, ChunkStore, MAX_MANIFEST_BYTES, SignedManifest, Validity};
 
@@ -21,6 +20,19 @@ pub(super) fn directory(path: &Path) -> Result<()> {
         fs::DirBuilder::new().mode(0o700).create(path)?;
     }
     private_directory(path)
+}
+
+/// Inspect optional retained files without applying the directory-only presence check.
+/// Existing bytes still pass the bounded, no-follow, owner-checked reader before use.
+pub(super) fn file_present(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(info) => {
+            ensure!(info.is_file(), "compute_synthesis_regular_file");
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn sha(bytes: &[u8]) -> String {
@@ -81,21 +93,7 @@ fn group(
     offset: usize,
     level: u16,
 ) -> Result<Group> {
-    let digest = sha(&serde_json::to_vec(parents)?);
-    let file = root.join("group.json");
-    if file.try_exists()? {
-        let saved: Group = serde_json::from_slice(&read(&file, MAX_SAVED_BYTES)?)?;
-        ensure!(
-            saved.version == 1
-                && saved.level == level
-                && saved.parent_offset == offset
-                && saved.parents_sha256 == digest
-                && saved.source_manifest_id == enrollment.source_manifest_id
-                && saved.created_at_unix_seconds >= enrollment.selected_at_unix_seconds
-                && saved.created_at_unix_seconds < enrollment.expires_at_unix_seconds
-                && saved.created_at_unix_seconds <= now()?,
-            "compute_synthesis_group_changed"
-        );
+    if let Some(saved) = saved_group(root, enrollment, parents, offset, level)? {
         return Ok(saved);
     }
     let at = now()?;
@@ -107,12 +105,38 @@ fn group(
         version: 1,
         level,
         parent_offset: offset,
-        parents_sha256: digest,
+        parents_sha256: sha(&serde_json::to_vec(parents)?),
         source_manifest_id: enrollment.source_manifest_id.clone(),
         created_at_unix_seconds: at,
     };
     retain_json(root, "group.json", &group)?;
     Ok(group)
+}
+
+fn saved_group(
+    root: &Path,
+    enrollment: &document_storage::Enrollment,
+    parents: &[Answer],
+    offset: usize,
+    level: u16,
+) -> Result<Option<Group>> {
+    let file = root.join("group.json");
+    if !file_present(&file)? {
+        return Ok(None);
+    }
+    let saved: Group = serde_json::from_slice(&read(&file, MAX_SAVED_BYTES)?)?;
+    ensure!(
+        saved.version == 1
+            && saved.level == level
+            && saved.parent_offset == offset
+            && saved.parents_sha256 == sha(&serde_json::to_vec(parents)?)
+            && saved.source_manifest_id == enrollment.source_manifest_id
+            && saved.created_at_unix_seconds >= enrollment.selected_at_unix_seconds
+            && saved.created_at_unix_seconds < enrollment.expires_at_unix_seconds
+            && saved.created_at_unix_seconds <= now()?,
+        "compute_synthesis_group_changed"
+    );
+    Ok(Some(saved))
 }
 
 fn combined(parents: &[Answer]) -> String {
@@ -196,18 +220,11 @@ pub(super) async fn prepare(
             && super::unusable(parents).is_none(),
         "compute_synthesis_parent_budget"
     );
+    super::check_parent_profiles(original, parents)?;
     directory(root)?;
     let group = group(root, enrollment, parents, offset, level)?;
     retain_json(root, "parents.json", &parents)?;
-    let input = Input {
-        version: 1,
-        visibility: "public".into(),
-        license: original.license.clone(),
-        document: combined(parents),
-        question: original.question.clone(),
-        synthesis: true,
-    };
-    input.validate()?;
+    let input = reduction_input(original, parents, args.grounded_synthesis)?;
     retain_json(root, "planner-input.json", &input)?;
     let plan: Plan = if root.join("document-plan.json").try_exists()? {
         serde_json::from_slice(&read(&root.join("document-plan.json"), MAX_SAVED_BYTES)?)?
@@ -224,7 +241,85 @@ pub(super) async fn prepare(
         retain_json(root, "document-plan.json", &plan)?;
         plan
     };
-    plan.validate(&input)?;
+    let prepared = from_plan(args, enrollment, &input, parents, group, plan)?;
+    publications(args, root, enrollment, &prepared, cancelled)?;
+    Ok(prepared)
+}
+
+fn reduction_input(original: &Input, parents: &[Answer], grounded: bool) -> Result<Input> {
+    let input = Input {
+        version: 1,
+        model_profile: original.model_profile,
+        visibility: "public".into(),
+        license: original.license.clone(),
+        document: combined(parents),
+        question: original.question.clone(),
+        synthesis: true,
+        original_source: grounded.then(|| original.document.clone()),
+    };
+    input.validate()?;
+    Ok(input)
+}
+
+/// Reconstruct an existing group without tokenizer, signer, cache writes or peer work.
+/// A partially prepared group stays pending; already published packages are inspected
+/// independently by the external frontier collector.
+pub(super) fn restore(
+    args: &Options,
+    root: &Path,
+    enrollment: &document_storage::Enrollment,
+    original: &Input,
+    parents: &[Answer],
+    offset: usize,
+    level: u16,
+) -> Result<Option<Prepared>> {
+    ensure!(
+        (1..=super::MAX_LEVELS).contains(&level)
+            && (1..=super::PARENTS_PER_GROUP).contains(&parents.len())
+            && super::unusable(parents).is_none(),
+        "compute_synthesis_parent_budget"
+    );
+    super::check_parent_profiles(original, parents)?;
+    if !document_storage::present(root)? {
+        return Ok(None);
+    }
+    private_directory(root)?;
+    let Some(group) = saved_group(root, enrollment, parents, offset, level)? else {
+        return Ok(None);
+    };
+    let input = reduction_input(original, parents, args.grounded_synthesis)?;
+    for (name, expected) in [
+        ("parents.json", serde_json::to_vec(parents)?),
+        ("planner-input.json", serde_json::to_vec(&input)?),
+    ] {
+        let file = root.join(name);
+        if !file_present(&file)? {
+            return Ok(None);
+        }
+        ensure!(
+            read(&file, MAX_SAVED_BYTES)? == expected,
+            "compute_synthesis_retained_input_changed"
+        );
+    }
+    let file = root.join("document-plan.json");
+    if !file_present(&file)? {
+        return Ok(None);
+    }
+    let plan: Plan = serde_json::from_slice(&read(&file, MAX_SAVED_BYTES)?)?;
+    Ok(Some(from_plan(
+        args, enrollment, &input, parents, group, plan,
+    )?))
+}
+
+fn from_plan(
+    args: &Options,
+    enrollment: &document_storage::Enrollment,
+    input: &Input,
+    parents: &[Answer],
+    group: Group,
+    plan: Plan,
+) -> Result<Prepared> {
+    plan.validate(input)?;
     let source = read(&args.directory.join("source.manifest"), MAX_MANIFEST_BYTES)?;
     ensure!(
         sha(&source) == enrollment.source_manifest_id,
@@ -233,17 +328,23 @@ pub(super) async fn prepare(
     let rows = plan
         .parts
         .iter()
-        .map(|part| row(&input, part, parents, offset))
+        .map(|part| row(input, part, parents, group.parent_offset))
         .collect::<Result<Vec<_>>>()?;
     let datasets = rows
         .chunks(4)
         .map(|rows| {
             let dataset = DerivedDataset {
-                version: 3,
+                model_profile: input.model_profile,
+                version: if input.original_source.is_some() {
+                    5
+                } else {
+                    3
+                },
+                original_source: input.original_source.clone(),
                 visibility: "public".into(),
                 license: input.license.clone(),
                 source_manifest_hex: hex::encode(&source),
-                level,
+                level: group.level,
                 claim_scope: DERIVED_CLAIM_SCOPE.into(),
                 inference: rows.to_vec(),
             };
@@ -251,14 +352,12 @@ pub(super) async fn prepare(
             Ok(dataset)
         })
         .collect::<Result<Vec<_>>>()?;
-    let prepared = Prepared {
+    Ok(Prepared {
         datasets,
         input_sha256: plan.source_sha256,
         parts: plan.parts.len(),
         group,
-    };
-    publications(args, root, enrollment, &prepared, cancelled)?;
-    Ok(prepared)
+    })
 }
 
 fn workflow_plan(root: &Path, publisher: &str, question: &str) -> Value {
@@ -342,7 +441,7 @@ fn publications(
         let manifest = document_storage::publish_object(
             &bytes,
             publication_name(prepared, index),
-            DERIVED_CONTENT_TYPE,
+            dataset.content_type()?,
             Validity {
                 created: prepared.group.created_at_unix_seconds,
                 expires: enrollment.expires_at_unix_seconds,

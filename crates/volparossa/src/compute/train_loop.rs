@@ -1,11 +1,15 @@
 //! Owner-enabled continuous public training, independent source selection and durable sharing.
 //! Every execution remains bounded; there is no hidden model download or private-cache intake.
 
+pub(super) mod aggregate;
+pub(super) mod aggregate_publication;
+mod aggregate_updates;
 mod catalogs;
 mod evaluation;
 mod peer_evaluation;
 mod peer_updates;
 mod publication;
+mod publication_order;
 mod seed;
 mod serving;
 mod storage;
@@ -65,6 +69,9 @@ pub(crate) struct Options {
     /// Explicit public peer-adapter channels; adoption requires a pinned validation source.
     #[arg(long)]
     peer_updates: Option<PathBuf>,
+    /// Automatically combine three enrolled public publishers, compare and adopt locally.
+    #[arg(long, conflicts_with = "peer_updates", requires = "validation_source")]
+    aggregate_plan: Option<PathBuf>,
     /// Optional exact signed validation-only public source, selected before any training.
     #[arg(long)]
     validation_source: Option<PathBuf>,
@@ -202,6 +209,10 @@ struct State {
     catalog: Option<catalogs::Registry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     peer_updates: Option<peer_updates::Registry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    aggregate_updates: Option<aggregate_updates::Registry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    publication_order: Option<publication_order::Ledger>,
 }
 
 impl State {
@@ -221,6 +232,8 @@ impl State {
             validation: None,
             catalog: None,
             peer_updates: None,
+            aggregate_updates: None,
+            publication_order: None,
         }
     }
     fn select(&self, plan: &Plan, repeat: bool, time: u64) -> Option<usize> {
@@ -274,6 +287,10 @@ fn now() -> Result<u64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Freeze owner-selected sources and mutually exclusive adoption authority together"
+)]
 fn enrollment(args: &Options) -> Result<(Plan, Value)> {
     let plan: Plan = serde_json::from_slice(&read_file(&args.plan, 64 * 1024)?)?;
     ensure!(
@@ -361,6 +378,19 @@ fn enrollment(args: &Options) -> Result<(Plan, Value)> {
         );
         selection["peer_updates"] = peers;
     }
+    if let Some(aggregate) = aggregate::loop_selection(args)? {
+        ensure!(
+            args.peer_updates.is_none(),
+            "train_loop_conflicting_adoption_modes"
+        );
+        selection["aggregate_updates"] = aggregate;
+        if args.publish_name.is_some() {
+            selection["aggregate_publication"] = json!({"version":1,
+                "ordering":"shared-local-and-aggregate-revisions",
+                "first_revision":args.first_publication_revision,
+                "original_authority_required":true});
+        }
+    }
     if let Some(validation) = validation::selection(args)? {
         for source in &plan.sources {
             ensure!(
@@ -418,7 +448,17 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         &activity.receiver,
     )
     .await?;
-    peer_updates::restore(args, &store, &mut state, &selection)?;
+    checked_integrity_recovery(
+        peer_updates::restore(args, &store, &mut state, &selection),
+        &mut serving,
+    )?;
+    if let Err(error) = aggregate_updates::restore(args, &store, &mut state, &selection) {
+        if let Some(serving) = &mut serving {
+            serving.withdraw()?;
+        }
+        return Err(error);
+    }
+    publication::restore_order(args, &store, &mut state, &selection)?;
     if let Some(sequence) = state
         .cycles
         .iter()
@@ -427,9 +467,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     {
         finish_cycle(args, &store, &mut state, sequence, &activity.receiver).await?;
     }
-    if let Some(serving) = &mut serving {
-        serving.reconcile(args, &store, &state)?;
-    }
+    reconcile_selected_adapter(args, &store, &mut state, &mut serving)?;
     let mut budget = Budget::new();
     let mut attempts = 0_u64;
     let mut publication_drain = None;
@@ -449,12 +487,22 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             {
                 pool = source_pool(&plan, &state);
             }
+            // Local integrity recovery is not driven by a failed retrieval or a
+            // comparison result. It precedes selecting either job's warmstart.
+            reconcile_selected_adapter(args, &store, &mut state, &mut serving)?;
             peer_updates::tick(args, socket, &pool, &store, &mut state, &activity.receiver).await?;
-            if let Some(serving) = &mut serving {
-                serving.reconcile(args, &store, &state)?;
-            }
+            Box::pin(aggregate_updates::tick(
+                args,
+                socket,
+                &store,
+                &mut state,
+                &activity.receiver,
+            ))
+            .await?;
+            reconcile_selected_adapter(args, &store, &mut state, &mut serving)?;
             if let Some(source) = state.select(&pool, args.repeat_sources, now()?) {
                 if make_room(&store, &mut state)? {
+                    reconcile_selected_adapter(args, &store, &mut state, &mut serving)?;
                     attempt(
                         args,
                         socket,
@@ -465,9 +513,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
                         &activity.receiver,
                     )
                     .await?;
-                    if let Some(serving) = &mut serving {
-                        serving.reconcile(args, &store, &state)?;
-                    }
+                    reconcile_selected_adapter(args, &store, &mut state, &mut serving)?;
                     attempts = attempts
                         .checked_add(1)
                         .context("train_loop_attempt_counter")?;
@@ -487,11 +533,55 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         "attempts_this_invocation":attempts,"owner_cancelled":!active(&activity.receiver),
         "catalog_source_discovery":state.catalog.is_some(),"remembered_sources":state.sources.len(),
         "peer_update_channels_enabled":state.peer_updates.is_some(),
-        "pending_publications":state.cycles.iter().filter(|cycle|matches!(cycle.phase,Phase::Trained|Phase::PublishPending)).count(),
+        "aggregate_updates_enabled":state.aggregate_updates.is_some(),
+        "active_aggregate_sequence":state.aggregate_updates.as_ref().and_then(aggregate_updates::active_sequence),
+        "pending_publications":state.cycles.iter().filter(|cycle|matches!(cycle.phase,Phase::Trained|Phase::PublishPending)).count()
+            + state.aggregate_updates.as_ref().map_or(0, |registry|aggregate_updates::publication::pending_sequences(registry).len()),
         "publication_drain":publication_drain,"publication_drain_seconds":publication_drain.map(|_|args.max_seconds),
         "private_data_supported":false,"full_b05_claimed":false})
     );
     Ok(())
+}
+
+fn reconcile_selected_adapter(
+    args: &Options,
+    store: &Store,
+    state: &mut State,
+    serving: &mut Option<serving::Serving>,
+) -> Result<()> {
+    let recovered =
+        checked_integrity_recovery(peer_updates::recover_active(args, store, state), serving)?;
+    if let Err(error) = aggregate_updates::reconcile(args, store, state) {
+        if let Some(serving) = serving {
+            serving.withdraw()?;
+        }
+        return Err(error);
+    }
+    if let Some(serving) = serving {
+        serving.reconcile(args, store, state)?;
+    }
+    if recovered {
+        // A local byte-integrity failure does not establish publisher malice.
+        eprintln!("compute loop_event=active_adapter_predecessor_restored");
+    }
+    Ok(())
+}
+
+fn checked_integrity_recovery<T>(
+    result: Result<T>,
+    serving: &mut Option<serving::Serving>,
+) -> Result<T> {
+    if result
+        .as_ref()
+        .err()
+        .is_some_and(peer_updates::recovery_blocked)
+    {
+        if let Some(serving) = serving {
+            serving.withdraw()?;
+        }
+        eprintln!("compute loop_event=active_adapter_recovery_blocked");
+    }
+    result
 }
 
 fn restore_source_pool(base: &Plan, state: &mut State) -> Result<Plan> {
@@ -674,6 +764,10 @@ fn make_room(store: &Store, state: &mut State) -> Result<bool> {
     Ok(true)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Persist and finish one bounded cycle with its actual selected predecessor"
+)]
 async fn attempt(
     args: &Options,
     socket: &Path,
@@ -699,7 +793,10 @@ async fn attempt(
     )?;
     if current.origin["kind"] == "peer_update" {
         options.peer_predecessor = Some(current.origin);
+    } else if current.origin["kind"] == "aggregate_update" {
+        options.aggregate_predecessor = Some(current.origin);
     }
+    options.inherited_authority_expires = current.authority_expires;
     if let Some(registry) = &state.catalog {
         options.source_catalog = registry.proof_for(plan, index);
     }
@@ -727,14 +824,41 @@ async fn attempt(
         validation_data.as_deref(),
     )
     .await;
-    if result.is_err() {
+    if let Err(error) = &result {
         state
             .cycles
             .last_mut()
             .context("train_loop_cycle_missing")?
             .phase = Phase::Failed;
-        // Model/network errors can contain source text. Record a fixed phase only.
-        eprintln!("compute loop_event=cycle_failed");
+        // Never format the arbitrary error chain: it may contain source text or
+        // paths. The stage is compiled context, not extracted from error text.
+        eprintln!(
+            "compute loop_event=cycle_failed stage={}",
+            train_cycle::failure_stage(error)
+        );
+        if error
+            .downcast_ref::<super::supervise::WorkerFailure>()
+            .is_some()
+        {
+            let (_, code) = super::broker::execution_failure_class(error);
+            eprintln!("compute loop_worker_failure={code}");
+        }
+        if let Some(startup) = error.downcast_ref::<super::supervise::StartupFailure>() {
+            eprintln!(
+                "compute loop_startup_failure exit_code={} signal={} stderr_class={} stderr_bytes={}",
+                startup.exit_code, startup.signal, startup.stderr_class, startup.stderr_bytes
+            );
+        }
+        if let Some(io) = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+        {
+            eprintln!(
+                "compute loop_io_failure kind={:?} errno={}",
+                io.kind(),
+                io.raw_os_error().unwrap_or(-1)
+            );
+        }
     } else {
         let training = store.snapshot_training(sequence)?;
         let cycle = state
@@ -760,14 +884,21 @@ async fn attempt(
 struct CurrentAdapter {
     adapter_root: Option<PathBuf>,
     origin: Value,
+    authority_expires: Option<u64>,
 }
 
 fn current_adapter(args: &Options, store: &Store, state: &State) -> Result<CurrentAdapter> {
+    if let Some(registry) = &state.aggregate_updates {
+        if let Some(aggregate) = aggregate_updates::active(args, registry, state.latest)? {
+            return Ok(aggregate);
+        }
+    }
     if let Some(registry) = &state.peer_updates {
         if let Some(peer) = peer_updates::active(args, registry, state.latest)? {
             return Ok(CurrentAdapter {
                 adapter_root: Some(peer.adapter_root),
                 origin: peer.origin,
+                authority_expires: None,
             });
         }
     }
@@ -784,9 +915,26 @@ fn current_adapter(args: &Options, store: &Store, state: &State) -> Result<Curre
                 .as_ref()
                 .context("train_loop_latest_snapshot")?,
         )?;
+        let inherited = store
+            .read_cycle_json(previous, "result.json")?
+            .get("authority_expires_unix_seconds")
+            .map(|value| {
+                value
+                    .as_u64()
+                    .context("train_loop_inherited_authority_expiry")
+            })
+            .transpose()?;
+        let authority_expires = if args.aggregate_plan.is_some() {
+            serving::local_candidate(store, state)?
+                .map(|(_, expires, _)| expires)
+                .map(|expires| inherited.map_or(expires, |bound| bound.min(expires)))
+        } else {
+            inherited
+        };
         Ok(CurrentAdapter {
             adapter_root: Some(store.cycle_path(previous)?.join("training/adapter")),
             origin: json!({"kind":"local_cycle","sequence":previous}),
+            authority_expires,
         })
     } else {
         let adapter_root = seed::adapter(args, state)?;
@@ -800,6 +948,7 @@ fn current_adapter(args: &Options, store: &Store, state: &State) -> Result<Curre
         Ok(CurrentAdapter {
             adapter_root,
             origin: json!({"kind":kind}),
+            authority_expires: None,
         })
     }
 }
@@ -817,6 +966,8 @@ fn cycle_options(
         dataset_manifest_id: source.manifest()?,
         source_catalog: None,
         peer_predecessor: None,
+        aggregate_predecessor: None,
+        inherited_authority_expires: None,
         min_revision: minimum,
         cache: args.cache.clone(),
         reuse_cache: true,
@@ -954,6 +1105,9 @@ fn select_successor(
         state.latest = Some(cycle.sequence);
         if let Some(registry) = &mut state.peer_updates {
             peer_updates::clear_active(registry);
+        }
+        if let Some(registry) = &mut state.aggregate_updates {
+            aggregate_updates::clear_active(registry);
         }
     }
     state.completed = completed;

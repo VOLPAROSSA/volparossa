@@ -8,8 +8,8 @@ use sha2::{Digest, Sha256};
 use tokio::{net::UnixStream, time::timeout};
 use volparossa_content::provider::compute::{self as wire, dataset::verify_source};
 use volparossa_local_control::{
-    CONTROL_PROTOCOL_VERSION, ComputeReady, ComputeRemoteRequest, ControlResponse, ControlResult,
-    Empty, compute, control_response::Payload, write_response,
+    CONTROL_PROTOCOL_VERSION, ComputeReady, ComputeRemoteRequest, ComputeTranscript,
+    ControlResponse, ControlResult, Empty, compute, control_response::Payload, write_response,
 };
 use volparossa_policy::VerifiedManifest as VerifiedPolicy;
 
@@ -56,14 +56,16 @@ impl ContentRuntime {
                 .await
                 .map_err(|_| ContentError::Unavailable)?
                 .map_err(|_| ContentError::Invalid)?;
+            validate_transcript_operation(&request.operation, remote.retain_transcript)?;
             validate_request(&request, &self.signer)?;
-            let response = exchange(
+            let (response, transcript) = exchange(
                 context,
                 peer,
                 provider_key,
                 &policy,
                 &self.signer,
                 &request,
+                remote.retain_transcript,
                 &mut stage,
             )
             .await?;
@@ -71,7 +73,8 @@ impl ContentRuntime {
             compute::write_response(local, &response)
                 .await
                 .map_err(|_| ContentError::Unavailable)?;
-            send(local, request_id, "COMPUTE_RPC_OK", Payload::Ack(Empty {})).await
+            let payload = final_payload(remote.retain_transcript, transcript)?;
+            send(local, request_id, "COMPUTE_RPC_OK", payload).await
         })
         .await
         .map_err(|_| ContentError::Unavailable)
@@ -83,6 +86,31 @@ impl ContentRuntime {
             super::content_event(context, stage).await;
         }
         result
+    }
+}
+
+fn validate_transcript_operation(
+    operation: &compute::Operation,
+    retain_transcript: bool,
+) -> Result<(), ContentError> {
+    if retain_transcript && !matches!(operation, compute::Operation::Poll(_)) {
+        return Err(ContentError::Invalid);
+    }
+    Ok(())
+}
+
+fn final_payload(
+    retain_transcript: bool,
+    transcript: Option<Vec<u8>>,
+) -> Result<Payload, ContentError> {
+    match (retain_transcript, transcript) {
+        (false, None) => Ok(Payload::Ack(Empty {})),
+        (true, Some(transcript))
+            if !transcript.is_empty() && transcript.len() <= wire::MAX_TRANSCRIPT_BYTES =>
+        {
+            Ok(Payload::ComputeTranscript(ComputeTranscript { transcript }))
+        }
+        _ => Err(ContentError::Invalid),
     }
 }
 
@@ -139,6 +167,10 @@ pub(super) async fn checked_policy(
     Ok(policy)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The explicit retention flag stays attached to the original bounded signed exchange"
+)]
 async fn exchange(
     context: &ControlContext,
     peer: PeerId,
@@ -146,8 +178,9 @@ async fn exchange(
     policy: &VerifiedPolicy,
     signer: &SigningKey,
     request: &compute::Request,
+    retain_transcript: bool,
     stage: &mut &'static str,
-) -> Result<compute::Response, ContentError> {
+) -> Result<(compute::Response, Option<Vec<u8>>), ContentError> {
     *stage = "COMPUTE_RPC_ROUTE_SETUP_FAILED";
     Box::pin(
         context
@@ -178,7 +211,17 @@ async fn exchange(
     if provider.peer_id != peer || provider.offer.provider_key() != &provider_key {
         return Err(ContentError::Invalid);
     }
-    exchange_offer(context, control, &provider, policy, signer, request, stage).await
+    exchange_offer_retained(
+        context,
+        control,
+        &provider,
+        policy,
+        signer,
+        request,
+        retain_transcript,
+        stage,
+    )
+    .await
 }
 
 /// Use an already verified CONTENT offer, never a direct provider dial or second lookup.
@@ -191,6 +234,28 @@ pub(super) async fn exchange_offer(
     request: &compute::Request,
     stage: &mut &'static str,
 ) -> Result<compute::Response, ContentError> {
+    exchange_offer_retained(
+        context, control, provider, policy, signer, request, false, stage,
+    )
+    .await
+    .map(|(response, _)| response)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "An existing authenticated offer and explicit Poll-only retention share the unchanged route lifecycle"
+)]
+async fn exchange_offer_retained(
+    context: &ControlContext,
+    control: PeerId,
+    provider: &DiscoveredContentProvider,
+    policy: &VerifiedPolicy,
+    signer: &SigningKey,
+    request: &compute::Request,
+    retain_transcript: bool,
+    stage: &mut &'static str,
+) -> Result<(compute::Response, Option<Vec<u8>>), ContentError> {
+    validate_transcript_operation(&request.operation, retain_transcript)?;
     let peer = provider.peer_id;
     let provider_key = *provider.offer.provider_key();
     let public = identity::ed25519::PublicKey::try_from_bytes(&provider_key)
@@ -227,9 +292,23 @@ pub(super) async fn exchange_offer(
     }
     let payload = serde_json::to_vec(request).map_err(|_| ContentError::Invalid)?;
     *stage = "COMPUTE_RPC_SIGNED_EXCHANGE_FAILED";
-    let bytes = wire::exchange(&mut remote, challenge, signer, payload)
-        .await
-        .map_err(|_| ContentError::Unavailable)?;
+    let (bytes, transcript) = if retain_transcript {
+        let (bytes, transcript) = wire::exchange_attested(&mut remote, challenge, signer, payload)
+            .await
+            .map_err(|_| ContentError::Unavailable)?
+            .into_parts();
+        if transcript.is_empty() || transcript.len() > wire::MAX_TRANSCRIPT_BYTES {
+            return Err(ContentError::Invalid);
+        }
+        (bytes, Some(transcript))
+    } else {
+        (
+            wire::exchange(&mut remote, challenge, signer, payload)
+                .await
+                .map_err(|_| ContentError::Unavailable)?,
+            None,
+        )
+    };
     *stage = "COMPUTE_RPC_REPLY_BINDING_FAILED";
     let response: compute::Response =
         serde_json::from_slice(&bytes).map_err(|_| ContentError::Invalid)?;
@@ -251,7 +330,7 @@ pub(super) async fn exchange_offer(
     if provider.offer.validity().expires <= now() {
         return Err(ContentError::Unavailable);
     }
-    Ok(response)
+    Ok((response, transcript))
 }
 
 pub(super) async fn checked_route(
@@ -287,4 +366,72 @@ async fn send(
     )
     .await
     .map_err(|_| ContentError::Unavailable)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn binding() -> compute::JobBinding {
+        compute::JobBinding {
+            job_id: "1".repeat(32),
+            dataset_manifest_id: "2".repeat(64),
+            dataset_sha256: "3".repeat(64),
+            model_fingerprint: "4".repeat(64),
+            row_indices: vec![0],
+            expires_unix_seconds: 1000,
+            task: None,
+        }
+    }
+
+    #[test]
+    fn explicit_transcript_is_poll_only_before_any_remote_exchange() {
+        let operations = [
+            compute::Operation::Capabilities,
+            compute::Operation::Eligibility(compute::EligibilityQuery {
+                publisher_keys: vec!["5".repeat(64)],
+                model_fingerprint: None,
+                model_profile: None,
+                require_task_derivation_v1: false,
+                require_document_inference_v2: true,
+                require_derived_inference_v3: false,
+                require_principle_inference_v4: false,
+            }),
+            compute::Operation::Submit(compute::Submit {
+                binding: binding(),
+                dataset_json: "{}".into(),
+                publication: compute::PublicDataset {
+                    publisher_key: "5".repeat(64),
+                    manifest_hex: "ab".into(),
+                    dataset_json: "{}".into(),
+                },
+            }),
+            compute::Operation::Cancel(binding()),
+            compute::Operation::Poll(binding()),
+        ];
+        for operation in operations {
+            assert!(validate_transcript_operation(&operation, false).is_ok());
+            assert_eq!(
+                validate_transcript_operation(&operation, true).is_ok(),
+                matches!(operation, compute::Operation::Poll(_))
+            );
+        }
+    }
+
+    #[test]
+    fn final_handoff_never_silently_downgrades_or_adds_transcript_retention() {
+        assert_eq!(wire::MAX_TRANSCRIPT_BYTES, 96 * 1024);
+        assert!(matches!(
+            final_payload(false, None).unwrap(),
+            Payload::Ack(_)
+        ));
+        assert!(matches!(
+            final_payload(true, Some(vec![1])).unwrap(),
+            Payload::ComputeTranscript(_)
+        ));
+        assert!(final_payload(true, None).is_err());
+        assert!(final_payload(false, Some(vec![1])).is_err());
+        assert!(final_payload(true, Some(Vec::new())).is_err());
+        assert!(final_payload(true, Some(vec![1; wire::MAX_TRANSCRIPT_BYTES + 1])).is_err());
+    }
 }

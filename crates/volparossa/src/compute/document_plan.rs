@@ -1,9 +1,11 @@
 //! Exact byte coverage from the isolated, pinned tokenizer; never a host-side approximation.
 
+use super::ModelProfile;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use volparossa_content::agent_artifact::{MODEL_ID, MODEL_REVISION};
 
 pub(super) const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
@@ -14,12 +16,17 @@ const TOKENIZER_SHA256: &str = "9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af
 #[serde(deny_unknown_fields)]
 pub(super) struct Input {
     pub(super) version: u32,
+    #[serde(default, skip_serializing_if = "ModelProfile::is_default")]
+    pub(super) model_profile: ModelProfile,
     pub(super) visibility: String,
     pub(super) license: String,
     pub(super) document: String,
     pub(super) question: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) synthesis: bool,
+    /// Complete original public source, separate from generated parent answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) original_source: Option<String>,
 }
 
 impl Input {
@@ -45,6 +52,16 @@ impl Input {
             question: self.question.clone(),
         }
         .question()?;
+        if let Some(source) = &self.original_source {
+            ensure!(
+                self.synthesis
+                    && self.model_profile == ModelProfile::Smol360
+                    && !source.trim().is_empty()
+                    && source.len() <= 4096
+                    && !source.contains('\0'),
+                "compute_document_grounded_source_bound"
+            );
+        }
         Ok(())
     }
 }
@@ -74,21 +91,39 @@ pub(super) struct Plan {
     pub(super) prompt_limit: u16,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) synthesis: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) original_source_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) original_source_bytes: Option<u64>,
     pub(super) parts: Vec<Part>,
 }
 
 impl Plan {
     pub(super) fn validate(&self, input: &Input) -> Result<()> {
         input.validate()?;
+        let profile = input.model_profile.spec();
+        ensure!(
+            self.original_source_sha256
+                == input
+                    .original_source
+                    .as_ref()
+                    .map(|source| hex::encode(Sha256::digest(source.as_bytes())))
+                && self.original_source_bytes
+                    == input
+                        .original_source
+                        .as_ref()
+                        .map(|source| source.len() as u64),
+            "compute_document_plan_original_source_changed"
+        );
         ensure!(
             self.version == 1
                 && self.source_bytes == input.document.len() as u64
                 && self.source_sha256 == hex::encode(Sha256::digest(input.document.as_bytes()))
                 && self.question_sha256 == hex::encode(Sha256::digest(input.question.as_bytes()))
-                && self.model_id == MODEL_ID
-                && self.model_revision == MODEL_REVISION
+                && self.model_id == profile.model_id
+                && self.model_revision == profile.revision
                 && self.tokenizer_sha256 == TOKENIZER_SHA256
-                && self.prompt_limit == 192
+                && self.prompt_limit == profile.prompt_tokens
                 && self.synthesis == input.synthesis,
             "compute_document_plan_source_or_tokenizer"
         );
@@ -128,11 +163,13 @@ mod tests {
     fn exact_unicode_coverage_refuses_gaps_overlaps_truncation_and_changed_task() {
         let input = Input {
             version: 1,
+            model_profile: ModelProfile::default(),
             visibility: "public".into(),
             license: "CC0-1.0".into(),
             document: "één\nwereld".into(),
             question: "What does it say?".into(),
             synthesis: false,
+            original_source: None,
         };
         let mut plan = Plan {
             version: 1,
@@ -144,6 +181,8 @@ mod tests {
             tokenizer_sha256: TOKENIZER_SHA256.into(),
             prompt_limit: 192,
             synthesis: false,
+            original_source_sha256: None,
+            original_source_bytes: None,
             parts: vec![
                 Part {
                     start: 0,
@@ -203,5 +242,38 @@ mod tests {
         assert_eq!(serde_json::to_value(&plan).unwrap()["synthesis"], true);
         input.synthesis = false;
         assert!(plan.validate(&input).is_err());
+    }
+
+    #[test]
+    fn grounded_tokenizer_plan_binds_complete_source_separately_from_parent_answers() {
+        let mut input: Input = serde_json::from_value(serde_json::json!({"version":1,
+            "model_profile":"smollm2-360m-v1","visibility":"public","license":"CC0-1.0",
+            "document":"A generated claim.\n","question":"What does the source actually establish?",
+            "synthesis":true,"original_source":"Original evidence, not a generated answer."}))
+        .unwrap();
+        input.validate().unwrap();
+        let spec = input.model_profile.spec();
+        let mut plan: Plan = serde_json::from_value(serde_json::json!({"version":1,
+            "source_sha256":hex::encode(Sha256::digest(input.document.as_bytes())),
+            "source_bytes":input.document.len(),"question_sha256":hex::encode(Sha256::digest(input.question.as_bytes())),
+            "model_id":spec.model_id,"model_revision":spec.revision,"tokenizer_sha256":TOKENIZER_SHA256,
+            "prompt_limit":spec.prompt_tokens,"synthesis":true,
+            "original_source_sha256":hex::encode(Sha256::digest(input.original_source.as_ref().unwrap().as_bytes())),
+            "original_source_bytes":input.original_source.as_ref().unwrap().len(),
+            "parts":[{"start":0,"end":input.document.len(),"prompt_tokens":80}]})).unwrap();
+        plan.validate(&input).unwrap(); // Synthetic counts only; no real tokenizer claim.
+        plan.original_source_bytes = None;
+        assert!(plan.validate(&input).is_err());
+        plan.original_source_bytes = Some(input.original_source.as_ref().unwrap().len() as u64);
+        input.original_source.as_mut().unwrap().push('!');
+        assert!(plan.validate(&input).is_err());
+        input.original_source = Some("x".repeat(4097));
+        assert!(input.validate().is_err());
+        input.original_source = Some("small source".into());
+        input.synthesis = false;
+        assert!(input.validate().is_err());
+        input.synthesis = true;
+        input.model_profile = ModelProfile::default();
+        assert!(input.validate().is_err());
     }
 }

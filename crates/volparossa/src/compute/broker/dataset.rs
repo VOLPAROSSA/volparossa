@@ -34,11 +34,15 @@ struct Question {
 
 pub(super) fn validate(json: &str, rows: usize) -> Result<()> {
     let header: serde_json::Value = serde_json::from_str(json)?;
+    if header["version"] == 4 {
+        volparossa_content::provider::compute::dataset::validate_principle_json(json, rows)?;
+        return Ok(());
+    }
     if header["version"] == 2 {
         volparossa_content::provider::compute::dataset::validate_document_json(json, rows)?;
         return Ok(());
     }
-    if header["version"] == 3 {
+    if matches!(header["version"].as_u64(), Some(3 | 5)) {
         volparossa_content::provider::compute::dataset::validate_derived_json(json, rows)?;
         return Ok(());
     }

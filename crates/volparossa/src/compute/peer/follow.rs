@@ -50,7 +50,8 @@ fn continue_after(report: &Value) -> Result<bool> {
         Some(
             "interrupted_handles_retained"
             | "source_expired_new_signed_package_required"
-            | "attempt_storage_bound",
+            | "attempt_storage_bound"
+            | "answer_incomplete_no_new_work",
         ) => Ok(false),
         Some(
             "invocation_budget"
@@ -232,6 +233,7 @@ mod tests {
             "complete",
             "source_expired_new_signed_package_required",
             "attempt_storage_bound",
+            "answer_incomplete_no_new_work",
         ] {
             let report = run_with_wait(
                 &Options {
@@ -245,6 +247,8 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(report["follow_windows"], 1);
+            assert_eq!(report["follow_waits"], 0);
+            assert_eq!(report["complete"], stopped == "complete");
         }
         for message in [
             "invalid signed source",

@@ -1,4 +1,5 @@
 use super::*;
+use crate::compute::ModelProfile;
 use std::os::unix::fs::PermissionsExt as _;
 use volparossa_content::agent_artifact::{MODEL_ID, MODEL_REVISION};
 
@@ -29,8 +30,10 @@ fn fixture_document(
     let root = tempfile::tempdir().unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let input = Input {
+        model_profile: ModelProfile::default(),
         version: 1,
         synthesis: false,
+        original_source: None,
         visibility: "public".into(),
         license: "CC0-1.0".into(),
         document,

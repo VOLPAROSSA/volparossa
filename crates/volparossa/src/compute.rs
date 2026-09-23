@@ -3,12 +3,16 @@
 mod broker;
 mod device_capacity;
 mod document_plan;
+mod inference_output;
 mod owner_control;
 mod peer;
+mod policy_assessment;
+mod private_task;
 mod sandbox;
 mod serving_snapshot;
 mod spare_capacity;
 mod supervise;
+mod task_plan;
 mod train_cycle;
 mod train_loop;
 
@@ -24,6 +28,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::watch;
+use volparossa_content::model_profile::ModelProfile;
 
 const MAX_DATASET_BYTES: u64 = 1024 * 1024;
 const MAX_LINE_BYTES: usize = 16 * 1024;
@@ -35,10 +40,16 @@ pub(crate) enum Command {
     Capacity,
     /// Preview or explicitly run an isolated job on an already provisioned open model.
     Run(Box<Options>),
+    /// Answer one private local question without publishing inputs or using peer executors.
+    PrivateTask(Box<private_task::Options>),
     /// Fetch one explicitly selected signed public training source, train, and pack an adapter.
     TrainCycle(Box<train_cycle::Options>),
     /// Autonomously cycle through explicitly selected public sources using spare capacity.
     TrainLoop(Box<train_loop::Options>),
+    /// Combine three explicitly trusted public adapters, then compare on pinned heldout data.
+    AggregateAdapters(Box<train_loop::aggregate::Options>),
+    /// Sign and share one approved aggregate without retraining or extending its source validity.
+    PublishAggregate(Box<train_loop::aggregate_publication::Options>),
     /// Explicit same-UID public-inference service using the fixed isolated worker.
     Serve(Box<broker::Serve>),
     /// Attach a local broker or perform a bounded protected peer job exchange.
@@ -55,6 +66,14 @@ pub(crate) enum Mode {
     Train,
     #[serde(rename = "plan_document")]
     PlanDocument,
+    #[serde(rename = "plan_tasks")]
+    PlanTasks,
+    #[value(skip)]
+    #[serde(rename = "private_infer")]
+    PrivateInfer,
+    #[value(skip)]
+    #[serde(rename = "aggregate_adapter")]
+    AggregateAdapter,
 }
 
 #[derive(Debug, Args)]
@@ -68,6 +87,9 @@ pub(crate) struct Options {
     /// Private directory containing verified model assets, not executable remote code.
     #[arg(long)]
     model_root: PathBuf,
+    /// Explicit pinned inference/planning profile; the default also supports training/adapters.
+    #[arg(long, default_value_t = ModelProfile::default())]
+    model_profile: ModelProfile,
     /// Explicit verified adapter directory; cache storage alone never activates an adapter.
     #[arg(long)]
     adapter_root: Option<PathBuf>,
@@ -99,6 +121,8 @@ struct WorkerRequest {
     version: u8,
     id: String,
     mode: Mode,
+    #[serde(skip_serializing_if = "ModelProfile::is_default")]
+    model_profile: ModelProfile,
     model_root: &'static str,
     dataset_path: &'static str,
     output_root: &'static str,
@@ -115,8 +139,15 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
     let options = match command {
         Command::Capacity => return spare_capacity::diagnostic(),
         Command::Run(options) => options,
+        Command::PrivateTask(options) => return private_task::run(&options).await,
         Command::TrainCycle(options) => return train_cycle::run(&options, socket).await,
         Command::TrainLoop(options) => return train_loop::run(&options, socket).await,
+        Command::AggregateAdapters(options) => {
+            return train_loop::aggregate::run(&options, socket).await;
+        }
+        Command::PublishAggregate(options) => {
+            return train_loop::aggregate_publication::run(&options, socket).await;
+        }
         Command::Serve(options) => return broker::run(*options).await,
         Command::Peer { command } => return peer::run(*command, socket).await,
     };
@@ -127,7 +158,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
             serde_json::json!({
                 "version": 1, "kind": "volparossa-compute-plan", "execute": false,
                 "mode": options.mode, "runtime_root": options.runtime_root,
-                "model_root": options.model_root, "dataset": options.dataset,
+                "model_root": options.model_root, "model_profile": options.model_profile, "dataset": options.dataset,
                 "adapter_root": options.adapter_root,
                 "new_output": options.output, "steps": options.steps,
                 "threads": options.threads, "max_seconds": options.max_seconds,
@@ -193,6 +224,7 @@ async fn execute(options: &Options, activity: watch::Receiver<bool>) -> Result<V
         version: 1,
         id: hex::encode(nonce),
         mode: options.mode,
+        model_profile: options.model_profile,
         model_root: "/model",
         dataset_path: "/dataset.json",
         output_root: "/output",
@@ -212,6 +244,18 @@ async fn execute(options: &Options, activity: watch::Receiver<bool>) -> Result<V
 
 impl Options {
     fn validate(&self) -> Result<()> {
+        if self.mode == Mode::AggregateAdapter {
+            ensure!(
+                self.adapter_root.is_some() && self.steps == 1 && self.spare_capacity,
+                "compute_aggregation_execution_scope"
+            );
+        }
+        if self.mode == Mode::PrivateInfer {
+            ensure!(
+                self.adapter_root.is_none() && self.steps == 1 && self.spare_capacity,
+                "compute_private_execution_scope"
+            );
+        }
         ensure!((1..=64).contains(&self.steps), "compute_steps");
         ensure!((1..=2).contains(&self.threads), "compute_threads");
         ensure!((1..=600).contains(&self.max_seconds), "compute_deadline");
@@ -236,7 +280,12 @@ impl Options {
                 MAX_DATASET_BYTES
             },
         )?;
-        validate_dataset(self.mode, self.adapter_root.is_some(), &dataset)?;
+        validate_profile_dataset(
+            self.mode,
+            self.adapter_root.is_some(),
+            &dataset,
+            self.model_profile,
+        )?;
         for file in [
             "/usr/bin/bwrap",
             "/usr/bin/prlimit",
@@ -256,11 +305,22 @@ impl Options {
 // Shared by direct execution and Broker::start before a worker is created. Inference-only
 // profiles must pass their strict validator here as well as at the signed RPC boundary.
 fn validate_dataset(mode: Mode, has_adapter: bool, dataset: &[u8]) -> Result<()> {
+    if mode == Mode::AggregateAdapter {
+        ensure!(has_adapter, "compute_aggregation_cohort_required");
+    }
+    if mode == Mode::PrivateInfer {
+        ensure!(!has_adapter, "compute_private_adapter_forbidden");
+        return private_task::validate_input(dataset);
+    }
+    if mode == Mode::PlanTasks {
+        ensure!(!has_adapter, "compute_task_plan_adapter");
+        return task_plan::Input::decode(dataset)?.validate_execution();
+    }
     let public: Value = serde_json::from_slice(dataset).context("compute_dataset_json")?;
     if mode == Mode::PlanDocument {
         ensure!(!has_adapter, "compute_document_plan_adapter");
         document_plan::validate_input(&public)?;
-    } else if public["version"] == 2 || public["version"] == 3 {
+    } else if matches!(public["version"].as_u64(), Some(2..=5)) {
         ensure!(
             mode == Mode::Infer,
             "compute_document_training_not_supported"
@@ -270,7 +330,9 @@ fn validate_dataset(mode: Mode, has_adapter: bool, dataset: &[u8]) -> Result<()>
             .context("compute_document_rows")?
             .len();
         let text = std::str::from_utf8(dataset)?;
-        if public["version"] == 3 {
+        if public["version"] == 4 {
+            volparossa_content::provider::compute::dataset::validate_principle_json(text, rows)?;
+        } else if matches!(public["version"].as_u64(), Some(3 | 5)) {
             volparossa_content::provider::compute::dataset::validate_derived_json(text, rows)?;
         } else {
             volparossa_content::provider::compute::dataset::validate_document_json(text, rows)?;
@@ -295,6 +357,56 @@ fn validate_dataset(mode: Mode, has_adapter: bool, dataset: &[u8]) -> Result<()>
                 .is_some_and(|s| is_hex(s, 40)),
             "compute_dataset_revision"
         );
+    }
+    Ok(())
+}
+
+fn validate_profile_dataset(
+    mode: Mode,
+    has_adapter: bool,
+    dataset: &[u8],
+    profile: ModelProfile,
+) -> Result<()> {
+    ensure!(
+        profile.is_default() || (mode != Mode::Train && !has_adapter),
+        "compute_profile_inference_only"
+    );
+    validate_dataset(mode, has_adapter, dataset)?;
+    if mode == Mode::PlanTasks {
+        ensure!(
+            task_plan::Input::decode(dataset)?.model_profile == profile,
+            "compute_planning_model_profile"
+        );
+    } else if mode == Mode::PlanDocument {
+        let input: document_plan::Input = serde_json::from_slice(dataset)?;
+        ensure!(
+            input.model_profile == profile,
+            "compute_planning_model_profile"
+        );
+    }
+    if mode == Mode::Infer {
+        let public: Value = serde_json::from_slice(dataset)?;
+        let rows = public["inference"]
+            .as_array()
+            .context("compute_profile_inference_rows")?;
+        ensure!(
+            (1..=usize::from(profile.spec().max_rows)).contains(&rows.len()),
+            "compute_profile_row_limit"
+        );
+        if matches!(public["version"].as_u64(), Some(3 | 5)) {
+            let selected: ModelProfile = public
+                .get("model_profile")
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()?
+                .unwrap_or_default();
+            ensure!(selected == profile, "compute_derived_model_profile");
+        }
+        if public["version"] == 4 {
+            ensure!(
+                profile == ModelProfile::Smol360 && !has_adapter,
+                "compute_principle_model_profile"
+            );
+        }
     }
     Ok(())
 }
@@ -408,6 +520,47 @@ fn check_message(bytes: &[u8], id: &str) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aggregation_requires_cohort_and_default_public_profile() {
+        let dataset = br#"{"version":1,"visibility":"public","license":"GPL-3.0-only","source_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
+        validate_profile_dataset(
+            Mode::AggregateAdapter,
+            true,
+            dataset,
+            ModelProfile::default(),
+        )
+        .unwrap();
+        assert!(
+            validate_profile_dataset(
+                Mode::AggregateAdapter,
+                false,
+                dataset,
+                ModelProfile::default()
+            )
+            .is_err()
+        );
+        let private = br#"{"version":1,"visibility":"private_local","license":"GPL-3.0-only","source_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
+        assert!(
+            validate_profile_dataset(
+                Mode::AggregateAdapter,
+                true,
+                private,
+                ModelProfile::default()
+            )
+            .is_err()
+        );
+        let inference = br#"{"version":2}"#;
+        assert!(
+            validate_profile_dataset(
+                Mode::AggregateAdapter,
+                true,
+                inference,
+                ModelProfile::default()
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn response_is_bounded_and_bound_to_exact_job() {

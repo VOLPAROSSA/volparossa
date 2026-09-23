@@ -5,6 +5,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use volparossa_content::agent_artifact::{MODEL_ID, MODEL_REVISION};
 
 use super::*;
+use crate::compute::ModelProfile;
 
 const TEXT: &str = "Public network notes.\nEvery route retains its original source.\n";
 
@@ -18,12 +19,14 @@ fn prepare(document: &str, question: &str) -> Prepared {
     let root = tempfile::tempdir().unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let input = Input {
+        model_profile: ModelProfile::default(),
         version: 1,
         visibility: "public".into(),
         license: "CC0-1.0".into(),
         document: document.into(),
         question: question.into(),
         synthesis: false,
+        original_source: None,
     };
     let mut offset = 0;
     let parts: Vec<_> = document
@@ -331,12 +334,14 @@ fn shared_source_validation_covers_real_chunk_boundary_and_cancellation_still_st
     };
     let document = "é".repeat(CHUNK_BYTES / 2 + 10);
     let mut input = Input {
+        model_profile: ModelProfile::default(),
         version: 1,
         visibility: "public".into(),
         license: "CC0-1.0".into(),
         document: document.clone(),
         question: "What does this public text say?".into(),
         synthesis: false,
+        original_source: None,
     };
     let source = publication(
         &document,

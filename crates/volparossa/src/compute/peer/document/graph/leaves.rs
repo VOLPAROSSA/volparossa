@@ -6,11 +6,12 @@ use tokio::sync::watch;
 use volparossa_content::SignedManifest;
 
 use super::super::{
-    MAX_SAVED_BYTES, collection, discovery, now, read_file, retain_selected_sources,
-    selected_input, source_lifetime, task, tokenize, workflow,
+    MAX_SAVED_BYTES, SelectedInput, collection, discovery, now, read_file, retain_selected_sources,
+    source_lifetime, task, tokenize, workflow,
 };
 use super::{
-    DocumentPlan, Enrollment, Input, Leaf, Options, Path, digest, node_root, plan, save, storage,
+    DocumentPlan, Enrollment, Input, Leaf, Options, Path, digest, node_root, plan, planner, save,
+    storage,
 };
 
 async fn providers(
@@ -26,9 +27,10 @@ async fn providers(
         "compute_discovery_conflicting_providers"
     );
     let publisher = args.publisher_key.context("compute_document_publisher")?;
-    let query = args
+    let mut query = args
         .discovery
         .query([hex::encode(publisher.as_bytes())], true, true, true)?;
+    super::super::bind_profile_query(&mut query, args.model_profile)?;
     Ok(Some(args.discovery.select(socket, query, cancelled).await?))
 }
 
@@ -47,6 +49,8 @@ pub(super) async fn prepare(
     socket: &Path,
     cancelled: &watch::Receiver<bool>,
     plan: &plan::Plan,
+    source_input: &SelectedInput,
+    planner: Option<planner::Authority>,
 ) -> Result<()> {
     ensure!(
         args.public_content && !args.batch_barrier && !args.synthesize,
@@ -54,6 +58,10 @@ pub(super) async fn prepare(
     );
     plan.validate()?;
     let selected = providers(args, socket, cancelled).await?;
+    let model_fingerprint = match &selected {
+        Some(selected) => selected.model_fingerprint.clone(),
+        None => super::super::manual_fingerprint(args, socket, cancelled).await?,
+    };
     let provider_keys = selected
         .as_ref()
         .map_or(&args.provider_key, |selected| &selected.providers);
@@ -67,7 +75,11 @@ pub(super) async fn prepare(
                 == provider_keys.len(),
         "compute_document_independent_peers"
     );
-    let (document, collection, network) = selected_input(args, socket, cancelled).await?;
+    let (document, collection, network) = source_input;
+    ensure!(
+        !args.grounded_synthesis || document.len() <= 4096,
+        "compute_graph_grounded_original_source_too_large"
+    );
     save(&args.directory, "graph-plan.json", plan, false)?;
     let mut prepared = Vec::new();
     // Finish the real tokenization first. No unlocked publication key crosses an await.
@@ -81,7 +93,9 @@ pub(super) async fn prepare(
         let _lock = task::open_directory(&root, false)?;
         let input = Input {
             version: 1,
+            model_profile: args.model_profile,
             synthesis: false,
+            original_source: None,
             visibility: "public".into(),
             license: args.license.clone().context("compute_document_license")?,
             document: document.clone(),
@@ -104,12 +118,12 @@ pub(super) async fn prepare(
     );
     let at = now()?;
     let lifetime = source_lifetime(args.lifetime_seconds, at, network.as_ref())?;
-    if let Some(proofs) = &network {
+    if let Some(proofs) = network {
         proofs.validate(
             collection
                 .as_ref()
                 .context("compute_collection_missing_ledger")?,
-            &document,
+            document,
             at,
             at + lifetime,
         )?;
@@ -150,9 +164,7 @@ pub(super) async fn prepare(
                 volparossa_content::MAX_MANIFEST_BYTES,
             )?)?);
         }
-        enrollment.model_fingerprint = selected
-            .as_ref()
-            .map(|selected| selected.model_fingerprint.clone());
+        enrollment.model_fingerprint = Some(model_fingerprint.clone());
         enrollment.replace_peers = args.discovery.replace_peers;
         enrollment.scheduling = workflow::Scheduling::ReadyRowsV1;
         enrollment.collection_sha256 = collection
@@ -177,6 +189,8 @@ pub(super) async fn prepare(
             version: 1,
             plan_sha256: plan.fingerprint()?,
             leaves,
+            planner,
+            grounded_synthesis: args.grounded_synthesis,
         },
         false,
     )

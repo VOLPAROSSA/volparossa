@@ -32,6 +32,94 @@ fn provenance(root: &Path, sequence: u64) -> Value {
 }
 
 #[test]
+fn approved_aggregate_requires_exact_origin_files_and_unrenewed_expiry() {
+    let root = setup();
+    let at = root.path();
+    let publisher =
+        Publisher::open(&at.join("published"), &at.join("runtime"), &"a".repeat(64)).unwrap();
+    let files = provenance(at, 1)["adapter_files"].clone();
+    let origin = json!({"kind":"aggregate_update","aggregate_sequence":7,
+        "local_predecessor":1,"manifest_ids":["1".repeat(64),"2".repeat(64),"3".repeat(64)],
+        "dataset_manifest_id":"4".repeat(64),"cohort_sha256":"5".repeat(64),
+        "comparison_sha256":"6".repeat(64),"result_sha256":"7".repeat(64),
+        "adapter_files":files,"expires_unix_seconds":100});
+    let proof = json!({"kind":"approved_aggregate","approved":true,"origin":origin,
+        "adapter_files":files,"expires_unix_seconds":100});
+    let selected = publisher
+        .publish(&at.join("adapter"), 100, &proof, 10)
+        .unwrap();
+    let retained = fs::read(at.join("published/current.json")).unwrap();
+    assert_eq!(selected.expires_unix_seconds, 100);
+    assert_eq!(
+        publisher
+            .publish(&at.join("adapter"), 100, &proof, 90)
+            .unwrap()
+            .id,
+        selected.id
+    );
+    assert_eq!(
+        fs::read(at.join("published/current.json")).unwrap(),
+        retained
+    );
+    for (field, value) in [
+        ("approved", json!(false)),
+        ("expires_unix_seconds", json!(101)),
+        ("origin", json!({"kind":"aggregate_update","approved":true})),
+    ] {
+        let mut changed = proof.clone();
+        changed[field] = value;
+        assert!(
+            publisher
+                .publish(&at.join("adapter"), 100, &changed, 90)
+                .is_err(),
+            "{field}"
+        );
+    }
+    for field in [
+        "manifest_ids",
+        "dataset_manifest_id",
+        "cohort_sha256",
+        "comparison_sha256",
+        "result_sha256",
+    ] {
+        let mut changed = proof.clone();
+        changed["origin"].as_object_mut().unwrap().remove(field);
+        assert!(
+            publisher
+                .publish(&at.join("adapter"), 100, &changed, 90)
+                .is_err(),
+            "{field}"
+        );
+    }
+    let mut changed = proof.clone();
+    changed["origin"]["adapter_files"]["README.md"]["sha256"] = "9".repeat(64).into();
+    assert!(
+        publisher
+            .publish(&at.join("adapter"), 100, &changed, 90)
+            .is_err()
+    );
+    assert!(
+        publisher
+            .publish(&at.join("adapter"), 101, &proof, 90)
+            .is_err()
+    );
+    assert!(
+        publisher
+            .publish(&at.join("adapter"), 99, &proof, 90)
+            .is_err()
+    );
+    assert!(
+        publisher
+            .publish(&at.join("adapter"), 100, &proof, 100)
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(at.join("published/current.json")).unwrap(),
+        retained
+    );
+}
+
+#[test]
 fn snapshot_preserves_original_expiry_and_exact_bytes_without_a_worker() {
     let root = setup();
     let at = root.path();
@@ -191,4 +279,83 @@ fn runtime_and_single_producer_authority_are_not_transferable() {
         fs::read(at.join("published/unowned.txt")).unwrap(),
         b"not ours to remove"
     );
+}
+
+#[test]
+fn withdrawal_survives_restart_and_requires_an_exact_nonwithdrawn_replacement() {
+    let root = setup();
+    let at = root.path();
+    let snapshots = at.join("published");
+    let runtime = at.join("runtime");
+    let publisher = Publisher::open(&snapshots, &runtime, &"a".repeat(64)).unwrap();
+    let first = publisher
+        .publish(&at.join("adapter"), 100, &provenance(at, 1), 10)
+        .unwrap();
+    let original_pointer = fs::read(snapshots.join("current.json")).unwrap();
+    publisher.withdraw_current().unwrap();
+    let first_withdrawal = fs::read(snapshots.join("withdrawal.json")).unwrap();
+    publisher.withdraw_current().unwrap();
+    assert_eq!(
+        fs::read(snapshots.join("withdrawal.json")).unwrap(),
+        first_withdrawal
+    );
+    assert_eq!(
+        fs::read(snapshots.join("current.json")).unwrap(),
+        original_pointer
+    );
+    assert!(!admission_allowed(&snapshots, &runtime, &first).unwrap());
+    drop(publisher);
+    let publisher = Publisher::open(&snapshots, &runtime, &"a".repeat(64)).unwrap();
+    assert!(!admission_allowed(&snapshots, &runtime, &first).unwrap());
+    assert!(
+        publisher
+            .publish(&at.join("adapter"), 100, &provenance(at, 1), 11)
+            .is_err()
+    );
+    let second = publisher
+        .publish(&at.join("adapter"), 90, &provenance(at, 2), 11)
+        .unwrap();
+    assert!(!admission_allowed(&snapshots, &runtime, &first).unwrap());
+    assert!(admission_allowed(&snapshots, &runtime, &second).unwrap());
+    assert_eq!(second.expires_unix_seconds, 90);
+    // Replacing the single withdrawal record must not reauthorize older copies.
+    publisher.withdraw_current().unwrap();
+    let third = publisher
+        .publish(&at.join("adapter"), 80, &provenance(at, 3), 12)
+        .unwrap();
+    for old in [&first, &second] {
+        assert!(!admission_allowed(&snapshots, &runtime, old).unwrap());
+    }
+    assert!(admission_allowed(&snapshots, &runtime, &third).unwrap());
+    assert_eq!(fs::read_dir(&snapshots).unwrap().count(), 6);
+}
+
+#[test]
+fn withdrawal_rejects_malformed_or_foreign_owner_metadata() {
+    let root = setup();
+    let at = root.path();
+    let snapshots = at.join("published");
+    let runtime = at.join("runtime");
+    let publisher = Publisher::open(&snapshots, &runtime, &"a".repeat(64)).unwrap();
+    let selected = publisher
+        .publish(&at.join("adapter"), 100, &provenance(at, 1), 10)
+        .unwrap();
+    publisher.withdraw_current().unwrap();
+    let path = snapshots.join("withdrawal.json");
+    let original: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for field in ["version", "owner", "selection_id"] {
+        let mut altered = original.clone();
+        match field {
+            "version" => altered[field] = json!(2),
+            "owner" => altered[field]["producer_id"] = json!("b".repeat(64)),
+            _ => altered[field] = json!("invalid"),
+        }
+        fs::write(&path, serde_json::to_vec(&altered).unwrap()).unwrap();
+        assert!(admission_allowed(&snapshots, &runtime, &selected).is_err());
+        assert!(
+            publisher
+                .publish(&at.join("adapter"), 100, &provenance(at, 2), 11)
+                .is_err()
+        );
+    }
 }

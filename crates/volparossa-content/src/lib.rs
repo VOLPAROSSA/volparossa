@@ -9,6 +9,7 @@
 pub mod agent_artifact;
 pub mod mailbox;
 mod manifest;
+pub mod model_profile;
 pub mod origin_https;
 pub mod private_message;
 pub mod provider;
@@ -23,6 +24,7 @@ use ed25519_dalek::SigningKey;
 use sha2::{Digest, Sha256};
 
 pub use manifest::{Chunk, Metadata, Publication, SignedManifest, Validity, VerifiedManifest};
+pub use model_profile::{ModelProfile, ModelSpec};
 pub use store::{CacheLimits, CacheUsage, ChunkStore, RevisionPin};
 
 /// Maximum bytes in a chunk; reconstruction needs only one chunk buffer at a time.

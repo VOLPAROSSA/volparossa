@@ -18,13 +18,22 @@ output_directory=
 expected_commit=
 scenario=alpha
 
+guest_memory_for_scenario() {
+    # These fixtures co-locate two 360M providers in one guest. Production
+    # per-worker limits and the owner's spare-memory reserve stay unchanged.
+    case $scenario in
+        agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-policy-assessment) printf '6144\n' ;;
+        *) printf '4096\n' ;;
+    esac
+}
+
 usage() {
     printf '%s\n' \
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-successor-serving|agent-task-graph]' \
-        '       --package is required only for alpha; --mpquic is unnecessary for wifi-mesh, agent-training, agent-owner-priority and agent-owner-cancel.'
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment]' \
+        '       --package is required only for alpha; --mpquic is unnecessary for wifi-mesh, agent-training, agent-owner-priority, agent-owner-cancel and agent-private-task.'
 }
 
 print_plan() {
@@ -39,7 +48,13 @@ print_plan() {
         '  retrieve bounded non-secret logs and its machine-readable result;' \
         '  power off and discard the overlay, keys, seed and source archive.' \
         'No TAP, bridge, host route, firewall, DNS, sysctl or VPN state is changed.'
-    if [ "$scenario" = agent-owner-cancel ]; then
+    printf 'Guest resources: 4 vCPUs, %s MiB RAM; model-worker limits are unchanged.\n' "$(guest_memory_for_scenario)"
+    if [ "$scenario" = agent-private-task ]; then
+        printf '%s\n' \
+            'Private-task: actual owner-local inference over explicitly private fixture input;' \
+            '  pinned 360M CPU worker with no peer/cache publication, unchanged device limits;' \
+            '  retain selected proof and the authorized synthetic test answer; remove guest job/model roots.'
+    elif [ "$scenario" = agent-owner-cancel ]; then
         printf '%s\n' \
             'Owner-cancel: explicitly provision an isolated guest model, begin actual training;' \
             '  owner sends SIGINT only to its exact live CLI and observes worker/process teardown;' \
@@ -56,6 +71,53 @@ print_plan() {
                 '  paused CPU ticks and unchanged model step, resumed updates/reload under original600s deadline;' \
                 '  no owner-cancel, battery/thermal, all-activity or full-B01 claim.'
         fi
+    elif [ "$scenario" = agent-ready-dag ]; then
+        printf '%s\n' \
+            '  Agent-ready-DAG: one shared dependency queue and explicit pinned 360M profile over a five-node public task graph;' \
+            '    cooperatively pause the exact live B worker with its guest-only CPU PSI floor;' \
+            '    require C to execute from A while B retains its original Running lease;' \
+            '    continue B, require EOS-complete D/E, preserve completed offline receipts and full cleanup.'
+    elif [ "$scenario" = agent-model-task-graph ]; then
+        printf '%s\n' \
+            'Agent-model-task-graph: one actual owner-local model chooses public tasks and their dependencies;' \
+            '  validate and retain the exact bounded JSON proposal before protected peer execution;' \
+            '  preserve model-selected questions and edges; join terminal answers under the original owner question;' \
+            '  retain original planner/worker receipts across completed offline resume and cleanup;' \
+            '  1800s owner within 3600s driver; no manual task plan, tools, private offload or quality claim.'
+    elif [ "$scenario" = agent-model-planning ]; then
+        printf '%s\n' \
+            'Agent-model-planning: one actual owner-local model proposes public subquestions;' \
+            '  validate and persist the bounded proposal before real protected peer execution;' \
+            '  join the generated leaves under the exact original owner question;' \
+            '  retain original planner/worker receipts across completed offline resume and cleanup;' \
+            '  1800s owner within 3600s driver; no manual task plan, tools, private offload or quality claim.'
+    elif [ "$scenario" = agent-policy-assessment ]; then
+        printf '%s\n' \
+            'Policy-assessment: four real 360M peer assessments of an exact public native subject;' \
+            '  preserve original execution receipts, completed offline replay, packet and cleanup evidence;' \
+            '  invalid/unknown output fails; no automatic production policy or full-B06 claim.'
+    elif [ "$scenario" = agent-autonomous-aggregation ]; then
+        printf '%s\n' \
+            'Agent-autonomous-aggregation: R3/R4/R5 train and sign three public adapters, explicitly provisioned unchanged to R5;' \
+            '  R4 train-loop cold-fetches the enrolled cohort and applies genuine aggregation/heldout comparison;' \
+            '  activate only an approved aggregate, serve it and use its exact bytes for the next local training warmstart;' \
+            '  retain original expiry, source/worker/journal receipts, packets and full private/network cleanup;' \
+            '  isolated 135M workers and 7200s driver bound; original worker/source limits remain unchanged.' \
+            '  no Sybil, general-quality or complete-B05 claim.'
+    elif [ "$scenario" = agent-adapter-aggregation ]; then
+        printf '%s\n' \
+            'Agent-adapter-aggregation: R3/R4/R5 train and sign three public adapters; unchanged supplier provisioning to R5;' \
+            '  R4 cold-fetches and combines them, requires its heldout approval before original-signature publication;' \
+            '  Client cold-imports the exact aggregate and performs actual inference, not an additional adoption comparison;' \
+            '  isolated 135M workers, complete source/decision/packet receipts and private/network cleanup;' \
+            '  3600s driver bound; no Sybil, general-quality or complete-B05 claim.'
+    elif [ "$scenario" = agent-active-recovery ]; then
+        printf '%s\n' \
+            'Agent-active-recovery: train P and distinct-peer Q; compare Q independently before adoption;' \
+            '  corrupt only local extracted Q, automatically restore original approved P and preserve the signed Q publication;' \
+            '  retain original job receipts/expiry, verify restart idempotence and actual continued P-warmstart training;' \
+            '  actual isolated 135M training/inference, protected peer work and full private/network cleanup;' \
+            '  3600s driver bound; no classifier-quality, general recovery or full-alpha claim.'
     elif [ "$scenario" = agent-successor-serving ]; then
         printf '%s\n' \
             'Agent-successor-serving: real local learning activates an approved adapter for new protected peer work;' \
@@ -283,7 +345,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-successor-serving|agent-task-graph) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --image)
@@ -344,7 +406,7 @@ case $image_path:$output_directory in
     *) exit 64 ;;
 esac
 if [ "$scenario" = alpha ] && [ -z "$package_path" ]; then usage >&2; exit 64; fi
-if [ "$scenario" != wifi-mesh ] && [ "$scenario" != agent-training ] && [ "$scenario" != agent-owner-priority ] && [ "$scenario" != agent-owner-cancel ] && [ -z "$mpquic_path" ]; then usage >&2; exit 64; fi
+if [ "$scenario" != wifi-mesh ] && [ "$scenario" != agent-training ] && [ "$scenario" != agent-owner-priority ] && [ "$scenario" != agent-owner-cancel ] && [ "$scenario" != agent-private-task ] && [ -z "$mpquic_path" ]; then usage >&2; exit 64; fi
 case $mpquic_path in ''|/*) ;; *) exit 64 ;; esac
 case $package_path in ''|/*) ;; *) exit 64 ;; esac
 case $expected_commit in ''|*[!0-9a-f]*) exit 64 ;; esac
@@ -553,7 +615,14 @@ SAFE_NAMES = {"runner.stdout", "runner.stderr", "guest-exit-status", "current-ph
               "agent-public-document-smoke.json", "agent-public-document-evidence.json",
               "agent-public-collection-smoke.json", "agent-public-collection-evidence.json",
               "agent-task-graph-smoke.json", "agent-task-graph-evidence.json",
+              "agent-ready-dag-smoke.json", "agent-ready-dag-evidence.json",
+              "agent-model-planning-smoke.json", "agent-model-planning-evidence.json",
+              "agent-model-task-graph-smoke.json", "agent-model-task-graph-evidence.json",
               "agent-successor-serving-smoke.json", "agent-successor-serving-evidence.json",
+              "agent-active-recovery-smoke.json", "agent-active-recovery-evidence.json",
+              "agent-adapter-aggregation-smoke.json", "agent-adapter-aggregation-evidence.json",
+              "agent-autonomous-aggregation-smoke.json", "agent-autonomous-aggregation-evidence.json",
+              "agent-policy-assessment-smoke.json", "agent-policy-assessment-evidence.json",
               "agent-public-document-first.json", "agent-public-document-first.err",
               "agent-public-document-result.json", "agent-public-document-result.err",
               "agent-public-document-resume.json", "agent-public-document-resume.err",
@@ -570,6 +639,9 @@ SAFE_NAMES = {"runner.stdout", "runner.stderr", "guest-exit-status", "current-ph
               "agent-jobs-resume-ready.json", "agent-jobs-resume-files.json", "agent-jobs-replacement-observer.err",
               "agent-jobs-status-0.json", "agent-jobs-status-1.json", "agent-jobs-replacement-status.json", "agent-jobs-retained-status.json",
               "agent-jobs-result.json", "agent-jobs-result.err", "agent-jobs-provision.json", "agent-jobs-provision.err",
+              "agent-jobs-aggregation-source.json", "agent-jobs-aggregation-source.err",
+              "agent-jobs-aggregation-backend.json", "agent-jobs-aggregation-backend.err",
+              "agent-jobs-aggregation-backend.log", "agent-jobs-aggregation-unit.json",
               "agent-artifact-smoke.json", "agent-artifact-evidence.json",
               "agent-train-cycle-smoke.json", "agent-train-cycle-evidence.json",
               "agent-train-loop-smoke.json", "agent-train-loop-evidence.json", "agent-train-loop-loop.json",
@@ -648,7 +720,9 @@ def collect(home, opt, revision, scenario, guest_status,
     entries = []
     seen_sources = set()
     total = 0
-    file_count_limit = 128 if scenario in ("agent-task-graph", "agent-successor-serving") else FILE_COUNT_LIMIT
+    file_count_limit = 128 if scenario in ("agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation", "agent-policy-assessment") else FILE_COUNT_LIMIT
+    if scenario == "agent-autonomous-aggregation":
+        file_count_limit = 192
     candidates = [(home / name, f"driver/{name}") for name in
                   ("guest-phase.txt", "cargo-build.log", "egress-netns-test.log",
                    "package-lifecycle.stdout", "package-lifecycle.stderr")]
@@ -682,9 +756,38 @@ def collect(home, opt, revision, scenario, guest_status,
         if scenario == "agent-task-graph":
             candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-task-graph-*"))[:128]
                               if re.fullmatch(r"agent-task-graph-[a-z0-9-]+\.(json|jsonl|err|log)", path.name))
+        if scenario == "agent-ready-dag":
+            candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-ready-dag-*"))[:128]
+                              if re.fullmatch(r"agent-ready-dag-[a-z0-9-]+\.(json|jsonl|err|log)", path.name))
+        if scenario == "agent-model-planning":
+            candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-model-planning-*"))[:128]
+                              if re.fullmatch(r"agent-model-planning-[a-z0-9-]+\.(json|jsonl|err|log)", path.name))
+        if scenario == "agent-model-task-graph":
+            candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-model-task-graph-*"))[:128]
+                              if re.fullmatch(r"agent-model-task-graph-[a-z0-9-]+\.(json|jsonl|err|log)", path.name))
         if scenario == "agent-successor-serving":
             candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-successor-serving-*"))[:128]
                               if re.fullmatch(r"agent-successor-serving-[a-z0-9-]+\.(json|jsonl|err|log)", path.name))
+        if scenario == "agent-active-recovery":
+            candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-active-recovery-*"))[:128]
+                              if re.fullmatch(r"agent-active-recovery-[a-z0-9-]+\.(json|jsonl|err|log)", path.name))
+        if scenario in ("agent-adapter-aggregation", "agent-autonomous-aggregation"):
+            candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-adapter-aggregation-*"))[:128]
+                              if re.fullmatch(r"agent-adapter-aggregation-[a-z0-9-]+\.(json|jsonl|err|log)", path.name))
+        if scenario == "agent-autonomous-aggregation":
+            candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-autonomous-aggregation-*"))[:128]
+                              if re.fullmatch(r"agent-autonomous-aggregation-[a-z0-9-]+\.(json|jsonl|err|log)", path.name))
+        if scenario == "agent-policy-assessment":
+            candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-policy-assessment-*"))[:128]
+                              if re.fullmatch(r"agent-policy-assessment-[a-z0-9-]+\.(json|jsonl|err|log)", path.name))
+        if scenario == "agent-private-task":
+            # Exact synthetic-fixture proof only, never arbitrary private input,
+            # model reports or a prefix glob over the owner's work area.
+            candidates.extend((root / name, f"{label}/{name}") for name in (
+                "agent-private-task-smoke.json", "agent-private-task-provision.json",
+                "agent-private-task-isolation.json", "agent-private-task-snapshot.json",
+                "agent-private-task-answer.json", "agent-private-task-owner_controls.json",
+                "agent-private-task-stdout_boundary.json", "agent-private-task-provision.log"))
         candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("wifi-link-*"))[:64]
                           if re.fullmatch(r"wifi-link-[a-z0-9-]+\.(json|txt|log)", path.name))
         candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("download-sharing-*"))[:64]
@@ -744,7 +847,7 @@ if __name__ == "__main__":
     if len(sys.argv) != 4 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sys.argv[1]):
         raise SystemExit(64)
     if sys.argv[2] not in ("alpha", "datapath", "reciprocity", "local-link", "mixed-link", "mpquic-growth", "mptcp-growth",
-                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel", "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-artifact-quarantine", "agent-jobs", "agent-jobs-loss", "agent-jobs-follow", "agent-jobs-peer-recovery", "agent-jobs-ready-queue", "agent-jobs-package-queue", "agent-public-task", "agent-public-document", "agent-public-collection", "agent-public-network-sources", "agent-successor-serving", "agent-task-graph"):
+                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel", "agent-private-task", "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-artifact-quarantine", "agent-jobs", "agent-jobs-loss", "agent-jobs-follow", "agent-jobs-peer-recovery", "agent-jobs-ready-queue", "agent-jobs-package-queue", "agent-public-task", "agent-public-document", "agent-public-collection", "agent-public-network-sources", "agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation", "agent-policy-assessment"):
         raise SystemExit(64)
     status_code = int(sys.argv[3])
     if not 0 <= status_code <= 255 or socket.gethostname() != "volparossa-alpha" or os.geteuid() != 0:
@@ -771,11 +874,19 @@ source_sha256=$2
 mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
-case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-successor-serving|agent-task-graph) ;; *) exit 64 ;; esac
+case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
 guest_phase verify-source
 printf '%s  source.tar.gz\n' "$source_sha256" | sha256sum --check --strict -
+if [ "$scenario" = agent-private-task ]; then
+    guest_phase agent-private-task
+    test "$(hostname)" = volparossa-alpha
+    test "$(systemd-detect-virt)" = kvm
+    tar -xzf source.tar.gz
+    cd source
+    exec sh tests/integration/agent-private-task-smoke.sh --execute --yes --expected-commit "$expected_commit"
+fi
 if [ "$scenario" = agent-training ] || [ "$scenario" = agent-owner-priority ] || [ "$scenario" = agent-owner-cancel ]; then
     guest_phase agent-training
     test "$(hostname)" = volparossa-alpha
@@ -810,13 +921,16 @@ sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
     --yes --no-install-recommends \
     build-essential ca-certificates cargo cmake dbus git iproute2 iputils-ping jq \
     nftables pkg-config python3 rustc sudo util-linux wireguard-tools
-if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-train-cycle ] || [ "$scenario" = agent-train-loop ] || [ "$scenario" = agent-artifact-quarantine ] || [ "$scenario" = agent-jobs ] || [ "$scenario" = agent-jobs-loss ] || [ "$scenario" = agent-jobs-follow ] || [ "$scenario" = agent-jobs-peer-recovery ] || [ "$scenario" = agent-jobs-ready-queue ] || [ "$scenario" = agent-jobs-package-queue ] || [ "$scenario" = agent-public-task ] || [ "$scenario" = agent-public-document ] || [ "$scenario" = agent-public-collection ] || [ "$scenario" = agent-public-network-sources ] || [ "$scenario" = agent-successor-serving ] || [ "$scenario" = agent-task-graph ]; then
+if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-train-cycle ] || [ "$scenario" = agent-train-loop ] || [ "$scenario" = agent-artifact-quarantine ] || [ "$scenario" = agent-jobs ] || [ "$scenario" = agent-jobs-loss ] || [ "$scenario" = agent-jobs-follow ] || [ "$scenario" = agent-jobs-peer-recovery ] || [ "$scenario" = agent-jobs-ready-queue ] || [ "$scenario" = agent-jobs-package-queue ] || [ "$scenario" = agent-public-task ] || [ "$scenario" = agent-public-document ] || [ "$scenario" = agent-public-collection ] || [ "$scenario" = agent-public-network-sources ] || [ "$scenario" = agent-task-graph ] || [ "$scenario" = agent-ready-dag ] || [ "$scenario" = agent-model-planning ] || [ "$scenario" = agent-model-task-graph ] || [ "$scenario" = agent-successor-serving ] || [ "$scenario" = agent-active-recovery ] || [ "$scenario" = agent-adapter-aggregation ] || [ "$scenario" = agent-autonomous-aggregation ] || [ "$scenario" = agent-policy-assessment ]; then
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends python3-venv bubblewrap
 fi
 if [ "$scenario" = agent-public-network-sources ]; then
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends openssl
 fi
-if [ "$scenario" = agent-task-graph ] || [ "$scenario" = agent-successor-serving ]; then
+if [ "$scenario" = agent-task-graph ] || [ "$scenario" = agent-ready-dag ] || [ "$scenario" = agent-successor-serving ] || [ "$scenario" = agent-active-recovery ] || [ "$scenario" = agent-adapter-aggregation ] || [ "$scenario" = agent-autonomous-aggregation ]; then
+    sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends openssl
+fi
+if [ "$scenario" = agent-model-planning ] || [ "$scenario" = agent-model-task-graph ] || [ "$scenario" = agent-policy-assessment ]; then
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends openssl
 fi
 [ "$(./volparossa-mpquic --api-version)" = 7 ]
@@ -903,7 +1017,7 @@ printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-stat
 fi
 
 topology_scenario=alpha
-case $scenario in reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-successor-serving|agent-task-graph) topology_scenario=$scenario ;; esac
+case $scenario in reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) topology_scenario=$scenario ;; esac
 guest_phase topology
 set +e
 sudo -n -- ./tests/integration/kvm-alpha-topology.sh \
@@ -932,10 +1046,21 @@ chmod 0700 "$GUEST_DRIVER"
 
 set -- -no-reboot
 case $scenario in wifi-mesh|wifi-link) set -- ;; esac
+guest_memory_mib=$(guest_memory_for_scenario)
+if [ "$guest_memory_mib" -gt 4096 ]; then
+    # A read-only preflight snapshot, not a host memory reservation. Refuse
+    # before spawning QEMU if the larger model fixture cannot fit plus 1 GiB.
+    runner_available_kib=$(awk '$1 == "MemAvailable:" && $3 == "kB" {print $2; found++} END {if (found != 1) exit 1}' /proc/meminfo)
+    case $runner_available_kib in ''|*[!0-9]*) exit 69 ;; esac
+    if [ "$runner_available_kib" -lt "$(((guest_memory_mib + 1024) * 1024))" ]; then
+        printf '%s\n' 'insufficient runner memory for two 360M fixture providers; worker protection remains enabled' >&2
+        exit 69
+    fi
+fi
 qemu-system-x86_64 \
     -name volparossa-alpha-topology \
     -no-user-config -nodefaults \
-    -machine q35,accel=kvm -cpu host -smp 4 -m 4096 \
+    -machine q35,accel=kvm -cpu host -smp 4 -m "$guest_memory_mib" \
     -device VGA,id=video0,bus=pcie.0,addr=0x1 \
     -drive "if=virtio,format=qcow2,file=$OVERLAY" \
     -drive "if=virtio,format=raw,readonly=on,file=$SEED" \
@@ -1042,7 +1167,15 @@ driver_time_bound=2400s
 [ "$scenario" != agent-public-collection ] || driver_time_bound=3600s
 [ "$scenario" != agent-public-network-sources ] || driver_time_bound=3600s
 [ "$scenario" != agent-task-graph ] || driver_time_bound=3600s
+[ "$scenario" != agent-ready-dag ] || driver_time_bound=3600s
+[ "$scenario" != agent-model-planning ] || driver_time_bound=3600s
+[ "$scenario" != agent-model-task-graph ] || driver_time_bound=3600s
 [ "$scenario" != agent-successor-serving ] || driver_time_bound=3600s
+[ "$scenario" != agent-active-recovery ] || driver_time_bound=3600s
+[ "$scenario" != agent-adapter-aggregation ] || driver_time_bound=3600s
+[ "$scenario" != agent-autonomous-aggregation ] || driver_time_bound=7200s
+[ "$scenario" != agent-private-task ] || driver_time_bound=3600s
+[ "$scenario" != agent-policy-assessment ] || driver_time_bound=3600s
 ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
     "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario"
 GUEST_STATUS=$?

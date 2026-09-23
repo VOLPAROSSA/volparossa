@@ -45,11 +45,13 @@ impl Authorization {
             "compute_executor_authorization"
         );
         let query = rpc::EligibilityQuery {
+            model_profile: None, // The already-enrolled full fingerprint is stricter.
             publisher_keys: vec![self.publisher_key.clone()],
             model_fingerprint: Some(self.model_fingerprint.clone()),
             require_task_derivation_v1: self.task.is_some(),
             require_document_inference_v2: self.document,
             require_derived_inference_v3: self.derived,
+            require_principle_inference_v4: false,
         };
         query.validate()?;
         Ok(query)

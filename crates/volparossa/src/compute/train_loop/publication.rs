@@ -11,6 +11,9 @@ use super::{
 };
 use volparossa_content::{VerifiedManifest, agent_artifact::ADAPTER_CONTENT_TYPE};
 
+mod joint;
+pub(super) use joint::restore_order;
+
 struct Binding<'a> {
     key: VerifyingKey,
     name: &'a str,
@@ -33,12 +36,19 @@ fn settled(state: &State) -> Option<DrainOutcome> {
         .cycles
         .iter()
         .any(|cycle| matches!(cycle.phase, Phase::Trained | Phase::PublishPending))
+        || state.aggregate_updates.as_ref().is_some_and(|registry| {
+            !super::aggregate_updates::publication::pending_sequences(registry).is_empty()
+        })
     {
         None
     } else if state
         .cycles
         .iter()
         .any(|cycle| cycle.phase == Phase::PublicationExpired)
+        || state
+            .aggregate_updates
+            .as_ref()
+            .is_some_and(super::aggregate_updates::publication::has_expired)
     {
         Some(DrainOutcome::Expired)
     } else {
@@ -103,6 +113,9 @@ async fn pending_until(
     let Some(name) = &args.publish_name else {
         return Ok(());
     };
+    if args.aggregate_plan.is_some() {
+        return joint::pending(args, socket, store, state, activity, deadline).await;
+    }
     let mut prepared = Vec::new();
     let mut changed = false;
     for (index, cycle) in state.cycles.iter_mut().enumerate() {
@@ -113,7 +126,7 @@ async fn pending_until(
             continue;
         }
         let previous = serde_json::to_value(&*cycle)?;
-        if let Some(verified) = prepare(args, socket, store, cycle, name).await? {
+        if let Some(verified) = prepare(args, socket, store, cycle, name, None).await? {
             prepared.push((index, verified));
         }
         changed |= previous != serde_json::to_value(&*cycle)?;
@@ -128,57 +141,71 @@ async fn pending_until(
             break;
         }
         let cycle = &mut state.cycles[index];
-        let request = content::Contribute::existing(
-            store.cycle_path(cycle.sequence)?.join("publication.pb"),
-            args.publication_key.context("train_loop_publication_key")?,
-            args.publish_cache
-                .clone()
-                .context("train_loop_publish_cache")?,
-            args.limits.clone(),
-        )
-        .expect_manifest_id(*verified.manifest_id());
-        let expiry_deadline = Instant::now()
-            + Duration::from_secs(verified.validity().expires.saturating_sub(now()?));
-        let handoff_deadline = deadline.map_or(expiry_deadline, |limit| limit.min(expiry_deadline));
-        // All identities above have been fsynced. Only this affine IPC transfer is droppable;
-        // dropping it closes its socket, not a model worker or detached local publication.
-        let receipt = handoff(
-            activity,
-            handoff_deadline,
-            content::contribute_existing(&request, socket),
-        )
-        .await;
-        let reason = match receipt {
-            Handoff::Received(Ok(mut receipt)) => {
-                validate_receipt(&receipt, &verified)?;
-                let observed = now()?;
-                ensure!(
-                    observed >= verified.validity().created
-                        && observed < verified.validity().expires,
-                    "train_loop_receipt_expired"
-                );
-                // Local recovery evidence, not a portable signed remote attestation.
-                receipt["coordinator_verified_at_unix_seconds"] = observed.into();
-                store.write_cycle_json(cycle.sequence, "contribution.json", &receipt)?;
-                cycle.phase = Phase::Complete;
-                None
-            }
-            Handoff::Received(Err(error)) => Some(failure_reason(&error)),
-            Handoff::Cancelled => Some("owner_cancelled"),
-            Handoff::Deadline => Some("deadline"),
-        };
-        if let Some(reason) = reason {
-            eprintln!("compute loop_event=publication_handoff_deferred reason={reason}");
-            if now()? >= verified.validity().expires {
-                cycle.phase = Phase::PublicationExpired;
-            } else {
-                defer(cycle, args.poll_seconds)?;
-            }
-        }
+        deliver(args, socket, store, cycle, &verified, activity, deadline).await?;
         changed = true;
     }
     if changed {
         store.save_state(&serde_json::to_value(state)?)?;
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Reuse one original manifest handoff in legacy and shared revision queues"
+)]
+async fn deliver(
+    args: &Options,
+    socket: &Path,
+    store: &Store,
+    cycle: &mut Cycle,
+    verified: &VerifiedManifest,
+    activity: &watch::Receiver<bool>,
+    deadline: Option<Instant>,
+) -> Result<()> {
+    let request = content::Contribute::existing(
+        store.cycle_path(cycle.sequence)?.join("publication.pb"),
+        args.publication_key.context("train_loop_publication_key")?,
+        args.publish_cache
+            .clone()
+            .context("train_loop_publish_cache")?,
+        args.limits.clone(),
+    )
+    .expect_manifest_id(*verified.manifest_id());
+    let expiry_deadline =
+        Instant::now() + Duration::from_secs(verified.validity().expires.saturating_sub(now()?));
+    let until = deadline.map_or(expiry_deadline, |limit| limit.min(expiry_deadline));
+    // Only the affine IPC transfer is droppable, never a model worker.
+    let receipt = handoff(
+        activity,
+        until,
+        content::contribute_existing(&request, socket),
+    )
+    .await;
+    let reason = match receipt {
+        Handoff::Received(Ok(mut receipt)) => {
+            validate_receipt(&receipt, verified)?;
+            let observed = now()?;
+            ensure!(
+                observed >= verified.validity().created && observed < verified.validity().expires,
+                "train_loop_receipt_expired"
+            );
+            receipt["coordinator_verified_at_unix_seconds"] = observed.into();
+            store.write_cycle_json(cycle.sequence, "contribution.json", &receipt)?;
+            cycle.phase = Phase::Complete;
+            None
+        }
+        Handoff::Received(Err(error)) => Some(failure_reason(&error)),
+        Handoff::Cancelled => Some("owner_cancelled"),
+        Handoff::Deadline => Some("deadline"),
+    };
+    if let Some(reason) = reason {
+        eprintln!("compute loop_event=publication_handoff_deferred reason={reason}");
+        if now()? >= verified.validity().expires {
+            cycle.phase = Phase::PublicationExpired;
+        } else {
+            defer(cycle, args.poll_seconds)?;
+        }
     }
     Ok(())
 }
@@ -197,9 +224,7 @@ fn retry_due(cycle: &Cycle, store: &Store, at: u64) -> Result<bool> {
             .as_u64()
             .context("train_loop_publication_expiry")?
     } else {
-        store.read_cycle_json(cycle.sequence, "result.json")?["source_expires_unix_seconds"]
-            .as_u64()
-            .context("train_loop_source_expiry")?
+        authority_expiry(&store.read_cycle_json(cycle.sequence, "result.json")?)?
     };
     Ok(expires <= at)
 }
@@ -208,6 +233,17 @@ enum Handoff {
     Received(Result<Value>),
     Cancelled,
     Deadline,
+}
+
+pub(super) fn authority_expiry(result: &Value) -> Result<u64> {
+    let source = result["source_expires_unix_seconds"]
+        .as_u64()
+        .context("train_loop_source_expiry")?;
+    result
+        .get("authority_expires_unix_seconds")
+        .map_or(Ok(source), |value| {
+            Ok(source.min(value.as_u64().context("train_loop_inherited_expiry")?))
+        })
 }
 
 async fn handoff(
@@ -269,6 +305,7 @@ async fn prepare(
     store: &Store,
     cycle: &mut Cycle,
     name: &str,
+    assigned_revision: Option<u64>,
 ) -> Result<Option<VerifiedManifest>> {
     let snapshot = cycle
         .snapshot
@@ -282,13 +319,14 @@ async fn prepare(
     );
     let root = store.cycle_path(cycle.sequence)?;
     let result = store.read_cycle_json(cycle.sequence, "result.json")?;
-    let source_expires = result["source_expires_unix_seconds"]
-        .as_u64()
-        .context("train_loop_source_expiry")?;
+    let source_expires = authority_expiry(&result)?;
     let binding = Binding {
         key: args.publication_key.context("train_loop_publication_key")?,
         name,
-        revision: expected_revision(args.first_publication_revision, cycle.sequence)?,
+        revision: match assigned_revision {
+            Some(revision) => revision,
+            None => expected_revision(args.first_publication_revision, cycle.sequence)?,
+        },
         snapshot,
         source_expires,
     };
@@ -463,6 +501,31 @@ fn validate_receipt(receipt: &Value, verified: &VerifiedManifest) -> Result<()> 
 mod tests {
     use super::super::storage;
     use super::*;
+
+    #[test]
+    fn inherited_aggregate_authority_cannot_be_renewed_by_a_later_source() {
+        assert_eq!(
+            authority_expiry(&json!({"source_expires_unix_seconds":3000})).unwrap(),
+            3000
+        );
+        assert_eq!(
+            authority_expiry(&json!({"source_expires_unix_seconds":3000,
+            "authority_expires_unix_seconds":2000}))
+            .unwrap(),
+            2000
+        );
+        assert_eq!(
+            authority_expiry(&json!({"source_expires_unix_seconds":1500,
+            "authority_expires_unix_seconds":2000}))
+            .unwrap(),
+            1500
+        );
+        assert!(
+            authority_expiry(&json!({"source_expires_unix_seconds":3000,
+            "authority_expires_unix_seconds":"renewed"}))
+            .is_err()
+        );
+    }
     use ed25519_dalek::SigningKey;
     use sha2::{Digest, Sha256};
     use std::{io::Write, os::unix::fs::OpenOptionsExt, path::PathBuf};

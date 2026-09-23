@@ -1,10 +1,17 @@
-//! Local CLI packaging checks only: opaque bytes and publisher-supplied synthetic reports
-//! do not prove any actual training, safe tensor format, useful model or network retrieval.
+//! Local CLI packaging and typed local-stream checks: opaque bytes and synthetic reports
+//! do not prove actual training, safe tensors, useful models or overlay retrieval.
 
 use clap::Parser;
 use ed25519_dalek::SigningKey;
+use tokio::net::UnixListener;
 use volparossa_content::agent_artifact::{BASE_MODEL_SHA256, MODEL_ID, MODEL_REVISION};
+use volparossa_content::transfer::{TransferLimits, serve_peer};
 use volparossa_content::{CacheLimits, ChunkStore, Metadata, Publication, Validity};
+use volparossa_local_control::{
+    CONTROL_PROTOCOL_VERSION, ContentReceipt, ControlResponse, ControlResult,
+    NamedContentTransferReady, control_request::Operation, control_response::Payload, read_request,
+    write_response,
+};
 
 use super::*;
 
@@ -257,4 +264,236 @@ fn fetch_does_not_force_offline_cache_and_explicit_cache_only_requires_reopen() 
         panic!("agent fetch expected")
     };
     assert!(options.cache_only && options.reuse_cache);
+}
+
+async fn serve_import_object(
+    listener: &UnixListener,
+    store: &mut ChunkStore,
+    args: &Fetch,
+    signed: &SignedManifest,
+    dataset_id: Option<[u8; 32]>,
+    mismatched: bool,
+) {
+    let dataset = dataset_id.is_some();
+    let key = if dataset {
+        args.dataset_publisher()
+    } else {
+        args.publisher_key
+    };
+    let manifest = signed.verify(&key, now_seconds().unwrap()).unwrap();
+    let (mut stream, _) = listener.accept().await.unwrap();
+    let request = read_request(&mut stream).await.unwrap();
+    let Some(Operation::ContentFetchName(parameters)) = request.operation else {
+        panic!("expected typed adapter/dataset query");
+    };
+    assert!(parameters.prefer_cached && parameters.reuse_cache);
+    assert_eq!(parameters.cache_only, args.cache_only);
+    assert_eq!(parameters.publisher_key, key.to_bytes());
+    assert_eq!(
+        parameters.name,
+        if dataset {
+            &args.dataset_name
+        } else {
+            &args.name
+        }
+        .as_str()
+    );
+    assert_eq!(
+        parameters.min_revision,
+        if dataset { None } else { Some(9) }
+    );
+    assert_eq!(
+        parameters.expected_manifest_id,
+        dataset_id.map(|id| id.to_vec())
+    );
+    assert_eq!(
+        parameters.expected_content_type.as_deref(),
+        Some(if dataset {
+            DATASET_CONTENT_TYPE
+        } else {
+            ADAPTER_CONTENT_TYPE
+        })
+    );
+    assert_eq!(
+        parameters.max_object_bytes,
+        Some(if dataset {
+            MAX_DATASET
+        } else {
+            MAX_ADAPTER_BYTES as u64
+        })
+    );
+    let response = |code: &str, payload| ControlResponse {
+        protocol_version: CONTROL_PROTOCOL_VERSION,
+        request_id: request.request_id.clone(),
+        result: ControlResult::Ok as i32,
+        diagnostic_code: code.into(),
+        payload: Some(payload),
+    };
+    write_response(
+        &mut stream,
+        &response(
+            "NAMED_CONTENT_TRANSFER_READY",
+            Payload::NamedContentTransferReady(NamedContentTransferReady {
+                manifest: signed.encode(),
+                cache_only: args.cache_only,
+            }),
+        ),
+    )
+    .await
+    .unwrap();
+    if mismatched {
+        // The consumer must reject a different signed dataset before receiving its body.
+        return;
+    }
+    let progress = serve_peer(&mut stream, &manifest, store, TransferLimits::default())
+        .await
+        .unwrap();
+    assert_eq!(progress.bytes, manifest.length());
+    write_response(
+        &mut stream,
+        &response(
+            "CONTENT_OK",
+            Payload::Content(ContentReceipt {
+                bytes: manifest.length(),
+                chunks: u32::try_from(manifest.chunks().len()).unwrap(),
+                // Actual local Unix delivery only: do not invent network/provider byte receipts.
+                ..ContentReceipt::default()
+            }),
+        ),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep signed fixtures and both typed stream exchanges together"
+)]
+async fn typed_import_prefers_valid_cache_without_forcing_offline_and_pins_exact_dataset() {
+    for (cache_only, wrong_dataset) in [(false, false), (true, false), (false, true)] {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let limits = CacheLimits {
+            max_bytes: 1024 * 1024,
+            max_entries: 16,
+            min_free_bytes: 0,
+        };
+        let mut store = ChunkStore::create(&root.path().join("source"), limits).unwrap();
+        let dataset_key = SigningKey::from_bytes(&[31; 32]);
+        let adapter_key = SigningKey::from_bytes(&[32; 32]);
+        let now = now_seconds().unwrap();
+        let mut publish =
+            |name: &str, content_type: &str, revision, mut bytes: &[u8], key: &SigningKey| {
+                let length = bytes.len() as u64;
+                volparossa_content::publish(
+                    &mut bytes,
+                    Publication {
+                        metadata: Metadata {
+                            name: name.into(),
+                            revision,
+                            content_type: content_type.into(),
+                        },
+                        length,
+                        validity: Validity {
+                            created: now,
+                            expires: now + 300,
+                        },
+                    },
+                    key,
+                    &mut store,
+                )
+                .unwrap()
+            };
+        let bytes = serde_json::to_vec(&serde_json::json!({"version":1,"visibility":"public",
+            "license":"GPL-3.0-only","source_revision":"d".repeat(40)}))
+        .unwrap();
+        let original = publish("public-data", DATASET_CONTENT_TYPE, 1, &bytes, &dataset_key);
+        let dataset_id = *original
+            .verify(&dataset_key.verifying_key(), now)
+            .unwrap()
+            .manifest_id();
+        let offered = if wrong_dataset {
+            publish("public-data", DATASET_CONTENT_TYPE, 2, &bytes, &dataset_key)
+        } else {
+            original
+        };
+        let bundle = AdapterBundle::encode(
+            dataset_id,
+            AdapterFiles {
+                config: CONFIG.to_vec(),
+                weights: WEIGHTS.to_vec(),
+                readme: README.to_vec(),
+            },
+        )
+        .unwrap();
+        let signed_adapter = publish(
+            "public-adapter",
+            ADAPTER_CONTENT_TYPE,
+            9,
+            &bundle,
+            &adapter_key,
+        );
+        let socket = root.path().join("agent.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let args = Fetch {
+            publisher_key: adapter_key.verifying_key(),
+            dataset_publisher_key: Some(dataset_key.verifying_key()),
+            name: "public-adapter".into(),
+            dataset_name: "public-data".into(),
+            min_revision: Some(9),
+            cache: root.path().join("consumer-cache"),
+            reuse_cache: true,
+            cache_only,
+            output: root.path().join("import"),
+            limits: Limits {
+                quota_bytes: 1024 * 1024,
+                max_entries: 16,
+                min_free_bytes: 0,
+            },
+        };
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::try_join!(fetch(&args, &socket), async {
+                serve_import_object(&listener, &mut store, &args, &signed_adapter, None, false)
+                    .await;
+                serve_import_object(
+                    &listener,
+                    &mut store,
+                    &args,
+                    &offered,
+                    Some(dataset_id),
+                    wrong_dataset,
+                )
+                .await;
+                Ok::<(), anyhow::Error>(())
+            })
+        })
+        .await
+        .expect("bounded typed import fixture")
+        .map(|(report, ())| report);
+        if wrong_dataset {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("explicitly selected bounded object")
+            );
+            assert!(!args.output.exists());
+            continue;
+        }
+        let result = result.unwrap();
+        assert_eq!(result["cache_only"], cache_only);
+        assert_eq!(result["expires_unix_seconds"], now + 300);
+        assert_eq!(result["dataset_manifest_id"], hex::encode(dataset_id));
+        for receipt in ["adapter_receipt", "dataset_receipt"] {
+            assert_eq!(result[receipt]["peer_bytes"], 0);
+            assert_eq!(result[receipt]["cache_only"], cache_only);
+            assert_eq!(result[receipt]["globally_latest"], false);
+        }
+        assert_eq!(
+            fs::read(args.output.join("adapter/adapter_model.safetensors")).unwrap(),
+            WEIGHTS
+        );
+        assert_eq!(fs::read(args.output.join("dataset.json")).unwrap(), bytes);
+    }
 }

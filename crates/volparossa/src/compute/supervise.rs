@@ -32,6 +32,7 @@ const MAX_OBSERVED_THREADS: usize = 128;
 pub(super) struct WorkerFailure {
     request_id: String,
     code: String,
+    planner_diagnostic: Option<super::task_plan::PlanningDiagnostic>,
 }
 
 impl WorkerFailure {
@@ -41,6 +42,10 @@ impl WorkerFailure {
 
     pub(super) fn code(&self) -> &str {
         &self.code
+    }
+
+    pub(super) fn planner_diagnostic(&self) -> Option<&super::task_plan::PlanningDiagnostic> {
+        self.planner_diagnostic.as_ref()
     }
 }
 
@@ -58,6 +63,7 @@ impl std::error::Error for WorkerFailure {}
 struct PendingWorkerFailure {
     request_id: String,
     code: String,
+    planner_diagnostic: Option<super::task_plan::PlanningDiagnostic>,
 }
 
 impl fmt::Display for PendingWorkerFailure {
@@ -92,6 +98,7 @@ fn reaped_failure(error: anyhow::Error) -> anyhow::Error {
         Ok(failure) => WorkerFailure {
             request_id: failure.request_id,
             code: failure.code,
+            planner_diagnostic: failure.planner_diagnostic,
         }
         .into(),
         Err(error) => error,
@@ -101,9 +108,20 @@ fn reaped_failure(error: anyhow::Error) -> anyhow::Error {
 /// Synthetic protocol input for pure caller tests; not evidence of a real worker or cleanup.
 #[cfg(test)]
 pub(super) fn test_worker_failure(code: &str) -> anyhow::Error {
+    test_worker_failure_with_diagnostic(code, None)
+}
+
+#[cfg(test)]
+pub(super) fn test_worker_failure_with_diagnostic(
+    code: &str,
+    diagnostic: Option<Value>,
+) -> anyhow::Error {
     let id = "ab".repeat(16);
-    let reply =
+    let mut reply =
         serde_json::json!({"version":1,"id":id,"kind":"result", "status":"error","code":code});
+    if let Some(diagnostic) = diagnostic {
+        reply["planner_diagnostic"] = diagnostic;
+    }
     reaped_failure(worker_failure(&reply, &id, ExitStatus::from_raw(1 << 8)))
 }
 
@@ -143,6 +161,7 @@ pub(super) async fn run(
                 &mut child, stdout, stderr, &request.id, controls.as_ref()
             ).await?;
             check_result(&result, request, status)?;
+            check_public_contract(&result, options)?;
             if let Some(controls) = &controls {
                 controls.check_report(&result)?;
             } else {
@@ -184,13 +203,7 @@ pub(super) async fn run(
         }
     }.await;
     if result.is_err() {
-        // Killing the exact live bwrap parent kills its sandbox child (die-with-parent).
-        // PID namespace teardown kills/reaps descendants; no host process-group scan.
-        let _ = child.start_kill();
-        tokio::time::timeout(Duration::from_secs(3), child.wait())
-            .await
-            .context("compute_reap_deadline")?
-            .context("compute_reap")?;
+        reap_failed_child(&mut child, options.mode).await?;
     }
     // Only this post-cleanup boundary can expose typed worker failure evidence to callers.
     let mut result = result.map_err(reaped_failure)?;
@@ -212,7 +225,60 @@ pub(super) async fn run(
         "distributed_execution_claimed": false,
         "private_training_claimed": false
     });
+    if options.mode == Mode::PlanTasks {
+        check_task_plan_result(&result, options)?;
+    } else if options.mode == Mode::PrivateInfer {
+        let input = super::read_file(&options.dataset, super::MAX_DATASET_BYTES)?;
+        super::private_task::validate_report(&result, &input, options.model_profile)?;
+    }
     Ok(result)
+}
+
+async fn reap_failed_child(child: &mut Child, mode: Mode) -> Result<()> {
+    // Killing the exact live bwrap parent kills its sandbox child (die-with-parent).
+    // PID namespace teardown kills/reaps descendants; no host process-group scan.
+    let _ = child.start_kill();
+    let reaped = tokio::time::timeout(Duration::from_secs(3), child.wait())
+        .await
+        .context("compute_reap_deadline")
+        .and_then(|result| result.context("compute_reap"));
+    if mode == Mode::PrivateInfer && reaped.is_err() {
+        return Err(super::private_task::CleanupUnconfirmed.into());
+    }
+    reaped?;
+    Ok(())
+}
+
+fn check_task_plan_result(result: &Value, options: &Options) -> Result<()> {
+    let bytes = super::read_file(&options.dataset, super::MAX_DATASET_BYTES)?;
+    let input = super::task_plan::Input::decode(&bytes)?;
+    input.validate_execution()?;
+    let (strategy, name) = if input.version == 3 {
+        (
+            super::task_plan::GUARDED_GRAPH_STRATEGY,
+            super::task_plan::GRAPH_ARTIFACT_NAME,
+        )
+    } else {
+        (super::task_plan::CURRENT_STRATEGY, "task-questions.json")
+    };
+    ensure!(
+        result["planner_strategy"] == strategy,
+        "compute_task_plan_execution_strategy"
+    );
+    let artifact = super::read_file(
+        &options.output.join(name),
+        super::task_plan::MAX_ARTIFACT_BYTES,
+    )?;
+    if input.version == 3 {
+        ensure!(
+            result["generation_question_max_bytes"]
+                == super::task_plan::GENERATED_GRAPH_QUESTION_BYTES,
+            "compute_task_graph_generation_policy"
+        );
+        super::task_plan::validate_graph_report(result, &input, &bytes, &artifact).map(|_| ())
+    } else {
+        super::task_plan::validate_report(result, &input, &bytes, &artifact).map(|_| ())
+    }
 }
 
 fn pressure_action(budget: &mut Budget) -> Result<Action> {
@@ -221,6 +287,14 @@ fn pressure_action(budget: &mut Budget) -> Result<Action> {
         Decision::Pause => Ok(Action::Pause),
         Decision::Cancel => bail!("{}", budget.cancellation_code()),
     }
+}
+
+fn check_public_contract(value: &Value, options: &Options) -> Result<()> {
+    if options.mode == Mode::Infer {
+        let dataset = super::read_file(&options.dataset, super::MAX_DATASET_BYTES)?;
+        super::inference_output::check_dataset_contract(value, &dataset)?;
+    }
+    Ok(())
 }
 
 fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> Result<()> {
@@ -241,7 +315,11 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
     );
     let updates = value.get("updates_completed").and_then(Value::as_u64);
     match request.mode {
-        Mode::Infer | Mode::PlanDocument => {
+        Mode::Infer
+        | Mode::PrivateInfer
+        | Mode::PlanDocument
+        | Mode::PlanTasks
+        | Mode::AggregateAdapter => {
             ensure!(updates == Some(0), "compute_unrequested_training");
         }
         Mode::Train => {
@@ -259,6 +337,53 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
                     "compute_training_proof_missing"
                 );
             }
+        }
+    }
+    if request.mode == Mode::AggregateAdapter {
+        ensure!(
+            value["model_weights_loaded"] == false
+                && value["aggregation"]["algorithm"] == "coordinate-median-effective-lora-rank4-v1"
+                && value["aggregation"]["combined_modules"] == 60
+                && value["aggregation"]["input_files"]
+                    .as_array()
+                    .is_some_and(|inputs| inputs.len() == 3),
+            "compute_aggregation_result_scope"
+        );
+    }
+    if request.mode == Mode::PrivateInfer {
+        ensure!(
+            value["private_data_supported"] == true
+                && value["distributed_execution_claimed"] == false
+                && value["private_training_claimed"] == false
+                && value["dataset"]["visibility"] == "private_local"
+                && value["outputs"]
+                    .as_array()
+                    .is_some_and(|outputs| outputs.len() == 1),
+            "compute_private_result_scope"
+        );
+    }
+    if matches!(request.mode, Mode::Infer | Mode::PrivateInfer | Mode::Train) {
+        let outputs = value["outputs"]
+            .as_array()
+            .context("compute_result_outputs")?;
+        ensure!(
+            (1..=usize::from(request.model_profile.spec().max_rows)).contains(&outputs.len()),
+            "compute_result_output_count"
+        );
+        for (index, output) in outputs.iter().enumerate() {
+            ensure!(
+                output["sample_index"] == index
+                    && output["text"].as_str().is_some_and(
+                        |text| text.len() <= request.model_profile.spec().max_output_bytes
+                    )
+                    && output["text_truncated"].is_boolean(),
+                "compute_result_output_shape"
+            );
+            ensure!(
+                super::inference_output::Generation::from_output(output, true)?
+                    .is_some_and(|generation| generation.model_profile == request.model_profile),
+                "compute_result_generation_profile"
+            );
         }
     }
     Ok(())
@@ -281,6 +406,11 @@ fn worker_failure(value: &Value, id: &str, status: ExitStatus) -> anyhow::Error 
         PendingWorkerFailure {
             request_id: id.to_owned(),
             code: code.to_owned(),
+            // Optional diagnostic data cannot change the fixed failure or authorize a plan.
+            // Invalid traces are discarded, never normalized into plausible observations.
+            planner_diagnostic: value
+                .get("planner_diagnostic")
+                .and_then(|value| super::task_plan::PlanningDiagnostic::from_value(value).ok()),
         }
         .into()
     } else {
@@ -293,8 +423,34 @@ fn check_artifacts(value: &Value, mode: Mode, output: &Path) -> Result<()> {
         .get("artifacts")
         .and_then(Value::as_array)
         .context("compute_artifacts")?;
-    if mode == Mode::Infer {
+    if matches!(mode, Mode::Infer | Mode::PrivateInfer) {
         ensure!(artifacts.is_empty(), "compute_inference_artifacts");
+        return Ok(());
+    }
+    if mode == Mode::PlanTasks {
+        ensure!(
+            value["model_weights_loaded"] == true
+                && artifacts.len() == 1
+                && matches!(
+                    artifacts[0]["relative_path"].as_str(),
+                    Some("task-questions.json" | super::task_plan::GRAPH_ARTIFACT_NAME)
+                ),
+            "compute_task_plan_artifact"
+        );
+        let name = artifacts[0]["relative_path"]
+            .as_str()
+            .context("compute_task_plan_artifact")?;
+        let bytes = super::read_file(&output.join(name), super::task_plan::MAX_ARTIFACT_BYTES)?;
+        ensure!(
+            artifacts[0]["bytes"] == bytes.len() as u64
+                && artifacts[0]["sha256"] == hex::encode(Sha256::digest(&bytes)),
+            "compute_task_plan_artifact_hash"
+        );
+        // Exact graph/goal corroboration follows the decoded original input after
+        // cleanup. At this boundary only either fixed filename and its bytes pass.
+        if name == "task-questions.json" {
+            super::task_plan::Questions::decode(&bytes)?;
+        }
         return Ok(());
     }
     if mode == Mode::PlanDocument {
@@ -347,6 +503,36 @@ fn check_input_adapter(value: &Value, options: &Options) -> Result<()> {
         );
         return Ok(());
     };
+    if options.mode == Mode::AggregateAdapter {
+        ensure!(
+            value.get("input_adapter").is_none(),
+            "compute_aggregation_not_applied"
+        );
+        let inputs = value["aggregation"]["input_files"]
+            .as_array()
+            .context("compute_aggregation_inputs")?;
+        ensure!(inputs.len() == 3, "compute_aggregation_inputs");
+        for (index, input) in inputs.iter().enumerate() {
+            ensure!(
+                input.as_object().is_some_and(|files| files.len() == 3),
+                "compute_aggregation_input_files"
+            );
+            for (name, maximum) in [
+                ("README.md", 16 * 1024),
+                ("adapter_config.json", 16 * 1024),
+                ("adapter_model.safetensors", 2 * 1024 * 1024),
+            ] {
+                let bytes = super::read_file(&root.join(index.to_string()).join(name), maximum)?;
+                ensure!(
+                    input[name]["bytes"].as_u64() == Some(bytes.len() as u64)
+                        && input[name]["sha256"].as_str()
+                            == Some(hex::encode(Sha256::digest(&bytes)).as_str()),
+                    "compute_aggregation_input_hash"
+                );
+            }
+        }
+        return Ok(());
+    }
     let input = &value["input_adapter"];
     ensure!(
         input["applied"] == true
@@ -428,6 +614,11 @@ async fn collect_stdout(
             }
             result = Some(value);
         } else {
+            if let Some((stage, attempt, tokens, elapsed)) = planner_progress(&value)? {
+                eprintln!(
+                    "compute planner stage={stage} attempt={attempt} generated_tokens={tokens} elapsed_ms={elapsed}"
+                );
+            }
             if matches!(value["phase"].as_str(), Some("paused" | "resumed")) {
                 controls
                     .context("compute_unrequested_control_ack")?
@@ -461,6 +652,46 @@ async fn collect_stdout(
         }
     }
     Ok(result)
+}
+
+fn planner_progress(value: &Value) -> Result<Option<(&str, u64, u64, u64)>> {
+    let Some(planner) = value.get("planner") else {
+        return Ok(None);
+    };
+    ensure!(
+        value["phase"] == "baseline"
+            && value["step"].as_u64() == Some(0)
+            && value.get("control_sequence").is_none()
+            && planner.as_object().is_some_and(|fields| fields.len() == 3),
+        "compute_planner_progress"
+    );
+    let stage = planner["stage"]
+        .as_str()
+        .filter(|stage| {
+            matches!(
+                *stage,
+                "hash_before"
+                    | "decoder_setup"
+                    | "generation"
+                    | "token_filter"
+                    | "validation"
+                    | "hash_after"
+            )
+        })
+        .context("compute_planner_progress")?;
+    let attempt = planner["attempt"]
+        .as_u64()
+        .filter(|n| *n <= 4)
+        .context("compute_planner_progress")?;
+    let tokens = planner["generated_tokens"]
+        .as_u64()
+        .filter(|n| *n <= 384)
+        .context("compute_planner_progress")?;
+    let elapsed = value["elapsed_ms"]
+        .as_u64()
+        .filter(|n| *n < 600_000)
+        .context("compute_planner_progress")?;
+    Ok(Some((stage, attempt, tokens, elapsed)))
 }
 
 async fn bounded_line(reader: &mut (impl AsyncBufRead + Unpin)) -> Result<Option<Vec<u8>>> {
@@ -516,6 +747,26 @@ struct StartupDiagnostics {
     bytes: usize,
 }
 
+#[derive(Debug)]
+pub(super) struct StartupFailure {
+    pub(super) exit_code: i32,
+    pub(super) signal: i32,
+    pub(super) stderr_class: &'static str,
+    pub(super) stderr_bytes: usize,
+}
+
+impl fmt::Display for StartupFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "compute_result_missing exit_code={} signal={} stderr_class={} stderr_bytes={}",
+            self.exit_code, self.signal, self.stderr_class, self.stderr_bytes
+        )
+    }
+}
+
+impl std::error::Error for StartupFailure {}
+
 fn startup_class(prefix: &[u8]) -> StartupClass {
     if prefix.is_empty() {
         StartupClass::None
@@ -553,14 +804,14 @@ fn required_result(
     status: ExitStatus,
     diagnostics: StartupDiagnostics,
 ) -> Result<Value> {
-    result.with_context(|| {
-        format!(
-            "compute_result_missing exit_code={} signal={} stderr_class={} stderr_bytes={}",
-            status.code().unwrap_or(-1),
-            status.signal().unwrap_or(0),
-            diagnostics.class.label(),
-            diagnostics.bytes,
-        )
+    result.ok_or_else(|| {
+        StartupFailure {
+            exit_code: status.code().unwrap_or(-1),
+            signal: status.signal().unwrap_or(0),
+            stderr_class: diagnostics.class.label(),
+            stderr_bytes: diagnostics.bytes,
+        }
+        .into()
     })
 }
 
@@ -736,6 +987,191 @@ mod tests {
         serde_json::json!({"version":1,"id":"abc","kind":"result","status":"error","code":code})
     }
 
+    #[test]
+    fn aggregation_inputs_are_three_original_hash_sets_not_applied_model_parameters() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let mut inputs = Vec::new();
+        for index in 0..3 {
+            let directory = root.path().join(index.to_string());
+            std::fs::create_dir(&directory).unwrap();
+            let mut files = serde_json::Map::new();
+            for name in [
+                "README.md",
+                "adapter_config.json",
+                "adapter_model.safetensors",
+            ] {
+                let bytes = format!("inert fixture {index} {name}").into_bytes();
+                let path = directory.join(name);
+                std::fs::write(&path, &bytes).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+                files.insert(name.into(), serde_json::json!({"bytes":bytes.len(),"sha256":hex::encode(Sha256::digest(&bytes))}));
+            }
+            inputs.push(Value::Object(files));
+        }
+        let options = Options {
+            mode: Mode::AggregateAdapter,
+            model_profile: crate::compute::ModelProfile::default(),
+            runtime_root: root.path().join("unused-runtime"),
+            model_root: root.path().join("unused-model"),
+            adapter_root: Some(root.path().into()),
+            dataset: root.path().join("unused-input"),
+            output: root.path().join("unused-output"),
+            steps: 1,
+            threads: 2,
+            max_seconds: 600,
+            spare_capacity: true,
+            execute: true,
+        };
+        let report = serde_json::json!({"aggregation":{"input_files":inputs}});
+        check_input_adapter(&report, &options).unwrap();
+        let mut modified = report.clone();
+        modified["aggregation"]["input_files"][1]["README.md"]["sha256"] = "0".repeat(64).into();
+        assert!(check_input_adapter(&modified, &options).is_err());
+        let mut modified = report.clone();
+        modified["input_adapter"] = serde_json::json!({"applied":true});
+        assert!(check_input_adapter(&modified, &options).is_err());
+        let mut modified = report;
+        modified["aggregation"]["input_files"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(check_input_adapter(&modified, &options).is_err());
+    }
+
+    #[test]
+    fn new_planner_execution_does_not_accept_historical_strategy() {
+        let directory = tempfile::tempdir().unwrap();
+        let options = Options {
+            mode: Mode::PlanTasks,
+            model_profile: crate::compute::ModelProfile::default(),
+            runtime_root: directory.path().join("unused-runtime"),
+            model_root: directory.path().join("unused-model"),
+            adapter_root: None,
+            dataset: directory.path().join("input.json"),
+            output: directory.path().join("absent-output"),
+            steps: 1,
+            threads: 2,
+            max_seconds: 600,
+            spare_capacity: true,
+            execute: true,
+        };
+        for version in [2, 3] {
+            let hash = hex::encode(Sha256::digest(b"public"));
+            let input = serde_json::json!({"version":version,"visibility":"public","license":"CC0-1.0",
+                "question":"What is described?","source_bytes":6,"source_sha256":hash,
+                "source_excerpt":{"start":0,"end":6,"text":"public","sha256":hash}});
+            std::fs::write(&options.dataset, serde_json::to_vec(&input).unwrap()).unwrap();
+            for strategy in [
+                "model_questions_scaffold_v1",
+                "model_questions_scaffold_recovery_v2",
+                "model_questions_source_recovery_v3",
+                crate::compute::task_plan::GRAPH_STRATEGY,
+                if version == 3 {
+                    crate::compute::task_plan::CURRENT_STRATEGY
+                } else {
+                    crate::compute::task_plan::GRAPH_STRATEGY
+                },
+            ] {
+                let report = serde_json::json!({"planner_strategy":strategy});
+                assert_eq!(
+                    check_task_plan_result(&report, &options)
+                        .unwrap_err()
+                        .to_string(),
+                    "compute_task_plan_execution_strategy"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fresh_inference_and_training_require_generation_metadata_but_keep_limited_jobs_terminal() {
+        // Inert result-contract inputs, not model execution or answer-quality evidence.
+        for mode in [Mode::Infer, Mode::Train] {
+            let request = WorkerRequest {
+                version: 1,
+                id: "abc".into(),
+                mode,
+                model_profile: super::super::ModelProfile::default(),
+                model_root: "/model",
+                dataset_path: "/dataset.json",
+                output_root: "/output",
+                adapter_root: None,
+                steps: 1,
+                threads: 1,
+                max_seconds: 60,
+                owner_control: false,
+            };
+            let mut reply = serde_json::json!({"status":"ok","mode":mode,"device":"cpu",
+                "updates_completed":u8::from(mode==Mode::Train),"base_weights_unchanged":true,
+                "adapter_weights_changed":true,"checkpoint_reloaded":true,
+                "outputs":[{"sample_index":0,"text":"Inert partial response",
+                    "generated_tokens":64,"text_truncated":false,
+                    "generation":{"version":1,"stop_reason":"token_limit","max_new_tokens":64}}]});
+            assert!(check_result(&reply, &request, ExitStatus::from_raw(0)).is_ok());
+            reply["outputs"][0]["generation"]["stop_reason"] = "eos".into();
+            assert!(check_result(&reply, &request, ExitStatus::from_raw(0)).is_ok());
+            reply["outputs"][0]["text_truncated"] = true.into();
+            assert!(check_result(&reply, &request, ExitStatus::from_raw(0)).is_ok());
+            reply["outputs"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("generation");
+            assert!(check_result(&reply, &request, ExitStatus::from_raw(0)).is_err());
+        }
+    }
+
+    #[test]
+    fn planning_diagnostics_are_typed_only_after_reaping_and_never_quarantine() {
+        let trace = serde_json::json!({"strategy":"model_questions_scaffold_recovery_v2",
+            "attempts":[],"incomplete_attempt":true});
+        let mut reply = failure_reply("BACKEND_EXECUTION_FAILED");
+        reply["planner_diagnostic"] = trace.clone();
+        let pending = worker_failure(&reply, "abc", ExitStatus::from_raw(256));
+        assert!(pending.downcast_ref::<WorkerFailure>().is_none());
+        let error = reaped_failure(pending);
+        let failure = error.downcast_ref::<WorkerFailure>().unwrap();
+        assert_eq!(
+            serde_json::to_value(failure.planner_diagnostic().unwrap()).unwrap(),
+            trace
+        );
+        assert_eq!(adapter_violation(&error), None);
+        reply["planner_diagnostic"]["incomplete_attempt"] = "invented".into();
+        let error = reaped_failure(worker_failure(&reply, "abc", ExitStatus::from_raw(256)));
+        let failure = error.downcast_ref::<WorkerFailure>().unwrap();
+        assert_eq!(failure.code(), "BACKEND_EXECUTION_FAILED");
+        assert!(failure.planner_diagnostic().is_none());
+        let error = reaped_failure(worker_failure(&reply, "abc", ExitStatus::from_raw(9)));
+        assert!(error.downcast_ref::<WorkerFailure>().is_none());
+    }
+
+    #[test]
+    fn planner_stage_failures_preserve_fixed_codes_without_adapter_authority() {
+        for stage in ["ONE", "TWO"] {
+            for cause in [
+                "PROMPT_TOKEN_LIMIT_EXCEEDED",
+                "INVALID_GENERATION_SHAPE",
+                "PROMPT_CHANGED",
+                "GENERATION_LIMIT_REACHED",
+                "COMPLETION_TOKENS_CHANGED",
+                "INCOMPLETE_GENERATION",
+                "INVALID_TEXT",
+                "EMPTY_TEXT",
+                "GOAL_COPY",
+            ] {
+                let code = format!("TASK_PLAN_QUESTION_{stage}_{cause}");
+                let error = reaped_failure(worker_failure(
+                    &failure_reply(&code),
+                    "abc",
+                    ExitStatus::from_raw(256),
+                ));
+                assert_eq!(error.to_string(), format!("compute_backend_failed: {code}"));
+                assert_eq!(error.downcast_ref::<WorkerFailure>().unwrap().code(), code);
+                assert_eq!(adapter_violation(&error), None);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn exact_adapter_failures_become_typed_only_at_the_reaped_boundary() {
         for code in [
@@ -883,15 +1319,27 @@ mod tests {
             let diagnostics = drain_stderr(raw.as_bytes()).await.unwrap();
             assert_eq!(diagnostics.class, expected);
             assert_eq!(diagnostics.bytes, raw.len());
-            let error = required_result(None, ExitStatus::from_raw(256), diagnostics)
-                .unwrap_err()
-                .to_string();
+            let failure =
+                required_result(None, ExitStatus::from_raw(256), diagnostics).unwrap_err();
+            let typed = failure.downcast_ref::<StartupFailure>().unwrap();
+            assert_eq!(typed.exit_code, 1);
+            assert_eq!(typed.signal, 0);
+            assert_eq!(typed.stderr_class, expected.label());
+            assert_eq!(typed.stderr_bytes, raw.len());
+            let error = failure.to_string();
             assert!(error.starts_with("compute_result_missing exit_code=1 signal=0 stderr_class="));
             assert!(
                 !error.contains("owner-secret-name")
                     && !error.contains("payload-sensitive-sentinel")
             );
             assert!(!format!("{diagnostics:?}").contains("private"));
+            assert!(!format!("{typed:?}").contains("private"));
+            assert!(
+                failure
+                    .context("compute_cycle_supervisor")
+                    .downcast_ref::<StartupFailure>()
+                    .is_some()
+            );
         }
         let too_large = vec![b'x'; MAX_STREAM_BYTES + 1];
         assert!(drain_stderr(too_large.as_slice()).await.is_err());
@@ -969,6 +1417,53 @@ mod tests {
                 .await
                 .expect("line"),
             Some(b"{}".to_vec())
+        );
+    }
+
+    #[test]
+    fn planner_progress_accepts_only_content_free_fixed_stages_and_counts() {
+        let mut value = serde_json::json!({"kind":"progress", "phase":"baseline", "step":0,
+            "elapsed_ms":4321, "planner":{"stage":"generation", "attempt":2, "generated_tokens":16}});
+        for stage in [
+            "hash_before",
+            "decoder_setup",
+            "generation",
+            "token_filter",
+            "validation",
+            "hash_after",
+        ] {
+            value["planner"]["stage"] = stage.into();
+            assert_eq!(
+                planner_progress(&value).unwrap(),
+                Some((stage, 2, 16, 4321))
+            );
+        }
+        for (pointer, replacement) in [
+            ("/planner/stage", serde_json::json!("PRIVATE MODEL TEXT")),
+            ("/planner/attempt", serde_json::json!(5)),
+            ("/planner/generated_tokens", serde_json::json!(385)),
+            ("/planner/generated_tokens", serde_json::json!(-1)),
+            ("/planner/attempt", serde_json::json!(true)),
+            ("/phase", serde_json::json!("paused")),
+            ("/step", serde_json::json!(1)),
+            ("/elapsed_ms", serde_json::json!(600_000)),
+        ] {
+            let mut invalid = value.clone();
+            *invalid.pointer_mut(pointer).unwrap() = replacement;
+            assert_eq!(
+                planner_progress(&invalid).unwrap_err().to_string(),
+                "compute_planner_progress"
+            );
+        }
+        let mut extra = value.clone();
+        extra["planner"]["text"] = "PRIVATE MODEL TEXT".into();
+        assert!(planner_progress(&extra).is_err());
+        value["control_sequence"] = 1.into();
+        assert!(planner_progress(&value).is_err());
+        assert!(
+            planner_progress(&serde_json::json!({"phase":"baseline"}))
+                .unwrap()
+                .is_none()
         );
     }
 

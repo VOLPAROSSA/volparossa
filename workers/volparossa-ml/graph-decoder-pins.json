@@ -1,0 +1,54 @@
+{
+  "format_version": 1,
+  "decoder": {
+    "implementation": "lm-format-enforcer",
+    "version": "0.11.3",
+    "adapter_version": 1,
+    "schema_version": 3,
+    "dependencies": {
+      "interegular": "0.3.3",
+      "pydantic": "1.10.24"
+    }
+  },
+  "wheels": [
+    {
+      "name": "lm-format-enforcer",
+      "version": "0.11.3",
+      "path": "lm_format_enforcer-0.11.3-py3-none-any.whl",
+      "bytes": 45418,
+      "sha256": "cf586350875def1ae7a8fba84fcbbfc8371424b6c9d05c1fcba70aa233fbf06f",
+      "url": "https://files.pythonhosted.org/packages/a0/ef/11292bb0b85cf4c93447cab5a29f64576ed14d3ab4280e35ddd23486594a/lm_format_enforcer-0.11.3-py3-none-any.whl",
+      "license": "MIT",
+      "metadata_url": "https://pypi.org/pypi/lm-format-enforcer/0.11.3/json",
+      "source_url": "https://github.com/noamgat/lm-format-enforcer/tree/05c7dc3a46305e39c1a67c8622c433d8deda48a2",
+      "source_revision": "05c7dc3a46305e39c1a67c8622c433d8deda48a2",
+      "source_license_sha256": "d1c02373f9da54abb40fb9fa5ca6c19136d10da76a1054ff1ee2528221ae1bfe"
+    },
+    {
+      "name": "interegular",
+      "version": "0.3.3",
+      "path": "interegular-0.3.3-py37-none-any.whl",
+      "bytes": 23635,
+      "sha256": "b0c07007d48c89d6d19f7204972d369b2a77222722e126b6aa63aa721dc3b19c",
+      "url": "https://files.pythonhosted.org/packages/c4/01/72d6472f80651673716d1deda2a5bbb633e563ecf94f4479da5519d69d25/interegular-0.3.3-py37-none-any.whl",
+      "license": "MIT",
+      "metadata_url": "https://pypi.org/pypi/interegular/0.3.3/json",
+      "source_url": "https://files.pythonhosted.org/packages/dc/9d/8b6dde58a028a3962ce17e84d5fe73758df61378e00ef8ac3d85da34b0ff/interegular-0.3.3.tar.gz",
+      "source_bytes": 24705,
+      "source_sha256": "d9b697b21b34884711399ba0f0376914b81899ce670032486d0d048344a76600"
+    },
+    {
+      "name": "pydantic",
+      "version": "1.10.24",
+      "path": "pydantic-1.10.24-py3-none-any.whl",
+      "bytes": 166727,
+      "sha256": "093768eba26db55a88b12f3073017e3fdee319ef60d3aef5c6c04a4e484db193",
+      "url": "https://files.pythonhosted.org/packages/46/7f/a168d7077f85f85128aa5636abf13c804c06235c786f1881e659703899a4/pydantic-1.10.24-py3-none-any.whl",
+      "license": "MIT",
+      "metadata_url": "https://pypi.org/pypi/pydantic/1.10.24/json",
+      "source_url": "https://github.com/pydantic/pydantic/tree/ebb3e81419f8a1c0b4976b91a22bfb17a3ddf23c",
+      "source_revision": "ebb3e81419f8a1c0b4976b91a22bfb17a3ddf23c",
+      "source_license_sha256": "9e3946690ac88b6b73e8f001a0586af13568be8852fd514e4393f39761764387"
+    }
+  ]
+}
