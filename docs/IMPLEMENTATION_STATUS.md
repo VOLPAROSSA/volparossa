@@ -4,6 +4,28 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-23
 
+The [first active-recovery run on `5b86711f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35850630251)
+**fails before training**, at `RECOVERY_SOURCE_SETUP_FAILED`: the fixture reads a README next
+to its source helper, but provisioning stages that file under `WORK/bin`. All 103 original
+files are preserved; the pinned runtime provision, cleanup and unchanged host-state bytes
+pass independently. No adoption, injected fault, rollback or continued training occurred.
+The corrected fixture uses the staged source and gives learner R4 its own protected route
+through the existing three-candidate topology. R4 starts without training sources or peer Q
+in its cache and cannot read the publisher's private directory. Original retrieval receipts
+must bind those cold transfers to R5; only R5 seed/cache provisioning remains fixture-owned.
+Learner acquisition and Client inference are serialized for independent path observation,
+without changing original approvals, enrollment, expiry or execution budgets. Inert fixture
+checks pass; a new KVM run is still required, and active recovery/full B07 remain incomplete.
+
+The [graph run on `b80f0b02`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35849837032)
+also **fails at `compute_deadline`** after the actual owner reaches baseline. Its original
+acknowledgments show 35.913 seconds of cooperative pauses, but no generation count, output
+or precise decoder subphase is retained. Review of all 110 original files checks the exact
+synthetic source/input, worker isolation, cleanup and unchanged host-state bytes. No graph
+or peer execution is proved. The source-level performance correction alone has therefore
+not established successful planning; neither those pauses nor the separately corrected
+Unicode dead prefixes can be identified as the complete cause from this artifact.
+
 The [policy run on `b80f0b02`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35849851694)
 now preserves the strict `PRINCIPLE_OUTPUT_REASONING` failure from both actual assessors.
 Both reached a parsed response but no accepted judgment, cross-review or portable bundle;
@@ -866,8 +888,11 @@ training P, a distinct node's warm-started Q, independent Q-versus-P approval, c
 the local Q extraction, automatic restoration of original P, protected inference, restart and
 continued P-based training. Its signed source catalog admits the next training source only after
 recovery; the original enrollment, approvals, expiry and completed job receipts remain intact.
-Explicit same-owner public-cache provisioning is not autonomous learner source discovery. This
-new fixture still requires a passing KVM run: active recovery and full B07 are not live-proven.
+The original fixture failed before training as recorded above. Its replacement cold-fetches
+the learner's signed catalog, training/validation sources and Q through its own protected
+route, while the producing peer's seed/cache is explicitly owner-provisioned. Selection remains
+within the enrolled signed catalog/channels, not unrestricted autonomous source selection.
+A passing KVM run is still required: active recovery and full B07 are not live-proven.
 
 Public-document synthesis: `compute peer document --synthesize` chains
 real peer inference over the checked fragment answers until one answer remains. A separate

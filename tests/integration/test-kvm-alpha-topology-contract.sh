@@ -277,7 +277,21 @@ fi''' in guest
 fixture = (root / "agent-active-recovery-smoke.sh").read_text()
 assert '--cache "$recovery_source/catalog-$recovery_catalog_revision-cache"' in fixture
 assert '--min-revision "$recovery_cache_revision"' in fixture
-assert '"learner-catalog-$recovery_catalog_revision" "$recovery_catalog_revision"' in fixture
+assert '[ "$recovery_cache_node" = relay5 ] || fail RECOVERY_LEARNER_CACHE_RELOCATION_FORBIDDEN' in fixture
+assert 'nsenter --target "$recovery_node_pid" --mount --net' in fixture
+for phase in ('relay4 p', 'relay4 adoption', 'relay4 continued', 'client job-p', 'client job-q', 'client job-restored'):
+    assert 'agent_active_recovery_network_start ' + phase in fixture
+assert 'agent_active_recovery_python await "$WORK" armed "$jobs_batch_pid"' in fixture
+assert '[ "$agent_train_loop" = yes ] || [ "$agent_active_recovery" = yes ]; then\n    content_replication_extend_network' in guest
+assert '[ "$agent_train_loop" = yes ] || [ "$agent_active_recovery" = yes ]; then\n        content_replication_configure_node' in guest
+assert '''if [ "$agent_active_recovery" = yes ]; then
+    # Existing disposable R4 client legs and R5 generic-control-only links.
+    # shellcheck source=tests/integration/content-replication-smoke.sh
+    . "$source_directory/tests/integration/content-replication-smoke.sh"''' in guest
+assert '"--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay3 $WORK/state-relay5"' in guest
+jobs = (root / "agent-jobs-smoke.sh").read_text()
+setup = jobs[jobs.index('agent_jobs_setup() {'):jobs.index('agent_jobs_run() {')]
+assert setup.index('if [ "${agent_active_recovery:-no}" = yes ]; then') < setup.index('content_provider_control_underlay')
 for line in guest.splitlines():
     if line.startswith('if [ "$agent_model_planning" = yes ]') or line.startswith('if [ "$agent_model_task_graph" = yes ]'):
         assert "agent_active_recovery" not in line, "135M recovery must not stage 360M/decoder"

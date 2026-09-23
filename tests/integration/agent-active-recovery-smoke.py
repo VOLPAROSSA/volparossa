@@ -3,8 +3,9 @@
 """Actual P -> approved peer Q -> local corruption -> automatic P recovery.
 
 Only self-test is host-safe. Every executable phase requires the disposable
-guest guard. Public cache relocation is explicit provisioning, not a claim of
-learner network acquisition. No model or decision is synthesized by this file.
+guest guard. R4 fetches its signed training sources and Q through its own protected
+route. Only R5's seed/cache is explicitly owner-provisioned. No model or decision
+is synthesized by this file.
 """
 import copy
 import json
@@ -18,6 +19,7 @@ import time
 
 HERE = Path(__file__).resolve().parent
 SUCCESSOR = runpy.run_path(str(HERE / "agent-successor-serving-smoke.py"))
+REP = runpy.run_path(str(HERE / "content-replication-smoke.py"))
 JOBS, TRAIN, ART, CUSTODY, COLLECTION = (SUCCESSOR[k] for k in ("JOBS", "TRAIN", "ART", "CUSTODY", "COLLECTION"))
 read, write, require, file_hash, digest = (SUCCESSOR[k] for k in ("read", "write", "require", "file_hash", "digest"))
 PREFIX = "agent-active-recovery"
@@ -25,8 +27,9 @@ KIND = "volparossa-active-local-adapter-integrity-recovery"
 SCOPE = ("Actual public training P; a distinct node trains from signed P and publishes approved Q; "
          "the learner independently compares Q with P, then automatically retires only its damaged local Q extraction, "
          "restores original unexpired P, serves a protected job and resumes real training from P. "
-         "Original signed bundles, approvals, receipts and enrollment are preserved. Explicit same-owner cache "
-         "provisioning is not learner network discovery. No publisher ban, general quality, Byzantine recovery, "
+         "Original signed bundles, approvals, receipts and enrollment are preserved. R4 cold-fetches signed sources "
+         "and Q over its own protected route; only R5 seed/cache is explicitly owner-provisioned. "
+         "No publisher ban, general quality, Byzantine recovery, "
          "full B07 or complete-alpha claim.")
 FILES = SUCCESSOR["FILES"]
 ROUND = "peer-update-0000000000000001"
@@ -54,12 +57,18 @@ def owned_write(path, value, owner):
     os.chown(path, owner.st_uid, owner.st_gid)
 
 
+def source_training_dataset(work, revision):
+    # kvm-alpha-topology stages the original README here, not alongside the
+    # source helper. Keep this identical to the existing agent-jobs provision.
+    return ART["dataset"](revision, (work / "bin/agent-jobs-README.md").read_text())
+
+
 def sources(work, revision):
     source = private(work, "relay5") / "recovery-source"
     owner = source.parent.stat()
     source.mkdir(mode=0o700)
     os.chown(source, owner.st_uid, owner.st_gid)
-    dataset = ART["dataset"](revision, (HERE / "agent-jobs-README.md").read_text())
+    dataset = source_training_dataset(work, revision)
     owned_write(source / "train.json", dataset, owner)
     validation = copy.deepcopy(dataset)
     validation["train"] = []
@@ -75,6 +84,7 @@ def sources(work, revision):
 
 
 def cache_move(work, node, label, outbound):
+    require(node == "relay5", "learner cache must not be fixture-relocated")
     node_cache = private(work, node) / "source-cache"
     transit = work / "state-client/compute-source/recovery-cache"
     source, target = (node_cache, transit) if outbound else (transit, node_cache)
@@ -120,6 +130,77 @@ def catalog(work, revision):
                  manifest_id=read(record(work, f"{name}-publish"))["manifest_id"]) for name in names]
     owned_write(root / f"catalog-{revision}.json", dict(version=1, visibility="public", purpose="agent_training",
         dataset_profile="application/vnd.volparossa.agent-dataset.v1+json", license="GPL-3.0-only", sources=rows), root.stat())
+
+
+def learner_isolation(work):
+    root = private(work, "relay4")
+    pid = int(subprocess.check_output(["systemctl", "show", "--property=MainPID", "--value",
+                                     "volparossa-alpha-agent@relay4.service"], text=True))
+    require(pid > 0, "learner service stopped")
+    owner_info = root.stat()
+    command = ["nsenter", "--target", str(pid), "--mount", "setpriv",
+        f"--reuid={owner_info.st_uid}", f"--regid={owner_info.st_gid}", "--clear-groups",
+        "--inh-caps=-all", "--ambient-caps=-all", "--bounding-set=-all", "--no-new-privs", "--", "test", "-r"]
+    own = subprocess.run([*command, str(root / "plan.json")], timeout=10, check=False).returncode
+    remote = {name: subprocess.run([*command, str(path)], timeout=10, check=False).returncode for name, path in
+              (("publisher_dataset", private(work, "relay5") / "recovery-source/train.json"),
+               ("client_cache", work / "state-client/compute-source/cache"))}
+    require(own == 0 and all(code == 1 for code in remote.values()), "learner can read another node's source/cache")
+    write(record(work, "learner-isolation"), dict(node="relay4", own_plan_readable=True,
+        foreign_sources_unreadable=True, node_mount_namespace=os.readlink(f"/proc/{pid}/ns/mnt"),
+        source_cache_files=bounded_tree(root / "source-cache"), cache_initializer=read(record(work, "learner-cache-init"))))
+
+
+def network_path(work, label):
+    require(label in ("p", "adoption", "continued", "job-p", "job-q", "job-restored", "receipts"), "unknown network phase")
+    prefix = f"{PREFIX}-path-{label}"
+    value = dict(layout=read(work / f"{prefix}-layout.json"),
+        selected_route=read(work / f"{prefix}-selection.json"), route=read(work / f"{prefix}-live-selection.json"),
+        captures={role: read(work / f"{prefix}-{role}.json") for role in REP["ROLES"]},
+        disconnected=True)
+    check_network_path(value, "uptake" if label in ("p", "adoption", "continued") else "reserve-fetch",
+                       read(work / "a01-expected-peers.json"))
+    write(record(work, f"network-{label}"), value)
+
+
+def check_network_path(value, phase, peers, minimum_bytes=1):
+    layout_ = REP["CAPTURE"]["validate_layout"](value["layout"])
+    REP["validate_route"](value["selected_route"], peers)
+    REP["validate_route"](value["route"], peers)
+    require(layout_["phase"] == phase and value["disconnected"] is True
+            and value["selected_route"]["route_context_id"] == value["route"]["route_context_id"]
+            and set(layout_["relays"]) == {slot["relay_node"] for slot in value["route"]["benchmark_slots"]},
+            "network phase changed its selected protected route")
+    captures, relays = value["captures"], sorted(layout_["relays"])
+    require(set(captures) == set(REP["ROLES"]), "network capture coverage incomplete")
+    for role, capture_ in captures.items():
+        node = (layout_["client"]["node"] if role == "receiver" else layout_["provider"]["node"] if role == "provider"
+                else relays[0] if role == "relay-a" else relays[1] if role == "relay-b" else "exit")
+        REP["validate_capture"](capture_, layout_, node)
+    # These are small functional messages, not a throughput benchmark. Both
+    # real WG legs of each selected path still have to carry encrypted data.
+    for role, relay in zip(("relay-a", "relay-b"), relays):
+        require(captures[role]["client_leg_wireguard_data_datagrams"] > 0
+                and captures[role]["exit_leg_wireguard_data_datagrams"] > 0
+                and captures["receiver"][f"{relay}_client_leg_wireguard_data_datagrams"] > 0
+                and captures["exit"][f"{relay}_exit_leg_wireguard_data_datagrams"] > 0,
+                "selected path did not carry real protected data")
+    for role in ("exit", "provider"):
+        require(captures[role]["provider_request_packets"] > 0 and captures[role]["provider_response_packets"] > 0
+                and captures[role]["provider_response_payload_bytes"] >= minimum_bytes,
+                "protected provider transfer not observed")
+    for role in ("receiver", "relay-a", "relay-b"):
+        require(all(captures[role][key] == 0 for key in ("provider_request_packets", "provider_response_packets",
+                                                       "provider_response_payload_bytes")), "provider payload escaped protected path")
+
+
+def check_cold_receipt(receipt, signed_manifest, payload, provider):
+    require(receipt["manifest_id"] == digest(signed_manifest)["sha256"]
+            and receipt["sha256"] == digest(payload)["sha256"]
+            and receipt["bytes"] == receipt["peer_bytes"] == len(payload) > 0
+            and receipt["provider_peer_ids"] == [provider] and receipt["providers_used"] == 1
+            and receipt["origin_body_bytes"] == receipt["origin_range_requests"] == 0
+            and receipt["cache_only"] is False, "learner did not acquire exact cold content over its protected route")
 
 
 def bounded_tree(root, retain_bundle=False):
@@ -171,6 +252,8 @@ def capture_cycle(work, label, node, sequence):
                  enrollment=(root / "loop/enrollment.json").read_bytes().hex())
     if label == "q":
         value["seed"] = bounded_tree(root / "loop/seed-input")
+    if label == "p":
+        value["validation"] = bounded_tree(root / "loop/validation-input")
     write(record(work, f"{label}-cycle"), value)
 
 
@@ -299,7 +382,7 @@ def snapshot(work):
 
 
 def await_state(work, stage, pid):
-    require(stage in ("active", "restored", "restarted"), "unknown state")
+    require(stage in ("active", "armed", "restored", "restarted"), "unknown state")
     identity = TRAIN["identity"](pid)
     deadline = time.monotonic() + 900
     seen_workers = []
@@ -317,12 +400,14 @@ def await_state(work, stage, pid):
                     if found:
                         seen_workers.append(dict(stage=part, **found))
             ready = registry["active"] == 1 and state["latest"] == 1
+        elif stage == "armed":
+            ready = registry["active"] == 1 and state["latest"] == 1
         else:
             rounds = registry["completed"]
             ready = registry["active"] is None and len(rounds) == 1 and rounds[0].get("retirement") is not None
         if ready:
             value = snapshot(work)
-            expected = (read(record(work, "q-cycle"), MAX_PROOF)["files"] if stage == "active"
+            expected = (read(record(work, "q-cycle"), MAX_PROOF)["files"] if stage in ("active", "armed")
                         else read(record(work, "p-cycle"), MAX_PROOF)["files"])
             files = {name: {key: expected[f"training/adapter/{name}"][key] for key in ("bytes", "sha256")} for name in FILES}
             if value["current"]["adapter_files"] != files:
@@ -331,6 +416,12 @@ def await_state(work, stage, pid):
             if stage == "active":
                 require({entry["stage"] for entry in seen_workers} == {"baseline", "candidate"}, "real independent comparison workers missing")
                 value["comparison_observations"] = seen_workers
+            if stage == "armed":
+                prior = read(record(work, "active"), MAX_PROOF)
+                require(value["state"]["peer_updates"]["completed"] == prior["state"]["peer_updates"]["completed"]
+                        and value["round_files"] == prior["round_files"] and value["enrollment"] == prior["enrollment"]
+                        and value["current"]["expires_unix_seconds"] == prior["current"]["expires_unix_seconds"],
+                        "clean coordinator restart changed Q original approval/expiry")
             if stage == "restarted":
                 prior = read(record(work, "restored"), MAX_PROOF)
                 require(value["state"]["peer_updates"]["completed"] == prior["state"]["peer_updates"]["completed"]
@@ -548,6 +639,18 @@ def check_evidence(value, revision):
     decision = json.loads(original["comparison/decision.json"])
     validation_expiry = signed_content(original["comparison/dataset.manifest"], original["comparison/dataset.json"],
                                       keys["relay5"], "disposable-recovery-validation")
+    validation_files = raw_files(p["validation"])
+    require(validation_files["dataset.manifest"] == original["comparison/dataset.manifest"]
+            and validation_files["dataset.json"] == original["comparison/dataset.json"],
+            "independent comparison changed its enrolled validation source")
+    provider = value["peers"]["relay5"]
+    for files in (p_files, later_files):
+        check_cold_receipt(json.loads(files["result.json"])["source_receipt"],
+                           files["dataset.manifest"], files["dataset.json"], provider)
+    check_cold_receipt(json.loads(validation_files["provenance.json"])["source_receipt"],
+                       validation_files["dataset.manifest"], validation_files["dataset.json"], provider)
+    check_cold_receipt(json.loads(original["import/provenance.json"])["adapter_receipt"],
+                       q_files["publication.pb"], q_files["adapter.bundle"], provider)
     require(decision["approved"] is True and decision["baseline_origin"] == dict(kind="local_cycle", sequence=1)
             and decision["candidate"]["target_tokens"] == decision["baseline"]["target_tokens"] > 0
             and decision["candidate"]["loss"] < decision["baseline"]["loss"] - 1e-6,
@@ -569,6 +672,15 @@ def check_evidence(value, revision):
             and value["restarted"]["state"]["peer_updates"]["completed"] == restored["state"]["peer_updates"]["completed"]
             and value["restarted"]["coordinator"] != restored["coordinator"]
             and value["final"]["round_files"] == restored["round_files"], "P expiry/restart/retention changed")
+    armed = value["armed"]
+    require(armed["state"]["peer_updates"]["active"] == 1
+            and armed["state"]["peer_updates"]["completed"] == active["state"]["peer_updates"]["completed"]
+            and armed["round_files"] == active["round_files"] and armed["enrollment"] == active["enrollment"]
+            and armed["current"]["adapter_files"] == active["current"]["adapter_files"]
+            and armed["current"]["expires_unix_seconds"] == active["current"]["expires_unix_seconds"]
+            and armed["coordinator"] != active["coordinator"] and armed["coordinator"] == restored["coordinator"]
+            and armed["observed_unix_seconds"] <= value["fault"]["injected_unix_seconds"] <= restored["observed_unix_seconds"],
+            "corruption/recovery did not occur in the live original-approval coordinator")
     for label in ("p", "q", "restored"):
         handle, receipt = value["handles"][label], value[f"{label}-status"]
         expected = decision["candidate_files"] if label == "q" else p_adapter
@@ -591,20 +703,28 @@ def check_evidence(value, revision):
     require(value["process-cleanup"]["all_recorded_processes_ended"] is True
             and value["process-cleanup"]["checked_before_private_store_removal"] is True
             and all(value["cleanup"].values()), "owned workers or private stores remain")
-    CUSTODY["validate_path"](value["path"], value["peers"], value["layout"], "inspect")
+    isolation = value["learner-isolation"]
+    require(isolation["node"] == "relay4" and isolation["own_plan_readable"] is True
+            and isolation["foreign_sources_unreadable"] is True and isolation["node_mount_namespace"].startswith("mnt:["),
+            "learner source/cache shortcut was not excluded")
+    minimums = {"p": len(p_files["dataset.json"]) + len(validation_files["dataset.json"]),
+                "adoption": len(q_files["adapter.bundle"]), "continued": len(later_files["dataset.json"])}
+    require(set(value["network"]) == {*minimums, "job-p", "job-q", "job-restored", "receipts"},
+            "serialized learner/job network phase missing")
+    for label, path in value["network"].items():
+        check_network_path(path, "uptake" if label in minimums else "reserve-fetch", value["peers"], minimums.get(label, 1))
 
 
 def evidence(work, revision):
-    names = ("p-cycle", "q-cycle", "continued-cycle", "active", "restored", "restarted", "fault", "final", "handles",
+    names = ("p-cycle", "q-cycle", "continued-cycle", "active", "armed", "restored", "restarted", "fault", "final", "handles", "learner-isolation",
              "p-training-observation", "q-training-observation", "continued-training-observation", "process-cleanup",
              "p-caps", "q-caps", "restored-caps", "p-status", "q-status", "restored-status", "p-retained", "q-retained",
              "p-job-observation", "q-job-observation", "restored-job-observation")
     value = {name: read(record(work, name), MAX_PROOF) for name in names}
     value.update(source_revision=revision, layout=layout(work), peers=read(work / "a01-expected-peers.json"),
         cleanup=read(work / "agent-jobs-private-cleanup.json"),
-        path=dict(selected_route=read(work / "content-custody-fetch-live-selection.json"),
-            privacy={role: read(work / f"content-custody-fetch-privacy-{role}.json") for role in CUSTODY["ROLES"]},
-            control_privacy=read(work / "content-provider-custody-fetch-control.json"), gates=read(work / "content-custody-fetch-gates.json")))
+        network={label: read(record(work, f"network-{label}"))
+                 for label in ("p", "adoption", "continued", "job-p", "job-q", "job-restored", "receipts")})
     check_evidence(value, revision)
     require(len(json.dumps(value)) < MAX_PROOF, "proof exceeds fixed artifact bound")
     write(record(work, "evidence"), value)
@@ -634,6 +754,23 @@ def report(value, revision):
 
 def self_test():
     # Inert structural controls, never presented as live ML/recovery evidence.
+    from unittest.mock import patch
+    public_source = ("Every parallel path uses exactly one distinct relay between the same client and exit.\n"
+                     "The normal client dataplane never connects directly to an exit.")
+    with patch.object(Path, "read_text", autospec=True, return_value=public_source) as staged:
+        dataset = source_training_dataset(Path("/fixture"), "a" * 40)
+        staged.assert_called_once_with(Path("/fixture/bin/agent-jobs-README.md"))
+        assert dataset["train"] and dataset["heldout"]
+    receipt = dict(manifest_id=digest(b"signed")["sha256"], sha256=digest(b"payload")["sha256"],
+                   bytes=7, peer_bytes=7, provider_peer_ids=["R5"], providers_used=1,
+                   origin_body_bytes=0, origin_range_requests=0, cache_only=False)
+    check_cold_receipt(receipt, b"signed", b"payload", "R5")
+    for changed in (dict(peer_bytes=0), dict(provider_peer_ids=["Client"]), dict(origin_body_bytes=1), dict(cache_only=True)):
+        try:
+            check_cold_receipt({**receipt, **changed}, b"signed", b"payload", "R5")
+        except ValueError:
+            continue
+        raise AssertionError("cache/provisioning or wrong-provider receipt accepted as cold learner fetch")
     before = {"import/adapter/adapter_model.safetensors": {"sha256": "a"}, "import/adapter.bundle": {"sha256": "b"}}
     after = copy.deepcopy(before)
     after["import/adapter/adapter_model.safetensors"]["sha256"] = "c"
@@ -675,6 +812,8 @@ def main():
     elif command in ("cache-in", "cache-out"): cache_move(work, args[1], args[2], command == "cache-out")
     elif command == "enroll": enroll(work)
     elif command == "catalog": catalog(work, int(args[1]))
+    elif command == "learner-isolation": learner_isolation(work)
+    elif command == "network-path": network_path(work, args[1])
     elif command == "owner": owner(work, args[1], int(args[2]))
     elif command == "observe-training": observe_training(work, args[1], args[2], int(args[3]), int(args[4]))
     elif command == "capture-cycle": capture_cycle(work, args[1], args[2], int(args[3]))

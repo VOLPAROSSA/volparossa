@@ -244,7 +244,15 @@ agent_jobs_setup() {
         | map(select($p[.] != $control)) | .[:2] | select(length == 2)' "$WORK/a01-expected-peers.json") || fail JOBS_PEERS_INVALID
     provider_node_a=$(printf '%s\n' "$provider_nodes" | jq -er '.[0]')
     provider_node_b=$(printf '%s\n' "$provider_nodes" | jq -er '.[1]')
-    if [ "${agent_jobs_peer_recovery:-no}" = yes ]; then
+    if [ "${agent_active_recovery:-no}" = yes ]; then
+        # The pre-start replication graph already connects both providers to
+        # all three candidates. Adding cp links would collide with those /32
+        # routes and replace the learner's actual WireGuard-capable legs.
+        [ "$provider_node_a" = relay4 ] || fail RECOVERY_NODE_LAYOUT_CHANGED
+        [ "$provider_node_b" = relay5 ] || fail RECOVERY_NODE_LAYOUT_CHANGED
+        jq -e --arg control "$provider_control_peer" '[.relay0,.relay1,.relay2] | index($control) != null' \
+            "$WORK/a01-expected-peers.json" >/dev/null || fail RECOVERY_CONTROL_NOT_INDEPENDENT
+    elif [ "${agent_jobs_peer_recovery:-no}" = yes ]; then
         jq -e --arg control "$provider_control_peer" '[.relay0,.relay1,.relay2] | index($control) != null' \
             "$WORK/a01-expected-peers.json" >/dev/null || fail PEER_RECOVERY_CONTROL_NOT_INDEPENDENT
         content_provider_adaptive_control_underlay "$provider_control_peer" || fail PEER_RECOVERY_CONTROL_UNDERLAY_FAILED

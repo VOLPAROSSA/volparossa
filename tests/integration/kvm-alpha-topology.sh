@@ -106,6 +106,8 @@ print_plan() {
         if [ "$agent_active_recovery" = yes ]; then
             printf '%s\n' \
                 'VOLPAROSSA active-recovery plan:' \
+                '  connect learner R4 through R0/R1/R2; fetch signed sources and Q over its own protected route;' \
+                '  provision only R5 seed/cache explicitly; serialize learner uptake and Client inference captures;' \
                 '  train P, then a distinct Client+Relay node trains and publishes an approved Q from P;' \
                 '  damage only the learner-local extracted Q weights; automatically restore original approved P;' \
                 '  preserve the signed Q publication, approval and old job receipts; verify restart and continued training;' \
@@ -869,7 +871,8 @@ if [ "$agent_successor_serving" = yes ] || [ "$agent_active_recovery" = yes ]; t
     command -v openssl >/dev/null 2>&1 || exit 69
 fi
 if [ "$agent_active_recovery" = yes ]; then
-    for recovery_fixture in agent-active-recovery-smoke.sh agent-active-recovery-smoke.py; do
+    for recovery_fixture in agent-active-recovery-smoke.sh agent-active-recovery-smoke.py \
+        content-replication-smoke.sh content-replication-smoke.py content-replication-capture.py; do
         [ -f "$source_directory/tests/integration/$recovery_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$recovery_fixture" ] || exit 69
     done
@@ -2200,6 +2203,9 @@ if [ "$agent_successor_serving" = yes ] || [ "$agent_active_recovery" = yes ]; t
     . "$source_directory/tests/integration/agent-successor-serving-smoke.sh"
 fi
 if [ "$agent_active_recovery" = yes ]; then
+    # Existing disposable R4 client legs and R5 generic-control-only links.
+    # shellcheck source=tests/integration/content-replication-smoke.sh
+    . "$source_directory/tests/integration/content-replication-smoke.sh"
     # shellcheck source=tests/integration/agent-active-recovery-smoke.sh
     . "$source_directory/tests/integration/agent-active-recovery-smoke.sh"
 fi
@@ -2374,6 +2380,9 @@ if [ "$agent_successor_serving" = yes ] || [ "$agent_active_recovery" = yes ]; t
 fi
 if [ "$agent_active_recovery" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/agent-active-recovery-smoke.py" "$WORK/bin/agent-active-recovery-smoke.py"
+    for recovery_script in content-replication-smoke.py content-replication-capture.py; do
+        install -o root -g root -m 0555 "$source_directory/tests/integration/$recovery_script" "$WORK/bin/$recovery_script"
+    done
 fi
 if [ "$agent_train_loop" = yes ]; then
     for loop_script in agent-train-loop-smoke.py agent-train-loop-catalog.py agent-peer-learning-smoke.py content-replication-smoke.py content-replication-capture.py; do
@@ -2586,7 +2595,7 @@ CONTENT_ADAPTIVE_FILTER
 fi
 if [ "$scenario" = dns-cache ]; then
     dns_cache_extend_network
-elif [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$agent_train_loop" = yes ]; then
+elif [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$agent_train_loop" = yes ] || [ "$agent_active_recovery" = yes ]; then
     content_replication_extend_network
 elif [ "$scenario" = mixed-link ]; then
     mixed_link_extend_network
@@ -2761,7 +2770,7 @@ write_config() {
         relay_capacity=10; exit_capacity=10
     fi
     [ "$scenario" != mixed-link ] || mixed_link_configure_node
-    if [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$agent_train_loop" = yes ]; then
+    if [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$agent_train_loop" = yes ] || [ "$agent_active_recovery" = yes ]; then
         content_replication_configure_node
     fi
     if [ "$agent_train_loop" = yes ] && [ "$node" = relay3 ]; then
@@ -3242,6 +3251,11 @@ launch_agent() {
             client) set -- "--property=InaccessiblePaths=$WORK/state-relay4 $WORK/state-relay5 $WORK/content-repair-seed" ;;
             relay4) set -- "--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay5 $WORK/content-repair-seed" ;;
         esac
+    fi
+    if [ "$agent_active_recovery" = yes ] && [ "$node" = relay4 ]; then
+        # The learner must acquire signed sources and adapters via its own API,
+        # not read the publisher's files merely because both use the same UID.
+        set -- "--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay3 $WORK/state-relay5"
     fi
     systemd-run --no-block --unit="$agent_unit" --slice=system.slice \
         --description="VOLPAROSSA disposable alpha agent $node" \

@@ -21,6 +21,9 @@ agent_active_recovery_publish() {
 
 agent_active_recovery_cache() {
     recovery_cache_node=$1; recovery_cache_key=$2; recovery_cache_name=$3
+    # Only the producing peer is owner-provisioned. R4's coordinator fetches
+    # its sources and Q itself through the protected node-local API.
+    [ "$recovery_cache_node" = relay5 ] || fail RECOVERY_LEARNER_CACHE_RELOCATION_FORBIDDEN
     recovery_cache_label=$4
     recovery_cache_revision=${5:-1}
     agent_active_recovery_python cache-out "$WORK" "$recovery_cache_node" "$recovery_cache_label" \
@@ -47,8 +50,36 @@ agent_active_recovery_catalog() {
         --cache "$recovery_source/catalog-$recovery_catalog_revision-cache" --manifest "$recovery_source/catalog-$recovery_catalog_revision.pb" \
         --lifetime-seconds 7200 --contribute >"$WORK/agent-active-recovery-catalog-$recovery_catalog_revision-publish.json" \
         2>"$WORK/agent-active-recovery-catalog-$recovery_catalog_revision-publish.err" || fail RECOVERY_CATALOG_PUBLICATION_FAILED
-    agent_active_recovery_cache "$provider_node_a" "$jobs_key_b" disposable-recovery-catalog \
-        "learner-catalog-$recovery_catalog_revision" "$recovery_catalog_revision"
+}
+
+agent_active_recovery_network_start() {
+    recovery_network_node=$1; recovery_network_label=$2
+    [ -z "${jobs_batch_pid:-}" ] || fail RECOVERY_NETWORK_PHASE_WORKER_ACTIVE
+    [ -z "$PRIVACY_CLIENT_PID$PRIVACY_RELAY0_PID$PRIVACY_RELAY1_PID$PRIVACY_RELAY2_PID$PRIVACY_EXIT_PID$PROVIDER_CONTROL_PID" ] \
+        || fail RECOVERY_CAPTURE_OVERLAP
+    case $recovery_network_node in
+        relay4) recovery_network_phase=uptake; recovery_other_node=client ;;
+        client) recovery_network_phase=reserve-fetch; recovery_other_node=relay4 ;;
+        *) fail RECOVERY_NETWORK_NODE_INVALID ;;
+    esac
+    content_replication_disconnect "$recovery_other_node" "agent-active-recovery-$recovery_network_label-other" \
+        || fail RECOVERY_OTHER_ROUTE_NOT_IDLE
+    recovery_network_prefix=agent-active-recovery-path-$recovery_network_label
+    content_replication_select "$recovery_network_node" "$recovery_network_prefix" \
+        || fail RECOVERY_PROTECTED_ROUTE_UNAVAILABLE
+    content_replication_capture "$recovery_network_phase" "$recovery_network_prefix" \
+        "$WORK/$recovery_network_prefix-selection.json" || fail RECOVERY_CAPTURE_UNAVAILABLE
+}
+
+agent_active_recovery_network_finish() {
+    [ -z "${jobs_batch_pid:-}" ] || fail RECOVERY_NETWORK_PHASE_WORKER_ACTIVE
+    content_replication_snapshot "$recovery_network_node" "$recovery_network_prefix-live" \
+        || fail RECOVERY_LIVE_ROUTE_MISSING
+    stop_privacy_observers || fail RECOVERY_CAPTURE_INCOMPLETE
+    content_replication_disconnect "$recovery_network_node" "$recovery_network_prefix" \
+        || fail RECOVERY_ROUTE_CLEANUP_FAILED
+    agent_active_recovery_python network-path "$WORK" "$recovery_network_label" \
+        || fail RECOVERY_NETWORK_EVIDENCE_FAILED
 }
 
 agent_active_recovery_loop_start() {
@@ -71,7 +102,7 @@ agent_active_recovery_loop_start() {
         *) fail RECOVERY_LOOP_MODE ;;
     esac
     PHASE=agent-active-recovery-$recovery_label
-    timeout --signal=INT --kill-after=15s 1200s nsenter --target "$recovery_node_pid" --net \
+    timeout --signal=INT --kill-after=15s 1200s nsenter --target "$recovery_node_pid" --mount --net \
         setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- "$binary_directory/volparossa" --control-socket "$WORK/runtime-$recovery_node/control/agent.sock" \
@@ -127,16 +158,14 @@ agent_active_recovery_job() {
 }
 
 agent_active_recovery_run() {
-    [ "$provider_node_a" = relay4 ] && [ "$provider_node_b" = relay5 ] || fail RECOVERY_NODE_LAYOUT_CHANGED
+    [ "$provider_node_a" = relay4 ] || fail RECOVERY_NODE_LAYOUT_CHANGED
+    [ "$provider_node_b" = relay5 ] || fail RECOVERY_NODE_LAYOUT_CHANGED
     recovery_source=$WORK/state-$provider_node_b/compute/recovery-source
     agent_active_recovery_python sources "$WORK" "$expected_commit" || fail RECOVERY_SOURCE_SETUP_FAILED
-    content_custody_phase_start fetch
     agent_active_recovery_publish train
     agent_active_recovery_publish validation
-    for recovery_seed_node in "$provider_node_a" "$provider_node_b"; do
-        agent_active_recovery_cache "$recovery_seed_node" "$jobs_key_b" disposable-recovery-train "$recovery_seed_node-train"
-        agent_active_recovery_cache "$recovery_seed_node" "$jobs_key_b" disposable-recovery-validation "$recovery_seed_node-validation"
-    done
+    agent_active_recovery_cache "$provider_node_b" "$jobs_key_b" disposable-recovery-train relay5-train
+    agent_active_recovery_cache "$provider_node_b" "$jobs_key_b" disposable-recovery-validation relay5-validation
     agent_active_recovery_catalog 1
     agent_active_recovery_python enroll "$WORK" || fail RECOVERY_ENROLLMENT_FAILED
     for recovery_seed_node in "$provider_node_a" "$provider_node_b"; do
@@ -148,47 +177,73 @@ agent_active_recovery_run() {
             --manifest "$WORK/state-$recovery_seed_node/compute/enrollment.pb" --lifetime-seconds 7200 \
             >"$WORK/agent-active-recovery-$recovery_seed_node-owner-cache.json" || fail RECOVERY_OWNER_CACHE_FAILED
     done
+    # The existing train-loop API reopens an owner-created cache. Initialize it
+    # with only the learner's own public enrollment, never a dataset or peer Q.
+    agent_jobs_cli "$provider_node_a" content publish --input "$WORK/state-$provider_node_a/compute/plan.json" \
+        --name disposable-recovery-cache-init --revision 1 --content-type application/json \
+        --identity "$WORK/state-$provider_node_a/identity.key" \
+        --passphrase-file "$WORK/credential-$provider_node_a/identity-passphrase" \
+        --cache "$WORK/state-$provider_node_a/compute/source-cache" \
+        --manifest "$WORK/state-$provider_node_a/compute/source-cache-init.pb" --lifetime-seconds 7200 \
+        >"$WORK/agent-active-recovery-learner-cache-init.json" || fail RECOVERY_LEARNER_EMPTY_CACHE_FAILED
+    agent_active_recovery_python learner-isolation "$WORK" || fail RECOVERY_LEARNER_SOURCE_SHORTCUT
+    agent_active_recovery_network_start relay4 p
     agent_active_recovery_loop_start "$provider_node_a" p initial
     agent_active_recovery_python observe-training "$WORK" p "$provider_node_a" 1 "$jobs_batch_pid" \
         || fail RECOVERY_P_REAL_TRAINING_MISSING
     wait "$jobs_batch_pid" || fail RECOVERY_P_LOOP_FAILED
     jobs_batch_pid=
     agent_active_recovery_python capture-cycle "$WORK" p "$provider_node_a" 1 || fail RECOVERY_P_NOT_APPROVED
+    agent_active_recovery_network_finish
+    agent_active_recovery_network_start client job-p
     agent_active_recovery_job p
     agent_active_recovery_cache "$provider_node_b" "$jobs_key_a" disposable-recovery-p q-seed
+    agent_active_recovery_network_finish
     agent_active_recovery_loop_start "$provider_node_b" q initial
     agent_active_recovery_python observe-training "$WORK" q "$provider_node_b" 1 "$jobs_batch_pid" \
         || fail RECOVERY_Q_REAL_TRAINING_MISSING
     wait "$jobs_batch_pid" || fail RECOVERY_Q_LOOP_FAILED
     jobs_batch_pid=
     agent_active_recovery_python capture-cycle "$WORK" q "$provider_node_b" 1 || fail RECOVERY_Q_NOT_APPROVED
-    agent_active_recovery_cache "$provider_node_a" "$jobs_key_b" disposable-recovery-q learner-q
+    agent_active_recovery_network_start relay4 adoption
     agent_active_recovery_loop_start "$provider_node_a" adoption observe
     agent_active_recovery_python await "$WORK" active "$jobs_batch_pid" || fail RECOVERY_REAL_Q_ADOPTION_MISSING
+    agent_active_recovery_loop_stop
+    agent_active_recovery_network_finish
+    agent_active_recovery_network_start client job-q
     agent_active_recovery_job q
+    agent_active_recovery_network_finish
+    # Resume the same durable Q approval before injecting the fault. This
+    # keeps Client inference and learner fetching in separate measured phases;
+    # no worker is frozen and no approval or deadline is regenerated.
+    agent_active_recovery_loop_start "$provider_node_a" recovery observe
+    agent_active_recovery_python await "$WORK" armed "$jobs_batch_pid" || fail RECOVERY_Q_RESTART_CHANGED
     agent_active_recovery_python inject "$WORK" || fail RECOVERY_LOCAL_EXTRACTION_FAULT_FAILED
     agent_active_recovery_python await "$WORK" restored "$jobs_batch_pid" || fail RECOVERY_AUTOMATIC_ROLLBACK_MISSING
-    agent_active_recovery_job restored
     agent_active_recovery_loop_stop
+    agent_active_recovery_network_start client job-restored
+    agent_active_recovery_job restored
+    agent_active_recovery_network_finish
     agent_active_recovery_loop_start "$provider_node_a" restart observe
     agent_active_recovery_python await "$WORK" restarted "$jobs_batch_pid" || fail RECOVERY_RESTART_NOT_IDEMPOTENT
     agent_active_recovery_loop_stop
     agent_active_recovery_publish next
-    agent_active_recovery_cache "$provider_node_a" "$jobs_key_b" disposable-recovery-next learner-next
     agent_active_recovery_catalog 2
+    agent_active_recovery_network_start relay4 continued
     agent_active_recovery_loop_start "$provider_node_a" continued train
     agent_active_recovery_python observe-training "$WORK" continued "$provider_node_a" 2 "$jobs_batch_pid" \
         || fail RECOVERY_RESTORED_WARMSTART_NOT_OBSERVED
     wait "$jobs_batch_pid" || fail RECOVERY_CONTINUED_TRAINING_FAILED
     jobs_batch_pid=
     agent_active_recovery_python capture-cycle "$WORK" continued "$provider_node_a" 2 || fail RECOVERY_CONTINUED_TRAINING_INVALID
+    agent_active_recovery_network_finish
+    agent_active_recovery_network_start client receipts
     for recovery_receipt in p q; do
         agent_jobs_cli client compute peer poll --handle "$jobs_source/recovery-$recovery_receipt-handle.json" \
             >"$WORK/agent-active-recovery-$recovery_receipt-retained.json" || fail RECOVERY_ORIGINAL_RECEIPT_MISSING
     done
     agent_active_recovery_python capture "$WORK" || fail RECOVERY_ORIGINALS_CHANGED
-    content_custody_phase_finish 4
-    benchmark_disconnect_route agent-jobs || fail RECOVERY_ROUTE_CLEANUP_FAILED
+    agent_active_recovery_network_finish
     agent_jobs_cleanup || fail RECOVERY_PRIVATE_CLEANUP_FAILED
     agent_active_recovery_python evidence "$WORK" "$expected_commit" || fail RECOVERY_EVIDENCE_INVALID
     OBSERVED_BLOCKER=NONE

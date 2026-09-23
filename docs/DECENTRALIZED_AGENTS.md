@@ -1771,9 +1771,16 @@ The runtime compiles and its targeted tests pass, including interrupted-validati
 withdrawal during the broker's initial-base window. The new `agent-active-recovery` disposable
 scenario follows actual P training, peer Q training from P and independent Q approval, then
 damages only the local Q extraction and requires restored P inference, restart and continued
-training. A signed catalog supplies the next source without changing the original enrollment;
-public-cache provisioning is explicitly fixture-owned, not autonomous learner discovery. The
-scenario still needs passing KVM evidence. Full B07 remains open.
+training. A signed catalog supplies the next source without changing the original enrollment.
+The [first run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35850630251) fails before
+training because the source helper looks for the staged README in the wrong directory; its
+successful provisioning and cleanup do not prove recovery. The replacement uses `WORK/bin`
+and adds the learner's own protected network legs. It cold-fetches training/validation sources
+and Q from the publishing peer, with original provider-bound receipts; the learner cannot read
+the publisher's private source/cache. Only the producing peer's seed/cache is owner-provisioned.
+Serialized learner acquisition and Client inference retain original approvals and expiry across
+coordinator restart. Source choice stays within enrolled signed catalogs/channels, not unrestricted
+autonomous discovery. The corrected scenario still needs passing KVM evidence. Full B07 remains open.
 
 Network-wide quarantine/replacement follows the automatic decision protocol, with bounded
 evidence, expiry and re-evaluation. A peer cannot erase another user's files or repair their
