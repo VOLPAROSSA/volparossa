@@ -86,12 +86,61 @@ fn complete_versioned_framework_is_the_context_not_an_example_catalogue() {
         assert!(context.contains(required));
     }
     assert_eq!(scope().framework_sha256, hash(&framework()).unwrap());
-    assert!(assessment_question().len() <= 512 && review_question().len() <= 512);
+    assert!(assessment_question(false).len() <= 512 && review_question(false).len() <= 512);
+    assert!(assessment_question(false).contains("total <=2048 bytes"));
+    assert!(review_question(false).contains("total <=2048 bytes"));
     let record = assessment(1, Outcome::Allow);
     let reviewed = review_context(SOURCE, &record).unwrap();
     assert!(reviewed.contains(&record.sha256().unwrap()));
     assert!(reviewed.contains(&serde_json::to_string(&record.assessment).unwrap()));
     assert!(reviewed.len() <= MAX_CONTEXT_BYTES);
+}
+
+#[test]
+fn full_three_principle_payloads_fit_without_relaxing_semantic_field_limits() {
+    use volparossa_content::provider::compute::dataset::PrincipleOutputContract::{
+        PrincipleAssessmentV1, PrincipleReviewV1,
+    };
+
+    let source = "q".repeat(128);
+    let scope = Scope::new(&key(3), &"a".repeat(64), &source).unwrap();
+    let reasoning = ["Mansuetudo", "Liberalitas", "Temperantia"]
+        .map(|principle| json!({"principle":principle,"quote":source,"reason":"r".repeat(192)}));
+    let mut value = json!({"version":1,"outcome":"undetermined","reasoning":reasoning,
+        "counterargument":"c".repeat(192),"uncertainty":{"material":true,"reason":"u".repeat(192)}});
+    let assessment_bytes = serde_json::to_vec(&value).unwrap();
+    assert!(assessment_bytes.len() > 1024 && assessment_bytes.len() <= MAX_OUTPUT_BYTES);
+    validate_output_shape(&assessment_bytes, PrincipleAssessmentV1).unwrap();
+    let assessment =
+        decode_assessment(&assessment_bytes, &scope, &evidence(1, 1), &source).unwrap();
+    value["verdict"] = json!("undetermined");
+    let review_bytes = serde_json::to_vec(&value).unwrap();
+    assert!(review_bytes.len() > 1024 && review_bytes.len() <= MAX_OUTPUT_BYTES);
+    validate_output_shape(&review_bytes, PrincipleReviewV1).unwrap();
+    decode_review(&review_bytes, &scope, &evidence(2, 2), &assessment, &source).unwrap();
+    for (raw, contract) in [
+        (assessment_bytes, PrincipleAssessmentV1),
+        (review_bytes, PrincipleReviewV1),
+    ] {
+        let mut at_limit = raw;
+        at_limit.resize(MAX_OUTPUT_BYTES, b' ');
+        validate_output_shape(&at_limit, contract).unwrap();
+        at_limit.push(b' ');
+        assert!(validate_output_shape(&at_limit, contract).is_err());
+    }
+    for (pointer, replacement) in [
+        ("/reasoning/0/quote", json!("q".repeat(129))),
+        ("/reasoning/0/reason", json!("r".repeat(193))),
+        ("/reasoning/0/reason", json!("é".repeat(97))),
+        ("/counterargument", json!("c".repeat(193))),
+        ("/uncertainty/reason", json!("u".repeat(193))),
+    ] {
+        let mut invalid = value.clone();
+        *invalid.pointer_mut(pointer).unwrap() = replacement;
+        let raw = serde_json::to_vec(&invalid).unwrap();
+        assert!(raw.len() <= MAX_OUTPUT_BYTES);
+        assert!(validate_output_shape(&raw, PrincipleReviewV1).is_err());
+    }
 }
 
 #[test]

@@ -51,6 +51,9 @@ TASK_GRAPH_DECODER = {"implementation": "lm-format-enforcer", "version": "0.11.3
                       "adapter_version": 1, "schema_version": 3,
                       "dependencies": {"interegular": "0.3.3", "pydantic": "1.10.24"}}
 PRINCIPLE_CONTRACTS = ("principle_assessment_v1", "principle_review_v1")
+# Complete original JSON envelope; individual text limits and the independent
+# 4096-byte escaped response wire limit remain unchanged.
+PRINCIPLE_OUTPUT_BYTES = 2048
 PRINCIPLES = ("Humilitas", "Humanitas", "Mansuetudo", "Diligentia", "Liberalitas", "Temperantia", "Castitas",
               "Superbia", "Invidia", "Ira", "Acedia", "Avaritia", "Gula", "Luxuria")
 TASK_GRAPH_CORRECTIONS = {
@@ -435,7 +438,7 @@ def principle_schema(contract, source, check):
 
 
 def validate_principle_output(raw, contract, source):
-    require(type(raw) is bytes and 0 < len(raw) <= 1024, "PRINCIPLE_OUTPUT_BOUND")
+    require(type(raw) is bytes and 0 < len(raw) <= PRINCIPLE_OUTPUT_BYTES, "PRINCIPLE_OUTPUT_BOUND")
     value = parse_json(raw)
     expected = {"version", "outcome", "reasoning", "counterargument", "uncertainty"}
     require(contract in PRINCIPLE_CONTRACTS, "PRINCIPLE_CONTRACT_INVALID")
@@ -1657,7 +1660,7 @@ def generate_principle(model, samples, tokenizer, torch, session, transformers, 
 
     decoder = create_constrained_decoder(tokenizer, session, accepts,
         schema=principle_schema(contract, source, session.check), prompt_limit=1024,
-        output_limit=1024, generation_limit=512, ordered_json=True,
+        output_limit=PRINCIPLE_OUTPUT_BYTES, generation_limit=512, ordered_json=True,
         unique_principles=list(PRINCIPLES))
     input_ids = samples[0]
     prompt = input_ids[0, :].tolist()

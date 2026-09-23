@@ -164,6 +164,7 @@ class PrincipleInferenceTests(unittest.TestCase):
                         model_profile=WORKER.LARGE_MODEL_PROFILE, output_contract=value["output_contract"]))
                     self.assertEqual(result["generated_tokens"], len(tokens))
                     self.assertEqual(factory.call_args.kwargs["prompt_limit"], 1024)
+                    self.assertEqual(factory.call_args.kwargs["output_limit"], WORKER.PRINCIPLE_OUTPUT_BYTES)
                     self.assertEqual(factory.call_args.kwargs["unique_principles"], list(WORKER.PRINCIPLES))
                     self.assertEqual(factory.call_args.kwargs["generation_limit"], 512)
                     self.assertTrue(factory.call_args.kwargs["ordered_json"])
@@ -183,6 +184,58 @@ class PrincipleInferenceTests(unittest.TestCase):
         self.assertEqual(result["text"], '{"version":')
         model.generate.assert_called_once()
         self.assertEqual(WORKER.model_profile(WORKER.LARGE_MODEL_PROFILE)["new_tokens"], 256)
+
+    def test_two_and_three_reason_envelopes_preserve_original_json_above_one_kib(self):
+        # Real contract-shaped JSON, not evidence of model execution or quality.
+        # Each field retains its existing byte limit and all decisions remain
+        # part of the original response, not invented to meet an envelope cap.
+        self.assertEqual(WORKER.PRINCIPLE_OUTPUT_BYTES, 2048)
+        for review in (False, True):
+            for count in (2, 3):
+                value = payload(review)
+                value["reasoning"] = [dict(principle=principle, quote=SOURCE, reason="r" * 192)
+                                      for principle in ("Liberalitas", "Temperantia", "Mansuetudo")[:count]]
+                value["counterargument"] = "c" * 192
+                value["uncertainty"] = dict(material=False, reason="u" * 192)
+                raw = b" \n" + encoded(value) + b" "
+                text = raw.decode()
+                self.assertGreater(len(raw), 1024)
+                self.assertLessEqual(len(raw), WORKER.PRINCIPLE_OUTPUT_BYTES)
+                self.assertLessEqual(len(json.dumps(text, ensure_ascii=True).encode("ascii")), 4096)
+                contract = WORKER.PRINCIPLE_CONTRACTS[int(review)]
+                self.assertEqual(WORKER.validate_principle_output(raw, contract, SOURCE), value)
+                for tokens, stop in (([21, 22], "json_boundary"), ([21, 2], "eos")):
+                    model, tokenizer, torch, transformers = task_planner_doubles(text, generated=tokens)
+                    with mock.patch.object(WORKER, "create_constrained_decoder", return_value=mock.Mock()) as factory:
+                        result = WORKER.generate_principle(model, [torch.tensor([[11, 12, 13]])], tokenizer, torch,
+                            mock.Mock(), transformers, dataset(review), WORKER.LARGE_MODEL_PROFILE)[0]
+                    self.assertEqual(result["text"].encode(), raw)
+                    self.assertFalse(result["text_truncated"])
+                    self.assertEqual(result["generation"]["stop_reason"], stop)
+                    self.assertEqual(factory.call_args.kwargs["output_limit"], WORKER.PRINCIPLE_OUTPUT_BYTES)
+                    self.assertEqual(factory.call_args.kwargs["generation_limit"], 512)
+                    self.assertEqual(model.generate.call_args.kwargs["max_new_tokens"], 512)
+                    self.assertEqual(factory.call_args.kwargs["schema"],
+                                     WORKER.principle_schema(contract, SOURCE, lambda: None))
+                    model.generate.assert_called_once()
+
+    def test_two_kib_envelope_and_existing_field_limits_remain_strict(self):
+        for review in (False, True):
+            value = payload(review)
+            contract = WORKER.PRINCIPLE_CONTRACTS[int(review)]
+            raw = encoded(value)
+            boundary = raw + b" " * (WORKER.PRINCIPLE_OUTPUT_BYTES - len(raw))
+            self.assertEqual(WORKER.validate_principle_output(boundary, contract, SOURCE), value)
+            with self.assertRaisesRegex(WORKER.JobError, "^PRINCIPLE_OUTPUT_BOUND$"):
+                WORKER.validate_principle_output(boundary + b" ", contract, SOURCE)
+            for changed in (
+                    dict(value, reasoning=[dict(value["reasoning"][0], quote="q" * 129)]),
+                    dict(value, reasoning=[dict(value["reasoning"][0], reason="r" * 193)]),
+                    dict(value, counterargument="c" * 193),
+                    dict(value, uncertainty=dict(material=False, reason="u" * 193))):
+                self.assertLess(len(encoded(changed)), WORKER.PRINCIPLE_OUTPUT_BYTES)
+                with self.assertRaisesRegex(WORKER.JobError, "^PRINCIPLE_OUTPUT_TEXT$"):
+                    WORKER.validate_principle_output(encoded(changed), contract, SOURCE)
 
     def test_bad_eos_short_unconfirmed_stop_and_cancellation_never_repaired(self):
         for text, tokens in (("invalid", [21, 2]), ("invalid", [21]), (encoded(payload()).decode(), [21, 2, 21])):
@@ -220,7 +273,8 @@ class PrincipleInferenceTests(unittest.TestCase):
                 (dict(original, counterargument=" "), "PRINCIPLE_OUTPUT_TEXT"),
                 (dict(original, uncertainty={"material": 1, "reason": "Unknown"}),
                  "PRINCIPLE_OUTPUT_UNCERTAINTY"),
-                (dict(original, counterargument="x" * 1100), "PRINCIPLE_OUTPUT_BOUND"),
+                (dict(original, counterargument="x" * 1100), "PRINCIPLE_OUTPUT_TEXT"),
+                (dict(original, counterargument="x" * WORKER.PRINCIPLE_OUTPUT_BYTES), "PRINCIPLE_OUTPUT_BOUND"),
             ]
             raw_cases = [(encoded(value).decode(), code) for value, code in cases]
             raw_cases.append((encoded(original).decode().replace('"version":1', '"version":1,"version":1'),

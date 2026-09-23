@@ -1701,7 +1701,11 @@ runtime/model/work/socket options. Other brokers do not advertise this capabilit
 constrains JSON structure, not allow/deny/undetermined, principles or the model's reasoning.
 The current generation-v3 envelope permits 1024 prompt tokens and up to 512 answer tokens for
 these structured judgments only; original generation-v2 receipts still mean 256 answer tokens,
-and ordinary inference is unchanged. A fully validated JSON
+and ordinary inference is unchanged. Complete raw judgment JSON permits 2048 UTF-8 bytes,
+while the existing escaped-text wire limit remains 4096 bytes. The former 1024-byte raw limit
+could reject a normal three-item explanation despite every individual field fitting its
+unchanged limit. Neither a complete oversized wire answer nor a partial answer is repaired or
+accepted as complete. A fully validated JSON
 boundary is reported as `json_boundary`, separately from actual EOS and incomplete `token_limit`.
 The fixed question no longer asks the model to imitate a schema-placeholder string. Quote
 grounding and opposite-peer review still apply; well-formed JSON does not prove sound judgment.
@@ -1724,6 +1728,15 @@ the existing independent validator. It does not select the first principle, a qu
 or the outcome. Separate fixed diagnostics distinguish count, fields, membership and repetition
 without logging the rejected subject or model text. No successful cross-review or automatic
 policy activation is established by the failed run.
+
+The [run on `3dc6136a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35852279407)
+does complete two structurally valid real assessments, each with 289 tokens and 1003 original
+bytes. Both subsequent review workers start with the opposite bound assessment and fail the
+old raw-output bound. Original signatures, capture and cleanup checks pass, but no complete
+cross-review or portable roundtrip does. The identical assessment texts contain terminology
+mistakes and unfinished prose; these observations explicitly do not establish useful independent
+reasoning. Correcting the response envelope addresses that separate execution blocker, not
+semantic quality or legal correctness. B06 and automatic network-policy activation stay open.
 
 Bind observations to specific agent/model artifacts, task contracts and observed failures.
 Use independently checked outcomes, regression/poisoning checks and diverse assessors; copied
@@ -1780,7 +1793,12 @@ and Q from the publishing peer, with original provider-bound receipts; the learn
 the publisher's private source/cache. Only the producing peer's seed/cache is owner-provisioned.
 Serialized learner acquisition and Client inference retain original approvals and expiry across
 coordinator restart. Source choice stays within enrolled signed catalogs/channels, not unrestricted
-autonomous discovery. The corrected scenario still needs passing KVM evidence. Full B07 remains open.
+autonomous discovery. The [follow-up](https://github.com/VOLPAROSSA/volparossa/actions/runs/35852732822)
+reaches catalog discovery and one cycle attempt, but the coordinator exits before an actual
+training worker is observed. It retains only `cycle_failed`, not the underlying cause or cycle
+files. Protected-path traffic is observed, but does not prove exact source acquisition or recovery.
+The learner reports a shutdown-cleanup failure; independently checked final object/process cleanup
+and unchanged host bytes pass. The scenario still needs passing KVM evidence. Full B07 remains open.
 
 Network-wide quarantine/replacement follows the automatic decision protocol, with bounded
 evidence, expiry and re-evaluation. A peer cannot erase another user's files or repair their

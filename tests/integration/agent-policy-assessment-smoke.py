@@ -21,6 +21,7 @@ NAME = "agent-policy-assessment"
 SUBJECT = "Neighbors voluntarily lend spare computing capacity to help each other, while respecting consent and each device owner's needs.\n"
 STAGES = ("assessment-0", "assessment-1", "review-0", "review-1")
 CONTRACTS = ("principle_assessment_v1", "principle_review_v1")
+MAX_OUTPUT_BYTES = 2048
 CONTENT_TYPE = "application/vnd.volparossa.agent-principle.v4+json"
 DECODER = {"implementation": "lm-format-enforcer", "version": "0.11.3", "adapter_version": 1,
            "schema_version": 3, "dependencies": {"interegular": "0.3.3", "pydantic": "1.10.24"}}
@@ -108,7 +109,7 @@ def check_output(output, stage, assessment):
     fields = {"version", "outcome", "reasoning", "counterargument", "uncertainty"}
     if stage.startswith("review-"):
         fields.add("verdict")
-    require(0 < len(raw) <= 1024 and set(payload) == fields and payload["version"] == 1
+    require(0 < len(raw) <= MAX_OUTPUT_BYTES and set(payload) == fields and payload["version"] == 1
             and sha(raw) == assessment["output_sha256"]
             and payload == assessment.get("assessment", assessment.get("review")),
             "full model JSON was malformed, repaired, replaced or bound to a different contract")
@@ -656,6 +657,20 @@ def self_test():
             "generation": {"version": 3, "stop_reason": "json_boundary", "max_new_tokens": 512,
                            "model_profile": "smollm2-360m-v1", "output_contract": stage_contract(stage)}}
         check_output(output, stage, assertion)
+        full = deepcopy(expected)
+        full["reasoning"] = [{"principle": principle, "quote": SUBJECT.strip(), "reason": "r" * 192}
+                             for principle in ("Mansuetudo", "Liberalitas", "Temperantia")]
+        full["counterargument"] = "c" * 192
+        full["uncertainty"] = {"material": True, "reason": "u" * 192}
+        full_text = json.dumps(full, separators=(",", ":"))
+        require(1024 < len(full_text.encode()) <= MAX_OUTPUT_BYTES, "expanded output fixture missed raw boundary")
+        for raw_text in (full_text, full_text + " " * (MAX_OUTPUT_BYTES - len(full_text.encode()))):
+            full_assertion = {"review" if stage.startswith("review-") else "assessment": full,
+                              "output_sha256": sha(raw_text.encode())}
+            check_output({**output, "text": raw_text}, stage, full_assertion)
+        too_long = full_text + " " * (MAX_OUTPUT_BYTES + 1 - len(full_text.encode()))
+        rejects(check_output, {**output, "text": too_long}, stage,
+                {**full_assertion, "output_sha256": sha(too_long.encode())})
         check_output({**output, "generation": {**output["generation"], "stop_reason": "eos"}}, stage, assertion)
         for stop_reason in ("json_boundary", "eos"):
             check_output({**output, "generated_tokens": 512,

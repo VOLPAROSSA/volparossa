@@ -4,6 +4,31 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-23
 
+The [policy run on `3dc6136a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35852279407)
+reaches both actual assessments and both opposite-peer review workers, but **fails overall**
+at `POLICY_REASONING_INCOMPLETE`. Each assessment completes at a real JSON boundary after
+289 tokens, retaining 1,003 original UTF-8 bytes and a verified provider-signed Poll transcript.
+The two texts are identical and contain terminology errors and unfinished prose: structural
+completion is not sound reasoning, independent judgment or legal authority. Both review inputs
+bind the opposite original assessment correctly, but the workers return `PRINCIPLE_OUTPUT_BOUND`;
+their rejected text/token counts are absent, so their other validity properties are unknown.
+Review of all 128 original files verifies the source/custody bindings, four real isolated
+workers, cleanup and unchanged host bytes. Five captures retain 73,666 frames with no drops or
+direct Client-to-Exit packets. No completed review, portable bundle or offline completed replay
+is proved; the concept stays undetermined with no policy activation. B06 remains open.
+
+The next candidate corrects an envelope mismatch: three ordinary ASCII reasoning items using
+the already permitted field sizes can require 1,639 compact review-JSON bytes, while the old
+whole-response gate permits only 1,024. The raw JSON envelope is now explicitly 2,048 bytes,
+within the existing 4,096-byte escaped-text transport envelope. Quotes, individual explanations,
+the fourteen principles, source grounding, opposite review and uncertainty requirements remain
+unchanged, as do the 512-token and original worker deadlines. This does not admit oversized
+wire output, repair/truncate a complete judgment, prove the old rejected reviews valid or fix
+the semantic defects observed above. The new envelope still requires real four-stage evidence.
+Fourteen focused Rust policy tests, thirteen pure worker tests and the independent fixture
+self-test pass. Historical enrollment-v1 questions remain byte-identical on signed-dataset
+reopen; new enrollment-v2 questions are unchanged. No model was run on the development host.
+
 The [first active-recovery run on `5b86711f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35850630251)
 **fails before training**, at `RECOVERY_SOURCE_SETUP_FAILED`: the fixture reads a README next
 to its source helper, but provisioning stages that file under `WORK/bin`. All 103 original
@@ -15,7 +40,15 @@ in its cache and cannot read the publisher's private directory. Original retriev
 must bind those cold transfers to R5; only R5 seed/cache provisioning remains fixture-owned.
 Learner acquisition and Client inference are serialized for independent path observation,
 without changing original approvals, enrollment, expiry or execution budgets. Inert fixture
-checks pass; a new KVM run is still required, and active recovery/full B07 remain incomplete.
+checks pass. The [follow-up on `bf08aee1`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35852732822)
+reaches catalog discovery and one attempted cycle, but still **fails before an observed training
+worker**, at `RECOVERY_P_REAL_TRAINING_MISSING`. The coordinator records only `cycle_failed`;
+the underlying error and cycle files are absent from the artifact. Five original captures show
+both selected protected relay paths carrying traffic, not receipt-verified dataset acquisition.
+R4 also reports `SHUTDOWN_CLEANUP_FAILED`; the independent final checks nevertheless find zero
+remaining owned network objects, ended recorded processes, removed private stores and unchanged
+host bytes. These distinct results are retained, not treated as successful lifecycle execution.
+All 134 original files remain preserved. Active recovery and full B07 are still incomplete.
 
 The [graph run on `b80f0b02`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35849837032)
 also **fails at `compute_deadline`** after the actual owner reaches baseline. Its original
@@ -171,7 +204,7 @@ UTF-8 bytes, without choosing a principle or verdict for the model. Fixed field 
 evidence and reasoning before the outcome; all fourteen principles, three outcomes, counterarguments
 and uncertainty remain available. The explicit generation-v3 envelope permits up to 512 answer tokens
 for this structured task only. Ordinary inference and original generation-v2 receipts keep their
-256-token contract. Completed output must still fit 1024 bytes and pass independent source-grounding
+256-token contract. That candidate required completed output to fit 1024 bytes and pass independent source-grounding
 and opposite-peer checks; no partial answer is repaired, accepted or relabeled EOS. This is a new
 functional candidate, not a passing four-stage assessment or a claim of semantic reliability.
 Verification: six generation-envelope tests, six coordinator/transfer tests, 102 pure worker/decoder
