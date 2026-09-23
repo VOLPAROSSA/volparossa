@@ -410,6 +410,10 @@ pub struct HttpsContentFetchRequest {
     /// The agent must authenticate Repr-Digest itself and verify the whole object before Ready.
     #[prost(bool, tag = "9")]
     pub origin_digest: bool,
+    /// Explicit same-origin checksum document; exclusive with both other authority modes.
+    /// Older agents reject this request because it has neither descriptor nor digest mode.
+    #[prost(string, tag = "10")]
+    pub checksum_path: String,
 }
 
 /// Same-operation local handoff after the agent's own fresh HTTPS authorization.
@@ -428,9 +432,12 @@ pub struct HttpsContentTransferReady {
     /// Original HTTP/manifest expiry, never renewed by this local transfer.
     #[prost(uint64, tag = "4")]
     pub expires_unix_seconds: u64,
-    /// Correlated explicit request mode. False is the legacy cooperative-origin descriptor.
+    /// Correlated Repr-Digest request mode. False without `checksum_path` is the legacy descriptor.
     #[prost(bool, tag = "5")]
     pub origin_digest: bool,
+    /// Exact checksum source from this request, empty for the two original authority modes.
+    #[prost(string, tag = "6")]
+    pub checksum_path: String,
 }
 
 impl HttpsContentTransferReady {
@@ -440,6 +447,8 @@ impl HttpsContentTransferReady {
             || !self.resource_url.starts_with("https://")
             || self.resource_url.bytes().any(|b| b.is_ascii_control())
             || self.expires_unix_seconds == 0
+            || (!self.checksum_path.is_empty()
+                && (self.origin_digest || !valid_https_metadata_path(&self.checksum_path)))
         {
             return Err(ControlProtocolError::Invalid(
                 "invalid local HTTPS readiness",
@@ -505,6 +514,10 @@ pub struct ContentReceipt {
     /// the configured local provider. Not an external replica receipt or availability promise.
     #[prost(bool, tag = "16")]
     pub network_publication: bool,
+    /// Checksum-document body bytes received from origin, separate from resource body bytes.
+    /// Excludes HTTP/TLS overhead; zero for operations without a checksum document.
+    #[prost(uint64, tag = "17")]
+    pub origin_authority_body_bytes: u64,
 }
 
 impl ContentReplicationConfig {
@@ -587,14 +600,14 @@ impl HttpsContentFetchRequest {
             || self.resource_url.len() > 4096
             || !self.resource_url.starts_with("https://")
             || self.resource_url.bytes().any(|b| b.is_ascii_control())
-            || if self.origin_digest {
+            || if !self.checksum_path.is_empty() {
+                self.origin_digest
+                    || !self.metadata_path.is_empty()
+                    || !valid_https_metadata_path(&self.checksum_path)
+            } else if self.origin_digest {
                 !self.metadata_path.is_empty()
             } else {
-                self.metadata_path.len() > 4096
-                    || !self.metadata_path.starts_with('/')
-                    || self.metadata_path.starts_with("//")
-                    || !self.metadata_path.bytes().all(|b| b.is_ascii_graphic())
-                    || self.metadata_path.contains(['#', '\\'])
+                !valid_https_metadata_path(&self.metadata_path)
             }
             || self.ca_certificates_pem.len() > 128 * 1024
         {
@@ -606,6 +619,14 @@ impl HttpsContentFetchRequest {
         validate_path(&self.cache)?;
         validate_limits(self.limits)
     }
+}
+
+fn valid_https_metadata_path(path: &str) -> bool {
+    path.len() <= 4096
+        && path.starts_with('/')
+        && !path.starts_with("//")
+        && path.bytes().all(|b| b.is_ascii_graphic())
+        && !path.contains(['#', '\\'])
 }
 
 fn validate_publication(manifest: &[u8], key: &[u8]) -> Result<(), ControlProtocolError> {
@@ -1114,6 +1135,7 @@ mod tests {
         HttpsContentFetchRequest {
             reuse_cache: false,
             origin_digest: false,
+            checksum_path: String::new(),
             source_strategy: HttpsSourceStrategy::Auto as i32,
             resource_url: "https://origin.example/object.bin".into(),
             metadata_path: "/.well-known/volparossa/object".into(),
@@ -1146,6 +1168,7 @@ mod tests {
         );
         let mut ready = HttpsContentTransferReady {
             origin_digest: false,
+            checksum_path: String::new(),
             manifest: vec![1; 256],
             publisher_key: vec![2; 32],
             resource_url: fetch.resource_url,
@@ -1215,6 +1238,7 @@ mod tests {
                 resource_url: "https://origin.example/object.bin".into(),
                 expires_unix_seconds: 1,
                 origin_digest,
+                checksum_path: String::new(),
             };
             let response = ControlResponse {
                 protocol_version: CONTROL_PROTOCOL_VERSION,
@@ -1229,6 +1253,50 @@ mod tests {
             );
         }
         assert_eq!(crate::MAX_CONTROL_FRAME, 256 * 1024);
+    }
+
+    #[test]
+    fn https_checksum_mode_is_exclusive_bounded_and_legacy_agents_fail_closed() {
+        let mut fetch = https_request();
+        assert!(fetch.checksum_path.is_empty());
+        fetch.checksum_path = "/SHA256SUMS".into();
+        assert!(fetch.validate().is_err());
+        fetch.metadata_path.clear();
+        assert!(fetch.validate().is_ok());
+        let encoded = fetch.encode_to_vec();
+        assert_eq!(
+            HttpsContentFetchRequest::decode(encoded.as_slice()).unwrap(),
+            fetch
+        );
+        fetch.origin_digest = true;
+        assert!(fetch.validate().is_err());
+        fetch.origin_digest = false;
+        for path in ["//other.example/SHA256SUMS", "/bad#fragment", "/bad\npath"] {
+            fetch.checksum_path = path.into();
+            assert!(fetch.validate().is_err());
+        }
+        fetch.checksum_path.clear();
+        assert!(
+            fetch.validate().is_err(),
+            "old agents ignoring new field have no authority mode"
+        );
+        let mut ready = HttpsContentTransferReady {
+            manifest: vec![1; 256],
+            publisher_key: vec![2; 32],
+            resource_url: fetch.resource_url,
+            expires_unix_seconds: 1,
+            origin_digest: false,
+            checksum_path: "/SHA256SUMS".into(),
+        };
+        assert!(ready.validate().is_ok());
+        ready.origin_digest = true;
+        assert!(ready.validate().is_err());
+        assert!(
+            HttpsContentTransferReady::default()
+                .checksum_path
+                .is_empty()
+        );
+        assert_eq!(ContentReceipt::default().origin_authority_body_bytes, 0);
     }
 
     #[test]

@@ -19,7 +19,7 @@ content_provider_https_cleanup() {
         [ -d "$ph_cleanup_root" ] \
             && [ "$(stat -Lc '%a:%u:%g' "$ph_cleanup_root")" = "700:$WORKER_UID:$WORKER_GID" ] \
             || return 1
-        for ph_cleanup_name in origin.pem complete-object.bin missing-object.bin origin-baseline.json origin-only-object.bin auto-object.bin digest-origin-only-object.bin digest-peers-first-object.bin limited-origin-only-object.bin limited-peers-first-object.bin limited-auto-object.bin; do
+        for ph_cleanup_name in origin.pem complete-object.bin missing-object.bin origin-baseline.json origin-only-object.bin auto-object.bin digest-origin-only-object.bin digest-peers-first-object.bin limited-origin-only-object.bin limited-peers-first-object.bin limited-auto-object.bin checksum-origin-only-object.bin checksum-peers-first-object.bin checksum-mismatch-object.bin; do
             ph_cleanup_mode=600
             [ "$ph_cleanup_name" != origin.pem ] || ph_cleanup_mode=400
             ph_cleanup_file=$ph_cleanup_root/$ph_cleanup_name
@@ -47,6 +47,8 @@ content_provider_https_phase() {
         limited-origin-only) ph_strategy=origin-only ;;
         limited-peers-first) ph_strategy=peers-first ;;
         limited-auto) ph_strategy=auto ;;
+        checksum-origin-only|checksum-mismatch) ph_strategy=origin-only ;;
+        checksum-peers-first) ph_strategy=peers-first ;;
         *) fail PROVIDER_HTTPS_SOURCE_STRATEGY_INVALID ;;
     esac
     ph_prefix=content-provider-https-$ph_case
@@ -72,24 +74,44 @@ content_provider_https_phase() {
         "$ph_parent_netns" "$ph_client_netns" "$WORKER_UID" "$WORKER_GID" "$ph_control_gid" \
         >"$WORK/$ph_prefix-consumer.json" 2>"$WORK/$ph_prefix-fetch.err" \
         || fail PROVIDER_HTTPS_RUNTIME_FETCH_FAILED
-    jq '.final' "$WORK/$ph_prefix-consumer.json" >"$WORK/$ph_prefix-fetch.json" \
-        || fail PROVIDER_HTTPS_RECEIPT_INVALID
+    if [ "$ph_case" != checksum-mismatch ]; then
+        jq '.final' "$WORK/$ph_prefix-consumer.json" >"$WORK/$ph_prefix-fetch.json" \
+            || fail PROVIDER_HTTPS_RECEIPT_INVALID
+    fi
     benchmark_capture_paths "$ph_prefix-live" mptcp || fail PROVIDER_HTTPS_PATHS_UNAVAILABLE
     jq -e --arg context "$provider_context" '.route_context_id == $context' \
         "$WORK/$ph_prefix-live-selection.json" >/dev/null || fail PROVIDER_HTTPS_ROUTE_CHANGED
-    jq -e --arg control "$provider_control_peer" \
-        '.origin_authenticated == true and .control_relay_peer_id == $control' \
-        "$WORK/$ph_prefix-fetch.json" >/dev/null || fail PROVIDER_HTTPS_AUTHORITY_NOT_PROVEN
+    if [ "$ph_case" != checksum-mismatch ]; then
+        jq -e --arg control "$provider_control_peer" \
+            '.origin_authenticated == true and .control_relay_peer_id == $control' \
+            "$WORK/$ph_prefix-fetch.json" >/dev/null || fail PROVIDER_HTTPS_AUTHORITY_NOT_PROVEN
+    fi
     stop_privacy_observers || fail PROVIDER_HTTPS_PRIVACY_INCOMPLETE
     content_provider_stop_control_observer || fail PROVIDER_HTTPS_CONTROL_CAPTURE_INCOMPLETE
+    if [ "$ph_case" = checksum-mismatch ]; then
+        if [ -e "$ph_output" ] || [ -L "$ph_output" ]; then
+            fail PROVIDER_HTTPS_WRONG_CHECKSUM_OUTPUT
+        fi
+        content_provider_https_cli content status >"$WORK/$ph_prefix-status.json" \
+            2>"$WORK/$ph_prefix-status.err" || fail PROVIDER_HTTPS_USER_CONTROL_UNAVAILABLE
+        jq -e '.serving == false and .publications == 0' "$WORK/$ph_prefix-status.json" >/dev/null \
+            || fail PROVIDER_HTTPS_WRONG_CHECKSUM_CONTRIBUTED
+        jq -n --arg output "$ph_output" --arg cache "$ph_cache" \
+            '{local_output_initially_absent:true,local_output_absent:true,client_cache_initially_absent:true,
+              path:$output,agent_cache:$cache}' >"$WORK/$ph_prefix-output.json"
+        return
+    fi
     ph_output_digest=$(sha256sum "$ph_output" | awk '{print $1}')
     # This is the existing local-output command's no-clobber guard, also for the file
     # obtained via HTTP. It is not an invented browser-download output-path option.
     case $ph_case in
+        checksum-*) set -- --checksum-path /SHA256SUMS ;;
         digest-*|limited-*) set -- --origin-digest ;;
         *) set -- --metadata-path /.well-known/volparossa/content/asset ;;
     esac
-    if content_provider_https_cli content fetch-https --url https://destination.volparossa.test:18443/asset.bin \
+    ph_resource=asset.bin
+    case $ph_case in checksum-*) ph_resource=checksum-asset.bin ;; esac
+    if content_provider_https_cli content fetch-https --url "https://destination.volparossa.test:18443/$ph_resource" \
         "$@" --ca-file "$ph_user/origin.pem" \
         --source-strategy "$ph_strategy" --cache "$ph_cache" --local-output "$ph_output" \
         >"$WORK/$ph_prefix-no-clobber.out" 2>"$WORK/$ph_prefix-no-clobber.err"; then
@@ -334,6 +356,11 @@ content_provider_https_run() {
     content_provider_https_independent_index
     content_provider_https_phase digest-peers-first
     content_provider_https_limited_run
+    # Same original bytes and independent peer indexes, but this resource offers
+    # neither a descriptor nor Repr-Digest. Each cold client authenticates SHA256SUMS.
+    content_provider_https_phase checksum-origin-only
+    content_provider_https_phase checksum-peers-first
+    content_provider_https_phase checksum-mismatch
     PHASE=content-provider-https-withdraw-one
     "$binary_directory/volparossa" --control-socket "$WORK/runtime-$provider_node_b/control/agent.sock" \
         content stop >"$WORK/content-provider-https-provider-stop.json" \

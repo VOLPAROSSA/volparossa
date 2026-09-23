@@ -34,11 +34,14 @@ pub(crate) struct Arguments {
     #[arg(long, value_parser = super::parse_origin_url)]
     url: String,
     /// Canonical same-origin descriptor path for the supported public representation.
-    #[arg(long, value_parser = super::parse_metadata_path, required_unless_present = "origin_digest", conflicts_with = "origin_digest")]
+    #[arg(long, value_parser = super::parse_metadata_path, required_unless_present_any = ["origin_digest", "checksum_path"], conflicts_with_all = ["origin_digest", "checksum_path"])]
     metadata_path: Option<String>,
     /// Authenticate the website's Repr-Digest instead of a VOLPAROSSA metadata descriptor.
     #[arg(long)]
     origin_digest: bool,
+    /// Authenticate an explicit same-directory SHA256SUMS document at the resource origin.
+    #[arg(long, value_parser = super::parse_metadata_path, conflicts_with_all = ["origin_digest", "metadata_path"])]
+    checksum_path: Option<String>,
     /// Agent-owned cache destination; the browser's temporary spool is separate and private.
     #[arg(long)]
     cache: PathBuf,
@@ -61,6 +64,7 @@ impl Arguments {
             url: self.url,
             metadata_path: self.metadata_path,
             origin_digest: self.origin_digest,
+            checksum_path: self.checksum_path,
             cache: self.cache,
             reuse_cache: self.reuse_cache,
             source_strategy: self.source_strategy,
@@ -286,6 +290,7 @@ fn report(download: &VerifiedDownload) -> serde_json::Value {
         "origin_authenticated":true, "authentication_scope":download.authentication_scope(),
         "origin_authority_persisted":false, "https_origin_privileges":false, "single_use":true,
         "peer_bytes":receipt.peer_bytes, "origin_body_bytes":receipt.origin_body_bytes,
+        "origin_authority_body_bytes":receipt.origin_authority_body_bytes,
         "origin_range_requests":receipt.origin_range_requests, "providers_used":receipt.providers_used,
         "provider_peer_ids":receipt.provider_peer_ids, "control_relay_peer_id":receipt.control_relay_peer_id,
     })

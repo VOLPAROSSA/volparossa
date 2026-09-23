@@ -1,18 +1,22 @@
 //! Typed exact-publication chunk bridge; no free-form stream proxy or extra wire schema.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, future::Future};
 
 use super::*;
 
-pub(crate) async fn bridge_peer<R, S>(
+/// Admission precedes each validated chunk request, inside its existing bounded deadline.
+pub(crate) async fn bridge_peer_with_admission<R, S, F, Fut>(
     receiver: &mut R,
     source: &mut S,
     manifest: &VerifiedManifest,
     limits: TransferLimits,
+    mut admit: F,
 ) -> Result<TransferProgress, TransferError>
 where
     R: AsyncRead + AsyncWrite + Unpin,
     S: AsyncRead + AsyncWrite + Unpin,
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = bool>,
 {
     let mut session = Session::new(limits)?;
     let allowed: BTreeMap<_, _> = manifest
@@ -49,6 +53,11 @@ where
                 return Err(TransferError::Protocol);
             }
             session.reserve(request.length)?;
+            if !admit(u64::from(request.length)).await {
+                return Err(TransferError::Protocol);
+            }
+            session.check_deadline()?;
+            check_time(manifest)?;
             write_frame(source, &request, MAX_REQUEST_BYTES).await?;
             let response: Response = read_frame(source, MAX_RESPONSE_BYTES).await?;
             if response.version != VERSION

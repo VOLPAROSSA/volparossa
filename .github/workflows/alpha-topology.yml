@@ -120,6 +120,7 @@ jobs:
           sh -n tests/integration/content-provider-smoke.sh
           sh -n tests/integration/content-custody-smoke.sh
           python3 -B tests/integration/test-content-custody-smoke.py
+          python3 -B tests/integration/test-content-retain-smoke.py
           sh -n tests/integration/content-repair-smoke.sh
           python3 -B tests/integration/test-content-repair-smoke.py
           sh -n tests/integration/content-named-smoke.sh

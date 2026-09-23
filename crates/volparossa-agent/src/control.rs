@@ -160,6 +160,10 @@ pub async fn serve_control(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "One typed stream handoff dispatch preserves readiness and final-error ordering"
+)]
 async fn process_connection(
     mut stream: UnixStream,
     context: ControlContext,
@@ -168,6 +172,29 @@ async fn process_connection(
         .await
         .map_err(|_| ControlServerError::Timeout)?
         .map_err(|_| ControlServerError::InvalidFrame)?;
+    if let Some(control_request::Operation::ContentCustodyDiscover(discover)) =
+        request.operation.as_ref()
+    {
+        let result = Box::pin(
+            context
+                .content
+                .custody_discover(discover, &context, &mut stream),
+        )
+        .await;
+        let reply = match result {
+            Ok(discovered) => response(
+                request.request_id,
+                ControlResult::Ok,
+                "CONTENT_CUSTODY_DISCOVERED",
+                control_response::Payload::ContentCustodyDiscovered(discovered),
+            ),
+            Err(error) => content_response(request.request_id, Err(error)),
+        };
+        return timeout(CONTROL_TIMEOUT, write_response(&mut stream, &reply))
+            .await
+            .map_err(|_| ControlServerError::Timeout)?
+            .map_err(|_| ControlServerError::InvalidFrame);
+    }
     if matches!(
         request.operation.as_ref(),
         Some(
@@ -283,6 +310,7 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
         | control_request::Operation::ContentFetchName(_)
         | control_request::Operation::MailboxRemote(_)
         | control_request::Operation::ContentCustody(_)
+        | control_request::Operation::ContentCustodyDiscover(_)
         | control_request::Operation::ComputeRemote(_)
         | control_request::Operation::ContentDownloadHttps(_) => {
             // These require the same authorized stream, never a second socket or generic dispatch.

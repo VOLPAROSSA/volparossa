@@ -703,6 +703,43 @@ duplicate full-object downloads. Recent cost hints are RAM-only and short-lived,
 object catalogue; native/explicit peer transfers supply useful-peer observations. A node with no
 such observations conservatively uses the origin, rather than inventing a speed estimate.
 
+### HTTPS checksum-file downloads
+
+For an anonymous public binary download whose origin publishes a SHA-256 checksum file,
+this explicit mode does not require a VOLPAROSSA descriptor or `Repr-Digest`:
+
+```sh
+volparossa content fetch-https \
+  --url https://downloads.example/releases/asset.bin \
+  --checksum-path /releases/SHA256SUMS \
+  --source-strategy peers-first \
+  --cache /agent-owned/new-checksum-cache --local-output ./asset.bin
+```
+
+Select exactly one of `--checksum-path`, `--origin-digest` and `--metadata-path`.
+`browser-download` accepts the same authority selection without an output argument.
+The checksum path is explicit, on the same HTTPS origin and in the resource's directory;
+no peer chooses it. Each consumer first authenticates the checksum document through its own
+protected TLS connection, then authenticates resource HEAD metadata. Both must be publicly
+cacheable, and the earliest original expiry wins. A present resource `Repr-Digest` must also
+agree. The selected whole hash and length authorize the existing protected peer lookup;
+complete bytes must verify before local output, browser readiness or contribution. Missing
+peer content uses one full authenticated origin GET, not guessed partial ranges.
+
+The first checksum profile accepts at most 64 KiB of `text/plain`, with strict GNU-style
+SHA-256 text/binary rows and exactly one matching simple filename. Query strings, ambiguous
+or escaped filenames, duplicate matching rows, redirects, cookies, private/no-store responses
+and unsupported representations are rejected. Resource bodies retain the public
+`application/octet-stream`, identity-encoding profile. This does not enable arbitrary browser
+capture, DRM bypass or offline HTTPS authority.
+
+Local/browser JSON uses `authentication_scope: "origin-checksum"`. The separate
+`origin_authority_body_bytes` counts the checksum-document body; `origin_body_bytes` continues
+to count resource bytes only. Neither includes HTTP/TLS overhead. End-to-end timing includes
+both authority requests; a peer hit is not a claim of zero origin traffic or speedup. The
+[original source-exact trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35919185330)
+proves this bounded profile; the isolated integration port still needs its own trial.
+
 ### HTTPS origin-digest downloads
 
 For an origin that returns a supported SHA-256 `Repr-Digest` in its own resource HEAD response,
@@ -1051,6 +1088,48 @@ Keep the original files while establishing copies. Signed receipts establish obs
 the stated time, not future reachability, a global latest revision or permanent website uptime.
 This explicit workflow does not yet choose holders automatically or repair a lost replica.
 Private messages use the separate encrypted mailbox workflow, not public custody.
+
+### Automatically maintaining public copies
+
+The development `content retain` controller adds owner-enrolled holder discovery and repair.
+It retains an existing public publication; it does not publish private browsing responses or
+renew the publisher's original expiry. No provider keys need to be chosen manually. Receivers
+must run the contribution service above, and both the sender's `sharing` and
+`download_sharing` budgets must be enabled with the actual accounting interfaces configured.
+Unknown/busy accounting defers background work; configured capacity is not measured spare
+ISP capacity or a guarantee of zero slowdown.
+
+```sh
+volparossa content retain \
+  --manifest /private/publishing/notes.v1.pb \
+  --cache /private/publishing/content-cache \
+  --identity /private/publishing/identity.key \
+  --passphrase-file /private/publishing/passphrase \
+  --copies 2 --directory /private/publishing/notes-retention \
+  --max-seconds 3600 --poll-seconds 30 --max-upload-bytes 67108864
+```
+
+Without `--execute`, this only prints the enrollment preview: no files, key unlock or network
+requests. The state directory must be new under a private owned `0700` parent and separate
+from the source cache. Add `--execute` to maintain copies for the stated lifetime, capped by
+the original publication expiry. To resume, repeat the exact original arguments with
+`--execute --resume`; neither the deadline nor spent upload budget resets. Every deposit
+reserves the full logical object size before attempting upload, including failed/interrupted
+attempts. This conservative budget is not a count of actual wire bytes.
+
+The private `status.json` reports the last poll, observed holders and remaining enrollment
+state. Signed offers are only discovery hints, not storage-capacity promises. A counted copy
+requires the fresh original signed custody exchange and successful local handoff. Historical
+receipts are retained for verification, never treated as fresh availability after restart.
+SIGINT/SIGTERM ends the owner loop and closes its in-flight exchange; the original stored
+copies may still be served until their original expiry while holders remain available.
+Maintenance does not continue while the owner is offline. The
+[original source-exact trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35916493141)
+demonstrates holder loss/replacement and subsequent retrieval without the publisher's source;
+the isolated integration port requires fresh verification. Neither proves globally fair
+placement or permanent site availability.
+
+### Repairing a holder's partial public copies
 
 The configured contribution service now also schedules bounded idle repair of **healthy partial
 public journal records** after restart. This is separate from the explicit publisher Deposit/

@@ -177,11 +177,15 @@ the diagram does not imply that every source must be contacted.*
   and opportunistically pick up other eligible chunks without taking over foreground resources.
 - **Public sites and files:** publish signed native objects and static sites; retained copies can
   serve requests after the original source disappears, while valid holders remain available.
+- **Keeping public copies available:** an enrolled publisher can automatically find holders,
+  check copies and replace a lost holder within its original lifetime and sharing budget.
+  The maintenance loop needs its owner online; existing copies can still serve without it.
 - **Offline messages:** known-contact mailboxes retain recipient-encrypted messages. Cache holders
   receive ciphertext, not the recipient's decryption key.
 - **Shared DNS:** reuse independently validated positive DNSSEC evidence, preserving original
   authority and expiry rather than trusting an arbitrary peer's answer.
-- **Existing HTTPS:** supported cooperative-origin or origin-digest modes authenticate the origin
+- **Existing HTTPS:** supported cooperative-origin, origin-digest or
+  [checksum-file](docs/OPERATIONS.md#https-checksum-file-downloads) modes authenticate the origin
   before using peer content. No interception CA, TLS bypass or automatic sharing of private
   responses is introduced.
 

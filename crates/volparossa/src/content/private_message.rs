@@ -25,6 +25,13 @@ pub(crate) struct Unlock {
 }
 
 impl Unlock {
+    pub(super) fn explicit(identity: PathBuf, passphrase_file: PathBuf) -> Self {
+        Self {
+            identity: Some(identity),
+            passphrase_file: Some(passphrase_file),
+        }
+    }
+
     pub(super) fn signer(&self) -> Result<ed25519_dalek::SigningKey> {
         unlock_signer(self.identity.as_deref(), self.passphrase_file.as_deref())
     }

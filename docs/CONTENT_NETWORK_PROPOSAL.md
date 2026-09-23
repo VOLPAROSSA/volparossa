@@ -86,8 +86,17 @@ the protected content route and obtains provider-signed observations only after 
 verification, durable journal admission and ready serving. Inspect revalidates stored bytes
 without uploading; restart does not renew the original expiry. The ordinary CLI preserves
 partial successes across independent providers. Local storage, typed-stream and real CLI-process
-tests pass; those duplex tests are not a protected-network acceptance result. Automatic holder
-selection, availability repair and general uptime remain outstanding. See the
+tests pass; those duplex tests are not a protected-network acceptance result. The separate
+`content retain` controller discovers eligible holders, requests fresh signed observations
+and places missing public copies without hand-picking provider keys. Its owner enrollment
+fixes the original object, desired copy count, lifetime and cumulative upload budget. It can
+replace an unavailable holder while that owner runs; restart preserves the budget/deadline
+and rechecks availability rather than counting old receipts. Transfers yield to foreground
+work through configured quiet admission and per-chunk budgets. The
+[original `2a431c1` loss/replacement trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35916493141)
+passes with a fresh named download after the publisher's owner process and source are removed.
+The isolated port onto `main` requires its own source-exact integration proof. This is not
+globally fair placement, owner-offline maintenance or guaranteed uptime. See the
 [development commands](OPERATIONS.md#depositing-a-public-copy-with-other-participants).
 
 ### Private messages and optional mail interoperability
@@ -363,6 +372,26 @@ recent comparable costs, otherwise bounds fresh known-peer lookup and transfer t
 verified chunks remain reusable under fresh origin authority. Explicit peers-first exploration
 is not a latency guarantee; source selection does not make unsupported HTTPS sites shareable.
 The new strategy requires its own integrated measurement.
+
+### Own-origin checksum files without a descriptor or digest header
+
+An additional `--checksum-path` mode extends public binary downloads to origins that
+publish a same-directory SHA-256 file instead of VOLPAROSSA metadata or a `Repr-Digest` header.
+The consumer authenticates that explicit text document itself, then obtains resource length
+and public cache conditions through its own HEAD exchange. Only their original minimum
+expiry is usable; peers cannot supply the trust anchor. Existing whole-object digest lookup,
+protected peer transfer, full verification and full-origin fallback are reused. An ambiguous
+checksum or contradictory resource digest cannot reach local output or contribution.
+
+This is a bounded profile of the [GNU checksum format](https://www.gnu.org/s/coreutils/manual/html_node/cksum-output-modes.html),
+not a generic parser for release pages, a browser interception mechanism, or a replacement
+for authenticated metadata. The resource remains an anonymous public binary object. The
+[original `7ca122a3` network trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35919185330)
+passes origin-only retrieval, a fresh two-provider download and wrong-checksum refusal.
+Checksum-document bytes are reported separately from resource bytes, and elapsed time includes
+both authentication requests. The source-exact integration port still needs its own trial;
+C08 remains open. See [operations](OPERATIONS.md#https-checksum-file-downloads) for selection
+and current compatibility limits.
 
 ### Own-origin representation digests without a custom descriptor
 

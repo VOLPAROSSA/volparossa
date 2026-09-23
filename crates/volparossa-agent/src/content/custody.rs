@@ -17,7 +17,10 @@ use volparossa_local_control::{
 };
 use volparossa_policy::VerifiedManifest as VerifiedPolicy;
 
-use super::{ContentError, ContentRuntime, OPERATION_TIMEOUT, now, tls};
+use super::{
+    ContentError, ContentRuntime, OPERATION_TIMEOUT, background_custody,
+    cancellation::until_requester_closed, now, tls,
+};
 use crate::{control::ControlContext, discovery::DiscoveredContentProvider, unix_millis};
 
 struct Request {
@@ -37,14 +40,56 @@ impl ContentRuntime {
         request_id: &[u8],
         ready_sent: &mut bool,
     ) -> Result<(), ContentError> {
-        let _foreground = self.foreground.enter();
-        let _retrieval = self.retrieval.try_lock().map_err(|_| ContentError::Busy)?;
-        timeout(
-            OPERATION_TIMEOUT,
-            remote(request, context, local, request_id, ready_sent),
-        )
-        .await
-        .map_err(|_| ContentError::Unavailable)?
+        let background = request.background;
+        let request = validate(&request)?;
+        if !self.object_policy.allows_now(&request.manifest) {
+            return Err(ContentError::Policy);
+        }
+        let mut changed = if background {
+            background_custody::owner_idle(&self.foreground)?
+        } else {
+            self.foreground.subscribe()
+        };
+        let spare = background
+            .then(|| self.background_custody.acquire(&context.config))
+            .transpose()?;
+        let _worker = if background {
+            Some(self.worker_budget.try_acquire().ok_or(ContentError::Busy)?)
+        } else {
+            None
+        };
+        let _foreground = (!background).then(|| self.foreground.enter());
+        // A separate bounded background lane must not make a foreground request fail its
+        // retrieval admission before the cancellation watch can release this operation.
+        let _retrieval = if background {
+            None
+        } else {
+            Some(self.retrieval.try_lock().map_err(|_| ContentError::Busy)?)
+        };
+        let operation = async {
+            if let Some(spare) = &spare {
+                until_requester_closed(local, async {
+                    spare.admit(0).await;
+                    Ok(())
+                })
+                .await?;
+            }
+            remote(
+                &request,
+                context,
+                local,
+                request_id,
+                ready_sent,
+                spare.as_ref(),
+            )
+            .await
+        };
+        tokio::select! {
+            biased;
+            _ = changed.changed(), if background => Err(ContentError::Busy),
+            () = self.object_policy.wait_until_withheld(&request.manifest) => Err(ContentError::Policy),
+            result = timeout(OPERATION_TIMEOUT, operation) => result.map_err(|_| ContentError::Unavailable)?,
+        }
     }
 }
 
@@ -54,19 +99,7 @@ fn validate(request: &ContentCustodyRequest) -> Result<Request, ContentError> {
         .as_slice()
         .try_into()
         .map_err(|_| ContentError::Invalid)?;
-    let publisher: [u8; 32] = request
-        .publisher_key
-        .as_slice()
-        .try_into()
-        .map_err(|_| ContentError::Invalid)?;
-    let key = VerifyingKey::from_bytes(&publisher).map_err(|_| ContentError::Invalid)?;
-    let signed = SignedManifest::decode(&request.manifest).map_err(|_| ContentError::Invalid)?;
-    let manifest = signed
-        .verify(&key, now())
-        .map_err(|_| ContentError::Invalid)?;
-    if manifest.metadata().content_type == PRIVATE_MESSAGE_CONTENT_TYPE {
-        return Err(ContentError::Policy);
-    }
+    let (signed, manifest) = public_manifest(&request.manifest, &request.publisher_key)?;
     let public = identity::ed25519::PublicKey::try_from_bytes(&provider_key)
         .map_err(|_| ContentError::Invalid)?;
     Ok(Request {
@@ -79,7 +112,23 @@ fn validate(request: &ContentCustodyRequest) -> Result<Request, ContentError> {
     })
 }
 
-async fn checked_policy(
+pub(super) fn public_manifest(
+    bytes: &[u8],
+    publisher: &[u8],
+) -> Result<(SignedManifest, VerifiedManifest), ContentError> {
+    let publisher: [u8; 32] = publisher.try_into().map_err(|_| ContentError::Invalid)?;
+    let key = VerifyingKey::from_bytes(&publisher).map_err(|_| ContentError::Invalid)?;
+    let signed = SignedManifest::decode(bytes).map_err(|_| ContentError::Invalid)?;
+    let manifest = signed
+        .verify(&key, now())
+        .map_err(|_| ContentError::Invalid)?;
+    if manifest.metadata().content_type == PRIVATE_MESSAGE_CONTENT_TYPE {
+        return Err(ContentError::Policy);
+    }
+    Ok((signed, manifest))
+}
+
+pub(super) async fn checked_policy(
     context: &ControlContext,
     original: Option<&VerifiedPolicy>,
 ) -> Result<VerifiedPolicy, ContentError> {
@@ -96,21 +145,24 @@ async fn checked_policy(
 }
 
 async fn remote(
-    request: ContentCustodyRequest,
+    request: &Request,
     context: &ControlContext,
     local: &mut UnixStream,
     id: &[u8],
     ready_sent: &mut bool,
+    spare: Option<&background_custody::Lease<'_>>,
 ) -> Result<(), ContentError> {
-    let request = validate(&request)?;
     let policy = checked_policy(context, None).await?;
-    Box::pin(
-        context
-            .routes
-            .connect_tcp(&context.config, &context.discovery, &context.helper),
-    )
-    .await
-    .map_err(|_| ContentError::Unavailable)?;
+    until_requester_closed(local, async {
+        Box::pin(
+            context
+                .routes
+                .connect_tcp(&context.config, &context.discovery, &context.helper),
+        )
+        .await
+        .map_err(|_| ContentError::Unavailable)
+    })
+    .await?;
     let control = context
         .routes
         .content_discovery_control()
@@ -123,11 +175,14 @@ async fn remote(
     {
         return Err(ContentError::Policy);
     }
-    let mut providers = context
-        .discovery
-        .lookup_content_providers(control, &[request.peer])
-        .await
-        .map_err(|_| ContentError::Unavailable)?;
+    let mut providers = until_requester_closed(local, async {
+        context
+            .discovery
+            .lookup_content_providers(control, &[request.peer])
+            .await
+            .map_err(|_| ContentError::Unavailable)
+    })
+    .await?;
     if providers.len() != 1 {
         return Err(ContentError::Unavailable);
     }
@@ -147,7 +202,7 @@ async fn remote(
     timeout(
         Duration::from_secs(remaining.min(150)),
         exchange(
-            &request, provider, &policy, control, context, local, id, ready_sent,
+            request, provider, &policy, control, context, local, id, ready_sent, spare,
         ),
     )
     .await
@@ -167,6 +222,7 @@ async fn exchange(
     local: &mut UnixStream,
     id: &[u8],
     ready_sent: &mut bool,
+    spare: Option<&background_custody::Lease<'_>>,
 ) -> Result<(), ContentError> {
     let current = checked_policy(context, Some(policy)).await?;
     if context.routes.content_discovery_control().await != Some(control)
@@ -179,22 +235,31 @@ async fn exchange(
     }
     super::check_publication_time(&request.manifest)?;
     let endpoint = provider.offer.endpoint();
-    let mut flow = context
-        .routes
-        .open_content_stream(
-            &current,
-            endpoint.hostname(),
-            endpoint.port(),
-            unix_millis(),
-        )
-        .await
-        .map_err(|_| ContentError::Unavailable)?;
-    let mut remote = tls::connect(flow.stream_mut(), request.peer, &provider.offer)
-        .await
-        .map_err(|_| ContentError::Unavailable)?;
-    let challenge = custody::begin(&mut remote, &request.provider_key)
-        .await
-        .map_err(|_| ContentError::Unavailable)?;
+    let mut flow = until_requester_closed(local, async {
+        context
+            .routes
+            .open_content_stream(
+                &current,
+                endpoint.hostname(),
+                endpoint.port(),
+                unix_millis(),
+            )
+            .await
+            .map_err(|_| ContentError::Unavailable)
+    })
+    .await?;
+    let mut remote = until_requester_closed(local, async {
+        tls::connect(flow.stream_mut(), request.peer, &provider.offer)
+            .await
+            .map_err(|_| ContentError::Unavailable)
+    })
+    .await?;
+    let challenge = until_requester_closed(local, async {
+        custody::begin(&mut remote, &request.provider_key)
+            .await
+            .map_err(|_| ContentError::Unavailable)
+    })
+    .await?;
     checked_policy(context, Some(policy)).await?;
     super::check_publication_time(&request.manifest)?;
     *ready_sent = true;
@@ -208,13 +273,19 @@ async fn exchange(
         }),
     )
     .await?;
-    let receipt = custody::bridge(
+    let receipt = custody::bridge_with_admission(
         local,
         &mut remote,
         &challenge,
         &request.signed,
         request.operation,
         TransferLimits::default(),
+        |bytes| async move {
+            match spare {
+                Some(spare) => spare.admit(bytes).await,
+                None => true,
+            }
+        },
     )
     .await
     .map_err(|_| ContentError::Unavailable)?;

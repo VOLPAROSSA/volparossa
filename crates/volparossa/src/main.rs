@@ -667,6 +667,9 @@ fn print_response(response: ControlResponse) -> Result<()> {
         Payload::ComputeDiscovered(_) => {
             anyhow::bail!("unexpected executor selection outside an explicit compute workflow")
         }
+        Payload::ContentCustodyDiscovered(_) => {
+            anyhow::bail!("unexpected custody selection outside an explicit retention workflow")
+        }
         Payload::Content(receipt) => println!(
             "{}",
             serde_json::json!({
@@ -676,6 +679,7 @@ fn print_response(response: ControlResponse) -> Result<()> {
                 "control_relay_peer_id":receipt.control_relay_peer_id,
                 "origin_authenticated":receipt.origin_authenticated,
                 "origin_body_bytes":receipt.origin_body_bytes,
+                "origin_authority_body_bytes":receipt.origin_authority_body_bytes,
                 "peer_bytes":receipt.peer_bytes,
                 "origin_range_requests":receipt.origin_range_requests,
                 "replication_enabled":receipt.replication_enabled,

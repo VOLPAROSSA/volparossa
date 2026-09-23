@@ -93,6 +93,40 @@ async fn digest_mode_downloads() {
 }
 
 #[test]
+fn https_checksum_mode_is_correlated_before_local_transfer() {
+    isolated(
+        "https_checksum_mode_is_correlated_before_local_transfer",
+        async {
+            for fault in [Fault::None, Fault::WrongChecksum] {
+                let mut fixture = Fixture::new();
+                fixture.checksum = true;
+                let output = exchange(&mut fixture, "checksum.bin", fault, 0).await;
+                if matches!(fault, Fault::None) {
+                    assert!(
+                        output.status.success(),
+                        "{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                    assert_eq!(report["authentication_scope"], "origin-checksum");
+                    assert_eq!(report["origin_digest"], false);
+                    assert_eq!(report["origin_authority_body_bytes"], 80);
+                    assert_eq!(report["origin_body_bytes"], 0);
+                    assert_eq!(
+                        fs::read(fixture.directory.path().join("checksum.bin")).unwrap(),
+                        fixture.bytes
+                    );
+                } else {
+                    assert!(!output.status.success());
+                    assert!(String::from_utf8_lossy(&output.stderr).contains("mode"));
+                    assert_eq!(directory_names(fixture.directory.path()), ["served-store"]);
+                }
+            }
+        },
+    );
+}
+
+#[test]
 fn https_local_output_is_not_published_before_valid_ready_and_final() {
     isolated(
         "https_local_output_is_not_published_before_valid_ready_and_final",
@@ -141,6 +175,7 @@ fn now() -> u64 {
 }
 
 struct Fixture {
+    checksum: bool,
     directory: tempfile::TempDir,
     store: ChunkStore,
     signed: SignedManifest,
@@ -190,6 +225,7 @@ impl Fixture {
             manifest,
             bytes,
             origin_digest: false,
+            checksum: false,
         }
     }
 
@@ -202,8 +238,16 @@ impl Fixture {
         assert_eq!(parameters.resource_url, RESOURCE);
         assert_eq!(parameters.origin_digest, self.origin_digest);
         assert_eq!(
+            parameters.checksum_path,
+            if self.checksum { "/SHA256SUMS" } else { "" }
+        );
+        assert_eq!(
             parameters.metadata_path,
-            if self.origin_digest { "" } else { "/metadata" }
+            if self.origin_digest || self.checksum {
+                ""
+            } else {
+                "/metadata"
+            }
         );
         assert_eq!(
             Path::new(&parameters.cache),
@@ -226,7 +270,7 @@ impl Fixture {
         .unwrap();
         if matches!(
             fault,
-            Fault::WrongResource | Fault::ExpiredReady | Fault::WrongMode
+            Fault::WrongResource | Fault::ExpiredReady | Fault::WrongMode | Fault::WrongChecksum
         ) {
             assert_eq!(
                 stream.read(&mut [0; 1]).await.unwrap(),
@@ -242,6 +286,13 @@ impl Fixture {
     fn readiness(&self, fault: Fault) -> HttpsContentTransferReady {
         HttpsContentTransferReady {
             origin_digest: self.origin_digest ^ matches!(fault, Fault::WrongMode),
+            checksum_path: if matches!(fault, Fault::WrongChecksum) {
+                "/OTHER-SUMS".into()
+            } else if self.checksum {
+                "/SHA256SUMS".into()
+            } else {
+                String::new()
+            },
             manifest: self.signed.encode(),
             publisher_key: self.manifest.publisher().to_vec(),
             resource_url: if matches!(fault, Fault::WrongResource) {
@@ -296,6 +347,7 @@ impl Fixture {
                     chunks: u32::try_from(self.manifest.chunks().len()).unwrap(),
                     origin_authenticated: true,
                     origin_body_bytes: origin_bytes,
+                    origin_authority_body_bytes: if self.checksum { 80 } else { 0 },
                     peer_bytes: self.manifest.length() - origin_bytes,
                     origin_range_requests: u32::from(origin_bytes > 0),
                     providers_used: 1,
@@ -318,6 +370,7 @@ enum Fault {
     Disconnect,
     WrongFinal,
     WrongMode,
+    WrongChecksum,
 }
 
 fn response(request_id: Vec<u8>, code: &str, payload: Payload) -> ControlResponse {
@@ -331,10 +384,10 @@ fn response(request_id: Vec<u8>, code: &str, payload: Payload) -> ControlRespons
 }
 
 async fn invoke(root: &Path, name: &str) -> Output {
-    invoke_mode(root, name, false).await
+    invoke_mode(root, name, false, false).await
 }
 
-async fn invoke_mode(root: &Path, name: &str, origin_digest: bool) -> Output {
+async fn invoke_mode(root: &Path, name: &str, origin_digest: bool, checksum: bool) -> Output {
     let root = root.to_owned();
     let name = name.to_owned();
     tokio::task::spawn_blocking(move || {
@@ -346,7 +399,9 @@ async fn invoke_mode(root: &Path, name: &str, origin_digest: bool) -> Output {
             .args(["content", "fetch-https", "--url", RESOURCE, "--cache"])
             .arg(root.join("agent-cache"))
             .args(["--local-output", &name, "--min-free-bytes", "0"]);
-        if origin_digest {
+        if checksum {
+            command.args(["--checksum-path", "/SHA256SUMS"]);
+        } else if origin_digest {
             command.arg("--origin-digest");
         } else {
             command.args(["--metadata-path", "/metadata"]);
@@ -363,11 +418,12 @@ async fn invoke_mode(root: &Path, name: &str, origin_digest: bool) -> Output {
 async fn exchange(fixture: &mut Fixture, name: &str, fault: Fault, origin_bytes: u64) -> Output {
     let root = fixture.directory.path().to_owned();
     let origin_digest = fixture.origin_digest;
+    let checksum = fixture.checksum;
     let listener = UnixListener::bind(root.join("control.sock")).unwrap();
     let ((), output) = tokio::time::timeout(Duration::from_secs(30), async {
         tokio::join!(
             fixture.serve(&listener, fault, origin_bytes),
-            invoke_mode(&root, name, origin_digest)
+            invoke_mode(&root, name, origin_digest, checksum)
         )
     })
     .await
