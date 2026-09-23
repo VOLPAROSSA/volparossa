@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-only
-# Explicit provisioning and exactly one isolated public 1.7B reasoning worker.
+# Explicit provisioning and exactly one isolated public v4/1.7B principle worker.
 # shellcheck disable=SC2317
 set -eu
 export LC_ALL=C
@@ -13,13 +13,15 @@ plan() {
         'VOLPAROSSA agent-reasoning plan:' \
         '  run only as vpci inside the disposable Debian 13 KVM guest, 4vCPU/8192MiB;' \
         '  install official guest build tools and bubblewrap, then build only the CLI;' \
-        '  explicitly provision pinned CPU SmolLM2-1.7B within a 5GiB provisioning budget;' \
+        '  explicitly provision pinned CPU SmolLM2-1.7B and LMFE within a 5GiB provisioning budget;' \
         '  run one BF16 inference worker, two threads, unchanged 600s worker deadline;' \
-        '  preserve the original 444-byte public routing source and factual question;' \
+        '  use the product principle framework and existing synthetic public policy subject;' \
+        '  create one disposable encrypted identity and sign the source, full context and v4 dataset;' \
+        '  retain 1024 prompt tokens, 512 generation tokens, 2048 JSON bytes and original field bounds;' \
         '  retain actual raw answer/report, pinned dtype, RSS, sampled CPU and namespaces;' \
-        '  keep semantic review pending independently: EOS is not correctness;' \
+        '  keep moral/legal review pending: valid schema, quotations and EOS are not correctness;' \
         '  remove the two new owned guest roots and compare routes/DNS/firewall.' \
-        'No host model/install, peer execution, private input, network publication or full-alpha claim.'
+        'No host model/install, peer execution, private input, network publication, policy activation or full-B06 claim.'
 }
 while [ "$#" -gt 0 ]; do
     case $1 in

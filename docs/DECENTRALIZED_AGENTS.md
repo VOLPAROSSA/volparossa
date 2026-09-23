@@ -1863,9 +1863,19 @@ still bound independently. This selector does not make two copies of a model ind
 Omit `--execute` for an inert preview. Reuse an existing source cache only with `--reuse-cache`.
 No automatic installation, private-file ingestion, training or network-policy signing occurs.
 
+The local `compute run` admission gate now accepts the same rich-inference profiles as the
+worker for version-4 principle inputs: 360M or explicitly selected 1.7B, without adapters or
+private input. Five focused admission tests pass, including the assessment and review contracts.
+The separate single-worker `agent-reasoning` candidate now exercises a genuinely signed public
+principle-assessment input using the current framework and pinned JSON decoder. It retains the
+original generated output for semantic review; execution and valid JSON do not establish sound
+reasoning. This new larger-model principle proof is pending, and does not change the ongoing
+360M distributed-cycle trial or establish larger-model distributed assessment.
+
 This initial assessment unit is one complete UTF-8 subject of at most 512 bytes, not a silently
-truncated page. Each actual prompt must fit 1024 tokens, each worker has the existing 256-token
-generation bound and at most a 600-second lease. Oversized prompts or incomplete/non-JSON answers
+truncated page. Each actual prompt must fit 1024 tokens; structured principle generation has
+its existing 512-token bound, a 2048-byte result bound and at most a 600-second lease.
+Oversized prompts or incomplete/non-JSON answers
 cannot become judgments. The four jobs run sequentially, with original receipts retained before
 later stages. Outcomes retain principle-linked literal source quotes, reasoning, counterarguments
 and material uncertainty. The coordinator binds opposite-peer reviews to the exact earlier
