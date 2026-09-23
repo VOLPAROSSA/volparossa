@@ -251,6 +251,12 @@ An opt-in source-grounded follow-up now keeps the complete original short docume
 generated answers in dependent tasks. Its real execution and offline resume pass, but its
 answers still contain privacy errors; retaining evidence is not the same as reasoning correctly.
 
+An optional `smollm2-1.7b-v1` candidate now connects a larger model to these same task and
+principle-assessment interfaces. It uses explicit CPU BF16 inference, its own memory budget,
+and requires sufficient observed spare memory before accepting work. It neither replaces the
+135M training model nor upgrades existing tasks on resume. Its first source-grounded VM trial
+is pending; more parameters alone are not evidence of better answers.
+
 An owner-enrolled automatic training-loop candidate can combine three trusted publishers'
 adapters, compare the result with its active model and use an approved combination for serving
 and further local training. With the owner's existing publishing configuration, approved

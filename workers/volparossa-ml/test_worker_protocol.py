@@ -153,6 +153,11 @@ def task_planner_doubles(text, generated=None, prompt=None):
         return Tensor([actual_prompt + generated])
 
     model.generate.side_effect = generate
+    # The opt-in BF16 branch inspects actual parameter metadata. This remains
+    # an inert double, never a model/backend import or numeric execution.
+    parameter = mock.Mock(dtype=torch.bfloat16, device=mock.Mock(type="cpu"))
+    parameter.numel.return_value = 1
+    model.parameters.return_value = [parameter]
     return model, tokenizer, torch, transformers
 
 

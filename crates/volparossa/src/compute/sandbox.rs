@@ -6,7 +6,6 @@ use tokio::process::Command;
 
 use super::Options;
 
-pub(super) const ADDRESS_SPACE_BYTES: u64 = 6 * 1024 * 1024 * 1024;
 pub(super) const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 pub(super) const TMPFS_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -143,7 +142,10 @@ pub(super) fn command(options: &Options) -> Command {
             "--core=0",
             "--nofile=128",
             "--nproc=128",
-            &format!("--as={ADDRESS_SPACE_BYTES}"),
+            &format!(
+                "--as={}",
+                super::resources::limits(options.model_profile).address_space
+            ),
             &format!("--fsize={MAX_FILE_BYTES}"),
             &format!("--cpu={}", options.max_seconds),
             "/usr/bin/nice",

@@ -55,7 +55,7 @@ impl Input {
         if let Some(source) = &self.original_source {
             ensure!(
                 self.synthesis
-                    && self.model_profile == ModelProfile::Smol360
+                    && self.model_profile.supports_rich_inference()
                     && !source.trim().is_empty()
                     && source.len() <= 4096
                     && !source.contains('\0'),
@@ -251,6 +251,8 @@ mod tests {
             "document":"A generated claim.\n","question":"What does the source actually establish?",
             "synthesis":true,"original_source":"Original evidence, not a generated answer."}))
         .unwrap();
+        input.validate().unwrap();
+        input.model_profile = ModelProfile::Smol1700;
         input.validate().unwrap();
         let spec = input.model_profile.spec();
         let mut plan: Plan = serde_json::from_value(serde_json::json!({"version":1,

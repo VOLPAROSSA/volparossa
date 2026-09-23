@@ -54,7 +54,7 @@ pub(super) fn load(root: &Path) -> Result<(Enrollment, String)> {
     let enrolled: Enrollment =
         serde_json::from_slice(&read(&root.join("enrollment.json"), 16 * 1024)?)?;
     ensure!(
-        matches!(enrolled.version, 1 | 2)
+        matches!(enrolled.version, 1..=3)
             && enrolled.providers[0] != enrolled.providers[1]
             && (1..=600).contains(&enrolled.max_seconds)
             && enrolled.selected_at < enrolled.expires
@@ -64,6 +64,7 @@ pub(super) fn load(root: &Path) -> Result<(Enrollment, String)> {
             ),
         "compute_policy_enrollment"
     );
+    enrolled.profile()?;
     for key in enrolled.providers.iter().chain([&enrolled.publisher_key]) {
         parse_key(key).map_err(anyhow::Error::msg)?;
     }

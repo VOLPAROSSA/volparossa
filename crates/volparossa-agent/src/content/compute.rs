@@ -499,7 +499,7 @@ pub(super) fn validate_capabilities(caps: &Capabilities) -> Result<(), ComputeEr
         || !(1..=profile.spec().max_rows).contains(&caps.max_rows)
         || (!profile.is_default()
             && (caps.model.adapter_files.is_some() || caps.successor_activation_v1))
-        || (caps.principle_inference_v4 && profile != ModelProfile::Smol360)
+        || (caps.principle_inference_v4 && !profile.supports_rich_inference())
         || caps.model_fingerprint
             != hex::encode(Sha256::digest(
                 serde_json::to_vec(&caps.model).map_err(|_| ComputeError::Invalid)?,

@@ -424,7 +424,7 @@ fn validate_profile(caps: &rpc::Capabilities) -> Result<()> {
     let profile = super::broker::profile_for_model(&caps.model)?;
     ensure!(
         caps.public_inference_only
-            && (!caps.principle_inference_v4 || profile == super::ModelProfile::Smol360)
+            && (!caps.principle_inference_v4 || profile.supports_rich_inference())
             && caps.runtime_slots == 1
             && caps.max_threads <= 2
             && (1..=600).contains(&caps.max_job_seconds)

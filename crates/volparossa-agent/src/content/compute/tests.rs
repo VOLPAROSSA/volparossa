@@ -49,6 +49,34 @@ fn capabilities() -> Capabilities {
 }
 
 #[test]
+fn explicit_large_profile_supports_principle_inference_but_not_successor_adapters() {
+    let mut caps = capabilities();
+    let spec = ModelProfile::Smol1700.spec();
+    caps.model = ModelIdentity {
+        model_id: spec.model_id.into(),
+        model_revision: spec.revision.into(),
+        base_weights: FileIdentity {
+            bytes: spec.weights_bytes,
+            sha256: spec.weights_sha256.into(),
+        },
+        adapter_files: None,
+    };
+    caps.max_rows = spec.max_rows;
+    caps.principle_inference_v4 = true;
+    caps.model_fingerprint = hex::encode(Sha256::digest(serde_json::to_vec(&caps.model).unwrap()));
+    validate_capabilities(&caps).unwrap();
+    caps.successor_activation_v1 = true;
+    assert!(validate_capabilities(&caps).is_err());
+    caps.successor_activation_v1 = false;
+    caps.model.adapter_files = Some(std::collections::BTreeMap::new());
+    caps.model_fingerprint = hex::encode(Sha256::digest(serde_json::to_vec(&caps.model).unwrap()));
+    assert!(validate_capabilities(&caps).is_err());
+    let mut old = capabilities();
+    old.principle_inference_v4 = true;
+    assert!(validate_capabilities(&old).is_err());
+}
+
+#[test]
 fn capability_profiles_bind_exact_base_identity_rows_and_adapter_compatibility() {
     fn bind(caps: &mut Capabilities) {
         caps.model_fingerprint =

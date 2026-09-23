@@ -4,6 +4,26 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-23
 
+An explicitly selected `smollm2-1.7b-v1` inference candidate now addresses the observed
+reasoning limitation without replacing the lightweight training model. It pins the original
+SmolLM2-1.7B files, reuses the existing CPU runtime and verifies actual CPU BF16 parameter
+storage. No training, 135M adapter application or silent FP32 fallback is admitted. Public and
+local-private inference, document/graph planning, grounded synthesis and principle-assessment
+interfaces retain the same token and time budgets. Existing 135M/360M defaults and historical
+enrollment encodings remain unchanged. New non-default policy enrollments retain the exact
+profile and original provider fingerprints; resume cannot upgrade either.
+
+The selected larger profile has explicit 5-GiB sampled RSS and 10-GiB address-space bounds;
+pre-launch admission and broker availability require at least 5.5 GiB observed spare memory,
+including cgroup parents. This is not a memory reservation or a hard RSS cap. Owner pressure,
+two-thread limits, isolation and cancellation remain active. A separate 8-GiB single-worker
+`agent-reasoning` VM scenario retains the same original 444-byte public source and question
+used by the earlier flawed graph, plus its actual answer and execution observations. Content
+review remains distinct from execution/EOS. Ninety focused Rust tests, strict production
+Clippy for the CLI/agent/content library, inert Python profile tests and the inert KVM launch
+contract pass. Its actual fit, speed, correctness and larger-model peer/policy execution remain
+unproved; no model or backend ran on the development host.
+
 An owner-enrolled `compute train-loop --aggregate-plan` candidate now connects automatic
 three-publisher discovery, frozen-cohort aggregation and held-out comparison to local adoption,
 serving and the next actual training warmstart. Unchanged cohorts are not recomputed; rollback

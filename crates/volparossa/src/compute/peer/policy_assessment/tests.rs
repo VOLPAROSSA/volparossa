@@ -63,6 +63,76 @@ fn preview_is_explicit_native_public_and_never_creates_work() {
 }
 
 #[test]
+fn optional_model_selection_is_explicit_and_cannot_override_resume() {
+    let root = tempfile::tempdir().unwrap();
+    let output = root.path().join("not-created");
+    let mut input = arguments(&output);
+    input.extend(["--model-profile".into(), "smollm2-1.7b-v1".into()]);
+    let mut args = Cli::try_parse_from(input).unwrap().options;
+    assert_eq!(preview(&args).unwrap()["model_profile"], "smollm2-1.7b-v1");
+    args.resume = true;
+    assert!(preview(&args).is_err());
+    args.model_profile = None;
+    assert_eq!(preview(&args).unwrap()["model_profile"], Value::Null);
+    args.resume = false;
+    args.model_profile = Some(ModelProfile::Default135);
+    assert!(preview(&args).is_err());
+    assert!(!output.exists());
+}
+
+#[test]
+fn retained_policy_enrollment_never_upgrades_a_historical_model() {
+    let signer = SigningKey::from_bytes(&[7; 32]);
+    let key = hex::encode(signer.verifying_key().as_bytes());
+    let mut enrolled = Enrollment {
+        version: 1,
+        scope: assessment::Scope::new(&key, &"a".repeat(64), "Public fixture.").unwrap(),
+        source_name: "subject".into(),
+        source_download_sha256: "b".repeat(64),
+        publisher_key: key,
+        providers: ["c".repeat(64), "d".repeat(64)],
+        model_fingerprints: ["e".repeat(64), "f".repeat(64)],
+        model_profile: None,
+        license: "CC0-1.0".into(),
+        selected_at: 1,
+        expires: 2,
+        max_seconds: 600,
+        portable_receipts: false,
+    };
+    for version in [1, 2] {
+        enrolled.version = version;
+        assert_eq!(enrolled.profile().unwrap(), ModelProfile::Smol360);
+        let historical = serde_json::to_vec(&enrolled).unwrap();
+        assert!(
+            serde_json::to_value(&enrolled)
+                .unwrap()
+                .get("model_profile")
+                .is_none()
+        );
+        let reopened: Enrollment = serde_json::from_slice(&historical).unwrap();
+        assert_eq!(serde_json::to_vec(&reopened).unwrap(), historical);
+        assert_eq!(reopened.profile().unwrap(), ModelProfile::Smol360);
+        enrolled.model_profile = Some(ModelProfile::Smol1700);
+        assert!(enrolled.profile().is_err());
+        enrolled.model_profile = None;
+    }
+    enrolled.version = 3;
+    assert!(enrolled.profile().is_err());
+    enrolled.model_profile = Some(ModelProfile::Default135);
+    assert!(enrolled.profile().is_err());
+    enrolled.model_profile = Some(ModelProfile::Smol1700);
+    assert_eq!(enrolled.profile().unwrap(), ModelProfile::Smol1700);
+    for review in [false, true] {
+        assert!(
+            enrolled
+                .output_contract(enrolled.question(review))
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+
+#[test]
 fn legacy_questions_reopen_original_signed_datasets_without_rewriting() {
     use volparossa_content::{
         CacheLimits, ChunkStore, Metadata, Publication, Validity,
@@ -89,6 +159,7 @@ fn legacy_questions_reopen_original_signed_datasets_without_rewriting() {
             .try_into()
             .unwrap(),
         model_fingerprints: ["c".repeat(64), "c".repeat(64)],
+        model_profile: None,
         license: "CC0-1.0".into(),
         selected_at: 100,
         expires: 200,
@@ -225,6 +296,7 @@ async fn cancellation_or_original_expiry_starts_no_assessment_work() {
             hex::encode(args.provider_key[1].as_bytes()),
         ],
         model_fingerprints: ["c".repeat(64), "c".repeat(64)],
+        model_profile: None,
         license: "CC0-1.0".into(),
         selected_at: 1,
         expires: 2,

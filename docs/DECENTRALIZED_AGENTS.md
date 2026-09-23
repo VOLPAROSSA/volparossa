@@ -162,23 +162,39 @@ runtime and isolation; see [asset and license provenance](../THIRD_PARTY_LICENSE
 | --- | ---: | ---: | ---: | ---: |
 | `smollm2-135m-v1` (default) | 192 tokens | 64 tokens | 1,024 | 4 |
 | `smollm2-360m-v1` | 1,024 tokens | 256 tokens | 4,096 | 1 |
+| `smollm2-1.7b-v1` (optional candidate) | 1,024 tokens | 256 tokens | 4,096 | 1 |
+
+The optional 1.7B profile pins `HuggingFaceTB/SmolLM2-1.7B-Instruct` at
+`31b70e2e869a7173562077fd711b654946d38674`. Its existing CPU backend explicitly loads
+BF16 parameters; the worker checks and reports the actual loaded dtype. There is no silent
+FP32 fallback, automatic installation, training or compatible 135M adapter for this profile.
+The original 135M and 360M profiles retain their existing FP32 execution and model identities.
 
 Select the same `--model-profile` when explicitly provisioning the model, starting its
 `compute serve` broker, and enrolling a new `compute peer document` task. `compute run`
 also accepts it. Discovery filters for the chosen base profile; manual enrollment checks the
 actual peers and pins their common complete model fingerprint before tokenization or publication.
 Resume uses the original profile and fingerprint, not a newly supplied CLI choice. Signed
-packages may still contain four rows, but the ready queue dispatches singleton 360M jobs.
-Legacy batch-barrier enrollment is not supported for that profile.
+packages may still contain four rows, but the ready queue dispatches singleton 360M/1.7B jobs.
+Legacy batch-barrier enrollment is not supported for these profiles.
 
 Synthesis retains complete parent text and the matching profile rather than silently applying
 135M limits. A token-limited or wire-truncated output cannot become a completed answer or new
 dependency. The task-question planner keeps its separate 512-prompt / 384-total-generated-token
 budget and four-attempt limit; selecting a model does not enlarge that planner budget, the
-600-second worker deadline, two-thread bound, or 3-GiB sampled RSS cancellation limit.
+600-second worker deadline or two-thread bound. The 135M/360M profiles keep their 3-GiB sampled
+RSS cancellation and 6-GiB address-space limits. Selecting 1.7B explicitly selects a 5-GiB
+sampled RSS limit and 10-GiB address-space limit. Before launch and when advertising availability,
+it requires at least 5.5 GiB of observed spare memory, using the minimum of host availability
+and observed cgroup parent limits. This is admission, not a memory reservation; existing
+pressure cancellation and owner-priority controls still apply. RSS sampling is not a hard
+cgroup cap or a guarantee that a user never notices load.
 The explicit 360M provision preview downloads 977,655,758 bytes, including the existing runtime
-wheels; no model or runtime is installed on the development host. Full 360M peer execution,
-resource behavior and useful/source-faithful answers remain pending the disposable VM proof.
+wheels; no model or runtime is installed on the development host. The later 360M trials prove
+peer execution but retain factual errors. The new 1.7B candidate has a separate single-worker
+8-GiB disposable VM trial pending; its actual fit, speed and source-faithful answers are not yet
+proved. That trial retains the original public source, question and actual answer for content
+review independently of execution completion.
 
 `volparossa compute run` is preview-only unless `--execute` is supplied. The current CLI
 supervises one real Python CPU worker in mandatory Bubblewrap network/PID/IPC/mount
@@ -761,7 +777,7 @@ volparossa compute serve --socket /OWNER/broker.sock \
 
 These illustrative directories must already be private and separate from the training-loop,
 model and cache directories. The broker's `--adapter-root` cannot be combined with this mode.
-The inference-only 360M profile rejects `--serving-directory`; its weights cannot accept 135M adapters.
+The inference-only 360M and 1.7B profiles reject `--serving-directory`; their weights cannot accept 135M adapters.
 Attach its protected socket and independently selected dataset publishers through the existing
 `compute peer attach` workflow. Without `--serving-directory`, the broker's fixed-model
 behavior is unchanged; the protocol advertises successor activation only for an opted-in broker.
@@ -1795,7 +1811,12 @@ volparossa compute peer policy-assess \
 
 The owner must have permission to redistribute the public subject under the specified license;
 the source signature does not itself grant that permission. Both peers must already be
-provisioned with the pinned 360M profile and independently trust the owner's context publisher.
+provisioned with the selected exact profile and independently trust the owner's context publisher.
+The default remains 360M. For the optional larger model, pass `--model-profile smollm2-1.7b-v1`
+when starting both brokers and enrolling this workflow. New non-default enrollments explicitly
+retain that selection as version 3; original version-1/2 enrollments remain exactly 360M and
+cannot acquire a different model on resume. Both original complete model fingerprints are
+still bound independently. This selector does not make two copies of a model independent judges.
 Omit `--execute` for an inert preview. Reuse an existing source cache only with `--reuse-cache`.
 No automatic installation, private-file ingestion, training or network-policy signing occurs.
 
@@ -1857,7 +1878,8 @@ This does not complete B06: these concepts are not authorized network-wide polic
 legal determinations, authority membership/quorum, conflict resolution across partitions or
 automatic cache/exit enforcement. The existing threshold-signed destination policy is unchanged.
 
-New assessment workflows use enrollment version 2 and signed
+Default-360M assessment workflows use enrollment version 2; explicitly selected larger models
+use enrollment version 3 with their retained profile. Both use signed
 `application/vnd.volparossa.agent-principle.v4+json` inputs. Each singleton input selects only
 `principle_assessment_v1` or `principle_review_v1`; peers cannot submit arbitrary decoder schemas.
 The owner must explicitly provision the existing pinned optional decoder (`--task-graph-decoder`)

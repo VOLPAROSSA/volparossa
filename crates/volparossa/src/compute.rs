@@ -8,6 +8,7 @@ mod owner_control;
 mod peer;
 mod policy_assessment;
 mod private_task;
+mod resources;
 mod sandbox;
 mod serving_snapshot;
 mod spare_capacity;
@@ -166,8 +167,8 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
                 "network": "isolated-loopback-only", "device": "cpu",
                 "private_data_supported": false, "distributed_execution": false,
                 "limits": {
-                    "address_space_bytes": sandbox::ADDRESS_SPACE_BYTES,
-                    "observed_rss_cancel_bytes": supervise::MAX_RSS_BYTES,
+                    "address_space_bytes": resources::limits(options.model_profile).address_space,
+                    "observed_rss_cancel_bytes": resources::limits(options.model_profile).observed_rss,
                     "output_cancel_bytes": supervise::MAX_OUTPUT_BYTES,
                     "file_size_bytes": sandbox::MAX_FILE_BYTES,
                     "tmpfs_bytes": sandbox::TMPFS_BYTES,
@@ -202,6 +203,7 @@ async fn execute(options: &Options, activity: watch::Receiver<bool>) -> Result<V
         "compute_unprivileged_user_required"
     );
     let _lease = runtime_lease(&options.runtime_root)?;
+    resources::admission(options.model_profile)?;
     if options.spare_capacity {
         let mut capacity = spare_capacity::Budget::new();
         ensure!(

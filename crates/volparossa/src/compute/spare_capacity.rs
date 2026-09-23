@@ -276,7 +276,7 @@ fn capped_memory(available: u64, limit: &str, current: Option<&str>) -> Option<u
     Some(available.min(limit.saturating_sub(used)))
 }
 
-fn memory_headroom() -> Option<u64> {
+pub(super) fn memory_headroom() -> Option<u64> {
     let host = available_memory(&system_text(Path::new("/proc/meminfo")).ok()?)?;
     let relative = unified_path(&system_text(Path::new("/proc/self/cgroup")).ok()?)?;
     cgroup_headroom(host, &relative, system_text)

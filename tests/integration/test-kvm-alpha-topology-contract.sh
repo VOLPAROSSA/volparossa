@@ -101,6 +101,23 @@ done
 [ -f "$GENERATOR" ] && [ -x "$GENERATOR" ] && [ ! -L "$GENERATOR" ]
 sh -n "$GENERATOR"
 
+# Public reasoning is a separate one-worker guest proof, never routed through
+# the older multi-peer or private-input scenario and never a semantic PASS.
+"$HOST" --preview --scenario agent-reasoning | grep -F 'Agent-reasoning:' >/dev/null
+"$HOST" --preview --scenario agent-reasoning | grep -F 'Guest resources: 4 vCPUs, 8192 MiB RAM;' >/dev/null
+if "$HOST" --preview --scenario agent-reasoning --scenario agent-private-task \
+    | grep -F 'Agent-reasoning:' >/dev/null; then exit 1; fi
+if "$HOST" --preview --scenario agent-private-task --scenario agent-reasoning \
+    | grep -F 'Private-task:' >/dev/null; then exit 1; fi
+sh -n "$HERE/agent-reasoning-smoke.sh"
+sh "$HERE/agent-reasoning-smoke.sh" --preview | grep -F 'PREVIEW ONLY:' >/dev/null
+grep -F 'exec sh tests/integration/agent-reasoning-smoke.sh --execute --yes --expected-commit "$expected_commit"' "$HOST" >/dev/null
+grep -F '[ "$scenario" != agent-reasoning ] || driver_time_bound=4200s' "$HOST" >/dev/null
+grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-reasoning'" "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-reasoning-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-reasoning-smoke.py self-test' "$WORKFLOW" >/dev/null
+python3 -B "$HERE/agent-reasoning-smoke.py" self-test
+
 # The private-input proof is standalone: no overlay roles, native MPQUIC or
 # public broker is started merely to exercise one owner-local model worker.
 "$HOST" --preview --scenario agent-private-task | grep -Fi 'Private-task:' >/dev/null

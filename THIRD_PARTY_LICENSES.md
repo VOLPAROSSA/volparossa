@@ -18,6 +18,7 @@ current Debian package; a later distributable ML package still needs complete no
 | --- | --- | --- |
 | SmolLM2-135M-Instruct | [HuggingFaceTB model](https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/tree/83212e1e2b3cfd6958f3707877bb878945dea8ee), `83212e1e2b3cfd6958f3707877bb878945dea8ee` | Apache-2.0; unchanged model LICENSE SHA-256 `59899c6091b540582ed617e8eeaac4919dc985ccfc35459ee9752b699be5205b` |
 | Opt-in SmolLM2-360M-Instruct | [HuggingFaceTB model](https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct/tree/a10cc1512eabd3dde888204e902eca88bddb4951), `a10cc1512eabd3dde888204e902eca88bddb4951` | Apache-2.0 declared by the original model card; this revision has no `LICENSE` file. The explicitly pinned, unchanged Apache-2.0 text from the 135M row is retained separately, not described as a file from the 360M repository. |
+| Opt-in SmolLM2-1.7B-Instruct | [HuggingFaceTB model](https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct/tree/31b70e2e869a7173562077fd711b654946d38674), `31b70e2e869a7173562077fd711b654946d38674` | Apache-2.0 declared by the original model card; this revision has no `LICENSE` file. The unchanged Apache-2.0 text from the pinned 135M repository is retained with separate provenance, not attributed to the 1.7B repository. |
 | PyTorch CPU `2.14.0+cpu` | [pytorch/pytorch](https://github.com/pytorch/pytorch/tree/2b3ec34829036a65cd9d1398ea72a0167dc37470), `2b3ec34829036a65cd9d1398ea72a0167dc37470` | Original official CPU wheel; retain its own and bundled dependency notices |
 | Transformers `5.16.1` | [huggingface/transformers](https://github.com/huggingface/transformers/tree/93c8b7b485963a10800c91f55304db6be211c2bd), `93c8b7b485963a10800c91f55304db6be211c2bd` | Apache-2.0; original wheel notices retained |
 | PEFT `0.20.0` | [huggingface/peft](https://github.com/huggingface/peft/tree/a5526d27a9d47d1e8264d5e1b1f96c0fdc79464e), `a5526d27a9d47d1e8264d5e1b1f96c0fdc79464e` | Apache-2.0; original wheel notices retained |
@@ -39,6 +40,21 @@ is reused because upstream lists the identical Git blob
 No weights or tokenizer were downloaded for this metadata check. The 360M profile does
 not enable training or apply 135M adapters, and does not raise the native content-object
 ceiling or establish answer quality.
+
+The separately selected `smollm2-1.7b-v1` profile pins its original assets in
+`workers/volparossa-ml/model-pins-1.7b.json`, reusing the same 38-wheel runtime.
+Original safetensors are 3,422,777,952 bytes, SHA-256
+`f55217be716b6a997b97b9d8d7eb6fad02e00858f5010ec24f64603c3a98a0e8`.
+The original configuration declares BF16. This inference-only profile explicitly
+loads CPU BF16 parameters, checks their actual dtype, and records it in reports;
+it does not quantize the file, train, accept 135M adapters, or retry with FP32.
+The 135M and 360M profiles retain their original FP32 loading and report formats.
+The pinned [Transformers Llama implementation](https://github.com/huggingface/transformers/blob/93c8b7b485963a10800c91f55304db6be211c2bd/src/transformers/models/llama/modeling_llama.py)
+uses FP32 softmax/RMS accumulation with casts back to the input dtype; the pinned
+[PyTorch CPU BLAS implementation](https://github.com/pytorch/pytorch/blob/2b3ec34829036a65cd9d1398ea72a0167dc37470/aten/src/ATen/native/CPUBlas.cpp)
+includes BF16 dispatch. These are source-level compatibility checks, not proof
+of guest memory fit, speed, answer quality, or support on every CPU. Only metadata
+was inspected for these pins; no model weights or backend were run on the host.
 
 The separate, explicit `--task-graph-decoder` provisioning option appends three original
 pure-Python wheels; neither the 38-wheel baseline nor its `requirements.lock` is changed.
