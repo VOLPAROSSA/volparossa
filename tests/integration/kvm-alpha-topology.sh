@@ -108,6 +108,7 @@ print_plan() {
                 'VOLPAROSSA active-recovery plan:' \
                 '  connect learner R4 through R0/R1/R2; fetch signed sources and Q over its own protected route;' \
                 '  provision only R5 seed/cache explicitly; serialize learner uptake and Client inference captures;' \
+                '  clone each coordinator mount view privately with a fresh proc; retain other-node storage masks;' \
                 '  train P, then a distinct Client+Relay node trains and publishes an approved Q from P;' \
                 '  damage only the learner-local extracted Q weights; automatically restore original approved P;' \
                 '  preserve the signed Q publication, approval and old job receipts; verify restart and continued training;' \

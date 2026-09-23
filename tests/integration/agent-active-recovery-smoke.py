@@ -137,8 +137,12 @@ def learner_isolation(work):
     pid = int(subprocess.check_output(["systemctl", "show", "--property=MainPID", "--value",
                                      "volparossa-alpha-agent@relay4.service"], text=True))
     require(pid > 0, "learner service stopped")
+    original_mounts = Path(f"/proc/{pid}/mountinfo").read_bytes()
     owner_info = root.stat()
-    command = ["nsenter", "--target", str(pid), "--mount", "setpriv",
+    # Same launch prefix as the coordinator: the clean proc belongs only to a
+    # disposable child mount namespace; node-private storage masks stay intact.
+    command = ["nsenter", "--target", str(pid), "--mount", "--net",
+        "unshare", "--mount", "--propagation", "private", "--mount-proc=/proc", "setpriv",
         f"--reuid={owner_info.st_uid}", f"--regid={owner_info.st_gid}", "--clear-groups",
         "--inh-caps=-all", "--ambient-caps=-all", "--bounding-set=-all", "--no-new-privs", "--", "test", "-r"]
     own = subprocess.run([*command, str(root / "plan.json")], timeout=10, check=False).returncode
@@ -146,8 +150,10 @@ def learner_isolation(work):
               (("publisher_dataset", private(work, "relay5") / "recovery-source/train.json"),
                ("client_cache", work / "state-client/compute-source/cache"))}
     require(own == 0 and all(code == 1 for code in remote.values()), "learner can read another node's source/cache")
+    require(Path(f"/proc/{pid}/mountinfo").read_bytes() == original_mounts, "learner service mounts changed")
     write(record(work, "learner-isolation"), dict(node="relay4", own_plan_readable=True,
         foreign_sources_unreadable=True, node_mount_namespace=os.readlink(f"/proc/{pid}/ns/mnt"),
+        private_child_proc=True, original_service_mounts=digest(original_mounts), service_mounts_unchanged=True,
         source_cache_files=bounded_tree(root / "source-cache"), cache_initializer=read(record(work, "learner-cache-init"))))
 
 
@@ -742,7 +748,10 @@ def check_evidence(value, revision):
             and all(value["cleanup"].values()), "owned workers or private stores remain")
     isolation = value["learner-isolation"]
     require(isolation["node"] == "relay4" and isolation["own_plan_readable"] is True
-            and isolation["foreign_sources_unreadable"] is True and isolation["node_mount_namespace"].startswith("mnt:["),
+            and isolation["foreign_sources_unreadable"] is True and isolation["node_mount_namespace"].startswith("mnt:[")
+            and isolation["private_child_proc"] is True and isolation["service_mounts_unchanged"] is True
+            and isolation["original_service_mounts"]["bytes"] > 0
+            and len(isolation["original_service_mounts"]["sha256"]) == 64,
             "learner source/cache shortcut was not excluded")
     minimums = {"p": len(p_files["dataset.json"]) + len(validation_files["dataset.json"]),
                 "adoption": len(q_files["adapter.bundle"]), "continued": len(later_files["dataset.json"])}
@@ -792,6 +801,25 @@ def report(value, revision):
 def self_test():
     # Inert structural controls, never presented as live ML/recovery evidence.
     from unittest.mock import patch
+    from types import SimpleNamespace
+    # Exercise the exact launch argument construction with inert subprocess
+    # doubles, never namespace/mount operations on the development host.
+    launch_calls = []
+    def probe(args, **_kwargs):
+        launch_calls.append(args)
+        return SimpleNamespace(returncode=0 if len(launch_calls) == 1 else 1)
+    with patch.object(subprocess, "check_output", return_value="123"), \
+            patch.object(subprocess, "run", side_effect=probe), \
+            patch.object(Path, "read_bytes", return_value=b"original service mountinfo"), \
+            patch.object(Path, "stat", return_value=SimpleNamespace(st_uid=1000, st_gid=1000)), \
+            patch.object(os, "readlink", return_value="mnt:[123]"), \
+            patch.dict(learner_isolation.__globals__, bounded_tree=lambda _path: {}, read=lambda _path: {}), \
+            patch.dict(learner_isolation.__globals__, write=lambda _path, _value: None):
+        learner_isolation(Path("/fixture"))
+    for command in launch_calls:
+        assert command[:12] == ["nsenter", "--target", "123", "--mount", "--net", "unshare",
+                                "--mount", "--propagation", "private", "--mount-proc=/proc", "setpriv",
+                                "--reuid=1000"]
     public_source = ("Every parallel path uses exactly one distinct relay between the same client and exit.\n"
                      "The normal client dataplane never connects directly to an exit.")
     with patch.object(Path, "read_text", autospec=True, return_value=public_source) as staged:

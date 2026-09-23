@@ -4,6 +4,20 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-23
 
+The [complete-envelope policy run on `fb574fdb`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35855257313)
+**passes its narrow four-worker pipeline**. Two original assessments finish at 1,003 bytes /
+289 tokens; both opposite-peer reviews now finish at 1,025 bytes / 252 tokens, each at a real
+JSON boundary. Original provider signatures, exact cross-review bindings and all 144 retained
+files pass source-exact checking. A 225,132-byte bundle transfers through the protected peer
+path into a fresh cache/folder on the same receiving client. With the brokers stopped, replay
+returns the unchanged result with zero new jobs. Five captures retain 80,173 frames with no
+drops or direct Client-to-Exit traffic; cleanup and original host bytes pass.
+This is **not sound or independent policy reasoning**: both assessments and reviews retain
+incorrect principle meanings and unfinished prose, and identical assessors use the same model.
+The concept remains `undetermined` / `review_disagreement`, with no network policy activation.
+B06 is not checked off. The new review bytes explain why the 2,048-byte envelope is needed for
+this run; they do not reconstruct or validate the absent rejected reviews from the older run.
+
 The [policy run on `3dc6136a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35852279407)
 reaches both actual assessments and both opposite-peer review workers, but **fails overall**
 at `POLICY_REASONING_INCOMPLETE`. Each assessment completes at a real JSON boundary after
@@ -58,6 +72,19 @@ admission, privacy boundaries, retry policy or execution deadlines. It is diagno
 not a claim to have repaired the unobserved underlying failure.
 The twelve focused cycle tests, typed startup/EOF checks, existing diagnostic-redaction checks
 and inert recovery-fixture self-test pass; no model runs on the development host.
+
+The [diagnostic run on `f55adaae`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35856197829)
+now identifies the boundary: `stage=supervisor`, startup exit 1, no signal,
+`stderr_class=proc_mount`, 58 stderr bytes. The original stderr text/errno are not retained.
+The original receipt binds a 1,005-byte cold dataset fetch from R5, and the bounded cycle
+snapshot survives cleanup; the worker still has not begun actual training. All 135 original
+files are preserved, including independent cleanup and host-state results. The fixture enters
+the agent service's masked mount namespace, unlike the prior working owner launch. The next
+candidate clones that view privately and mounts a clean proc in the child before dropping
+privileges. Other-node storage masks, worker isolation and service mounts remain protected;
+the learner probe uses the same launch prefix and checks the service mount table is unchanged.
+This is a disposable-guest fixture correction, not a host mount or service-policy change.
+Shell syntax and the inert launch/provenance tests pass; real recovery remains unproved.
 
 The [graph run on `b80f0b02`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35849837032)
 also **fails at `compute_deadline`** after the actual owner reaches baseline. Its original

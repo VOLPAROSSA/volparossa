@@ -102,7 +102,13 @@ agent_active_recovery_loop_start() {
         *) fail RECOVERY_LOOP_MODE ;;
     esac
     PHASE=agent-active-recovery-$recovery_label
+    # Clone the node's masked filesystem view, then mount a clean proc only in
+    # that non-propagating child namespace. Inheriting systemd's masked proc
+    # prevents unprivileged bubblewrap from mounting its own isolated proc.
+    # Do not remove --mount: it also hides the other same-UID fixture nodes.
+    # No --fork is used, so GNU timeout still signals the original coordinator.
     timeout --signal=INT --kill-after=15s 1200s nsenter --target "$recovery_node_pid" --mount --net \
+        unshare --mount --propagation private --mount-proc=/proc \
         setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- "$binary_directory/volparossa" --control-socket "$WORK/runtime-$recovery_node/control/agent.sock" \
