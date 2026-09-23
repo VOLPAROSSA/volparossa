@@ -163,6 +163,23 @@ agent_active_recovery_job() {
     fail RECOVERY_INFERENCE_DEADLINE
 }
 
+agent_active_recovery_first_job_and_seed() {
+    agent_active_recovery_network_start client job-p
+    agent_active_recovery_job p
+    agent_active_recovery_network_finish
+    # R5's owner-provisioned seed is not part of the R4-only inference proof.
+    # fetch-name checks signed name metadata at all discovered providers, even
+    # when all bundle bytes come from R4. Give that provisioning its own route
+    # lifetime, like the earlier explicit R5 dataset/cache provisioning; do not
+    # widen any capture allowlist or count it as cold learner acquisition.
+    PHASE=agent-active-recovery-q-seed-provision
+    content_replication_select client agent-active-recovery-q-seed \
+        || fail RECOVERY_SEED_ROUTE_UNAVAILABLE
+    agent_active_recovery_cache "$provider_node_b" "$jobs_key_a" disposable-recovery-p q-seed
+    content_replication_disconnect client agent-active-recovery-q-seed \
+        || fail RECOVERY_SEED_ROUTE_CLEANUP_FAILED
+}
+
 agent_active_recovery_run() {
     [ "$provider_node_a" = relay4 ] || fail RECOVERY_NODE_LAYOUT_CHANGED
     [ "$provider_node_b" = relay5 ] || fail RECOVERY_NODE_LAYOUT_CHANGED
@@ -201,10 +218,7 @@ agent_active_recovery_run() {
     jobs_batch_pid=
     agent_active_recovery_python capture-cycle "$WORK" p "$provider_node_a" 1 || fail RECOVERY_P_NOT_APPROVED
     agent_active_recovery_network_finish
-    agent_active_recovery_network_start client job-p
-    agent_active_recovery_job p
-    agent_active_recovery_cache "$provider_node_b" "$jobs_key_a" disposable-recovery-p q-seed
-    agent_active_recovery_network_finish
+    agent_active_recovery_first_job_and_seed
     agent_active_recovery_loop_start "$provider_node_b" q initial
     agent_active_recovery_python observe-training "$WORK" q "$provider_node_b" 1 "$jobs_batch_pid" \
         || fail RECOVERY_Q_REAL_TRAINING_MISSING
@@ -250,6 +264,11 @@ agent_active_recovery_run() {
     done
     agent_active_recovery_python capture "$WORK" || fail RECOVERY_ORIGINALS_CHANGED
     agent_active_recovery_network_finish
+    # Finish and retain the primary recovery phases first. Reuse the original
+    # pinned provision for the separate synthetic kernel check only after all
+    # recovery workers are stopped; a probe failure never fabricates recovery.
+    agent_jobs_stop || fail RECOVERY_WORKERS_STOP_FAILED
+    agent_jobs_aggregation_backend
     agent_jobs_cleanup || fail RECOVERY_PRIVATE_CLEANUP_FAILED
     agent_active_recovery_python evidence "$WORK" "$expected_commit" || fail RECOVERY_EVIDENCE_INVALID
     OBSERVED_BLOCKER=NONE

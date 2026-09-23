@@ -14,6 +14,10 @@ baseline/candidate comparison can produce a local bundle; nothing is automatical
 published. Six focused Rust checks and 87 pure Python admission/dispatch checks pass. No backend
 or model ran on the development host, and real numerical/three-publisher VM proof is pending.
 This adds executable integration, not completed B05, general quality or poisoning resistance.
+A guest-only numerical probe now reuses the existing pinned runtime in a separate, bounded
+private-network user unit. It checks real saved tensors against gauge/outlier and rank-six
+median/rank-four projection oracles, plus cancellation. Archive-bound source staging and
+inert admission checks pass; this synthetic kernel probe has not yet run on the real backend.
 
 The [complete-envelope policy run on `fb574fdb`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35855257313)
 **passes its narrow four-worker pipeline**. Two original assessments finish at 1,003 bytes /
@@ -96,6 +100,21 @@ privileges. Other-node storage masks, worker isolation and service mounts remain
 the learner probe uses the same launch prefix and checks the service mount table is unchanged.
 This is a disposable-guest fixture correction, not a host mount or service-policy change.
 Shell syntax and the inert launch/provenance tests pass; real recovery remains unproved.
+
+The [child-proc follow-up on `f7ddf9e2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35858537654)
+now completes actual P training (eight updates), held-out comparison, approved serving and a
+protected inference using the same adapter. Cold source/validation receipts, the original
+signed four-chunk bundle, isolation and unchanged service mounts validate independently.
+The run still **fails**: its inference capture contains 33 unexpected Exit↔R5 TCP packets.
+The fixture also performs R5's explicit seed provisioning inside that R4-only measurement;
+name lookup queries other discovered cache providers even when payload bytes come only from
+R4. The next candidate separates those phases without widening the traffic classifier.
+Aggregate headers alone cannot attribute each original packet to that lookup. It also fixes
+the evidence reader's singleton-only chunk parsing by comparing the entire canonical ordered
+manifest, retaining original signatures. Inert phase-order/chunk mutation checks and the new
+reader against the unchanged P originals pass. All 165 original files and cleanup/host-state
+checks are retained. No Q training, adoption or rollback occurred, and the actual inference
+answer was incorrect; this is lifecycle progress, not improved reasoning or completed B07.
 
 The [graph run on `b80f0b02`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35849837032)
 also **fails at `compute_deadline`** after the actual owner reaches baseline. Its original

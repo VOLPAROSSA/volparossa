@@ -106,6 +106,8 @@ print_plan() {
         if [ "$agent_active_recovery" = yes ]; then
             printf '%s\n' \
                 'VOLPAROSSA active-recovery plan:' \
+                '  after retaining recovery phases, reuse the pinned 135M runtime for bounded synthetic adapter algebra in a private-network user unit;' \
+                '  retain true tensor/residual/hash evidence and reap that unit; this is not trained-peer/B05 proof;' \
                 '  connect learner R4 through R0/R1/R2; fetch signed sources and Q over its own protected route;' \
                 '  provision only R5 seed/cache explicitly; serialize learner uptake and Client inference captures;' \
                 '  clone each coordinator mount view privately with a fresh proc; retain other-node storage masks;' \
@@ -872,6 +874,8 @@ if [ "$agent_successor_serving" = yes ] || [ "$agent_active_recovery" = yes ]; t
     command -v openssl >/dev/null 2>&1 || exit 69
 fi
 if [ "$agent_active_recovery" = yes ]; then
+    [ -f "$source_directory/tests/integration/agent-aggregation-backend-smoke.py" ] \
+        && [ ! -L "$source_directory/tests/integration/agent-aggregation-backend-smoke.py" ] || exit 69
     for recovery_fixture in agent-active-recovery-smoke.sh agent-active-recovery-smoke.py \
         content-replication-smoke.sh content-replication-smoke.py content-replication-capture.py; do
         [ -f "$source_directory/tests/integration/$recovery_fixture" ] \

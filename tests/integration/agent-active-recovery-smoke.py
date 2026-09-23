@@ -34,6 +34,9 @@ SCOPE = ("Actual public training P; a distinct node trains from signed P and pub
 FILES = SUCCESSOR["FILES"]
 ROUND = "peer-update-0000000000000001"
 MAX_PROOF = 24 * 1024 * 1024
+DATASET_TYPE = "application/vnd.volparossa.agent-dataset.v1+json"
+ADAPTER_TYPE = "application/vnd.volparossa.adapter.v1"
+CATALOG_TYPE = "application/vnd.volparossa.agent-source-catalog.v1+json"
 
 
 def record(work, name):
@@ -559,14 +562,43 @@ def check_training(cycle, observation, revision, predecessor=None):
     return files, training, evaluation
 
 
-def signed_content(signed, raw, publisher, name):
+def protobuf_value(number, value):
+    # Encode known expected metadata; do not relax the strict singleton parser
+    # for the outer signature envelope/body or silently discard repeated chunks.
+    def integer(value):
+        encoded = bytearray()
+        while value >= 128:
+            encoded.append((value & 127) | 128)
+            value >>= 7
+        return bytes(encoded) + bytes([value])
+    if isinstance(value, bytes):
+        return integer(number * 8 + 2) + integer(len(value)) + value
+    return integer(number * 8) + integer(value)
+
+
+def content_payload(raw, name, content_type, revision):
+    require(isinstance(raw, bytes) and 0 < len(raw) <= 4 * 1024 * 1024 and revision >= 1,
+            "invalid bounded fixture publication")
+    field = protobuf_value
+    payload = field(1, name.encode()) + field(2, revision)
+    payload += field(3, content_type.encode()) + field(4, len(raw))
+    for offset in range(0, len(raw), 256 * 1024):
+        chunk = raw[offset:offset + 256 * 1024]
+        payload += field(5, field(1, bytes.fromhex(digest(chunk)["sha256"])) + field(2, len(chunk)))
+    return payload + field(6, bytes.fromhex(digest(raw)["sha256"]))
+
+
+def signed_content(signed, raw, publisher, name, content_type, revision=1):
     envelope = CUSTODY["fields"](signed, 65536)
+    require(set(envelope) == {1, 2} and isinstance(envelope[2], bytes) and len(envelope[2]) == 64,
+            "original signed public content envelope differs")
     body = CUSTODY["fields"](envelope[1], 65536)
-    payload = CUSTODY["fields"](body[8], 65536)
-    require(body[1] == body[6] == 1 and body[2].hex() == publisher
+    payload = content_payload(raw, name, content_type, revision)
+    require(set(body) == set(range(1, 9)) and body[1] == body[6] == 1
+            and isinstance(body[2], bytes) and len(body[2]) == 32 and body[2].hex() == publisher
+            and isinstance(body[5], bytes) and len(body[5]) == 32
             and body[7].hex() == digest(body[8])["sha256"]
-            and payload[1].decode() == name and payload[2] >= 1 and payload[4] == len(raw)
-            and payload[6].hex() == digest(raw)["sha256"] and body[4] > body[3],
+            and body[8] == payload and 0 < body[3] < body[4],
             "original signed public content binding differs")
     COLLECTION["verify_signature"](envelope[1], envelope[2], body[2], b"VOLPAROSSA/native-content-manifest/v1\0")
     return body[4]
@@ -641,21 +673,21 @@ def check_evidence(value, revision):
     require(q_files["adapter.bundle"] != p_files["adapter.bundle"], "Q did not publish new trained weights")
     keys = value["layout"]["provider_keys"]
     require(keys["relay4"] != keys["relay5"], "training/publication identities are not distinct")
-    source_expiry = signed_content(p_files["dataset.manifest"], p_files["dataset.json"], keys["relay5"], "disposable-recovery-train")
+    source_expiry = signed_content(p_files["dataset.manifest"], p_files["dataset.json"], keys["relay5"], "disposable-recovery-train", DATASET_TYPE)
     require(q_files["dataset.manifest"] == p_files["dataset.manifest"]
             and q_files["dataset.json"] == p_files["dataset.json"], "Q trained on another source")
-    p_expiry = signed_content(p_files["publication.pb"], p_files["adapter.bundle"], keys["relay4"], "disposable-recovery-p")
-    q_expiry = signed_content(q_files["publication.pb"], q_files["adapter.bundle"], keys["relay5"], "disposable-recovery-q")
+    p_expiry = signed_content(p_files["publication.pb"], p_files["adapter.bundle"], keys["relay4"], "disposable-recovery-p", ADAPTER_TYPE)
+    q_expiry = signed_content(q_files["publication.pb"], q_files["adapter.bundle"], keys["relay5"], "disposable-recovery-q", ADAPTER_TYPE)
     require(p_expiry <= source_expiry and q_expiry <= source_expiry, "publication enlarged original source authority")
     for files, evaluation in ((p_files, p_evaluation), (q_files, q_evaluation)):
         check_bundle(files["adapter.bundle"], evaluation["candidate_adapter"], digest(files["dataset.manifest"])["sha256"])
-    next_expiry = signed_content(later_files["dataset.manifest"], later_files["dataset.json"], keys["relay5"], "disposable-recovery-next")
+    next_expiry = signed_content(later_files["dataset.manifest"], later_files["dataset.json"], keys["relay5"], "disposable-recovery-next", DATASET_TYPE)
     next_manifest = digest(later_files["dataset.manifest"])["sha256"]
     selection = json.loads(later_files["selection.json"])
     catalog_proof = selection["source_catalog"]
     catalog_raw = bytes.fromhex(catalog_proof["signed_manifest_hex"])
     catalog_body = catalog_proof["catalog_body"].encode()
-    catalog_expiry = signed_content(catalog_raw, catalog_body, keys["relay5"], "disposable-recovery-catalog")
+    catalog_expiry = signed_content(catalog_raw, catalog_body, keys["relay5"], "disposable-recovery-catalog", CATALOG_TYPE, 2)
     catalog_envelope = CUSTODY["fields"](catalog_raw, 65536)
     catalog_header = CUSTODY["fields"](catalog_envelope[1], 65536)
     catalog_metadata = CUSTODY["fields"](catalog_header[8], 65536)
@@ -681,7 +713,7 @@ def check_evidence(value, revision):
             and original["import/adapter.manifest"] == q_files["publication.pb"], "learner Q is not the original peer publication")
     decision = json.loads(original["comparison/decision.json"])
     validation_expiry = signed_content(original["comparison/dataset.manifest"], original["comparison/dataset.json"],
-                                      keys["relay5"], "disposable-recovery-validation")
+                                      keys["relay5"], "disposable-recovery-validation", DATASET_TYPE)
     validation_files = raw_files(p["validation"])
     require(validation_files["dataset.manifest"] == original["comparison/dataset.manifest"]
             and validation_files["dataset.json"] == original["comparison/dataset.json"],
@@ -802,6 +834,73 @@ def self_test():
     # Inert structural controls, never presented as live ML/recovery evidence.
     from unittest.mock import patch
     from types import SimpleNamespace
+    # Real native bundles exceed one chunk. Compare their entire ordered
+    # encoding, not a duplicate-tolerant dict that could lose chunk references.
+    field = protobuf_value
+    pieces = [letter * (256 * 1024) for letter in (b"a", b"b", b"c")] + [b"d" * 123]
+    raw = b"".join(pieces)
+    prefix = field(1, b"fixture") + field(2, 1) + field(3, ADAPTER_TYPE.encode()) + field(4, len(raw))
+    chunks = [field(5, field(1, bytes.fromhex(digest(piece)["sha256"])) + field(2, len(piece))) for piece in pieces]
+    suffix = field(6, bytes.fromhex(digest(raw)["sha256"]))
+    payload = prefix + b"".join(chunks) + suffix
+    assert content_payload(raw, "fixture", ADAPTER_TYPE, 1) == payload
+    public_key, signature = b"k" * 32, b"s" * 64
+    def manifest(value):
+        body = (field(1, 1) + field(2, public_key) + field(3, 100) + field(4, 200)
+                + field(5, b"n" * 32) + field(6, 1) + field(7, bytes.fromhex(digest(value)["sha256"]))
+                + field(8, value))
+        return field(1, body) + field(2, signature), body
+    signed, original_body = manifest(payload)
+    with patch.dict(COLLECTION, verify_signature=lambda *args: signature_calls.append(args)):
+        signature_calls = []
+        assert signed_content(signed, raw, public_key.hex(), "fixture", ADAPTER_TYPE) == 200
+        assert signature_calls == [(original_body, signature, public_key, b"VOLPAROSSA/native-content-manifest/v1\0")]
+        altered_chunks = [field(5, field(1, b"x" * 32) + field(2, len(pieces[0]))),
+                          field(5, field(1, bytes.fromhex(digest(pieces[0])["sha256"])) + field(2, len(pieces[0]) - 1))]
+        invalid = [prefix + changed + b"".join(chunks[1:]) + suffix for changed in altered_chunks]
+        invalid += [prefix + b"".join([chunks[1], chunks[0], *chunks[2:]]) + suffix,
+                    prefix + b"".join(chunks[:-1]) + suffix,
+                    prefix + b"".join([*chunks, chunks[-1]]) + suffix,
+                    payload + field(7, b"unknown")]
+        for changed_signed, changed_raw, changed_name, changed_type, changed_revision in (
+                [(manifest(value)[0], raw, "fixture", ADAPTER_TYPE, 1) for value in invalid]
+                + [(signed, b"e" + raw[1:], "fixture", ADAPTER_TYPE, 1),
+                   (signed, raw, "other", ADAPTER_TYPE, 1),
+                   (signed, raw, "fixture", DATASET_TYPE, 1),
+                   (signed, raw, "fixture", ADAPTER_TYPE, 2)]):
+            try:
+                signed_content(changed_signed, changed_raw, public_key.hex(), changed_name, changed_type, changed_revision)
+            except ValueError:
+                continue
+            raise AssertionError("altered chunk order/identity or public metadata accepted")
+        assert len(signature_calls) == 1
+    # Execute the real fixture phase ordering with shell-only doubles: name
+    # lookup/provisioning must be outside the R4-only inference capture. Never
+    # run a namespace, model, network or service command on this host.
+    phase_probe = r'''
+phase_result=$2
+. "$1"
+provider_node_b=relay5; jobs_key_a=R4_KEY
+fail() { exit 91; }
+agent_active_recovery_network_start() { printf 'capture:%s:%s\n' "$1" "$2"; }
+agent_active_recovery_job() { printf 'job:%s\n' "$1"; }
+agent_active_recovery_network_finish() { printf 'capture-ended\n'; [ "$phase_result" != reject ] || exit 92; }
+content_replication_select() { printf 'select:%s:%s\n' "$1" "$2"; }
+agent_active_recovery_cache() { printf 'seed:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4"; }
+content_replication_disconnect() { printf 'disconnect:%s:%s\n' "$1" "$2"; }
+agent_active_recovery_first_job_and_seed
+'''
+    for outcome in ("accept", "reject"):
+        observed = subprocess.run(["/bin/sh", "-c", phase_probe, "recovery-phase-probe",
+                                   str(HERE / "agent-active-recovery-smoke.sh"), outcome],
+                                  capture_output=True, text=True, timeout=5, check=False)
+        expected = ["capture:client:job-p", "job:p", "capture-ended"]
+        if outcome == "accept":
+            expected += ["select:client:agent-active-recovery-q-seed",
+                         "seed:relay5:R4_KEY:disposable-recovery-p:q-seed",
+                         "disconnect:client:agent-active-recovery-q-seed"]
+        assert observed.returncode == (0 if outcome == "accept" else 92), observed.stderr
+        assert observed.stdout.splitlines() == expected
     # Exercise the exact launch argument construction with inert subprocess
     # doubles, never namespace/mount operations on the development host.
     launch_calls = []
