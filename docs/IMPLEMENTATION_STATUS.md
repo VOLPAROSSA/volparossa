@@ -24,8 +24,28 @@ The gate connects native acquisition/serving, queued contribution, custody and r
 intake rather than copying rules into stale registry snapshots. Twenty-three focused Rust
 checks and scoped strict Clippy pass locally, including actual in-flight withdrawal, denied
 intake/queued copies, mixed-publication restart/reclaim and an isolated custody-service lifecycle.
-The extended disposable policy proof has not run. This is not network-wide decision distribution or membership governance,
-physical removal of cached bytes, arbitrary HTTPS inspection, legal correctness or completed B06.
+The [first extended disposable proof on `6ac301ee`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35893332294)
+**failed** in its restart-evidence checker: it confused manifest schema/version 1 with the
+existing minimum policy protocol version 2. The 170 retained originals contain the actual
+three-authority `undetermined` decision, successful local application, unchanged original
+journal/authority bytes across restart, and `CONTENT_POLICY` cache refusals before and after
+restart. All four model jobs still contain reasoning errors. A prospective check changing only
+that protocol expectation passes the retained evidence, including captures and cleanup;
+the original run remains failed and emitted no final activation report. The fixture now
+distinguishes the fields and has a focused schema regression.
+
+The next candidate adds `compute peer policy-publish` and `policy-import --execute --apply`:
+original quorum bytes travel as an inert signed native object through existing protected
+custody transport. A receiver verifies the exact subject, decision and evidence pins under its
+own configured current authority, then uses the same durable local gate. The content publisher
+does not become a policy signer. Original decision bytes and expiry survive publication,
+import and retry; no model or signing key needs to be transferred to the receiver. The extended
+fixture requires a genuinely cold decision on a separate node, actual custody receipt/export,
+fresh subject-access probes, and unchanged authority after that receiving agent restarts.
+Seven focused CLI checks, strict CLI/agent Clippy, and inert fixture/shell checks pass; this
+new peer-distribution VM proof has not run. There is no automatic channel subscription or
+network-wide membership/conflict governance, physical cache erasure, arbitrary HTTPS
+inspection, legal-correctness guarantee or completed B06.
 
 An explicitly selected `smollm2-1.7b-v1` inference candidate now addresses the observed
 reasoning limitation without replacing the lightweight training model. It pins the original

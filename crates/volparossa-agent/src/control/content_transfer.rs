@@ -52,8 +52,11 @@ pub(super) async fn process(
         };
         let gate = context.map(|context| context.content.object_policy_gate());
         if let Some(context) = context {
-            context.content.check_object_policy(&scope.manifest)
-                .map_err(|_| ControlServerError::InvalidFrame)?;
+            if let Err(error) = context.content.check_object_policy(&scope.manifest) {
+                return write_response(&mut stream, &content_response(request_id, Err(error)))
+                    .await
+                    .map_err(|_| ControlServerError::InvalidFrame);
+            }
         }
         let withheld = async {
             if let Some(gate) = gate.as_ref() {

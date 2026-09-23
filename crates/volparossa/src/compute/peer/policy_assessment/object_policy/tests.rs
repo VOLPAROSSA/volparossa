@@ -87,7 +87,7 @@ fn private_root() -> tempfile::TempDir {
     root
 }
 
-fn context(at: u64) -> (Vec<SigningKey>, PolicyContext) {
+pub(super) fn context(at: u64) -> (Vec<SigningKey>, PolicyContext) {
     let keys: Vec<_> = (31_u8..=35)
         .map(|byte| SigningKey::from_bytes(&[byte; 32]))
         .collect();

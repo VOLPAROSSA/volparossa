@@ -1,6 +1,8 @@
 //! Automatic object-scoped policy decisions under the existing, separate authority quorum.
 //! Compute peers provide signed judgments; they never become policy maintainers.
 
+pub(in crate::compute::peer) mod distribution;
+
 #[cfg(test)]
 mod tests;
 
@@ -15,7 +17,8 @@ use nix::fcntl::Flock;
 use rand_core::{OsRng, RngCore as _};
 use volparossa_config::Config;
 use volparossa_policy::object::{
-    ObjectDecision, ObjectOutcome, ObjectSubject, SignedObjectDecision, verify_object_decision,
+    ObjectDecision, ObjectOutcome, ObjectSubject, SignedObjectDecision, VerifiedObjectDecision,
+    verify_object_decision,
 };
 
 use super::{
@@ -423,38 +426,47 @@ pub(in crate::compute::peer) async fn combine(args: &Combine, socket: &Path) -> 
     let path = args.output.join("decision.bin");
     retain(&path, &bytes_verified)?;
     if args.apply {
-        use volparossa_local_control::{
-            ContentPolicyApplyRequest, control_request::Operation, control_response::Payload,
-        };
-        let response = crate::control::request(
-            socket,
-            Operation::ContentPolicyApply(ContentPolicyApplyRequest {
-                envelope: bytes_verified,
-            }),
-        )
-        .await?;
-        ensure!(
-            response.diagnostic_code == "CONTENT_POLICY_APPLIED",
-            "compute_object_policy_apply_receipt"
-        );
-        let Some(Payload::ContentPolicy(receipt)) = response.payload else {
-            anyhow::bail!("compute_object_policy_apply_receipt");
-        };
-        ensure!(
-            receipt.version == 1
-                && receipt.manifest_id == combined.body().subject.manifest_id
-                && receipt.decision_hash.as_slice() == verified.decision_hash().as_slice()
-                && receipt.decision_revision == combined.body().decision_revision
-                && receipt.policy_hash == combined.body().policy_hash
-                && receipt.outcome == combined.body().outcome as i32,
-            "compute_object_policy_apply_receipt"
-        );
-        task::write_bytes(
-            &args.output.join("apply-receipt.json"),
-            &serde_json::to_vec(&receipt)?,
-            true,
-        )?;
+        apply_decision(&bytes_verified, &verified, &args.output, socket).await?;
     }
     report(OP, combined.body(), &path, true, args.apply);
     Ok(())
+}
+
+async fn apply_decision(
+    bytes: &[u8],
+    verified: &VerifiedObjectDecision,
+    output: &Path,
+    socket: &Path,
+) -> Result<()> {
+    use volparossa_local_control::{
+        ContentPolicyApplyRequest, control_request::Operation, control_response::Payload,
+    };
+    let response = crate::control::request(
+        socket,
+        Operation::ContentPolicyApply(ContentPolicyApplyRequest {
+            envelope: bytes.to_vec(),
+        }),
+    )
+    .await?;
+    ensure!(
+        response.diagnostic_code == "CONTENT_POLICY_APPLIED",
+        "compute_object_policy_apply_receipt"
+    );
+    let Some(Payload::ContentPolicy(receipt)) = response.payload else {
+        anyhow::bail!("compute_object_policy_apply_receipt");
+    };
+    let body = verified.body();
+    ensure!(
+        receipt.version == 1
+            && receipt.manifest_id == body.subject.manifest_id
+            && receipt.decision_hash.as_slice() == verified.decision_hash().as_slice()
+            && receipt.decision_revision == body.decision_revision
+            && receipt.policy_hash == body.policy_hash
+            && receipt.outcome == body.outcome as i32,
+        "compute_object_policy_apply_receipt"
+    );
+    retain(
+        &output.join("apply-receipt.json"),
+        &serde_json::to_vec(&receipt)?,
+    )
 }

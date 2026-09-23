@@ -65,6 +65,10 @@ pub(crate) enum Command {
     PolicyEndorse(Box<policy_assessment::object_policy::Endorse>),
     /// Combine exact-body endorsements and verify the configured current policy quorum.
     PolicyCombine(Box<policy_assessment::object_policy::Combine>),
+    /// Publish an unchanged, quorum-verified exact-object decision as inert native cache content.
+    PolicyPublish(Box<policy_assessment::object_policy::distribution::Publish>),
+    /// Verify an exact received decision using this node's own policy authority; optionally apply locally.
+    PolicyImport(Box<policy_assessment::object_policy::distribution::Import>),
 }
 
 #[derive(Debug, Args)]
@@ -279,6 +283,12 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::PolicyEndorse(args) => return policy_assessment::object_policy::endorse(&args),
         Command::PolicyCombine(args) => {
             return policy_assessment::object_policy::combine(&args, socket).await;
+        }
+        Command::PolicyPublish(args) => {
+            return policy_assessment::object_policy::distribution::publish(&args, socket).await;
+        }
+        Command::PolicyImport(args) => {
+            return policy_assessment::object_policy::distribution::import(&args, socket).await;
         }
     };
     println!("{}", serde_json::to_string(&report)?);

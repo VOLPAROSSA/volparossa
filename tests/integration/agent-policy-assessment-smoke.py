@@ -31,7 +31,9 @@ SCOPE = ("one exact synthetic public native object fetched through its protected
          "using the explicitly provisioned pinned decoder without fixed verdicts, publish and fetch their exact native bundle into "
          "a new cache and directory on the same client, unchanged completed offline replay, three separately invoked "
          "existing development authorities replaying and endorsing that actual outcome, exact-object local quorum "
-         "activation with cached-access and Client-restart persistence checks, and full owned cleanup; "
+         "activation with cached-access and Client-restart persistence checks, protected signed-decision custody "
+         "delivery to a second node, its independent quorum verification, exact cached-object export and restart "
+         "checks, and full owned cleanup; "
          "not classifier quality, legal correctness, independent semantic judgment, global-policy activation or full B06")
 
 
@@ -636,6 +638,13 @@ def object_collect(work, phase):
         write(record(work, "object-activation"), proof)
 
 
+def check_fixture_epoch_header(epoch_body, epoch_signers, public):
+    # Manifest schema/version are 1; minimum_protocol_version is the separate policy protocol 2.
+    require(set(epoch_body) == set(range(1, 10)) and epoch_body[1] == epoch_body[2] == 1
+            and epoch_body[3] == 2 and epoch_body[7] == 3 and epoch_signers == set(public),
+            "different fixture authority epoch")
+
+
 def check_object_activation(proof, result, transfer_value, original_files):
     original = proof["originals"]
     trust = original["trust"]
@@ -647,8 +656,7 @@ def check_object_activation(proof, result, transfer_value, original_files):
     require(len(public) == 3, "duplicate configured authority")
     epoch, epoch_signers = object_envelope(bytes.fromhex(original["epoch_manifest_hex"]), public, 3, True)
     epoch_body = object_fields(epoch[1], 64 * 1024, (8, 9))
-    require(set(epoch_body) == set(range(1, 10)) and epoch_body[1] == epoch_body[2] == epoch_body[3] == 1
-            and epoch_body[7] == 3 and epoch_signers == set(public), "different fixture authority epoch")
+    check_fixture_epoch_header(epoch_body, epoch_signers, public)
     epoch_members = [object_fields(item, 256) for item in epoch_body[8]]
     require(len(epoch_members) == 3 and {member[1] for member in epoch_members} == set(public)
             and all(set(member) == {1, 2, 3} and member[2] == public[member[1]] and member[3] == 2
@@ -719,6 +727,242 @@ def check_object_activation(proof, result, transfer_value, original_files):
             and proof["originals_unchanged_after_restart"] is True
             and proof["old_agent_ended"] is True and proof["new_agent_alive"] is True,
             "restart did not preserve original exact-object access decision")
+
+
+def object_peer_context(work):
+    node = read(work / "agent-jobs-layout.json")["provider_nodes"][0]
+    require(node in ("relay3", "relay4", "relay5"), "wrong independent object-policy receiver")
+    root = work / f"state-{node}/policy-object-receiver"
+    owner = root_path(work).parent.stat().st_uid
+    info = root.lstat()
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == owner and stat.S_IMODE(info.st_mode) == 0o700,
+            "unsafe object receiver directory")
+    pid = int(JOBS["subprocess"].check_output(["systemctl", "show", "--property=MainPID", "--value",
+        f"volparossa-alpha-agent@{node}.service"], text=True))
+    return node, root, owner, JOBS["identity"](pid), os.readlink(f"/proc/{pid}/ns/net")
+
+
+def object_peer_pins(work):
+    JOBS["guest_work"](work)
+    source = root_path(work).parent
+    raw = public_file(source / "policy-object-combined/decision.bin", source.stat().st_uid)
+    trust = read(work / "policy-maintainers.json")
+    public = {hashlib.sha256(b"volparossa/whitelist-maintainer/id/v1\0" + bytes.fromhex(item["public_key_hex"])).digest():
+              bytes.fromhex(item["public_key_hex"]) for item in trust["maintainers"]}
+    envelope, _ = object_envelope(raw, public, 3)
+    body = object_fields(envelope[1], 1024)
+    scope = read(record(work, "result"))["decision"]["scope"]
+    receipt = read(source / "policy-object-combined/apply-receipt.json")
+    require(body[6].hex() == scope["source_publisher_key"] and body[7].hex() == scope["source_manifest_id"]
+            and body[8].hex() == scope["source_sha256"] and body[9].hex() == scope["framework_sha256"]
+            and receipt["decision_hash"] == list(envelope[2]) and receipt["manifest_id"] == list(body[7])
+            and receipt["outcome"] == body[11], "remote pins not derived from original applied decision")
+    write(record(work, "remote-object-pins"), dict(subject_publisher_key=body[6].hex(),
+        subject_manifest_id=body[7].hex(), subject_sha256=body[8].hex(),
+        decision_hash=envelope[2].hex(), evidence_sha256=body[10].hex()))
+
+
+def object_peer_before(work):
+    JOBS["guest_work"](work)
+    node, root, owner, agent, namespace = object_peer_context(work)
+    source = root_path(work).parent
+    raw = public_file(source / "policy-object-publication/decision.bin", owner)
+    manifest = public_file(root / "decision.manifest", owner)
+    subject = public_file(root / "subject.manifest", owner)
+    require(set(path.name for path in root.iterdir()) == {"subject.manifest", "decision.manifest"}
+            and manifest == public_file(source / "policy-object-publication/publication.manifest", owner)
+            and subject == public_file(source / "policy-subject.pb", owner), "receiver seeded data instead of public metadata")
+    custody = root.parent / "custody-cache"
+    require(not os.path.lexists(custody / sha(raw)), "decision payload was not cold before custody deposit")
+    require(public_file(custody / sha(SUBJECT.encode()), owner) == SUBJECT.encode(),
+            "receiver does not hold the original deposited subject")
+    journal = public_file(root.parent / "object-policy/journal.json", owner)
+    require(strict_json(journal) == {"version": 1, "entries": []}, "receiver already had an object-policy decision")
+    write(record(work, "remote-object-cold"), dict(node=node, agent=agent, namespace=namespace,
+        observed_at_ms=time.time_ns() // 1000000, decision_chunk_absent=True, local_decision_absent=True,
+        metadata_only=True, subject_manifest_hex=subject.hex(), manifest_hex=manifest.hex(),
+        journal_hex=journal.hex(), custody_directory=[custody.stat().st_dev, custody.stat().st_ino]))
+
+
+def object_peer_received(work):
+    JOBS["guest_work"](work)
+    node, root, owner, agent, namespace = object_peer_context(work)
+    source = root_path(work).parent
+    raw = public_file(root / "decision.bin", owner)
+    require(raw == public_file(source / "policy-object-combined/decision.bin", owner)
+            == public_file(source / "policy-object-publication/decision.bin", owner),
+            "remote custody transport replaced original quorum bytes")
+    require(snapshot(root_path(work)) == read(record(work, "files"), 32 * 1048576),
+            "policy distribution changed original model work")
+    write(record(work, "remote-object-received"), dict(node=node, agent=agent, namespace=namespace,
+        observed_at_ms=time.time_ns() // 1000000, decision_hex=raw.hex(),
+        before=read(record(work, "remote-object-cold")), pins=read(record(work, "remote-object-pins")),
+        publication=read(record(work, "remote-object-publication")),
+        deposit=read(record(work, "remote-object-deposit")),
+        export=read(record(work, "remote-object-export")), assemble=read(record(work, "remote-object-assemble")),
+        original_model_files_unchanged=True, new_jobs=0))
+
+
+def check_object_peer_probe(probe, phase, outcome, subject, manifest_id):
+    require(probe["phase"] == phase and type(probe["exit_code"]) is int and probe["agent"]["pid"] > 0,
+            "missing actual receiver export probe")
+    allowed = phase == "before" or outcome == "allow"
+    raw, error = bytes.fromhex(probe["stdout_hex"]), bytes.fromhex(probe["stderr_hex"])
+    if allowed:
+        receipt, assembled = strict_json(raw), probe["assemble"]
+        require(probe["exit_code"] == 0 and probe["cache_exists"] is True
+                and probe["output_bytes"] == len(subject) and probe["output_sha256"] == sha(subject)
+                and receipt["operation"] == "content_export" and receipt["manifest_id"] == manifest_id
+                and receipt["complete"] is True and receipt["network_transfer"] is False
+                and receipt["public_content"] is True and receipt["content_bytes"] == len(subject)
+                and receipt["ownership_changed"] is False and receipt["private_keys_transferred"] is False
+                and assembled["operation"] == "offline_content_assemble" and assembled["network_retrieval"] is False
+                and assembled["bytes"] == len(subject), "receiver did not export/assemble the exact cached object")
+    else:
+        require(probe["exit_code"] == 1 and raw == b"" and probe["cache_exists"] is False
+                and probe["output_bytes"] is None and probe["output_sha256"] is None and probe["assemble"] is None
+                and error.splitlines() and error.splitlines()[-1].strip() == b"agent rejected request: CONTENT_POLICY (Policy)",
+                "receiver did not refuse before creating the output cache")
+
+
+def object_peer_probe(work, phase, status):
+    JOBS["guest_work"](work)
+    require(phase in ("before", "applied", "restarted"), "unknown receiver probe")
+    node, root, owner, agent, namespace = object_peer_context(work)
+    output = root / f"output-{phase}.txt"
+    raw = public_file(output, owner) if output.exists() else None
+    value = dict(node=node, phase=phase, exit_code=status, agent=agent, namespace=namespace,
+        observed_at_ms=time.time_ns() // 1000000,
+        stdout_hex=record(work, "remote-object-" + phase).read_bytes().hex(),
+        stderr_hex=(work / f"{NAME}-remote-object-{phase}.err").read_bytes().hex(),
+        cache_exists=os.path.lexists(root / f"cache-{phase}"),
+        output_bytes=len(raw) if raw is not None else None, output_sha256=sha(raw) if raw is not None else None,
+        assemble=read(record(work, f"remote-object-{phase}-assemble")) if status == 0 else None)
+    result = read(record(work, "result"))["decision"]
+    write(record(work, "remote-object-probe-" + phase), value)
+    check_object_peer_probe(value, phase, result["outcome"], SUBJECT.encode(), result["scope"]["source_manifest_id"])
+
+
+def object_peer_collect(work, phase):
+    JOBS["guest_work"](work)
+    require(phase in ("before", "after"), "unknown receiver collection phase")
+    node, root, owner, agent, namespace = object_peer_context(work)
+    imported = root / "import"
+    require(set(path.name for path in imported.iterdir()) == {".task.lock", "selection.json", "decision.bin", "apply-receipt.json"},
+            "unexpected import files or model work")
+    originals = dict(files={name: public_file(imported / name, owner).hex()
+                           for name in ("selection.json", "decision.bin", "apply-receipt.json")},
+        journal_hex=public_file(root.parent / "object-policy/journal.json", owner).hex(),
+        custody_directory=[(root.parent / "custody-cache").stat().st_dev, (root.parent / "custody-cache").stat().st_ino],
+        import_report=read(record(work, "remote-object-import")))
+    write(record(work, "remote-object-originals-" + phase), originals)
+    if phase == "after":
+        require(originals == read(record(work, "remote-object-originals-before")), "receiver restart rewrote original authority")
+        probes = {name: read(record(work, "remote-object-probe-" + name)) for name in ("before", "applied", "restarted")}
+        require(not JOBS["alive"](probes["applied"]["agent"]) and JOBS["alive"](agent)
+                and agent == probes["restarted"]["agent"], "receiver agent did not actually restart")
+        require(snapshot(root_path(work)) == read(record(work, "files"), 32 * 1048576), "remote import added/changed original jobs")
+        proof = dict(originals=originals, probes=probes, received=read(record(work, "remote-object-received")),
+            original_model_files_unchanged=True, new_jobs=0, original_decision_unchanged_after_restart=True,
+            old_agent_ended=True, new_agent_alive=True, node=node, namespace=namespace)
+        check_object_peer(proof, read(record(work, "object-activation")), read(record(work, "result")),
+            read(work / "agent-jobs-layout.json"), read(work / "a01-expected-peers.json"))
+        write(record(work, "remote-object-proof"), proof)
+
+
+def check_object_peer(value, local, result, layout, peers):
+    received, before, originals = value["received"], value["received"]["before"], value["originals"]
+    raw = decode_file(local["originals"]["files"], "policy-object-combined/decision.bin", False)
+    envelope = object_fields(raw, 8192, (3,))
+    body = object_fields(envelope[1], 1024)
+    node = layout["provider_nodes"][0]
+    require(node != "client" and value["node"] == received["node"] == before["node"] == node
+            and received["decision_hex"] == originals["files"]["decision.bin"] == raw.hex()
+            and before["decision_chunk_absent"] is True and before["local_decision_absent"] is True
+            and before["metadata_only"] is True and sha(bytes.fromhex(before["subject_manifest_hex"])) == body[7].hex()
+            and originals["custody_directory"] == before["custody_directory"]
+            and strict_json(bytes.fromhex(before["journal_hex"])) == {"version": 1, "entries": []},
+            "second node or exact cold original decision changed")
+    pins = dict(subject_publisher_key=body[6].hex(), subject_manifest_id=body[7].hex(), subject_sha256=body[8].hex(),
+                decision_hash=envelope[2].hex(), evidence_sha256=body[10].hex())
+    require(received["pins"] == pins, "remote verification selection changed")
+    wrapper = bytes.fromhex(before["manifest_hex"])
+    native = object_fields(wrapper, 64 * 1024)
+    native_body = object_fields(native[1], 64 * 1024)
+    payload = object_fields(native_body[8], 64 * 1024)
+    publication = received["publication"]
+    require(set(native) == {1, 2} and set(native_body) == set(range(1, 9))
+            and native_body[1] == native_body[6] == 1 and native_body[2].hex() == publication["publisher_key"]
+            and body[12] // 1000 <= native_body[3] < native_body[4] == body[13] // 1000
+            and native_body[7] == hashlib.sha256(native_body[8]).digest() and len(native_body[5]) == 32
+            and payload == {1: publication["name"].encode(), 2: 1,
+                3: b"application/vnd.volparossa.object-policy.v1", 4: len(raw),
+                5: protobuf_value(1, hashlib.sha256(raw).digest()) + protobuf_value(2, len(raw)),
+                6: hashlib.sha256(raw).digest()}, "wrapper changed bytes, MIME or original authority lease")
+    require(native_body[2].hex() not in {item["public_key_hex"] for item in local["originals"]["trust"]["maintainers"]},
+            "fixture accidentally used a policy authority as its content publisher")
+    verify_signature(native[1], native[2], native_body[2], b"VOLPAROSSA/native-content-manifest/v1\0")
+    require(publication["manifest_id"] == sha(wrapper) and publication["network_publication"] is False
+            and publication["content_type"] == "application/vnd.volparossa.object-policy.v1"
+            and publication["publication_expires_unix_seconds"] == native_body[4], "publication receipt differs")
+    for report, operation, applied in ((publication, "compute_policy_publish", False),
+                                      (originals["import_report"], "compute_policy_import", True)):
+        expected = dict(operation=operation, complete=True, decision_sha256=sha(raw), decision_hash=envelope[2].hex(),
+            evidence_sha256=body[10].hex(), subject=dict(publisher_key=body[6].hex(), manifest_id=body[7].hex(), object_sha256=body[8].hex()),
+            policy_hash=body[3].hex(), policy_version=body[4], decision_revision=body[5], issued_at_ms=body[12], expires_at_ms=body[13],
+            outcome=result["decision"]["outcome"], threshold_verified=True, network_policy_activation=False,
+            local_object_policy_applied=applied, wrapper_publisher_is_policy_authority=False,
+            provider_signed_claims_replayed=0, model_execution=False, semantic_correctness_proven=False)
+        require(all(report.get(key) == item for key, item in expected.items()), "publication/import changed authority or claims")
+    imported_selection = strict_json(bytes.fromhex(originals["files"]["selection.json"]))
+    require(imported_selection == dict(version=1, policy_config=str(Path(publication["manifest"]).parents[3] / f"config-{node}.yaml"),
+            decision_sha256=sha(raw), **pins), "import did not use receiver's own configuration/exact pins")
+    require(originals["journal_hex"] == local["originals"]["journal_hex"]
+            and strict_json(bytes.fromhex(originals["files"]["apply-receipt.json"]))
+                == decode_file(local["originals"]["files"], "policy-object-combined/apply-receipt.json"),
+            "second node replaced original quorum/epoch/expiry")
+    deposit = received["deposit"]
+    require(deposit["operation"] == "content_custody_deposit" and deposit["complete"] is True
+            and deposit["manifest_id"] == sha(wrapper) and deposit["publisher_key_hex"] == publication["publisher_key"]
+            and deposit["object_bytes"] == len(raw) and deposit["original_expiry_unix_seconds"] == native_body[4]
+            and deposit["requested_providers"] == deposit["confirmed_complete_providers"] == 1 and deposit["failed_providers"] == 0
+            and deposit["direct_provider_dial"] is False and deposit["private_keys_transferred"] is False
+            and len(deposit["observations"]) == 1, "original quorum wrapper was not actually deposited at one peer")
+    observation = deposit["observations"][0]
+    provider = layout["provider_keys"][node]
+    require(provider == CUSTODY["peer_key"](peers[node]) and observation["provider_key_hex"] == provider
+            and observation["agent_handoff_complete"] is True and observation["state"] == "complete" and observation["error"] is None,
+            "wrong or incomplete remote custody owner")
+    custody = object_fields(bytes.fromhex(observation["signed_receipt_hex"]), 2048)
+    custody_body = object_fields(custody[1], 2048)
+    claim = object_fields(custody_body[8], 1024)
+    require(set(custody) == {1, 2} and custody_body[1] == 1 and custody_body[2].hex() == provider
+            and custody_body[6] == 3 and custody_body[7] == hashlib.sha256(custody_body[8]).digest()
+            and 0 < custody_body[4] - custody_body[3] <= 900 and custody_body[4] <= native_body[4]
+            and claim.get(5, 1) == 1 and claim.get(6) == 2 and claim[3].hex() == provider
+            and claim[4] == native_body[2] and claim[7] == hashlib.sha256(wrapper).digest()
+            and claim[8] == hashlib.sha256(raw).digest() and claim[9] == len(raw) and claim[10] == 1 and claim[11] == native_body[4],
+            "signed receiver receipt changed object/provider/original expiry")
+    verify_signature(custody[1], custody[2], custody_body[2], b"VOLPAROSSA/public-custody/v1\0")
+    exported, assembled = received["export"], received["assemble"]
+    require(exported["operation"] == "content_export" and exported["manifest_id"] == sha(wrapper)
+            and exported["content_bytes"] == assembled["bytes"] == len(raw) and exported["complete"] is True
+            and exported["network_transfer"] is False and exported["public_content"] is True
+            and assembled["operation"] == "offline_content_assemble" and assembled["network_retrieval"] is False,
+            "receiver did not get original decision from its own actual custody export")
+    probes = value["probes"]
+    for phase in ("before", "applied", "restarted"):
+        check_object_peer_probe(probes[phase], phase, result["decision"]["outcome"], SUBJECT.encode(), body[7].hex())
+        require(probes[phase]["node"] == node and probes[phase]["namespace"] == value["namespace"]
+                and body[12] <= probes[phase]["observed_at_ms"] < body[13], "receiver proof ran outside original authority")
+    require(before["agent"] == received["agent"] == probes["before"]["agent"] == probes["applied"]["agent"]
+            != probes["restarted"]["agent"] and before["namespace"] == received["namespace"] == value["namespace"]
+            and before["observed_at_ms"] <= received["observed_at_ms"] <= probes["before"]["observed_at_ms"]
+            and probes["before"]["observed_at_ms"] <= probes["applied"]["observed_at_ms"] <= probes["restarted"]["observed_at_ms"]
+            and value["old_agent_ended"] is True and value["new_agent_alive"] is True
+            and value["original_decision_unchanged_after_restart"] is True
+            and value["original_model_files_unchanged"] is received["original_model_files_unchanged"] is True
+            and value["new_jobs"] == received["new_jobs"] == 0, "second-node restart changed evidence or reran models")
 
 
 def check_evidence(value, revision):
@@ -805,6 +1049,7 @@ def check_evidence(value, revision):
     check_transfer(value["transfer"], files, requester, value["layout"], value["peers"], result,
                    value["publication"]["publisher_key_hex"])
     check_object_activation(value["object_activation"], result, value["transfer"], files)
+    check_object_peer(value["object_peer"], value["object_activation"], result, value["layout"], value["peers"])
     response_bytes[value["layout"]["provider_nodes"][0]] += value["transfer"]["download"]["peer_bytes"]
     CUSTODY["validate_path"](value["path"], value["peers"], value["layout"], "inspect")
     for node, minimum in response_bytes.items():
@@ -823,6 +1068,7 @@ def evidence(work, revision):
         publication=read(record(work, "publication")), replay=read(record(work, "replay")),
         requester=read(record(work, "requester")), transfer=read(record(work, "transfer"), 8 * 1048576),
         object_activation=read(record(work, "object-activation"), 8 * 1048576),
+        object_peer=read(record(work, "remote-object-proof"), 8 * 1048576),
         stopped=read(record(work, "stopped")), layout=read(work / "agent-jobs-layout.json"),
         peers=read(work / "a01-expected-peers.json"), cleanup=read(work / "agent-jobs-private-cleanup.json"),
         path=dict(selected_route=read(work / "content-custody-fetch-live-selection.json"),
@@ -842,6 +1088,7 @@ def finalize(work, revision, status, complete, remaining, phase, blocker):
         runner_exit_status=status, phase=phase, observed_blocker=None if blocker == "NONE" else blocker,
         full_b06_claimed=False, network_policy_activation_claimed=False, evidence=proof,
         local_object_policy_applied=proof is not None,
+        second_node_object_policy_applied=proof is not None,
         object_outcome=proof["result"]["decision"]["outcome"] if proof is not None else None,
         object_access_branch=("allow_exact_cached_access" if proof["result"]["decision"]["outcome"] == "allow"
                               else "withhold_exact_cached_object") if proof is not None else None,
@@ -854,6 +1101,7 @@ def check_report(value, revision):
             and value["success"] is True and value["runner_exit_status"] == 0
             and value["full_b06_claimed"] is False and value["network_policy_activation_claimed"] is False
             and value["local_object_policy_applied"] is True
+            and value["second_node_object_policy_applied"] is True
             and value["object_outcome"] == value["evidence"]["result"]["decision"]["outcome"]
             and value["object_access_branch"] == ("allow_exact_cached_access" if value["object_outcome"] == "allow"
                                                  else "withhold_exact_cached_object"),
@@ -896,6 +1144,15 @@ def self_test():
         rejects(object_envelope, unsigned + field(3, signature) * 2, {signer_id: key}, 2)
         rejects(object_envelope, unsigned + field(3, signature), {}, 1)
         rejects(object_envelope, field(1, b"changed") + field(2, hashlib.sha256(b"body").digest()), {}, 0)
+    # Header-only regression for the actual protocol-2 development epoch; not a signature proof.
+    epoch_header = {number: 1 for number in range(1, 10)}
+    epoch_header.update({3: 2, 7: 3})
+    epoch_signers = {b"a", b"b", b"c"}
+    check_fixture_epoch_header(epoch_header, epoch_signers, epoch_signers)
+    rejects(check_fixture_epoch_header, {**epoch_header, 3: 1}, epoch_signers, epoch_signers)
+    rejects(check_fixture_epoch_header, {**epoch_header, 7: 2}, epoch_signers, epoch_signers)
+    rejects(check_fixture_epoch_header, epoch_header, {b"a", b"b"}, epoch_signers)
+
     scope = {"source_manifest_id": "21" * 32, "source_publisher_key": "22" * 32,
              "source_sha256": sha(SUBJECT.encode()), "source_bytes": len(SUBJECT.encode())}
     cached = {"operation": "named_content_download", "cache_only": True, "manifest_id": scope["source_manifest_id"],
@@ -914,6 +1171,25 @@ def self_test():
         check_object_probe({**good, "phase": "before"}, "before", result)
     rejects(check_object_probe, {**blocked, "stderr_hex": b"Error: CONTENT_UNAVAILABLE".hex()}, "applied",
             {"decision": {"outcome": "deny", "scope": scope}})
+
+    remote_receipt = dict(operation="content_export", manifest_id=scope["source_manifest_id"], complete=True,
+        network_transfer=False, public_content=True, content_bytes=len(SUBJECT.encode()), ownership_changed=False,
+        private_keys_transferred=False)
+    remote_good = dict(phase="applied", exit_code=0, agent={"pid": 2}, cache_exists=True,
+        stdout_hex=json.dumps(remote_receipt).encode().hex(), stderr_hex="", output_bytes=len(SUBJECT.encode()),
+        output_sha256=sha(SUBJECT.encode()), assemble=dict(operation="offline_content_assemble",
+        network_retrieval=False, bytes=len(SUBJECT.encode())))
+    remote_blocked = dict(remote_good, exit_code=1, cache_exists=False, stdout_hex="",
+        stderr_hex=b"Error: content handoff failed\n\nCaused by:\n    agent rejected request: CONTENT_POLICY (Policy)\n".hex(),
+        output_bytes=None, output_sha256=None, assemble=None)
+    for outcome in ("allow", "deny", "undetermined"):
+        check_object_peer_probe(remote_good if outcome == "allow" else remote_blocked, "applied", outcome,
+                                SUBJECT.encode(), scope["source_manifest_id"])
+    for bad, outcome in ((dict(remote_good, output_sha256="00" * 32), "allow"),
+                         (dict(remote_blocked, cache_exists=True), "deny"),
+                         (dict(remote_blocked, stderr_hex=b"Error: CONTENT_UNAVAILABLE".hex()), "undetermined"),
+                         (remote_good, "deny")):
+        rejects(check_object_peer_probe, bad, "applied", outcome, SUBJECT.encode(), scope["source_manifest_id"])
 
     # Synthetic checker controls only; never supplied to real model inference.
     payload = {"version": 1, "outcome": "undetermined", "reasoning": [
@@ -1080,7 +1356,8 @@ def main():
     args = sys.argv[1:]
     if args == ["self-test"]:
         self_test()
-    elif len(args) == 2 and args[0] in ("prepare", "collect", "stopped", "replay", "bundle_before", "transfer"):
+    elif len(args) == 2 and args[0] in ("prepare", "collect", "stopped", "replay", "bundle_before", "transfer",
+                                       "object_peer_pins", "object_peer_before", "object_peer_received"):
         globals()[args[0]](Path(args[1]))
     elif len(args) == 3 and args[0] == "observe":
         observe(Path(args[1]), int(args[2]))
@@ -1088,6 +1365,10 @@ def main():
         object_probe(Path(args[1]), args[2], int(args[3]))
     elif len(args) == 3 and args[0] == "object_collect":
         object_collect(Path(args[1]), args[2])
+    elif len(args) == 4 and args[0] == "object_peer_probe":
+        object_peer_probe(Path(args[1]), args[2], int(args[3]))
+    elif len(args) == 3 and args[0] == "object_peer_collect":
+        object_peer_collect(Path(args[1]), args[2])
     elif len(args) == 3 and args[0] == "evidence":
         evidence(Path(args[1]), args[2])
     elif len(args) == 3 and args[0] == "report":

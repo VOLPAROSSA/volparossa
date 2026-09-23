@@ -2000,19 +2000,45 @@ Original source/policy expiry bounds the decision; copying, retrying or restarti
 The agent verifies the current authority and epoch, then durably records the original signed
 decision before installing it in a shared live gate. Its retained per-object revision floor
 rejects rollback and same-revision conflicts across restart. Registries, active transfers and
-new native-content work share the gate; contribution/custody and replication intake are being
-connected to the same checks. `deny` and `undetermined` withhold the exact object, as do expiry
+new native-content work share the gate; contribution/custody and replication intake use
+the same checks. `deny` and `undetermined` withhold the exact object, as do expiry
 or a changed epoch for a previously decided object. An absent rule grants no new permission:
 existing signature, publication and source-eligibility checks still apply. Allowing one object
 does not authorize its publisher, hostname or other revisions wholesale.
 
-Focused CLI/owner and real-duplex gate checks pass locally. The extended `agent-policy-assessment`
-VM proof has **not run**. A successful local receipt intentionally keeps
+Focused CLI/owner and real-duplex gate checks pass locally. The first extended
+[`agent-policy-assessment` VM proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/35893332294)
+**failed** because its checker expected policy protocol 1 instead of the existing protocol 2.
+Original records retain actual local quorum application and cache refusal across restart;
+the checker correction is not a retroactive passing run. A successful local receipt intentionally keeps
 `network_policy_activation=false` and reports `local_object_policy_applied=true`: only this
 node's exact-object gate changes. Automatic network-wide distribution, authority membership,
 partition/conflict governance, physical cache deletion, arbitrary HTTPS inspection and legal
 correctness remain outside this candidate. It does not complete B06 or make uncertain model
 judgments trustworthy.
+
+#### Distributing an original decision through the cache (new candidate)
+
+`compute peer policy-publish` wraps the original `decision.bin` in a signed native publication
+with MIME type `application/vnd.volparossa.object-policy.v1`. Its private output contains
+`decision.bin`, `publication.manifest`, `cache/` and immutable selection metadata. The wrapper
+uses a content publisher identity, not a new policy authority, and never outlives the original
+decision. Publication is local; existing explicit `content custody deposit` or contribution
+operations provide protected sharing. Retrying retains the original bytes and lease.
+
+After fetching or exporting and assembling that object from its own cache, a receiving node
+can run `compute peer policy-import --execute --apply`. Both commands require independently
+selected `--subject-publisher-key`, `--subject-manifest-id`, `--subject-sha256`, `--decision-hash`
+and `--evidence-sha256`, plus the node's own `--policy-config`. Import needs no publication
+identity, private policy keys or model worker. It verifies the original quorum and current
+epoch before asking its own agent to apply the exact object decision. Omit `--apply` to retain
+verified bytes without changing the gate, or omit `--execute` for an inert preview.
+
+This is explicit node-to-node distribution, **not automatic network-wide consensus**. The
+second-node cache-transfer/application/restart fixture is implemented but has no live passing
+run yet. Automatic subscriptions, policy-authority membership and partition/conflict handling
+remain separate work. Publisher signatures authenticate transport objects; they cannot replace
+the receiving node's policy trust or prove the assessors' judgments correct.
 
 Bind observations to specific agent/model artifacts, task contracts and observed failures.
 Use independently checked outcomes, regression/poisoning checks and diverse assessors; copied
