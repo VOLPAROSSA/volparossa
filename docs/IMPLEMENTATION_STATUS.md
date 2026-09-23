@@ -42,10 +42,21 @@ does not become a policy signer. Original decision bytes and expiry survive publ
 import and retry; no model or signing key needs to be transferred to the receiver. The extended
 fixture requires a genuinely cold decision on a separate node, actual custody receipt/export,
 fresh subject-access probes, and unchanged authority after that receiving agent restarts.
-Seven focused CLI checks, strict CLI/agent Clippy, and inert fixture/shell checks pass; this
-peer-distribution VM proof on `4d438099` is pending, not a live PASS. There is no
-network-wide membership/conflict governance, physical cache erasure, arbitrary HTTPS
-inspection, legal-correctness guarantee or completed B06.
+Seven focused CLI checks, strict CLI/agent Clippy, and inert fixture/shell checks pass. The
+[source-exact peer-distribution VM proof on `4d438099`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35896887925)
+now passes its full committed checker against 199 unchanged original files. Four real model
+jobs produce an `undetermined` / `review_disagreement` result. The separately configured
+three-authority quorum authorizes that same result; its 605 original signed bytes reach a
+previously cold second node through protected custody transfer. That receiver verifies its
+own authority and applies the exact-object decision without new model work or signing keys.
+Both nodes serve the original cached subject before application and refuse it with
+`CONTENT_POLICY` after application and after their actual agent restarts. Original decision,
+epoch, expiry and journal records remain unchanged. Five capture records contain 96,199 frames;
+full cleanup and unchanged host state pass. The original model responses still confuse
+principle meanings and contain unfinished prose: correct transport/enforcement is not sound
+judgment, independent reasoning or legality. Automatic channel subscription, network-wide
+membership/conflict governance, physical cache erasure, arbitrary HTTPS inspection and B06
+completion remain open. The earlier `6ac301ee` failure is not relabelled.
 
 A subsequent `compute peer policy-follow --execute` candidate automatically refreshes one
 owner-enrolled native publisher/name channel and applies only quorum-verified decisions for
@@ -66,8 +77,10 @@ download and automatic apply acknowledgement to the unchanged original quorum. F
 reaping, cached-access probes and both real agent restarts remain mandatory. All 11 focused
 object-policy CLI tests pass, including four new follower checks, along with strict CLI
 Clippy, scoped formatting and shell checks. Its inert Python self-test
-passes with 81 rejection cases; the new automatic-consumer live proof remains
-unproven. The failed `6ac301ee` and pending `4d438099` retain their separate historical scopes.
+passes with 81 rejection cases. The separate
+[automatic-consumer proof on `3f30a5f9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35899595361)
+is pending. Neither the failed `6ac301ee` nor the passing manual-import `4d438099` proves that
+new automatic flow.
 This is selected-channel automation, not a complete global feed, new authority membership,
 independent semantic accuracy or B06 completion.
 
