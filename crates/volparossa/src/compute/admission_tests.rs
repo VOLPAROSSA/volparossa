@@ -118,24 +118,41 @@ fn original_document_and_repository_admission_profiles_stay_distinct() {
 
 #[test]
 fn principle_input_requires_explicit_fixed_contract_inference_profile() {
-    let document = json!({"version":4,"visibility":"public","license":"CC0-1.0",
+    let mut document = json!({"version":4,"visibility":"public","license":"CC0-1.0",
         "source_manifest_hex":source_manifest(),"output_contract":"principle_assessment_v1",
         "inference":[{"question":"Assess this source.","context":"An explicitly public source.","start":0,"end":28}]});
-    let bytes = serde_json::to_vec(&document).unwrap();
-    assert!(validate_profile_dataset(Mode::Infer, false, &bytes, ModelProfile::Smol360).is_ok());
-    assert!(validate_profile_dataset(Mode::Infer, false, &bytes, ModelProfile::default()).is_err());
-    assert!(validate_profile_dataset(Mode::Train, false, &bytes, ModelProfile::Smol360).is_err());
-    assert!(validate_profile_dataset(Mode::Infer, true, &bytes, ModelProfile::Smol360).is_err());
-    for (pointer, value) in [
-        ("/output_contract", json!("arbitrary_schema")),
-        ("/visibility", json!("private")),
-        ("/version", json!(2)),
-    ] {
-        let mut changed = document.clone();
-        *changed.pointer_mut(pointer).unwrap() = value;
+    for contract in ["principle_assessment_v1", "principle_review_v1"] {
+        document["output_contract"] = contract.into();
+        let bytes = serde_json::to_vec(&document).unwrap();
         assert!(
-            validate_dataset(Mode::Infer, false, &serde_json::to_vec(&changed).unwrap()).is_err()
+            validate_profile_dataset(Mode::Infer, false, &bytes, ModelProfile::default()).is_err()
         );
+        for profile in [ModelProfile::Smol360, ModelProfile::Smol1700] {
+            assert!(validate_profile_dataset(Mode::Infer, false, &bytes, profile).is_ok());
+            assert!(validate_profile_dataset(Mode::Train, false, &bytes, profile).is_err());
+            assert!(validate_profile_dataset(Mode::Infer, true, &bytes, profile).is_err());
+            assert!(validate_profile_dataset(Mode::PrivateInfer, false, &bytes, profile).is_err());
+            for (field, value) in [
+                ("output_contract", json!("arbitrary_schema")),
+                ("visibility", json!("private")),
+                ("version", json!(2)),
+                ("model_profile", json!("smollm2-1.7b-v1")),
+                ("schema", json!({"type":"object"})),
+            ] {
+                let mut changed = document.clone();
+                changed[field] = value;
+                assert!(
+                    validate_profile_dataset(
+                        Mode::Infer,
+                        false,
+                        &serde_json::to_vec(&changed).unwrap(),
+                        profile
+                    )
+                    .is_err(),
+                    "{contract}: {profile}: {field}"
+                );
+            }
+        }
     }
 }
 

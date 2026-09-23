@@ -11,9 +11,12 @@ The exact-object policy and explicit peer-distribution milestone is also integra
 [PR #151](https://github.com/VOLPAROSSA/volparossa/pull/151), normal merge `2761b9da`.
 The automatic-follow milestone is integrated by
 [PR #153](https://github.com/VOLPAROSSA/volparossa/pull/153), normal merge `54c382c0`.
+Automatic public-copy maintenance and origin-authenticated HTTPS checksum downloads are
+integrated by [PR #160](https://github.com/VOLPAROSSA/volparossa/pull/160), normal merge
+`e87f1933`, after Quality, CodeQL and both source-exact network proofs passed.
 Neither integration nor execution proves reliable model reasoning.
 
-The companion HTTPS slice adds explicit `--checksum-path` to `fetch-https` and
+The integrated HTTPS slice adds explicit `--checksum-path` to `fetch-https` and
 `browser-download`. The consumer authenticates a same-directory SHA-256 document itself,
 then resource HEAD metadata; a peer's hash or signature is not the origin authority. Original
 minimum freshness survives both requests. Full resource bytes must verify before output or
@@ -29,11 +32,15 @@ complete cleanup and unchanged host state pass. In this fixture the whole peer c
 not a speedup claim. The isolated combined candidate passes strict four-crate Clippy, six
 TLS/parser, six local-control HTTPS, twelve CLI content and five actual HTTPS CLI-process
 checks, plus the real custody CLI-process test and 17 inert HTTPS-fixture checks. Scoped
-formatting and shell checks pass. Its fresh source-exact network trials are pending; neither
-this profile nor the original proof completes C08 or makes arbitrary/private browser HTTPS
-traffic shareable.
+formatting and shell checks pass. The fresh
+[`ca7` integration provider trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35921899178)
+also passes the full source-exact checker against 652 original files: 2,097,275 resource bytes
+come from peers, zero from the origin, alongside the original 85-byte checksum authority.
+It takes 3.935 seconds versus 2.838 seconds for origin-only, with complete cleanup and unchanged
+host state; no speedup is claimed. Neither this profile nor either proof completes C08 or makes
+arbitrary/private browser HTTPS traffic shareable.
 
-The next isolated integration candidate adds automatic public-copy maintenance with
+The integrated public-copy maintenance slice adds
 `content retain`. An owner enrolls one original public object, desired copies and a finite
 lifetime/upload budget, rather than hand-selecting every provider key. Protected discovery
 returns signed route-distinct service hints; fresh signed Inspect/Deposit exchanges establish
@@ -54,14 +61,19 @@ expiry/window and cumulative upload reservations remain intact. All 52,559 captu
 frames, complete cleanup and unchanged host state pass. The publisher application, not the
 whole Client node, was stopped; this does not establish owner-offline maintenance.
 
-This candidate ports only that custody slice onto `54c382c0`; it does not import the separate
+This integration ports only that custody slice onto `54c382c0`; it does not import the separate
 authority-round/cycle or later model work. It adds the small explicit identity-unlock helper
 and retains custody discovery's IPC tag 37 without occupying reserved tag 36. The original
 trial proves the original source, not this adapted candidate. Strict Clippy for the CLI,
 agent, content and local-control crates passes here, together with eight custody/storage,
 three custody-protocol, two background-admission and 48 CLI content tests. The seven retention
-and four custody fixture checks, scoped formatting and shell checks also pass. A fresh
-protected loss/replacement trial on the integration candidate remains pending.
+and four custody fixture checks, scoped formatting and shell checks also pass. The fresh
+[`ca7` integration custody trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35921884371)
+passes its full source-exact checker against 174 originals: loss of R5 leads to replacement R4
+alongside R3; the fresh consumer receives 2,097,275 logical bytes / 1,048,699 unique peer bytes
+and zero origin bytes. All 51,064 privacy frames, zero remaining owned objects and unchanged
+host state pass. The publisher application is offline, not its node; maintenance after its
+owner controller stops is still unproved.
 
 A new node-local policy candidate connects the original four signed assessment/review
 transcripts to `compute peer policy-propose`, `policy-endorse` and `policy-combine --execute --apply`.
@@ -172,6 +184,25 @@ tokens, and supervisor peak sampled RSS is 4,073,488,384 bytes under the 5-GiB l
 weights remain unchanged, the child is reaped, cleanup is complete and host hashes match.
 Larger-model peer/policy execution and general answer quality remain open; no model or backend
 ran on the development host.
+
+An isolated main-line port now admits signed public principle dataset v4 under either existing
+rich-inference profile, 360M or explicitly selected 1.7B, without an adapter. Training, private
+inference, 135M and arbitrary schemas remain rejected. The 1.7B worker was already present on
+main; this is the independent input-gate and standalone fixture delta from `44eec3b9`, not the
+separate authority-round/cycle or custody-admission work. `agent-reasoning` now runs one signed
+public 1.7B `principle_assessment_v1` input with the pinned decoder, unchanged 1024-prompt /
+512-generation-token, 2048-byte JSON, field, two-thread and 600-second worker limits.
+The [original exact-source `44eec3b9` trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35912302153)
+passes the complete execution checker without omitted gates: 293 generated tokens reach
+`json_boundary` in 62.132 seconds, peak supervisor-sampled RSS is 4,596,285,440 bytes, original
+signatures/isolation/limits pass, cleanup leaves zero objects and host hashes match. The original
+judgment says `allow` while declaring material uncertainty, and invents motives not stated by
+the source. No semantic accuracy, independent cross-review, quorum, automatic activation,
+distributed policy cycle or B06 completion is established. Fresh verification of this main-line
+port has passed all five CLI admission tests, strict CLI all-target Clippy, the inert reasoning
+self-test, scoped formatting and shell checks. Its adapted checker also accepts the unchanged
+original `44eec3b9` artifact bundle. A new actual VM trial remains pending; these local checks
+do not relabel the historical execution pass as a new-source pass.
 
 A small functional follow-up adds the `public-source-parts-v1` instruction to new public
 answers and grounded synthesis: answer all requested parts, separate missing evidence from
