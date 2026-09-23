@@ -852,10 +852,12 @@ fn validate_content_receipt(receipt: &ContentReceipt) -> Result<(), ControlProto
         // Disjoint 206 ranges may precede one valid full 200 response: at most two
         // object budgets, without falsely dropping the already transferred bytes.
         || receipt.origin_body_bytes > 512 * 1024 * 1024
+        || receipt.origin_authority_body_bytes > 64 * 1024
         || receipt.peer_bytes > 256 * 1024 * 1024
         || receipt.origin_range_requests > 1024
         || (!receipt.origin_authenticated
-            && (receipt.origin_body_bytes != 0 || receipt.origin_range_requests != 0))
+            && (receipt.origin_body_bytes != 0 || receipt.origin_range_requests != 0
+                || receipt.origin_authority_body_bytes != 0))
         || receipt.chunks > 1024
         || receipt.providers_used > 16
         || receipt.publications > 64

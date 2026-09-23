@@ -39,6 +39,10 @@ const METADATA: &str = "/.well-known/volparossa/content/asset";
 const OBJECT_BYTES: usize = 2 * 1024 * 1024 + 123;
 const OBJECT_SHA256: &str = "add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767";
 const OBJECT_REPR_DIGEST: &str = "sha-256=:rdByTY2+aEB9VEwkcUEocyopxIgM/zDSg7GtqTYuN2c=:";
+const CHECKSUM_BODY: &[u8] =
+    b"add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767  checksum-asset.bin\n";
+const WRONG_CHECKSUM_BODY: &[u8] =
+    b"0dd0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767  checksum-asset.bin\n";
 const ADAPTIVE_BYTES: usize = 60 * CHUNK_BYTES;
 const ADAPTIVE_SHA256: &str = "8fd67e1fc14d95b27d5d9be573c6609baf59054a129a669a15a6cd4562b41ecb";
 const ADAPTIVE_REPR_DIGEST: &str = "sha-256=:j9Z+H8FNlbJ9XZvlc8Zgm69ZBUoSmmaaFabNRWK0Hss=:";
@@ -452,8 +456,10 @@ async fn origin(
             });
             let date = format_http_date(now()?)?;
             let length = if payload.head { object.len() } else { payload.bytes.len() };
-            let digest_header = if payload.kind == "metadata" { String::new() }
-                else { format!("Repr-Digest: {representation_digest}\r\n") };
+            let repr_digest = matches!(payload.kind, "digest_head" | "body" | "body_range");
+            let checksum_list = matches!(payload.kind, "checksum_list" | "checksum_bad_list");
+            let digest_header = if repr_digest { format!("Repr-Digest: {representation_digest}\r\n") }
+                else { String::new() };
             let response = format!("HTTP/1.1 {status_line}\r\nDate: {date}\r\nContent-Length: {length}\r\nContent-Type: {}\r\n{range_header}{digest_header}Cache-Control: public, max-age=300\r\nAge: 0\r\nConnection: close\r\n\r\n", payload.content_type);
             stream.write_all(response.as_bytes()).await?;
             stream.write_all(payload.bytes).await?;
@@ -466,8 +472,9 @@ async fn origin(
                 "range_end":payload.range.map(|range| range.1),
                 "range_total":payload.range.map(|_| object.len()),
                 "content_length":length, "method":if payload.head { "HEAD" } else { "GET" },
-                "representation_digest":if payload.kind == "metadata" { None } else { Some(representation_digest) },
-                "object_sha256":if payload.kind == "metadata" { None } else { Some(object_hash) },
+                "representation_digest":if repr_digest { Some(representation_digest) } else { None },
+                "object_sha256":if payload.kind == "metadata" || checksum_list { None } else { Some(object_hash) },
+                "checksum_body_hex":if checksum_list { Some(hex::encode(payload.bytes)) } else { None },
             }))
         }).await??;
         records.push(record);
@@ -511,6 +518,42 @@ fn origin_payload<'a>(
         .filter(|(name, _)| name.eq_ignore_ascii_case("range"))
         .map(|(_, value)| value.trim())
         .collect();
+    if ranges.is_empty() {
+        let checksum = match request.lines().next() {
+            Some("GET /SHA256SUMS HTTP/1.1") => Some(("checksum_list", CHECKSUM_BODY)),
+            Some("GET /BAD-SHA256SUMS HTTP/1.1") => {
+                Some(("checksum_bad_list", WRONG_CHECKSUM_BODY))
+            }
+            _ => None,
+        };
+        if let Some((kind, bytes)) = checksum {
+            return Ok(OriginPayload {
+                kind,
+                content_type: "text/plain",
+                bytes,
+                range: None,
+                head: false,
+            });
+        }
+        if request.starts_with("HEAD /checksum-asset.bin HTTP/1.1\r\n") {
+            return Ok(OriginPayload {
+                kind: "checksum_head",
+                content_type: "application/octet-stream",
+                bytes: &[],
+                range: None,
+                head: true,
+            });
+        }
+        if request.starts_with("GET /checksum-asset.bin HTTP/1.1\r\n") {
+            return Ok(OriginPayload {
+                kind: "checksum_body",
+                content_type: "application/octet-stream",
+                bytes: object,
+                range: None,
+                head: false,
+            });
+        }
+    }
     if request.starts_with(&format!("GET {METADATA} HTTP/1.1\r\n")) && ranges.is_empty() {
         return Ok(OriginPayload {
             kind: "metadata",
@@ -950,6 +993,60 @@ mod tests {
             .is_err()
         );
         assert!(!rejected.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn origin_fixture_checksum_is_separate_and_binds_the_exact_resource() -> Result<()> {
+        let object = fixture_bytes();
+        for (path, expected, kind) in [
+            ("/SHA256SUMS", CHECKSUM_BODY, "checksum_list"),
+            ("/BAD-SHA256SUMS", WRONG_CHECKSUM_BODY, "checksum_bad_list"),
+        ] {
+            let request = format!("GET {path} HTTP/1.1\r\n\r\n");
+            let list = origin_payload(&request, b"unused", &object)?;
+            assert_eq!(list.kind, kind);
+            assert_eq!(list.content_type, "text/plain");
+            assert_eq!(list.bytes, expected);
+            assert!(!list.head && list.range.is_none());
+        }
+        assert_eq!(
+            std::str::from_utf8(CHECKSUM_BODY)?,
+            format!("{OBJECT_SHA256}  checksum-asset.bin\n")
+        );
+        assert_ne!(CHECKSUM_BODY, WRONG_CHECKSUM_BODY);
+        for method in ["HEAD", "GET"] {
+            let request = format!("{method} /checksum-asset.bin HTTP/1.1\r\n\r\n");
+            let response = origin_payload(&request, b"unused", &object)?;
+            assert_eq!(
+                response.kind,
+                if method == "HEAD" {
+                    "checksum_head"
+                } else {
+                    "checksum_body"
+                }
+            );
+            assert_eq!(
+                response.bytes,
+                if method == "HEAD" {
+                    &[][..]
+                } else {
+                    object.as_slice()
+                }
+            );
+            assert!(!matches!(
+                response.kind,
+                "digest_head" | "body" | "body_range"
+            ));
+        }
+        assert!(
+            origin_payload(
+                "GET /checksum-asset.bin HTTP/1.1\r\nRange: bytes=0-10\r\n\r\n",
+                b"unused",
+                &object
+            )
+            .is_err()
+        );
         Ok(())
     }
 
