@@ -50,7 +50,23 @@ pub(super) async fn process(
                     .map_err(|_| ControlServerError::InvalidFrame);
             }
         };
-        let complete = exchange(&mut stream, &request_id, &scope.manifest, &mut scope.store, scope.importing, false).await?;
+        let gate = context.map(|context| context.content.object_policy_gate());
+        if let Some(context) = context {
+            context.content.check_object_policy(&scope.manifest)
+                .map_err(|_| ControlServerError::InvalidFrame)?;
+        }
+        let withheld = async {
+            if let Some(gate) = gate.as_ref() {
+                gate.wait_until_withheld(&scope.manifest).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        let complete = tokio::select! {
+            biased;
+            () = withheld => return Err(ControlServerError::InvalidFrame),
+            result = exchange(&mut stream, &request_id, &scope.manifest, &mut scope.store, scope.importing, false) => result?,
+        };
         let result = if complete {
             Ok(ContentReceipt {
                 bytes: scope.manifest.length(),
@@ -139,12 +155,14 @@ async fn publication(
         }
     };
     let mut stop = admission.stop_receiver();
+    let gate = context.content.object_policy_gate();
     if *stop.borrow() {
         return Err(ControlServerError::InvalidFrame);
     }
     let complete = tokio::select! {
         biased;
         _ = stop.changed() => return Err(ControlServerError::InvalidFrame),
+        () = gate.wait_until_withheld(&manifest) => return Err(ControlServerError::InvalidFrame),
         result = exchange(&mut stream, &request_id, &manifest, admission.source(), true, true) => result?,
     };
     let result = if complete {

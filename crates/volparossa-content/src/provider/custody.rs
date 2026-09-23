@@ -99,11 +99,23 @@ pub trait CustodyBackend: Send + Sync {
 pub struct CustodyService {
     signer: Arc<SigningKey>,
     backend: Arc<dyn CustodyBackend>,
+    object_policy: crate::object_policy::ObjectPolicyGate,
 }
 
 impl CustodyService {
     /// Attach public custody to an existing authenticated service; no listener is opened.
     pub fn new(signer: Arc<SigningKey>, backend: Arc<dyn CustodyBackend>) -> Self {
-        Self { signer, backend }
+        Self {
+            signer,
+            backend,
+            object_policy: crate::object_policy::ObjectPolicyGate::default(),
+        }
+    }
+
+    /// Share independently verified live object decisions across deposits and inspections.
+    #[must_use]
+    pub fn with_object_policy_gate(mut self, gate: crate::object_policy::ObjectPolicyGate) -> Self {
+        self.object_policy = gate;
+        self
     }
 }

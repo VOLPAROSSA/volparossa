@@ -16,8 +16,7 @@ use tokio::{
 };
 use volparossa_content::provider::replication::{
     Replica, ReplicationExclusions, ReplicationLimits, ReplicationProgress, persist_replicas,
-    pull_public_replicas_with_admission, pull_replicas_with_admission, restore_public_replicas,
-    restore_replicas,
+    pull_replicas_with_policy, restore_public_replicas, restore_replicas,
 };
 use volparossa_content::provider::{ProviderError, PublicationRegistry, VerifiedProviderOffer};
 use volparossa_content::{CacheLimits, CacheUsage, ChunkId, ChunkStore};
@@ -103,9 +102,10 @@ impl ReplicationRuntime {
         let mut chunks = VecDeque::new();
         let mut publications = BTreeSet::new();
         for replica in restored {
-            if public_only
-                && replica.content_type()
-                    == volparossa_content::private_message::PRIVATE_MESSAGE_CONTENT_TYPE
+            if !registry.allows_replica(&replica)
+                || public_only
+                    && replica.content_type()
+                        == volparossa_content::private_message::PRIVATE_MESSAGE_CONTENT_TYPE
             {
                 continue;
             }
@@ -221,13 +221,14 @@ impl ReplicationRuntime {
                 && result
                     .live
                     .iter()
-                    .any(|replica| replica.manifest_id() == id)
+                    .any(|replica| replica.manifest_id() == id && registry.allows_replica(replica))
         });
         state.chunks.clear();
         for replica in result.live {
-            if self.public_only
-                && replica.content_type()
-                    == volparossa_content::private_message::PRIVATE_MESSAGE_CONTENT_TYPE
+            if !registry.allows_replica(&replica)
+                || self.public_only
+                    && replica.content_type()
+                        == volparossa_content::private_message::PRIVATE_MESSAGE_CONTENT_TYPE
             {
                 continue;
             }
@@ -376,7 +377,13 @@ impl ReplicationRuntime {
                 return;
             };
             let progress = self
-                .pull(&mut stream, &mut store, exclusions, budget)
+                .pull(
+                    &mut stream,
+                    &mut store,
+                    exclusions,
+                    budget,
+                    &context.content.object_policy,
+                )
                 .await
                 .ok();
             if progress.is_some() && super::tls::finish(&mut stream).await.is_err() {
@@ -433,6 +440,7 @@ impl ReplicationRuntime {
         store: &mut ChunkStore,
         exclusions: &ReplicationExclusions,
         budget: &IdleBudget,
+        policy: &volparossa_content::object_policy::ObjectPolicyGate,
     ) -> Result<ReplicationProgress, ProviderError>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -448,19 +456,16 @@ impl ReplicationRuntime {
             budget.wait_until_quiet().await;
             true
         };
-        if self.public_only {
-            pull_public_replicas_with_admission(
-                stream,
-                store,
-                transfer_limits,
-                exclusions,
-                admission,
-            )
-            .await
-        } else {
-            pull_replicas_with_admission(stream, store, transfer_limits, exclusions, admission)
-                .await
-        }
+        pull_replicas_with_policy(
+            stream,
+            store,
+            transfer_limits,
+            exclusions,
+            self.public_only,
+            policy,
+            admission,
+        )
+        .await
     }
 }
 
@@ -478,6 +483,7 @@ fn remember_chunks(remembered: &mut VecDeque<ChunkId>, chunks: &[ChunkId]) {
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
+    use volparossa_content::provider::replication::pull_replicas_with_admission;
     use volparossa_content::provider::serve_publication;
     use volparossa_content::transfer::TransferLimits;
     use volparossa_content::{Metadata, Publication, SignedManifest, Validity, publish};
@@ -502,6 +508,93 @@ mod tests {
             store,
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn withheld_replica_does_not_block_unrelated_restart_or_reclaim() {
+        use volparossa_content::object_policy::{ObjectPolicyGate, ObjectRule, ObjectSubject};
+        use volparossa_content::provider::replication::{LocalReplicaLimits, admit_public_replica};
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("replicas");
+        let cache_limits = CacheLimits {
+            max_bytes: 1024,
+            max_entries: 4,
+            min_free_bytes: 0,
+        };
+        let mut source =
+            ChunkStore::create(&directory.path().join("source"), cache_limits).unwrap();
+        let mut destination = ChunkStore::create(&root, cache_limits).unwrap();
+        let mut originals = Vec::new();
+        for _ in 0..2 {
+            let key = SigningKey::generate(&mut rand_core::OsRng);
+            let signed = test_publication(&mut source, &key);
+            let manifest = signed.verify(&key.verifying_key(), now()).unwrap();
+            admit_public_replica(
+                &signed,
+                &manifest,
+                &mut source,
+                &mut destination,
+                LocalReplicaLimits {
+                    max_chunks: 1,
+                    max_bytes: 1024,
+                },
+                now(),
+            )
+            .unwrap();
+            originals.push((signed, manifest));
+        }
+        let original_usage = destination.usage();
+        assert_eq!(
+            restore_public_replicas(&mut destination, now())
+                .unwrap()
+                .len(),
+            2
+        );
+        drop(destination);
+        let gate = ObjectPolicyGate::default();
+        gate.install(ObjectRule {
+            subject: ObjectSubject::from_manifest(&originals[0].1),
+            policy_hash: [1; 32],
+            allow: false,
+            expires_at_ms: originals[0].1.validity().expires * 1000,
+        })
+        .unwrap();
+        let config = ContentReplicationConfig {
+            replica_cache: root.to_str().unwrap().into(),
+            reuse_replica_cache: true,
+            limits: Some(ContentCacheLimits {
+                quota_bytes: 1024,
+                max_entries: 4,
+                min_free_bytes: 0,
+            }),
+            max_bytes: 1024,
+            max_chunks: 2,
+        };
+        let mut registry = PublicationRegistry::new();
+        registry.set_object_policy_gate(gate);
+        let runtime = ReplicationRuntime::create_public(config, &mut registry).unwrap();
+        assert!(!registry.contains(originals[0].1.manifest_id()));
+        assert!(registry.contains(originals[1].1.manifest_id()));
+        assert_eq!(runtime.state.lock().await.publications.len(), 1);
+        // Force the allowed registration to be rebuilt while the denied journal remains.
+        assert!(registry.remove(originals[1].1.manifest_id()));
+        let registry = Mutex::new(registry);
+        assert!(!runtime.reclaim(&registry, now()).await.unwrap());
+        assert!(!registry.lock().await.contains(originals[0].1.manifest_id()));
+        assert!(registry.lock().await.contains(originals[1].1.manifest_id()));
+        assert_eq!(runtime.state.lock().await.publications.len(), 1);
+        let mut destination = ChunkStore::open(&root, cache_limits).unwrap();
+        assert_eq!(destination.usage(), original_usage);
+        let retained = restore_public_replicas(&mut destination, now()).unwrap();
+        assert_eq!(retained.len(), 2);
+        for (signed, manifest) in originals {
+            assert!(
+                retained
+                    .iter()
+                    .any(|replica| replica.manifest_id() == manifest.manifest_id()
+                        && replica.signed_manifest().encode() == signed.encode())
+            );
+        }
     }
 
     #[tokio::test]

@@ -269,6 +269,11 @@ signed publication channel. Automatic combination, further training, approved se
 restart and cold retrieval/use of the returned model have passed a real VM proof. The receiving
 model still gives a wrong answer about relay count: successful learning and distribution
 mechanics are not yet evidence of reliable reasoning.
+The extended recovery proof also restores the original approved aggregate after its local
+successor is damaged, preserves that approval across restart and serves its exact weights.
+If the aggregate is then damaged without an approved predecessor, new work is withdrawn
+instead of silently falling back to the base model. This is local integrity recovery, not
+detection of every poisoned or misleading agent.
 [How cooperating tasks fit together →](docs/DECENTRALIZED_AGENTS.md#cooperating-public-tasks)
 
 Public work can be split across selected peers, with retained results and bounded recovery
@@ -353,12 +358,17 @@ The new `compute peer policy-assess` development candidate fetches one exact pub
 asks two selected peers for principle-led judgments, and has each peer examine the other's
 reasoning. It retains the original answers, evidence and disagreements; its concept outcome is
 **allow, deny or undetermined**. The first real-model run fetched the source and executed both
-assessors, but their answers hit the token limit without complete JSON. A later structured run
-also quoted the framework instead of the subject. The next candidate constrains quotes to the
-actual source and separates that source from the framework; cross-review remains unproven.
-An opt-in transfer path now preserves the original provider-signed replies and can
-package/retrieve completed judgments through the shared cache. This verifies who signed each
-answer, not that the answer is correct. These concepts do not change network policy or establish legality.
+assessors but failed to complete the required answers. A later complete four-worker proof now
+passes, including protected cache transfer and offline replay of the original signed judgments.
+The actual reasoning still contains errors and its outcome remains undetermined. Signatures
+identify who signed an answer; they do not establish correctness or legality.
+
+A new **node-local object-policy candidate** connects those retained judgments to the existing,
+separate policy-signing quorum: propose, independently endorse, then combine and optionally
+apply a decision to one exact native publication. Compute peers do not become policy authorities.
+A durable revision floor and shared live gate prevent stale decisions from reopening that object
+after restart. Local checks pass; its extended network proof is still pending. It is not yet
+network-wide governance, physical cache erasure or inspection of arbitrary HTTPS content.
 [Public assessment workflow →](docs/DECENTRALIZED_AGENTS.md#public-principle-assessments-and-cross-review)
 
 [Principle-led governance and illustrative examples →](docs/DECENTRALIZED_AGENTS.md#principles-guide-rules-not-the-other-way-around) ·
@@ -374,13 +384,16 @@ different revisions are not combined into a claim that the current build is full
 | **Protected v1 transports** | A01–A15 on `482e33d0`: real two-leg WireGuard, MPTCP, protected UDP, MPQUIC, privacy captures and cleanup. Later scoped flows grow to three paths. | Current-build integration and remaining transport/path-growth limits; release hardening. |
 | **Local + Internet links** | Offline-node consumption/contribution, mixed LAN/WAN traffic and simulated-radio operation. | Physical radios, phone support, general mesh reachability and broader capacity detection. |
 | **Content network** | Scoped C01–C07 results: verified chunks, peer retrieval, replication, DNS sharing, static publication and encrypted delivery. | C08 existing-web coverage/benefit, automatic holder selection and ongoing availability. |
-| **Cooperative AI** | Real adapter training/reuse, B02 protected artifact exchange, public peer-job/recovery and selected-source training-loop checkpoints. | Remaining B01/B03–B07 scope: broader owner priority, general tasks, private offload, autonomous learning and defended aggregation. |
-| **Automatic governance** | Existing signed destination-policy enforcement and rollback/conflict checks. | Content judgments, decentralized decision membership, conflict resolution and the agent immune system. |
+| **Cooperative AI** | Real adapter training/reuse, protected exchange, automatic approved-model publication, cold reuse and scoped integrity recovery. | Remaining B01/B03–B07 scope: reliable reasoning, broader owner priority, general tasks, private offload and defended aggregation. |
+| **Automatic governance** | Signed destination-policy enforcement; four-worker public assessment, cross-review and signed cache replay. | Sound judgments, live proof of the new local exact-object gate, decentralized membership, conflict resolution and the agent immune system. |
 
 The detailed chronology, failed runs, exact measurements and pending proofs live in
 [IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md), rather than being duplicated here.
 The original v1 pass is [recorded with its run and evidence](https://github.com/VOLPAROSSA/volparossa/actions/runs/34047766913).
 There is no release-readiness or universal speed/privacy guarantee.
+The completed integration milestone is now in `main` through [PR #150](https://github.com/VOLPAROSSA/volparossa/pull/150)
+(`322c45b9`), including the scoped provider and recovery proofs. The object-policy candidate
+described above is subsequent development, not part of that merged checkpoint.
 
 ## Developing VOLPAROSSA
 

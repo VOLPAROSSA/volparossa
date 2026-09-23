@@ -59,6 +59,12 @@ pub(crate) enum Command {
     PolicyPack(Box<policy_assessment::transfer::Pack>),
     /// Retrieve and independently recheck a selected assessment package without activating policy.
     PolicyFetch(Box<policy_assessment::transfer::Fetch>),
+    /// Automatically derive one immutable native-object policy proposal from four signed judgments.
+    PolicyPropose(Box<policy_assessment::object_policy::Propose>),
+    /// Independently replay a proposal's evidence and sign with this configured authority only.
+    PolicyEndorse(Box<policy_assessment::object_policy::Endorse>),
+    /// Combine exact-body endorsements and verify the configured current policy quorum.
+    PolicyCombine(Box<policy_assessment::object_policy::Combine>),
 }
 
 #[derive(Debug, Args)]
@@ -268,6 +274,11 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::PolicyPack(args) => return policy_assessment::transfer::pack(&args),
         Command::PolicyFetch(args) => {
             return policy_assessment::transfer::fetch(&args, socket).await;
+        }
+        Command::PolicyPropose(args) => return policy_assessment::object_policy::propose(&args),
+        Command::PolicyEndorse(args) => return policy_assessment::object_policy::endorse(&args),
+        Command::PolicyCombine(args) => {
+            return policy_assessment::object_policy::combine(&args, socket).await;
         }
     };
     println!("{}", serde_json::to_string(&report)?);

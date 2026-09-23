@@ -172,6 +172,7 @@ async fn backend(context: &ControlContext) -> Backend {
         foreground: Arc::clone(&context.content.foreground),
         config: runtime.config.clone(),
         endpoint: active.endpoint.clone(),
+        object_policy: context.content.object_policy_gate(),
     }
 }
 
@@ -365,6 +366,8 @@ async fn scenario() {
     reassemble(&manifest, &mut [&mut destination], now(), &mut actual).unwrap();
     assert_eq!(actual, payload);
 
+    object_policy_withholding(&context, &restarted, &signed, &manifest, &publisher).await;
+
     // Even a retained protocol-service snapshot cannot operate on a replacement service.
     let (mut client, mut server) = tokio::io::duplex(1024);
     let stale_server = async move {
@@ -399,4 +402,89 @@ async fn scenario() {
     stop_discovery.send(true).unwrap();
     discovery_task.await.unwrap();
     assert!(!directory.path().join("absent-helper.sock").exists());
+}
+
+async fn object_policy_withholding(
+    context: &ControlContext,
+    backend: &Backend,
+    signed: &SignedManifest,
+    manifest: &VerifiedManifest,
+    publisher: &SigningKey,
+) {
+    use volparossa_content::object_policy::{ObjectRule, ObjectSubject};
+
+    let pending = backend
+        .begin_deposit(signed.clone(), manifest.clone())
+        .await
+        .unwrap();
+    let gate = context.content.object_policy_gate();
+    gate.set_epoch(Some([0x61; 32]));
+    let rule = ObjectRule {
+        subject: ObjectSubject::from_manifest(manifest),
+        policy_hash: [0x61; 32],
+        allow: false,
+        expires_at_ms: (now() + 60) * 1000,
+    };
+    gate.install(rule).unwrap();
+    assert!(
+        pending.commit().await.is_err(),
+        "already admitted upload cannot commit after denial"
+    );
+    assert!(!context.content.foreground.active());
+    assert!(
+        backend
+            .begin_deposit(signed.clone(), manifest.clone())
+            .await
+            .is_err()
+    );
+    assert!(
+        backend
+            .inspect(signed.clone(), manifest.clone())
+            .await
+            .is_err()
+    );
+    assert!(
+        !backend
+            .registry
+            .upgrade()
+            .unwrap()
+            .lock()
+            .await
+            .has_live_publications(now())
+    );
+
+    let mut stream = connection(context).await;
+    let challenge = begin(
+        &mut stream,
+        context.content.signer.verifying_key().as_bytes(),
+    )
+    .await
+    .unwrap();
+    let authorization = CustodyAuthorization::sign(
+        &challenge,
+        CustodyOperation::Inspect,
+        signed.clone(),
+        publisher,
+        now(),
+    )
+    .unwrap();
+    assert!(
+        execute(
+            &mut stream,
+            &challenge,
+            &authorization,
+            None,
+            TransferLimits::default()
+        )
+        .await
+        .is_err()
+    );
+    drop(stream);
+    // Preserve the preexisting stale-owner test's independent scope: restore access so that
+    // its old backend is rejected for ownership, not merely because of this new object gate.
+    gate.install(ObjectRule {
+        allow: true,
+        ..rule
+    })
+    .unwrap();
 }

@@ -1900,6 +1900,42 @@ pub(crate) fn verify_policy_at(
     trust_path: &Path,
     now_ms: u64,
 ) -> Result<PolicyEvidence> {
+    let context = read_policy_context_at(config, manifest_path, trust_path, now_ms)?;
+    Ok(PolicyEvidence {
+        manifest_version: context.manifest.manifest_version(),
+        policy_hash: *context.manifest.policy_hash(),
+        verified_signatures: context.manifest.verified_signatures(),
+        expires_at_ms: context.manifest.expires_at_ms(),
+    })
+}
+
+/// Independently configured authority and its current verified policy epoch.
+/// Loading this read-only view does not install a policy or change its version floor.
+pub(crate) struct PolicyContext {
+    pub(crate) trust: TrustStore,
+    pub(crate) verification: VerificationPolicy,
+    pub(crate) manifest: volparossa_policy::VerifiedManifest,
+}
+
+pub(crate) fn load_policy_context(
+    config: &Config,
+    config_path: &Path,
+    now_ms: u64,
+) -> Result<PolicyContext> {
+    read_policy_context_at(
+        config,
+        Path::new(&config.policy.manifest_path),
+        &policy_trust_path(config_path)?,
+        now_ms,
+    )
+}
+
+fn read_policy_context_at(
+    config: &Config,
+    manifest_path: &Path,
+    trust_path: &Path,
+    now_ms: u64,
+) -> Result<PolicyContext> {
     if !manifest_path.is_absolute() || !trust_path.is_absolute() {
         bail!("policy and trust paths must be absolute");
     }
@@ -1938,11 +1974,10 @@ pub(crate) fn verify_policy_at(
     verified
         .ensure_active_at(now_ms)
         .context("manifest is not active")?;
-    Ok(PolicyEvidence {
-        manifest_version: verified.manifest_version(),
-        policy_hash: *verified.policy_hash(),
-        verified_signatures: verified.verified_signatures(),
-        expires_at_ms: verified.expires_at_ms(),
+    Ok(PolicyContext {
+        trust: store,
+        verification,
+        manifest: verified,
     })
 }
 

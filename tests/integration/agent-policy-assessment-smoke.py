@@ -29,8 +29,10 @@ SCOPE = ("one exact synthetic public native object fetched through its protected
          "360M peer assessments and opposite-peer cross-reviews under the seven virtues/vices, bound "
          "to signed dataset-v4 contracts and original provider-signed JSON-boundary/EOS receipts, "
          "using the explicitly provisioned pinned decoder without fixed verdicts, publish and fetch their exact native bundle into "
-         "a new cache and directory on the same client, then unchanged completed offline replay and full owned cleanup; "
-         "not classifier quality, legal correctness, independent semantic judgment, network-policy activation or full B06")
+         "a new cache and directory on the same client, unchanged completed offline replay, three separately invoked "
+         "existing development authorities replaying and endorsing that actual outcome, exact-object local quorum "
+         "activation with cached-access and Client-restart persistence checks, and full owned cleanup; "
+         "not classifier quality, legal correctness, independent semantic judgment, global-policy activation or full B06")
 
 
 def sha(raw):
@@ -496,6 +498,229 @@ def assessment_hash(value):
     return sha(json.dumps(record_value, ensure_ascii=False, separators=(",", ":")).encode())
 
 
+def object_fields(raw, maximum, repeated=()):
+    """Strict original protobuf fields, with only declared repeatable message tags."""
+    require(isinstance(raw, bytes) and 0 < len(raw) <= maximum, "object proof bound")
+    values, offset, previous, canonical = {}, 0, 0, b""
+    while offset < len(raw):
+        tag, offset = CUSTODY["varint"](raw, offset)
+        number, wire = tag >> 3, tag & 7
+        require(number > previous or number == previous and number in repeated, "object proof field order")
+        require(number > 0 and wire in (0, 2), "object proof wire type")
+        previous = number
+        value, offset = CUSTODY["varint"](raw, offset)
+        if wire == 2:
+            require(value > 0 and offset + value <= len(raw), "object proof truncated field")
+            value, offset = raw[offset:offset + value], offset + value
+        else:
+            require(value > 0, "noncanonical default object scalar")
+        canonical += protobuf_value(number, value)
+        if number in repeated:
+            values.setdefault(number, []).append(value)
+        else:
+            values[number] = value
+    require(canonical == raw, "noncanonical object proof encoding")
+    return values
+
+
+def object_envelope(raw, public_keys, expected_signers, policy_epoch=False):
+    envelope = object_fields(raw, 64 * 1024 if policy_epoch else 8192, (3,))
+    require(set(envelope) == ({1, 2, 3} if expected_signers else {1, 2})
+            and envelope[2] == hashlib.sha256(envelope[1]).digest(), "original signed body hash differs")
+    signatures = envelope.get(3, [])
+    require(len(signatures) == expected_signers, "wrong distinct authority signature count")
+    previous = b""
+    observed = set()
+    for original in signatures:
+        signature = object_fields(original, 256)
+        require(set(signature) == {1, 2} and signature[1] > previous and signature[1] in public_keys,
+                "unknown, repeated or unordered authority")
+        previous = signature[1]
+        observed.add(previous)
+        if policy_epoch:
+            domain = b"volparossa/whitelist-manifest/signature/v1\0"
+            message = envelope[2] + envelope[1]
+        else:
+            domain = b"VOLPAROSSA/native-object-decision/signature/v1\0"
+            message = signature[1] + envelope[2] + envelope[1]
+        verify_signature(message, signature[2], public_keys[signature[1]], domain)
+    return envelope, observed
+
+
+def check_object_probe(probe, phase, result):
+    require(probe["phase"] == phase and type(probe["exit_code"]) is int
+            and probe["observed_at_ms"] > 0 and probe["agent"]["pid"] > 0,
+            "missing actual cache probe observation")
+    allowed = phase == "before" or result["decision"]["outcome"] == "allow"
+    raw = bytes.fromhex(probe["stdout_hex"])
+    error = bytes.fromhex(probe["stderr_hex"])
+    if allowed:
+        receipt = strict_json(raw)
+        scope = result["decision"]["scope"]
+        require(probe["exit_code"] == 0 and probe["output_bytes"] == len(SUBJECT.encode())
+                and probe["output_sha256"] == sha(SUBJECT.encode())
+                and receipt["operation"] == "named_content_download" and receipt["cache_only"] is True
+                and receipt["manifest_id"] == scope["source_manifest_id"]
+                and receipt["publisher_key"] == scope["source_publisher_key"]
+                and receipt["sha256"] == scope["source_sha256"] and receipt["bytes"] == scope["source_bytes"]
+                and receipt["peer_bytes"] == receipt["providers_used"] == receipt["origin_body_bytes"] == 0,
+                "Allow did not retain actual exact cached-object access")
+    else:
+        require(probe["exit_code"] == 1 and raw == b"" and probe["output_bytes"] is None
+                and probe["output_sha256"] is None
+                and error.strip() == b"Error: agent rejected request: CONTENT_POLICY (Policy)",
+                "Deny/Undetermined was not an actual typed policy refusal without output")
+
+
+def object_probe(work, phase, status):
+    JOBS["guest_work"](work)
+    require(phase in ("before", "applied", "restarted"), "unknown object probe")
+    source = root_path(work).parent
+    output = source / f"policy-object-{phase}.txt"
+    raw = public_file(output, source.stat().st_uid) if output.exists() else None
+    pid = int(JOBS["subprocess"].check_output(["systemctl", "show", "--property=MainPID", "--value",
+                                              "volparossa-alpha-agent@client.service"], text=True))
+    observed = dict(phase=phase, exit_code=status, observed_at_ms=time.time_ns() // 1000000,
+        stdout_hex=record(work, "object-" + phase).read_bytes().hex(),
+        stderr_hex=(work / f"{NAME}-object-{phase}.err").read_bytes().hex(),
+        output_bytes=len(raw) if raw is not None else None, output_sha256=sha(raw) if raw is not None else None,
+        agent=JOBS["identity"](pid), namespace=os.readlink(f"/proc/{pid}/ns/net"))
+    write(record(work, "object-probe-" + phase), observed)
+    check_object_probe(observed, phase, read(record(work, "result")))
+
+
+def object_collect(work, phase):
+    JOBS["guest_work"](work)
+    require(phase in ("before", "after"), "unknown object collection phase")
+    source = root_path(work).parent
+    owner = source.stat().st_uid
+    bundle = public_file(source / "policy-bundle-fetch/assessment.bundle", owner)
+    retained = {}
+    for directory, extra in [("policy-object-proposal", "proposal.bin"),
+                            *[(f"policy-object-endorsement-{i}", "endorsement.bin") for i in range(3)],
+                            ("policy-object-combined", "decision.bin")]:
+        base = source / directory
+        expected = {".task.lock", "assessment.bundle", "selection.json", "proposal.bin", extra}
+        if extra == "decision.bin":
+            expected.add("apply-receipt.json")
+        require(set(item.name for item in base.iterdir()) == expected, "unexpected policy output/private file")
+        for name in sorted(expected - {".task.lock"}):
+            raw = public_file(base / name, owner)
+            item = {"bytes": len(raw), "sha256": sha(raw)}
+            if name == "assessment.bundle":
+                require(raw == bundle, "authority silently replaced original assessment bundle")
+            else:
+                item["raw_hex"] = raw.hex()
+            retained[directory + "/" + name] = item
+    require(snapshot(root_path(work)) == read(record(work, "files"), 32 * 1048576),
+            "object authority flow altered original model work")
+    journal = public_file(work / "state-client/object-policy/journal.json", owner)
+    value = {"files": retained, "journal_hex": journal.hex(),
+             "epoch_manifest_hex": public_file(work / "development-policy.manifest", owner).hex(),
+             "trust": strict_json(public_file(work / "policy-maintainers.json", owner)),
+             "authorities": [read(record(work, f"object-authority-{i}")) for i in range(3)],
+             "reports": {name: read(record(work, "object-" + name)) for name in
+                         ("proposal", "endorsement-0", "endorsement-1", "endorsement-2", "combined")}}
+    write(record(work, "object-originals-" + phase), value)
+    if phase == "after":
+        require(value == read(record(work, "object-originals-before"), 8 * 1048576),
+                "restart changed original decision, authority or durable journal")
+        probes = {name: read(record(work, "object-probe-" + name)) for name in ("before", "applied", "restarted")}
+        require(not JOBS["alive"](probes["applied"]["agent"]) and JOBS["alive"](probes["restarted"]["agent"]),
+                "restart did not end the original agent lifetime")
+        proof = {"originals": value, "probes": probes, "originals_unchanged_after_restart": True,
+                 "old_agent_ended": True, "new_agent_alive": True}
+        check_object_activation(proof, read(record(work, "result")),
+                                read(record(work, "transfer"), 8 * 1048576),
+                                read(record(work, "files"), 32 * 1048576))
+        write(record(work, "object-activation"), proof)
+
+
+def check_object_activation(proof, result, transfer_value, original_files):
+    original = proof["originals"]
+    trust = original["trust"]
+    require(trust["schema_version"] == 1 and len(trust["maintainers"]) == 3
+            and all(item["environment"] == "development" for item in trust["maintainers"]),
+            "authority is not the original three development maintainers")
+    public = {hashlib.sha256(b"volparossa/whitelist-maintainer/id/v1\0" + bytes.fromhex(item["public_key_hex"])).digest():
+              bytes.fromhex(item["public_key_hex"]) for item in trust["maintainers"]}
+    require(len(public) == 3, "duplicate configured authority")
+    epoch, epoch_signers = object_envelope(bytes.fromhex(original["epoch_manifest_hex"]), public, 3, True)
+    epoch_body = object_fields(epoch[1], 64 * 1024, (8, 9))
+    require(set(epoch_body) == set(range(1, 10)) and epoch_body[1] == epoch_body[2] == epoch_body[3] == 1
+            and epoch_body[7] == 3 and epoch_signers == set(public), "different fixture authority epoch")
+    epoch_members = [object_fields(item, 256) for item in epoch_body[8]]
+    require(len(epoch_members) == 3 and {member[1] for member in epoch_members} == set(public)
+            and all(set(member) == {1, 2, 3} and member[2] == public[member[1]] and member[3] == 2
+                    for member in epoch_members), "original policy assigned a different development trust set")
+    files = original["files"]
+    raw_bundle = bytes.fromhex(transfer_value["bundle_hex"])
+    enrolled = decode_file(original_files, "enrollment.json")
+    scope = result["decision"]["scope"]
+    proposal, _ = object_envelope(decode_file(files, "policy-object-proposal/proposal.bin", False), public, 0)
+    body = object_fields(proposal[1], 1024)
+    outcome = {"allow": 1, "deny": 2, "undetermined": 3}[result["decision"]["outcome"]]
+    require(set(body) == set(range(1, 15)) and body[1] == body[2] == body[5] == 1
+            and body[3] == epoch[2] and body[4] == epoch_body[2]
+            and body[6] == bytes.fromhex(scope["source_publisher_key"])
+            and body[7] == bytes.fromhex(scope["source_manifest_id"])
+            and body[8] == bytes.fromhex(scope["source_sha256"])
+            and body[9] == bytes.fromhex(scope["framework_sha256"])
+            and body[10] == hashlib.sha256(raw_bundle).digest() and body[11] == outcome
+            and len(body[14]) == 32 and body[14] != bytes(32)
+            and max(enrolled["selected_at"] * 1000, epoch_body[5]) <= body[12] < body[13]
+            and body[13] == min(enrolled["expires"] * 1000, epoch_body[6], body[12] + 7 * 24 * 3600 * 1000),
+            "proposal changed the actual model verdict, original source/evidence or expiry")
+    expected_selection = {"version": 1, "requester_key": json.loads(raw_bundle)["requester_key"],
+        "source_publisher_key": scope["source_publisher_key"],
+        "source_manifest_id": scope["source_manifest_id"], "providers": enrolled["providers"],
+        "model_profile": "smollm2-360m-v1"}
+    signed_by = set()
+    for index, authority in enumerate(original["authorities"]):
+        require(authority == {"index": index, "public_key_hex": trust["maintainers"][index]["public_key_hex"],
+                             "development_only": True, "identities_created": 1}, "authority was replaced")
+        endorsement, signers = object_envelope(decode_file(files,
+            f"policy-object-endorsement-{index}/endorsement.bin", False), public, 1)
+        expected_key = hashlib.sha256(b"volparossa/whitelist-maintainer/id/v1\0" + bytes.fromhex(authority["public_key_hex"])).digest()
+        require(endorsement[1] == proposal[1] and signers == {expected_key} and not signed_by.intersection(signers),
+                "authority did not sign the same original body separately")
+        signed_by.update(signers)
+    decision_raw = decode_file(files, "policy-object-combined/decision.bin", False)
+    decision, signers = object_envelope(decision_raw, public, 3)
+    require(decision[1] == proposal[1] and signers == signed_by == set(public), "quorum changed the original body")
+    for directory in ("policy-object-proposal", "policy-object-combined",
+                      *(f"policy-object-endorsement-{i}" for i in range(3))):
+        require(files[directory + "/assessment.bundle"] == {"bytes": len(raw_bundle), "sha256": sha(raw_bundle)}
+                and decode_file(files, directory + "/selection.json") == expected_selection
+                and decode_file(files, directory + "/proposal.bin", False)
+                    == decode_file(files, "policy-object-proposal/proposal.bin", False), "independent selection/evidence changed")
+    for name, report_value in original["reports"].items():
+        require(report_value["complete"] is True and report_value["outcome"] == result["decision"]["outcome"]
+                and report_value["provider_signed_claims_replayed"] == 4
+                and report_value["threshold_verified"] == (name == "combined")
+                and report_value["network_policy_activation"] is False
+                and report_value["local_object_policy_applied"] == (name == "combined")
+                and report_value["semantic_correctness_proven"] is False
+                and report_value["issued_at_ms"] == body[12] and report_value["expires_at_ms"] == body[13],
+                "CLI overclaimed global/model authority or changed actual outcome")
+    receipt = decode_file(files, "policy-object-combined/apply-receipt.json")
+    require(receipt == {"version": 1, "manifest_id": list(body[7]), "decision_hash": list(decision[2]),
+        "decision_revision": 1, "policy_hash": list(epoch[2]), "outcome": outcome}, "applied a different object decision")
+    require(strict_json(bytes.fromhex(original["journal_hex"])) == {"version": 1, "entries": [
+        {"envelope_hex": decision_raw.hex(), "epoch_manifest_hex": original["epoch_manifest_hex"]}]},
+        "durable restart authority did not retain exact original signatures")
+    probes = proof["probes"]
+    for phase in ("before", "applied", "restarted"):
+        check_object_probe(probes[phase], phase, result)
+        require(probes[phase]["observed_at_ms"] < body[13], "access proof ran after original authority expiry")
+    require(probes["before"]["agent"] == probes["applied"]["agent"] != probes["restarted"]["agent"]
+            and len({item["namespace"] for item in probes.values()}) == 1
+            and body[12] <= probes["applied"]["observed_at_ms"] <= probes["restarted"]["observed_at_ms"]
+            and proof["originals_unchanged_after_restart"] is True
+            and proof["old_agent_ended"] is True and proof["new_agent_alive"] is True,
+            "restart did not preserve original exact-object access decision")
+
+
 def check_evidence(value, revision):
     require(value["source_revision"] == revision and value["scope"] == SCOPE, "wrong source/scope")
     check_provision(value["provision"])
@@ -579,6 +804,7 @@ def check_evidence(value, revision):
         response_bytes[observation["node"]] += len(report_json.encode())
     check_transfer(value["transfer"], files, requester, value["layout"], value["peers"], result,
                    value["publication"]["publisher_key_hex"])
+    check_object_activation(value["object_activation"], result, value["transfer"], files)
     response_bytes[value["layout"]["provider_nodes"][0]] += value["transfer"]["download"]["peer_bytes"]
     CUSTODY["validate_path"](value["path"], value["peers"], value["layout"], "inspect")
     for node, minimum in response_bytes.items():
@@ -596,6 +822,7 @@ def evidence(work, revision):
         files=read(record(work, "files"), 32 * 1048576), observation=read(record(work, "observation")),
         publication=read(record(work, "publication")), replay=read(record(work, "replay")),
         requester=read(record(work, "requester")), transfer=read(record(work, "transfer"), 8 * 1048576),
+        object_activation=read(record(work, "object-activation"), 8 * 1048576),
         stopped=read(record(work, "stopped")), layout=read(work / "agent-jobs-layout.json"),
         peers=read(work / "a01-expected-peers.json"), cleanup=read(work / "agent-jobs-private-cleanup.json"),
         path=dict(selected_route=read(work / "content-custody-fetch-live-selection.json"),
@@ -614,6 +841,10 @@ def finalize(work, revision, status, complete, remaining, phase, blocker):
         success=status == 0 and complete and remaining == 0 and host.get("unchanged") is True and proof is not None,
         runner_exit_status=status, phase=phase, observed_blocker=None if blocker == "NONE" else blocker,
         full_b06_claimed=False, network_policy_activation_claimed=False, evidence=proof,
+        local_object_policy_applied=proof is not None,
+        object_outcome=proof["result"]["decision"]["outcome"] if proof is not None else None,
+        object_access_branch=("allow_exact_cached_access" if proof["result"]["decision"]["outcome"] == "allow"
+                              else "withhold_exact_cached_object") if proof is not None else None,
         cleanup=dict(complete=complete, remaining_owned_objects=remaining), host_state=host)
     write(record(work, "smoke"), value)
 
@@ -621,7 +852,11 @@ def finalize(work, revision, status, complete, remaining, phase, blocker):
 def check_report(value, revision):
     require(value["report_kind"] == NAME and value["source_revision"] == revision and value["scope"] == SCOPE
             and value["success"] is True and value["runner_exit_status"] == 0
-            and value["full_b06_claimed"] is False and value["network_policy_activation_claimed"] is False,
+            and value["full_b06_claimed"] is False and value["network_policy_activation_claimed"] is False
+            and value["local_object_policy_applied"] is True
+            and value["object_outcome"] == value["evidence"]["result"]["decision"]["outcome"]
+            and value["object_access_branch"] == ("allow_exact_cached_access" if value["object_outcome"] == "allow"
+                                                 else "withhold_exact_cached_object"),
             "incomplete or overstated policy proof")
     require(value["cleanup"] == {"complete": True, "remaining_owned_objects": 0}
             and value["host_state"]["unchanged"] is True
@@ -642,6 +877,43 @@ def self_test():
             checked_rejections += 1
         else:
             raise ValueError("structured inference mutation accepted")
+
+    # Inert numeric/byte controls only; no synthetic outcome is submitted to agents.
+    field = protobuf_value
+    repeated = field(1, b"a") + field(3, b"b") + field(3, b"c")
+    require(object_fields(repeated, 128, (3,)) == {1: b"a", 3: [b"b", b"c"]}, "repeated proof parser differs")
+    rejects(object_fields, repeated, 128)
+    rejects(object_fields, field(3, b"a") + field(1, b"b"), 128, (3,))
+    rejects(object_fields, b"\x08\x81\x00", 128)
+    key = bytes.fromhex("11" * 32)
+    signer_id = hashlib.sha256(b"volparossa/whitelist-maintainer/id/v1\0" + key).digest()
+    unsigned = field(1, b"body") + field(2, hashlib.sha256(b"body").digest())
+    signature = field(1, signer_id) + field(2, b"s" * 64)
+    with patch.dict(globals(), {"verify_signature": lambda *_: None}):
+        object_envelope(unsigned, {signer_id: key}, 0)
+        object_envelope(unsigned + field(3, signature), {signer_id: key}, 1)
+        rejects(object_envelope, unsigned + field(3, signature), {signer_id: key}, 3)
+        rejects(object_envelope, unsigned + field(3, signature) * 2, {signer_id: key}, 2)
+        rejects(object_envelope, unsigned + field(3, signature), {}, 1)
+        rejects(object_envelope, field(1, b"changed") + field(2, hashlib.sha256(b"body").digest()), {}, 0)
+    scope = {"source_manifest_id": "21" * 32, "source_publisher_key": "22" * 32,
+             "source_sha256": sha(SUBJECT.encode()), "source_bytes": len(SUBJECT.encode())}
+    cached = {"operation": "named_content_download", "cache_only": True, "manifest_id": scope["source_manifest_id"],
+              "publisher_key": scope["source_publisher_key"], "sha256": scope["source_sha256"],
+              "bytes": scope["source_bytes"], "peer_bytes": 0, "providers_used": 0, "origin_body_bytes": 0}
+    good = {"phase": "applied", "exit_code": 0, "observed_at_ms": 10, "agent": {"pid": 123},
+            "stdout_hex": json.dumps(cached).encode().hex(), "stderr_hex": "",
+            "output_bytes": len(SUBJECT.encode()), "output_sha256": sha(SUBJECT.encode())}
+    blocked = {**good, "exit_code": 1, "stdout_hex": "", "output_bytes": None, "output_sha256": None,
+               "stderr_hex": b"Error: agent rejected request: CONTENT_POLICY (Policy)\n".hex()}
+    for outcome in ("allow", "deny", "undetermined"):
+        result = {"decision": {"outcome": outcome, "scope": scope}}
+        expected, incorrect = (good, blocked) if outcome == "allow" else (blocked, good)
+        check_object_probe(expected, "applied", result)
+        rejects(check_object_probe, incorrect, "applied", result)
+        check_object_probe({**good, "phase": "before"}, "before", result)
+    rejects(check_object_probe, {**blocked, "stderr_hex": b"Error: CONTENT_UNAVAILABLE".hex()}, "applied",
+            {"decision": {"outcome": "deny", "scope": scope}})
 
     # Synthetic checker controls only; never supplied to real model inference.
     payload = {"version": 1, "outcome": "undetermined", "reasoning": [
@@ -812,6 +1084,10 @@ def main():
         globals()[args[0]](Path(args[1]))
     elif len(args) == 3 and args[0] == "observe":
         observe(Path(args[1]), int(args[2]))
+    elif len(args) == 4 and args[0] == "object_probe":
+        object_probe(Path(args[1]), args[2], int(args[3]))
+    elif len(args) == 3 and args[0] == "object_collect":
+        object_collect(Path(args[1]), args[2])
     elif len(args) == 3 and args[0] == "evidence":
         evidence(Path(args[1]), args[2])
     elif len(args) == 3 and args[0] == "report":

@@ -18,8 +18,9 @@ mod custody;
 mod mailbox;
 pub use content::{
     ContentCacheLimits, ContentExportRequest, ContentFetchNameRequest, ContentFetchRequest,
-    ContentImportRequest, ContentReceipt, ContentReplicationConfig, ContentServeRequest,
-    ContentTransferReady, HttpsContentFetchRequest, HttpsContentTransferReady, HttpsSourceStrategy,
+    ContentImportRequest, ContentPolicyApplyRequest, ContentPolicyOutcome, ContentPolicyReceipt,
+    ContentReceipt, ContentReplicationConfig, ContentServeRequest, ContentTransferReady,
+    HttpsContentFetchRequest, HttpsContentTransferReady, HttpsSourceStrategy,
     NamedContentTransferReady,
 };
 pub use custody::{ContentCustodyReady, ContentCustodyRequest};
@@ -52,7 +53,7 @@ pub struct ControlRequest {
     /// One allowlisted operation.
     #[prost(
         oneof = "control_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35"
     )]
     pub operation: Option<control_request::Operation>,
 }
@@ -64,8 +65,8 @@ pub mod control_request {
     use super::{
         ComputeAttachRequest, ComputeDiscoverRequest, ComputeRemoteRequest, ConnectRequest,
         ContentCustodyRequest, ContentExportRequest, ContentFetchNameRequest, ContentFetchRequest,
-        ContentImportRequest, ContentServeRequest, Empty, HttpsContentFetchRequest, LogQuery,
-        MailboxRemoteRequest, MailboxServeRequest, RoleChange,
+        ContentImportRequest, ContentPolicyApplyRequest, ContentServeRequest, Empty,
+        HttpsContentFetchRequest, LogQuery, MailboxRemoteRequest, MailboxServeRequest, RoleChange,
     };
 
     /// Exactly one supported CLI-to-agent operation.
@@ -146,6 +147,9 @@ pub mod control_request {
         /// Discover a bounded compatible pool through protected, content-free eligibility RPCs.
         #[prost(message, tag = "34")]
         ComputeDiscover(ComputeDiscoverRequest),
+        /// Durably apply an exact-object decision verified under the current configured quorum.
+        #[prost(message, tag = "35")]
+        ContentPolicyApply(ContentPolicyApplyRequest),
     }
 }
 
@@ -231,7 +235,7 @@ pub struct ControlResponse {
     /// Typed response body.
     #[prost(
         oneof = "control_response::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27"
     )]
     pub payload: Option<control_response::Payload>,
 }
@@ -241,10 +245,10 @@ pub mod control_response {
     use prost::Oneof;
 
     use super::{
-        ComputeDiscovered, ComputeReady, ComputeTranscript, ContentCustodyReady, ContentReceipt,
-        ContentTransferReady, Empty, HttpsContentTransferReady, LogList, MailboxReady,
-        NamedContentTransferReady, PathList, PeerList, PolicySnapshot, RoleSnapshot, SessionList,
-        StatusSnapshot,
+        ComputeDiscovered, ComputeReady, ComputeTranscript, ContentCustodyReady,
+        ContentPolicyReceipt, ContentReceipt, ContentTransferReady, Empty,
+        HttpsContentTransferReady, LogList, MailboxReady, NamedContentTransferReady, PathList,
+        PeerList, PolicySnapshot, RoleSnapshot, SessionList, StatusSnapshot,
     };
 
     /// Exactly one response body.
@@ -301,6 +305,9 @@ pub mod control_response {
         /// Opt-in original signed Poll transcript after protected route and policy closure.
         #[prost(message, tag = "26")]
         ComputeTranscript(ComputeTranscript),
+        /// Durable and live application of one original threshold-signed object decision.
+        #[prost(message, tag = "27")]
+        ContentPolicy(ContentPolicyReceipt),
     }
 }
 
@@ -702,6 +709,7 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
             }
         }
         control_request::Operation::ContentServe(request) => request.validate()?,
+        control_request::Operation::ContentPolicyApply(request) => request.validate()?,
         control_request::Operation::ComputeAttach(request) => request.validate()?,
         control_request::Operation::ComputeRemote(request) => request.validate()?,
         control_request::Operation::ComputeDiscover(request) => {
@@ -807,6 +815,7 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
             }
         }
         control_response::Payload::Content(receipt) => validate_content_receipt(receipt)?,
+        control_response::Payload::ContentPolicy(receipt) => receipt.validate()?,
         control_response::Payload::ContentTransferReady(ready) => ready.validate()?,
         control_response::Payload::HttpsContentTransferReady(ready) => ready.validate()?,
         control_response::Payload::NamedContentTransferReady(ready) => ready.validate()?,

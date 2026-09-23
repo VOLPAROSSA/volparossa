@@ -12,11 +12,89 @@ agent_policy_assessment_cli() {
         -- "$binary_directory/volparossa" --control-socket "$WORK/runtime-client/control/agent.sock" "$@"
 }
 
+agent_policy_object_cli() {
+    policy_object_command=$1
+    shift
+    agent_policy_assessment_cli compute peer "$policy_object_command" \
+        --assessment-bundle "$jobs_source/policy-bundle-fetch/assessment.bundle" \
+        --policy-config "$WORK/config-client.yaml" --requester-key "$policy_requester" \
+        --source-publisher-key "$jobs_publisher" --source-manifest-id "$policy_manifest" \
+        --provider-key "$jobs_key_a" --provider-key "$jobs_key_b" --model-profile smollm2-360m-v1 "$@"
+}
+
+agent_policy_object_probe() {
+    policy_probe_phase=$1
+    policy_probe_status=0
+    agent_policy_assessment_cli content fetch-name --publisher-key "$jobs_publisher" \
+        --name disposable-policy-subject --min-revision 1 --cache "$jobs_source/policy-source-cache" \
+        --reuse-cache --cache-only --local-output "$jobs_source/policy-object-$policy_probe_phase.txt" \
+        >"$WORK/agent-policy-assessment-object-$policy_probe_phase.json" \
+        2>"$WORK/agent-policy-assessment-object-$policy_probe_phase.err" || policy_probe_status=$?
+    python3 -B "$policy_script" object_probe "$WORK" "$policy_probe_phase" "$policy_probe_status" \
+        || fail POLICY_OBJECT_ACCESS_DID_NOT_MATCH_REAL_OUTCOME
+}
+
+agent_policy_object_run() {
+    PHASE=agent-policy-assessment-object-quorum
+    agent_policy_object_probe before
+    agent_policy_object_cli policy-propose --output "$jobs_source/policy-object-proposal" \
+        --decision-revision 1 --execute >"$WORK/agent-policy-assessment-object-proposal.json" \
+        2>"$WORK/agent-policy-assessment-object-proposal.err" || fail POLICY_OBJECT_PROPOSAL_FAILED
+    # Three invocations, each loading only one already-configured development key.
+    for policy_authority in 0 1 2; do
+        policy_authority_root=$jobs_source/policy-authority-$policy_authority
+        install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$policy_authority_root"
+        setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+            -- "$binary_directory/examples/acceptance-policy-fixture" "$policy_authority_root" \
+            --authority-identity "$policy_authority" \
+            >"$WORK/agent-policy-assessment-object-authority-$policy_authority.json" \
+            2>"$WORK/agent-policy-assessment-object-authority-$policy_authority.err" \
+            || fail POLICY_OBJECT_DEVELOPMENT_IDENTITY_FAILED
+        agent_policy_object_cli policy-endorse --proposal "$jobs_source/policy-object-proposal/proposal.bin" \
+            --output "$jobs_source/policy-object-endorsement-$policy_authority" \
+            --identity "$policy_authority_root/identity.key" --passphrase-file "$policy_authority_root/passphrase" \
+            --execute >"$WORK/agent-policy-assessment-object-endorsement-$policy_authority.json" \
+            2>"$WORK/agent-policy-assessment-object-endorsement-$policy_authority.err" \
+            || fail POLICY_OBJECT_INDEPENDENT_ENDORSEMENT_FAILED
+    done
+    agent_policy_object_cli policy-combine --proposal "$jobs_source/policy-object-proposal/proposal.bin" \
+        --endorsement "$jobs_source/policy-object-endorsement-0/endorsement.bin" \
+        --endorsement "$jobs_source/policy-object-endorsement-1/endorsement.bin" \
+        --endorsement "$jobs_source/policy-object-endorsement-2/endorsement.bin" \
+        --output "$jobs_source/policy-object-combined" --execute --apply \
+        >"$WORK/agent-policy-assessment-object-combined.json" \
+        2>"$WORK/agent-policy-assessment-object-combined.err" || fail POLICY_OBJECT_QUORUM_APPLY_FAILED
+    agent_policy_object_probe applied
+    python3 -B "$policy_script" object_collect "$WORK" before || fail POLICY_OBJECT_ORIGINALS_INVALID
+    PHASE=agent-policy-assessment-object-restart
+    policy_old_pid=$(systemctl show --property=MainPID --value volparossa-alpha-agent@client.service)
+    case $policy_old_pid in ''|0|*[!0-9]*) fail POLICY_OBJECT_OLD_AGENT_MISSING ;; esac
+    systemctl restart volparossa-alpha-agent@client.service || fail POLICY_OBJECT_RESTART_FAILED
+    policy_restart_attempt=0
+    while [ "$policy_restart_attempt" -lt 300 ]; do
+        policy_new_pid=$(systemctl show --property=MainPID --value volparossa-alpha-agent@client.service)
+        case $policy_new_pid in ''|0|*[!0-9]*) policy_new_pid=0 ;; esac
+        if [ "$policy_new_pid" != 0 ] && [ "$policy_new_pid" != "$policy_old_pid" ] \
+            && [ "$(systemctl show --property=ActiveState --value volparossa-alpha-agent@client.service)" = active ] \
+            && [ -S "$WORK/runtime-client/control/agent.sock" ]; then break; fi
+        sleep 0.1
+        policy_restart_attempt=$((policy_restart_attempt + 1))
+    done
+    [ "$policy_restart_attempt" -lt 300 ] || fail POLICY_OBJECT_RESTART_NOT_READY
+    [ "$(readlink -f -- "/proc/$policy_new_pid/exe")" = "$binary_directory/volparossa-agent" ] \
+        || fail POLICY_OBJECT_RESTART_EXECUTABLE_CHANGED
+    [ "$(stat -Lc '%d:%i' "/proc/$policy_new_pid/ns/net")" = "$(stat -Lc '%d:%i' "/run/netns/$CLIENT")" ] \
+        || fail POLICY_OBJECT_RESTART_NAMESPACE_CHANGED
+    agent_policy_object_probe restarted
+    python3 -B "$policy_script" object_collect "$WORK" after || fail POLICY_OBJECT_RESTART_EVIDENCE_INVALID
+}
+
 agent_policy_assessment_run() {
     policy_script=$source_directory/tests/integration/agent-policy-assessment-smoke.py
     policy_root=$jobs_source/policy-assessment
     PHASE=agent-policy-assessment-publication
-    printf '%s\n' 'Disposable guest only: publish one new synthetic CC0 public text, deposit its exact chunks on a peer, fetch the selected native object, execute two bounded principle assessments and two cross-reviews using signed dataset-v4 contracts on two explicitly enabled peers and the pinned JSON decoder, retain original provider-signed replies with truthful JSON-boundary/EOS termination, publish/deposit their bundle and fetch it into a new cache and directory on the SAME client, replay completed evidence offline, and clean all owned resources. No canned verdicts, other-node isolation, production policy keys, network-policy activation or legal-correctness claim.'
+    printf '%s\n' 'Disposable guest only: publish one new synthetic CC0 public text, deposit its exact chunks on a peer, fetch the selected native object, execute two bounded principle assessments and two cross-reviews using signed dataset-v4 contracts on two explicitly enabled peers and the pinned JSON decoder, retain original provider-signed replies with truthful JSON-boundary/EOS termination, publish/deposit their bundle and fetch it into a new cache and directory on the SAME client, replay completed evidence offline, let three separately invoked existing development authorities replay and endorse its unchanged actual outcome, apply the exact-object quorum locally, test cached access and Client-agent restart persistence, and clean all owned resources. No canned verdicts, new model tasks, production policy keys, global-policy activation or legal-correctness claim.'
     setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- python3 -B "$WORK/bin/agent-policy-assessment-smoke.py" prepare "$WORK" \
@@ -97,6 +175,7 @@ agent_policy_assessment_run() {
         >"$WORK/agent-policy-assessment-resume.json" 2>"$WORK/agent-policy-assessment-resume.err" \
         || fail POLICY_OFFLINE_REPLAY_FAILED
     python3 -B "$policy_script" replay "$WORK" || fail POLICY_OFFLINE_HISTORY_CHANGED
+    agent_policy_object_run
     agent_jobs_cleanup || fail POLICY_PRIVATE_CLEANUP_FAILED
     python3 -B "$policy_script" evidence "$WORK" "$expected_commit" || fail POLICY_EVIDENCE_INVALID
     OBSERVED_BLOCKER=NONE

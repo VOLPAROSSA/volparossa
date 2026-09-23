@@ -53,6 +53,7 @@ impl Pending {
 pub(super) struct ContributionRuntime {
     config: ContentContributionConfig,
     replication: Arc<ReplicationRuntime>,
+    object_policy: volparossa_content::object_policy::ObjectPolicyGate,
     queue: Mutex<VecDeque<Pending>>,
     wake: Notify,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -89,12 +90,14 @@ impl ContentRuntime {
             )
             .map_err(|_| ContentError::Policy)?;
         let mut registry = PublicationRegistry::new();
+        registry.set_object_policy_gate(self.object_policy.clone());
         registry.set_name_lookup(true);
         let replication =
             ReplicationRuntime::create_public(replication_config(config)?, &mut registry)?;
         let runtime = Arc::new(ContributionRuntime {
             config: config.clone(),
             replication: Arc::clone(&replication),
+            object_policy: self.object_policy.clone(),
             queue: Mutex::new(VecDeque::new()),
             wake: Notify::new(),
             worker: Mutex::new(None),
@@ -152,6 +155,9 @@ impl ContentRuntime {
         source_root: PathBuf,
         source_limits: CacheLimits,
     ) {
+        if self.check_object_policy(&authorized).is_err() {
+            return;
+        }
         let expires = authorized.validity().expires;
         self.queue_contribution(signed, authorized, source_root, source_limits, expires)
             .await;
@@ -208,7 +214,8 @@ impl ContentRuntime {
         limits: CacheLimits,
         expires: u64,
     ) {
-        if authorized.metadata().content_type == PRIVATE_MESSAGE_CONTENT_TYPE
+        if self.check_object_policy(&authorized).is_err()
+            || authorized.metadata().content_type == PRIVATE_MESSAGE_CONTENT_TYPE
             || authorized.chunks().is_empty()
             || expires <= now()
         {
@@ -337,7 +344,7 @@ impl ContributionRuntime {
                     .await;
                 continue;
             };
-            if !pending.live() {
+            if !pending.live() || !self.object_policy.allows_now(&pending.authorized) {
                 continue;
             }
             let Some(budget) = IdleBudget::new(&context.config) else {
@@ -356,7 +363,10 @@ impl ContributionRuntime {
                 () = tokio::time::sleep(Duration::from_secs(30)) => None,
                 result = self.copy(&pending, &budget) => Some(result),
             };
-            if pending.live() && progress != Some(false) {
+            if pending.live()
+                && self.object_policy.allows_now(&pending.authorized)
+                && progress != Some(false)
+            {
                 self.queue.lock().await.push_back(pending);
             }
             if *stop.borrow() {
@@ -432,7 +442,7 @@ impl ContributionRuntime {
     }
 
     fn copy_one(&self, pending: &Pending, bytes: u64) -> Result<Option<u64>, ContentError> {
-        if !pending.live() {
+        if !pending.live() || !self.object_policy.allows_now(&pending.authorized) {
             return Ok(None);
         }
         let mut source =

@@ -734,6 +734,9 @@ fn print_response(response: ControlResponse) -> Result<()> {
             println!("verified signatures: {}", policy.verified_signatures);
             println!("expires at (ms): {}", policy.expires_at_ms);
         }
+        Payload::ContentPolicy(receipt) => {
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+        }
         Payload::Roles(roles) => {
             println!("client: {}", roles.client);
             println!("relay: {}", roles.relay);

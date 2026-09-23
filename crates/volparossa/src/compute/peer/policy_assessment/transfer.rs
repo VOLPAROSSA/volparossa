@@ -225,6 +225,27 @@ fn private_temporary(parent: &Path) -> Result<tempfile::TempDir> {
         .tempdir_in(parent)?)
 }
 
+/// Reopen original portable claims before a separately authorized policy signer
+/// decides whether to endorse them. Bundle authors never select local trust.
+pub(super) fn replay_bundle(
+    bytes: &[u8],
+    requester: &VerifyingKey,
+    parent: &Path,
+) -> Result<(Enrollment, Value)> {
+    let package = bundle::decode(bytes)?;
+    let requester = hex::encode(requester.as_bytes());
+    ensure!(
+        package.requester_key == requester,
+        "compute_policy_bundle_requester"
+    );
+    let retained = private_temporary(parent)?;
+    package.materialize(retained.path())?;
+    let (enrolled, _) = storage::load(retained.path())?;
+    let result = replay(retained.path(), &requester)?;
+    retained.close()?;
+    Ok((enrolled, result))
+}
+
 fn replay(root: &Path, requester: &str) -> Result<Value> {
     let (enrolled, subject) = storage::load(root)?;
     ensure!(
@@ -298,4 +319,4 @@ fn replay(root: &Path, requester: &str) -> Result<Value> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

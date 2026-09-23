@@ -294,6 +294,7 @@ async fn retrieve(
         preferred_selection(&request, &mut store, &query)?
     };
     if let Some((selected, receipt)) = cached {
+        context.content.check_object_policy(&selected.manifest)?;
         return Ok(PreparedDownload {
             selected,
             query,
@@ -361,8 +362,12 @@ async fn retrieve_network(
     // Reject the selected metadata before any body retrieval, not only when the
     // completed cache object is subsequently handed to the local CLI consumer.
     consumer_requirements(&request, &verified)?;
-    let (provider_peer_ids, peer_bytes) =
-        ContentRuntime::pull_providers(context, &verified, &mut store, &policy, providers).await?;
+    context.content.check_object_policy(&verified)?;
+    let (provider_peer_ids, peer_bytes) = tokio::select! {
+        biased;
+        () = context.content.object_policy.wait_until_withheld(&verified) => return Err(ContentError::Policy),
+        result = ContentRuntime::pull_providers(context, &verified, &mut store, &policy, providers) => result?,
+    };
     let bytes =
         volparossa_content::reassemble(&verified, &mut [&mut store], now(), &mut std::io::sink())
             .map_err(|_| ContentError::Unavailable)?;
@@ -414,6 +419,7 @@ pub(super) async fn download(
         receipt,
     } = super::cancellation::until_requester_closed(stream, retrieve(request, context)).await?;
     let verified = &selected.manifest;
+    context.content.check_object_policy(verified)?;
     let remaining = verified
         .validity()
         .expires
@@ -436,7 +442,7 @@ pub(super) async fn download(
             }),
         )
         .await?;
-        let progress = serve_peer(
+        let transfer = serve_peer(
             stream,
             verified,
             &mut store,
@@ -446,9 +452,12 @@ pub(super) async fn download(
                 max_requests: verified.chunks().len().max(1),
                 max_bytes: verified.length().max(1),
             },
-        )
-        .await
-        .map_err(|_| ContentError::Unavailable)?;
+        );
+        let progress = tokio::select! {
+            biased;
+            () = context.content.object_policy.wait_until_withheld(verified) => return Err(ContentError::Policy),
+            result = transfer => result.map_err(|_| ContentError::Unavailable)?,
+        };
         if progress.missing != 0
             || progress.bytes != verified.length()
             || progress.chunks != verified.chunks().len()
@@ -456,6 +465,7 @@ pub(super) async fn download(
             return Err(ContentError::Unavailable);
         }
         checked_download_access(context, policy.as_ref()).await?;
+        context.content.check_object_policy(verified)?;
         query
             .verify_candidate(&selected.signed, now())
             .map_err(|_| ContentError::Unavailable)?;

@@ -296,6 +296,17 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
         control_request::Operation::ContentServe(request) => {
             content_response(request_id, context.content.serve(request, context).await)
         }
+        control_request::Operation::ContentPolicyApply(request) => {
+            match context.content.apply_object_policy(request, context).await {
+                Ok(receipt) => response(
+                    request_id,
+                    ControlResult::Ok,
+                    "CONTENT_POLICY_APPLIED",
+                    control_response::Payload::ContentPolicy(receipt),
+                ),
+                Err(error) => content_response(request_id, Err(error)),
+            }
+        }
         control_request::Operation::ComputeAttach(request) => content_response(
             request_id,
             context.content.compute_attach(&request, context).await,

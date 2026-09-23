@@ -17,7 +17,7 @@ use volparossa_content::{
         custody_storage::PublicCustodyStore,
         replication::{
             Replica, ReplicationLimits, ReplicationProgress, persist_replicas,
-            pull_public_repair_with_admission, restore_public_replicas,
+            pull_public_repair_with_policy, restore_public_replicas,
         },
     },
 };
@@ -228,15 +228,20 @@ impl ReplicationRuntime {
                 .await
                 .map_err(|_| ContentError::Unavailable)?;
                 let progress = self
-                    .repair_from_stream(&mut stream, target, || async {
-                        budget.wait_until_quiet().await;
-                        let state = context.state.read().await;
-                        state.roles().client
-                            && state.roles().relay
-                            && state.active_policy(unix_millis()).is_some_and(|current| {
-                                current.policy_hash() == policy.policy_hash()
-                            })
-                    })
+                    .repair_from_stream(
+                        &mut stream,
+                        target,
+                        &context.content.object_policy,
+                        || async {
+                            budget.wait_until_quiet().await;
+                            let state = context.state.read().await;
+                            state.roles().client
+                                && state.roles().relay
+                                && state.active_policy(unix_millis()).is_some_and(|current| {
+                                    current.policy_hash() == policy.policy_hash()
+                                })
+                        },
+                    )
                     .await;
                 let progress = match progress {
                     Ok(progress) => progress,
@@ -277,6 +282,7 @@ impl ReplicationRuntime {
         &self,
         stream: &mut S,
         target: &Replica,
+        policy: &volparossa_content::object_policy::ObjectPolicyGate,
         admission: F,
     ) -> Result<ReplicationProgress, ContentError>
     where
@@ -286,7 +292,7 @@ impl ReplicationRuntime {
     {
         let mut store =
             ChunkStore::open(&self.root, self.limits).map_err(|_| ContentError::Busy)?;
-        let progress = pull_public_repair_with_admission(
+        let progress = pull_public_repair_with_policy(
             stream,
             &mut store,
             target,
@@ -295,6 +301,7 @@ impl ReplicationRuntime {
                 max_wire_bytes: self.config.max_bytes,
                 ..ReplicationLimits::default()
             },
+            policy,
             admission,
         )
         .await

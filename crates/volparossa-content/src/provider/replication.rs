@@ -28,6 +28,7 @@ use tokio::{
 };
 
 use super::{ProviderError, PublicationRegistry, Selector, SelectorSession, now};
+use crate::object_policy::ObjectPolicyGate;
 use crate::transfer::{TransferLimits, TransferProgress};
 use crate::{
     CHUNK_BYTES, CacheLimits, ChunkId, ChunkStore, MAX_MANIFEST_BYTES, SignedManifest, Validity,
@@ -385,11 +386,124 @@ where
     .await
 }
 
+/// Receive optional chunks with the receiver's independently installed exact-object gate.
+///
+/// `public_only` additionally refuses private-message manifests. Original credit, wire,
+/// storage and lifetime limits are unchanged. A denied frame is never inserted or journaled.
+///
+/// # Errors
+/// The existing admission errors, or an exact-object decision withholding a received object.
+pub async fn pull_replicas_with_policy<S, F, Fut>(
+    stream: &mut S,
+    store: &mut ChunkStore,
+    limits: ReplicationLimits,
+    exclusions: &ReplicationExclusions,
+    public_only: bool,
+    policy: &ObjectPolicyGate,
+    admission: F,
+) -> Result<ReplicationProgress, ProviderError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    pull_with_admission(
+        stream,
+        store,
+        limits,
+        exclusions,
+        CREDIT_VERSION,
+        Uptake::Policy {
+            gate: policy,
+            public_only,
+            target: None,
+        },
+        admission,
+    )
+    .await
+}
+
+/// Repair only this original public replica, checking local object policy before every write.
+///
+/// # Errors
+/// The existing bounded repair errors, or an exact-object rule withholding this target.
+pub async fn pull_public_repair_with_policy<S, F, Fut>(
+    stream: &mut S,
+    store: &mut ChunkStore,
+    target: &Replica,
+    limits: ReplicationLimits,
+    policy: &ObjectPolicyGate,
+    admission: F,
+) -> Result<ReplicationProgress, ProviderError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    target.checked.check_time(now()?)?;
+    if target.content_type() == crate::private_message::PRIVATE_MESSAGE_CONTENT_TYPE
+        || !policy.allows_now(&target.checked)
+    {
+        return Err(ProviderError::Registry);
+    }
+    let exclusions = ReplicationExclusions::default();
+    tokio::select! {
+        biased;
+        () = policy.wait_until_withheld(&target.checked) => Err(ProviderError::Registry),
+        result = pull_with_admission(
+            stream, store, limits, &exclusions, REPAIR_VERSION,
+            Uptake::Policy { gate: policy, public_only: true, target: Some(target) },
+            admission,
+        ) => result,
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Uptake<'a> {
     Any,
     Public,
     Repair(&'a Replica),
+    Policy {
+        gate: &'a ObjectPolicyGate,
+        public_only: bool,
+        target: Option<&'a Replica>,
+    },
+}
+
+impl Uptake<'_> {
+    fn public_only(self) -> bool {
+        !matches!(
+            self,
+            Self::Any
+                | Self::Policy {
+                    public_only: false,
+                    ..
+                }
+        )
+    }
+
+    fn request(
+        self,
+        limits: ReplicationLimits,
+        exclusions: &ReplicationExclusions,
+        version: u32,
+    ) -> Result<Request, ProviderError> {
+        match self {
+            Self::Repair(target)
+            | Self::Policy {
+                target: Some(target),
+                ..
+            } => Request::repair(target, limits),
+            _ => Request::new(limits, exclusions, version),
+        }
+    }
+
+    fn allows(self, manifest: &VerifiedManifest) -> bool {
+        match self {
+            Self::Policy { gate, .. } => gate.allows_now(manifest),
+            _ => true,
+        }
+    }
 }
 
 async fn pull_with_admission<S, F, Fut>(
@@ -407,16 +521,12 @@ where
     Fut: Future<Output = bool>,
 {
     let limits = limits.validate()?;
-    let public_only = !matches!(uptake, Uptake::Any);
+    let public_only = uptake.public_only();
     if public_only && store.read_mailbox_metadata()?.is_some() {
         return Err(ProviderError::Registry);
     }
     let deadline = Instant::now() + limits.session_timeout;
-    let request = if let Uptake::Repair(target) = uptake {
-        Request::repair(target, limits)?
-    } else {
-        Request::new(limits, exclusions, version)?
-    };
+    let request = uptake.request(limits, exclusions, version)?;
     let mut budget = Budget::new(limits.max_wire_bytes);
     timeout_at(deadline, async {
         write(
@@ -459,6 +569,9 @@ where
                 return Err(ProviderError::Limit);
             }
             let (replica, chunk_id) = checked_frame(&frame, limits, exclusions, public_only)?;
+            if !uptake.allows(&replica.checked) {
+                return Err(ProviderError::Registry);
+            }
             if version == REPAIR_VERSION
                 && (replica.manifest_id().as_slice() != request.target_manifest
                     || !request
@@ -493,6 +606,9 @@ where
         }
         for replica in replicas.values() {
             replica.checked.check_time(now()?)?;
+            if !uptake.allows(&replica.checked) {
+                return Err(ProviderError::Registry);
+            }
         }
         progress.replicas = replicas.into_values().collect();
         progress.wire_bytes = budget.used;
@@ -594,6 +710,7 @@ where
                 .any(|item| item.as_slice() == id)
                 || u32::from(shared.hops) >= request.max_hops
                 || entry.manifest.check_time(now()?).is_err()
+                || !registry.object_policy.allows_now(&entry.manifest)
             {
                 continue;
             }
@@ -618,6 +735,9 @@ where
                     return Err(ProviderError::Timeout);
                 }
                 entry.manifest.check_time(now()?)?;
+                if !registry.object_policy.allows_now(&entry.manifest) {
+                    break;
+                }
                 let Some(data) = store.get(chunk.id())? else {
                     continue;
                 };
@@ -634,7 +754,7 @@ where
                 if !budget.fits(cost) {
                     continue;
                 }
-                write(stream, &frame, MAX_FRAME_BYTES, &mut budget).await?;
+                write_allowed(stream, &frame, &mut budget, registry, &entry.manifest).await?;
                 sent.insert(*chunk.id());
                 progress.chunks += 1;
                 progress.bytes += frame.data.len() as u64;
@@ -692,14 +812,19 @@ where
             {
                 break;
             }
-            let Some(frame) = next_credited_frame(registry, &request, &sent, &budget, deadline)?
+            let Some((frame, manifest_id)) =
+                next_credited_frame(registry, &request, &sent, &budget, deadline)?
             else {
                 break;
             };
             if Instant::now() >= deadline {
                 return Err(ProviderError::Timeout);
             }
-            write(stream, &frame, MAX_FRAME_BYTES, &mut budget).await?;
+            let entry = registry
+                .entries
+                .get(&manifest_id)
+                .ok_or(ProviderError::Unavailable)?;
+            write_allowed(stream, &frame, &mut budget, registry, &entry.manifest).await?;
             sent.insert(ChunkId::digest(&frame.data));
             progress.chunks += 1;
             progress.bytes += frame.data.len() as u64;
@@ -714,13 +839,27 @@ where
     .map_err(|_| ProviderError::Timeout)?
 }
 
+async fn write_allowed<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    frame: &Frame,
+    budget: &mut Budget,
+    registry: &PublicationRegistry,
+    manifest: &VerifiedManifest,
+) -> Result<(), ProviderError> {
+    tokio::select! {
+        biased;
+        () = registry.object_policy.wait_until_withheld(manifest) => Err(ProviderError::Unavailable),
+        result = write(stream, frame, MAX_FRAME_BYTES, budget) => result,
+    }
+}
+
 fn next_credited_frame(
     registry: &PublicationRegistry,
     request: &Request,
     sent: &BTreeSet<ChunkId>,
     budget: &Budget,
     deadline: Instant,
-) -> Result<Option<Frame>, ProviderError> {
+) -> Result<Option<(Frame, [u8; 32])>, ProviderError> {
     // Reserve the next credit/stop plus final finish before emitting any chunk. Both credit
     // decisions have the same canonical length. Returning a frame drops every cache handle.
     let closing_cost = Credit::versioned(false, request.version).encoded_len()
@@ -742,6 +881,7 @@ fn next_credited_frame(
             .any(|item| item.as_slice() == id)
             || u32::from(shared.hops) >= request.max_hops
             || entry.manifest.check_time(now()?).is_err()
+            || !registry.object_policy.allows_now(&entry.manifest)
         {
             continue;
         }
@@ -779,7 +919,7 @@ fn next_credited_frame(
                 data,
             };
             if budget.fits((frame.encoded_len() + 4 + closing_cost) as u64) {
-                return Ok(Some(frame));
+                return Ok(Some((frame, *id)));
             }
         }
     }

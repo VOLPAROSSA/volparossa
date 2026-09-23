@@ -11,6 +11,7 @@
 #![deny(missing_docs)]
 
 mod domain;
+pub mod object;
 mod wire;
 
 use std::cmp::Ordering;
