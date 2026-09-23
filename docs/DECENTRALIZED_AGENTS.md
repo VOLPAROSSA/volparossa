@@ -2035,10 +2035,22 @@ epoch before asking its own agent to apply the exact object decision. Omit `--ap
 verified bytes without changing the gate, or omit `--execute` for an inert preview.
 
 This is explicit node-to-node distribution, **not automatic network-wide consensus**. The
-second-node cache-transfer/application/restart fixture is implemented but has no live passing
-run yet. Automatic subscriptions, policy-authority membership and partition/conflict handling
-remain separate work. Publisher signatures authenticate transport objects; they cannot replace
-the receiving node's policy trust or prove the assessors' judgments correct.
+second-node cache-transfer/application/restart
+[proof on `4d438099`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35896887925) now passes
+the complete committed checker against 199 unchanged originals. Four real model jobs yield
+`undetermined`; the existing three-authority quorum signs that actual result, and its 605
+original bytes travel through protected custody to a previously cold second node. Both nodes
+serve the cached subject before application and withhold it afterwards, including after actual
+agent restarts with unchanged original authority/decision records. Five capture records
+(96,199 frames), cleanup and unchanged host state pass. No alternate Allow/Deny outcome was
+substituted. The model's incorrect principle meanings and unfinished prose remain visible;
+successful enforcement does not make its reasoning correct.
+
+Automatic subscriptions, policy-authority membership and partition/conflict handling remain
+separate work. Publisher signatures authenticate transport objects; they cannot replace the
+receiving node's policy trust or prove the assessors' judgments correct. This proves a selected
+two-node development path, not complete B06 or global governance; the earlier failed run stays
+failed.
 
 Bind observations to specific agent/model artifacts, task contracts and observed failures.
 Use independently checked outcomes, regression/poisoning checks and diverse assessors; copied

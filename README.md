@@ -489,12 +489,14 @@ The actual reasoning still contains errors and its outcome remains undetermined.
 identify who signed an answer; they do not establish correctness or legality. This assessment
 proof does not by itself activate network policy or establish complete governance.
 
-A new **node-local object-policy candidate** connects those retained judgments to the existing,
+A **node-local object-policy development path** connects those retained judgments to the existing,
 separate policy-signing quorum: propose, independently endorse, then combine and optionally
 apply a decision to one exact native publication. Compute peers do not become policy authorities.
 A durable revision floor and shared live gate prevent stale decisions from reopening that object
-after restart. Local checks pass; its extended network proof is still pending. It is not yet
-network-wide governance, physical cache erasure or inspection of arbitrary HTTPS content.
+after restart. A real two-node proof now passes: original signed decisions travel through the
+protected cache and both nodes enforce the same uncertain result, including after restart.
+That proves distribution and enforcement, not correct judgments, network-wide governance,
+physical cache erasure or inspection of arbitrary HTTPS content.
 [Public assessment workflow →](docs/DECENTRALIZED_AGENTS.md#public-principle-assessments-and-cross-review)
 
 </details>
@@ -532,9 +534,10 @@ different revisions are not combined into a claim that the current build is full
 
 - **Automatic governance**<br>
   Demonstrated: signed destination-policy enforcement, rollback/conflict checks, and a scoped
-  four-worker public assessment with cross-review and signed cache replay.<br>
-  **Next:** sound content judgments, live proof of the new local exact-object gate, decentralized
-  decision membership, conflict resolution and the agent immune system.
+  four-worker public assessment with cross-review, signed cache replay and quorum-backed
+  exact-object enforcement on two nodes across restart.<br>
+  **Next:** sound content judgments, automatic decision following, decentralized decision
+  membership, conflict resolution and the broader agent immune system.
 
 The detailed chronology, failed runs, exact measurements and pending proofs live in
 [IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md), rather than being duplicated here.

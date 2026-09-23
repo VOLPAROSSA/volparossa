@@ -42,10 +42,21 @@ does not become a policy signer. Original decision bytes and expiry survive publ
 import and retry; no model or signing key needs to be transferred to the receiver. The extended
 fixture requires a genuinely cold decision on a separate node, actual custody receipt/export,
 fresh subject-access probes, and unchanged authority after that receiving agent restarts.
-Seven focused CLI checks, strict CLI/agent Clippy, and inert fixture/shell checks pass; this
-new peer-distribution VM proof has not run. There is no automatic channel subscription or
-network-wide membership/conflict governance, physical cache erasure, arbitrary HTTPS
-inspection, legal-correctness guarantee or completed B06.
+Seven focused CLI checks, strict CLI/agent Clippy, and inert fixture/shell checks pass. The
+[source-exact peer-distribution VM proof on `4d438099`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35896887925)
+now passes its full committed checker against 199 unchanged original files. Four real model
+jobs produce an `undetermined` / `review_disagreement` result. The separately configured
+three-authority quorum authorizes that same result; its 605 original signed bytes reach a
+previously cold second node through protected custody transfer. That receiver verifies its
+own authority and applies the exact-object decision without new model work or signing keys.
+Both nodes serve the original cached subject before application and refuse it with
+`CONTENT_POLICY` after application and after their actual agent restarts. Original decision,
+epoch, expiry and journal records remain unchanged. Five capture records contain 96,199 frames;
+full cleanup and unchanged host state pass. The original model responses still confuse
+principle meanings and contain unfinished prose: correct transport/enforcement is not sound
+judgment, independent reasoning or legality. Automatic channel subscription, network-wide
+membership/conflict governance, physical cache erasure, arbitrary HTTPS inspection and B06
+completion remain open. The earlier `6ac301ee` failure is not relabelled.
 
 An explicitly selected `smollm2-1.7b-v1` inference candidate now addresses the observed
 reasoning limitation without replacing the lightweight training model. It pins the original
