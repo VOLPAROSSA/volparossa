@@ -189,6 +189,19 @@ and failure measurements, but repeatedly asks whether the exit can handle the cl
 address, contradicting the source boundary. It also omits Route B's violation. Complete
 correctness and controlled quality improvement are not proved; the original answer is retained.
 
+A subsequent candidate fixes a concrete admission mismatch: the worker already accepts the
+rich-inference 360M/1.7B profiles for version-4 principle inputs, but local `compute run` still
+rejected 1.7B. The gate now uses the same capability predicate while preserving inference-only,
+no-adapter, public-input and fixed-contract restrictions. Five focused admission tests pass.
+The existing 8-GiB single-worker fixture is now directed at one real, signed public principle
+assessment with the current framework and explicitly provisioned pinned JSON decoder. The
+unchanged 1024-token prompt, 512-token structured generation, 2048-byte JSON, 192-byte field and
+600-second limits remain in force. That new proof is pending; the previous ordinary-inference
+runs are not substituted for it. The distributed cycle remains on its original 360M source.
+The scoped CLI build/Clippy, inert fixture checks and an actual offline CLI preparation pass:
+the current framework and three freshly signed public publications verify unchanged. No model,
+backend provisioning or network work ran on the development host; temporary input was removed.
+
 An owner-enrolled `compute train-loop --aggregate-plan` candidate now connects automatic
 three-publisher discovery, frozen-cohort aggregation and held-out comparison to local adoption,
 serving and the next actual training warmstart. Unchanged cohorts are not recomputed; rollback
