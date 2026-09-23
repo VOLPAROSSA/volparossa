@@ -78,6 +78,31 @@ def membership_frame(source, destination="224.0.0.22", payload=None, ttl=1, opti
 
 
 class ReplicationCaptureTests(unittest.TestCase):
+    def test_duration_is_explicit_bounded_and_preserves_default_capture_contract(self):
+        self.assertEqual(CAPTURE.MAX_SECONDS, 1800)
+        self.assertEqual(CAPTURE.capture_seconds("4200"), 4200)
+        with patch.object(CAPTURE.socket, "socket") as create_socket:
+            for invalid in (0, -1, 4201, True, 1.0, "", "04200", "1e3", "9" * 100):
+                with self.assertRaises(ValueError):
+                    CAPTURE.capture(layout(), "unused", "unused", "relay4", ["underlay"], invalid)
+            create_socket.assert_not_called()
+        with tempfile.TemporaryDirectory(prefix="volparossa-capture-duration-") as temporary:
+            source = Path(temporary) / "layout.json"
+            source.write_text(json.dumps(layout()))
+            with patch.object(CAPTURE, "capture") as run_capture:
+                for duration in (None, "4200"):
+                    extra = [] if duration is None else ["--max-seconds", duration]
+                    CAPTURE.main(["capture", str(source), "output", "ready", "relay4", *extra, "underlay"])
+                    self.assertEqual(run_capture.call_args.args[-2:], (["underlay"], 1800 if duration is None else 4200))
+                for extra in (["--max-seconds"], ["--max-seconds", "4200"], ["--max-seconds", "4201", "underlay"]):
+                    with self.assertRaises(ValueError):
+                        CAPTURE.main(["capture", str(source), "output", "ready", "relay4", *extra])
+        old, _ = buffered_capture()
+        extended, _ = buffered_capture(max_seconds=4200)
+        self.assertNotIn("max_seconds", old)
+        self.assertEqual(extended.pop("max_seconds"), 4200)
+        self.assertEqual(extended, old)
+
     def test_repair_membership_requires_exact_mdns_group_link_and_actual_ip_header(self):
         current = repair_layout()
         expected = {"control_packets": 1, "mdns_membership_packets": 1}
@@ -509,7 +534,7 @@ class ReplicationCaptureTests(unittest.TestCase):
             self.assertNotIn(detail, serialized)
 
 
-def buffered_capture(extra=0, drops=0, frames=None):
+def buffered_capture(extra=0, drops=0, frames=None, max_seconds=CAPTURE.MAX_SECONDS):
     """Exercise the actual collector with finite mock socket queues and a real temporary report."""
     handlers, order = {}, []
     packet = udp_frame("49.165.5.1", "42.158.0.1", struct.pack("<I", 4) + bytes(44))
@@ -566,7 +591,7 @@ def buffered_capture(extra=0, drops=0, frames=None):
                 patch.object(CAPTURE.signal, "signal", side_effect=handlers.__setitem__), \
                 patch.object(CAPTURE.select, "select", side_effect=select_ready):
             try:
-                CAPTURE.capture(layout(), output, ready, "relay4", [observer.interface for observer in observers])
+                CAPTURE.capture(layout(), output, ready, "relay4", [observer.interface for observer in observers], max_seconds)
             except ValueError:
                 if not (extra or drops):
                     raise

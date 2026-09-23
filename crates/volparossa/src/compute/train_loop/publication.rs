@@ -197,9 +197,7 @@ fn retry_due(cycle: &Cycle, store: &Store, at: u64) -> Result<bool> {
             .as_u64()
             .context("train_loop_publication_expiry")?
     } else {
-        store.read_cycle_json(cycle.sequence, "result.json")?["source_expires_unix_seconds"]
-            .as_u64()
-            .context("train_loop_source_expiry")?
+        authority_expiry(&store.read_cycle_json(cycle.sequence, "result.json")?)?
     };
     Ok(expires <= at)
 }
@@ -208,6 +206,17 @@ enum Handoff {
     Received(Result<Value>),
     Cancelled,
     Deadline,
+}
+
+pub(super) fn authority_expiry(result: &Value) -> Result<u64> {
+    let source = result["source_expires_unix_seconds"]
+        .as_u64()
+        .context("train_loop_source_expiry")?;
+    result
+        .get("authority_expires_unix_seconds")
+        .map_or(Ok(source), |value| {
+            Ok(source.min(value.as_u64().context("train_loop_inherited_expiry")?))
+        })
 }
 
 async fn handoff(
@@ -282,9 +291,7 @@ async fn prepare(
     );
     let root = store.cycle_path(cycle.sequence)?;
     let result = store.read_cycle_json(cycle.sequence, "result.json")?;
-    let source_expires = result["source_expires_unix_seconds"]
-        .as_u64()
-        .context("train_loop_source_expiry")?;
+    let source_expires = authority_expiry(&result)?;
     let binding = Binding {
         key: args.publication_key.context("train_loop_publication_key")?,
         name,
@@ -463,6 +470,31 @@ fn validate_receipt(receipt: &Value, verified: &VerifiedManifest) -> Result<()> 
 mod tests {
     use super::super::storage;
     use super::*;
+
+    #[test]
+    fn inherited_aggregate_authority_cannot_be_renewed_by_a_later_source() {
+        assert_eq!(
+            authority_expiry(&json!({"source_expires_unix_seconds":3000})).unwrap(),
+            3000
+        );
+        assert_eq!(
+            authority_expiry(&json!({"source_expires_unix_seconds":3000,
+            "authority_expires_unix_seconds":2000}))
+            .unwrap(),
+            2000
+        );
+        assert_eq!(
+            authority_expiry(&json!({"source_expires_unix_seconds":1500,
+            "authority_expires_unix_seconds":2000}))
+            .unwrap(),
+            1500
+        );
+        assert!(
+            authority_expiry(&json!({"source_expires_unix_seconds":3000,
+            "authority_expires_unix_seconds":"renewed"}))
+            .is_err()
+        );
+    }
     use ed25519_dalek::SigningKey;
     use sha2::{Digest, Sha256};
     use std::{io::Write, os::unix::fs::OpenOptionsExt, path::PathBuf};

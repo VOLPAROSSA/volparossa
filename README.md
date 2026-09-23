@@ -248,7 +248,12 @@ the original planner input is removed. The original signed results stay unchange
 questions and answers still contain factual routing errors. This proves executable cooperation,
 **not yet useful, source-faithful reasoning** or evidence that a larger model is always better.
 An opt-in source-grounded follow-up now keeps the complete original short document beside
-generated answers in dependent tasks; its effect on real answer quality is not yet verified.
+generated answers in dependent tasks. Its real execution and offline resume pass, but its
+answers still contain privacy errors; retaining evidence is not the same as reasoning correctly.
+
+An owner-enrolled automatic training-loop candidate can combine three trusted publishers'
+adapters, compare the result with its active model and use an approved combination for serving
+and further local training. Its dedicated real-model integration proof is still pending.
 [How cooperating tasks fit together →](docs/DECENTRALIZED_AGENTS.md#cooperating-public-tasks)
 
 Public work can be split across selected peers, with retained results and bounded recovery

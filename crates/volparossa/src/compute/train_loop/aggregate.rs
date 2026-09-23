@@ -14,6 +14,7 @@ use clap::Args;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
+use tokio::sync::watch;
 use volparossa_content::{
     SignedManifest,
     agent_artifact::{
@@ -143,6 +144,7 @@ fn comparison_options(args: &Options, validation_source: PathBuf) -> super::Opti
         adapter_root: None,
         seed: None,
         peer_updates: None,
+        aggregate_plan: None,
         validation_source: Some(validation_source),
         steps: 1,
         threads: args.threads,
@@ -194,14 +196,214 @@ fn enrollment(args: &Options) -> Result<(Plan, DatasetSource, Source, Value)> {
         validation.manifest()? != Some(source.manifest_id),
         "aggregate_training_validation_same_manifest"
     );
-    let preview = json!({"version":1,"operation":"compute_aggregate_adapters","execute":false,
+    let preview = preview(args, &plan, &validation);
+    Ok((plan, source, validation, preview))
+}
+
+fn preview(args: &Options, plan: &Plan, validation: &Source) -> Value {
+    json!({"version":1,"operation":"compute_aggregate_adapters","execute":false,
         "plan":plan,"validation_source":validation,"baseline_adapter":args.adapter_root,
         "algorithm":ALGORITHM,"peers":3,"model_id":MODEL_ID,"model_revision":MODEL_REVISION,
         "worker_deadline_seconds":args.max_seconds,"threads":args.threads,
         "limits":args.limits.configuration(),"private_data_supported":false,
         "three_keys_prove_independent_parties":false,"quality_guaranteed":false,
-        "network_publication":false,"model_activated":false,"optimizer_steps":0});
-    Ok((plan, source, validation, preview))
+        "network_publication":false,"model_activated":false,"optimizer_steps":0})
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LoopSelection {
+    version: u32,
+    plan: Plan,
+    validation_source: Source,
+}
+
+impl LoopSelection {
+    fn validate(&self) -> Result<DatasetSource> {
+        ensure!(self.version == 1, "aggregate_loop_selection_version");
+        let source = self.plan.validate()?;
+        self.validation_source.key()?;
+        crate::content::parse_content_name(&self.validation_source.name)
+            .map_err(anyhow::Error::msg)?;
+        ensure!(
+            self.validation_source.manifest()?.is_some()
+                && self.validation_source.min_revision != Some(0),
+            "aggregate_pinned_validation_required"
+        );
+        ensure!(
+            self.validation_source.manifest()? != Some(source.manifest_id),
+            "aggregate_training_validation_same_manifest"
+        );
+        Ok(source)
+    }
+}
+
+fn loop_options(args: &super::Options, directory: &Path, baseline: Option<&Path>) -> Options {
+    Options {
+        // These are the retained frozen inputs, not mutable owner plan paths.
+        plan: directory.join("selection.json"),
+        directory: directory.to_path_buf(),
+        runtime_root: args.runtime_root.clone(),
+        model_root: args.model_root.clone(),
+        cache: args.cache.clone(),
+        validation_source: directory.join("validation-source.json"),
+        adapter_root: baseline.map(Path::to_path_buf),
+        threads: args.threads,
+        max_seconds: args.max_seconds,
+        execute: true,
+        limits: args.limits.clone(),
+    }
+}
+
+/// Freeze the owner-authorized plan and exact validation selection at enrollment.
+/// Discovery and execution consume this value, not mutable enrollment files.
+pub(super) fn loop_selection(args: &super::Options) -> Result<Option<Value>> {
+    if args.aggregate_plan.is_none() {
+        return Ok(None);
+    }
+    let mut options = loop_options(args, &args.directory, args.adapter_root.as_deref());
+    options.plan = args
+        .aggregate_plan
+        .clone()
+        .context("aggregate_plan_required")?;
+    options.validation_source = args
+        .validation_source
+        .clone()
+        .context("aggregate_pinned_validation_required")?;
+    let (plan, _, validation_source, _) = enrollment(&options)?;
+    let selected = LoopSelection {
+        version: 1,
+        plan,
+        validation_source,
+    };
+    selected.validate()?;
+    Ok(Some(serde_json::to_value(selected)?))
+}
+
+/// A single immutable adapter selection. Discovery does not run a model or import
+/// a second choice; original signatures/receipts remain available to the loop.
+pub(super) struct LoopCohort {
+    pub(super) manifest_ids: [String; 3],
+    pub(super) revisions: [u64; 3],
+    /// Adapter-authority minimum; dataset/validation/baseline may shorten it later.
+    pub(super) expires: u64,
+    selection: Value,
+    updates: [peer_update::VerifiedUpdate; 3],
+}
+
+pub(super) async fn discover_loop(
+    args: &super::Options,
+    selection: &Value,
+    socket: &Path,
+    staging: &Path,
+    activity: &watch::Receiver<bool>,
+) -> Result<LoopCohort> {
+    let selected: LoopSelection = serde_json::from_value(selection.clone())?;
+    let source = selected.validate()?;
+    let options = loop_options(args, staging, None);
+    private_directory(staging)?;
+    let mut updates = Vec::with_capacity(3);
+    for (index, channel) in selected.plan.adapters.iter().enumerate() {
+        ensure!(active(activity), "aggregate_cancelled");
+        let parent = staging.join(index.to_string());
+        directory(&parent)?;
+        let query = channel_query(&options, channel)?;
+        let mut changed = activity.clone();
+        let update = tokio::select! { biased;
+            _=changed.changed()=>anyhow::bail!("aggregate_cancelled"),
+            result=peer_update::fetch(&query,socket,&parent)=>result?,
+        };
+        ensure!(
+            update.dataset_manifest_id() == &source.manifest_id,
+            "aggregate_same_dataset_required"
+        );
+        peer_update::save_pending(&update, &parent.join("pending"))?;
+        updates.push(update);
+    }
+    let updates: [peer_update::VerifiedUpdate; 3] = updates
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("aggregate_three_updates_required"))?;
+    let manifest_ids = updates
+        .each_ref()
+        .map(|update| hex::encode(update.manifest_id()));
+    let revisions = updates
+        .each_ref()
+        .map(peer_update::VerifiedUpdate::revision);
+    let expires = updates
+        .iter()
+        .map(peer_update::VerifiedUpdate::expires)
+        .min()
+        .context("aggregate_three_updates_required")?;
+    ensure!(
+        active(activity) && now()? < expires,
+        "aggregate_cancelled_or_expired"
+    );
+    Ok(LoopCohort {
+        manifest_ids,
+        revisions,
+        expires,
+        selection: selection.clone(),
+        updates,
+    })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Execute exactly one owner-frozen cohort and baseline under the loop cancellation"
+)]
+pub(super) async fn execute_loop(
+    args: &super::Options,
+    selection: &Value,
+    directory: &Path,
+    baseline: Option<&Path>,
+    baseline_expires: Option<u64>,
+    cohort: LoopCohort,
+    socket: &Path,
+    activity: &watch::Receiver<bool>,
+) -> Result<Value> {
+    ensure!(
+        &cohort.selection == selection,
+        "aggregate_frozen_selection_changed"
+    );
+    ensure!(
+        baseline.is_some() || baseline_expires.is_none(),
+        "aggregate_baseline_expiry_without_adapter"
+    );
+    let selected: LoopSelection = serde_json::from_value(selection.clone())?;
+    let source = selected.validate()?;
+    let options = loop_options(args, directory, baseline);
+    for (index, update) in cohort.updates.iter().enumerate() {
+        ensure!(
+            hex::encode(update.manifest_id()) == cohort.manifest_ids[index]
+                && update.revision() == cohort.revisions[index]
+                && update.dataset_manifest_id() == &source.manifest_id,
+            "aggregate_frozen_cohort_changed"
+        );
+    }
+    ensure!(
+        cohort
+            .updates
+            .iter()
+            .map(peer_update::VerifiedUpdate::expires)
+            .min()
+            == Some(cohort.expires)
+            && active(activity)
+            && now()? < cohort.expires,
+        "aggregate_cancelled_or_expired"
+    );
+    let mut preview = preview(&options, &selected.plan, &selected.validation_source);
+    if let Some(expires) = baseline_expires {
+        ensure!(now()? < expires, "aggregate_baseline_expired");
+        preview["baseline_expires_unix_seconds"] = expires.into();
+    }
+    execute_selected(
+        &options,
+        socket,
+        activity,
+        (selected.plan, source, selected.validation_source, preview),
+        Some(cohort.updates),
+    )
+    .await
 }
 
 fn directory(path: &Path) -> Result<()> {
@@ -259,8 +461,9 @@ async fn validation_input(
     args: &Options,
     selected: &Source,
     socket: &Path,
-    activity: &Activity,
+    activity: &watch::Receiver<bool>,
 ) -> Result<u64> {
+    ensure!(active(activity), "aggregate_cancelled");
     let root = args.directory.join("validation-input");
     directory(&root)?;
     let request = TrainingSource {
@@ -272,7 +475,7 @@ async fn validation_input(
         reuse_cache: true,
         limits: args.limits.clone(),
     };
-    let mut changed = activity.receiver.clone();
+    let mut changed = activity.clone();
     let downloaded = tokio::select! { biased;
         _=changed.changed()=>anyhow::bail!("aggregate_cancelled"),
         result=agent_artifact::fetch_training_source(&request,socket,&root)=>result?,
@@ -421,7 +624,7 @@ pub(super) fn reopen_approved(root: &Path, limits: &Limits, at: u64) -> Result<A
                 .is_some_and(Vec::is_empty),
         "aggregate_original_public_validation"
     );
-    let mut expires = manifest.validity().expires;
+    let mut expires = cap_baseline_expiry(&selection, manifest.validity().expires, at)?;
     let mut inputs = Vec::with_capacity(3);
     let mut provenance = Vec::with_capacity(3);
     for (index, channel) in plan.adapters.iter().enumerate() {
@@ -585,16 +788,49 @@ pub(super) fn reopen_approved(root: &Path, limits: &Limits, at: u64) -> Result<A
     })
 }
 
+pub(in crate::compute) async fn run(args: &Options, socket: &Path) -> Result<()> {
+    let enrolled = enrollment(args)?;
+    if !args.execute {
+        println!("{}", serde_json::to_string_pretty(&enrolled.3)?);
+        return Ok(());
+    }
+    let activity = Activity::new()?;
+    let result = execute_selected(args, socket, &activity.receiver, enrolled, None).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+fn cap_baseline_expiry(selection: &Value, expires: u64, at: u64) -> Result<u64> {
+    let Some(bound) = selection.get("baseline_expires_unix_seconds") else {
+        return Ok(expires);
+    };
+    let bound = bound.as_u64().context("aggregate_baseline_expiry")?;
+    ensure!(
+        at < bound && !selection["baseline_adapter"].is_null(),
+        "aggregate_baseline_expired"
+    );
+    Ok(expires.min(bound))
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "Keep explicit cohort freeze, bounded worker and held-out approval in one sequence"
 )]
-pub(in crate::compute) async fn run(args: &Options, socket: &Path) -> Result<()> {
-    let (plan, source, validation, mut selection) = enrollment(args)?;
-    if !args.execute {
-        println!("{}", serde_json::to_string_pretty(&selection)?);
-        return Ok(());
-    }
+async fn execute_selected(
+    args: &Options,
+    socket: &Path,
+    activity: &watch::Receiver<bool>,
+    enrolled: (Plan, DatasetSource, Source, Value),
+    frozen: Option<[peer_update::VerifiedUpdate; 3]>,
+) -> Result<Value> {
+    let (plan, source, validation, mut selection) = enrolled;
+    let automatic_training_loop_integration = frozen.is_some();
+    ensure!(active(activity), "aggregate_cancelled");
+    ensure!(
+        (1..=2).contains(&args.threads) && (1..=600).contains(&args.max_seconds),
+        "aggregate_worker_bounds"
+    );
+    ensure!(args.directory.is_absolute(), "aggregate_absolute_directory");
     private_directory(
         args.directory
             .parent()
@@ -605,7 +841,6 @@ pub(in crate::compute) async fn run(args: &Options, socket: &Path) -> Result<()>
     save(&args.directory.join("selection.json"), &selection)?;
     let validation_path = args.directory.join("validation-source.json");
     save(&validation_path, &validation)?;
-    let activity = Activity::new()?;
     let baseline_root = args
         .adapter_root
         .as_ref()
@@ -618,7 +853,8 @@ pub(in crate::compute) async fn run(args: &Options, socket: &Path) -> Result<()>
     };
     let baseline_origin = json!({"kind":if baseline_root.is_some(){"configured_adapter"}else{"pinned_base"},
         "original_path":args.adapter_root,"adapter_files":baseline_files});
-    let mut expires = validation_input(args, &validation, socket, &activity).await?;
+    let mut expires = validation_input(args, &validation, socket, activity).await?;
+    expires = cap_baseline_expiry(&selection, expires, now()?)?;
     let peers = args.directory.join("peers");
     let cohort = args.directory.join("cohort");
     directory(&peers)?;
@@ -627,15 +863,22 @@ pub(in crate::compute) async fn run(args: &Options, socket: &Path) -> Result<()>
     let mut provenance = Vec::with_capacity(3);
     let mut queries = Vec::with_capacity(3);
     let mut dataset = Vec::new();
+    let mut frozen = frozen.map(IntoIterator::into_iter);
     for (index, channel) in plan.adapters.iter().enumerate() {
-        ensure!(active(&activity.receiver), "aggregate_cancelled");
+        ensure!(active(activity), "aggregate_cancelled");
         let parent = peers.join(index.to_string());
         directory(&parent)?;
         let mut query = channel_query(args, channel)?;
-        let mut changed = activity.receiver.clone();
-        let update = tokio::select! {biased;
-            _=changed.changed()=>anyhow::bail!("aggregate_cancelled"),
-            result=peer_update::fetch(&query,socket,&parent)=>result?,
+        let mut changed = activity.clone();
+        let update = if let Some(updates) = &mut frozen {
+            updates
+                .next()
+                .context("aggregate_frozen_cohort_incomplete")?
+        } else {
+            tokio::select! {biased;
+                _=changed.changed()=>anyhow::bail!("aggregate_cancelled"),
+                result=peer_update::fetch(&query,socket,&parent)=>result?,
+            }
         };
         ensure!(
             update.dataset_manifest_id() == &source.manifest_id,
@@ -703,10 +946,10 @@ pub(in crate::compute) async fn run(args: &Options, socket: &Path) -> Result<()>
     };
     options.validate()?;
     // Await the actual supervisor on cancellation, never abandon an active worker future.
-    let report = super::super::execute(&options, activity.receiver.clone()).await?;
+    let report = super::super::execute(&options, activity.clone()).await?;
     save(&args.directory.join("aggregate-report.json"), &report)?;
     ensure!(
-        active(&activity.receiver) && now()? < expires,
+        active(activity) && now()? < expires,
         "aggregate_cancelled_or_expired"
     );
     verify_report(
@@ -774,7 +1017,7 @@ pub(in crate::compute) async fn run(args: &Options, socket: &Path) -> Result<()>
         baseline_root.as_deref(),
         &baseline_origin,
         &proof,
-        &activity.receiver,
+        activity,
     )
     .await?;
     let (approved, comparison) = match compared {
@@ -782,7 +1025,7 @@ pub(in crate::compute) async fn run(args: &Options, socket: &Path) -> Result<()>
         peer_evaluation::Outcome::Quarantined => (false, json!({"quarantined":true})),
     };
     ensure!(
-        active(&activity.receiver) && now()? < expires,
+        active(activity) && now()? < expires,
         "aggregate_cancelled_or_expired"
     );
     let bundle = if approved {
@@ -812,10 +1055,9 @@ pub(in crate::compute) async fn run(args: &Options, socket: &Path) -> Result<()>
     let result = json!({"version":1,"operation":"compute_aggregate_adapters","approved":approved,
         "comparison":comparison,"cohort":proof,"candidate_files":candidate_files,"bundle":bundle,
         "network_publication":false,"model_activated":false,"optimizer_steps":0,
-        "automatic_training_loop_integration":false,"general_quality_proven":false});
+        "automatic_training_loop_integration":automatic_training_loop_integration,"general_quality_proven":false});
     save(&args.directory.join("result.json"), &result)?;
-    println!("{}", serde_json::to_string_pretty(&result)?);
-    Ok(())
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -966,5 +1208,79 @@ mod tests {
         assert_eq!(result["network_publication"], false);
         assert_eq!(result["model_activated"], false);
         assert!(!args.directory.exists());
+        let mut loop_args = comparison_options(&args, validation_path.clone());
+        assert!(loop_selection(&loop_args).unwrap().is_none());
+        loop_args.aggregate_plan = Some(plan_path.clone());
+        let frozen = loop_selection(&loop_args).unwrap().unwrap();
+        let selected: LoopSelection = serde_json::from_value(frozen.clone()).unwrap();
+        assert_eq!(
+            selected.validate().unwrap().manifest_id,
+            plan().validate().unwrap().manifest_id
+        );
+        assert_eq!(frozen["plan"], serde_json::to_value(plan()).unwrap());
+        assert_eq!(frozen["validation_source"]["manifest_id"], "b".repeat(64));
+        assert!(!args.directory.exists());
+        // These are disposable test files. Discovery/execute use the saved value,
+        // and never reopen owner configuration after the explicit selection.
+        fs::write(&plan_path, b"changed after enrollment").unwrap();
+        fs::write(&validation_path, b"changed after enrollment").unwrap();
+        assert!(loop_selection(&loop_args).is_err());
+        assert!(
+            serde_json::from_value::<LoopSelection>(frozen)
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
+        loop_args.aggregate_plan = None;
+        loop_args.validation_source = None;
+        let executed = loop_options(&loop_args, &args.directory, None);
+        assert_eq!(executed.plan, args.directory.join("selection.json"));
+        assert_eq!(
+            executed.validation_source,
+            args.directory.join("validation-source.json")
+        );
+        assert!(loop_selection(&loop_args).unwrap().is_none());
+    }
+
+    #[test]
+    fn frozen_loop_selection_requires_exact_independent_validation() {
+        let mut selected = LoopSelection {
+            version: 1,
+            plan: plan(),
+            validation_source: Source {
+                publisher_key: plan().dataset.publisher_key,
+                name: "validation".into(),
+                min_revision: Some(1),
+                manifest_id: Some("b".repeat(64)),
+            },
+        };
+        assert!(selected.validate().is_ok());
+        selected.validation_source.manifest_id = Some(selected.plan.dataset.manifest_id.clone());
+        assert!(selected.validate().is_err());
+        selected.validation_source.manifest_id = None;
+        assert!(selected.validate().is_err());
+        selected.validation_source.manifest_id = Some("b".repeat(64));
+        selected.validation_source.min_revision = Some(0);
+        assert!(selected.validate().is_err());
+    }
+
+    #[test]
+    fn inherited_baseline_expiry_only_shortens_original_authorities() {
+        let legacy = json!({"baseline_adapter":null});
+        assert_eq!(cap_baseline_expiry(&legacy, 3000, 1000).unwrap(), 3000);
+        assert!(legacy.get("baseline_expires_unix_seconds").is_none());
+        let selected = json!({"baseline_adapter":"/owner/original-adapter",
+            "baseline_expires_unix_seconds":2000});
+        assert_eq!(cap_baseline_expiry(&selected, 3000, 1000).unwrap(), 2000);
+        assert_eq!(cap_baseline_expiry(&selected, 1500, 1000).unwrap(), 1500);
+        assert!(cap_baseline_expiry(&selected, 3000, 2000).is_err());
+        let mut invalid = selected.clone();
+        invalid["baseline_adapter"] = Value::Null;
+        assert!(cap_baseline_expiry(&invalid, 3000, 1000).is_err());
+        for bound in [Value::Null, json!(true), json!(0), json!("2000")] {
+            let mut invalid = selected.clone();
+            invalid["baseline_expires_unix_seconds"] = bound;
+            assert!(cap_baseline_expiry(&invalid, 3000, 1000).is_err());
+        }
     }
 }

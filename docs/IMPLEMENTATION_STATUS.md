@@ -4,6 +4,22 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-23
 
+An owner-enrolled `compute train-loop --aggregate-plan` candidate now connects automatic
+three-publisher discovery, frozen-cohort aggregation and held-out comparison to local adoption,
+serving and the next actual training warmstart. Unchanged cohorts are not recomputed; rollback
+or same-revision forks are rejected. The active model, not an assumed base, is the comparison
+baseline. Original authority deadlines propagate through aggregation and local successors.
+Interrupted rounds retain their inputs and do not silently restart; completed results can be
+reopened after coordinator restart. Storage is bounded and only exact owned round files may
+be reclaimed. The mode requires independent pinned validation and excludes individual-peer
+adoption in the same enrollment. Compilation, 82 focused training checks and strict CLI Clippy
+pass; the dedicated `agent-autonomous-aggregation` real-model scenario is implemented but
+its execution result remains pending. It retains the three original training contributions,
+the automatic combination and local successor, protected serving and a completed-cohort
+restart without recomputation. Network
+publication of combined results remains explicit through `compute publish-aggregate`, and
+general quality, robust corruption rollback for aggregate selections and full B05 remain open.
+
 A source-grounded synthesis candidate now addresses the observed loss of original evidence
 between model-graph tasks. New 360M `--plan-task-graph --grounded-synthesis` workflows retain
 the complete original document (at most 4096 UTF-8 bytes) separately from generated parent
@@ -11,8 +27,22 @@ answers. V5 derived packages authenticate those bytes against the original signe
 tokenization and actual inference share one prompt under the unchanged 1024/256-token budgets.
 Historical v3 workflows keep their exact source-free synthesis contract on resume. Three
 tokenizer-plan checks, 59 focused document/graph/replay checks, nine derived-source checks and
-seven inert worker checks pass. This fixes an information-loss path, not proven answer quality
-or complete B03. Genuine execution of the new grounded mode is still pending.
+seven inert worker checks pass. The [grounded run on `c4bd274`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35868855324)
+also passes complete source-exact checking: all five jobs use their original signed results,
+dependent tasks retain the complete 444-byte source, all answers reach EOS, and offline resume
+retains 114 original files with no new work. Captures and cleanup pass. The final answer still
+incorrectly says that an exit learning the client's address satisfies the privacy requirement.
+This fixes information loss and proves execution, not reliable reasoning or completed B03.
+
+The [complete recovery run on `c4bd274`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35868906953)
+now passes: real P/Q training and approval, local Q corruption, restoration of original
+unexpired P, coordinator restart and eight further optimizer updates from a newly published
+catalog source. Parsed original job receipts remain unchanged; all seven protected network
+phases, cleanup and host-state equality pass. The source-bound numerical probe reports actual
+60-module gauge/outlier and rank-six/rank-four projection checks plus callback cancellation;
+its unit is stopped and empty. Original synthetic tensor bodies are not retained, so subsequent
+review checks the original source-bound report rather than replaying the tensor arithmetic.
+This is scoped local recovery, not malicious-publisher detection, complete B07 or general quality.
 
 The [recovery follow-up on `b6984851`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35865224745)
 proves further scoped progress but **fails overall**: both nodes actually train; Q warm-starts
@@ -55,8 +85,13 @@ held-out approval, original signed publication, protected cold transfer and exac
 receiver inference. Final owned objects are zero and host-state hashes match. Neither the
 original report nor its failure is rewritten. The composite reader/writer now uses an
 explicit 2 MiB cap, with the overall 24 MiB cap unchanged; inert boundary checks pass.
-A complete green rerun remains pending. General answer quality, automatic aggregation in
-the training loop, poisoning resistance and full B05 remain unproved.
+The [complete rerun on `865a38b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35869598198)
+now passes without rewriting records or omitting checker gates. The three real trainings
+produce distinct weights; seven isolated workers complete the aggregation, comparison and
+receiver inference. The held-out comparison covers seven target tokens (baseline loss
+2.5174422264; candidate loss 1.9376181364), not general answer quality. Original signed
+publication, both protected transfer phases, cleanup and unchanged host state all pass.
+Automatic adoption in the training loop, poisoning resistance and full B05 remain unproved.
 The new cached-import and aggregate/publication checks pass (eight CLI import checks, one
 cache hit/miss/revision-floor check and six aggregate/publication checks), as do command help,
 scoped formatting and strict production-CLI Clippy. Clippy including test targets still reports
@@ -64,7 +99,7 @@ six existing style issues in unrelated test modules; this is not a clean full-su
 A guest-only numerical probe now reuses the existing pinned runtime in a separate, bounded
 private-network user unit. It checks real saved tensors against gauge/outlier and rank-six
 median/rank-four projection oracles, plus cancellation. Archive-bound source staging and
-inert admission checks pass; this synthetic kernel probe has not yet run on the real backend.
+inert admission checks pass; the real backend result is scoped in the complete recovery run above.
 
 The [complete-envelope policy run on `fb574fdb`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35855257313)
 **passes its narrow four-worker pipeline**. Two original assessments finish at 1,003 bytes /

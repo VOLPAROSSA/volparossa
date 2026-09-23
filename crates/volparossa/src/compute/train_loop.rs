@@ -3,6 +3,7 @@
 
 pub(super) mod aggregate;
 pub(super) mod aggregate_publication;
+mod aggregate_updates;
 mod catalogs;
 mod evaluation;
 mod peer_evaluation;
@@ -67,6 +68,9 @@ pub(crate) struct Options {
     /// Explicit public peer-adapter channels; adoption requires a pinned validation source.
     #[arg(long)]
     peer_updates: Option<PathBuf>,
+    /// Automatically combine three enrolled public publishers, compare and adopt locally.
+    #[arg(long, conflicts_with = "peer_updates", requires = "validation_source")]
+    aggregate_plan: Option<PathBuf>,
     /// Optional exact signed validation-only public source, selected before any training.
     #[arg(long)]
     validation_source: Option<PathBuf>,
@@ -204,6 +208,8 @@ struct State {
     catalog: Option<catalogs::Registry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     peer_updates: Option<peer_updates::Registry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    aggregate_updates: Option<aggregate_updates::Registry>,
 }
 
 impl State {
@@ -223,6 +229,7 @@ impl State {
             validation: None,
             catalog: None,
             peer_updates: None,
+            aggregate_updates: None,
         }
     }
     fn select(&self, plan: &Plan, repeat: bool, time: u64) -> Option<usize> {
@@ -276,6 +283,10 @@ fn now() -> Result<u64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Freeze owner-selected sources and mutually exclusive adoption authority together"
+)]
 fn enrollment(args: &Options) -> Result<(Plan, Value)> {
     let plan: Plan = serde_json::from_slice(&read_file(&args.plan, 64 * 1024)?)?;
     ensure!(
@@ -363,6 +374,13 @@ fn enrollment(args: &Options) -> Result<(Plan, Value)> {
         );
         selection["peer_updates"] = peers;
     }
+    if let Some(aggregate) = aggregate::loop_selection(args)? {
+        ensure!(
+            args.peer_updates.is_none(),
+            "train_loop_conflicting_adoption_modes"
+        );
+        selection["aggregate_updates"] = aggregate;
+    }
     if let Some(validation) = validation::selection(args)? {
         for source in &plan.sources {
             ensure!(
@@ -424,6 +442,12 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         peer_updates::restore(args, &store, &mut state, &selection),
         &mut serving,
     )?;
+    if let Err(error) = aggregate_updates::restore(args, &store, &mut state, &selection) {
+        if let Some(serving) = &mut serving {
+            serving.withdraw()?;
+        }
+        return Err(error);
+    }
     if let Some(sequence) = state
         .cycles
         .iter()
@@ -456,6 +480,14 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             // comparison result. It precedes selecting either job's warmstart.
             reconcile_selected_adapter(args, &store, &mut state, &mut serving)?;
             peer_updates::tick(args, socket, &pool, &store, &mut state, &activity.receiver).await?;
+            Box::pin(aggregate_updates::tick(
+                args,
+                socket,
+                &store,
+                &mut state,
+                &activity.receiver,
+            ))
+            .await?;
             reconcile_selected_adapter(args, &store, &mut state, &mut serving)?;
             if let Some(source) = state.select(&pool, args.repeat_sources, now()?) {
                 if make_room(&store, &mut state)? {
@@ -490,6 +522,8 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         "attempts_this_invocation":attempts,"owner_cancelled":!active(&activity.receiver),
         "catalog_source_discovery":state.catalog.is_some(),"remembered_sources":state.sources.len(),
         "peer_update_channels_enabled":state.peer_updates.is_some(),
+        "aggregate_updates_enabled":state.aggregate_updates.is_some(),
+        "active_aggregate_sequence":state.aggregate_updates.as_ref().and_then(aggregate_updates::active_sequence),
         "pending_publications":state.cycles.iter().filter(|cycle|matches!(cycle.phase,Phase::Trained|Phase::PublishPending)).count(),
         "publication_drain":publication_drain,"publication_drain_seconds":publication_drain.map(|_|args.max_seconds),
         "private_data_supported":false,"full_b05_claimed":false})
@@ -505,6 +539,12 @@ fn reconcile_selected_adapter(
 ) -> Result<()> {
     let recovered =
         checked_integrity_recovery(peer_updates::recover_active(args, store, state), serving)?;
+    if let Err(error) = aggregate_updates::reconcile(args, store, state) {
+        if let Some(serving) = serving {
+            serving.withdraw()?;
+        }
+        return Err(error);
+    }
     if let Some(serving) = serving {
         serving.reconcile(args, store, state)?;
     }
@@ -712,6 +752,10 @@ fn make_room(store: &Store, state: &mut State) -> Result<bool> {
     Ok(true)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Persist and finish one bounded cycle with its actual selected predecessor"
+)]
 async fn attempt(
     args: &Options,
     socket: &Path,
@@ -737,7 +781,10 @@ async fn attempt(
     )?;
     if current.origin["kind"] == "peer_update" {
         options.peer_predecessor = Some(current.origin);
+    } else if current.origin["kind"] == "aggregate_update" {
+        options.aggregate_predecessor = Some(current.origin);
     }
+    options.inherited_authority_expires = current.authority_expires;
     if let Some(registry) = &state.catalog {
         options.source_catalog = registry.proof_for(plan, index);
     }
@@ -825,14 +872,21 @@ async fn attempt(
 struct CurrentAdapter {
     adapter_root: Option<PathBuf>,
     origin: Value,
+    authority_expires: Option<u64>,
 }
 
 fn current_adapter(args: &Options, store: &Store, state: &State) -> Result<CurrentAdapter> {
+    if let Some(registry) = &state.aggregate_updates {
+        if let Some(aggregate) = aggregate_updates::active(args, registry, state.latest)? {
+            return Ok(aggregate);
+        }
+    }
     if let Some(registry) = &state.peer_updates {
         if let Some(peer) = peer_updates::active(args, registry, state.latest)? {
             return Ok(CurrentAdapter {
                 adapter_root: Some(peer.adapter_root),
                 origin: peer.origin,
+                authority_expires: None,
             });
         }
     }
@@ -849,9 +903,26 @@ fn current_adapter(args: &Options, store: &Store, state: &State) -> Result<Curre
                 .as_ref()
                 .context("train_loop_latest_snapshot")?,
         )?;
+        let inherited = store
+            .read_cycle_json(previous, "result.json")?
+            .get("authority_expires_unix_seconds")
+            .map(|value| {
+                value
+                    .as_u64()
+                    .context("train_loop_inherited_authority_expiry")
+            })
+            .transpose()?;
+        let authority_expires = if args.aggregate_plan.is_some() {
+            serving::local_candidate(store, state)?
+                .map(|(_, expires, _)| expires)
+                .map(|expires| inherited.map_or(expires, |bound| bound.min(expires)))
+        } else {
+            inherited
+        };
         Ok(CurrentAdapter {
             adapter_root: Some(store.cycle_path(previous)?.join("training/adapter")),
             origin: json!({"kind":"local_cycle","sequence":previous}),
+            authority_expires,
         })
     } else {
         let adapter_root = seed::adapter(args, state)?;
@@ -865,6 +936,7 @@ fn current_adapter(args: &Options, store: &Store, state: &State) -> Result<Curre
         Ok(CurrentAdapter {
             adapter_root,
             origin: json!({"kind":kind}),
+            authority_expires: None,
         })
     }
 }
@@ -882,6 +954,8 @@ fn cycle_options(
         dataset_manifest_id: source.manifest()?,
         source_catalog: None,
         peer_predecessor: None,
+        aggregate_predecessor: None,
+        inherited_authority_expires: None,
         min_revision: minimum,
         cache: args.cache.clone(),
         reuse_cache: true,
@@ -1019,6 +1093,9 @@ fn select_successor(
         state.latest = Some(cycle.sequence);
         if let Some(registry) = &mut state.peer_updates {
             peer_updates::clear_active(registry);
+        }
+        if let Some(registry) = &mut state.aggregate_updates {
+            aggregate_updates::clear_active(registry);
         }
     }
     state.completed = completed;

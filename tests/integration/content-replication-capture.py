@@ -61,6 +61,7 @@ MAX_WIREGUARD_DATA_BYTES = WIREGUARD_MTU + 32
 MAX_FRAMES = 1_048_576
 MAX_FRAME_BYTES = 65_589  # Ethernet + IPv6 header + maximum non-jumbo IPv6 payload.
 MAX_SECONDS = 1800
+MAX_REQUESTED_SECONDS = 4200
 DRAIN_SECONDS = 3
 MAX_HEADER_SAMPLES = 32
 LEARNER_IP = "48.164.4.1"
@@ -624,7 +625,17 @@ def stop_capture_intake(observer):
     observer.setsockopt(socket.SOL_SOCKET, 26, bytes(Program(1, instructions)))
 
 
-def capture(layout, output, ready, role, interfaces):
+def capture_seconds(value):
+    if type(value) not in (int, str) or not re.fullmatch(r"[1-9][0-9]{0,3}", str(value)):
+        raise ValueError("invalid bounded capture duration")
+    seconds = int(value)
+    if seconds > MAX_REQUESTED_SECONDS:
+        raise ValueError("capture duration exceeds fixed maximum")
+    return seconds
+
+
+def capture(layout, output, ready, role, interfaces, max_seconds=MAX_SECONDS):
+    max_seconds = capture_seconds(max_seconds)
     validate_layout(layout)
     role_node(layout, role)
     if not 1 <= len(interfaces) <= 16 or len(set(interfaces)) != len(interfaces) \
@@ -635,6 +646,8 @@ def capture(layout, output, ready, role, interfaces):
                   observed_frames=0, packet_socket_drops=0, truncated=False, complete=False,
                   forbidden_header_samples=[], forbidden_header_sample_overflow_packets=0,
                   **dict.fromkeys((*COUNTERS, *DIAGNOSTIC_COUNTERS), 0))
+    if max_seconds != MAX_SECONDS:
+        record["max_seconds"] = max_seconds
     if layout["phase"] == "peer-learning":
         record.update(dict.fromkeys(LEARNER_PROVIDER_COUNTERS, 0))
         record["underlay_control_attempt_packets"] = 0
@@ -706,7 +719,7 @@ def capture(layout, output, ready, role, interfaces):
             observer.setblocking(False)
         with Path(ready).open("x", encoding="ascii") as marker:
             marker.write("ready\n")
-        deadline, drain_deadline = time.monotonic() + MAX_SECONDS, None
+        deadline, drain_deadline = time.monotonic() + max_seconds, None
         while True:
             current = time.monotonic()
             if current >= deadline:
@@ -758,13 +771,19 @@ def capture(layout, output, ready, role, interfaces):
 
 def main(arguments):
     if len(arguments) < 6 or arguments[0] != "capture":
-        raise ValueError("usage: capture LAYOUT_JSON OUTPUT READY ROLE IFACE...")
+        raise ValueError("usage: capture LAYOUT_JSON OUTPUT READY ROLE [--max-seconds SECONDS] IFACE...")
     layout_path, output, ready, role, *interfaces = arguments[1:]
+    max_seconds = MAX_SECONDS
+    if interfaces[0] == "--max-seconds":
+        if len(interfaces) < 3:
+            raise ValueError("capture duration requires physical interfaces")
+        max_seconds = capture_seconds(interfaces[1])
+        interfaces = interfaces[2:]
     with Path(layout_path).open("rb") as source:
         data = source.read(8193)
     if len(data) > 8192:
         raise ValueError("oversized capture layout")
-    capture(json.loads(data), output, ready, role, interfaces)
+    capture(json.loads(data), output, ready, role, interfaces, max_seconds)
 
 
 if __name__ == "__main__":

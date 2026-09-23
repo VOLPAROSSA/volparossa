@@ -124,7 +124,7 @@ agent_jobs_broker() {
         # Explicit owner opt-in; no other fixture advertises structured principle inference.
         set -- "$@" --principle-inference-v4
     fi
-    if { [ "${agent_successor_serving:-no}" = yes ] || [ "${agent_active_recovery:-no}" = yes ]; } && [ "$jobs_node" = "$provider_node_a" ]; then
+    if { [ "${agent_successor_serving:-no}" = yes ] || [ "${agent_active_recovery:-no}" = yes ] || [ "${agent_autonomous_aggregation:-no}" = yes ]; } && [ "$jobs_node" = "$provider_node_a" ]; then
         install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$jobs_private/serving"
         set -- "$@" --serving-directory "$jobs_private/serving"
     fi
@@ -251,8 +251,11 @@ agent_jobs_stop() {
     if [ "${agent_active_recovery:-no}" = yes ]; then
         agent_active_recovery_python cleanup-workers "$WORK" || return 1
     fi
-    if [ "${agent_adapter_aggregation:-no}" = yes ]; then
+    if [ "${agent_adapter_aggregation:-no}" = yes ] || [ "${agent_autonomous_aggregation:-no}" = yes ]; then
         agent_adapter_aggregation_python cleanup-workers "$WORK" || return 1
+    fi
+    if [ "${agent_autonomous_aggregation:-no}" = yes ]; then
+        agent_autonomous_aggregation_python cleanup-workers "$WORK" || return 1
     fi
     [ "$jobs_dag_pressure_cleanup_failed" = no ]
 }
@@ -293,7 +296,7 @@ agent_jobs_setup() {
         | map(select($p[.] != $control)) | .[:2] | select(length == 2)' "$WORK/a01-expected-peers.json") || fail JOBS_PEERS_INVALID
     provider_node_a=$(printf '%s\n' "$provider_nodes" | jq -er '.[0]')
     provider_node_b=$(printf '%s\n' "$provider_nodes" | jq -er '.[1]')
-    if [ "${agent_active_recovery:-no}" = yes ] || [ "${agent_adapter_aggregation:-no}" = yes ]; then
+    if [ "${agent_active_recovery:-no}" = yes ] || [ "${agent_adapter_aggregation:-no}" = yes ] || [ "${agent_autonomous_aggregation:-no}" = yes ]; then
         # The pre-start replication graph already connects both providers to
         # all three candidates. Adding cp links would collide with those /32
         # routes and replace the learner's actual WireGuard-capable legs.
@@ -333,6 +336,10 @@ agent_jobs_setup() {
 
 agent_jobs_run() {
     agent_jobs_setup
+    if [ "${agent_autonomous_aggregation:-no}" = yes ]; then
+        agent_autonomous_aggregation_run
+        return
+    fi
     if [ "${agent_adapter_aggregation:-no}" = yes ]; then
         agent_adapter_aggregation_run
         return
@@ -460,6 +467,10 @@ agent_jobs_finalize_report() {
         [ ! -f "$jobs_log" ] || [ -L "$jobs_log" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$jobs_log" "$output_directory/$(basename -- "$jobs_log")"
     done
+    if [ "${agent_autonomous_aggregation:-no}" = yes ]; then
+        agent_autonomous_aggregation_finalize_report "$jobs_status"
+        return
+    fi
     if [ "${agent_adapter_aggregation:-no}" = yes ]; then
         agent_adapter_aggregation_finalize_report "$jobs_status"
         return

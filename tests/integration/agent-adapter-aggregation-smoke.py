@@ -326,7 +326,7 @@ def check_artifacts(report_, expected):
              for entry in artifacts} == expected, "adapter artifact hashes differ")
 
 
-def check_evidence(value, revision):
+def check_aggregate_core(value, revision, cached_validation=False):
     require(value["source_revision"] == revision and value["layout"]["publishers"] == list(NODES), "source/layout mismatch")
     keys, peers = value["layout"]["keys"], value["peers"]
     require(len(set(keys.values())) == 3, "publisher identities repeated")
@@ -357,7 +357,14 @@ def check_evidence(value, revision):
                     and receipt["peer_bytes"] == 0 and receipt["providers_used"] == 0, "shared exact dataset not efficiently cached")
         require(all({k: value["aggregate-files"][f"cohort/{index}/{name}"][k] for k in ("bytes", "sha256")} == inputs[index][name]
                     for name in FILES), "frozen cohort changed")
-    R["check_cold_receipt"](json.loads(files["validation-input/provenance.json"])["source_receipt"], validation_signed, validation, peers["relay5"])
+    receipt = json.loads(files["validation-input/provenance.json"])["source_receipt"]
+    if cached_validation:
+        require(receipt["manifest_id"] == digest(validation_signed)["sha256"]
+                and receipt["sha256"] == digest(validation)["sha256"] and receipt["bytes"] == len(validation)
+                and receipt["peer_bytes"] == receipt["providers_used"] == receipt["origin_body_bytes"] == 0,
+                "loop aggregation did not reuse its exact already verified validation source")
+    else:
+        R["check_cold_receipt"](receipt, validation_signed, validation, peers["relay5"])
     check_supervisor(aggregate, "aggregate_adapter", dataset)
     check_original_report(aggregate, files["job/report.json"])
     require(aggregate["updates_completed"] == 0 and aggregate["model_weights_loaded"] is False
@@ -385,6 +392,16 @@ def check_evidence(value, revision):
                 and envelope["deadline"] - envelope["started_at"] <= 600, "comparison deadline renewed")
         if stage == "candidate":
             require(envelope["report"]["input_adapter"]["files"] == result["candidate_files"], "compared a different adapter")
+    return dict(result=result, files=files, cohort=cohort, inputs=inputs, dataset=dataset, dataset_signed=dataset_signed,
+                source_expiry=source_expiry, validation_expiry=validation_expiry, original_expiry=original_expiry)
+
+
+def check_evidence(value, revision):
+    checked = check_aggregate_core(value, revision)
+    result, files, cohort, inputs, dataset, dataset_signed, source_expiry, validation_expiry, original_expiry = (
+        checked[key] for key in ("result", "files", "cohort", "inputs", "dataset", "dataset_signed",
+                                "source_expiry", "validation_expiry", "original_expiry"))
+    keys, peers = value["layout"]["keys"], value["peers"]
     bundle, signed = files["adapter.bundle"], files["publication/publication.pb"]
     expiry = R["signed_content"](signed, bundle, keys["relay4"], "disposable-approved-aggregate", R["ADAPTER_TYPE"])
     R["check_bundle"](bundle, result["candidate_files"], digest(dataset_signed)["sha256"])

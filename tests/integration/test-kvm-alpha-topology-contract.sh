@@ -61,6 +61,11 @@ for script in "$GUEST" "$HOST"; do
         | grep -Ei 'explicit public task graph|Agent-task-graph:' >/dev/null; then exit 1; fi
     "$script" --preview --scenario agent-active-recovery | grep -Fi 'active-recovery' >/dev/null
     "$script" --preview --scenario agent-adapter-aggregation | grep -Fi 'agent-adapter-aggregation' >/dev/null
+    "$script" --preview --scenario agent-autonomous-aggregation | grep -Fi 'agent-autonomous-aggregation' >/dev/null
+    if "$script" --preview --scenario agent-autonomous-aggregation --scenario agent-adapter-aggregation \
+        | grep -Fi 'agent-autonomous-aggregation' >/dev/null; then exit 1; fi
+    if "$script" --preview --scenario agent-adapter-aggregation --scenario agent-autonomous-aggregation \
+        | grep -Fi 'agent-adapter-aggregation' >/dev/null; then exit 1; fi
     if "$script" --preview --scenario agent-adapter-aggregation --scenario agent-active-recovery \
         | grep -Fi 'agent-adapter-aggregation' >/dev/null; then exit 1; fi
     if "$script" --preview --scenario agent-active-recovery --scenario agent-adapter-aggregation \
@@ -164,7 +169,7 @@ grep -F '. "$source_directory/tests/integration/agent-task-graph-smoke.sh"' "$GU
 grep -F 'agent-task-graph-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py' "$GUEST" >/dev/null
 grep -F '[ "$scenario" != agent-task-graph ] || driver_time_bound=3600s' "$HOST" >/dev/null
 grep -F 'root.glob("agent-task-graph-*")' "$HOST" >/dev/null
-grep -F 'file_count_limit = 128 if scenario in ("agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-adapter-aggregation", "agent-policy-assessment") else FILE_COUNT_LIMIT' "$HOST" >/dev/null
+grep -F 'file_count_limit = 128 if scenario in ("agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation", "agent-policy-assessment") else FILE_COUNT_LIMIT' "$HOST" >/dev/null
 grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-task-graph'" "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/agent-task-graph-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/agent-task-graph-smoke.py self-test' "$WORKFLOW" >/dev/null
@@ -272,7 +277,7 @@ guest = (root / "kvm-alpha-topology.sh").read_text()
 host = (root / "run-alpha-topology-vm.sh").read_text()
 workflow = (root / "../../.github/workflows/alpha-topology.yml").resolve().read_text()
 assert guest.count("agent_active_recovery=no") == 2
-assert 'if { [ "$agent_successor_serving" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ]; } && [ "$node" = relay4 ]; then' in guest
+assert 'if { [ "$agent_successor_serving" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; } && [ "$node" = relay4 ]; then' in guest
 assert 'if [ "$agent_active_recovery" = yes ] && [ "$node" = relay5 ]; then' in guest
 assert '''if [ "$agent_active_recovery" = yes ]; then
     grep -Fx 'client: true' "$WORK/roles-relay5.txt" >/dev/null || fail RELAY5_CLIENT_ROLE_INVALID
@@ -287,16 +292,16 @@ assert 'nsenter --target "$recovery_node_pid" --mount --net' in fixture
 for phase in ('relay4 p', 'relay4 adoption', 'relay4 continued', 'client job-p', 'client job-q', 'client job-restored'):
     assert 'agent_active_recovery_network_start ' + phase in fixture
 assert 'agent_active_recovery_python await "$WORK" armed "$jobs_batch_pid"' in fixture
-assert '[ "$agent_train_loop" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ]; then\n    content_replication_extend_network' in guest
-assert '[ "$agent_train_loop" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ]; then\n        content_replication_configure_node' in guest
-assert '''if [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ]; then
+assert '[ "$agent_train_loop" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then\n    content_replication_extend_network' in guest
+assert '[ "$agent_train_loop" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then\n        content_replication_configure_node' in guest
+assert '''if [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
     # Existing disposable R4 client legs and R5 generic-control-only links.
     # shellcheck source=tests/integration/content-replication-smoke.sh
     . "$source_directory/tests/integration/content-replication-smoke.sh"''' in guest
 assert '"--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay3 $WORK/state-relay5"' in guest
 jobs = (root / "agent-jobs-smoke.sh").read_text()
 setup = jobs[jobs.index('agent_jobs_setup() {'):jobs.index('agent_jobs_run() {')]
-assert setup.index('if [ "${agent_active_recovery:-no}" = yes ] || [ "${agent_adapter_aggregation:-no}" = yes ]; then') < setup.index('content_provider_control_underlay')
+assert setup.index('if [ "${agent_active_recovery:-no}" = yes ] || [ "${agent_adapter_aggregation:-no}" = yes ] || [ "${agent_autonomous_aggregation:-no}" = yes ]; then') < setup.index('content_provider_control_underlay')
 for line in guest.splitlines():
     if line.startswith('if [ "$agent_model_planning" = yes ]') or line.startswith('if [ "$agent_model_task_graph" = yes ]'):
         assert "agent_active_recovery" not in line, "135M recovery must not stage 360M/decoder"
@@ -333,7 +338,7 @@ guest = (root / "kvm-alpha-topology.sh").read_text()
 jobs = (root / "agent-jobs-smoke.sh").read_text()
 workflow = (root / "../../.github/workflows/alpha-topology.yml").resolve().read_text()
 assert guest.count("agent_adapter_aggregation=no") == 2
-assert '''[ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ]; then
+assert '''[ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/agent-active-recovery-smoke.py"''' in guest
 for node, others in (("relay3", "relay4 $WORK/state-relay5"),
                      ("relay4", "relay3 $WORK/state-relay5"),
@@ -351,6 +356,51 @@ for line in workflow.splitlines():
     if 'test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-active-recovery' in line:
         assert 'test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-adapter-aggregation' in line
 PYTHON_ADAPTER_AGGREGATION
+grep -F 'agent-autonomous-aggregation) scenario=agent-jobs; agent_autonomous_aggregation=yes; wifi_link=no; uplink_link=no ;;' "$GUEST" >/dev/null
+grep -F '. "$source_directory/tests/integration/agent-autonomous-aggregation-smoke.sh"' "$GUEST" >/dev/null
+grep -F 'install -o root -g root -m 0555 "$source_directory/tests/integration/agent-autonomous-aggregation-smoke.py" "$WORK/bin/agent-autonomous-aggregation-smoke.py"' "$GUEST" >/dev/null
+grep -F '[ "$scenario" != agent-autonomous-aggregation ] || driver_time_bound=7200s' "$HOST" >/dev/null
+grep -F 'root.glob("agent-autonomous-aggregation-*")' "$HOST" >/dev/null
+grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-autonomous-aggregation'" "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-autonomous-aggregation-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-autonomous-aggregation-smoke.py self-test' "$WORKFLOW" >/dev/null
+grep -F 'agent_autonomous_aggregation_run' "$HERE/agent-jobs-smoke.sh" >/dev/null
+grep -F 'agent_autonomous_aggregation_finalize_report "$jobs_status"' "$HERE/agent-jobs-smoke.sh" >/dev/null
+"$HOST" --preview --scenario agent-autonomous-aggregation | grep -F 'Guest resources: 4 vCPUs, 4096 MiB RAM;' >/dev/null
+python3 -B - "$HERE" <<'PYTHON_AUTONOMOUS_AGGREGATION'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+guest = (root / "kvm-alpha-topology.sh").read_text()
+jobs = (root / "agent-jobs-smoke.sh").read_text()
+workflow = (root / "../../.github/workflows/alpha-topology.yml").resolve().read_text()
+assert guest.count("agent_autonomous_aggregation=no") == 2
+assert "timeout-minutes: ${{ inputs.scenario == 'agent-autonomous-aggregation' && 180 || 120 }}" in workflow
+host = (root / "run-alpha-topology-vm.sh").read_text()
+assert 'if scenario == "agent-autonomous-aggregation":\n        file_count_limit = 192' in host
+assert 'if scenario in ("agent-adapter-aggregation", "agent-autonomous-aggregation"):' in host
+shared = '. "$source_directory/tests/integration/agent-adapter-aggregation-smoke.sh"'
+wrapper = '. "$source_directory/tests/integration/agent-autonomous-aggregation-smoke.sh"'
+assert guest.index(shared) < guest.index(wrapper)
+assert '''if [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
+    install -o root -g root -m 0555 "$source_directory/tests/integration/agent-adapter-aggregation-smoke.py"''' in guest
+assert '[ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then\n    content_replication_extend_network' in guest
+assert '[ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then\n        content_replication_configure_node' in guest
+assert 'if { [ "${agent_successor_serving:-no}" = yes ] || [ "${agent_active_recovery:-no}" = yes ] || [ "${agent_autonomous_aggregation:-no}" = yes ]; } && [ "$jobs_node" = "$provider_node_a" ]; then' in jobs
+stop = jobs[jobs.index('agent_jobs_stop() {'):jobs.index('agent_jobs_cleanup() {')]
+assert stop.index('agent_jobs_stop_unit "$jobs_stop_unit"') < stop.index('agent_adapter_aggregation_python cleanup-workers "$WORK"') < stop.index('agent_autonomous_aggregation_python cleanup-workers "$WORK"')
+for line in guest.splitlines():
+    if line.startswith('if [ "$agent_model_planning" = yes ]') or line.startswith('if [ "$agent_model_task_graph" = yes ]'):
+        assert "agent_autonomous_aggregation" not in line
+    if '[ "$node" = relay5 ]' in line:
+        assert "agent_autonomous_aggregation" not in line
+for line in workflow.splitlines():
+    if "VOLPAROSSA_ALPHA_SCENARIO != 'agent-adapter-aggregation'" in line:
+        assert "VOLPAROSSA_ALPHA_SCENARIO != 'agent-autonomous-aggregation'" in line
+    if 'test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-adapter-aggregation' in line:
+        assert 'test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-autonomous-aggregation' in line
+PYTHON_AUTONOMOUS_AGGREGATION
 grep -Fx '  workflow_dispatch:' "$WORKFLOW" >/dev/null
 grep -Fx '  pull_request:' "$WORKFLOW" >/dev/null
 grep -F 'github.event.pull_request.head.repo.full_name == github.repository' "$WORKFLOW" \

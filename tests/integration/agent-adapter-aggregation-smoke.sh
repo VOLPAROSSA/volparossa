@@ -42,7 +42,7 @@ agent_adapter_aggregation_network_start() {
     aa_network_prefix=agent-adapter-aggregation-path-$aa_network_label
     content_replication_disconnect "$aa_other_node" "$aa_network_prefix-other" || fail AGGREGATION_OTHER_ROUTE_ACTIVE
     content_replication_select "$aa_network_node" "$aa_network_prefix" || fail AGGREGATION_PROTECTED_ROUTE_UNAVAILABLE
-    content_replication_capture "$aa_network_phase" "$aa_network_prefix" "$WORK/$aa_network_prefix-selection.json" \
+    content_replication_capture "$aa_network_phase" "$aa_network_prefix" "$WORK/$aa_network_prefix-selection.json" "${2:-1800}" \
         || fail AGGREGATION_CAPTURE_UNAVAILABLE
 }
 
@@ -66,7 +66,7 @@ agent_adapter_aggregation_stop_supplier() {
         || fail AGGREGATION_SUPPLIER_STILL_RUNNING
 }
 
-agent_adapter_aggregation_run() {
+agent_adapter_aggregation_prepare() {
     [ "$provider_node_a" = relay4 ] || fail AGGREGATION_LAYOUT_CHANGED
     [ "$provider_node_b" = relay5 ] || fail AGGREGATION_LAYOUT_CHANGED
     aa_r3=$WORK/state-relay3/compute
@@ -142,6 +142,10 @@ agent_adapter_aggregation_run() {
             --manifest "$aa_r4/$aa_cache.pb" --lifetime-seconds 7200 \
             >"$WORK/agent-adapter-aggregation-$aa_cache-init.json" || fail AGGREGATION_EMPTY_CACHE_INIT_FAILED
     done
+}
+
+agent_adapter_aggregation_run() {
+    agent_adapter_aggregation_prepare
     agent_adapter_aggregation_network_start uptake
     agent_adapter_aggregation_start relay4 aggregate 1900s compute aggregate-adapters --plan "$aa_r4/plan.json" \
         --directory "$aa_r4/aggregate" --runtime-root "$aa_r4/runtime" --model-root "$jobs_root/provision/model" \

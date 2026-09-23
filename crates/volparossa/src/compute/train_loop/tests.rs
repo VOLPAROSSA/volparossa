@@ -9,7 +9,7 @@ use clap::Parser;
 
 use super::*;
 
-fn fixture() -> (tempfile::TempDir, Options) {
+pub(super) fn fixture() -> (tempfile::TempDir, Options) {
     let root = tempfile::tempdir().unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let publisher = ed25519_dalek::SigningKey::from_bytes(&[43; 32]).verifying_key();
@@ -76,6 +76,66 @@ fn cycle_directory(store: &Store, sequence: u64, complete: bool) -> PathBuf {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
     }
     root
+}
+
+#[test]
+fn automatic_aggregation_enrollment_is_explicit_frozen_and_exclusive() {
+    let (root, mut args) = fixture();
+    let key = |byte| {
+        hex::encode(
+            ed25519_dalek::SigningKey::from_bytes(&[byte; 32])
+                .verifying_key()
+                .as_bytes(),
+        )
+    };
+    let validation = json!({"publisher_key":key(44),"name":"heldout","min_revision":1,"manifest_id":"b".repeat(64)});
+    let aggregate = json!({"version":1,"dataset":{"publisher_key":key(43),"name":"public-a",
+        "revision":1,"manifest_id":"a".repeat(64)},"adapters":[
+            {"publisher_key":key(45),"name":"a","min_revision":1},
+            {"publisher_key":key(46),"name":"b","min_revision":1},
+            {"publisher_key":key(47),"name":"c","min_revision":1}]});
+    let original = enrollment(&args).unwrap().1;
+    assert!(original.get("aggregate_updates").is_none());
+    let plan = root.path().join("aggregate.json");
+    let validation_path = root.path().join("validation.json");
+    for (path, value) in [(&plan, &aggregate), (&validation_path, &validation)] {
+        fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    args.aggregate_plan = Some(plan);
+    assert!(enrollment(&args).is_err());
+    args.validation_source = Some(validation_path);
+    let selected = enrollment(&args).unwrap().1;
+    assert_eq!(selected["aggregate_updates"]["plan"], aggregate);
+    assert_eq!(
+        selected["aggregate_updates"]["validation_source"],
+        validation
+    );
+    assert!(!args.directory.exists());
+    let store = Store::open(&args.directory, &selected, false).unwrap();
+    let retained = fs::read(args.directory.join("enrollment.json")).unwrap();
+    drop(store);
+    let mut changed = selected;
+    changed["aggregate_updates"]["plan"]["adapters"][0]["publisher_key"] = key(48).into();
+    assert!(Store::open(&args.directory, &changed, true).is_err());
+    assert_eq!(
+        fs::read(args.directory.join("enrollment.json")).unwrap(),
+        retained
+    );
+    args.peer_updates = Some(root.path().join("peer-updates.json"));
+    fs::write(
+        args.peer_updates.as_ref().unwrap(),
+        serde_json::to_vec(&json!({"version":1,
+        "channels":[{"publisher_key":key(48),"name":"individual"}]}))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(
+        args.peer_updates.as_ref().unwrap(),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    assert!(enrollment(&args).is_err());
 }
 
 fn add_cycle(store: &Store, state: &mut State, sequence: u64, phase: Phase) {

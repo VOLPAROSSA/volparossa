@@ -648,7 +648,7 @@ Without `--execute` this only previews the plan. Optional `--adapter-root` selec
 local baseline instead of the pinned base model. Compilation and inert admission/dispatch
 checks pass; the first real three-publisher result and its reporting failure are described below.
 Neither the median nor one validation set establishes poisoning resistance, general intelligence
-gain or completed B05. Automatic aggregation in the training loop remains to integrate.
+gain or completed B05. Owner-enrolled automatic training-loop integration is described below.
 
 An approved result can now be shared explicitly using `compute publish-aggregate`:
 
@@ -685,8 +685,49 @@ report hits a 262,144-byte reader limit. Source-exact checking of the unchanged 
 fields in memory passes the entire execution-evidence check, including seven observed workers,
 original signatures, transfers and cleanup. This does not turn the original failed report
 into a pass. A targeted 2 MiB composite-record bound is now implemented, retaining the 24 MiB
-overall evidence cap; a complete rerun is still needed. This bounded held-out result is not
-general answer-quality improvement, automatic aggregation or poisoning resistance.
+overall evidence cap. The [complete rerun on `865a38b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35869598198)
+passes the unchanged complete evidence checker: three distinct actually trained contributions,
+seven isolated workers, original signed publication, both protected transfers, exact-weight
+receiver inference and cleanup. The comparison uses seven held-out target tokens, with loss
+2.5174422264 for the baseline and 1.9376181364 for the candidate. This bounded result is not
+general answer-quality improvement, automatic adoption or poisoning resistance.
+
+### Automatically combining enrolled peer contributions
+
+For a new training loop, `--aggregate-plan` accepts the same three-publisher plan as
+`compute aggregate-adapters`. A separate exact `--validation-source` is required. The loop
+checks for updated contributions within its existing spare-capacity budget, freezes the three
+original signed inputs, performs the real aggregation and compares the result against its
+currently selected adapter. Only a locally approved result becomes the new serving/warmstart
+selection; combining weights does not increment local training or optimizer counters.
+
+```sh
+volparossa --control-socket /OWNER/agent.sock compute train-loop \
+  --plan /OWNER/public-sources.json --aggregate-plan /OWNER/trusted-three.json \
+  --validation-source /OWNER/validation-source.json --directory /OWNER/new-loop \
+  --runtime-root /OWNER/runtime --model-root /OWNER/model --cache /OWNER/agent-cache \
+  --serving-directory /OWNER/existing-serving-directory --execute
+```
+
+No model is downloaded and no broker is enabled by this command. The separately configured
+broker must use that serving directory. The next local cycle starts from the exact approved
+combined adapter, retaining a distinct aggregate origin and its comparison/cohort identities.
+A rejected local successor leaves the aggregate selected. An approved local successor replaces
+it and inherits the original authority expiry; fresh training data cannot renew that authority.
+
+The same three manifest IDs are processed once, not on every poll. Revision rollback and
+same-revision equivocation are refused. A completed result can be reopened after restart;
+an interrupted incomplete round is retained as failed rather than silently rerunning the model.
+The journal retains at most eight rounds and protects the active round from reclamation.
+Expired selections are no longer used; ambiguous/corrupted retained evidence fails closed,
+not as an accusation or automatic ban of the three publishers. Automatic rollback after
+aggregate corruption remains to extend beyond the existing individual-peer recovery path.
+
+This opt-in mode is mutually exclusive with `--peer-updates`; resume cannot grant an old
+enrollment new publishers or adoption authority. Sharing a combined result still uses the
+explicit `compute publish-aggregate` command. Compilation and focused checks pass; the new
+`agent-autonomous-aggregation` disposable proof is pending. No general intelligence gain,
+poisoning resistance or complete B05 is claimed.
 
 ### Using approved successors for new peer jobs
 
@@ -1441,7 +1482,10 @@ which treats parent answers and their assumptions as fallible analysis, not sour
 The original document remains data, not permission to execute embedded instructions. The
 enrolled mode survives `--resume`; historical graphs keep their original v3 bytes and prompts.
 Participating workers need this v5 implementation; older workers may reject it, and there is
-no silent downgrade. Focused checks pass, but live source-grounded answer quality is pending.
+no silent downgrade. The [real grounded run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35868855324)
+passes all five observed jobs, original-result checks and offline resume with the complete
+444-byte original source retained. Its final answer still incorrectly accepts an exit learning
+the client's address. This proves the evidence reaches execution, not source-faithful reasoning.
 
 Strategy `model_task_graph_constrained_v3` generates the whole JSON under one original owner/deadline:
 512 prompt tokens, 384 generated tokens shared across at most four attempts. Each attempt can
@@ -1904,7 +1948,13 @@ reaches catalog discovery and one cycle attempt, but the coordinator exits befor
 training worker is observed. It retains only `cycle_failed`, not the underlying cause or cycle
 files. Protected-path traffic is observed, but does not prove exact source acquisition or recovery.
 The learner reports a shutdown-cleanup failure; independently checked final object/process cleanup
-and unchanged host bytes pass. The scenario still needs passing KVM evidence. Full B07 remains open.
+and unchanged host bytes pass. Those attempts remain failed.
+The [complete run on `c4bd274`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35868906953)
+now passes source-exact review: actual P/Q training, Q approval, local Q corruption, restoration
+of original unexpired P, restart and eight real further updates from the new catalog source.
+Original parsed job receipts, seven protected network phases, cleanup and host-state equality
+pass. This is local recovery with controlled corruption, not general malicious-agent detection
+or independently attested remote execution. Full B07 remains open.
 
 Network-wide quarantine/replacement follows the automatic decision protocol, with bounded
 evidence, expiry and re-evaluation. A peer cannot erase another user's files or repair their

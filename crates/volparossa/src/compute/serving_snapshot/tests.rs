@@ -32,6 +32,94 @@ fn provenance(root: &Path, sequence: u64) -> Value {
 }
 
 #[test]
+fn approved_aggregate_requires_exact_origin_files_and_unrenewed_expiry() {
+    let root = setup();
+    let at = root.path();
+    let publisher =
+        Publisher::open(&at.join("published"), &at.join("runtime"), &"a".repeat(64)).unwrap();
+    let files = provenance(at, 1)["adapter_files"].clone();
+    let origin = json!({"kind":"aggregate_update","aggregate_sequence":7,
+        "local_predecessor":1,"manifest_ids":["1".repeat(64),"2".repeat(64),"3".repeat(64)],
+        "dataset_manifest_id":"4".repeat(64),"cohort_sha256":"5".repeat(64),
+        "comparison_sha256":"6".repeat(64),"result_sha256":"7".repeat(64),
+        "adapter_files":files,"expires_unix_seconds":100});
+    let proof = json!({"kind":"approved_aggregate","approved":true,"origin":origin,
+        "adapter_files":files,"expires_unix_seconds":100});
+    let selected = publisher
+        .publish(&at.join("adapter"), 100, &proof, 10)
+        .unwrap();
+    let retained = fs::read(at.join("published/current.json")).unwrap();
+    assert_eq!(selected.expires_unix_seconds, 100);
+    assert_eq!(
+        publisher
+            .publish(&at.join("adapter"), 100, &proof, 90)
+            .unwrap()
+            .id,
+        selected.id
+    );
+    assert_eq!(
+        fs::read(at.join("published/current.json")).unwrap(),
+        retained
+    );
+    for (field, value) in [
+        ("approved", json!(false)),
+        ("expires_unix_seconds", json!(101)),
+        ("origin", json!({"kind":"aggregate_update","approved":true})),
+    ] {
+        let mut changed = proof.clone();
+        changed[field] = value;
+        assert!(
+            publisher
+                .publish(&at.join("adapter"), 100, &changed, 90)
+                .is_err(),
+            "{field}"
+        );
+    }
+    for field in [
+        "manifest_ids",
+        "dataset_manifest_id",
+        "cohort_sha256",
+        "comparison_sha256",
+        "result_sha256",
+    ] {
+        let mut changed = proof.clone();
+        changed["origin"].as_object_mut().unwrap().remove(field);
+        assert!(
+            publisher
+                .publish(&at.join("adapter"), 100, &changed, 90)
+                .is_err(),
+            "{field}"
+        );
+    }
+    let mut changed = proof.clone();
+    changed["origin"]["adapter_files"]["README.md"]["sha256"] = "9".repeat(64).into();
+    assert!(
+        publisher
+            .publish(&at.join("adapter"), 100, &changed, 90)
+            .is_err()
+    );
+    assert!(
+        publisher
+            .publish(&at.join("adapter"), 101, &proof, 90)
+            .is_err()
+    );
+    assert!(
+        publisher
+            .publish(&at.join("adapter"), 99, &proof, 90)
+            .is_err()
+    );
+    assert!(
+        publisher
+            .publish(&at.join("adapter"), 100, &proof, 100)
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(at.join("published/current.json")).unwrap(),
+        retained
+    );
+}
+
+#[test]
 fn snapshot_preserves_original_expiry_and_exact_bytes_without_a_worker() {
     let root = setup();
     let at = root.path();

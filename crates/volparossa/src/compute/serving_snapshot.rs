@@ -86,12 +86,24 @@ impl Selection {
             record.provenance["approved"] == true
                 && matches!(
                     record.provenance["kind"].as_str(),
-                    Some("approved_local_successor" | "approved_peer_update")
+                    Some(
+                        "approved_local_successor" | "approved_peer_update" | "approved_aggregate"
+                    )
                 )
                 && record.provenance["adapter_files"]
                     == serde_json::to_value(&record.adapter_files)?,
             "serving_snapshot_approval_binding"
         );
+        if record.provenance["kind"] == "approved_aggregate" {
+            let origin = &record.provenance["origin"];
+            let expires = super::train_cycle::aggregate_predecessor_expiry(origin)?;
+            ensure!(
+                record.expires_unix_seconds == expires
+                    && record.provenance["expires_unix_seconds"] == expires
+                    && origin["adapter_files"] == serde_json::to_value(&record.adapter_files)?,
+                "serving_snapshot_aggregate_approval_binding"
+            );
+        }
         let bytes = encoded(&record)?;
         Ok(Self {
             id: digest(&bytes),

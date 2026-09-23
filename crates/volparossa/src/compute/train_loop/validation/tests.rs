@@ -219,6 +219,70 @@ async fn completed_stage_is_reused_without_runtime_and_partial_stage_is_retained
     assert!(!args.runtime_root.exists() && !args.model_root.exists());
 }
 
+#[tokio::test]
+async fn inherited_authority_bounds_validation_even_when_both_signed_sources_live_longer() {
+    let (_root, args, store) = owner();
+    super::super::evaluation::fixture(&store, 1, true);
+    let cycle = store.cycle_path(1).unwrap();
+    let input = source_fixture(&cycle.join("validation"));
+    let prepared = args.directory.join("validation-input");
+    make_directory(&prepared).unwrap();
+    for (name, limit) in SOURCE_FILES {
+        write_new(
+            &prepared.join(name),
+            &read_owned(&cycle.join("validation").join(name), limit).unwrap(),
+        )
+        .unwrap();
+    }
+    let mut state = State::new(1);
+    state.validation = Some(snapshot(&prepared).unwrap());
+    let baseline = stage_fixture(&cycle, &input, "baseline", 2.0);
+    let candidate = stage_fixture(&cycle, &input, "candidate", 1.5);
+    // Legacy receipts fit both original signed sources. These are inert reports,
+    // not model execution or proof that any adapter improves actual answers.
+    assert!(recompute(&store, 1).unwrap().approved);
+    let authority = baseline
+        .deadline_unix_seconds
+        .min(candidate.deadline_unix_seconds)
+        - 1;
+    assert!(baseline.verified_at_unix_seconds < authority);
+    assert!(candidate.verified_at_unix_seconds < authority);
+    let mut result = store.read_cycle_json(1, "result.json").unwrap();
+    assert!(authority < result["source_expires_unix_seconds"].as_u64().unwrap());
+    assert!(authority < input.provenance.expires_unix_seconds);
+    result["authority_expires_unix_seconds"] = authority.into();
+    overwrite(&cycle.join("result.json"), &result);
+    assert_eq!(
+        recompute(&store, 1).unwrap_err().to_string(),
+        "train_validation_stage_expiry"
+    );
+    let (_sender, activity) = watch::channel(true);
+    assert_eq!(
+        assess(&args, &store, &state, 1, &activity)
+            .await
+            .unwrap_err()
+            .to_string(),
+        "train_validation_stage_expiry"
+    );
+    assert!(!cycle.join("validation.json").exists());
+    // The same completed byte-bound receipts are accepted with stage deadlines
+    // actually inside the inherited authority, without starting a worker.
+    for (name, mut stage) in [("baseline", baseline), ("candidate", candidate)] {
+        stage.deadline_unix_seconds = authority;
+        stage.report["supervisor"]["deadline_seconds"] =
+            (authority - stage.started_at_unix_seconds).into();
+        overwrite(&cycle.join(format!("{name}-report.json")), &stage);
+    }
+    assert!(
+        assess(&args, &store, &state, 1, &activity)
+            .await
+            .unwrap()
+            .approved
+    );
+    assert!(verify(&store, 1).unwrap().approved);
+    assert!(!args.runtime_root.exists() && !args.model_root.exists());
+}
+
 #[test]
 fn missing_manifest_training_rows_invalid_metrics_and_changed_candidate_are_rejected() {
     let (_root, _args, store) = owner();

@@ -28,6 +28,7 @@ agent_model_task_graph=no
 agent_successor_serving=no
 agent_active_recovery=no
 agent_adapter_aggregation=no
+agent_autonomous_aggregation=no
 agent_policy_assessment=no
 agent_train_cycle=no
 agent_train_loop=no
@@ -47,7 +48,7 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-policy-assessment|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
 }
 
 print_plan() {
@@ -102,6 +103,18 @@ print_plan() {
                 '  execute its source questions on protected peers and join under the exact original goal;' \
                 '  preserve planner and worker receipts across completed offline resume and full cleanup;' \
                 '  no supplied task graph, canned fallback, model-selected tools or answer-quality claim.'
+            return
+        fi
+        if [ "$agent_autonomous_aggregation" = yes ]; then
+            printf '%s\n' \
+                'VOLPAROSSA agent-autonomous-aggregation plan:' \
+                '  train three real public adapters under distinct explicitly enrolled publisher keys;' \
+                '  provision their unchanged signed public inputs to R5; this is not peer upload;' \
+                '  R4 cold-fetches its enrolled cohort through protected paths inside the real train-loop;' \
+                '  combine effective LoRA updates, require actual heldout approval, then activate the exact aggregate;' \
+                '  verify genuine serving and the next local training warmstart with inherited original expiry;' \
+                '  retain immutable inputs, journal, worker receipts, packets and full cleanup;' \
+                '  isolated 135M workers; no Sybil, general-quality or complete-B05 guarantee.'
             return
         fi
         if [ "$agent_adapter_aggregation" = yes ]; then
@@ -579,6 +592,7 @@ while [ "$#" -gt 0 ]; do
             agent_successor_serving=no
             agent_active_recovery=no
             agent_adapter_aggregation=no
+            agent_autonomous_aggregation=no
             agent_policy_assessment=no
             agent_train_cycle=no
             agent_train_loop=no
@@ -603,6 +617,7 @@ while [ "$#" -gt 0 ]; do
                 agent-successor-serving) scenario=agent-jobs; agent_successor_serving=yes; wifi_link=no; uplink_link=no ;;
                 agent-active-recovery) scenario=agent-jobs; agent_active_recovery=yes; wifi_link=no; uplink_link=no ;;
                 agent-adapter-aggregation) scenario=agent-jobs; agent_adapter_aggregation=yes; wifi_link=no; uplink_link=no ;;
+                agent-autonomous-aggregation) scenario=agent-jobs; agent_autonomous_aggregation=yes; wifi_link=no; uplink_link=no ;;
                 agent-policy-assessment) scenario=agent-jobs; agent_policy_assessment=yes; wifi_link=no; uplink_link=no ;;
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
@@ -880,7 +895,7 @@ if [ "$agent_policy_assessment" = yes ]; then
     done
     command -v openssl >/dev/null 2>&1 || exit 69
 fi
-if [ "$agent_successor_serving" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ]; then
+if [ "$agent_successor_serving" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
     for successor_fixture in agent-successor-serving-smoke.sh agent-successor-serving-smoke.py \
         agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py; do
         [ -f "$source_directory/tests/integration/$successor_fixture" ] \
@@ -892,15 +907,21 @@ if [ "$agent_active_recovery" = yes ]; then
     [ -f "$source_directory/tests/integration/agent-aggregation-backend-smoke.py" ] \
         && [ ! -L "$source_directory/tests/integration/agent-aggregation-backend-smoke.py" ] || exit 69
 fi
-if [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ]; then
+if [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
     for recovery_fixture in agent-active-recovery-smoke.sh agent-active-recovery-smoke.py \
         content-replication-smoke.sh content-replication-smoke.py content-replication-capture.py; do
         [ -f "$source_directory/tests/integration/$recovery_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$recovery_fixture" ] || exit 69
     done
 fi
-if [ "$agent_adapter_aggregation" = yes ]; then
+if [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
     for aggregation_fixture in agent-adapter-aggregation-smoke.sh agent-adapter-aggregation-smoke.py; do
+        [ -f "$source_directory/tests/integration/$aggregation_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$aggregation_fixture" ] || exit 69
+    done
+fi
+if [ "$agent_autonomous_aggregation" = yes ]; then
+    for aggregation_fixture in agent-autonomous-aggregation-smoke.sh agent-autonomous-aggregation-smoke.py; do
         [ -f "$source_directory/tests/integration/$aggregation_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$aggregation_fixture" ] || exit 69
     done
@@ -2226,11 +2247,11 @@ if [ "$agent_policy_assessment" = yes ]; then
     # shellcheck source=tests/integration/agent-policy-assessment-smoke.sh
     . "$source_directory/tests/integration/agent-policy-assessment-smoke.sh"
 fi
-if [ "$agent_successor_serving" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ]; then
+if [ "$agent_successor_serving" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
     # shellcheck source=tests/integration/agent-successor-serving-smoke.sh
     . "$source_directory/tests/integration/agent-successor-serving-smoke.sh"
 fi
-if [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ]; then
+if [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
     # Existing disposable R4 client legs and R5 generic-control-only links.
     # shellcheck source=tests/integration/content-replication-smoke.sh
     . "$source_directory/tests/integration/content-replication-smoke.sh"
@@ -2239,9 +2260,14 @@ if [ "$agent_active_recovery" = yes ]; then
     # shellcheck source=tests/integration/agent-active-recovery-smoke.sh
     . "$source_directory/tests/integration/agent-active-recovery-smoke.sh"
 fi
-if [ "$agent_adapter_aggregation" = yes ]; then
+if [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
     # shellcheck source=tests/integration/agent-adapter-aggregation-smoke.sh
     . "$source_directory/tests/integration/agent-adapter-aggregation-smoke.sh"
+fi
+if [ "$agent_autonomous_aggregation" = yes ]; then
+    # Shared aggregation definitions must be loaded before the autonomous wrapper.
+    # shellcheck source=tests/integration/agent-autonomous-aggregation-smoke.sh
+    . "$source_directory/tests/integration/agent-autonomous-aggregation-smoke.sh"
 fi
 if [ "$scenario" = agent-artifact ]; then
     # shellcheck source=tests/integration/agent-artifact-smoke.sh
@@ -2407,19 +2433,22 @@ fi
 if [ "$agent_policy_assessment" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/agent-policy-assessment-smoke.py" "$WORK/bin/agent-policy-assessment-smoke.py"
 fi
-if [ "$agent_successor_serving" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ]; then
+if [ "$agent_successor_serving" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
     for successor_script in agent-successor-serving-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$successor_script" "$WORK/bin/$successor_script"
     done
 fi
-if [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ]; then
+if [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/agent-active-recovery-smoke.py" "$WORK/bin/agent-active-recovery-smoke.py"
     for recovery_script in content-replication-smoke.py content-replication-capture.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$recovery_script" "$WORK/bin/$recovery_script"
     done
 fi
-if [ "$agent_adapter_aggregation" = yes ]; then
+if [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/agent-adapter-aggregation-smoke.py" "$WORK/bin/agent-adapter-aggregation-smoke.py"
+fi
+if [ "$agent_autonomous_aggregation" = yes ]; then
+    install -o root -g root -m 0555 "$source_directory/tests/integration/agent-autonomous-aggregation-smoke.py" "$WORK/bin/agent-autonomous-aggregation-smoke.py"
 fi
 if [ "$agent_train_loop" = yes ]; then
     for loop_script in agent-train-loop-smoke.py agent-train-loop-catalog.py agent-peer-learning-smoke.py content-replication-smoke.py content-replication-capture.py; do
@@ -2632,7 +2661,7 @@ CONTENT_ADAPTIVE_FILTER
 fi
 if [ "$scenario" = dns-cache ]; then
     dns_cache_extend_network
-elif [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$agent_train_loop" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ]; then
+elif [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$agent_train_loop" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
     content_replication_extend_network
 elif [ "$scenario" = mixed-link ]; then
     mixed_link_extend_network
@@ -2724,7 +2753,7 @@ write_config() {
     uplink=independent_internet; extra_listen=none
     dc_enabled=false; dc_upstream=null; dc_metrics=false
     [ "$node" != client ] || client_role=true
-    if { [ "$agent_successor_serving" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ]; } && [ "$node" = relay4 ]; then
+    if { [ "$agent_successor_serving" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; } && [ "$node" = relay4 ]; then
         # Disposable learner only: the existing local cache API requires Client.
         # Roles cannot be enabled dynamically without restarting discovery.
         # Relay stays enabled; this is not a production participation configuration.
@@ -2807,7 +2836,7 @@ write_config() {
         relay_capacity=10; exit_capacity=10
     fi
     [ "$scenario" != mixed-link ] || mixed_link_configure_node
-    if [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$agent_train_loop" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ]; then
+    if [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$agent_train_loop" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
         content_replication_configure_node
     fi
     if [ "$agent_train_loop" = yes ] && [ "$node" = relay3 ]; then
@@ -3294,7 +3323,7 @@ launch_agent() {
         # not read the publisher's files merely because both use the same UID.
         set -- "--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay3 $WORK/state-relay5"
     fi
-    if [ "$agent_adapter_aggregation" = yes ]; then
+    if [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
         # Fixed public model provisioning remains visible; peer source/adapters do not.
         case $node in
             relay3) set -- "--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay4 $WORK/state-relay5" ;;
@@ -4905,7 +4934,7 @@ grep -Fx 'client: false' "$WORK/roles-relay0.txt" >/dev/null || fail RELAY0_CLIE
 grep -Fx 'client: false' "$WORK/roles-relay1.txt" >/dev/null || fail RELAY1_CLIENT_ROLE_INVALID
 grep -Fx 'client: false' "$WORK/roles-relay2.txt" >/dev/null || fail RELAY2_CLIENT_ROLE_INVALID
 grep -Fx 'client: false' "$WORK/roles-relay3.txt" >/dev/null || fail RELAY3_CLIENT_ROLE_INVALID
-if [ "$agent_successor_serving" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ]; then
+if [ "$agent_successor_serving" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
     grep -Fx 'client: true' "$WORK/roles-relay4.txt" >/dev/null || fail RELAY4_CLIENT_ROLE_INVALID
 else
     grep -Fx 'client: false' "$WORK/roles-relay4.txt" >/dev/null || fail RELAY4_CLIENT_ROLE_INVALID
