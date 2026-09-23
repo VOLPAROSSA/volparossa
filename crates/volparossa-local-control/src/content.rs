@@ -321,6 +321,54 @@ impl ContentFetchNameRequest {
     }
 }
 
+/// Read only an already registered public object from this node's configured contribution
+/// service. There is no caller-selected cache, discovery, route preparation or remote fallback.
+#[derive(Clone, PartialEq, Message)]
+pub struct ContentLocalFetchNameRequest {
+    /// Independently selected original publisher, not the local storage provider's identity.
+    #[prost(bytes = "vec", tag = "1")]
+    pub publisher_key: Vec<u8>,
+    /// Exact publisher-local native name.
+    #[prost(string, tag = "2")]
+    pub name: String,
+    /// Positive retained owner revision floor; this is not global freshness evidence.
+    #[prost(uint64, tag = "3")]
+    pub min_revision: u64,
+    /// Mandatory public MIME restriction, checked before any object bytes are delivered.
+    #[prost(string, tag = "4")]
+    pub expected_content_type: String,
+    /// Mandatory per-object byte bound, independent of the configured store quota.
+    #[prost(uint64, tag = "5")]
+    pub max_object_bytes: u64,
+}
+
+impl ContentLocalFetchNameRequest {
+    pub(crate) fn validate(&self) -> Result<(), ControlProtocolError> {
+        if self.publisher_key.len() != 32
+            || self.name.is_empty()
+            || self.name.len() > 128
+            || self.name.chars().any(char::is_control)
+            || self.min_revision == 0
+            || self.expected_content_type.is_empty()
+            || self.expected_content_type.len() > 128
+            || !self
+                .expected_content_type
+                .bytes()
+                .all(|b| b.is_ascii_graphic())
+            || self.max_object_bytes == 0
+            || self.max_object_bytes > 256 * 1024 * 1024
+        {
+            return Err(ControlProtocolError::Invalid(
+                "invalid local native name request",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod local_name_tests;
+
 /// Original signed envelope for this request's following bounded local transfer, not completion.
 #[derive(Clone, PartialEq, Eq, Message)]
 pub struct NamedContentTransferReady {

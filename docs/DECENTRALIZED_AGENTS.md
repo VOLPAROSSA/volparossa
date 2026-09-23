@@ -2046,8 +2046,8 @@ agent restarts with unchanged original authority/decision records. Five capture 
 substituted. The model's incorrect principle meanings and unfinished prose remain visible;
 successful enforcement does not make its reasoning correct.
 
-Automatic subscriptions, policy-authority membership and partition/conflict handling remain
-separate work. Publisher signatures authenticate transport objects; they cannot replace the
+The automatic selected-channel follower below is a separate subsequent proof; policy-authority
+membership and partition/conflict handling remain open. Publisher signatures authenticate transport objects; they cannot replace the
 receiving node's policy trust or prove the assessors' judgments correct. This proves a selected
 two-node development path, not complete B06 or global governance; the earlier failed run stays
 failed.
@@ -2058,9 +2058,10 @@ failed.
 owner selects one `--publisher-key`/`--name` channel, its minimum publication revision, the
 complete exact-object subject (`--subject-publisher-key`, `--subject-manifest-id`,
 `--subject-sha256`), `--framework-sha256` and the node's own `--policy-config`. It is not a
-global policy-feed subscription or discovery of new authorities. A content publisher must
-register its signed wrapper using the existing contribution API: custody of chunks alone
-does **not** create a named publication.
+global policy-feed subscription or discovery of new authorities. The selected signed wrapper
+must be registered in the serving peer's live name-enabled registry. Contribution registers
+a publisher's wrapper; complete custody admission can register the original wrapper too.
+Raw chunks alone do not create a named publication or change its publisher/name.
 
 The follower refreshes that channel through the existing protected named-content path,
 accepting only the policy-decision MIME type and at most 8 KiB of original decision bytes.
@@ -2092,8 +2093,39 @@ checks remain. All 11 focused object-policy CLI tests pass, including four new f
 checks; strict CLI Clippy, scoped formatting and shell checks also pass. The inert fixture
 self-test passes with 81 rejection cases. The separate
 [automatic-consumer proof on `3f30a5f9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35899595361)
-is pending. This automatic flow is not proved by either the failed `6ac301ee` or the passing
-manual-import `4d438099` evidence; B06 remains open.
+passes its full committed checker against 208 unchanged originals. The same follower goes from
+one completed unsuccessful cold poll to one actual protected named-peer download of 605 original
+quorum bytes and one automatic application, with no origin-body fetch. Both actual agent restarts
+preserve the original decision, epoch and expiry, and the decided cached subject remains withheld.
+The 101,947 privacy frames, full cleanup and unchanged host state pass. Original model reasoning
+errors are retained, not corrected in the report. B06, authority membership and reliable semantic
+judgment remain open; neither older run is substituted for this separate automatic proof.
+
+#### Automatic rounds with independently owned signing keys (development candidate)
+
+`compute peer policy-round` takes one complete original `--assessment-bundle` and independently
+selected authorities (`--authority POLICY_KEY:TRANSPORT_PUBLISHER:REPLY_NAME`). It derives the
+proposal, deposits its canonical request through protected custody, retrieves the original
+endorsements and verifies the full existing policy quorum. It does not hold authority private
+keys, rerun models, supply a human verdict or activate policy itself. The original finite
+`--max-seconds` window, selected quorum and signed expiries survive `--resume` unchanged.
+
+Each `compute peer policy-authority` owner selects its own policy configuration, source,
+requester, assessors, model profile, request channel and separate authority/content identities.
+It reads public requests through its local agent's live contribution registry, replays all four
+original signed transcripts and validates the exact proposal. A fsynced identity-adjacent
+reservation prevents automatic owners from signing conflicting bodies at one revision or
+rolling that subject/epoch back. It then contributes exactly one endorsement under its content
+identity. A content signature alone never supplies a policy vote. Polling, storage and transfers
+are bounded; stopping the owner does not disconnect shared routes.
+
+The completed quorum is normally contributed locally. Repeated `--publication-provider-key`
+instead selects protected custody providers for the **same original wrapper**, allowing a
+coordinator without a local content service. Existing `policy-follow` subscribers can fetch it
+by its original publisher/name and verify their own authority before applying it. Retained
+receipts describe completed historical handoffs, not guaranteed current availability. The new
+separate-authority network proof remains pending; configured authority membership, partition
+governance and reliable semantic judgment are not solved by these commands.
 
 Bind observations to specific agent/model artifacts, task contracts and observed failures.
 Use independently checked outcomes, regression/poisoning checks and diverse assessors; copied

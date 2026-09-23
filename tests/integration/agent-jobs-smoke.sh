@@ -189,7 +189,7 @@ agent_jobs_cgroup_empty() {
 
 agent_jobs_stop_unit() {
     jobs_stop_unit=$1
-    case $jobs_stop_unit in volparossa-alpha-compute@relay[345].service|volparossa-alpha-aggregation.service) ;; *) return 1 ;; esac
+    case $jobs_stop_unit in volparossa-alpha-compute@relay[345].service|volparossa-alpha-policy-authority@relay[345].service|volparossa-alpha-aggregation.service) ;; *) return 1 ;; esac
     jobs_load_state=$(systemctl show --property=LoadState --value "$jobs_stop_unit") || return 1
     case $jobs_load_state in
         loaded)
@@ -214,6 +214,9 @@ agent_jobs_stop_unit() {
 
 agent_jobs_stop() {
     jobs_dag_pressure_cleanup_failed=no
+    if [ "${agent_policy_assessment:-no}" = yes ]; then
+        agent_policy_owners_stop || return 1
+    fi
     if [ "${agent_ready_dag:-no}" = yes ]; then
         # Preserve the floor-restoration failure, but still stop the original
         # owner and every broker; a dead B must not prevent ordinary teardown.
@@ -263,6 +266,9 @@ agent_jobs_stop() {
 
 agent_jobs_cleanup() {
     agent_jobs_stop || return 1
+    if [ "${agent_policy_assessment:-no}" = yes ]; then
+        python3 -B "$source_directory/tests/integration/agent-policy-assessment-smoke.py" round_cleanup "$WORK" || return 1
+    fi
     [ -n "${jobs_root:-}" ] && [ -f "$WORK/bin/agent-jobs-smoke.py" ] || return 0
     if [ ! -f "$WORK/agent-jobs-private-cleanup.json" ]; then
         python3 -B "$source_directory/tests/integration/agent-jobs-smoke.py" cleanup "$WORK" \
@@ -305,7 +311,7 @@ agent_jobs_setup() {
         [ "$provider_node_b" = relay5 ] || fail RECOVERY_NODE_LAYOUT_CHANGED
         jq -e --arg control "$provider_control_peer" '[.relay0,.relay1,.relay2] | index($control) != null' \
             "$WORK/a01-expected-peers.json" >/dev/null || fail RECOVERY_CONTROL_NOT_INDEPENDENT
-    elif [ "${agent_jobs_peer_recovery:-no}" = yes ]; then
+    elif [ "${agent_jobs_peer_recovery:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ]; then
         jq -e --arg control "$provider_control_peer" '[.relay0,.relay1,.relay2] | index($control) != null' \
             "$WORK/a01-expected-peers.json" >/dev/null || fail PEER_RECOVERY_CONTROL_NOT_INDEPENDENT
         content_provider_adaptive_control_underlay "$provider_control_peer" || fail PEER_RECOVERY_CONTROL_UNDERLAY_FAILED
