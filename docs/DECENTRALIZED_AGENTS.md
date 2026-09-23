@@ -648,7 +648,29 @@ Without `--execute` this only previews the plan. Optional `--adapter-root` selec
 local baseline instead of the pinned base model. Compilation and inert admission/dispatch
 checks pass; numerical/backend and real three-publisher execution evidence is still pending.
 Neither the median nor one validation set establishes poisoning resistance, general intelligence
-gain or completed B05. Autonomous adoption and signed aggregate publication remain to integrate.
+gain or completed B05. Automatic aggregation in the training loop remains to integrate.
+
+An approved result can now be shared explicitly using `compute publish-aggregate`:
+
+```sh
+volparossa --control-socket /OWNER/agent.sock compute publish-aggregate \
+  --directory /OWNER/new-combination --publish-name combined-public-adapter --revision 1 \
+  --publication-key "$OWNER_PUBLIC_KEY_HEX" --identity /OWNER/identity.key \
+  --passphrase-file /OWNER/identity-passphrase --publish-cache /OWNER/existing-public-cache
+```
+
+The default is a read-only recheck/preview. Add `--execute` to sign and contribute through an
+already authorized content-serving agent. All three original signatures, exact cohort bytes,
+validation and approval are reopened before handoff. Publication expires no later than the
+earliest original authority; retries reuse the same signed manifest, not a new training cycle
+or a renewed lease. The local publication directory retains the original request, manifest and
+receipt. This is a publisher signature on an aggregate, not an attestation that its contributors
+are independent or honest. No model or policy is activated by publishing it.
+
+Other nodes can use the existing adapter fetch and trusted peer-update channel: the bundle
+format is unchanged. Automatic adoption still requires the receiver's own pinned validation
+comparison; serving requires its separately enabled serving configuration. The new publication
+path and its three-trained-publisher end-to-end proof are not yet live-verified.
 
 ### Using approved successors for new peer jobs
 

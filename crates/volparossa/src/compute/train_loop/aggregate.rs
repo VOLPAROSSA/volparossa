@@ -359,6 +359,232 @@ fn verify_report(
     Ok(())
 }
 
+pub(super) struct Approved {
+    pub(super) bundle: Vec<u8>,
+    pub(super) expires: u64,
+    pub(super) identity: Value,
+}
+
+/// Reopen a completed aggregation, not a training cycle or a new comparison.
+/// Every original authority must still be live when publication is requested.
+#[allow(
+    clippy::too_many_lines,
+    reason = "Recheck the complete frozen cohort before granting publication"
+)]
+pub(super) fn reopen_approved(root: &Path, limits: &Limits, at: u64) -> Result<Approved> {
+    private_directory(root)?;
+    let read = |name: &str| -> Result<Value> {
+        Ok(serde_json::from_slice(&read_file(
+            &root.join(name),
+            512 * 1024,
+        )?)?)
+    };
+    let selection = read("selection.json")?;
+    ensure!(
+        selection["version"] == 1
+            && selection["execute"] == true
+            && selection["operation"] == "compute_aggregate_adapters"
+            && selection["algorithm"] == ALGORITHM,
+        "aggregate_original_selection"
+    );
+    let plan: Plan = serde_json::from_value(selection["plan"].clone())?;
+    let source = plan.validate()?;
+    let validation: Source = serde_json::from_value(read("validation-source.json")?)?;
+    ensure!(
+        serde_json::to_value(&validation)? == selection["validation_source"]
+            && validation.manifest()? != Some(source.manifest_id),
+        "aggregate_original_validation_selection"
+    );
+    let dataset = read_file(&root.join("dataset.json"), 1024 * 1024)?;
+    let validation_data = read_file(&root.join("validation-input/dataset.json"), 1024 * 1024)?;
+    let validation_signed = read_file(&root.join("validation-input/dataset.manifest"), 64 * 1024)?;
+    let manifest = SignedManifest::decode(&validation_signed)?.verify(&validation.key()?, at)?;
+    ensure!(
+        Some(*manifest.manifest_id()) == validation.manifest()?
+            && manifest.metadata().name == validation.name
+            && validation
+                .min_revision
+                .is_none_or(|floor| manifest.metadata().revision >= floor)
+            && manifest.metadata().content_type
+                == volparossa_content::provider::compute::dataset::CONTENT_TYPE
+            && manifest.length() == validation_data.len() as u64
+            && manifest.object_sha256() == &<[u8; 32]>::from(Sha256::digest(&validation_data)),
+        "aggregate_original_validation_manifest"
+    );
+    let validation_value: Value = serde_json::from_slice(&validation_data)?;
+    ensure!(
+        validation_value["version"] == 1
+            && validation_value["visibility"] == "public"
+            && validation_value["license"] == "GPL-3.0-only"
+            && validation_value["train"]
+                .as_array()
+                .is_some_and(Vec::is_empty),
+        "aggregate_original_public_validation"
+    );
+    let mut expires = manifest.validity().expires;
+    let mut inputs = Vec::with_capacity(3);
+    let mut provenance = Vec::with_capacity(3);
+    for (index, channel) in plan.adapters.iter().enumerate() {
+        let query = peer_update::Fetch {
+            publisher_key: crate::content::parse_publisher_key(&channel.publisher_key)
+                .map_err(anyhow::Error::msg)?,
+            name: channel.name.clone(),
+            min_revision: channel.min_revision,
+            cache: root.to_path_buf(),
+            limits: limits.clone(),
+        };
+        // reopen/open_pending perform no cache/network operation; the cache path is unused.
+        let parent = root.join("peers").join(index.to_string());
+        let imported = peer_update::reopen(&parent.join("import"), &query, &source, at)?;
+        let pending = peer_update::open_pending(&parent.join("pending"), &query, at)?;
+        ensure!(
+            pending.manifest_id() == imported.manifest_id()
+                && read_file(&parent.join("import/dataset.json"), 1024 * 1024)? == dataset,
+            "aggregate_original_peer_selection"
+        );
+        let files = peer_evaluation::adapter_files(&parent.join("import/adapter"))?;
+        ensure!(
+            peer_evaluation::adapter_files(&root.join("cohort").join(index.to_string()))? == files,
+            "aggregate_original_cohort_files"
+        );
+        inputs.push(serde_json::to_value(files)?);
+        provenance.push(imported.provenance().clone());
+        expires = expires.min(imported.expires());
+    }
+    let proof = read("cohort.json")?;
+    ensure!(
+        proof["version"] == 1
+            && proof["kind"] == "three_publisher_adapter_aggregation"
+            && proof["algorithm"] == ALGORITHM
+            && proof["inputs"] == json!(provenance)
+            && proof["input_files"] == json!(inputs)
+            && proof["dataset_manifest_id"] == hex::encode(source.manifest_id)
+            && proof["expires_unix_seconds"] == expires
+            && at < expires,
+        "aggregate_original_cohort_provenance"
+    );
+    let baseline = &proof["baseline"];
+    if selection["baseline_adapter"].is_null() {
+        ensure!(
+            baseline == &json!({"kind":"pinned_base","original_path":null,"adapter_files":null}),
+            "aggregate_original_base_baseline"
+        );
+    } else {
+        ensure!(
+            baseline["kind"] == "configured_adapter"
+                && baseline["original_path"] == selection["baseline_adapter"]
+                && baseline["adapter_files"]
+                    == serde_json::to_value(peer_evaluation::adapter_files(
+                        &root.join("baseline")
+                    )?)?,
+            "aggregate_original_adapter_baseline"
+        );
+    }
+    super::super::train_cycle::guard_overlap(&dataset, &validation_data)?;
+    let report = read("aggregate-report.json")?;
+    let threads = u16::try_from(
+        selection["threads"]
+            .as_u64()
+            .context("aggregate_original_threads")?,
+    )?;
+    let seconds = u16::try_from(
+        report["supervisor"]["deadline_seconds"]
+            .as_u64()
+            .context("aggregate_original_deadline")?,
+    )?;
+    ensure!(
+        (1..=2).contains(&threads)
+            && (1..=600).contains(&seconds)
+            && u64::from(seconds)
+                <= selection["worker_deadline_seconds"]
+                    .as_u64()
+                    .context("aggregate_original_worker_bound")?,
+        "aggregate_original_worker_bounds"
+    );
+    verify_report(
+        &report,
+        &dataset,
+        &inputs,
+        &root.join("job/adapter"),
+        threads,
+        seconds,
+    )?;
+    let mut original_report = report.clone();
+    original_report
+        .as_object_mut()
+        .context("aggregate_original_worker_report")?
+        .remove("supervisor");
+    ensure!(
+        original_report == read("job/report.json")?,
+        "aggregate_original_worker_report_changed"
+    );
+    let candidate = root.join("candidate");
+    let files = peer_evaluation::adapter_files(&candidate.join("import/adapter"))?;
+    let comparison = peer_evaluation::verify(&candidate)?;
+    let compared_selection = read("candidate/comparison/selection.json")?;
+    ensure!(
+        comparison.approved
+            && comparison.import_proof == proof
+            && comparison.baseline_origin == *baseline
+            && comparison.candidate_files == files
+            && peer_evaluation::adapter_files(&root.join("job/adapter"))? == files
+            && read("candidate/import/provenance.json")? == proof
+            && read_file(&candidate.join("import/dataset.json"), 1024 * 1024)? == dataset
+            && read_file(&candidate.join("comparison/dataset.json"), 1024 * 1024)?
+                == validation_data
+            && read_file(&candidate.join("comparison/dataset.manifest"), 64 * 1024)?
+                == validation_signed
+            && read_file(&candidate.join("comparison/provenance.json"), 64 * 1024)?
+                == read_file(&root.join("validation-input/provenance.json"), 64 * 1024)?
+            && compared_selection["validation_source"] == serde_json::to_value(&validation)?
+            && compared_selection["expires"] == expires,
+        "aggregate_original_approved_comparison"
+    );
+    let result = read("result.json")?;
+    ensure!(
+        result["version"] == 1
+            && result["operation"] == "compute_aggregate_adapters"
+            && result["approved"] == true
+            && result["optimizer_steps"] == 0
+            && result["comparison"] == serde_json::to_value(&comparison)?
+            && result["cohort"] == proof
+            && result["candidate_files"] == serde_json::to_value(&files)?,
+        "aggregate_original_result"
+    );
+    let bundle = read_file(&root.join("adapter.bundle"), 4 * 1024 * 1024)?;
+    let decoded = AdapterBundle::decode(bundle.clone())?;
+    ensure!(
+        decoded.dataset_manifest_id() == source.manifest_id
+            && decoded.readme()
+                == read_file(&candidate.join("import/adapter/README.md"), 16 * 1024)?
+            && decoded.config()
+                == read_file(
+                    &candidate.join("import/adapter/adapter_config.json"),
+                    16 * 1024
+                )?
+            && decoded.weights()
+                == read_file(
+                    &candidate.join("import/adapter/adapter_model.safetensors"),
+                    2 * 1024 * 1024
+                )?
+            && result["bundle"]
+                == json!({"content_type":ADAPTER_CONTENT_TYPE,"bytes":bundle.len(),
+            "sha256":digest(&bundle),"dataset_manifest_id":hex::encode(source.manifest_id),"expires_not_after":expires}),
+        "aggregate_original_approved_bundle"
+    );
+    Ok(Approved {
+        bundle,
+        expires,
+        identity: json!({"kind":"approved_three_publisher_adapter_aggregation",
+        "result_sha256":digest(&read_file(&root.join("result.json"),512*1024)?),
+        "cohort_sha256":digest(&read_file(&root.join("cohort.json"),512*1024)?),
+        "comparison_sha256":digest(&read_file(&candidate.join("comparison/decision.json"),512*1024)?),
+        "aggregate_report_sha256":digest(&read_file(&root.join("aggregate-report.json"),512*1024)?),
+        "dataset_manifest_id":hex::encode(source.manifest_id),"adapter_files":files,
+        "expires_not_after":expires,"optimizer_steps":0,"remote_training_attestation":false}),
+    })
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "Keep explicit cohort freeze, bounded worker and held-out approval in one sequence"

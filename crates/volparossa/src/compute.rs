@@ -48,6 +48,8 @@ pub(crate) enum Command {
     TrainLoop(Box<train_loop::Options>),
     /// Combine three explicitly trusted public adapters, then compare on pinned heldout data.
     AggregateAdapters(Box<train_loop::aggregate::Options>),
+    /// Sign and share one approved aggregate without retraining or extending its source validity.
+    PublishAggregate(Box<train_loop::aggregate_publication::Options>),
     /// Explicit same-UID public-inference service using the fixed isolated worker.
     Serve(Box<broker::Serve>),
     /// Attach a local broker or perform a bounded protected peer job exchange.
@@ -142,6 +144,9 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::TrainLoop(options) => return train_loop::run(&options, socket).await,
         Command::AggregateAdapters(options) => {
             return train_loop::aggregate::run(&options, socket).await;
+        }
+        Command::PublishAggregate(options) => {
+            return train_loop::aggregate_publication::run(&options, socket).await;
         }
         Command::Serve(options) => return broker::run(*options).await,
         Command::Peer { command } => return peer::run(*command, socket).await,

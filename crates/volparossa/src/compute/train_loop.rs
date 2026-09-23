@@ -2,6 +2,7 @@
 //! Every execution remains bounded; there is no hidden model download or private-cache intake.
 
 pub(super) mod aggregate;
+pub(super) mod aggregate_publication;
 mod catalogs;
 mod evaluation;
 mod peer_evaluation;

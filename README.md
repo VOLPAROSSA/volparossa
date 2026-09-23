@@ -232,34 +232,21 @@ use its completed parents while unrelated work continues, sharing the same peer-
 accounting. Focused checks pass; live trials did not preserve the required original worker/owner
 condition. That proof remains pending while cooperative pause/resume replaces the fixture's process stop.
 
-The next opt-in mode asks the local model to propose the initial subquestions
-automatically, preserving the original question in the final task. Its goal-only predecessor
-completed real model-and-peer execution, but the generated texts were unrelated to the source;
-that is not useful task decomposition. The current candidate supplies an exact bounded public
-source excerpt, records how much of the source was read, and rejects non-question output.
-Up to four generations share the same token budget and deadline, charging rejected attempts
-too. It never repairs text or supplies replacement questions. Real model-and-peer execution
-now passes, but content review still finds a repeated main question, invented facts and answers
-cut off by the token limit. The updated answer path retains the model's actual stop reason
-and prevents unfinished outputs from becoming completed answers or new dependencies; its
-focused checks pass, with live execution of the updated contract still pending.
-Useful, source-faithful decomposition remains unfinished. The model does not choose task count or shape.
-The latest fixed-layout planner asks for narrower questions and rejects an exact copy of
-the original question as a charged attempt. A real model run now demonstrates that rejection,
-but still accepts a paraphrase: this is not a semantic quality test.
-An explicit `smollm2-360m-v1` profile now connects the larger pinned model to planning,
-peer selection, inference and synthesis, with a larger per-answer budget. The existing 135M
-training/adapters remain separate. The latest VM run executes real 360M planning and starts
-two peer workers, but both fail before producing answers. The complete peer workflow remains
-unfinished; fixed, privacy-limited failure diagnostics now support investigating the cause.
-A larger model alone is not proof of better answers.
-The new opt-in `--plan-task-graph` goes beyond the fixed two-question layout: the model proposes
-one to four subtasks and their dependencies as one complete JSON object. The existing executor
-runs the accepted graph and joins its terminal branches under the unchanged original question.
-Add `--plan-structure dependent` to explicitly request tasks that build on other tasks' results;
-the model still chooses the questions and dependencies, without supplied answers or repaired plans.
-This candidate still needs real model-and-peer verification; choosing a valid graph is not proof
-of choosing useful work. The existing `--plan-tasks` mode and retained histories remain available.
+**Model-proposed work** is opt-in. `--plan-tasks` asks for subquestions in a fixed layout;
+`--plan-task-graph` lets the model propose one to four subtasks and their dependencies.
+Add `--plan-structure dependent` for tasks that build on earlier answers. Planning uses an
+exact bounded public source excerpt, records its coverage and retains the original question
+for the final join. Rejected attempts consume the original budget; questions and plans are
+never repaired or supplied after generation. Incomplete answers cannot become completed
+dependencies.
+
+The explicit `smollm2-360m-v1` profile connects the larger pinned model to planning, peer
+selection, inference and synthesis. The existing 135M training/adapters remain separate.
+A real VM run now retains a model-generated four-task graph and five completed peer answers,
+including the final join. Its overall acceptance still fails at a fixture observation bug;
+the corrected observation and offline-resume proof are being rerun. The generated questions
+and answers contain factual routing errors. This is progress in executable cooperation,
+**not yet useful, source-faithful reasoning** or evidence that a larger model is always better.
 [How cooperating tasks fit together →](docs/DECENTRALIZED_AGENTS.md#cooperating-public-tasks)
 
 Public work can be split across selected peers, with retained results and bounded recovery

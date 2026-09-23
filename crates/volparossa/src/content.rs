@@ -309,9 +309,9 @@ pub(crate) struct Publish {
     limits: Limits,
 }
 
-/// Explicit owner configuration for an offline first publication of a trained bundle.
+/// Explicit owner configuration for an offline first publication of an adapter bundle.
 /// The coordinator records that manifest before separately requesting contribution.
-pub(crate) struct TrainingPublication {
+pub(crate) struct AdapterPublication {
     pub(crate) input: PathBuf,
     pub(crate) cache: PathBuf,
     pub(crate) reuse_cache: bool,
@@ -325,8 +325,15 @@ pub(crate) struct TrainingPublication {
     pub(crate) limits: Limits,
 }
 
+/// Existing training callers retain their name; publication itself claims no training.
+pub(crate) type TrainingPublication = AdapterPublication;
+
 impl Publish {
     pub(crate) fn training_bundle(args: TrainingPublication) -> Self {
+        Self::adapter_bundle(args)
+    }
+
+    pub(crate) fn adapter_bundle(args: AdapterPublication) -> Self {
         Self {
             input: args.input,
             cache: args.cache,

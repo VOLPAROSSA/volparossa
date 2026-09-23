@@ -10,10 +10,18 @@ comparison gate. Original bundles/dataset signatures are retained; all three inp
 the same exact dataset. The isolated worker computes a coordinate median of effective LoRA
 deltas and a rank-four SVD projection, with no optimizer updates or base-model instantiation.
 It retains input/output hashes and measured reconstruction residuals. Only an actually approved
-baseline/candidate comparison can produce a local bundle; nothing is automatically served or
-published. Six focused Rust checks and 87 pure Python admission/dispatch checks pass. No backend
+baseline/candidate comparison can produce a local bundle. The explicit `compute publish-aggregate`
+command now reopens that approval, all three original imports and their original expiries before
+signing and contributing the unchanged adapter format. Retry uses one retained manifest without
+renewing its lease or claiming optimizer updates. A receiver still needs independent publisher
+trust and its own local adoption gate; publication itself does not activate a model. Focused Rust
+checks and 87 pure Python admission/dispatch checks cover the earlier aggregation candidate. No backend
 or model ran on the development host, and real numerical/three-publisher VM proof is pending.
 This adds executable integration, not completed B05, general quality or poisoning resistance.
+The new cached-import and aggregate/publication checks pass (eight CLI import checks, one
+cache hit/miss/revision-floor check and six aggregate/publication checks), as do command help,
+scoped formatting and strict production-CLI Clippy. Clippy including test targets still reports
+six existing style issues in unrelated test modules; this is not a clean full-suite claim.
 A guest-only numerical probe now reuses the existing pinned runtime in a separate, bounded
 private-network user unit. It checks real saved tensors against gauge/outlier and rank-six
 median/rank-four projection oracles, plus cancellation. Archive-bound source staging and
@@ -115,6 +123,17 @@ manifest, retaining original signatures. Inert phase-order/chunk mutation checks
 reader against the unchanged P originals pass. All 165 original files and cleanup/host-state
 checks are retained. No Q training, adoption or rollback occurred, and the actual inference
 answer was incorrect; this is lifecycle progress, not improved reasoning or completed B07.
+
+The [separate-capture run on `e8744e6c`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35861650169)
+now passes the original P training, approved publication, exact-adapter inference and both
+protected network captures. All 173 original files, cleanup and unchanged host bytes are
+retained. It still **fails before Q training**, with `CONTENT_UNAVAILABLE` during the initial
+seed import. R5's owner-provisioned cache contains all four original P-bundle chunks and both
+datasets, but the adapter importer unconditionally refreshes name metadata over a network
+route that this supplier fixture does not have. The bounded cache-first import correction
+retains exact publisher/dataset binding and network fallback on a miss; it does not force
+offline mode or extend an expiry. No Q adoption, rollback, continued training or numerical
+aggregation is proved by this run.
 
 The [graph run on `b80f0b02`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35849837032)
 also **fails at `compute_deadline`** after the actual owner reaches baseline. Its original
