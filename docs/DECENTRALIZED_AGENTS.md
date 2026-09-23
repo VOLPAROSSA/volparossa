@@ -672,6 +672,16 @@ format is unchanged. Automatic adoption still requires the receiver's own pinned
 comparison; serving requires its separately enabled serving configuration. The new publication
 path and its three-trained-publisher end-to-end proof are not yet live-verified.
 
+The disposable `agent-adapter-aggregation` scenario now exercises this chain: R3, R4
+and R5 perform distinct 8/9/10-step trainings and sign their own original bundles;
+the fixture explicitly provisions those unchanged public objects to R5. R4 then
+cold-fetches all three, combines them, applies its independent held-out gate and
+publishes only an approved result. Client cold-fetches the aggregate and its exact
+dataset and runs inference with those weights. Original worker reports, signatures,
+transfer receipts, packet observations and cleanup are retained. Supplier provisioning
+is not peer-upload evidence, and final inference is not another receiver-side adoption
+gate. Inert checks pass; genuine execution of this new scenario is still pending.
+
 ### Using approved successors for new peer jobs
 
 For the supported 135M training/adapter profile, pass the same existing private `--serving-directory` to
@@ -1421,9 +1431,9 @@ limit is recorded as `generation_question_max_bytes`; full graph admission and h
 questions still allow 512 bytes. It does not change task count/edge choices, truncate output,
 or guarantee completion for every tokenizer/language. The exact raw artifact, report and source are bound before enrollment and reused
 on resume without replanning. Existing peer-capacity accounting, source expiry, EOS parent
-requirements, cancellation and offline receipts remain in force. This candidate needs a live
-model-and-peer proof of actual selected dependencies and useful output; pure graph validation
-is not evidence of autonomous reasoning, private computation or general tool use.
+requirements, cancellation and offline receipts remain in force. Actual selected dependencies
+and completed offline replay now have the scoped live proof below; useful output remains
+unproved. Graph execution is not evidence of sound reasoning, private computation or general tool use.
 The prompt explicitly requests intermediate questions: the coordinator adds the unchanged original
 goal as the terminal task. The pinned optional LM Format Enforcer adapter constrains JSON syntax
 and rejects invalid question endings, duplicate/trim-equivalent goal copies and non-earlier or
@@ -1436,13 +1446,21 @@ readable under their original contracts, without reinterpreting their old failed
 Provisioning requires the explicit `--task-graph-decoder` option to add three pinned pure-Python
 wheels. The ordinary 38-wheel runtime stays unchanged, and a missing decoder refuses graph
 execution rather than silently reverting to unconstrained generation. There is no model or
-runtime download from the worker. Current pure/compile checks are not real-model proof.
+runtime download from the worker. Pure/compile checks alone are not real-model proof.
 The disposable `agent-model-task-graph` scenario now explicitly requests dependent analysis over
 a synthetic public routing case: privacy constraints, two route choices and absent performance
 measurements. This is a new request and source, not a reinterpretation of the earlier README test.
 It retains the original model proposal, checks all actual peer jobs and completed offline replay,
 and does not supply subquestions, edges or a replacement answer. The fixed two-question fixture
-is unchanged. Local fixture checks are not a live-model pass or an answer-quality claim.
+is unchanged. Local fixture checks alone are not a live-model pass or an answer-quality claim.
+
+The [complete execution run on `7ac8a154`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35863165144)
+passes the original live-worker, signature, dependency-input, protected-path and cleanup gates.
+The model generates four tasks and their edges; five observed peer workers finish those tasks
+and the unchanged original-question join. After removing the original planning input and
+stopping both brokers, offline resume returns the same retained answers with no new jobs.
+The actual questions and final answer nevertheless misstate the source's routing/privacy
+facts. This is a working execution/recovery pipeline, not correct decomposition or completed B03.
 
 The [source-exact `7309b266` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35663652657)
 corrects `GRAPH_GOAL_COPY` and accepts the second model proposal using 107 total tokens. That

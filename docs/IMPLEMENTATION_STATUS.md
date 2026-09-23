@@ -18,6 +18,11 @@ trust and its own local adoption gate; publication itself does not activate a mo
 checks and 87 pure Python admission/dispatch checks cover the earlier aggregation candidate. No backend
 or model ran on the development host, and real numerical/three-publisher VM proof is pending.
 This adds executable integration, not completed B05, general quality or poisoning resistance.
+The new `agent-adapter-aggregation` disposable scenario connects three real 8/9/10-step
+trainings to protected cold acquisition, aggregation, held-out approval, publication and
+exact-weight inference on another node. Original public objects are explicitly provisioned
+to one supplier without re-signing; this is not peer-upload evidence. The fixture and
+workflow wiring have inert checks, but this new real-model execution is still pending.
 The new cached-import and aggregate/publication checks pass (eight CLI import checks, one
 cache hit/miss/revision-floor check and six aggregate/publication checks), as do command help,
 scoped formatting and strict production-CLI Clippy. Clippy including test targets still reports
@@ -203,6 +208,17 @@ Both inert fixture modes pass. The corrected reader validates the five jobs agai
 retained original raw files; that retrospective check does not replace the missing live gates.
 The actual questions and answers also contain incorrect routing
 claims; executable task cooperation is not sound decomposition or answer quality. B03 stays open.
+
+The [observation follow-up on `7ac8a154`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35863165144)
+**passes its complete scoped execution proof**. Source-exact checking of all 140 original files
+verifies the actual 808-byte model graph (213 generated tokens, 201.694 seconds), five live
+isolated peer workers, original signed receipts and byte-exact dependent inputs. All five answers
+reach EOS. After the original planner input is removed and the brokers stop, completed offline
+resume performs zero new rounds and preserves the 114-file original snapshot. Protected-path
+captures, private-store cleanup, zero remaining owned network objects and unchanged host bytes
+pass. The model still misstates Route A as direct-exit and treats client-address disclosure as
+satisfying privacy. This verifies model-selected task execution and retained-result recovery,
+not useful reasoning, private offload, model-selected tools, complete B03 or the full alpha.
 
 The [policy run on `b80f0b02`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35849851694)
 now preserves the strict `PRINCIPLE_OUTPUT_REASONING` failure from both actual assessors.

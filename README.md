@@ -242,10 +242,10 @@ dependencies.
 
 The explicit `smollm2-360m-v1` profile connects the larger pinned model to planning, peer
 selection, inference and synthesis. The existing 135M training/adapters remain separate.
-A real VM run now retains a model-generated four-task graph and five completed peer answers,
-including the final join. Its overall acceptance still fails at a fixture observation bug;
-the corrected observation and offline-resume proof are being rerun. The generated questions
-and answers contain factual routing errors. This is progress in executable cooperation,
+A real VM proof now passes: a model-generated four-task graph, five observed peer jobs and
+completed answers, followed by offline resume with no new jobs after the brokers stop and
+the original planner input is removed. The original signed results stay unchanged. The generated
+questions and answers still contain factual routing errors. This proves executable cooperation,
 **not yet useful, source-faithful reasoning** or evidence that a larger model is always better.
 [How cooperating tasks fit together →](docs/DECENTRALIZED_AGENTS.md#cooperating-public-tasks)
 
