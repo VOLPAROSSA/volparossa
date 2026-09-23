@@ -10,7 +10,8 @@ use volparossa_content::{
     transfer::{TransferLimits, TransferProgress, pull_to_writer},
 };
 use volparossa_local_control::{
-    ContentFetchNameRequest, ContentReceipt, control_request::Operation, control_response::Payload,
+    ContentFetchNameRequest, ContentLocalFetchNameRequest, ContentReceipt,
+    NamedContentTransferReady, control_request::Operation, control_response::Payload,
 };
 
 use super::{FetchName, absolute_path, ensure_new_output, now_seconds, output_parent};
@@ -170,7 +171,7 @@ async fn download(
         expected_manifest_id: requirement.and_then(|value| value.manifest_id.map(|id| id.to_vec())),
         prefer_cached,
     };
-    let (mut stream, request_id, response) =
+    let (stream, request_id, response) =
         crate::control::begin_request(socket, Operation::ContentFetchName(request)).await?;
     if response.diagnostic_code != "NAMED_CONTENT_TRANSFER_READY" {
         bail!("expected explicit publisher/name stream readiness");
@@ -181,6 +182,72 @@ async fn download(
     if ready.cache_only != args.cache_only {
         bail!("named readiness changed the requested cache-only mode");
     }
+    receive(
+        stream,
+        &request_id,
+        ready,
+        &query,
+        private_parent,
+        requirement,
+    )
+    .await
+}
+
+/// Reads only this node's active contribution registry. No discovery, caller cache path or
+/// adoption of agent-owned storage. Inbound custody remains a separate authenticated operation.
+pub(super) async fn prepare_local(
+    publisher: &ed25519_dalek::VerifyingKey,
+    name: &str,
+    min_revision: u64,
+    socket: &Path,
+    private_parent: &Path,
+    requirement: &Requirement,
+) -> Result<VerifiedNamedDownload> {
+    timeout(Duration::from_secs(30), async {
+        let query = NameQuery::new(publisher.to_bytes(), name, min_revision)?;
+        let (stream, request_id, response) = crate::control::begin_request(
+            socket,
+            Operation::ContentLocalFetchName(ContentLocalFetchNameRequest {
+                publisher_key: publisher.to_bytes().to_vec(),
+                name: name.to_owned(),
+                min_revision,
+                expected_content_type: requirement.content_type.to_owned(),
+                max_object_bytes: requirement.maximum_bytes,
+            }),
+        )
+        .await?;
+        if response.diagnostic_code != "LOCAL_NAMED_CONTENT_TRANSFER_READY" {
+            bail!("expected explicit local registry name readiness");
+        }
+        let Some(Payload::NamedContentTransferReady(ready)) = response.payload else {
+            bail!("expected same-operation local named readiness");
+        };
+        if !ready.cache_only {
+            bail!("local registry read reported remote delivery");
+        }
+        receive(
+            stream,
+            &request_id,
+            ready,
+            &query,
+            private_parent,
+            Some(requirement),
+        )
+        .await
+    })
+    .await
+    .context("local named registry deadline exceeded")?
+}
+
+async fn receive(
+    mut stream: tokio::net::UnixStream,
+    request_id: &[u8],
+    ready: NamedContentTransferReady,
+    query: &NameQuery,
+    private_parent: &Path,
+    requirement: Option<&Requirement>,
+) -> Result<VerifiedNamedDownload> {
+    let cache_only = ready.cache_only;
     let signed_manifest = SignedManifest::decode(&ready.manifest)?;
     let manifest = query.verify_candidate(&signed_manifest, now_seconds()?)?;
     if let Some(requirement) = requirement {
@@ -211,7 +278,7 @@ async fn download(
             },
         )
         .await?;
-        let response = crate::control::finish_request(&mut stream, &request_id).await?;
+        let response = crate::control::finish_request(&mut stream, request_id).await?;
         Ok::<_, anyhow::Error>((progress, response))
     })
     .await
@@ -224,7 +291,7 @@ async fn download(
         &receipt,
         &manifest,
         progress,
-        args.cache_only,
+        cache_only,
     )?;
     let download = VerifiedNamedDownload {
         temporary,
@@ -233,7 +300,7 @@ async fn download(
         receipt,
         expires,
         authority_deadline,
-        cache_only: args.cache_only,
+        cache_only,
     };
     download.as_file().sync_all()?;
     if Instant::now() >= deadline {

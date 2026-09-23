@@ -42,7 +42,8 @@ pub(super) async fn process(
             return publication(stream, request, context).await;
         }
         let request_id = request.request_id;
-        let mut scope = match prepare(request.operation) {
+        let gate = context.map(|context| context.content.object_policy_gate());
+        let mut scope = match prepare(request.operation, gate.as_ref()) {
             Ok(scope) => scope,
             Err(error) => {
                 return write_response(&mut stream, &content_response(request_id, Err(error)))
@@ -50,7 +51,6 @@ pub(super) async fn process(
                     .map_err(|_| ControlServerError::InvalidFrame);
             }
         };
-        let gate = context.map(|context| context.content.object_policy_gate());
         if let Some(context) = context {
             if let Err(error) = context.content.check_object_policy(&scope.manifest) {
                 return write_response(&mut stream, &content_response(request_id, Err(error)))
@@ -197,7 +197,10 @@ fn publication_manifest(
     Ok((signed, manifest))
 }
 
-fn prepare(operation: Option<Operation>) -> Result<Scope, ContentError> {
+fn prepare(
+    operation: Option<Operation>,
+    gate: Option<&volparossa_content::object_policy::ObjectPolicyGate>,
+) -> Result<Scope, ContentError> {
     let (encoded, key, cache, limits, importing, allow_public_content) = match operation {
         Some(Operation::ContentImport(request)) => (
             request.manifest,
@@ -219,6 +222,13 @@ fn prepare(operation: Option<Operation>) -> Result<Scope, ContentError> {
     };
     let manifest = handoff_manifest(&encoded, &key, allow_public_content)?;
     let cache_limits = cache_limits(limits, &manifest)?;
+    // The protected control parser already validated the operation's path and limits.
+    // Authenticate the exact manifest before policy admission, but do not open/read a
+    // withheld object's cache: a concurrent startup/reclamation lock must not mask
+    // the independently verified policy refusal as an invalid transfer request.
+    if gate.is_some_and(|gate| !gate.allows_now(&manifest)) {
+        return Err(ContentError::Policy);
+    }
     let mut store = if importing {
         ChunkStore::create(Path::new(&cache), cache_limits)
     } else {

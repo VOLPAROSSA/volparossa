@@ -95,8 +95,10 @@ and rechecks availability rather than counting old receipts. Transfers yield to 
 work through configured quiet admission and per-chunk budgets. The
 [original `2a431c1` loss/replacement trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35916493141)
 passes with a fresh named download after the publisher's owner process and source are removed.
-The isolated port onto `main` requires its own source-exact integration proof. This is not
-globally fair placement, owner-offline maintenance or guaranteed uptime. See the
+The [source-exact `ca7` integration proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/35921884371)
+also passes and is integrated by PR #160. Original expiry, signed observations, upload budget,
+privacy captures and cleanup are verified; the Client node remains online. This is not
+globally fair placement, maintenance after the owner controller stops or guaranteed uptime. See the
 [development commands](OPERATIONS.md#depositing-a-public-copy-with-other-participants).
 
 ### Private messages and optional mail interoperability
@@ -387,10 +389,11 @@ This is a bounded profile of the [GNU checksum format](https://www.gnu.org/s/cor
 not a generic parser for release pages, a browser interception mechanism, or a replacement
 for authenticated metadata. The resource remains an anonymous public binary object. The
 [original `7ca122a3` network trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35919185330)
-passes origin-only retrieval, a fresh two-provider download and wrong-checksum refusal.
+and [source-exact `ca7` integration trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35921899178)
+pass origin-only retrieval, a fresh two-provider download and wrong-checksum refusal.
 Checksum-document bytes are reported separately from resource bytes, and elapsed time includes
-both authentication requests. The source-exact integration port still needs its own trial;
-C08 remains open. See [operations](OPERATIONS.md#https-checksum-file-downloads) for selection
+both authentication requests. The function is integrated by PR #160; C08 remains open.
+See [operations](OPERATIONS.md#https-checksum-file-downloads) for selection
 and current compatibility limits.
 
 ### Own-origin representation digests without a custom descriptor

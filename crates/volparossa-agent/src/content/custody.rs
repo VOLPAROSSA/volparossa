@@ -4,7 +4,11 @@ use std::time::Duration;
 
 use ed25519_dalek::VerifyingKey;
 use libp2p::{PeerId, identity};
-use tokio::{net::UnixStream, time::timeout};
+use tokio::{
+    net::UnixStream,
+    sync::{Mutex, MutexGuard},
+    time::timeout,
+};
 use volparossa_content::{
     SignedManifest, VerifiedManifest,
     private_message::PRIVATE_MESSAGE_CONTENT_TYPE,
@@ -29,6 +33,19 @@ struct Request {
     signed: SignedManifest,
     manifest: VerifiedManifest,
     operation: CustodyOperation,
+}
+
+async fn retrieval_admission<'a>(
+    retrieval: &'a Mutex<()>,
+    local: &mut UnixStream,
+    background: bool,
+) -> Result<Option<MutexGuard<'a, ()>>, ContentError> {
+    if background {
+        // The separately bounded background lane is cancelled by foreground work.
+        Ok(None)
+    } else {
+        super::named_retrieval(retrieval, local).await.map(Some)
+    }
 }
 
 impl ContentRuntime {
@@ -59,14 +76,10 @@ impl ContentRuntime {
             None
         };
         let _foreground = (!background).then(|| self.foreground.enter());
-        // A separate bounded background lane must not make a foreground request fail its
-        // retrieval admission before the cancellation watch can release this operation.
-        let _retrieval = if background {
-            None
-        } else {
-            Some(self.retrieval.try_lock().map_err(|_| ContentError::Busy)?)
-        };
         let operation = async {
+            // Share FIFO admission with named refreshes instead of racing their active lock.
+            // Waiting remains inside the original deadline, policy watch and requester EOF.
+            let _retrieval = retrieval_admission(&self.retrieval, local, background).await?;
             if let Some(spare) = &spare {
                 until_requester_closed(local, async {
                     spare.admit(0).await;
@@ -339,4 +352,91 @@ async fn send(
     )
     .await
     .map_err(|_| ContentError::Unavailable)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        future::{Future, poll_fn},
+        task::Poll,
+    };
+
+    use super::*;
+
+    const WAIT: Duration = Duration::from_secs(2);
+
+    #[tokio::test]
+    async fn foreground_custody_queues_between_named_refreshes_without_busy_retry() {
+        let retrieval = Mutex::new(());
+        let (_initial_client, mut initial_stream) = UnixStream::pair().unwrap();
+        let initial = super::super::named_retrieval(&retrieval, &mut initial_stream)
+            .await
+            .unwrap();
+        let (_custody_client, mut custody_stream) = UnixStream::pair().unwrap();
+        let mut custody = Box::pin(retrieval_admission(&retrieval, &mut custody_stream, false));
+        assert!(poll_fn(|cx| Poll::Ready(custody.as_mut().poll(cx).is_pending())).await);
+        let (_next_client, mut next_stream) = UnixStream::pair().unwrap();
+        let mut next = Box::pin(super::super::named_retrieval(&retrieval, &mut next_stream));
+        assert!(poll_fn(|cx| Poll::Ready(next.as_mut().poll(cx).is_pending())).await);
+
+        drop(initial);
+        let admitted = timeout(WAIT, &mut custody).await.unwrap().unwrap().unwrap();
+        assert!(poll_fn(|cx| Poll::Ready(next.as_mut().poll(cx).is_pending())).await);
+        drop(admitted);
+        drop(timeout(WAIT, next).await.unwrap().unwrap());
+        assert!(retrieval.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn background_bypasses_retrieval_and_foreground_eof_or_deadline_leaves_queue() {
+        let retrieval = Mutex::new(());
+        let held = retrieval.lock().await;
+        let (_background_client, mut background_stream) = UnixStream::pair().unwrap();
+        assert!(
+            timeout(
+                WAIT,
+                retrieval_admission(&retrieval, &mut background_stream, true)
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+        );
+
+        let (cancelled_client, mut cancelled_stream) = UnixStream::pair().unwrap();
+        let mut cancelled = Box::pin(retrieval_admission(
+            &retrieval,
+            &mut cancelled_stream,
+            false,
+        ));
+        assert!(poll_fn(|cx| Poll::Ready(cancelled.as_mut().poll(cx).is_pending())).await);
+        drop(cancelled_client);
+        assert!(matches!(
+            timeout(WAIT, cancelled).await.unwrap(),
+            Err(ContentError::Unavailable)
+        ));
+
+        let (_timed_client, mut timed_stream) = UnixStream::pair().unwrap();
+        assert!(
+            timeout(
+                Duration::ZERO,
+                retrieval_admission(&retrieval, &mut timed_stream, false)
+            )
+            .await
+            .is_err()
+        );
+        drop(held);
+        let (_live_client, mut live_stream) = UnixStream::pair().unwrap();
+        drop(
+            timeout(
+                WAIT,
+                retrieval_admission(&retrieval, &mut live_stream, false),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        );
+        assert!(retrieval.try_lock().is_ok());
+    }
 }
