@@ -113,6 +113,8 @@ print_plan() {
                 '  R4 cold-fetches its enrolled cohort through protected paths inside the real train-loop;' \
                 '  combine effective LoRA updates, require actual heldout approval, then activate the exact aggregate;' \
                 '  verify genuine serving and the next local training warmstart with inherited original expiry;' \
+                '  preserve originals; damage only approved local extraction C, resume exact approved aggregate A, and infer through a protected peer job;' \
+                '  damage A extraction next: require blocked resume and withdrawn broker admission because base is not an approved predecessor;' \
                 '  retain immutable inputs, journal, worker receipts, packets and full cleanup;' \
                 '  isolated 135M workers; no Sybil, general-quality or complete-B05 guarantee.'
             return
@@ -923,7 +925,8 @@ if [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" =
     done
 fi
 if [ "$agent_autonomous_aggregation" = yes ]; then
-    for aggregation_fixture in agent-autonomous-aggregation-smoke.sh agent-autonomous-aggregation-smoke.py; do
+    for aggregation_fixture in agent-autonomous-aggregation-smoke.sh agent-autonomous-aggregation-smoke.py \
+        agent-aggregate-recovery-smoke.sh agent-aggregate-recovery-smoke.py; do
         [ -f "$source_directory/tests/integration/$aggregation_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$aggregation_fixture" ] || exit 69
     done
@@ -2274,6 +2277,8 @@ if [ "$agent_autonomous_aggregation" = yes ]; then
     # Shared aggregation definitions must be loaded before the autonomous wrapper.
     # shellcheck source=tests/integration/agent-autonomous-aggregation-smoke.sh
     . "$source_directory/tests/integration/agent-autonomous-aggregation-smoke.sh"
+    # shellcheck source=tests/integration/agent-aggregate-recovery-smoke.sh
+    . "$source_directory/tests/integration/agent-aggregate-recovery-smoke.sh"
 fi
 if [ "$scenario" = agent-artifact ]; then
     # shellcheck source=tests/integration/agent-artifact-smoke.sh
@@ -2455,6 +2460,7 @@ if [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" =
 fi
 if [ "$agent_autonomous_aggregation" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/agent-autonomous-aggregation-smoke.py" "$WORK/bin/agent-autonomous-aggregation-smoke.py"
+    install -o root -g root -m 0555 "$source_directory/tests/integration/agent-aggregate-recovery-smoke.py" "$WORK/bin/agent-aggregate-recovery-smoke.py"
 fi
 if [ "$agent_train_loop" = yes ]; then
     for loop_script in agent-train-loop-smoke.py agent-train-loop-catalog.py agent-peer-learning-smoke.py content-replication-smoke.py content-replication-capture.py; do

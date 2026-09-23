@@ -107,6 +107,8 @@ print_plan() {
             'Agent-autonomous-aggregation: R3/R4/R5 train and sign three public adapters, explicitly provisioned unchanged to R5;' \
             '  R4 train-loop cold-fetches the enrolled cohort and applies genuine aggregation/heldout comparison;' \
             '  activate only an approved aggregate, serve it and use its exact bytes for the next local training warmstart;' \
+            '  preserve originals, damage approved local C extraction, restore original aggregate A and prove protected A inference;' \
+            '  then damage A extraction: require blocked resume and withdrawn admission, never a base-model fallback;' \
             '  retain original expiry, source/worker/journal receipts, packets and full private/network cleanup;' \
             '  isolated 135M workers and 7200s driver bound; original worker/source limits remain unchanged.' \
             '  no Sybil, general-quality or complete-B05 claim.'
@@ -783,6 +785,8 @@ def collect(home, opt, revision, scenario, guest_status,
         if scenario == "agent-autonomous-aggregation":
             candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-autonomous-aggregation-*"))[:128]
                               if re.fullmatch(r"agent-autonomous-aggregation-[a-z0-9-]+\.(json|jsonl|err|log)", path.name))
+            candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-aggregate-recovery-*"))[:64]
+                              if re.fullmatch(r"agent-aggregate-recovery-[a-z0-9-]+\.(json|jsonl|err|log)", path.name))
         if scenario == "agent-policy-assessment":
             candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-policy-assessment-*"))[:128]
                               if re.fullmatch(r"agent-policy-assessment-[a-z0-9-]+\.(json|jsonl|err|log)", path.name))

@@ -33,6 +33,10 @@ SCOPE = ("Three real 8/9/10-step public publisher trainings and explicit unchang
     "The same owner-enrolled channel automatically publishes the aggregate as revision 1 and an approved local successor, if any, as revision 2. "
     "Another node cold-fetches the last approved signed publication and really infers with its exact weights. "
     "Restart retains original signatures, revisions and expiry without recomputing or republishing. "
+    "After preserving those originals, damage only the genuinely approved local extraction C; "
+    "resume restores its original approved aggregate A, a second restart is idempotent, and a protected job uses exact A. "
+    "Then damage A's extraction: its pinned-base predecessor is not an approved rollback, so the coordinator blocks and broker admission is withdrawn. "
+    "Successful aggregate-to-aggregate rollback is not covered. "
     "No peer-upload, independent-party, general-quality, Byzantine robustness, "
     "full B05 or complete-alpha claim.")
 
@@ -457,6 +461,7 @@ def check(value, revision):
     require(summary["attempts_this_invocation"] == 0 and summary["owner_cancelled"] is True
         and summary["completed_cycles"] == 1 and value["resume-no-source-failure"] is True,
         "resume did not retain/recheck completed work without another model run")
+    runpy.run_path(str(HERE / "agent-aggregate-recovery-smoke.py"))["check"](value["recovery"], value)
 
 
 def evidence(work, revision):
@@ -471,7 +476,8 @@ def evidence(work, revision):
         observations={path.name[len(PREFIX) + 1:-len("-observation.json")]: read(path)
             for path in work.glob(f"{PREFIX}-*-observation.json")},
         network={label: A["read_network_report"](work, label) for label in ("uptake", "receiver")},
-        cleanup=read(work / "agent-jobs-private-cleanup.json"))
+        cleanup=read(work / "agent-jobs-private-cleanup.json"),
+        recovery=read(work / "agent-aggregate-recovery-evidence.json", 4 * 1024 * 1024))
     lines = (work / f"{PREFIX}-resume.jsonl").read_bytes()
     errors = (work / f"{PREFIX}-resume.err").read_bytes()
     require(len(lines) <= 262144 and len(errors) <= 262144, "resume diagnostic bound")
@@ -510,6 +516,7 @@ def report(value, revision):
 
 def self_test():
     A["self_test"]()
+    runpy.run_path(str(HERE / "agent-aggregate-recovery-smoke.py"))["self_test"]()
     # Only inert byte/state controls, not invented optimizer or network evidence.
     first = dict(files={"state.json": digest(b"old"), "original.json": digest(b"inert")},
         state=dict(completed=1, aggregate_updates=dict(next_poll=10, next_sequence=2, verified_cohort_polls=1)), serving_hex="aa", owner=dict(pid=1, start=1))

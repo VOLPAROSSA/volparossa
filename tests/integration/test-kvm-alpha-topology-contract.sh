@@ -400,6 +400,14 @@ assert 'if scenario in ("agent-adapter-aggregation", "agent-autonomous-aggregati
 shared = '. "$source_directory/tests/integration/agent-adapter-aggregation-smoke.sh"'
 wrapper = '. "$source_directory/tests/integration/agent-autonomous-aggregation-smoke.sh"'
 assert guest.index(shared) < guest.index(wrapper)
+recovery = '. "$source_directory/tests/integration/agent-aggregate-recovery-smoke.sh"'
+assert guest.index(wrapper) < guest.index(recovery)
+assert '"$WORK/bin/agent-aggregate-recovery-smoke.py"' in guest
+assert 'root.glob("agent-aggregate-recovery-*")' in host
+autonomous = (root / "agent-autonomous-aggregation-smoke.sh").read_text()
+run = autonomous[autonomous.index('agent_autonomous_aggregation_run() {'):]
+assert run.index('agent_autonomous_aggregation_receiver_inference') < run.index('agent_aggregate_recovery_run') < run.index('agent_jobs_cleanup')
+assert 'resume|recovery-local|recovery-resume|recovery-blocked) auto_bound=150s' in autonomous
 assert '''if [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/agent-adapter-aggregation-smoke.py"''' in guest
 assert '[ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then\n    content_replication_extend_network' in guest
@@ -407,6 +415,7 @@ assert '[ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregati
 assert 'if { [ "${agent_successor_serving:-no}" = yes ] || [ "${agent_active_recovery:-no}" = yes ] || [ "${agent_autonomous_aggregation:-no}" = yes ]; } && [ "$jobs_node" = "$provider_node_a" ]; then' in jobs
 stop = jobs[jobs.index('agent_jobs_stop() {'):jobs.index('agent_jobs_cleanup() {')]
 assert stop.index('agent_jobs_stop_unit "$jobs_stop_unit"') < stop.index('agent_adapter_aggregation_python cleanup-workers "$WORK"') < stop.index('agent_autonomous_aggregation_python cleanup-workers "$WORK"')
+assert stop.index('agent_autonomous_aggregation_python cleanup-workers "$WORK"') < stop.index('agent_aggregate_recovery_python cleanup-workers "$WORK"')
 for line in guest.splitlines():
     if line.startswith('if [ "$agent_model_planning" = yes ]') or line.startswith('if [ "$agent_model_task_graph" = yes ]'):
         assert "agent_autonomous_aggregation" not in line

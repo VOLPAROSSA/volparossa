@@ -101,6 +101,15 @@ and removes retired selections from publication retries without recycling revisi
 focused train-loop tests and strict CLI Clippy pass. These include a complete inert local-to-local
 rollback/withdrawal and historical second-source verification, not real model execution.
 Aggregate recovery still needs the full runtime proof; no completed B05/B07 claim is made.
+The existing disposable `agent-autonomous-aggregation` scenario now includes that candidate's
+local-successor-to-aggregate case after retaining the original training/publication evidence.
+It requires a genuinely approved successor C, damages only its extracted weights, resumes the
+original approved aggregate A twice and submits a protected peer job using exact A weights.
+It then damages A's extraction and requires blocked resume plus withdrawn broker admission:
+the pinned base is not an approved predecessor. Original approval, expiry and counters must
+remain unchanged; one additional bounded inference reuses the existing guest runtime. The new
+phase has not yet passed a live VM run and does not cover successful aggregate-to-aggregate
+rollback or establish general model quality.
 
 A source-grounded synthesis candidate now addresses the observed loss of original evidence
 between model-graph tasks. New 360M `--plan-task-graph --grounded-synthesis` workflows retain
