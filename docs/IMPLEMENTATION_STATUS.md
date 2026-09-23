@@ -155,6 +155,18 @@ blocked-helper execution remains pending KVM, not claimed from those inert check
 direct-to-agent-file fetch operations, mailbox and compute request cancellation are outside
 this change.
 
+The [provider run on `3d57f418`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35883871060)
+fails before reaching that cancellation phase: all three providers deliver the original
+3,932,160-byte object, but their interior bulk windows do not overlap simultaneously. Native
+and HTTPS overlap measurements are negative by 396.078 ms and 107.156 ms respectively. The
+ordinary HTTPS, site, user-publication and named phases pass their source-exact checks; final
+cleanup leaves zero owned objects and host hashes match. The failed run remains failed.
+The adaptive-only fixture now supplies 60 unique chunks (15 MiB), twenty per provider (5 MiB).
+Its kernel-timestamp milestones scale by the same factor, preserving the original 5%-75%
+interior-bulk fractions and the strict three-provider overlap requirement. Ordinary two-provider
+vectors, production admission, pacing and timeouts are unchanged. This gives the deliberately
+cold, late-admitted third connection more real payload to overlap; a new live run must prove it.
+
 A new explicit `compute aggregate-adapters` candidate now connects three independently
 authorized public publisher channels to a real worker implementation and the existing held-out
 comparison gate. Original bundles/dataset signatures are retained; all three inputs must bind

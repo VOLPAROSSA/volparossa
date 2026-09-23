@@ -205,8 +205,8 @@ content_provider_adaptive_run() {
     adaptive_publisher=$(jq -er '.publisher_hex | select(test("^[0-9a-f]{64}$"))' \
         "$WORK/content-provider-adaptive-publication.json") || fail CONTENT_PROVIDER_ADAPTIVE_KEY_INVALID
     jq -e '.publisher_removed == true and .publisher_private_key_persisted == false
-        and .bytes == 3932160 and .chunks == 15
-        and .replica_a_chunks == 5 and .replica_b_chunks == 5 and .replica_c_chunks == 5' \
+        and .bytes == 15728640 and .chunks == 60
+        and .replica_a_chunks == 20 and .replica_b_chunks == 20 and .replica_c_chunks == 20' \
         "$WORK/content-provider-adaptive-publication.json" >/dev/null \
         || fail CONTENT_PROVIDER_ADAPTIVE_SEED_INVALID
     adaptive_manifest=$adaptive_client/manifest.bin

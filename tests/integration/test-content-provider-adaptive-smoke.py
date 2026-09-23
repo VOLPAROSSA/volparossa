@@ -3,6 +3,7 @@
 """Pure evidence-gate regressions; these synthetic captures are not network proof."""
 
 import ast
+import base64
 import copy
 import hashlib
 import json
@@ -51,7 +52,7 @@ def fixture(control_node="relay2"):
             client_leg_wireguard_data_datagrams=900, exit_leg_wireguard_data_datagrams=900,
             provider_application=application)
     privacy["exit"]["provider_payload_timing"] = dict(enabled=True, clock="linux-so-timestampns-new",
-        errors=0, milestones_bytes=[65536, 983040],
+        errors=0, milestones_bytes=CHECK["PAYLOAD_MILESTONES"],
         providers={node: [100 + index * 20, 300 + index * 20] for index, node in enumerate(nodes)})
     selected = dict(transport="mptcp", route_context_id="b" * 32,
         paths=[dict(route_context_id="b" * 32, path_id=i + 1, relay_peer_id=peers[f"relay{i}"],
@@ -71,17 +72,17 @@ def fixture(control_node="relay2"):
                          back=[dict(dst=addresses[control_node], prefsrc=addresses[node],
                                     dev=f"ap{i}", gateway=f"10.241.{83+i}.1")]) for i, node in enumerate(nodes)}
     publication = dict(report_kind="volparossa-content-adaptive-provider-seed", bytes=CHECK["BYTES"],
-        chunks=15, object_sha256=CHECK["SHA"], publisher_hex="2" * 64, manifest_id="e" * 64,
+        chunks=CHECK["CHUNKS"], object_sha256=CHECK["SHA"], publisher_hex="2" * 64, manifest_id="e" * 64,
         publisher_removed=True, publisher_private_key_persisted=False, recipient_encrypted=False,
         created_unix_seconds=1000, expires_unix_seconds=4600)
     for label in "abc":
-        publication[f"replica_{label}_chunks"] = 5
+        publication[f"replica_{label}_chunks"] = CHECK["SHARD_CHUNKS"]
         publication[f"replica_{label}_bytes"] = CHECK["SHARD_BYTES"]
     evidence = dict(success=True, publication=publication, expected_peers=peers,
         previous_context="a" * 32, selected_before=copy.deepcopy(selected), selected_route=selected,
         layout=dict(provider_nodes=list(nodes), control_relay_peer_id=control),
         status_before=dict(control_relay_peer_id=control), status_after=dict(control_relay_peer_id=control),
-        fetch=dict(operation="native_content", bytes=CHECK["BYTES"], chunks=15, providers_used=3,
+        fetch=dict(operation="native_content", bytes=CHECK["BYTES"], chunks=CHECK["CHUNKS"], providers_used=3,
             provider_peer_ids=[peers[node] for node in nodes], control_relay_peer_id=control,
             peer_bytes=CHECK["BYTES"], origin_body_bytes=0, origin_range_requests=0, origin_authenticated=False),
         output=dict(bytes=CHECK["BYTES"], sha256=CHECK["SHA"], client_cache_initially_absent=True,
@@ -102,7 +103,7 @@ def fixture(control_node="relay2"):
 def https_fixture(evidence):
     native, peers = evidence["publication"], evidence["expected_peers"]
     layout = [dict(sha256=hashlib.sha256(bytes([65 + i]) * 262144).hexdigest(), bytes=262144)
-              for i in range(15)]
+              for i in range(CHECK["CHUNKS"])]
     original = {key: native[key] for key in ("manifest_id", "publisher_hex", "object_sha256", "bytes",
                                             "created_unix_seconds", "expires_unix_seconds")}
     original.update(chunks=layout, name="disposable-adaptive-native-publication", revision=1,
@@ -111,7 +112,7 @@ def https_fixture(evidence):
     for shard, node in enumerate(CHECK["NODES"][1:], 1):
         independent = dict(original, publisher_hex=str(4 + shard) * 64, manifest_id=str(2 + shard) * 64)
         cache = dict(path=f"/fixture/state-{node}/content-adaptive/cache", device=1, inode=123 + shard,
-                     entries=5, bytes=CHECK["SHARD_BYTES"], chunk_ids=[chunk["sha256"] for chunk in layout[shard::3]])
+                     entries=CHECK["SHARD_CHUNKS"], bytes=CHECK["SHARD_BYTES"], chunk_ids=[chunk["sha256"] for chunk in layout[shard::3]])
         indexes[node] = dict(publication=dict(report_kind="volparossa-https-independent-index",
             original=copy.deepcopy(original), independent=independent,
             cache_before=cache, cache_after=copy.deepcopy(cache), checked_unix_seconds=1050,
@@ -139,7 +140,7 @@ def https_fixture(evidence):
         started_monotonic_ns=10_000_000_000, completed_monotonic_ns=11_000_000_000,
         started_unix_ms=1_100_000, completed_unix_ms=1_101_000)
     return dict(publication=dict(report_kind="volparossa-https-content-seed", manifest_id=native["manifest_id"],
-        publisher_hex=native["publisher_hex"], bytes=CHECK["BYTES"], chunks=15, object_sha256=CHECK["SHA"],
+        publisher_hex=native["publisher_hex"], bytes=CHECK["BYTES"], chunks=CHECK["CHUNKS"], object_sha256=CHECK["SHA"],
         existing_publication_reused=True, publisher_private_key_persisted=False),
         a_status=dict(serving=True, publications=1, replication_enabled=False), indexes=indexes,
         fetch=fetch, output=output, application=application, status=dict(serving=False,
@@ -191,6 +192,40 @@ def raw_files(evidence):
 
 
 class AdaptiveEvidence(unittest.TestCase):
+    def test_bulk_vector_has_exact_disjoint_shards_and_unchanged_interior_fractions(self):
+        digest = hashlib.sha256()
+        chunks = []
+        for index in range(CHECK["CHUNKS"]):
+            payload = bytes([65 + index]) * 262144
+            digest.update(payload)
+            chunks.append(hashlib.sha256(payload).hexdigest())
+        self.assertEqual(len(set(chunks)), 60)
+        self.assertEqual(CHECK["BYTES"], 60 * 262144)
+        self.assertEqual(CHECK["SHARD_CHUNKS"], 20)
+        self.assertEqual(CHECK["SHARD_BYTES"], 20 * 262144)
+        self.assertEqual(CHECK["SHA"], digest.hexdigest())
+        self.assertEqual(CHECK["REPR_DIGEST"], f"sha-256=:{base64.b64encode(digest.digest()).decode()}:")
+        self.assertEqual(CHECK["PAYLOAD_MILESTONES"], [4 * 65536, 4 * 983040])
+        self.assertEqual(CHECK["PAYLOAD_MILESTONES"][0] * 20, CHECK["SHARD_BYTES"])
+        self.assertEqual(CHECK["PAYLOAD_MILESTONES"][1] * 4, CHECK["SHARD_BYTES"] * 3)
+
+    def test_observer_changes_only_adaptive_bulk_boundaries_and_rejects_old_windows(self):
+        source = Path(__file__).with_name("kvm-alpha-topology.sh").read_text(encoding="utf-8")
+        observer = source.split('cat >"$WORK/bin/privacy-observer.py" <<\'PYTHON\'\n', 1)[1].split("\nPYTHON\n", 1)[0]
+        boundaries = next(node for node in ast.parse(observer).body if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "provider_payload_milestones"
+                    for target in node.targets))
+        for prefix, expected in (("content-provider", [65536, 983040]),
+                                 ("content-provider-adaptive", CHECK["PAYLOAD_MILESTONES"]),
+                                 ("content-provider-adaptive-https", CHECK["PAYLOAD_MILESTONES"])):
+            environment = dict(os=os, output_path=f"/fixture/{prefix}-privacy-exit.json")
+            exec(compile(ast.Module(body=[boundaries], type_ignores=[]), "actual-bulk-boundaries", "exec"), environment)
+            self.assertEqual(environment["provider_payload_milestones"], expected)
+        capture = fixture()["privacy"]["exit"]
+        capture["provider_payload_timing"]["milestones_bytes"] = [65536, 983040]
+        with self.assertRaises(ValueError):
+            CHECK["payload_overlap"](capture)
+
     def test_https_exact_capture_prefix_enables_only_exit_kernel_timing_and_cleanup(self):
         source = (Path(__file__).with_name("kvm-alpha-topology.sh")).read_text(encoding="utf-8")
         observer = source.split('cat >"$WORK/bin/privacy-observer.py" <<\'PYTHON\'\n', 1)[1].split("\nPYTHON\n", 1)[0]

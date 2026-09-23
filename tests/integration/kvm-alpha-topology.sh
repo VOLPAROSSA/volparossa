@@ -4028,8 +4028,12 @@ provider_timing_enabled = (content_provider_mode and role == "exit"
 # Capture packet arrival, not socket-drain time: fair queue draining can reorder interfaces.
 # https://docs.kernel.org/networking/timestamping.html#so-timestampns-also-so-timestampns-old-and-so-timestampns-new
 SO_TIMESTAMPNS_NEW = 64
+provider_payload_milestones = ([262144, 3932160]
+    if os.path.basename(output_path) in {"content-provider-adaptive-privacy-exit.json",
+                                      "content-provider-adaptive-https-privacy-exit.json"}
+    else [65536, 983040])
 provider_payload_timing = dict(enabled=provider_timing_enabled, clock="linux-so-timestampns-new",
-    milestones_bytes=[65536, 983040], errors=0,
+    milestones_bytes=provider_payload_milestones, errors=0,
     providers={node: [0, 0] for node in provider_addresses.values()})
 provider_last_timestamp = {node: 0 for node in provider_addresses.values()}
 frame_timestamp_ns = 0

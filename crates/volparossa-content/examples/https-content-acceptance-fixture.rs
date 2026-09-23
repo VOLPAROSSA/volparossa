@@ -39,9 +39,9 @@ const METADATA: &str = "/.well-known/volparossa/content/asset";
 const OBJECT_BYTES: usize = 2 * 1024 * 1024 + 123;
 const OBJECT_SHA256: &str = "add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767";
 const OBJECT_REPR_DIGEST: &str = "sha-256=:rdByTY2+aEB9VEwkcUEocyopxIgM/zDSg7GtqTYuN2c=:";
-const ADAPTIVE_BYTES: usize = 15 * CHUNK_BYTES;
-const ADAPTIVE_SHA256: &str = "26fc4696f0ebcd7e36a3c0a0369e2d843742b3915a222ad57b49cd53020a9011";
-const ADAPTIVE_REPR_DIGEST: &str = "sha-256=:JvxGlvDrzX42o8CgNp4thDdCs5FaIirVe0nNUwIKkBE=:";
+const ADAPTIVE_BYTES: usize = 60 * CHUNK_BYTES;
+const ADAPTIVE_SHA256: &str = "8fd67e1fc14d95b27d5d9be573c6609baf59054a129a669a15a6cd4562b41ecb";
+const ADAPTIVE_REPR_DIGEST: &str = "sha-256=:j9Z+H8FNlbJ9XZvlc8Zgm69ZBUoSmmaaFabNRWK0Hss=:";
 const DEADLINE: Duration = Duration::from_secs(90);
 
 #[tokio::main]
@@ -98,6 +98,14 @@ fn limits() -> CacheLimits {
         max_bytes: 16 * CHUNK_BYTES as u64,
         max_entries: 16,
         min_free_bytes: 1024 * 1024,
+    }
+}
+
+fn adaptive_limits() -> CacheLimits {
+    CacheLimits {
+        max_bytes: 64 * CHUNK_BYTES as u64,
+        max_entries: 64,
+        ..limits()
     }
 }
 
@@ -177,7 +185,7 @@ fn seed_from_publication(root: &Path, manifest_path: &Path, publisher: &str) -> 
 
 fn checked_fixture_bytes(manifest: &VerifiedManifest, adaptive: bool) -> Result<Vec<u8>> {
     let bytes = if adaptive {
-        (b'A'..=b'O')
+        (b'A'..b'A' + 60)
             .flat_map(|value| vec![value; CHUNK_BYTES])
             .collect()
     } else {
@@ -272,7 +280,12 @@ fn independent_index_profile(
     let before = partial_cache_snapshot(cache, &original, shard)?;
     fs::DirBuilder::new().mode(0o700).create(root)?;
     let temporary = tempfile::tempdir_in(root)?;
-    let mut store = ChunkStore::create(&temporary.path().join("publisher-cache"), limits())?;
+    let profile_limits = if shard.is_some() {
+        adaptive_limits()
+    } else {
+        limits()
+    };
+    let mut store = ChunkStore::create(&temporary.path().join("publisher-cache"), profile_limits)?;
     let signer = SigningKey::generate(&mut rand_core::OsRng);
     let envelope = publish(
         &mut bytes.as_slice(),
@@ -327,10 +340,15 @@ fn partial_cache_snapshot(
     shard: Option<usize>,
 ) -> Result<Value> {
     let metadata = fs::symlink_metadata(cache)?;
-    let mut store = ChunkStore::open(cache, limits())?;
+    let profile_limits = if shard.is_some() {
+        adaptive_limits()
+    } else {
+        limits()
+    };
+    let mut store = ChunkStore::open(cache, profile_limits)?;
     if !metadata.is_dir()
-        || store.usage().entries != if shard.is_some() { 5 } else { 4 }
-        || store.usage().bytes != if shard.is_some() { 5 } else { 4 } * CHUNK_BYTES as u64
+        || store.usage().entries != if shard.is_some() { 20 } else { 4 }
+        || store.usage().bytes != if shard.is_some() { 20 } else { 4 } * CHUNK_BYTES as u64
     {
         return Err("provider B must retain exactly its four original odd chunks".into());
     }
@@ -803,10 +821,10 @@ mod tests {
     {
         let temporary = tempfile::tempdir()?;
         let root = temporary.path();
-        let bytes = (b'A'..=b'O')
+        let bytes = (b'A'..b'A' + 60)
             .flat_map(|value| vec![value; CHUNK_BYTES])
             .collect::<Vec<_>>();
-        let mut source = ChunkStore::create(&root.join("source"), limits())?;
+        let mut source = ChunkStore::create(&root.join("source"), adaptive_limits())?;
         let signer = SigningKey::generate(&mut rand_core::OsRng);
         let time = now()?;
         let signed = publish(
@@ -827,6 +845,12 @@ mod tests {
             &mut source,
         )?;
         let original = signed.verify(&signer.verifying_key(), time)?;
+        assert_eq!(limits().max_bytes, 16 * CHUNK_BYTES as u64);
+        assert_eq!(limits().max_entries, 16);
+        assert_eq!(adaptive_limits().max_bytes, 64 * CHUNK_BYTES as u64);
+        assert_eq!(adaptive_limits().max_entries, 64);
+        assert_eq!(source.usage().bytes, ADAPTIVE_BYTES as u64);
+        assert_eq!(source.usage().entries, 60);
         let manifest = root.join("manifest.bin");
         write_new(&manifest, &signed.encode())?;
         let publisher = hex::encode(original.publisher());
@@ -840,7 +864,7 @@ mod tests {
         let mut identities = vec![*original.manifest_id()];
         for shard in 0..3 {
             let cache = root.join(format!("shard-{shard}"));
-            let mut destination = ChunkStore::create(&cache, limits())?;
+            let mut destination = ChunkStore::create(&cache, adaptive_limits())?;
             for (index, chunk) in original.chunks().iter().enumerate() {
                 if index % 3 == shard {
                     destination.put(&source.get(chunk.id())?.ok_or("missing chunk")?)?;
