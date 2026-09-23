@@ -17,6 +17,8 @@ SPEC = importlib.util.spec_from_file_location("graph_decoder", Path(__file__).wi
 DECODER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(DECODER)
 RAW = b'{ "version":3, "tasks":[{"question":"Which limit applies?","depends_on":[]}] }'
+PRINCIPLES = ("Humilitas", "Humanitas", "Mansuetudo", "Diligentia", "Liberalitas", "Temperantia", "Castitas",
+              "Superbia", "Invidia", "Ira", "Acedia", "Avaritia", "Gula", "Luxuria")
 
 
 class Tokenizer:
@@ -151,6 +153,36 @@ class GraphSyntaxDouble:
 
     def shortcut_key(self):
         return ('json_freetext', 0, 1, 512)
+
+
+class PrincipleSyntaxDouble(ScalarRoot):
+    """Pinned object-stack/value-stage shape; not a substitute JSON backend."""
+
+    def __init__(self, field="principle", prefix="", stage="PARSING_VALUE", parent="reasoning"):
+        super().__init__()
+        value = StringState(self, list(PRINCIPLES) if field == "principle" else None, False)
+        value.parsed_string = prefix
+        self.object_stack = [SimpleNamespace(current_key=parent), SimpleNamespace(),
+                             SimpleNamespace(current_key=field, current_stage=SimpleNamespace(name=stage)), value]
+
+    def add_character(self, character):
+        updated = copy.copy(self)
+        value = copy.copy(self.object_stack[-1])
+        if character == '"':
+            value.seen_closing_quote = True
+        else:
+            value.parsed_string += character
+        updated.object_stack = self.object_stack[:-1] + [value]
+        return updated
+
+    def get_allowed_characters(self):
+        return ''.join(chr(code) for code in range(32, 127))
+
+    def can_end(self):
+        return self.object_stack[-1].seen_closing_quote
+
+    def shortcut_key(self):
+        return ('json_freetext', len(self.object_stack[-1].parsed_string), 1, 192)
 
 
 class Core:
@@ -327,6 +359,42 @@ class DecoderTests(unittest.TestCase):
                     DECODER.GraphDecoder(Tokenizer(), lambda: None, lambda _raw: True, **options)
                 loading.assert_not_called()
 
+    def test_unicode_prefix_rejects_dead_branches_before_the_last_hex_digit(self):
+        opening = '{"version":3,"tasks":[{"question":"'
+        for content in ("\\uDFF", "x" * 511 + "?\\u000", "x" * 511 + "\\u004",
+                        "x" * 508 + "\\ud83", "\\ud83d\\u004"):
+            rules = DECODER._GraphRules("Main goal?", None)
+            for character in opening + content:
+                following = rules.advance(character)
+                self.assertEqual(rules.allows(character), following is not None)
+                if following is None:
+                    break
+                rules = following
+            else:
+                self.fail("admitted an escape prefix with no scalar/question completion")
+        # Rejection neither alters the existing question nor forces its closing
+        # quote/EOS. The original complete 512-byte question remains closable.
+        rules = DECODER._GraphRules("Main goal?", None)
+        for character in opening + "x" * 511 + "?":
+            rules = rules.advance(character)
+        self.assertTrue(rules.allows('"'))
+        self.assertFalse(rules.allows("\\"))
+        self.assertIsNone(rules.advance("\\"))
+        self.assertEqual((rules.text_bytes, rules.escape), (512, ""))
+
+    def test_unicode_liveness_preserves_escaped_question_surrogate_and_whitespace_endings(self):
+        opening = '{"version":3,"tasks":[{"question":"'
+        endings = ("x" * 511 + "\\u003f", "x" * 507 + "\\ud83d\\ude42?",
+                   "x" * 508 + "?\\u2003", "What about \\ud83d\\ude42?")
+        for content in endings:
+            rules = DECODER._GraphRules("Main goal?", None)
+            for character in opening + content + '","depends_on":[]}]}':
+                self.assertEqual(rules.allows(character), rules.advance(character) is not None)
+                rules = rules.advance(character)
+                self.assertIsNotNone(rules, repr(content))
+            self.assertEqual(rules.phase, "done")
+            self.assertEqual(rules.questions, (json.loads('"' + content + '"').strip(),))
+
     def test_graph_alphabet_probe_matches_transitions_without_cloning_ordinary_text(self):
         alphabet = ''.join(chr(code) for code in range(128)) + 'é漢🙂\ud800\udfff'
         prefixes = [
@@ -367,6 +435,93 @@ class DecoderTests(unittest.TestCase):
         callback = value.new_attempt([0], 512)
         self.assertIs(callback.enforcer.root_parser.config, module.CharacterLevelParserConfig.return_value)
         self.assertIsNone(decoder().new_attempt([0], 384).enforcer.root_parser.config)
+
+    def principle_parser(self, **options):
+        used = options.pop("used", frozenset())
+        return DECODER._UniquePrinciplesJsonParser(
+            DECODER._CompactJsonParser(PrincipleSyntaxDouble(**options), StringState), StringState, PRINCIPLES, used)
+
+    def test_unique_principles_keep_all_initial_choices_and_fork_siblings_independently(self):
+        root = self.principle_parser()
+        for name in PRINCIPLES:
+            selected = root
+            for character in name + '"':
+                self.assertIn(character, selected.get_allowed_characters())
+                selected = selected.add_character(character)
+            self.assertEqual(selected.used, {name})
+            self.assertEqual(root.used, frozenset())
+            other_row = self.principle_parser(used=selected.used)
+            for available in PRINCIPLES:
+                current = other_row
+                for character in available + '"':
+                    if character not in current.get_allowed_characters():
+                        self.assertEqual(available, name)
+                        with self.assertRaises(DECODER.DecoderError):
+                            current.add_character(character)
+                        break
+                    current = current.add_character(character)
+                else:
+                    self.assertNotEqual(available, name)
+                    self.assertEqual(current.used, {name, available})
+            self.assertIsNone(selected.cache_key())
+        self.assertIsNone(root.shortcut_key())
+
+    def test_unique_principles_do_not_treat_quotes_reasons_or_keys_as_selections(self):
+        for options in ({"field": "quote"}, {"field": "reason"}, {"field": "counterargument", "parent": None},
+                        {"field": "reason", "parent": "uncertainty"},
+                        {"field": "principle", "stage": "PARSING_KEY_VALUE_SEPARATOR"}):
+            parser = self.principle_parser(used=frozenset({"Humanitas"}), **options)
+            shortcut = parser.shortcut_key()
+            self.assertEqual(shortcut[0], "json_freetext")
+            # Including a complete quoted JSON-looking fragment in public prose
+            # must not be searched for a principle choice.
+            for character in 'Humanitas Humanitas principle':
+                self.assertIn(character, parser.get_allowed_characters())
+                parser = parser.add_character(character)
+            self.assertEqual(parser.used, {"Humanitas"})
+
+    def test_unique_principles_cannot_be_bypassed_by_escaped_equivalent_name(self):
+        # The pinned enum's literal-name grammar does not offer backslash. Do
+        # not add an alternate escape grammar; if a syntax state already holds
+        # the decoded equivalent, it must still reject the duplicate at closing.
+        escaped = json.loads('"\\u0048umanitas"')
+        self.assertEqual(escaped, "Humanitas")
+        parser = self.principle_parser(prefix=escaped, used=frozenset({"Humanitas"}))
+        self.assertNotIn('"', parser.get_allowed_characters())
+        with self.assertRaises(DECODER.DecoderError):
+            parser.add_character('"')
+        parser = self.principle_parser()
+        self.assertNotIn("\\", parser.get_allowed_characters())
+        with self.assertRaises(DECODER.DecoderError):
+            parser.add_character("\\")
+
+    def test_unique_principles_are_explicit_fixed_schema_opt_in_and_reset_per_attempt(self):
+        schema = {"type": "object", "properties": {"reasoning": {"type": "array", "items": {"type": "object",
+            "properties": {"principle": {"type": "string", "enum": list(PRINCIPLES)}}}}}}
+        module = SimpleNamespace(CharacterLevelParserConfig=mock.Mock(return_value=object()), StringParsingState=StringState)
+        for choices in (list(PRINCIPLES), PRINCIPLES):
+            with mock.patch.object(DECODER, "_load_backend", return_value=(Parser, Data, Core, TokenList)), \
+                    mock.patch.object(DECODER.importlib, "import_module", return_value=module):
+                value = DECODER.GraphDecoder(Tokenizer(), lambda: None, lambda _raw: True, schema=schema,
+                                            ordered_json=True, unique_principles=choices)
+                first, second = value.new_attempt([0], 20), value.new_attempt([0], 20)
+            self.assertIsInstance(first.enforcer.root_parser, DECODER._UniquePrinciplesJsonParser)
+            self.assertIsNot(first.enforcer.root_parser, second.enforcer.root_parser)
+            self.assertEqual(first.enforcer.root_parser.used, frozenset())
+            self.assertEqual(second.enforcer.root_parser.used, frozenset())
+        for options in ({"unique_principles": list(PRINCIPLES[:-1])},
+                        {"unique_principles": [PRINCIPLES[0]] * 14},
+                        {"unique_principles": list(reversed(PRINCIPLES))},
+                        {"unique_principles": "Humanitas"},
+                        {"unique_principles": list(PRINCIPLES), "ordered_json": False},
+                        {"unique_principles": list(PRINCIPLES), "schema": {"type": "object"}},
+                        {"unique_principles": list(PRINCIPLES), "graph_goal": "Main?"}):
+            selected = dict(schema=schema, ordered_json=True, **{})
+            selected.update(options)
+            with mock.patch.object(DECODER, "_load_backend") as loading:
+                with self.assertRaisesRegex(DECODER.DecoderError, '^TASK_GRAPH_DECODER_ATTEMPT_INVALID$'):
+                    DECODER.GraphDecoder(Tokenizer(), lambda: None, lambda _raw: True, **selected)
+                loading.assert_not_called()
         for instance, limit in ((value, 513), (decoder(), 385)):
             with self.assertRaisesRegex(DECODER.DecoderError, "ATTEMPT_INVALID"):
                 instance.new_attempt([0], limit)

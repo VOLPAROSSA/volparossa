@@ -1716,6 +1716,15 @@ counterarguments and uncertainty before the outcome. This restriction selects no
 all fourteen principles and all outcomes remain open. Source-quote matching still does not prove
 that a quote supports the argument. Real four-stage completion and sound judgment remain unproven.
 
+The [run on `b80f0b02`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35849851694)
+preserves `PRINCIPLE_OUTPUT_REASONING` from both real assessors after complete JSON parsing.
+Rejected output is not retained, so its particular validator branch is unknown. The next
+decoder candidate excludes a principle already selected in an earlier reasoning row, matching
+the existing independent validator. It does not select the first principle, a quote's meaning
+or the outcome. Separate fixed diagnostics distinguish count, fields, membership and repetition
+without logging the rejected subject or model text. No successful cross-review or automatic
+policy activation is established by the failed run.
+
 Bind observations to specific agent/model artifacts, task contracts and observed failures.
 Use independently checked outcomes, regression/poisoning checks and diverse assessors; copied
 models or coordinated peers can share the same error. Disagreement alone is not proof of a

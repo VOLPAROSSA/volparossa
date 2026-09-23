@@ -4,6 +4,21 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-23
 
+The [policy run on `b80f0b02`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35849851694)
+now preserves the strict `PRINCIPLE_OUTPUT_REASONING` failure from both actual assessors.
+Both reached a parsed response but no accepted judgment, cross-review or portable bundle;
+their failed receipts retained 549/552 seconds of the original lease. All 126 original files
+remain source-bound and unchanged. Raw rejected output is absent, so the exact reason-count,
+field, principle-membership or duplicate-principle branch cannot be identified from this run.
+Source review separately identifies an actual gap: the decoder permits repeated principles
+that the independent validator already rejects. The next candidate constrains only that
+uniqueness, leaving all fourteen initial choices, reasoning and outcomes to the model, and
+keeps separate fixed failure codes for the four rejection classes. Known impossible Unicode
+escape prefixes in graph questions are also excluded without repairing questions or adding
+dependencies. All 116 pure Python checks and six focused Rust diagnostic/bootstrap checks pass;
+the CLI compiles with the updated embedded worker. No model/backend runs on the development
+host. These corrections are not evidence of real-model completion; B03/B06 stay open.
+
 The [graph run on `c9b784a1`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35673084743)
 confirms real worker startup with the split-argument bootstrap, but **fails at `compute_deadline`**
 after the baseline phase. Its original 600-second owner budget is unchanged; the artifact retains

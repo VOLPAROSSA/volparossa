@@ -453,9 +453,11 @@ def validate_principle_output(raw, contract, source):
     reasons, seen = value["reasoning"], set()
     require(type(reasons) is list and 1 <= len(reasons) <= 3, "PRINCIPLE_OUTPUT_REASONING")
     for reason in reasons:
-        require(type(reason) is dict and reason.keys() == {"principle", "quote", "reason"}
-                and type(reason["principle"]) is str and reason["principle"] in PRINCIPLES
-                and reason["principle"] not in seen, "PRINCIPLE_OUTPUT_REASONING")
+        require(type(reason) is dict and reason.keys() == {"principle", "quote", "reason"},
+                "PRINCIPLE_OUTPUT_REASONING_FIELDS")
+        require(type(reason["principle"]) is str and reason["principle"] in PRINCIPLES,
+                "PRINCIPLE_OUTPUT_PRINCIPLE")
+        require(reason["principle"] not in seen, "PRINCIPLE_OUTPUT_DUPLICATE_PRINCIPLE")
         text(reason["quote"], 128)
         text(reason["reason"], 192)
         require(reason["quote"] in source, "PRINCIPLE_OUTPUT_SOURCE_QUOTE")
@@ -1626,7 +1628,8 @@ def generate_principle(model, samples, tokenizer, torch, session, transformers, 
 
     decoder = create_constrained_decoder(tokenizer, session, accepts,
         schema=principle_schema(contract, source, session.check), prompt_limit=1024,
-        output_limit=1024, generation_limit=512, ordered_json=True)
+        output_limit=1024, generation_limit=512, ordered_json=True,
+        unique_principles=list(PRINCIPLES))
     input_ids = samples[0]
     prompt = input_ids[0, :].tolist()
     require(1 <= len(prompt) <= 1024, "DOCUMENT_TOKEN_LIMIT_EXCEEDED")

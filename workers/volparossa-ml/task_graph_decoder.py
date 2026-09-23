@@ -253,6 +253,70 @@ class _CompactJsonParser:
         return self.inner.shortcut_key()
 
 
+class _UniquePrinciplesJsonParser:
+    """Branch-local enum exclusion only at reasoning[*].principle.
+
+    Use the pinned syntax parser's object stack, not substrings of quoted source
+    or reasoning text. Keys themselves have a different ObjectParsingStage and
+    cannot be mistaken for the preceding property's value.
+    """
+
+    def __init__(self, inner, string_type, choices, used=frozenset()):
+        self.inner, self.string_type, self.choices, self.used = inner, string_type, choices, used
+
+    @property
+    def config(self):
+        return self.inner.config
+
+    @config.setter
+    def config(self, config):
+        self.inner.config = config
+
+    def _principle_state(self):
+        stack = self.inner.inner.object_stack  # The explicitly ordered compact parser.
+        if not stack or not isinstance(stack[-1], self.string_type):
+            return None
+        objects = [state for state in stack if hasattr(state, "current_key")]
+        if (len(objects) != 2 or objects[0].current_key != "reasoning"
+                or objects[1].current_key != "principle"
+                or getattr(objects[1].current_stage, "name", None) != "PARSING_VALUE"):
+            return None
+        return stack[-1]
+
+    def _characters(self, state):
+        prefix = state.parsed_string
+        choices = [name for name in self.choices if name not in self.used and name.startswith(prefix)]
+        return {name[len(prefix)] if len(name) > len(prefix) else '"' for name in choices}
+
+    def add_character(self, character):
+        used = self.used
+        state = self._principle_state()
+        if state is not None and state.seen_opening_quote and not state.seen_closing_quote:
+            if character not in self._characters(state):
+                raise DecoderError("TASK_GRAPH_DECODER_PARSER_FAILED")
+            if character == '"':
+                used = used | {state.parsed_string}
+        return _UniquePrinciplesJsonParser(self.inner.add_character(character), self.string_type, self.choices, used)
+
+    def get_allowed_characters(self):
+        allowed = self.inner.get_allowed_characters()
+        state = self._principle_state()
+        if state is None or not state.seen_opening_quote or state.seen_closing_quote:
+            return allowed
+        remaining = self._characters(state)
+        return "".join(character for character in allowed if character in remaining)
+
+    def can_end(self):
+        return self.inner.can_end()
+
+    def cache_key(self):
+        # Identical syntax states with different previous rows are not equivalent.
+        return None
+
+    def shortcut_key(self):
+        return None if self._principle_state() is not None else self.inner.shortcut_key()
+
+
 class _GraphRules:
     """Immutable prefix state for the one fixed graph schema, not a JSON repairer."""
 
@@ -282,12 +346,49 @@ class _GraphRules:
         # Do not enter an irreversibly overfull/non-question scalar.
         return size < 512 or self._question_complete()
 
+    def _scalar_range_can_finish(self, low, high):
+        remaining = 512 - self.text_bytes
+        # A scalar that leaves room can still be followed by a question mark.
+        # Split the BMP around surrogate code units; NUL is never admissible.
+        for first, last, width in ((1, 0x7f, 1), (0x80, 0x7ff, 2), (0x800, 0xd7ff, 3),
+                                   (0xe000, 0xffff, 3), (0x10000, 0x10ffff, 4)):
+            if width < remaining and max(low, first) <= min(high, last):
+                return True
+        # Exactly filling the byte budget is viable only with '?' or trailing
+        # whitespace after an already complete, distinct question. This bounded
+        # set covers Python's Unicode whitespace without scanning 65,536 values
+        # for every partial escape in the tokenizer trie.
+        endings = "?\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+        for character in endings:
+            if low <= ord(character) <= high and len(character.encode("utf-8")) == remaining:
+                value = (self.text + character).strip()
+                if value and value.endswith("?") and value != self.goal and value not in self.questions:
+                    return True
+        return False
+
+    def _unicode_prefix_can_finish(self, digits):
+        # A hexadecimal prefix describes one interval of UTF-16 code units.
+        # Admit it only if some completion encodes an admissible scalar; a high
+        # surrogate also needs a possible low-surrogate continuation and room.
+        shift = 4 * (4 - len(digits))
+        low = int(digits or "0", 16) << shift
+        high = low + (1 << shift) - 1
+        if self.high_surrogate is not None:
+            low, high = max(low, 0xdc00), min(high, 0xdfff)
+            base = 0x10000 + (self.high_surrogate - 0xd800) * 0x400
+            return low <= high and self._scalar_range_can_finish(base + low - 0xdc00, base + high - 0xdc00)
+        if self._scalar_range_can_finish(low, high):
+            return True
+        low, high = max(low, 0xd800), min(high, 0xdbff)
+        return low <= high and self._scalar_range_can_finish(
+            0x10000 + (low - 0xd800) * 0x400, 0x10000 + (high - 0xd800) * 0x400 + 0x3ff)
+
     def _question_character(self, character):
         if self.escape == "\\":
             self.escape = ""
             if character == "u":
                 self.escape = "u"
-                return True
+                return self._unicode_prefix_can_finish("")
             escaped = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
             return (self.high_surrogate is None and character in escaped
                     and self._append_text(escaped[character]))
@@ -295,6 +396,8 @@ class _GraphRules:
             if character not in "0123456789abcdefABCDEF":
                 return False
             self.escape += character
+            if not self._unicode_prefix_can_finish(self.escape[1:]):
+                return False
             if len(self.escape) < 5:
                 return True
             codepoint = int(self.escape[1:], 16)
@@ -312,7 +415,7 @@ class _GraphRules:
             return self._append_text(chr(codepoint))
         if character == "\\":
             self.escape = "\\"
-            return True
+            return self._unicode_prefix_can_finish("")
         if self.high_surrogate is not None:
             return False
         if character == '"':
@@ -377,7 +480,7 @@ class _GraphRules:
         if character == '"':
             return self._question_complete()
         if character == "\\":
-            return True
+            return self._unicode_prefix_can_finish("")
         codepoint = ord(character)
         if codepoint < 0x20 or 0xD800 <= codepoint <= 0xDFFF:
             return False
@@ -491,7 +594,7 @@ class GraphDecoder:
 
     def __init__(self, tokenizer, check, accepts_graph_bytes, *, schema=None,
                  prompt_limit=512, output_limit=16384, generation_limit=384,
-                 ordered_json=False, graph_goal=None, graph_requirement=None):
+                 ordered_json=False, graph_goal=None, graph_requirement=None, unique_principles=None):
         # Only compiled worker code supplies this schema/limits, never a dataset.
         # Defaults preserve the original graph profile and historical contract.
         if (type(prompt_limit) is not int or not 1 <= prompt_limit <= 1024
@@ -504,6 +607,21 @@ class GraphDecoder:
         self.tokenizer = tokenizer
         self.accepts_graph_bytes = accepts_graph_bytes
         self.schema = graph_schema() if schema is None else schema
+        self.unique_principles = None
+        if unique_principles is not None:
+            try:
+                choices = tuple(unique_principles)
+                value_schema = self.schema["properties"]["reasoning"]["items"]["properties"]["principle"]
+                valid = (type(unique_principles) in (list, tuple) and len(choices) == 14
+                         and all(type(name) is str and name.isascii() and name.isalpha() and 1 <= len(name) <= 32
+                                 for name in choices) and len(set(choices)) == 14
+                         and value_schema["type"] == "string" and tuple(value_schema["enum"]) == choices
+                         and ordered_json is True and graph_goal is None and graph_requirement is None)
+            except (KeyError, TypeError):
+                valid = False
+            if not valid:
+                raise DecoderError("TASK_GRAPH_DECODER_ATTEMPT_INVALID")
+            self.unique_principles = choices
         self.graph_goal, self.graph_requirement = graph_goal, graph_requirement
         if graph_goal is not None or graph_requirement is not None:
             try:
@@ -594,6 +712,8 @@ class GraphDecoder:
             parser = self.parser(copy.deepcopy(self.schema), **self.parser_options)
             if self.ordered_string_type is not None:
                 parser = _CompactJsonParser(parser, self.ordered_string_type)
+            if self.unique_principles is not None:
+                parser = _UniquePrinciplesJsonParser(parser, self.ordered_string_type, self.unique_principles)
             if self.graph_goal is not None:
                 parser = _GraphJsonParser(parser, _GraphRules(self.graph_goal, self.graph_requirement))
             enforcer = self.enforcer(self.data, parser)

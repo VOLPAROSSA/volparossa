@@ -164,6 +164,7 @@ class PrincipleInferenceTests(unittest.TestCase):
                         model_profile=WORKER.LARGE_MODEL_PROFILE, output_contract=value["output_contract"]))
                     self.assertEqual(result["generated_tokens"], len(tokens))
                     self.assertEqual(factory.call_args.kwargs["prompt_limit"], 1024)
+                    self.assertEqual(factory.call_args.kwargs["unique_principles"], list(WORKER.PRINCIPLES))
                     self.assertEqual(factory.call_args.kwargs["generation_limit"], 512)
                     self.assertTrue(factory.call_args.kwargs["ordered_json"])
                     quote_schema = factory.call_args.kwargs["schema"]["properties"]["reasoning"]["items"]["properties"]["quote"]
@@ -207,7 +208,11 @@ class PrincipleInferenceTests(unittest.TestCase):
         for review in (False, True):
             original = payload(review)
             cases = [
-                (dict(original, reasoning=original["reasoning"] * 2), "PRINCIPLE_OUTPUT_REASONING"),
+                (dict(original, reasoning=original["reasoning"] * 2), "PRINCIPLE_OUTPUT_DUPLICATE_PRINCIPLE"),
+                (dict(original, reasoning=[]), "PRINCIPLE_OUTPUT_REASONING"),
+                (dict(original, reasoning=[{"principle": "Humanitas"}]), "PRINCIPLE_OUTPUT_REASONING_FIELDS"),
+                (dict(original, reasoning=[dict(original["reasoning"][0], principle="Unknown")]),
+                 "PRINCIPLE_OUTPUT_PRINCIPLE"),
                 (dict(original, reasoning=[dict(original["reasoning"][0], quote="Not in source")]),
                  "PRINCIPLE_OUTPUT_SOURCE_QUOTE"),
                 (dict(original, version=True), "PRINCIPLE_OUTPUT_FIELDS"),
