@@ -327,6 +327,33 @@ class DecoderTests(unittest.TestCase):
                     DECODER.GraphDecoder(Tokenizer(), lambda: None, lambda _raw: True, **options)
                 loading.assert_not_called()
 
+    def test_graph_alphabet_probe_matches_transitions_without_cloning_ordinary_text(self):
+        alphabet = ''.join(chr(code) for code in range(128)) + 'é漢🙂\ud800\udfff'
+        prefixes = [
+            '{"version":3,"tasks":[{"question":"Which constraint matters?',
+            '{"version":3,"tasks":[{"question":"Which fact?","depends_on":[]},'
+            '{"question":"What follows?","depends_on":[0]}]}',
+            '{"version":3,"tasks":[{"question":"' + 'x' * 510 + '? ',
+            '{"version":3,"tasks":[{"question":"What about \\u00e9 or \\ud83d\\ude42?',
+        ]
+        for prefix in prefixes:
+            rules = DECODER._GraphRules("Main goal?", "dependent_analysis_v1")
+            for character in prefix:
+                for candidate in alphabet:
+                    self.assertEqual(rules.allows(candidate), rules.advance(candidate) is not None,
+                                     (rules.phase, rules.text_bytes, repr(candidate)))
+                rules = rules.advance(character)
+                self.assertIsNotNone(rules)
+        rules = DECODER._GraphRules("Main goal?", None)
+        for character in '{"version":3,"tasks":[{"question":"Which ':
+            rules = rules.advance(character)
+        parser = DECODER._GraphJsonParser(GraphSyntaxDouble(), rules)
+        with mock.patch.object(DECODER._GraphRules, "advance", side_effect=AssertionError("alphabet clone")):
+            allowed = parser.get_allowed_characters()
+            self.assertIn('x', allowed)
+            self.assertNotIn('"', allowed)
+            self.assertEqual(parser.get_allowed_characters(), allowed)
+
     def test_explicit_ordered_principle_budget_does_not_change_graph_defaults(self):
         module = SimpleNamespace(CharacterLevelParserConfig=mock.Mock(return_value=object()), StringParsingState=StringState)
         with mock.patch.object(DECODER, "_load_backend", return_value=(Parser, Data, Core, TokenList)), \

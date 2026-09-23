@@ -203,6 +203,57 @@ class PrincipleInferenceTests(unittest.TestCase):
                 session, transformers, dataset(), WORKER.LARGE_MODEL_PROFILE)
         model.generate.assert_called_once()
 
+    def test_complete_invalid_json_preserves_strict_validator_code_before_decoder_exhaustion(self):
+        for review in (False, True):
+            original = payload(review)
+            cases = [
+                (dict(original, reasoning=original["reasoning"] * 2), "PRINCIPLE_OUTPUT_REASONING"),
+                (dict(original, reasoning=[dict(original["reasoning"][0], quote="Not in source")]),
+                 "PRINCIPLE_OUTPUT_SOURCE_QUOTE"),
+                (dict(original, version=True), "PRINCIPLE_OUTPUT_FIELDS"),
+                (dict(original, outcome="legally_safe"), "PRINCIPLE_OUTPUT_OUTCOME"),
+                (dict(original, counterargument=" "), "PRINCIPLE_OUTPUT_TEXT"),
+                (dict(original, uncertainty={"material": 1, "reason": "Unknown"}),
+                 "PRINCIPLE_OUTPUT_UNCERTAINTY"),
+                (dict(original, counterargument="x" * 1100), "PRINCIPLE_OUTPUT_BOUND"),
+            ]
+            raw_cases = [(encoded(value).decode(), code) for value, code in cases]
+            raw_cases.append((encoded(original).decode().replace('"version":1', '"version":1,"version":1'),
+                              "DUPLICATE_JSON_KEY"))
+            for text, code in raw_cases:
+                for tokens in ([21, 22], [21, 2], [21] * 512):
+                    with self.subTest(review=review, code=code, eos=tokens[-1] == 2, count=len(tokens)):
+                        model, tokenizer, torch, transformers = task_planner_doubles(text, generated=tokens)
+                        with mock.patch.object(WORKER, "create_constrained_decoder", return_value=mock.Mock()), \
+                                self.assertRaises(WORKER.JobError) as failure:
+                            WORKER.generate_principle(model, [torch.tensor([[11, 12, 13]])], tokenizer, torch,
+                                mock.Mock(), transformers, dataset(review), WORKER.LARGE_MODEL_PROFILE)
+                        self.assertEqual(str(failure.exception), code)
+                        model.generate.assert_called_once()
+
+    def test_incomplete_prefix_continues_until_exact_valid_json_boundary(self):
+        text = " \n" + encoded(payload()).decode() + " "
+        model, tokenizer, torch, transformers = task_planner_doubles(text, generated=[21, 22])
+        partial = '{"version":1,"reasoning":['
+        tokenizer.decode.side_effect = lambda tokens, **_kwargs: partial if tokens == [21] else text
+
+        def generate(**kwargs):
+            prompt = kwargs["input_ids"].rows[0]
+            criterion, = kwargs["stopping_criteria"]
+            self.assertFalse(criterion(torch.tensor([prompt + [21]]), None))
+            self.assertTrue(criterion(torch.tensor([prompt + [21, 22]]), None))
+            return torch.tensor([prompt + [21, 22]])
+
+        model.generate.side_effect = generate
+        with mock.patch.object(WORKER, "create_constrained_decoder", return_value=mock.Mock()):
+            result = WORKER.generate_principle(model, [torch.tensor([[11, 12, 13]])], tokenizer, torch,
+                mock.Mock(), transformers, dataset(), WORKER.LARGE_MODEL_PROFILE)[0]
+        self.assertEqual(result["text"], text)
+        self.assertEqual(result["generation"]["stop_reason"], "json_boundary")
+        self.assertEqual(result["generated_tokens"], 2)
+        self.assertFalse(result["text_truncated"])
+        model.generate.assert_called_once()
+
     def test_missing_pinned_decoder_is_failure_before_any_generation(self):
         model, tokenizer, torch, transformers = task_planner_doubles(encoded(payload()).decode())
         with mock.patch.dict(sys.modules, {"volparossa_task_graph_decoder": None}), \

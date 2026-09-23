@@ -363,12 +363,39 @@ class _GraphRules:
             return None
         return updated
 
+    def allows(self, character):
+        # The tokenizer trie asks about the whole alphabet at every visited
+        # prefix. Do not clone/append a graph state for every candidate letter:
+        # only the selected trie edge needs advance(). Keep exceptional escape
+        # and boundary handling identical to the authoritative transition.
+        if type(character) is not str or len(character) != 1:
+            return False
+        if self.phase == "literal":
+            return character == self.literal[0]
+        if self.phase != "question" or self.escape or self.high_surrogate is not None:
+            return self.advance(character) is not None
+        if character == '"':
+            return self._question_complete()
+        if character == "\\":
+            return True
+        codepoint = ord(character)
+        if codepoint < 0x20 or 0xD800 <= codepoint <= 0xDFFF:
+            return False
+        if self.text_bytes <= 507:
+            return True  # Even a four-byte scalar remains below the 512-byte edge.
+        size = self.text_bytes + len(character.encode("utf-8"))
+        if size != 512:
+            return size < 512
+        value = (self.text + character).strip()
+        return bool(value) and value.endswith("?") and value != self.goal and value not in self.questions
+
 
 class _GraphJsonParser:
     """Intersect pinned JSON syntax with branch-local graph contract constraints."""
 
     def __init__(self, inner, rules):
         self.inner, self.rules = inner, rules
+        self._allowed = None
 
     @property
     def config(self):
@@ -377,6 +404,7 @@ class _GraphJsonParser:
     @config.setter
     def config(self, config):
         self.inner.config = config
+        self._allowed = None
 
     def add_character(self, character):
         rules = self.rules.advance(character)
@@ -385,8 +413,10 @@ class _GraphJsonParser:
         return _GraphJsonParser(self.inner.add_character(character), rules)
 
     def get_allowed_characters(self):
-        return "".join(character for character in dict.fromkeys(self.inner.get_allowed_characters())
-                       if self.rules.advance(character) is not None)
+        if self._allowed is None:
+            self._allowed = "".join(character for character in dict.fromkeys(self.inner.get_allowed_characters())
+                                    if self.rules.allows(character))
+        return self._allowed
 
     def can_end(self):
         return self.rules.phase == "done" and self.inner.can_end()

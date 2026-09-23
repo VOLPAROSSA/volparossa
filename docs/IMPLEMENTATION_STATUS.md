@@ -15,6 +15,17 @@ prefix failure cannot be distinguished from complete-output rejection. Original 
 reviews of all 110 graph and 126 policy files verify cleanup and unchanged host bytes; they
 do not convert either run into a success. B03 and B06 remain incomplete.
 
+The follow-up removes speculative graph-state cloning for every alphabet character at every
+token-trie prefix. A direct membership predicate and immutable per-prefix cache preserve the
+same graph transitions, including UTF-8 limits, escaped questions and required dependencies;
+token/deadline budgets and the model's question/edge choices are unchanged. This addresses an
+expensive decoder path found in source review, not a proven explanation of all the deadline's
+elapsed time. Principle generation now distinguishes an incomplete JSON prefix from a complete
+but invalid response: the latter returns its original strict validator code, without repair,
+content logging or an invented EOS. This does not establish why the preceding run had no allowed
+tokens. All 110 pure worker/decoder/principle tests pass, without executing the model or pinned
+backend on the development host. Real completion still requires new disposable-VM evidence.
+
 The [graph-v3 run on `2a565506`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35671611820)
 **fails before the worker starts**: the original enrollment error is `compute_sandbox_spawn`
 with `Argument list too long (os error 7)`. Exact source reconstruction yields a 136,410-byte

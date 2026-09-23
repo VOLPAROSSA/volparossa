@@ -1647,10 +1647,18 @@ def generate_principle(model, samples, tokenizer, torch, session, transformers, 
                 raw = text.encode("utf-8")
             except UnicodeError:
                 return False
-            if accepts(raw):
-                boundary = tuple(generated)
-                return True
-            return False
+            # Distinguish an unfinished JSON prefix from a complete but invalid
+            # response. Continuing after the latter hides the real validator
+            # failure behind the decoder's eventual lack of allowed tokens.
+            # This parse detects completion only: validate the original bytes
+            # separately, preserving duplicate-key, quote and bound checks.
+            try:
+                json.loads(raw)
+            except (ValueError, RecursionError):
+                return False
+            validate_principle_output(raw, contract, source)
+            boundary = tuple(generated)
+            return True
 
     session.check()
     model.eval()
@@ -1673,10 +1681,10 @@ def generate_principle(model, samples, tokenizer, torch, session, transformers, 
                             skip_special_tokens=False, clean_up_tokenization_spaces=False)
     raw = text.encode("utf-8")
     if eos:
-        require(accepts(raw), "PRINCIPLE_OUTPUT_INVALID")
+        validate_principle_output(raw, contract, source)
         reason = "eos"
     elif boundary == tuple(generated):
-        require(accepts(raw), "PRINCIPLE_OUTPUT_INVALID")
+        validate_principle_output(raw, contract, source)
         reason = "json_boundary"
     else:
         require(len(generated) == 512, "GENERATION_STOP_UNCONFIRMED")
