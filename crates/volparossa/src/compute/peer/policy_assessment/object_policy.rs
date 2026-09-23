@@ -3,6 +3,7 @@
 
 pub(in crate::compute::peer) mod distribution;
 pub(in crate::compute::peer) mod follow;
+pub(in crate::compute::peer) mod round;
 
 #[cfg(test)]
 mod tests;
@@ -34,21 +35,21 @@ const MAX_DECISION_BYTES: u64 = 8192;
 pub(crate) struct Selection {
     /// Existing portable four-transcript assessment package; never a caller-supplied verdict.
     #[arg(long)]
-    assessment_bundle: PathBuf,
+    pub(super) assessment_bundle: PathBuf,
     /// Existing node configuration. Trust and current policy are loaded through its normal loader.
     #[arg(long)]
-    policy_config: PathBuf,
+    pub(super) policy_config: PathBuf,
     #[arg(long, value_parser = parse_key)]
-    requester_key: VerifyingKey,
+    pub(super) requester_key: VerifyingKey,
     #[arg(long, value_parser = parse_key)]
-    source_publisher_key: VerifyingKey,
+    pub(super) source_publisher_key: VerifyingKey,
     #[arg(long, value_parser = parse_manifest)]
-    source_manifest_id: [u8; 32],
+    pub(super) source_manifest_id: [u8; 32],
     /// The two selected assessors, in their original order. Not policy signing authorities.
     #[arg(long, required = true, value_parser = parse_key)]
-    provider_key: Vec<VerifyingKey>,
+    pub(super) provider_key: Vec<VerifyingKey>,
     #[arg(long, default_value = "smollm2-360m-v1")]
-    model_profile: ModelProfile,
+    pub(super) model_profile: ModelProfile,
 }
 
 #[derive(Debug, Args)]
@@ -126,7 +127,12 @@ fn selection_record(args: &Selection) -> Value {
         "model_profile":args.model_profile})
 }
 
-fn preview(args: &Selection, output: &Path, operation: &str, execute: bool) -> Result<bool> {
+fn preview(
+    args: &Selection,
+    output: &Path,
+    operation: &str,
+    execute: bool,
+) -> Result<Option<Value>> {
     ensure!(
         args.assessment_bundle.is_absolute()
             && args.policy_config.is_absolute()
@@ -140,15 +146,12 @@ fn preview(args: &Selection, output: &Path, operation: &str, execute: bool) -> R
         "compute_object_policy_selected_assessors"
     );
     if !execute {
-        println!(
-            "{}",
-            json!({"operation":operation,"execute":false,
+        return Ok(Some(json!({"operation":operation,"execute":false,
             "subject_scope":"exact_native_object","automatic_judgment":true,
             "human_approval_required":false,"compute_providers_are_authorities":false,
-            "network_policy_activation":false,"model_execution":false})
-        );
+            "network_policy_activation":false,"model_execution":false})));
     }
-    Ok(!execute)
+    Ok(None)
 }
 
 fn retain(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -292,15 +295,19 @@ fn proposal(
     Ok((bytes, original))
 }
 
-fn report(operation: &str, body: &ObjectDecision, output: &Path, threshold: bool, applied: bool) {
+fn report(
+    operation: &str,
+    body: &ObjectDecision,
+    output: &Path,
+    threshold: bool,
+    applied: bool,
+) -> Value {
     let outcome = match body.outcome {
         ObjectOutcome::Allow => "allow",
         ObjectOutcome::Deny => "deny",
         ObjectOutcome::Undetermined => "undetermined",
     };
-    println!(
-        "{}",
-        json!({"operation":operation,"complete":true,"decision_revision":body.decision_revision,
+    json!({"operation":operation,"complete":true,"decision_revision":body.decision_revision,
         "subject":{"publisher_key":hex::encode(body.subject.publisher_key),
             "manifest_id":hex::encode(body.subject.manifest_id),"object_sha256":hex::encode(body.subject.object_sha256)},
         "outcome":outcome,"policy_hash":hex::encode(body.policy_hash),"policy_version":body.policy_version,
@@ -309,13 +316,17 @@ fn report(operation: &str, body: &ObjectDecision, output: &Path, threshold: bool
         "provider_signed_claims_replayed":4,"network_policy_activation":false,
         "local_object_policy_applied":applied,
         "legal_status":"not_determined","semantic_correctness_proven":false})
-    );
 }
 
 pub(in crate::compute::peer) fn propose(args: &Propose) -> Result<()> {
+    println!("{}", propose_value(args)?);
+    Ok(())
+}
+
+pub(in crate::compute::peer) fn propose_value(args: &Propose) -> Result<Value> {
     const OP: &str = "compute_policy_propose";
-    if preview(&args.selection, &args.output, OP, args.execute)? {
-        return Ok(());
+    if let Some(planned) = preview(&args.selection, &args.output, OP, args.execute)? {
+        return Ok(planned);
     }
     let _lock = open_output(&args.output)?;
     let at = milliseconds()?;
@@ -348,18 +359,22 @@ pub(in crate::compute::peer) fn propose(args: &Propose) -> Result<()> {
         original.body().decision_revision == args.decision_revision,
         "compute_object_policy_revision_changed"
     );
-    report(OP, original.body(), &path, false, false);
-    Ok(())
+    Ok(report(OP, original.body(), &path, false, false))
 }
 
 pub(in crate::compute::peer) fn endorse(args: &Endorse) -> Result<()> {
+    println!("{}", endorse_value(args)?);
+    Ok(())
+}
+
+pub(in crate::compute::peer) fn endorse_value(args: &Endorse) -> Result<Value> {
     const OP: &str = "compute_policy_endorse";
     ensure!(
         args.proposal.is_absolute(),
         "compute_object_policy_absolute_paths"
     );
-    if preview(&args.selection, &args.output, OP, args.execute)? {
-        return Ok(());
+    if let Some(planned) = preview(&args.selection, &args.output, OP, args.execute)? {
+        return Ok(planned);
     }
     let _lock = open_output(&args.output)?;
     let at = milliseconds()?;
@@ -384,11 +399,18 @@ pub(in crate::compute::peer) fn endorse(args: &Endorse) -> Result<()> {
     drop(signer);
     let path = args.output.join("endorsement.bin");
     retain(&path, &endorsement.encode()?)?;
-    report(OP, endorsement.body(), &path, false, false);
-    Ok(())
+    Ok(report(OP, endorsement.body(), &path, false, false))
 }
 
 pub(in crate::compute::peer) async fn combine(args: &Combine, socket: &Path) -> Result<()> {
+    println!("{}", combine_value(args, socket).await?);
+    Ok(())
+}
+
+pub(in crate::compute::peer) async fn combine_value(
+    args: &Combine,
+    socket: &Path,
+) -> Result<Value> {
     const OP: &str = "compute_policy_combine";
     ensure!(
         !args.apply || args.execute,
@@ -400,8 +422,8 @@ pub(in crate::compute::peer) async fn combine(args: &Combine, socket: &Path) -> 
             && args.endorsement.iter().all(|path| path.is_absolute()),
         "compute_object_policy_endorsement_inputs"
     );
-    if preview(&args.selection, &args.output, OP, args.execute)? {
-        return Ok(());
+    if let Some(planned) = preview(&args.selection, &args.output, OP, args.execute)? {
+        return Ok(planned);
     }
     let _lock = open_output(&args.output)?;
     let at = milliseconds()?;
@@ -429,8 +451,7 @@ pub(in crate::compute::peer) async fn combine(args: &Combine, socket: &Path) -> 
     if args.apply {
         apply_decision(&bytes_verified, &verified, &args.output, socket).await?;
     }
-    report(OP, combined.body(), &path, true, args.apply);
-    Ok(())
+    Ok(report(OP, combined.body(), &path, true, args.apply))
 }
 
 async fn apply_decision(

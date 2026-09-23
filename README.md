@@ -187,7 +187,9 @@ the diagram does not imply that every source must be contacted.*
 - **Existing HTTPS:** supported cooperative-origin, origin-digest or
   [checksum-file](docs/OPERATIONS.md#https-checksum-file-downloads) modes authenticate the origin
   before using peer content. No interception CA, TLS bypass or automatic sharing of private
-  responses is introduced.
+  responses is introduced. A [checksum-file extension](docs/OPERATIONS.md#https-checksum-file-downloads)
+  adds an explicit path for public downloads without those metadata formats; its integrated
+  network proof is still pending.
 
 The aim is faster retrieval and less origin-server traffic **when peers are advantageous**.
 Some constrained-uplink tests show a benefit; others show that the origin is faster. Peer caching
