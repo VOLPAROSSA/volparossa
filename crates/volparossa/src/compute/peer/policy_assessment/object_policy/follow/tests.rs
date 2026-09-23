@@ -4,6 +4,7 @@ use std::os::unix::fs::PermissionsExt as _;
 
 use clap::{CommandFactory as _, Parser as _};
 use ed25519_dalek::SigningKey;
+use rand_core::{OsRng, RngCore as _};
 use volparossa_content::{Metadata, Publication, Validity};
 use volparossa_policy::{
     DestinationRule, ManifestSpec, ProtocolPort, TransportProtocol,
@@ -51,6 +52,12 @@ fn private_root() -> tempfile::TempDir {
     directory
 }
 
+fn fresh_nonce() -> [u8; 32] {
+    let mut nonce = [0; 32];
+    OsRng.fill_bytes(&mut nonce);
+    nonce
+}
+
 fn authority(at: u64) -> (Vec<SigningKey>, PolicyContext, Vec<u8>) {
     let (keys, context) = super::super::tests::context(at);
     let mut spec = ManifestSpec::new(7, 1, at - 1000, at - 1000, at + 30_000).unwrap();
@@ -79,7 +86,7 @@ fn record(
     epoch: &[u8],
     wrapper_revision: u64,
     decision_revision: u64,
-    nonce: u8,
+    nonce: [u8; 32],
 ) -> Record {
     let mut original = SignedObjectDecision::new(ObjectDecision {
         policy_hash: *context.manifest.policy_hash(),
@@ -95,7 +102,7 @@ fn record(
         outcome: ObjectOutcome::Undetermined,
         issued_at_ms: 100_000,
         expires_at_ms: 110_999,
-        nonce: [nonce; 32],
+        nonce,
     })
     .unwrap();
     for signer in &keys[..3] {
@@ -173,7 +180,7 @@ fn pending_checkpoint_reopens_original_authority_and_receipt_without_renewal() {
     let _lock = task::open_directory(&args.directory, false).unwrap();
     let mut saved = load(&args).unwrap();
     let (keys, authority, epoch) = authority(100_000);
-    let original = record(&args, &keys, &authority, &epoch, 1, 1, 26);
+    let original = record(&args, &keys, &authority, &epoch, 1, 1, fresh_nonce());
     let verified = original.verify_live(&args, &authority, 100_000).unwrap();
     saved.latest = Some(original.clone());
     saved.poll_completed(100_000, "pending").unwrap();
@@ -206,14 +213,22 @@ fn pending_checkpoint_reopens_original_authority_and_receipt_without_renewal() {
 fn followed_feed_rejects_equivocation_rollback_and_changed_subject_or_framework() {
     let args = options();
     let (keys, authority, epoch) = authority(100_000);
-    let original = record(&args, &keys, &authority, &epoch, 2, 2, 26);
+    // Reuse the original nonce only where the test deliberately repeats the
+    // signed decision; changing it must still create a different decision body.
+    let original_nonce = fresh_nonce();
+    let next_nonce = fresh_nonce();
+    let original = record(&args, &keys, &authority, &epoch, 2, 2, original_nonce);
     let mut state = State::default();
     assert!(state.accepts(&args, &authority, &original).unwrap());
     state.latest = Some(original.clone());
     assert!(!state.accepts(&args, &authority, &original).unwrap());
-    let same_revision = record(&args, &keys, &authority, &epoch, 2, 2, 26);
+    let same_revision = record(&args, &keys, &authority, &epoch, 2, 2, original_nonce);
     assert!(state.accepts(&args, &authority, &same_revision).is_err());
-    for (wrapper, decision, nonce) in [(1, 2, 26), (3, 1, 27), (3, 2, 27)] {
+    for (wrapper, decision, nonce) in [
+        (1, 2, original_nonce),
+        (3, 1, next_nonce),
+        (3, 2, next_nonce),
+    ] {
         assert!(
             state
                 .accepts(
@@ -229,7 +244,7 @@ fn followed_feed_rejects_equivocation_rollback_and_changed_subject_or_framework(
             .accepts(
                 &args,
                 &authority,
-                &record(&args, &keys, &authority, &epoch, 3, 3, 27)
+                &record(&args, &keys, &authority, &epoch, 3, 3, next_nonce)
             )
             .unwrap()
     );
