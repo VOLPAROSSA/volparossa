@@ -9,8 +9,33 @@ The completed development milestone is integrated into `main` by
 unchanged normal Quality/CodeQL checks and source-exact provider/recovery audits passed.
 The exact-object policy and explicit peer-distribution milestone below is now also integrated
 by [PR #151](https://github.com/VOLPAROSSA/volparossa/pull/151), normal merge `2761b9da`.
-Automatic-follow and authority-round work are subsequent slices. Neither integration nor
-execution proves reliable model reasoning.
+The automatic-follow milestone is integrated by
+[PR #153](https://github.com/VOLPAROSSA/volparossa/pull/153), normal merge `54c382c0`, with
+normal Quality/CodeQL checks passing. Authority-round/cycle and larger-model work remain
+subsequent slices. Neither integration nor execution proves reliable model reasoning.
+
+An automatic public-copy maintenance candidate adds `content retain`: the publisher enrolls
+one original public object, desired copies and finite lifetime/upload budget, rather than
+hand-selecting every provider key. Protected discovery returns signed route-distinct service
+hints; fresh signed Inspect/Deposit exchanges establish actual observations. The controller
+can seek another holder after a loss while its owner runs. Every attempted upload reserves
+the full object budget durably, and resume retains original deadlines and re-inspects known
+holders instead of counting historical receipts. Background discovery/transfers use the
+existing configured quiet admission, per-chunk cooldown and foreground cancellation. No
+provider storage-capacity promise, owner-offline maintenance, global placement fairness or
+permanent availability is implied. The three-holder loss/replacement network proof is pending.
+Three protocol, five real custody-stream, two background-admission and 48 CLI content tests
+pass, along with the existing real CLI custody-process trial. Strict scoped Clippy for the
+CLI, agent, content and local-control crates passes. An actual inert CLI preview accepts the
+owner enrollment without requiring files, key unlock or a running agent. These local checks
+do not substitute for automatic remote placement/replacement evidence.
+The disposable fixture now enrolls two copies without provider-key arguments, withdraws one
+actual service, requires a third holder's original signed exchange, then reaps the publisher
+owner and removes its source before a fresh protected named download. Original deadlines,
+upload reservations, challenge freshness, privacy captures and host cleanup remain checked.
+Seven focused inert retention-fixture tests and four existing custody checks pass, together
+with scoped shell checks and the existing inert topology contract. A deliberately exited
+owner remains a failed trial while its private fixture files can still be cleaned up.
 
 A new node-local policy candidate connects the original four signed assessment/review
 transcripts to `compute peer policy-propose`, `policy-endorse` and `policy-combine --execute --apply`.
@@ -129,9 +154,16 @@ binds all selections and the original total deadline. Resuming observes existing
 may start previously unstarted subsequent stages, but never replaces ambiguous/submitted work.
 Cancellation reaches the existing job protocol; unconfirmed remote termination stays explicit.
 The current quorum is checked before model work and again by the signing round. No authority
-private key or human-supplied verdict enters the coordinator. The combined cycle's new live
-network proof is pending; earlier assessment/follower proofs do not establish this composition,
-reliable semantic judgment, automatic authority membership or B06 completion.
+private key or human-supplied verdict enters the coordinator. The combined cycle's first
+[exact-source network trial on `4eb06de2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35910694773)
+**fails overall**: assessment-0 returns `preflight_unavailable` before retaining a job handle;
+assessment-1 completes, but the two cross-reviews and authority round do not execute. The
+original specific preflight error was discarded, so discovery, resource pressure or a local
+failure cannot retrospectively be selected as the cause. The retained packet captures and
+cleanup/unchanged-host checks pass separately; they do not establish the combined cycle.
+Earlier assessment/follower proofs do not establish this composition, reliable semantic
+judgment, automatic authority membership or B06 completion. A follow-up retains a bounded
+local preflight diagnostic without remote text, new retries or a changed operation deadline.
 The combined fixture requires the original source, four worker receipts, exact bundle, three
 authority owners and one original cycle deadline; its inert checker passes 91 rejection cases.
 All 31 focused assessment/round/cycle CLI tests and strict CLI Clippy pass. Five transfer tests
@@ -196,8 +228,17 @@ no-adapter, public-input and fixed-contract restrictions. Five focused admission
 The existing 8-GiB single-worker fixture is now directed at one real, signed public principle
 assessment with the current framework and explicitly provisioned pinned JSON decoder. The
 unchanged 1024-token prompt, 512-token structured generation, 2048-byte JSON, 192-byte field and
-600-second limits remain in force. That new proof is pending; the previous ordinary-inference
-runs are not substituted for it. The distributed cycle remains on its original 360M source.
+600-second limits remain in force. The
+[exact-source trial on `44eec3b9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35912302153)
+passes its original execution checker: one real BF16 worker produces 293 tokens in 62.132
+seconds, with 4,596,285,440 bytes of observed peak RSS, the actual 10-GiB address-space limit,
+original signed inputs, child reaping and unchanged host state. Its answer correctly connects
+Mansuetudo to gentleness and voluntary cooperation, but invents absence of ulterior motives
+under Humanitas and infers humility not established by the source. It also chooses `allow`
+while reporting material uncertainty. The original answer remains visible; this is not a
+general semantic/legal pass, independent cross-review or policy activation. The changed
+question/pipeline prevents attributing differences solely to model size. The distributed
+cycle remains on its original 360M source.
 The scoped CLI build/Clippy, inert fixture checks and an actual offline CLI preparation pass:
 the current framework and three freshly signed public publications verify unchanged. No model,
 backend provisioning or network work ran on the development host; temporary input was removed.

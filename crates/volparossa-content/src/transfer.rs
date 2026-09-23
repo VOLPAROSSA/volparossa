@@ -19,7 +19,7 @@ use crate::{CHUNK_BYTES, ChunkId, ChunkStore, MAX_CHUNKS, MAX_OBJECT_BYTES, Veri
 
 mod bridge;
 pub mod parallel;
-pub(crate) use bridge::bridge_peer;
+pub(crate) use bridge::bridge_peer_with_admission;
 
 const VERSION: u32 = 1;
 const MAX_REQUEST_BYTES: usize = 64;

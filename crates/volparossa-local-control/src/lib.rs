@@ -23,7 +23,10 @@ pub use content::{
     ContentServeRequest, ContentTransferReady, HttpsContentFetchRequest, HttpsContentTransferReady,
     HttpsSourceStrategy, NamedContentTransferReady,
 };
-pub use custody::{ContentCustodyReady, ContentCustodyRequest};
+pub use custody::{
+    ContentCustodyDiscoverRequest, ContentCustodyDiscovered, ContentCustodyProvider,
+    ContentCustodyReady, ContentCustodyRequest,
+};
 pub use mailbox::{MailboxReady, MailboxRemoteRequest, MailboxServeRequest};
 
 use prost::Message;
@@ -53,7 +56,7 @@ pub struct ControlRequest {
     /// One allowlisted operation.
     #[prost(
         oneof = "control_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37"
     )]
     pub operation: Option<control_request::Operation>,
 }
@@ -64,10 +67,10 @@ pub mod control_request {
 
     use super::{
         ComputeAttachRequest, ComputeDiscoverRequest, ComputeRemoteRequest, ConnectRequest,
-        ContentCustodyRequest, ContentExportRequest, ContentFetchNameRequest, ContentFetchRequest,
-        ContentImportRequest, ContentLocalFetchNameRequest, ContentPolicyApplyRequest,
-        ContentServeRequest, Empty, HttpsContentFetchRequest, LogQuery, MailboxRemoteRequest,
-        MailboxServeRequest, RoleChange,
+        ContentCustodyDiscoverRequest, ContentCustodyRequest, ContentExportRequest,
+        ContentFetchNameRequest, ContentFetchRequest, ContentImportRequest,
+        ContentLocalFetchNameRequest, ContentPolicyApplyRequest, ContentServeRequest, Empty,
+        HttpsContentFetchRequest, LogQuery, MailboxRemoteRequest, MailboxServeRequest, RoleChange,
     };
 
     /// Exactly one supported CLI-to-agent operation.
@@ -142,6 +145,9 @@ pub mod control_request {
         /// Bridge one publisher-authorized public deposit/inspection on this same socket.
         #[prost(message, tag = "31")]
         ContentCustody(ContentCustodyRequest),
+        /// Background public-custody candidates through the existing protected discovery route.
+        #[prost(message, tag = "37")]
+        ContentCustodyDiscover(ContentCustodyDiscoverRequest),
         /// Attach an explicitly enabled local inference broker to the protected provider.
         #[prost(message, tag = "32")]
         ComputeAttach(ComputeAttachRequest),
@@ -239,7 +245,7 @@ pub struct ControlResponse {
     /// Typed response body.
     #[prost(
         oneof = "control_response::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28"
     )]
     pub payload: Option<control_response::Payload>,
 }
@@ -249,8 +255,8 @@ pub mod control_response {
     use prost::Oneof;
 
     use super::{
-        ComputeDiscovered, ComputeReady, ComputeTranscript, ContentCustodyReady,
-        ContentPolicyReceipt, ContentReceipt, ContentTransferReady, Empty,
+        ComputeDiscovered, ComputeReady, ComputeTranscript, ContentCustodyDiscovered,
+        ContentCustodyReady, ContentPolicyReceipt, ContentReceipt, ContentTransferReady, Empty,
         HttpsContentTransferReady, LogList, MailboxReady, NamedContentTransferReady, PathList,
         PeerList, PolicySnapshot, RoleSnapshot, SessionList, StatusSnapshot,
     };
@@ -312,6 +318,9 @@ pub mod control_response {
         /// Durable and live application of one original threshold-signed object decision.
         #[prost(message, tag = "27")]
         ContentPolicy(ContentPolicyReceipt),
+        /// Authenticated current hints, not reservations or retention promises.
+        #[prost(message, tag = "28")]
+        ContentCustodyDiscovered(ContentCustodyDiscovered),
     }
 }
 
@@ -727,6 +736,7 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
         control_request::Operation::MailboxServe(request) => request.validate()?,
         control_request::Operation::MailboxRemote(request) => request.validate()?,
         control_request::Operation::ContentCustody(request) => request.validate()?,
+        control_request::Operation::ContentCustodyDiscover(request) => request.validate()?,
         control_request::Operation::ContentImport(request) => request.validate()?,
         control_request::Operation::ContentExport(request) => request.validate()?,
         control_request::Operation::SetRole(change) => {
@@ -826,6 +836,7 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
         control_response::Payload::NamedContentTransferReady(ready) => ready.validate()?,
         control_response::Payload::MailboxReady(ready) => ready.validate()?,
         control_response::Payload::ContentCustodyReady(ready) => ready.validate()?,
+        control_response::Payload::ContentCustodyDiscovered(discovered) => discovered.validate()?,
         control_response::Payload::ComputeReady(ready) => ready.validate()?,
         control_response::Payload::ComputeDiscovered(discovered) => discovered.validate()?,
         control_response::Payload::ComputeTranscript(transcript) => transcript.validate()?,

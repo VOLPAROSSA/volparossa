@@ -9,6 +9,7 @@ use std::{
 use anyhow::{Context as _, Result, bail, ensure};
 use clap::{Args, Subcommand};
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 use volparossa_content::{
     CacheLimits, ChunkStore, SignedManifest, VerifiedManifest,
@@ -121,9 +122,10 @@ async fn run_report(command: &Command, socket: &Path) -> Result<serde_json::Valu
         // Retain even an authenticated receipt followed by a broken local final response.
         // It is reported separately, never counted as a completed agent handoff.
         let mut signed_receipt = None;
+        let mut original = None;
         let result = timeout(
             Duration::from_secs(600),
-            prepared.remote(socket, provider, &mut signed_receipt),
+            prepared.remote(socket, provider, &mut signed_receipt, false, &mut original),
         )
         .await
         .context("public custody operation exceeded its deadline")
@@ -227,6 +229,8 @@ impl Prepared {
         socket: &Path,
         provider: &VerifyingKey,
         signed_receipt: &mut Option<CustodyReceipt>,
+        background: bool,
+        original: &mut Option<RetainedExchange>,
     ) -> Result<()> {
         let validity = self.manifest.validity();
         ensure!(
@@ -238,6 +242,7 @@ impl Prepared {
             manifest: self.signed.encode(),
             publisher_key: self.manifest.publisher().to_vec(),
             operation: self.operation as i32,
+            background,
         };
         let (mut stream, request_id, response) =
             crate::control::begin_request(socket, Operation::ContentCustody(request)).await?;
@@ -269,6 +274,13 @@ impl Prepared {
             TransferLimits::default(),
         )
         .await?;
+        *original = Some(RetainedExchange {
+            verified_at: now_seconds()?,
+            challenge_hex: hex::encode(challenge.encode()),
+            authorization_hex: hex::encode(authorization.encode()),
+            receipt_hex: hex::encode(receipt.encode()),
+            handoff_complete: false,
+        });
         *signed_receipt = Some(receipt);
         let response = crate::control::finish_request(&mut stream, &request_id).await?;
         ensure!(
@@ -283,7 +295,126 @@ impl Prepared {
             signed_receipt
                 .as_ref()
                 .context("missing verified custody receipt")?,
-        )
+        )?;
+        if let Some(record) = original {
+            record.handoff_complete = true;
+        }
+        Ok(())
+    }
+}
+
+/// Exact original protocol evidence. Reopening verifies signatures at its original
+/// observation time; it never converts historical evidence into current availability.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RetainedExchange {
+    pub(super) verified_at: u64,
+    pub(super) challenge_hex: String,
+    pub(super) authorization_hex: String,
+    pub(super) receipt_hex: String,
+    pub(super) handoff_complete: bool,
+}
+
+impl RetainedExchange {
+    pub(super) fn verify(
+        &self,
+        provider: &VerifyingKey,
+        original: &[u8],
+        operation: CustodyOperation,
+    ) -> Result<CustodyReceipt> {
+        ensure!(
+            self.challenge_hex.len() <= 4096
+                && self.receipt_hex.len() <= 4096
+                && self.authorization_hex.len()
+                    <= 2 * (volparossa_content::MAX_MANIFEST_BYTES + 2048),
+            "content_retain_exchange_bound"
+        );
+        let challenge = CustodyChallenge::decode(
+            &hex::decode(&self.challenge_hex)?,
+            provider.as_bytes(),
+            self.verified_at,
+        )?;
+        let authorization = CustodyAuthorization::decode(
+            &hex::decode(&self.authorization_hex)?,
+            &challenge,
+            self.verified_at,
+        )?;
+        ensure!(
+            authorization.signed_manifest().encode() == original
+                && authorization.operation() == operation,
+            "content_retain_exchange_substitution"
+        );
+        Ok(CustodyReceipt::decode(
+            &hex::decode(&self.receipt_hex)?,
+            &authorization,
+            self.verified_at,
+        )?)
+    }
+}
+
+/// One local owner key, never exported. The source cache is opened only while a
+/// budget-reserved deposit is in progress, not held throughout the maintenance loop.
+pub(super) struct RetentionOwner {
+    prepared: Prepared,
+}
+
+impl RetentionOwner {
+    pub(super) fn new(signer: SigningKey, original: &[u8], at: u64) -> Result<Self> {
+        let publication = SignedManifest::decode(original)?;
+        let manifest = publication.verify(&signer.verifying_key(), at)?;
+        ensure!(
+            manifest.metadata().content_type != PRIVATE_MESSAGE_CONTENT_TYPE,
+            "content_retain_public_only"
+        );
+        Ok(Self {
+            prepared: Prepared {
+                signer,
+                signed: publication,
+                manifest,
+                source: None,
+                operation: CustodyOperation::Inspect,
+            },
+        })
+    }
+
+    pub(super) fn manifest(&self) -> &VerifiedManifest {
+        &self.prepared.manifest
+    }
+
+    pub(super) async fn exchange(
+        &mut self,
+        socket: &Path,
+        provider: &VerifyingKey,
+        source: Option<(&Path, CacheLimits)>,
+        original: &mut Option<RetainedExchange>,
+    ) -> Result<()> {
+        self.prepared.operation = if source.is_some() {
+            CustodyOperation::Deposit
+        } else {
+            CustodyOperation::Inspect
+        };
+        self.prepared.source = source
+            .map(|(path, limits)| {
+                let mut cache = ChunkStore::open(path, limits)?;
+                reassemble(
+                    &self.prepared.manifest,
+                    &mut [&mut cache],
+                    now_seconds()?,
+                    &mut std::io::sink(),
+                )?;
+                Ok::<_, anyhow::Error>(cache)
+            })
+            .transpose()?;
+        let result = self
+            .prepared
+            .remote(socket, provider, &mut None, true, original)
+            .await;
+        self.prepared.source = None;
+        result
+    }
+
+    pub(super) fn release_source(&mut self) {
+        self.prepared.source = None;
     }
 }
 

@@ -86,8 +86,15 @@ the protected content route and obtains provider-signed observations only after 
 verification, durable journal admission and ready serving. Inspect revalidates stored bytes
 without uploading; restart does not renew the original expiry. The ordinary CLI preserves
 partial successes across independent providers. Local storage, typed-stream and real CLI-process
-tests pass; those duplex tests are not a protected-network acceptance result. Automatic holder
-selection, availability repair and general uptime remain outstanding. See the
+tests pass; those duplex tests are not a protected-network acceptance result. The separate
+`content retain` candidate now discovers eligible holders, requests fresh signed observations
+and places missing public copies without hand-picking provider keys. Its owner enrollment
+fixes the original object, desired copy count, lifetime and cumulative upload budget. It can
+replace an unavailable holder while that owner runs; restart preserves the budget/deadline
+and rechecks availability rather than counting old receipts. Transfers yield to foreground
+work through configured quiet admission and per-chunk budgets. The actual three-provider
+loss/replacement trial is pending. This is not globally fair placement, owner-offline
+maintenance or guaranteed uptime. See the
 [development commands](OPERATIONS.md#depositing-a-public-copy-with-other-participants).
 
 ### Private messages and optional mail interoperability

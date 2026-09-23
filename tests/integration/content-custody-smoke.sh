@@ -13,6 +13,15 @@ content_custody_endpoint() {
 }
 
 content_custody_config() {
+    if [ "${scenario:-}" = content-custody ] && [ "$node" = client ]; then
+        # Real existing Client underlay interfaces; optional background work observes
+        # these configured owner-first budgets, not fictional spare capacity.
+        printf 'sharing:\n  enabled: true\n  interface: cr0\n'
+        printf '  total_upload_mbps: 100\n  contribution_upload_ceiling_mbps: 1\n'
+        printf 'download_sharing:\n  enabled: true\n  interface: cr2\n'
+        printf '  total_download_mbps: 100\n  contribution_download_ceiling_mbps: 1\n'
+        return 0
+    fi
     case $node in relay3|relay4|relay5) ;; *) return 0 ;; esac
     content_custody_endpoint "$node" || return 1
     printf 'sharing:\n  enabled: true\n  interface: %s\n' "$custody_interface"
@@ -43,6 +52,18 @@ content_custody_private() {
 
 content_custody_cleanup() {
     [ -f "$WORK/bin/content-custody-smoke.py" ] || return 0
+    custody_cleanup_status=0
+    if [ -n "${CUSTODY_OWNER_PID:-}" ]; then
+        content_custody_owner_stop || custody_cleanup_status=1
+    fi
+    # A failed product may already be reaped. Preserve that failure, but do not leave
+    # its private fixture files behind. An unverified/maybe-live owner is different.
+    [ -z "${CUSTODY_OWNER_PID:-}" ] || return 1
+    if [ "${CUSTODY_AUTOMATIC:-no}" = yes ]; then
+        content_custody_retain_private cleanup "$WORK/client-fixtures/custody-user" \
+            >"$WORK/content-custody-private-cleanup.json" || custody_cleanup_status=1
+        return "$custody_cleanup_status"
+    fi
     content_custody_private cleanup "$WORK/client-fixtures/custody-user" \
         >"$WORK/content-custody-private-cleanup.json"
 }
@@ -69,8 +90,13 @@ content_custody_phase_start() {
     capture_product_logs
     provider_baseline_ms=$(client_log_baseline_ms) || fail CUSTODY_EVENT_BASELINE_UNAVAILABLE
     start_privacy_observers "content-custody-$custody_phase-privacy" || fail CUSTODY_CAPTURE_UNAVAILABLE
-    content_provider_start_control_observer "content-provider-custody-$custody_phase-control" \
-        || fail CUSTODY_CONTROL_CAPTURE_UNAVAILABLE
+    if [ "${CUSTODY_AUTOMATIC:-no}" = yes ]; then
+        content_provider_adaptive_start_control_observer "content-provider-adaptive-custody-$custody_phase-control" \
+            || fail CUSTODY_CONTROL_CAPTURE_UNAVAILABLE
+    else
+        content_provider_start_control_observer "content-provider-custody-$custody_phase-control" \
+            || fail CUSTODY_CONTROL_CAPTURE_UNAVAILABLE
+    fi
 }
 
 content_custody_phase_finish() {
@@ -128,7 +154,7 @@ content_custody_restart() {
         >"$WORK/content-custody-$custody_restart_node-restart.json"
 }
 
-content_custody_run() {
+content_custody_manual_run() {
     PHASE=content-custody-prepare
     custody_control_gid=$(getent group volparossa-users | cut -d: -f3)
     case $custody_control_gid in ''|*[!0-9]*) fail CUSTODY_CONTROL_GROUP_INVALID ;; esac
@@ -245,11 +271,190 @@ content_custody_run() {
     PHASE=content-custody-complete
 }
 
+content_custody_retain_private() {
+    setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --clear-groups \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- python3 -B "$WORK/bin/content-retain-smoke.py" "$@"
+}
+
+content_custody_owner_stop() {
+    [ -n "${CUSTODY_OWNER_PID:-}" ] || return 0
+    custody_owner_pid=$CUSTODY_OWNER_PID
+    custody_term_sent=false
+    custody_killed=false
+    if [ -d "/proc/$custody_owner_pid" ]; then
+        custody_start_ticks=$(jq -er '.start_ticks' "$WORK/content-custody-process-start.json") || return 1
+        [ "$(awk '{print $22}' "/proc/$custody_owner_pid/stat")" = "$custody_start_ticks" ] || return 1
+        if [ "$(awk '{print $3}' "/proc/$custody_owner_pid/stat")" != Z ]; then
+            [ "$(readlink -f -- "/proc/$custody_owner_pid/exe")" = "$binary_directory/volparossa" ] || return 1
+            kill -TERM "$custody_owner_pid" || return 1
+            custody_term_sent=true
+            custody_stop_wait=0
+            while kill -0 "$custody_owner_pid" 2>/dev/null && [ "$custody_stop_wait" -lt 150 ]; do
+                [ "$(awk '{print $3}' "/proc/$custody_owner_pid/stat" 2>/dev/null)" != Z ] || break
+                sleep 0.1
+                custody_stop_wait=$((custody_stop_wait + 1))
+            done
+            if kill -0 "$custody_owner_pid" 2>/dev/null \
+                && [ "$(awk '{print $3}' "/proc/$custody_owner_pid/stat" 2>/dev/null)" != Z ]; then
+                # Recheck identity before escalation; never signal a recycled PID.
+                [ "$(awk '{print $22}' "/proc/$custody_owner_pid/stat")" = "$custody_start_ticks" ] || return 1
+                [ "$(readlink -f -- "/proc/$custody_owner_pid/exe")" = "$binary_directory/volparossa" ] || return 1
+                kill -KILL "$custody_owner_pid" || return 1
+                custody_killed=true
+            fi
+        fi
+    fi
+    # This PID comes only from our own retained background child. With no live proc,
+    # or its matching zombie, wait retrieves the actual exit, including early failures.
+    custody_exit=0
+    wait "$custody_owner_pid" || custody_exit=$?
+    CUSTODY_OWNER_PID=
+    custody_start_json=$(optional_json_evidence "$WORK/content-custody-process-start.json")
+    jq -n --argjson start "$custody_start_json" --argjson pid "$custody_owner_pid" \
+        --argjson code "$custody_exit" --argjson forced "$custody_killed" \
+        --argjson term "$custody_term_sent" \
+        --argjson ended "$(date +%s%3N)" \
+        '($start // {pid:$pid,executable_verified:false}) +
+          {exit_status:$code,forced_kill:$forced,term_sent:$term,reaped:true,ended_unix_ms:$ended}' \
+        >"$WORK/content-custody-process.json" || return 1
+    [ "$custody_exit" = 0 ] && [ "$custody_killed" = false ] && [ "$custody_term_sent" = true ]
+}
+
+content_custody_run() {
+    CUSTODY_AUTOMATIC=yes
+    CUSTODY_OWNER_PID=
+    PHASE=content-custody-prepare
+    custody_control_gid=$(getent group volparossa-users | cut -d: -f3)
+    case $custody_control_gid in ''|*[!0-9]*) fail CUSTODY_CONTROL_GROUP_INVALID ;; esac
+    [ "$custody_control_gid" != "$AGENT_GID" ] || fail CUSTODY_CONTROL_GROUP_INVALID
+    custody_user=$WORK/client-fixtures/custody-user
+    [ ! -e "$custody_user" ] && [ ! -L "$custody_user" ] || fail CUSTODY_USER_NOT_NEW
+    install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$custody_user"
+    content_custody_private init "$custody_user" >"$WORK/content-custody-input.json" || fail CUSTODY_INPUT_FAILED
+    content_custody_cli client init --identity "$custody_user/identity.key" --passphrase-file "$custody_user/passphrase" \
+        >"$WORK/content-custody-init.log" 2>"$WORK/content-custody-init.err" || fail CUSTODY_IDENTITY_FAILED
+    content_custody_cli client content publish --input "$custody_user/input.bin" \
+        --name disposable-public-custody --revision 1 --content-type application/octet-stream \
+        --identity "$custody_user/identity.key" --passphrase-file "$custody_user/passphrase" \
+        --cache "$custody_user/source-cache" --manifest "$custody_user/manifest.bin" --lifetime-seconds 7200 \
+        >"$WORK/content-custody-publish.json" 2>"$WORK/content-custody-publish.err" || fail CUSTODY_PUBLISH_FAILED
+    custody_publisher=$(jq -er '.publisher_key_hex' "$WORK/content-custody-publish.json")
+    custody_manifest=$(sha256sum "$custody_user/manifest.bin" | awk '{print $1}')
+    benchmark_select_route content-custody mptcp || fail CUSTODY_ROUTE_UNAVAILABLE
+    benchmark_bind_slots "$WORK/content-custody-selection.json" || fail CUSTODY_ROUTE_INVALID
+    custody_context=$(jq -er '.route_context_id' "$WORK/content-custody-selection.json")
+    content_custody_cli client content status >"$WORK/content-custody-client-status.json" || fail CUSTODY_CONTROL_UNAVAILABLE
+    provider_control_peer=$(jq -er '.control_relay_peer_id' "$WORK/content-custody-client-status.json")
+    jq -e --arg control "$provider_control_peer" '[.relay0,.relay1,.relay2] | index($control) != null' \
+        "$WORK/a01-expected-peers.json" >/dev/null || fail CUSTODY_CONTROL_NOT_ROUTE_DISTINCT
+    content_provider_adaptive_control_underlay "$provider_control_peer" || fail CUSTODY_CONTROL_UNDERLAY_FAILED
+    custody_client_pid=$(systemctl show --property=MainPID --value volparossa-alpha-agent@client.service)
+    case $custody_client_pid in ''|0|*[!0-9]*) fail CUSTODY_CLIENT_PID_INVALID ;; esac
+    nsenter --target "$custody_client_pid" --mount setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
+        --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- test -r "$WORK/state-client/identity.key" || fail CUSTODY_POSITIVE_ISOLATION_FAILED
+    for custody_node in relay3 relay4 relay5; do
+        content_custody_status "$custody_node" empty 0 || fail CUSTODY_EMPTY_SERVICE_UNAVAILABLE
+        setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+            -- "$binary_directory/volparossa" content recipient-key \
+            --identity "$WORK/state-$custody_node/identity.key" --passphrase-file "$WORK/credential-$custody_node/identity-passphrase" \
+            >"$WORK/content-custody-$custody_node-public.json" || fail CUSTODY_PROVIDER_KEY_FAILED
+        if nsenter --target "$custody_client_pid" --mount setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
+            --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+            -- test -r "$WORK/state-$custody_node/custody-cache"; then fail CUSTODY_LOCAL_PROVIDER_SHORTCUT; fi
+    done
+    if nsenter --target "$custody_client_pid" --mount setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
+        --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- test -r "$custody_user"; then fail CUSTODY_USER_STATE_EXPOSED; fi
+    jq -n --slurpfile a "$WORK/content-custody-relay3-public.json" \
+        --slurpfile b "$WORK/content-custody-relay4-public.json" --slurpfile c "$WORK/content-custody-relay5-public.json" \
+        --arg control "$provider_control_peer" --arg context "$custody_context" --arg manifest "$custody_manifest" \
+        '{provider_nodes:["relay3","relay4","relay5"],provider_keys:{relay3:$a[0].identity_public_key_hex,
+          relay4:$b[0].identity_public_key_hex,relay5:$c[0].identity_public_key_hex},
+          control_relay_peer_id:$control,route_context_id:$context,manifest_id:$manifest}' \
+        >"$WORK/content-custody-layout.json"
+
+    PHASE=content-custody-automatic-initial
+    content_custody_phase_start initial
+    custody_upload_budget=$(jq -er '.bytes * 4' "$WORK/content-custody-publish.json")
+    # No explicit provider identities: the real owner discovers and selects the holders.
+    setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$custody_control_gid" \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- "$binary_directory/volparossa" --control-socket "$WORK/runtime-client/control/agent.sock" \
+        content retain --manifest "$custody_user/manifest.bin" --cache "$custody_user/source-cache" \
+        --identity "$custody_user/identity.key" --passphrase-file "$custody_user/passphrase" \
+        --directory "$custody_user/retain-owner" --copies 2 --poll-seconds 10 --max-seconds 1600 \
+        --max-upload-bytes "$custody_upload_budget" --execute \
+        >"$WORK/content-custody-stopped.json" 2>"$WORK/content-custody-owner.err" &
+    CUSTODY_OWNER_PID=$!
+    python3 -B "$WORK/bin/content-retain-smoke.py" process "$CUSTODY_OWNER_PID" "$binary_directory/volparossa" \
+        >"$WORK/content-custody-process-start.json" || fail CUSTODY_OWNER_PROCESS_INVALID
+    content_custody_retain_private observe "$custody_user" initial \
+        >"$WORK/content-custody-initial.json" || fail CUSTODY_AUTOMATIC_INITIAL_FAILED
+    content_custody_phase_finish 4
+    custody_lost_key=$(jq -er '.state.confirmed_holders[0]' "$WORK/content-custody-initial.json")
+    custody_lost_node=$(jq -er --arg key "$custody_lost_key" \
+        '.provider_keys | to_entries[] | select(.value == $key) | .key' "$WORK/content-custody-layout.json")
+    PHASE=content-custody-automatic-replacement
+    content_custody_phase_start replacement
+    content_custody_cli "$custody_lost_node" content stop >"$WORK/content-custody-withdrawn-service.json" \
+        2>"$WORK/content-custody-withdrawn-service.err" || fail CUSTODY_WITHDRAWAL_FAILED
+    jq -n --arg node "$custody_lost_node" --arg key "$custody_lost_key" --argjson at "$(date +%s)" \
+        --slurpfile receipt "$WORK/content-custody-withdrawn-service.json" \
+        '{node:$node,provider_key:$key,withdrawn_unix_seconds:$at,receipt:$receipt[0]}' >"$WORK/content-custody-withdrawal.json"
+    # The private user can read only this public snapshot copy, not root's WORK reports.
+    install -o "$WORKER_UID" -g "$WORKER_GID" -m 0600 "$WORK/content-custody-initial.json" \
+        "$custody_user/initial-observation.json"
+    content_custody_retain_private observe "$custody_user" replacement "$custody_user/initial-observation.json" \
+        >"$WORK/content-custody-replacement.json" || fail CUSTODY_AUTOMATIC_REPLACEMENT_FAILED
+    content_custody_owner_stop || fail CUSTODY_OWNER_STOP_FAILED
+    content_custody_phase_finish 3
+    content_custody_retain_private snapshot "$custody_user" >"$WORK/content-custody-final-state.json" \
+        || fail CUSTODY_FINAL_ORIGINAL_STATE_MISSING
+    content_custody_private drop-source "$custody_user" >"$WORK/content-custody-source-removed.json" \
+        || fail CUSTODY_SOURCE_REMOVAL_FAILED
+    PHASE=content-custody-fetch
+    custody_fetch_cache=$WORK/state-client/custody-fetch-cache
+    [ ! -e "$custody_fetch_cache" ] && [ ! -L "$custody_fetch_cache" ] || fail CUSTODY_FETCH_CACHE_NOT_FRESH
+    [ ! -e "$custody_user/output.bin" ] || fail CUSTODY_FETCH_OUTPUT_NOT_FRESH
+    content_custody_phase_start fetch
+    jq -n --argjson now "$(date +%s%3N)" '{unix_ms:$now}' >"$WORK/content-custody-fetch-start.json"
+    content_custody_cli client content fetch-name --publisher-key "$custody_publisher" \
+        --name disposable-public-custody --min-revision 1 --cache "$custody_fetch_cache" \
+        --local-output "$custody_user/output.bin" >"$WORK/content-custody-fetch.json" \
+        2>"$WORK/content-custody-fetch.err" || fail CUSTODY_NORMAL_FETCH_FAILED
+    content_custody_phase_finish 1
+    content_custody_private output "$custody_user" >"$WORK/content-custody-output.json" || fail CUSTODY_REASSEMBLY_INVALID
+    [ "$(stat -Lc '%a:%u:%g' "$custody_fetch_cache")" = "700:$AGENT_UID:$AGENT_GID" ] || fail CUSTODY_FETCH_CACHE_OWNERSHIP
+    if setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$custody_control_gid" \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- test -r "$custody_fetch_cache"; then fail CUSTODY_AGENT_CACHE_EXPOSED; fi
+    jq -n --argjson user "$WORKER_UID" --argjson agent "$AGENT_UID" --argjson control "$custody_control_gid" \
+        --argjson agent_group "$AGENT_GID" '{user_uid:$user,agent_uid:$agent,control_gid:$control,agent_gid:$agent_group,
+          agent_mount_positive_control:true,agent_cannot_read_user_state:true,client_cannot_read_provider_stores:true,
+          user_cannot_read_agent_cache:true,fresh_consumer_cache:true,cache_mode:"0700",output_mode:"0600"}' \
+        >"$WORK/content-custody-isolation.json"
+    for custody_node in relay3 relay4 relay5; do
+        content_custody_cli "$custody_node" content stop >"$WORK/content-custody-$custody_node-stop.json" \
+            2>"$WORK/content-custody-$custody_node-stop.err" || fail CUSTODY_PROVIDER_STOP_FAILED
+    done
+    benchmark_disconnect_route content-custody || fail CUSTODY_ROUTE_CLEANUP_FAILED
+    content_custody_cleanup || fail CUSTODY_PRIVATE_CLEANUP_FAILED
+    python3 -B "$source_directory/tests/integration/content-retain-smoke.py" evidence "$WORK" \
+        "$WORK/content-custody-evidence.json" || fail CUSTODY_EVIDENCE_INVALID
+    OBSERVED_BLOCKER=NONE
+    PHASE=content-custody-complete
+}
+
 content_custody_finalize_report() {
     custody_status=$1
     for custody_artifact in "$WORK"/content-custody-*.json "$WORK"/content-custody-*.txt \
         "$WORK"/content-custody-*.log "$WORK"/content-custody-*.err "$WORK"/content-custody-*.out \
-        "$WORK"/content-provider-custody-*.json "$WORK"/content-provider-custody-*.log "$WORK"/content-provider-control-*.json; do
+        "$WORK"/content-provider-custody-*.json "$WORK"/content-provider-custody-*.log "$WORK"/content-provider-control-*.json \
+        "$WORK"/content-provider-adaptive-custody-*.json "$WORK"/content-provider-adaptive-custody-*.log \
+        "$WORK"/content-provider-adaptive-control-*.json; do
         [ ! -f "$custody_artifact" ] || [ -L "$custody_artifact" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$custody_artifact" "$output_directory/$(basename -- "$custody_artifact")"
     done
@@ -264,7 +469,7 @@ content_custody_finalize_report() {
        success:($status == 0 and $evidence[0].success == true and $complete and $remaining == 0 and $host[0].unchanged == true),
        observed_blocker:(if $blocker == "NONE" then null else $blocker end),
        cleanup:{complete:$complete,remaining_owned_objects:$remaining},host_state:($host[0] | del(.acceptance_id)),
-       scope:"ordinary CLI deposits to two contribution peers, original source removed, both real agents restarted, fresh signed inspect and normal name-based retrieval over one protected MPTCP route with two parallel one-relay paths",
+       scope:"automatic owner selects two independent custody holders, detects a stopped service and restores redundancy on a third; owner application stopped/reaped and original source removed before fresh name retrieval on a protected two-path MPTCP route; Client node remains online",
        independent_publisher_node_offline_claimed:false,future_availability_guaranteed:false,full_alpha_acceptance_claimed:false}' \
         >"$WORK/content-custody-smoke.json" || return 1
     install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$WORK/content-custody-smoke.json" "$output_directory/content-custody-smoke.json"

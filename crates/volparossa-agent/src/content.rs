@@ -3,12 +3,14 @@
 //! Neither browsing capture nor a default listener is enabled. Provider offers are only
 //! discovery hints: every destination still passes the existing signed Exit policy.
 
+mod background_custody;
 mod cancellation;
 mod compute;
 mod compute_discovery;
 mod compute_remote;
 mod contribution;
 mod custody;
+mod custody_discovery;
 mod https;
 mod mailbox;
 mod named;
@@ -106,6 +108,7 @@ pub(crate) struct ContentRuntime {
     service: Arc<Mutex<Option<Service>>>,
     retrieval: Arc<Mutex<()>>,
     foreground: Arc<Foreground>,
+    background_custody: Arc<background_custody::BackgroundCustody>,
     recent: Arc<Mutex<recent::RecentProviders>>,
     source_costs: Arc<Mutex<https::sources::SourceCosts>>,
     worker_budget: worker_budget::WorkerBudget,
@@ -159,6 +162,7 @@ impl ContentRuntime {
             service: Arc::new(Mutex::new(None)),
             retrieval: Arc::new(Mutex::new(())),
             foreground: Arc::new(Foreground::default()),
+            background_custody: Arc::new(background_custody::BackgroundCustody::default()),
             recent: Arc::new(Mutex::new(recent::RecentProviders::default())),
             source_costs: Arc::new(Mutex::new(https::sources::SourceCosts::default())),
             worker_budget: worker_budget::WorkerBudget::default(),
