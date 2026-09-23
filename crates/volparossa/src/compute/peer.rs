@@ -69,6 +69,8 @@ pub(crate) enum Command {
     PolicyPublish(Box<policy_assessment::object_policy::distribution::Publish>),
     /// Verify an exact received decision using this node's own policy authority; optionally apply locally.
     PolicyImport(Box<policy_assessment::object_policy::distribution::Import>),
+    /// Follow one explicitly enrolled public decision feed using this node's own authority.
+    PolicyFollow(Box<policy_assessment::object_policy::follow::Options>),
 }
 
 #[derive(Debug, Args)]
@@ -289,6 +291,9 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         }
         Command::PolicyImport(args) => {
             return policy_assessment::object_policy::distribution::import(&args, socket).await;
+        }
+        Command::PolicyFollow(args) => {
+            return policy_assessment::object_policy::follow::run(&args, socket).await;
         }
     };
     println!("{}", serde_json::to_string(&report)?);

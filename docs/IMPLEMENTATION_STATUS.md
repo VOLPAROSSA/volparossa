@@ -58,6 +58,32 @@ judgment, independent reasoning or legality. Automatic channel subscription, net
 membership/conflict governance, physical cache erasure, arbitrary HTTPS inspection and B06
 completion remain open. The earlier `6ac301ee` failure is not relabelled.
 
+A subsequent `compute peer policy-follow --execute` candidate automatically refreshes one
+owner-enrolled native publisher/name channel and applies only quorum-verified decisions for
+its exact enrolled subject/framework under the node's own current policy configuration.
+The peer must actually contribute its signed named wrapper; custody alone is not a name index.
+The bounded serial loop retains original wrapper/decision/epoch bytes and transport/application
+receipts, enforces publication and decision revision floors, and skips unchanged publications.
+SIGINT/SIGTERM stops its own work without disconnecting shared consumers. `--resume` requires
+the same enrollment and preserves pending handoff and original expiry; it never signs a new
+decision or turns an expired/historical receipt into current authorization. Explicit polling
+and cache limits require no model work or transferred private keys. Automatic spare-bandwidth
+scheduling and measured interactive non-interference are not claimed for this follower.
+
+The new fixture keeps the same four model jobs but combines without direct application. It
+starts the follower with a fresh cache before the receiving peer publishes, requires an actual
+completed unavailable poll and empty Client journal, then binds the real protected named
+download and automatic apply acknowledgement to the unchanged original quorum. Follower
+reaping, cached-access probes and both real agent restarts remain mandatory. All 11 focused
+object-policy CLI tests pass, including four new follower checks, along with strict CLI
+Clippy, scoped formatting and shell checks. Its inert Python self-test
+passes with 81 rejection cases. The separate
+[automatic-consumer proof on `3f30a5f9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35899595361)
+is pending. Neither the failed `6ac301ee` nor the passing manual-import `4d438099` proves that
+new automatic flow.
+This is selected-channel automation, not a complete global feed, new authority membership,
+independent semantic accuracy or B06 completion.
+
 An explicitly selected `smollm2-1.7b-v1` inference candidate now addresses the observed
 reasoning limitation without replacing the lightweight training model. It pins the original
 SmolLM2-1.7B files, reuses the existing CPU runtime and verifies actual CPU BF16 parameter

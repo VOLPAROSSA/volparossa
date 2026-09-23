@@ -62,11 +62,9 @@ agent_policy_object_prepare() {
         --endorsement "$jobs_source/policy-object-endorsement-0/endorsement.bin" \
         --endorsement "$jobs_source/policy-object-endorsement-1/endorsement.bin" \
         --endorsement "$jobs_source/policy-object-endorsement-2/endorsement.bin" \
-        --output "$jobs_source/policy-object-combined" --execute --apply \
+        --output "$jobs_source/policy-object-combined" --execute \
         >"$WORK/agent-policy-assessment-object-combined.json" \
-        2>"$WORK/agent-policy-assessment-object-combined.err" || fail POLICY_OBJECT_QUORUM_APPLY_FAILED
-    agent_policy_object_probe applied
-    python3 -B "$policy_script" object_collect "$WORK" before || fail POLICY_OBJECT_ORIGINALS_INVALID
+        2>"$WORK/agent-policy-assessment-object-combined.err" || fail POLICY_OBJECT_QUORUM_COMBINE_FAILED
 }
 
 agent_policy_object_restart() {
@@ -177,6 +175,62 @@ agent_policy_object_peer_probe() {
         || fail POLICY_OBJECT_PEER_ACCESS_DID_NOT_MATCH_REAL_OUTCOME
 }
 
+agent_policy_object_follow() {
+    PHASE=agent-policy-object-follow-cold
+    [ -z "${jobs_batch_pid:-}" ] || fail POLICY_FOLLOW_OWNER_ALREADY_RUNNING
+    policy_follow_directory=$jobs_source/policy-object-follow
+    policy_follow_cache=$jobs_source/policy-object-follow-cache
+    policy_follow_publication=$policy_peer_root/follow-publication
+    policy_framework=$(jq -er '.decision.scope.framework_sha256' "$WORK/agent-policy-assessment-result.json")
+    policy_follow_agent=$(systemctl show --property=MainPID --value volparossa-alpha-agent@client.service)
+    case $policy_follow_agent in ''|0|*[!0-9]*) fail POLICY_FOLLOW_CLIENT_MISSING ;; esac
+    # GNU timeout owns one original unprivileged coordinator, in the real Client's masked
+    # mount/network namespaces. The ordinary jobs teardown also owns jobs_batch_pid on failure.
+    timeout --signal=INT --kill-after=15s 330s nsenter --target "$policy_follow_agent" --mount --net \
+        setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- "$binary_directory/volparossa" --control-socket "$WORK/runtime-client/control/agent.sock" \
+        compute peer policy-follow --policy-config "$WORK/config-client.yaml" \
+        --publisher-key "$jobs_key_a" --name disposable-follow-policy --min-revision 1 \
+        --subject-publisher-key "$policy_subject_publisher" --subject-manifest-id "$policy_manifest" \
+        --subject-sha256 "$policy_subject_sha256" --framework-sha256 "$policy_framework" \
+        --directory "$policy_follow_directory" --cache "$policy_follow_cache" --poll-seconds 1 \
+        --quota-bytes 16777216 --max-entries 64 --min-free-bytes 268435456 --execute \
+        >"$WORK/agent-policy-assessment-follow-summary.json" \
+        2>"$WORK/agent-policy-assessment-follow-stderr.err" &
+    jobs_batch_pid=$!
+    policy_follow_pid=$jobs_batch_pid
+    python3 -B "$policy_script" object_follow_before "$WORK" "$policy_follow_pid" \
+        || fail POLICY_FOLLOW_COLD_POLL_NOT_OBSERVED
+    PHASE=agent-policy-object-follow-publication
+    # This node can publish only the original quorum bytes it actually received. Its own
+    # content identity signs the wrapper; it has no policy-authority private keys.
+    agent_policy_decision_cli "$provider_node_a" policy-publish --decision "$policy_peer_root/decision.bin" \
+        --publication-key "$jobs_key_a" --name disposable-follow-policy --revision 1 \
+        --identity "$WORK/state-$provider_node_a/identity.key" \
+        --passphrase-file "$WORK/credential-$provider_node_a/identity-passphrase" \
+        --output "$policy_follow_publication" --execute \
+        >"$WORK/agent-policy-assessment-follow-publication.json" \
+        2>"$WORK/agent-policy-assessment-follow-publication.err" || fail POLICY_FOLLOW_PUBLICATION_FAILED
+    agent_jobs_cli "$provider_node_a" content contribute \
+        --manifest "$policy_follow_publication/publication.manifest" --publisher-key "$jobs_key_a" \
+        --cache "$policy_follow_publication/cache" \
+        >"$WORK/agent-policy-assessment-follow-contribution.json" \
+        2>"$WORK/agent-policy-assessment-follow-contribution.err" || fail POLICY_FOLLOW_CONTRIBUTION_FAILED
+    PHASE=agent-policy-object-follow-application
+    python3 -B "$policy_script" object_follow_applied "$WORK" "$policy_follow_pid" \
+        || fail POLICY_FOLLOW_AUTOMATIC_APPLICATION_MISSING
+    kill -INT "$policy_follow_pid" || fail POLICY_FOLLOW_STOP_FAILED
+    policy_follow_status=0
+    wait "$policy_follow_pid" || policy_follow_status=$?
+    jobs_batch_pid=
+    python3 -B "$policy_script" object_follow_collect "$WORK" "$policy_follow_pid" "$policy_follow_status" \
+        || fail POLICY_FOLLOW_ORIGINALS_INVALID
+    [ "$policy_follow_status" -eq 0 ] || fail POLICY_FOLLOW_REAP_FAILED
+    agent_policy_object_probe applied
+    python3 -B "$policy_script" object_collect "$WORK" before || fail POLICY_OBJECT_ORIGINALS_INVALID
+}
+
 agent_policy_object_peer_activate() {
     PHASE=agent-policy-object-peer-activation
     agent_policy_object_peer_probe before
@@ -219,7 +273,12 @@ agent_policy_assessment_run() {
     policy_script=$source_directory/tests/integration/agent-policy-assessment-smoke.py
     policy_root=$jobs_source/policy-assessment
     PHASE=agent-policy-assessment-publication
-    printf '%s\n' 'Disposable guest only: publish one new synthetic CC0 public text, deposit its exact chunks on a peer, fetch the selected native object, execute two bounded principle assessments and two cross-reviews using signed dataset-v4 contracts on two explicitly enabled peers and the pinned JSON decoder, retain original provider-signed replies with truthful JSON-boundary/EOS termination, publish/deposit their bundle and fetch it into a new cache and directory on the SAME client, replay completed evidence offline, let three separately invoked existing development authorities replay and endorse its unchanged actual outcome, apply the exact-object quorum locally, test cached access and Client-agent restart persistence, publish its original quorum bytes through protected custody transfer to a separate node, import under the independently configured authority of that receiving node without copying private signing keys, test fresh export before/after application and a real receiving-agent restart, and clean all owned resources. No canned verdicts, additional model tasks, production policy keys, global-policy activation or legal-correctness claim.'
+    printf '%s\n' \
+        'Disposable guest only: publish one synthetic CC0 text, fetch its exact chunks through a protected peer route, execute two bounded principle assessments and two cross-reviews with the pinned 360M/JSON runtime, and retain original signed results and actual JSON-boundary/EOS termination.' \
+        'Publish, deposit and fetch their unchanged bundle into a new cache on the same Client; replay it offline without new jobs. Three separately invoked existing development authorities endorse its actual outcome without applying it yet.' \
+        'Transfer the original quorum bytes through protected custody to a second node. Start an enrolled Client follower before that node publishes its own signed wrapper into the real named index; require automatic protected retrieval and local application under the existing Client authority.' \
+        'Stop and reap the follower, test cached access and Client-agent restart persistence, independently import on the second node, test its fresh exports and actual agent restart, and clean all owned resources.' \
+        'No canned verdicts, additional model tasks, private signing-key transfer, production policy keys, global-policy activation or legal-correctness claim.'
     setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- python3 -B "$WORK/bin/agent-policy-assessment-smoke.py" prepare "$WORK" \
@@ -293,6 +352,7 @@ agent_policy_assessment_run() {
     python3 -B "$policy_script" transfer "$WORK" || fail POLICY_BUNDLE_ROUNDTRIP_INVALID
     agent_policy_object_prepare
     agent_policy_object_peer_transfer
+    agent_policy_object_follow
     content_custody_phase_finish 4
     benchmark_disconnect_route agent-jobs || fail POLICY_ROUTE_CLEANUP_FAILED
     PHASE=agent-policy-assessment-offline-replay
