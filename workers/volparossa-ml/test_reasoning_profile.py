@@ -188,6 +188,10 @@ class ReasoningProfileTests(unittest.TestCase):
                 self.assertEqual(result["model_parameter_dtype"], None if mode == "plan_document" else "bfloat16")
                 self.assertEqual(json.loads((root / "report.json").read_text())["model_parameter_dtype"], result["model_parameter_dtype"])
                 self.assertEqual(result["updates_completed"], 0)
+                if mode in ("infer", "plan_document"):
+                    self.assertEqual(result["answer_prompt_revision"], WORKER.ANSWER_PROMPT_REVISION)
+                else:
+                    self.assertNotIn("answer_prompt_revision", result)
                 self.assertEqual(result["model"]["files"], files)
                 self.assertLessEqual((root / "report.json").stat().st_size, WORKER.MAX_LINE)
                 if mode == "plan_document":

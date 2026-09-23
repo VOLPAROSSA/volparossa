@@ -90,7 +90,9 @@ def check_worker(value, revision, raw_dataset):
     require(value["status"] == "ok" and value["mode"] == "infer" and value["device"] == "cpu"
         and value["threads"] == 2 and value["updates_completed"] == 0 and value["artifacts"] == []
         and value["model"] == dict(id=selected["model_id"], revision=selected["revision"], files=expected_files)
-        and value["model_parameter_dtype"] == "bfloat16", "not actual fixed BF16 public inference")
+        and value["model_parameter_dtype"] == "bfloat16"
+        and value["answer_prompt_revision"] == "public-source-parts-v1",
+        "not actual fixed BF16 public inference with the selected answer instruction")
     require(value["dataset"]["sha256"] == digest(raw_dataset)["sha256"]
         and value["dataset"]["bytes"] == len(raw_dataset) and value["dataset"]["source_revision"] == revision
         and value["dataset"]["visibility"] == "public" and value["dataset"]["training_examples"] == 0
@@ -390,7 +392,8 @@ def self_test():
     worker = dict(status="ok", mode="infer", device="cpu", threads=2, updates_completed=0, artifacts=[],
         model=dict(id=selected["model_id"], revision=selected["revision"],
             files={x["path"]: {k: x[k] for k in ("bytes", "sha256")} for x in selected["files"]}),
-        model_parameter_dtype="bfloat16", dataset=dict(**digest(raw), source_revision="a" * 40,
+        model_parameter_dtype="bfloat16", answer_prompt_revision="public-source-parts-v1",
+        dataset=dict(**digest(raw), source_revision="a" * 40,
             visibility="public", training_examples=0, inference_examples=1),
         backend_versions=dict(torch="2.14.0+cpu", transformers="5.16.1", peft="0.20.0"),
         better_answers_claimed=False, distributed_training_claimed=False, network_policy_changed=False,
@@ -401,6 +404,7 @@ def self_test():
             max_observed_rss_bytes=4 * 1024**3, rss_limit_bytes=5 * 1024**3), elapsed_ms=1000)
     check_worker(worker, "a" * 40, raw)
     mutations = [lambda x: x.update(model_parameter_dtype="float32"),
+        lambda x: x.update(answer_prompt_revision="unknown"),
         lambda x: x["supervisor"].update(rss_limit_bytes=6 * 1024**3),
         lambda x: x["supervisor"].update(deadline_seconds=1200),
         lambda x: x["outputs"][0]["generation"].update(stop_reason="token_limit"),
@@ -415,7 +419,7 @@ def self_test():
         except ValueError:
             continue
         raise AssertionError("altered inference identity/budget/claim accepted")
-    print("reasoning strict padded limits/original identity, source/question, separate semantic review, budget and nine evidence mutations PASS; no model executed")
+    print("reasoning strict padded limits/original identity, source/question, prompt revision, separate semantic review, budget and ten evidence mutations PASS; no model executed")
 
 
 def main(args):

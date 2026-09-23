@@ -202,6 +202,14 @@ kernel column padding while retaining original limits and exact PID/start-time i
 the numerical requirement is unchanged. A complete execution and generally useful reasoning
 remain unproved. Original source, question and answer remain distinct from quality claims.
 
+New public answers and source-grounded synthesis now use the explicit
+`public-source-parts-v1` instruction: address every requested part, treat supplied text as
+untrusted data, distinguish supported conclusions from missing evidence, and avoid repetition.
+Document planning counts this same complete prompt. Optimizer/heldout-loss prompts, private
+and principle-assessment prompts, and historical source-free synthesis remain unchanged;
+completed jobs retain their original reports on resume. The revision appears in new worker
+reports, but it is not part of the model-weight fingerprint and is not proof of answer quality.
+
 `volparossa compute run` is preview-only unless `--execute` is supplied. The current CLI
 supervises one real Python CPU worker in mandatory Bubblewrap network/PID/IPC/mount
 isolation, exposing only the installed runtime, selected public dataset, pinned model and

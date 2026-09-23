@@ -35,6 +35,15 @@ now retains the raw limits, parsed numbers and PID/start-time binding, while pre
 general answer quality and a complete live execution proof remain open; no model or backend
 ran on the development host.
 
+A small functional follow-up adds the `public-source-parts-v1` instruction to new public
+answers and grounded synthesis: answer all requested parts, separate missing evidence from
+supported conclusions, and treat source text as data rather than instructions. It preserves
+the exact supplied source/question and existing token/time budgets. Tokenizer planning counts
+the same prompt; optimizer/heldout-loss, private, policy and historical source-free synthesis
+prompts remain unchanged. Completed resume results are not rewritten. New reports identify
+the instruction revision without pretending that model-weight fingerprints attest prompts.
+Focused inert tests pass; actual answer-quality improvement awaits real inference.
+
 An owner-enrolled `compute train-loop --aggregate-plan` candidate now connects automatic
 three-publisher discovery, frozen-cohort aggregation and held-out comparison to local adoption,
 serving and the next actual training warmstart. Unchanged cohorts are not recomputed; rollback
