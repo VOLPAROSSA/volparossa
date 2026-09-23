@@ -126,9 +126,14 @@ now belongs to a retained controller task, not to the cancelled RPC. Daemon shut
 both main/DNS bootstrap owners before exact retirement while discovery remains available.
 Expired-route retirement also retains its cleanup owner across requester cancellation, and a
 later request can observe its completion. Fifteen focused socket/bootstrap/retirement tests
-and strict agent library/test Clippy pass. This is not yet live evidence for the blocked-helper
-shutdown case; that disposable `content-provider` trial is being added. The legacy direct-to-
-agent-file fetch operations, mailbox and compute request cancellation are outside this change.
+and strict agent library/test Clippy pass. The disposable `content-provider` trial now also
+pauses only the exact guest helper, cancels a real named download, requires an independent
+cache-only delivery, then stops the original agent during pending bootstrap and resumes the
+same helper before cleanup. It retains original process identities, receipts and the systemd
+wait result. Sixteen provider checks, including ten inert cancellation cases, pass. Actual
+blocked-helper execution remains pending KVM, not claimed from those inert checks. The legacy
+direct-to-agent-file fetch operations, mailbox and compute request cancellation are outside
+this change.
 
 A new explicit `compute aggregate-adapters` candidate now connects three independently
 authorized public publisher channels to a real worker implementation and the existing held-out

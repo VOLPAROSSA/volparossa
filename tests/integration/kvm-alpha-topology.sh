@@ -390,6 +390,8 @@ print_plan() {
             '  open by publisher/name in the Client, verify HTTP assets/ranges and SIGTERM spool cleanup (no browser engine);' \
             '  after existing phases, create three separate control-only broker links to R3/R4/R5 and fetch 15 disjoint chunks on a fresh route;' \
             '  require real triple provider payload overlap, exact reconstruction and normal service/route teardown;' \
+            '  pause only the exact guest Client helper via pidfd, cancel a pending named download and require independent cached delivery;' \
+            '  stop the original Client agent while bootstrap is pending, resume that helper before teardown and require successful drain;' \
             '  retain complete privacy captures/cleanup; no general NAT, arbitrary-browser HTTPS or full-C02 claim.'
         return
     fi
@@ -943,7 +945,7 @@ if [ "$scenario" = content-provider ]; then
     for provider_fixture in content-provider-smoke.sh content-provider-smoke.py content-network-smoke.py \
         content-provider-https-smoke.sh content-provider-https-smoke.py content-publication-smoke.sh content-named-smoke.sh \
         content-provider-site-smoke.sh content-provider-site-smoke.py \
-        content-provider-adaptive-smoke.sh content-provider-adaptive-smoke.py; do
+        content-provider-adaptive-smoke.sh content-provider-adaptive-smoke.py content-cancellation-smoke.py; do
         if [ ! -f "$source_directory/tests/integration/$provider_fixture" ] \
             || [ -L "$source_directory/tests/integration/$provider_fixture" ]; then
             printf '%s\n' 'content provider fixture unavailable' >&2
@@ -1714,6 +1716,10 @@ cleanup() {
     [ "$FINALIZED" = no ] || exit "$original_status"
     FINALIZED=yes
     trap - EXIT HUP INT TERM
+    # Resume a fixture-paused helper BEFORE any namespace, process or service teardown.
+    if [ "$scenario" = content-provider ] && command -v content_provider_cancellation_resume >/dev/null 2>&1; then
+        content_provider_cancellation_resume || original_status=1
+    fi
     if [ "$scenario" = dns-cache ] && command -v dns_cache_stop_server >/dev/null 2>&1; then
         dns_cache_stop_server || original_status=1
     fi

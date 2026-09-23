@@ -297,6 +297,11 @@ def validate_transfer(evidence):
             and adaptive["publication"]["publisher_hex"] != publication["publisher_hex"]
             and adaptive["publication"]["manifest_id"] != publication["manifest_id"],
             "adaptive proof substituted the topology or reused the earlier route/publication")
+    # Earlier source-exact reports predate this additive phase; never reinterpret them.
+    if "requester_cancellation" in evidence:
+        cancellation = runpy.run_path(str(Path(__file__).with_name("content-cancellation-smoke.py")))
+        cancellation["validate"](evidence["requester_cancellation"], publication,
+                                 evidence["named_publication"]["fetch"])
 
 
 def build_site_publication(work):
@@ -334,6 +339,7 @@ def build_evidence(work):
                     named_publication=build_named_publication(work, layout["provider_nodes"]),
                     site_publication=build_site_publication(work),
                     adaptive_workers=build_adaptive_workers(work),
+                    requester_cancellation=read(work / "content-provider-cancellation.json"),
                     expected_peers=read(work / "a01-expected-peers.json"),
                     selected_route=read(work / "content-provider-live-selection.json"),
                     privacy={r: read(work / f"content-provider-privacy-{r}.json") for r in ROLES},
@@ -391,6 +397,8 @@ def validate_report(report, revision):
             and report["native_name_retrieval"] is True
             and report["native_static_site"] is True
             and report["adaptive_provider_workers"] is True
+            and report.get("requester_cancellation") is True
+            and report["transfer"].get("requester_cancellation", {}).get("success") is True
             and report["cleanup"] == {"complete": True, "remaining_owned_objects": 0}
             and report["host_state"]["unchanged"] is True
             and report["host_state"]["before_sha256"] == report["host_state"]["after_sha256"]

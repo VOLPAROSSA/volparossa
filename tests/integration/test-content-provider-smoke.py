@@ -91,6 +91,15 @@ def fixture(control_node="relay2"):
     evidence["named_publication"] = named_fixture(evidence)
     evidence["site_publication"] = runpy.run_path(str(HERE / "test-content-provider-site-smoke.py"))["fixture"](control_node)
     evidence["adaptive_workers"] = runpy.run_path(str(HERE / "test-content-provider-adaptive-smoke.py"))["fixture"]()
+    cancellation = runpy.run_path(str(HERE / "content-cancellation-smoke.py"))
+    component, _, _ = cancellation["sample"]()
+    named_fetch = evidence["named_publication"]["fetch"]
+    named_fetch["publication_expires_unix_seconds"] = 99
+    for key in ("publisher_key", "manifest_id", "sha256", "bytes"):
+        component["cache_only"][key] = named_fetch[key]
+    component["cache_only_attempts"][-1]["stdout"] = json.dumps(component["cache_only"])
+    component["output"] = {key: named_fetch[key] for key in ("sha256", "bytes")}
+    evidence["requester_cancellation"] = component
     return evidence
 
 
@@ -351,6 +360,7 @@ class ContentProviderContract(unittest.TestCase):
             "ordinary_publication": "user-publication",
             "site_publication": "site-evidence",
             "adaptive_workers": "adaptive-evidence",
+            "requester_cancellation": "cancellation",
         }
         files = {f"content-provider-{suffix}.json": evidence[key] for key, suffix in names.items()}
         files["a01-expected-peers.json"] = evidence["expected_peers"]
@@ -436,7 +446,7 @@ class ContentProviderContract(unittest.TestCase):
         report = dict(report_kind="volparossa-native-content-providers", source_revision="a" * 40,
                       explicit_origin_authenticated_https=True, normal_user_publication=True, native_name_retrieval=True,
                       native_static_site=True,
-                      adaptive_provider_workers=True,
+                      adaptive_provider_workers=True, requester_cancellation=True,
                       success=True, runner_exit_status=0, cleanup=dict(complete=True, remaining_owned_objects=0),
                       host_state=dict(unchanged=True, before_sha256="b" * 64, after_sha256="b" * 64),
                       transfer=fixture(), **{name: False for name in CHECK["SCOPE"]})
@@ -447,6 +457,8 @@ class ContentProviderContract(unittest.TestCase):
             lambda item: item.update(explicit_origin_authenticated_https=False),
             lambda item: item.update(native_static_site=False),
             lambda item: item.update(adaptive_provider_workers=False),
+            lambda item: item.update(requester_cancellation=False),
+            lambda item: (item.pop("requester_cancellation"), item["transfer"].pop("requester_cancellation")),
             lambda item: item["cleanup"].update(remaining_owned_objects=1),
             lambda item: item["host_state"].update(after_sha256="c" * 64),
         ):
@@ -577,6 +589,12 @@ class ContentProviderContract(unittest.TestCase):
                      ("cp0", socket.IPPROTO_UDP, "42.158.0.1", 41000, "48.164.4.1", 41000)):
             record(*args)
         self.assertEqual(environment["unexpected_provider_control_packets"], 4)
+
+
+class CancellationChecks(unittest.TestCase):
+    def test_pending_bootstrap_cancellation_evidence(self):
+        cancellation = runpy.run_path(str(HERE / "content-cancellation-smoke.py"))
+        cancellation["self_test"]()
 
 
 if __name__ == "__main__":

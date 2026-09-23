@@ -147,6 +147,17 @@ content_provider_stop_control_observer() {
     PROVIDER_CONTROL_PID=
 }
 
+content_provider_cancellation_resume() {
+    python3 -B "$source_directory/tests/integration/content-cancellation-smoke.py" resume "$WORK"
+}
+
+content_provider_cancellation_run() {
+    PHASE=content-provider-requester-cancellation
+    python3 -B "$source_directory/tests/integration/content-cancellation-smoke.py" \
+        run "$WORK" "$binary_directory/volparossa" "$WORKER_UID" "$WORKER_GID" "$named_control_gid" \
+        || fail CONTENT_PROVIDER_CANCELLATION_FAILED
+}
+
 content_provider_run() {
     PHASE=content-provider-selection
     benchmark_select_route content-provider mptcp || fail CONTENT_PROVIDER_MPTCP_SELECTION_UNAVAILABLE
@@ -308,6 +319,7 @@ content_provider_run() {
         fail CONTENT_PROVIDER_ROUTE_CLEANUP_FAILED
     fi
     content_provider_adaptive_run
+    content_provider_cancellation_run
     python3 -B "$source_directory/tests/integration/content-provider-smoke.py" \
         evidence "$WORK" "$WORK/content-provider-evidence.json" || fail CONTENT_PROVIDER_EVIDENCE_INVALID
     OBSERVED_BLOCKER=NONE
@@ -339,17 +351,18 @@ content_provider_finalize_report() {
        source_revision:$revision,run_id:$run_id,phase:$phase,
        success:($status == 0 and $evidence.success == true and
          $evidence.ordinary_publication.success == true and $evidence.site_publication.success == true and
-         $evidence.adaptive_workers.success == true and $complete and
+         $evidence.adaptive_workers.success == true and $evidence.requester_cancellation.success == true and $complete and
          $remaining == 0 and $host.unchanged == true),transfer:$evidence,
        runner_exit_status:$status,observed_blocker:(if $blocker == "NONE" then null else $blocker end),
        cleanup:{complete:$complete,remaining_owned_objects:$remaining},host_state:($host | del(.acceptance_id)),
-       scope:"explicit native publication and cooperative-origin HTTPS for the same object, normal named static-site HTTP assets, two policy-authorized providers via generic DHT/control-relay discovery and protected MPTCP/TLS/WireGuard, complete peers and missing origin ranges",
+       scope:"explicit native publication and cooperative-origin HTTPS for the same object, normal named static-site HTTP assets, two policy-authorized providers via generic DHT/control-relay discovery and protected MPTCP/TLS/WireGuard, complete peers and missing origin ranges; named requester cancellation and agent shutdown during pending bootstrap",
        general_nat_reachability_claimed:false,full_c02_claimed:false,
        explicit_origin_authenticated_https:($evidence.https.success == true),
        normal_user_publication:($evidence.ordinary_publication.success == true),
        native_name_retrieval:($evidence.named_publication.success == true),
        native_static_site:($evidence.site_publication.success == true),
        adaptive_provider_workers:($evidence.adaptive_workers.success == true),
+       requester_cancellation:($evidence.requester_cancellation.success == true),
        browser_integration_claimed:false,arbitrary_https_integration_claimed:false,
        speed_improvement_claimed:false,full_alpha_acceptance_claimed:false}' \
         >"$WORK/content-provider-smoke.json" || return 1
