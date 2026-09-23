@@ -703,6 +703,42 @@ duplicate full-object downloads. Recent cost hints are RAM-only and short-lived,
 object catalogue; native/explicit peer transfers supply useful-peer observations. A node with no
 such observations conservatively uses the origin, rather than inventing a speed estimate.
 
+### HTTPS checksum-file downloads
+
+For an anonymous public binary download whose origin publishes a SHA-256 checksum file,
+the new explicit mode does not require a VOLPAROSSA descriptor or `Repr-Digest`:
+
+```sh
+volparossa content fetch-https \
+  --url https://downloads.example/releases/asset.bin \
+  --checksum-path /releases/SHA256SUMS \
+  --source-strategy peers-first \
+  --cache /agent-owned/new-checksum-cache --local-output ./asset.bin
+```
+
+Select exactly one of `--checksum-path`, `--origin-digest` and `--metadata-path`.
+`browser-download` accepts the same authority selection without an output argument.
+The checksum path is explicit, on the same HTTPS origin and in the resource's directory;
+no peer chooses it. Each consumer first authenticates the checksum document through its own
+protected TLS connection, then authenticates resource HEAD metadata. Both must be publicly
+cacheable, and the earliest original expiry wins. A present resource `Repr-Digest` must also
+agree. The selected whole hash and length authorize the existing protected peer lookup;
+complete bytes must verify before local output, browser readiness or contribution. Missing
+peer content uses one full authenticated origin GET, not guessed partial ranges.
+
+The first checksum profile accepts at most 64 KiB of `text/plain`, with strict GNU-style
+SHA-256 text/binary rows and exactly one matching simple filename. Query strings, ambiguous
+or escaped filenames, duplicate matching rows, redirects, cookies, private/no-store responses
+and unsupported representations are rejected. Resource bodies retain the public
+`application/octet-stream`, identity-encoding profile. This does not enable arbitrary browser
+capture, DRM bypass or offline HTTPS authority.
+
+Local/browser JSON uses `authentication_scope: "origin-checksum"`. The separate
+`origin_authority_body_bytes` counts the checksum-document body; `origin_body_bytes` continues
+to count resource bytes only. Neither includes HTTP/TLS overhead. End-to-end timing must
+include both authority requests; a peer hit is not a claim of zero origin traffic or speedup.
+The source candidate and focused disposable fixture do not yet establish a live-network pass.
+
 ### HTTPS origin-digest downloads
 
 For an origin that returns a supported SHA-256 `Repr-Digest` in its own resource HEAD response,
@@ -1086,9 +1122,11 @@ requires the fresh original signed custody exchange and successful local handoff
 receipts are retained for verification, never treated as fresh availability after restart.
 SIGINT/SIGTERM ends the owner loop and closes its in-flight exchange; the original stored
 copies may still be served until their original expiry while holders remain available.
-Maintenance does not continue while the owner is offline. Network loss/replacement evidence
-for this new combined controller is still pending; it does not promise globally fair placement
-or permanent site availability.
+Maintenance does not continue while the owner is offline. The
+[exact `2a431c1` network trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35916493141)
+passes automatic two-copy placement, replacement after one actual service stops, and a fresh
+peer-only download after owner-app termination and source removal. The Client node stays
+online; this does not promise globally fair placement or permanent site availability.
 
 The configured contribution service now also schedules bounded idle repair of **healthy partial
 public journal records** after restart. This is separate from the explicit publisher Deposit/

@@ -79,7 +79,7 @@ async fn retrieve(
     request: HttpsContentFetchRequest,
     context: &ControlContext,
 ) -> Result<PreparedDownload, ContentError> {
-    if request.origin_digest {
+    if request.origin_digest || !request.checksum_path.is_empty() {
         return Box::pin(digest::retrieve(request, context)).await;
     }
     let strategy = HttpsSourceStrategy::try_from(request.source_strategy)
@@ -315,6 +315,11 @@ pub(super) async fn download(
             resource_url,
             expires_unix_seconds: expires,
             origin_digest: download.authorized.origin_digest(),
+            checksum_path: download
+                .authorized
+                .checksum_path()
+                .unwrap_or_default()
+                .into(),
         };
         checked_policy(context, &download.origin, &download.policy).await?;
         *ready_sent = true;

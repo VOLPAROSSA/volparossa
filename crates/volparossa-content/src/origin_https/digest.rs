@@ -24,9 +24,45 @@ pub struct OriginAuthorizedDigest {
     length: u64,
     expires: u64,
     clock: Clock,
+    checksum: Option<ChecksumProvenance>,
+}
+
+struct ChecksumProvenance {
+    path: String,
+    body_bytes: u64,
 }
 
 impl OriginAuthorizedDigest {
+    /// Original same-origin checksum path, absent for ordinary Repr-Digest HEAD authority.
+    /// It remains request-local and is not a reusable peer/origin proof.
+    pub fn checksum_path(&self) -> Option<&str> {
+        self.checksum.as_ref().map(|value| value.path.as_str())
+    }
+
+    /// Checksum-document body bytes consumed to establish authority, excluding resource bytes.
+    pub fn authority_body_bytes(&self) -> u64 {
+        self.checksum.as_ref().map_or(0, |value| value.body_bytes)
+    }
+
+    pub(super) fn from_checksum(
+        request: OriginRequest,
+        hash: [u8; 32],
+        length: u64,
+        expires: u64,
+        clock: Clock,
+        path: String,
+        body_bytes: u64,
+    ) -> Self {
+        Self {
+            request,
+            hash,
+            length,
+            expires,
+            clock,
+            checksum: Some(ChecksumProvenance { path, body_bytes }),
+        }
+    }
+
     /// SHA-256 of the complete identity-encoded representation, not of an individual range.
     pub const fn object_sha256(&self) -> &[u8; 32] {
         &self.hash
@@ -183,6 +219,7 @@ impl OriginClient {
                 length: response.length,
                 expires,
                 clock,
+                checksum: None,
             };
             authorized.check_validity(now_unix)?;
             Ok(authorized)
@@ -293,7 +330,7 @@ async fn receive_body<S: AsyncRead + Unpin>(
     Ok(chunks)
 }
 
-fn check_response(response: &Response, max_bytes: u64) -> Result<(), OriginError> {
+pub(super) fn check_response(response: &Response, max_bytes: u64) -> Result<(), OriginError> {
     if response.status != 200
         || response.content_type != BINARY_TYPE
         || response.length > max_bytes
@@ -304,7 +341,7 @@ fn check_response(response: &Response, max_bytes: u64) -> Result<(), OriginError
     Ok(())
 }
 
-async fn send_head<S: AsyncWrite + Unpin>(
+pub(super) async fn send_head<S: AsyncWrite + Unpin>(
     stream: &mut S,
     request: &OriginRequest,
 ) -> Result<(), OriginError> {
@@ -324,7 +361,7 @@ async fn send_head<S: AsyncWrite + Unpin>(
 
 // Initial explicit RFC 9530 subset: a single SHA-256 byte-sequence dictionary member,
 // without parameters or additional algorithms. Unsupported forms never grant authority.
-fn parse_digest(value: Option<&str>) -> Result<[u8; 32], OriginError> {
+pub(super) fn parse_digest(value: Option<&str>) -> Result<[u8; 32], OriginError> {
     let value = value.ok_or(OriginError::DigestUnavailable)?;
     if value.contains([',', ';']) {
         return Err(OriginError::DigestUnavailable);

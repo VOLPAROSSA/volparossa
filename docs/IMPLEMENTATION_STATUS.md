@@ -14,6 +14,21 @@ The automatic-follow milestone is integrated by
 normal Quality/CodeQL checks passing. Authority-round/cycle and larger-model work remain
 subsequent slices. Neither integration nor execution proves reliable model reasoning.
 
+The new explicit HTTPS checksum-file candidate connects `--checksum-path` from normal
+`fetch-https`/`browser-download` through local control, protected origin streams and existing
+whole-digest peer retrieval. The consumer authenticates a same-directory SHA-256 document
+itself and then the resource HEAD; neither a peer hash nor its signing key supplies origin
+authority. Original minimum freshness survives both requests, and full bytes must verify
+before delivery or contribution. Cookie/private/no-store, ambiguous names/checksums and
+conflicting digests are refused. Six focused real-TLS/parser checks (four new checksum checks
+and two existing digest checks), six local-control HTTPS checks, twelve CLI content checks,
+five actual CLI-process tests, the checksum-origin fixture check, and scoped strict Clippy
+for CLI/agent/content/local-control pass. Seventeen inert provider-HTTPS checker tests,
+scoped formatting and shell checks also pass. The extended disposable scenario exercises
+origin-only retrieval, a fresh two-provider hit and wrong-checksum rejection with original
+privacy/cleanup gates; its live protected-network result is pending. This
+extends one public binary-download profile, not arbitrary browser capture or completed C08.
+
 An automatic public-copy maintenance candidate adds `content retain`: the publisher enrolls
 one original public object, desired copies and finite lifetime/upload budget, rather than
 hand-selecting every provider key. Protected discovery returns signed route-distinct service
@@ -23,7 +38,16 @@ the full object budget durably, and resume retains original deadlines and re-ins
 holders instead of counting historical receipts. Background discovery/transfers use the
 existing configured quiet admission, per-chunk cooldown and foreground cancellation. No
 provider storage-capacity promise, owner-offline maintenance, global placement fairness or
-permanent availability is implied. The three-holder loss/replacement network proof is pending.
+permanent availability is implied. The
+[three-holder loss/replacement proof on `2a431c1`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35916493141)
+now passes its unchanged source-exact checkers against 174 original files. The owner chooses
+R5 and R3 without provider-key arguments; after actual R5 service withdrawal, fresh challenges
+establish R3 and replacement R4. The owner is then terminated/reaped with exit 0 and its source
+cache/input removed. A fresh download reconstructs 2,097,275 bytes using 1,048,699 unique peer
+bytes from two providers and no origin bytes. Original manifest/expiry/window and cumulative
+upload reservations are retained. All 52,559 captured frames, cleanup and unchanged host state
+pass. The publisher application stops, not the full Client node; no future availability,
+owner-offline maintenance, global fairness or model-governance completion is established.
 Three protocol, five real custody-stream, two background-admission and 48 CLI content tests
 pass, along with the existing real CLI custody-process trial. Strict scoped Clippy for the
 CLI, agent, content and local-control crates passes. An actual inert CLI preview accepts the

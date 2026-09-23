@@ -1,4 +1,4 @@
-//! Two own-origin authorization paths, never a peer key promoted to HTTPS authority.
+//! Own-origin authorization paths, never a peer key promoted to HTTPS authority.
 
 use std::path::{Path, PathBuf};
 
@@ -12,7 +12,7 @@ use super::super::{ContentRuntime, now};
 pub(super) enum Authorization {
     Cooperative(OriginAuthorizedManifest),
     Digest {
-        authority: OriginAuthorizedDigest,
+        authority: Box<OriginAuthorizedDigest>,
         signed: SignedManifest,
         manifest: VerifiedManifest,
     },
@@ -27,7 +27,7 @@ impl Authorization {
         let manifest = authority.verify_candidate(&signed, now())?;
         authority.verify_cached(&manifest, store, now())?;
         Ok(Self::Digest {
-            authority,
+            authority: Box::new(authority),
             signed,
             manifest,
         })
@@ -48,7 +48,14 @@ impl Authorization {
     }
 
     pub(super) fn origin_digest(&self) -> bool {
-        matches!(self, Self::Digest { .. })
+        matches!(self, Self::Digest { authority, .. } if authority.checksum_path().is_none())
+    }
+
+    pub(super) fn checksum_path(&self) -> Option<&str> {
+        match self {
+            Self::Cooperative(_) => None,
+            Self::Digest { authority, .. } => authority.checksum_path(),
+        }
     }
 
     pub(super) fn check_validity(&self, at: u64) -> Result<u64, OriginError> {

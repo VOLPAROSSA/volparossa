@@ -7,7 +7,9 @@
 //! to shared storage. This is not a browser adapter, generic web proof or offline origin trust.
 //! URLs and HTTP metadata remain in the caller's in-memory authorization, not the chunk store.
 
+mod checksum;
 mod digest;
+pub use checksum::OriginAuthenticatedChecksum;
 pub use digest::OriginAuthorizedDigest;
 
 use std::{path::Path, sync::Arc, time::Duration};
@@ -51,6 +53,15 @@ pub struct OriginRequest {
 }
 
 impl OriginRequest {
+    /// Validate an explicit checksum document before opening any origin connection.
+    /// This limited profile accepts simple sibling filenames, not URL/query aliases.
+    ///
+    /// # Errors
+    /// Rejects other origins/directories, ambiguous paths, queries and descriptor-mode requests.
+    pub fn validate_checksum_path(&self, checksum_path: &str) -> Result<(), OriginError> {
+        checksum::validate_path(self, checksum_path).map(|_| ())
+    }
+
     /// Select a canonical HTTPS URL and an explicit same-origin metadata path.
     ///
     /// # Errors

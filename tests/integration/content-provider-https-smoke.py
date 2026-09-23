@@ -33,8 +33,13 @@ RANGES = ((262144, 524287), (786432, 1048575),
           (1310720, 1572863), (1835008, 2097151))
 RANGE_BYTES = 262144
 DIGEST_CASES = ("digest-origin-only", "digest-peers-first")
+CHECKSUM_CASES = ("checksum-origin-only", "checksum-peers-first")
+CHECKSUM_BAD_CASE = "checksum-mismatch"
+CHECKSUM_TEXT = (SHA + "  checksum-asset.bin\n").encode("ascii")
+BAD_CHECKSUM_TEXT = ("0" + SHA[1:] + "  checksum-asset.bin\n").encode("ascii")
 LIMITED_CASES = ("limited-origin-only", "limited-peers-first", "limited-auto")
-CONSUMER_CASES = ("complete", "missing", "baseline", "origin-only", "auto", *DIGEST_CASES, *LIMITED_CASES)
+CONSUMER_CASES = ("complete", "missing", "baseline", "origin-only", "auto", *DIGEST_CASES,
+                  *LIMITED_CASES, *CHECKSUM_CASES, CHECKSUM_BAD_CASE)
 REPR_DIGEST = "sha-256=:rdByTY2+aEB9VEwkcUEocyopxIgM/zDSg7GtqTYuN2c=:"
 
 
@@ -157,17 +162,39 @@ def consumer_command(case, binary, control, cache, user_directory, output):
     if case == "baseline":
         return [binary, "origin-baseline", str(user_directory), "47.163.4.2:18443",
                 str(user_directory / "origin.pem"), str(output)]
+    checksum = case in (*CHECKSUM_CASES, CHECKSUM_BAD_CASE)
+    resource = "checksum-asset.bin" if checksum else "asset.bin"
+    strategy = "origin-only" if case == CHECKSUM_BAD_CASE else case.split("-", 1)[1] \
+        if case in (*DIGEST_CASES, *LIMITED_CASES, *CHECKSUM_CASES) else case \
+        if case in ("origin-only", "auto") else "peers-first"
     command = [binary, "--control-socket", control, "content",
                "browser-download" if case == "complete" else "fetch-https",
-               "--url", "https://destination.volparossa.test:18443/asset.bin",
+               "--url", f"https://destination.volparossa.test:18443/{resource}",
                "--ca-file", str(user_directory / "origin.pem"), "--cache", cache,
-               "--source-strategy", case.split("-", 1)[1] if case in (*DIGEST_CASES, *LIMITED_CASES)
-                   else case if case in ("origin-only", "auto") else "peers-first"]
-    command.extend(["--origin-digest"] if case in (*DIGEST_CASES, *LIMITED_CASES)
+               "--source-strategy", strategy]
+    command.extend(["--checksum-path", "/BAD-SHA256SUMS" if case == CHECKSUM_BAD_CASE else "/SHA256SUMS"]
+                   if checksum else ["--origin-digest"] if case in (*DIGEST_CASES, *LIMITED_CASES)
                    else ["--metadata-path", "/.well-known/volparossa/content/asset"])
     if case != "complete":
         command.extend(["--local-output", str(output)])
     return command
+
+
+def rejected_consumer(process, boundary, cli_boundary, output, deadline, started, wall):
+    stdout, stderr = process.communicate(timeout=max(0.1, deadline - time.monotonic()))
+    require(process.returncode != 0 and stdout == b"" and 0 < len(stderr) <= 16384
+            and "agent rejected request: CONTENT_UNAVAILABLE" in stderr.decode("utf-8")
+            and not output.exists() and not output.is_symlink()
+            and not list(output.parent.glob("volparossa-browser-*")),
+            "wrong checksum did not fail before output/readiness")
+    finished = time.monotonic_ns()
+    return dict(consumer=boundary, cli=cli_boundary, returncode=process.returncode,
+                stdout_hex=stdout.hex(), stderr=stderr.decode("utf-8"),
+                control_diagnostic="CONTENT_UNAVAILABLE", local_output_absent=True,
+                requested_checksum_path="/BAD-SHA256SUMS", requested_origin_digest=False,
+                requested_source_strategy="origin-only", started_monotonic_ns=started,
+                completed_monotonic_ns=finished, elapsed_ns=finished-started,
+                started_unix_ms=wall, completed_unix_ms=time.time_ns() // 1_000_000)
 
 
 def consume(arguments):
@@ -185,6 +212,7 @@ def consume(arguments):
     started, deadline = time.monotonic_ns(), time.monotonic() + 110
     started_unix_ms = time.time_ns() // 1_000_000
     process = subprocess.Popen(command, stdout=subprocess.PIPE, bufsize=0,
+                               stderr=subprocess.PIPE if case == CHECKSUM_BAD_CASE else None,
                                env=dict(os.environ, TMPDIR=str(user_directory)))
     previous = {}
     def interrupted(_signum, _frame):
@@ -193,11 +221,16 @@ def consume(arguments):
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous[signum] = signal.signal(signum, interrupted)
         cli_boundary = process_boundary(process.pid, parent_ns, client_ns, uid, gid, control_gid)
+        if case == CHECKSUM_BAD_CASE:
+            return rejected_consumer(process, boundary, cli_boundary, output, deadline,
+                                     started, started_unix_ms)
         first = bounded_json_line(process.stdout, deadline)
         report = dict(final=first, consumer=boundary, cli=cli_boundary)
         if case != "baseline":
             report["requested_source_strategy"] = command[command.index("--source-strategy") + 1]
             report["requested_origin_digest"] = "--origin-digest" in command
+            if "--checksum-path" in command:
+                report["requested_checksum_path"] = command[command.index("--checksum-path") + 1]
         if case == "baseline":
             require(first["network_namespace"] == client_ns and first["effective_uid"] == uid
                     and read(output) == first, "baseline report differs from actual isolated fixture process")
@@ -237,6 +270,8 @@ def consume(arguments):
                 process.kill()
                 process.wait(timeout=2)
         process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
         for signum, handler in previous.items():
             signal.signal(signum, handler)
 
@@ -639,14 +674,15 @@ def validate_digest_cases(evidence, records, control_node):
             "digest phases reused an earlier output or agent cache")
 
 
-def validate_digest_phase(evidence, phase, from_origin, strategy, control_node, original_ids):
+def validate_digest_phase(evidence, phase, from_origin, strategy, control_node, original_ids,
+                          authority="origin-repr-digest"):
     peers, nodes = evidence["expected_peers"], evidence["layout"]["provider_nodes"]
     fetch, output, application = phase["fetch"], phase["output"], phase["application"]
     require(fetch["bytes"] == output["bytes"] == BYTES and fetch["chunks"] == 9
                 and fetch["origin_authenticated"] is True
-                and fetch["authentication_scope"] == "origin-repr-digest"
-                and fetch["origin_digest"] is True
-                and application["requested_origin_digest"] is True
+                and fetch["authentication_scope"] == authority
+                and fetch["origin_digest"] is (authority == "origin-repr-digest")
+                and application["requested_origin_digest"] is (authority == "origin-repr-digest")
                 and re.fullmatch(r"[0-9a-f]{64}", fetch["transport_manifest_id"])
                 and fetch["peer_bytes"] == (0 if from_origin else BYTES)
                 and fetch["origin_body_bytes"] == (BYTES if from_origin else 0)
@@ -667,6 +703,68 @@ def validate_digest_phase(evidence, phase, from_origin, strategy, control_node, 
     validate_application(phase, browser=False, source_strategy=strategy)
     validate_path(phase, peers, nodes, missing=False, origin_only=from_origin)
     validate_control(phase["control"], control_node, nodes, missing=False, require_contacts=not from_origin)
+
+
+def validate_checksum_cases(evidence, records, control_node):
+    cases, rejected = evidence["origin_checksum_cases"], evidence["checksum_mismatch"]
+    require(set(cases) == set(CHECKSUM_CASES), "both cold checksum cases required")
+    require([row["kind"] for row in records] == ["checksum_list", "checksum_head", "checksum_body",
+            "checksum_list", "checksum_head", "checksum_bad_list", "checksum_head", "checksum_body"],
+            "checksum requests must be original GET-list + HEAD and only required whole bodies")
+    for record in records:
+        kind = record["kind"]
+        listed = kind in ("checksum_list", "checksum_bad_list")
+        expected = BAD_CHECKSUM_TEXT if kind == "checksum_bad_list" else CHECKSUM_TEXT
+        body = kind == "checksum_body"
+        require(record["method"] == ("HEAD" if kind == "checksum_head" else "GET")
+                and record["status"] == 200 and record["representation_digest"] is None
+                and record["payload_bytes"] == (len(expected) if listed else BYTES if body else 0)
+                and record["content_length"] == (len(expected) if listed else BYTES)
+                and record["object_sha256"] == (None if listed else SHA)
+                and record["checksum_body_hex"] == (expected.hex() if listed else None)
+                and all(record[key] is None for key in ("range_start", "range_end", "range_total")),
+                "checksum origin offered another digest/descriptor/body or invalid authority bytes")
+    ids = validate_digest_indexes(evidence)
+    for name in CHECKSUM_CASES:
+        phase = cases[name]
+        validate_digest_phase(evidence, phase, name == "checksum-origin-only",
+            name.removeprefix("checksum-"), control_node, ids, "origin-checksum")
+        require(phase["application"]["requested_checksum_path"] == "/SHA256SUMS"
+                and phase["fetch"]["origin_authority_body_bytes"] == len(CHECKSUM_TEXT),
+                "checksum authority body was not independently accounted for")
+    application, output = rejected["application"], rejected["output"]
+    require(application["returncode"] != 0 and application["stdout_hex"] == ""
+            and application["control_diagnostic"] == "CONTENT_UNAVAILABLE"
+            and 0 < len(application["stderr"].encode()) <= 16384
+            and "agent rejected request: CONTENT_UNAVAILABLE" in application["stderr"]
+            and application["requested_checksum_path"] == "/BAD-SHA256SUMS"
+            and application["requested_origin_digest"] is False
+            and application["requested_source_strategy"] == "origin-only"
+            and application["local_output_absent"] is True
+            and output["local_output_initially_absent"] is True
+            and output["local_output_absent"] is True
+            and output["client_cache_initially_absent"] is True
+            and rejected["status"]["serving"] is False and rejected["status"]["publications"] == 0
+            and 0 < application["elapsed_ns"] <= 120_000_000_000
+            and application["elapsed_ns"] == application["completed_monotonic_ns"] - application["started_monotonic_ns"],
+            "whole checksum mismatch was not rejected before output/readiness/contribution")
+    for key in ("consumer", "cli"):
+        boundary = application[key]
+        require(boundary["user_uid"] == 985 and boundary["user_gid"] > 0 and boundary["control_gid"] > 0
+                and all(boundary[flag] is True for flag in ("client_namespace", "outside_parent_namespace",
+                    "all_capabilities_dropped", "no_new_privileges")), "checksum rejection escaped Client isolation")
+    peers, nodes = evidence["expected_peers"], evidence["layout"]["provider_nodes"]
+    require(rejected["selected_route"]["route_context_id"]
+            == evidence["cases"]["complete"]["selected_route"]["route_context_id"],
+            "checksum mismatch changed the protected route context")
+    validate_path(rejected, peers, nodes, missing=False, origin_only=True)
+    validate_control(rejected["control"], control_node, nodes, missing=False, require_contacts=False)
+    all_phases = (*evidence["cases"].values(), *evidence["source_strategy_cases"].values(),
+                  *evidence["origin_digest_cases"].values(), *evidence["limited_uplink"]["cases"].values(),
+                  *cases.values(), rejected)
+    require(len({phase["output"]["path"] for phase in all_phases}) == len(all_phases)
+            and len({phase["output"]["agent_cache"] for phase in all_phases}) == len(all_phases),
+            "checksum cases reused previous output or cache")
 
 
 def limited_comparison(cases):
@@ -815,8 +913,9 @@ def validate_evidence(evidence):
     # additional full GET belongs to that phase, not the following missing-chunk metadata.
     limited_end = 8 + int(limited_auto_from_origin(evidence))
     limited_records = raw_records[4:limited_end]
-    records = raw_records[:1] + raw_records[limited_end:]
-    require(origin["pid"] > 0 and 19 <= len(raw_records) <= 31
+    checksum_records = raw_records[limited_end:limited_end + 8]
+    records = raw_records[:1] + raw_records[limited_end + 8:]
+    require(origin["pid"] > 0 and 27 <= len(raw_records) <= 31
             and origin["request_limit"] == 31 and origin["stop_requested"] is True
             and origin["listener_closed"] is True and origin["inflight_drained"] is True
             and [r["kind"] for r in records[:8]] == ["metadata"] * 2 + ["body_range"] * 4 + ["metadata", "body"]
@@ -864,6 +963,7 @@ def validate_evidence(evidence):
     validate_strategies(evidence, records, control_node)
     validate_digest_cases(evidence, digest_records, control_node)
     validate_limited(evidence, limited_records, control_node)
+    validate_checksum_cases(evidence, checksum_records, control_node)
     require(evidence["user_cleanup"] == dict(user_outputs_removed=True,
             explicit_fixture_ca_removed=True, user_directory_removed=True),
             "temporary user outputs and explicit public CA were not cleaned up")
@@ -871,10 +971,11 @@ def validate_evidence(evidence):
 
 def build_evidence(work):
     cases = {}
-    for name in ("complete", "missing", "origin-only", "auto", *DIGEST_CASES, *LIMITED_CASES):
+    for name in ("complete", "missing", "origin-only", "auto", *DIGEST_CASES, *LIMITED_CASES,
+                 *CHECKSUM_CASES, CHECKSUM_BAD_CASE):
         prefix = f"content-provider-https-{name}"
         cases[name] = dict(
-            fetch=read(work / f"{prefix}-fetch.json"),
+            **({} if name == CHECKSUM_BAD_CASE else {"fetch":read(work / f"{prefix}-fetch.json")}),
             application=read(work / f"{prefix}-consumer.json"),
             status=read(work / f"{prefix}-status.json"),
             output=read(work / f"{prefix}-output.json"),
@@ -884,6 +985,8 @@ def build_evidence(work):
     strategies = {mode: cases.pop(mode) for mode in ("origin-only", "auto")}
     digests = {mode: cases.pop(mode) for mode in DIGEST_CASES}
     limited = {mode: cases.pop(mode) for mode in LIMITED_CASES}
+    checksums = {mode: cases.pop(mode) for mode in CHECKSUM_CASES}
+    mismatch = cases.pop(CHECKSUM_BAD_CASE)
     for mode, phase in limited.items():
         prefix = f"content-provider-https-{mode}"
         phase.update(source_events=source_events(work, prefix),
@@ -891,6 +994,7 @@ def build_evidence(work):
             qdisc_after=read_qdiscs(work / f"{prefix}-qdisc-after.json"))
     evidence = dict(success=True, cases=cases, source_strategy_cases=strategies,
         origin_digest_cases=digests,
+        origin_checksum_cases=checksums, checksum_mismatch=mismatch,
         limited_uplink=dict(cases=limited, comparison=limited_comparison(limited),
             profile=read(work / "content-provider-https-limited-profile.json"),
             **{"qdisc_" + position: read_qdiscs(work / f"content-provider-https-limited-qdisc-{position}.json")
