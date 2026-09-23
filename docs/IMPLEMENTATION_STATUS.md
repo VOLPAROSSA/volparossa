@@ -204,6 +204,24 @@ decision is `undetermined`, not evidence of reliable legal or ethical judgment.
 A fixture-only follow-up retains bounded original cycle/round status and failed deposit
 receipts before returning that same nonzero failure. It neither increases retries/deadlines
 nor claims to repair the as-yet unattributed custody failure.
+
+The [instrumented `2e2787f7` trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35920386749)
+still **fails overall**, but retains all 64 original deposit records: 179 of 192 provider
+observations are `CONTENT_BUSY (InvalidState)`. The other 13 have completed handoffs and
+independently verified provider signatures, all from R3; R4/R5 never receive a completed
+deposit. The round stops about 124 seconds into its original 600-second window, not because
+that deadline was exhausted. Four real model jobs, their original source/transcript bindings,
+164,090 privacy frames, cleanup and unchanged host state pass separately; no quorum or
+whole-cycle success is established. Receipts identify the busy admission, not its competing
+caller. Inspecting the foreground custody code identifies its immediate `retrieval.try_lock`
+refusal; the concurrently enrolled Client policy follower uses that same retrieval mutex.
+A focused fix lets foreground custody join the existing named-retrieval FIFO inside its
+original operation timeout, policy watch and requester-disconnect cancellation. The separate
+background lane, original leases, model work, round deadline and retry bound are unchanged.
+Two focused FIFO/cancellation tests, the two existing named-admission tests, the two background
+custody tests and strict agent all-target Clippy pass. The actual combined-cycle outcome after
+this fix remains pending.
+
 The combined fixture requires the original source, four worker receipts, exact bundle, three
 authority owners and one original cycle deadline; its inert checker passes 91 rejection cases.
 All 31 focused assessment/round/cycle CLI tests and strict CLI Clippy pass. Five transfer tests
