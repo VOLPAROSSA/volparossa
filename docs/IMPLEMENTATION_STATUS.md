@@ -40,13 +40,23 @@ signing and contributing the unchanged adapter format. Retry uses one retained m
 renewing its lease or claiming optimizer updates. A receiver still needs independent publisher
 trust and its own local adoption gate; publication itself does not activate a model. Focused Rust
 checks and 87 pure Python admission/dispatch checks cover the earlier aggregation candidate. No backend
-or model ran on the development host, and real numerical/three-publisher VM proof is pending.
+or model ran on the development host; the real three-publisher VM result is scoped below.
 This adds executable integration, not completed B05, general quality or poisoning resistance.
 The new `agent-adapter-aggregation` disposable scenario connects three real 8/9/10-step
 trainings to protected cold acquisition, aggregation, held-out approval, publication and
 exact-weight inference on another node. Original public objects are explicitly provisioned
-to one supplier without re-signing; this is not peer-upload evidence. The fixture and
-workflow wiring have inert checks, but this new real-model execution is still pending.
+to one supplier without re-signing; this is not peer-upload evidence. Its first
+[run on `4c821fc`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35866815840)
+**fails overall** during evidence assembly: the original 587,887-byte combined network
+record exceeds the reader's inherited 262,144-byte individual-report cap. The unchanged
+source-exact evidence checker passes against the retained original fields assembled only
+in memory: three distinct trained adapters, seven actual isolated workers, real aggregation,
+held-out approval, original signed publication, protected cold transfer and exact-weight
+receiver inference. Final owned objects are zero and host-state hashes match. Neither the
+original report nor its failure is rewritten. The composite reader/writer now uses an
+explicit 2 MiB cap, with the overall 24 MiB cap unchanged; inert boundary checks pass.
+A complete green rerun remains pending. General answer quality, automatic aggregation in
+the training loop, poisoning resistance and full B05 remain unproved.
 The new cached-import and aggregate/publication checks pass (eight CLI import checks, one
 cache hit/miss/revision-floor check and six aggregate/publication checks), as do command help,
 scoped formatting and strict production-CLI Clippy. Clippy including test targets still reports

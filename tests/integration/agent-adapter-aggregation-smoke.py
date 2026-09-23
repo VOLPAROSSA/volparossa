@@ -26,6 +26,10 @@ NODES = ("relay3", "relay4", "relay5")
 KIND = "volparossa-three-trained-publisher-adapter-aggregation"
 ALGORITHM = "coordinate-median-effective-lora-rank4-v1"
 MAX_PROOF = 24 * 1024 * 1024
+# One network record combines five separately bounded captures and route/layout
+# metadata. Match the existing content-replication evidence reader's 2 MiB cap,
+# not the inherited 256 KiB limit for an individual training report.
+MAX_NETWORK_REPORT = 2 * 1024 * 1024
 SCOPE = ("Three isolated nodes perform 8/9/10 actual optimizer updates on one signed public dataset. "
          "Their unchanged signed artifacts are explicitly owner-provisioned at R5. R4 cold-fetches all three, "
          "aggregates effective deltas, performs a real held-out pinned-base comparison and publishes only if approved. "
@@ -215,7 +219,14 @@ def network_path(work, label):
         route=read(work / f"{prefix}-live-selection.json"),
         captures={role: read(work / f"{prefix}-{role}.json") for role in REP["ROLES"]}, disconnected=True)
     R["check_network_path"](value, "uptake" if label == "uptake" else "reserve-fetch", read(work / "a01-expected-peers.json"))
+    require(len(json.dumps(value, indent=2, allow_nan=False)) + 1 <= MAX_NETWORK_REPORT,
+            "combined network report exceeds bound")
     write(record(work, f"network-{label}"), value)
+
+
+def read_network_report(work, label):
+    require(label in ("uptake", "receiver"), "unknown aggregation network report")
+    return read(record(work, f"network-{label}"), MAX_NETWORK_REPORT)
 
 
 def receiver_sources(work):
@@ -417,7 +428,7 @@ def evidence(work, revision):
         originals={node: read(record(work, f"{node}-original"), MAX_PROOF) for node in NODES},
         observations={path.name[len(PREFIX) + 1:-len("-observation.json")]: read(path)
                       for path in work.glob(f"{PREFIX}-*-observation.json")},
-        network={name: read(record(work, f"network-{name}")) for name in ("uptake", "receiver")},
+        network={name: read_network_report(work, name) for name in ("uptake", "receiver")},
         cleanup=read(work / "agent-jobs-private-cleanup.json"))
     check_evidence(value, revision)
     require(len(json.dumps(value, indent=2)) < MAX_PROOF - 65536, "evidence bound exceeded")
@@ -470,6 +481,25 @@ def self_test():
         except (AssertionError, ValueError, RuntimeError, SystemExit):
             return
         raise AssertionError("changed original evidence accepted")
+    with TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        # Actual failure size was 587887 B; also cover the exact composite cap.
+        # These inert JSON bytes are not packet observations or success evidence.
+        overhead = len(json.dumps(dict(inert=""), indent=2)) + 1
+        for size in (587887, MAX_NETWORK_REPORT):
+            case = root / str(size)
+            case.mkdir()
+            value = dict(inert="x" * (size - overhead))
+            write(record(case, "network-uptake"), value)
+            require(record(case, "network-uptake").stat().st_size == size > 262144,
+                    "composite read regression did not exceed old limit")
+            reject(lambda: read(record(case, "network-uptake")))
+            require(read_network_report(case, "uptake") == value, "bounded composite network report changed")
+        write(record(root, "network-receiver"), dict(inert="x" * (MAX_NETWORK_REPORT + 1 - overhead)))
+        require(record(root, "network-receiver").stat().st_size == MAX_NETWORK_REPORT + 1,
+                "oversized composite boundary not exercised")
+        reject(lambda: read_network_report(root, "receiver"))
+        require(2 * MAX_NETWORK_REPORT < MAX_PROOF == 24 * 1024 * 1024, "total evidence cap changed")
     original = dict(mode="aggregate_adapter", updates_completed=0, marker="original")
     supervised = dict(original, supervisor=dict(child_reaped=True))
     check_original_report(supervised, json.dumps(original).encode())

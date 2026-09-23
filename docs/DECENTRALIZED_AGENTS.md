@@ -646,7 +646,7 @@ volparossa --control-socket /OWNER/agent.sock compute aggregate-adapters \
 
 Without `--execute` this only previews the plan. Optional `--adapter-root` selects the current
 local baseline instead of the pinned base model. Compilation and inert admission/dispatch
-checks pass; numerical/backend and real three-publisher execution evidence is still pending.
+checks pass; the first real three-publisher result and its reporting failure are described below.
 Neither the median nor one validation set establishes poisoning resistance, general intelligence
 gain or completed B05. Automatic aggregation in the training loop remains to integrate.
 
@@ -669,8 +669,7 @@ are independent or honest. No model or policy is activated by publishing it.
 
 Other nodes can use the existing adapter fetch and trusted peer-update channel: the bundle
 format is unchanged. Automatic adoption still requires the receiver's own pinned validation
-comparison; serving requires its separately enabled serving configuration. The new publication
-path and its three-trained-publisher end-to-end proof are not yet live-verified.
+comparison; serving requires its separately enabled serving configuration.
 
 The disposable `agent-adapter-aggregation` scenario now exercises this chain: R3, R4
 and R5 perform distinct 8/9/10-step trainings and sign their own original bundles;
@@ -680,7 +679,14 @@ publishes only an approved result. Client cold-fetches the aggregate and its exa
 dataset and runs inference with those weights. Original worker reports, signatures,
 transfer receipts, packet observations and cleanup are retained. Supplier provisioning
 is not peer-upload evidence, and final inference is not another receiver-side adoption
-gate. Inert checks pass; genuine execution of this new scenario is still pending.
+gate. The first [real run on `4c821fc`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35866815840)
+reaches all these execution stages but **fails overall**: its 587,887-byte combined packet
+report hits a 262,144-byte reader limit. Source-exact checking of the unchanged original
+fields in memory passes the entire execution-evidence check, including seven observed workers,
+original signatures, transfers and cleanup. This does not turn the original failed report
+into a pass. A targeted 2 MiB composite-record bound is now implemented, retaining the 24 MiB
+overall evidence cap; a complete rerun is still needed. This bounded held-out result is not
+general answer-quality improvement, automatic aggregation or poisoning resistance.
 
 ### Using approved successors for new peer jobs
 
