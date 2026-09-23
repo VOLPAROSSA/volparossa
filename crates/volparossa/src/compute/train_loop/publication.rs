@@ -26,21 +26,26 @@ struct Binding<'a> {
 #[serde(rename_all = "snake_case")]
 pub(super) enum DrainOutcome {
     Complete,
+    Retired,
     Expired,
     Cancelled,
     Deadline,
 }
 
 fn settled(state: &State) -> Option<DrainOutcome> {
-    if state
-        .cycles
-        .iter()
-        .any(|cycle| matches!(cycle.phase, Phase::Trained | Phase::PublishPending))
-        || state.aggregate_updates.as_ref().is_some_and(|registry| {
-            !super::aggregate_updates::publication::pending_sequences(registry).is_empty()
-        })
-    {
+    if state.cycles.iter().any(|cycle| {
+        cycle.retirement.is_none() && matches!(cycle.phase, Phase::Trained | Phase::PublishPending)
+    }) || state.aggregate_updates.as_ref().is_some_and(|registry| {
+        !super::aggregate_updates::publication::pending_sequences(registry).is_empty()
+    }) {
         None
+    } else if state.cycles.iter().any(|cycle| cycle.retirement.is_some())
+        || state
+            .aggregate_updates
+            .as_ref()
+            .is_some_and(super::aggregate_updates::publication::has_retired)
+    {
+        Some(DrainOutcome::Retired)
     } else if state
         .cycles
         .iter()
@@ -211,7 +216,8 @@ async fn deliver(
 }
 
 fn retry_due(cycle: &Cycle, store: &Store, at: u64) -> Result<bool> {
-    if !matches!(cycle.phase, Phase::Trained | Phase::PublishPending) {
+    if cycle.retirement.is_some() || !matches!(cycle.phase, Phase::Trained | Phase::PublishPending)
+    {
         return Ok(false);
     }
     if cycle.next_publication_attempt <= at {
@@ -307,6 +313,7 @@ async fn prepare(
     name: &str,
     assigned_revision: Option<u64>,
 ) -> Result<Option<VerifiedManifest>> {
+    ensure!(cycle.retirement.is_none(), "train_loop_retired_publication");
     let snapshot = cycle
         .snapshot
         .as_ref()
@@ -594,6 +601,7 @@ mod tests {
             snapshot: None,
             training: None,
             publication: None,
+            retirement: None,
             next_publication_attempt: 0,
         });
         assert_eq!(settled(&state), Some(DrainOutcome::Expired));

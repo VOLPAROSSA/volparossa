@@ -58,7 +58,7 @@ pub(crate) struct Options {
     /// Let the pinned model choose bounded public subtasks and dependencies; keeps the exact final question.
     #[arg(long, requires = "public_question", conflicts_with_all = ["resume", "task_plan", "plan_tasks", "synthesize", "batch_barrier"])]
     plan_task_graph: bool,
-    /// Keep the complete original public source in each model-graph synthesis prompt (360M, at most 4096 bytes).
+    /// Keep the complete original public source in each rich model-graph synthesis prompt (at most 4096 bytes).
     #[arg(long, requires = "plan_task_graph", conflicts_with = "resume")]
     grounded_synthesis: bool,
     /// Require a model-selected dependent analysis, not just independent source questions.
@@ -152,8 +152,8 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         !args.grounded_synthesis
             || (args.plan_task_graph
                 && !args.resume
-                && args.model_profile == ModelProfile::Smol360),
-        "compute_graph_grounded_synthesis_requires_new_360m_model_graph"
+                && args.model_profile.supports_rich_inference()),
+        "compute_graph_grounded_synthesis_requires_new_rich_model_graph"
     );
     ensure!(
         args.plan_structure.is_none()

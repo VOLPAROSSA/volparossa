@@ -14,6 +14,8 @@ fn execution_failure_diagnostic_preserves_known_typed_and_supervisor_classes() {
         "compute_sandbox_spawn",
         "compute_control_ack_deadline",
         "compute_memory_budget",
+        "compute_model_memory_headroom",
+        "compute_result_model_precision",
         "compute_deadline",
     ] {
         assert_eq!(
@@ -45,6 +47,7 @@ fn execution_failure_diagnostic_redacts_unknown_text_and_unlisted_worker_codes()
 #[test]
 fn execution_failure_diagnostic_preserves_only_literal_principle_and_decoder_codes() {
     for code in [
+        "MODEL_PARAMETER_DTYPE_MISMATCH",
         "TASK_GRAPH_DECODER_UNAVAILABLE",
         "TASK_GRAPH_DECODER_VERSION_MISMATCH",
         "TASK_GRAPH_DECODER_NO_ALLOWED_TOKENS",
@@ -217,15 +220,30 @@ fn larger_profile_rejects_multiple_rows_before_creating_a_job() {
 }
 
 #[test]
+fn large_bf16_profile_does_not_advertise_availability_without_known_spare_memory() {
+    let root = tempfile::tempdir().unwrap();
+    let mut broker = broker(root.path());
+    assert!(broker.available());
+    broker.options.model_profile = ModelProfile::Smol360;
+    assert!(broker.available());
+    assert!(broker.budget.observation().memory_bytes.is_none());
+    broker.options.model_profile = ModelProfile::Smol1700;
+    assert!(!broker.available());
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
 fn larger_profile_rejects_135m_successor_directory_before_service_start() {
     let root = tempfile::tempdir().unwrap();
     let mut broker = broker(root.path());
-    broker.options.model_profile = ModelProfile::Smol360;
     broker.options.serving_directory = Some(root.path().join("selected"));
-    assert_eq!(
-        validate_roots(&broker.options).unwrap_err().to_string(),
-        "compute_profile_inference_only"
-    );
+    for profile in [ModelProfile::Smol360, ModelProfile::Smol1700] {
+        broker.options.model_profile = profile;
+        assert_eq!(
+            validate_roots(&broker.options).unwrap_err().to_string(),
+            "compute_profile_inference_only"
+        );
+    }
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
 }
 

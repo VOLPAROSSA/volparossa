@@ -11,6 +11,7 @@
     reason = "a future transparent ingress coordinator consumes this boundary"
 )]
 
+mod bootstrap;
 mod browser_failure;
 mod path_growth;
 mod path_telemetry;
@@ -21,6 +22,7 @@ pub(crate) use selection_bridge::{
     PreProbeContinuation, PreparedPreselectionEvidence, prepare_preselection_evidence,
 };
 
+use bootstrap::BootstrapOwner;
 use browser_failure::BrowserFailureStage;
 use path_growth::{GrowthDecision, WarmPathGrowth};
 use path_telemetry::PathTelemetry;
@@ -154,6 +156,7 @@ const SINGLE_UDP_CONNECT_RECOVERY_HORIZON: Duration = Duration::from_secs(35);
 #[derive(Clone)]
 pub(crate) struct ClientRouteControl {
     state: Arc<Mutex<ClientRouteControlState>>,
+    bootstrap: Arc<Mutex<BootstrapOwner>>,
     tcp_connect: Arc<Mutex<()>>,
     single_udp_connect: Arc<Mutex<()>>,
     dns_transaction: Arc<Mutex<()>>,
@@ -1139,6 +1142,7 @@ impl ClientRouteControl {
     pub(crate) fn new(mpquic_socket: PathBuf) -> Self {
         Self {
             state: Arc::new(Mutex::new(ClientRouteControlState::Idle)),
+            bootstrap: Arc::new(Mutex::new(BootstrapOwner::default())),
             tcp_connect: Arc::new(Mutex::new(())),
             single_udp_connect: Arc::new(Mutex::new(())),
             dns_transaction: Arc::new(Mutex::new(())),
@@ -1153,6 +1157,7 @@ impl ClientRouteControl {
     ) -> Self {
         Self {
             state: Arc::new(Mutex::new(ClientRouteControlState::Idle)),
+            bootstrap: Arc::new(Mutex::new(BootstrapOwner::default())),
             tcp_connect: Arc::new(Mutex::new(())),
             single_udp_connect: Arc::new(Mutex::new(())),
             dns_transaction: Arc::new(Mutex::new(())),
@@ -1168,23 +1173,24 @@ impl ClientRouteControl {
     }
 
     /// Retire an established route as soon as either projection of its signed hard deadline has
-    /// elapsed. Cleanup runs outside the state lock behind `Connecting`; callers therefore never
-    /// observe either an expired reusable owner or Idle until its shutdown has completed.
+    /// elapsed. The retained retirement task survives cancellation of a content/ingress caller;
+    /// no caller observes Idle until exact cleanup has been confirmed.
     async fn retire_expired_route(&self, wall_now_ms: u64, monotonic_now: Instant) {
-        let expired = {
-            let mut state = self.state.lock().await;
-            let should_retire = matches!(
-                &*state,
-                ClientRouteControlState::Established(established)
-                    if established.is_expired(wall_now_ms, monotonic_now)
-            );
-            should_retire
-                .then(|| std::mem::replace(&mut *state, ClientRouteControlState::Connecting))
-        };
-        if let Some(ClientRouteControlState::Established(established)) = expired {
-            Box::pin(established.shutdown(self.agent_state.as_ref())).await;
-            let mut state = self.state.lock().await;
-            if matches!(*state, ClientRouteControlState::Connecting) {
+        let mut state = self.state.lock().await;
+        if matches!(
+            &*state,
+            ClientRouteControlState::Established(established)
+                if established.is_expired(wall_now_ms, monotonic_now)
+        ) {
+            let ClientRouteControlState::Established(established) =
+                std::mem::replace(&mut *state, ClientRouteControlState::Connecting)
+            else {
+                unreachable!("validated expired owner")
+            };
+            *state = self.start_retirement(established);
+        }
+        if let ClientRouteControlState::CleanupPending(retirement) = &mut *state {
+            if retirement.confirm(MAXIMUM_CALL_DURATION).await.is_ok() {
                 *state = ClientRouteControlState::Idle;
             }
         }
@@ -1402,6 +1408,19 @@ impl ClientRouteControl {
         native_single_udp: bool,
     ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
         let (requested_transport, _) = client_native_path_requirement(config)?;
+        let mut bootstrap = self.bootstrap.lock().await;
+        if bootstrap.is_closed() {
+            return Err(ClientRouteConnectError::Busy);
+        }
+        // A cancelled earlier requester may have left a live task. Drain that same task before
+        // rechecking the requested transport; never start a duplicate or reuse a mismatched one.
+        if let Some(result) = bootstrap
+            .join()
+            .await
+            .map_err(|()| ClientRouteConnectError::Busy)?
+        {
+            result?;
+        }
         let previous = {
             let mut state = self.state.lock().await;
             match std::mem::replace(&mut *state, ClientRouteControlState::Connecting) {
@@ -1424,6 +1443,37 @@ impl ClientRouteControl {
                 }
             }
         };
+        let owner = self.clone();
+        let config = config.clone();
+        let discovery = discovery.clone();
+        let helper = helper.clone();
+        // No await between publishing Connecting and retaining the task. All affine setup and
+        // cleanup tails now live in the controller, independent of the requesting local socket.
+        bootstrap.start(async move {
+            Box::pin(owner.finish_bootstrap(
+                previous,
+                &config,
+                &discovery,
+                &helper,
+                native_single_udp,
+            ))
+            .await
+        });
+        bootstrap
+            .join()
+            .await
+            .map_err(|()| ClientRouteConnectError::Busy)?
+            .ok_or(ClientRouteConnectError::Busy)?
+    }
+
+    async fn finish_bootstrap(
+        &self,
+        previous: Option<Box<EstablishedClientRoute>>,
+        config: &Config,
+        discovery: &DiscoveryControlHandle,
+        helper: &HelperClient,
+        native_single_udp: bool,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
         if let Some(previous) = previous {
             Box::pin(previous.shutdown(self.agent_state.as_ref())).await;
         }
@@ -2574,6 +2624,29 @@ impl ClientRouteControl {
         self.disconnect_with_wait(MAXIMUM_CALL_DURATION).await
     }
 
+    /// Daemon shutdown stops admission and drains any RPC-independent bootstrap while discovery
+    /// is still available, then retires its exact result. Ordinary Disconnect is not permanent.
+    pub(crate) async fn shutdown_confirmed(&self) -> Result<(), ClientRouteDisconnectError> {
+        let mut bootstrap = self.bootstrap.lock().await;
+        let drained = bootstrap
+            .close_and_drain()
+            .await
+            .map_err(|()| ClientRouteDisconnectError::CleanupPending);
+        let retired = self.disconnect_confirmed().await;
+        drained.and(retired)
+    }
+
+    fn start_retirement(
+        &self,
+        established: Box<EstablishedClientRoute>,
+    ) -> ClientRouteControlState {
+        let agent_state = self.agent_state.clone();
+        let task = tokio::spawn(async move {
+            Box::pin(established.shutdown_confirmed(agent_state.as_ref())).await
+        });
+        ClientRouteControlState::CleanupPending(ClientRouteRetirement::new(task))
+    }
+
     async fn disconnect_with_wait(&self, wait: Duration) -> Result<(), ClientRouteDisconnectError> {
         let mut state = self.state.lock().await;
         match &*state {
@@ -2588,11 +2661,7 @@ impl ClientRouteControl {
                 else {
                     unreachable!("validated established owner")
                 };
-                let agent_state = self.agent_state.clone();
-                let task = tokio::spawn(async move {
-                    Box::pin(established.shutdown_confirmed(agent_state.as_ref())).await
-                });
-                *state = ClientRouteControlState::CleanupPending(ClientRouteRetirement::new(task));
+                *state = self.start_retirement(established);
             }
         }
         let ClientRouteControlState::CleanupPending(retirement) = &mut *state else {
@@ -10825,6 +10894,78 @@ mod tests {
             .shutdown()
             .await
             .expect("rollback owns remote teardown");
+    }
+
+    #[tokio::test]
+    async fn client_shutdown_drains_cancelled_request_bootstrap_and_exact_retirement() {
+        let (route, manager, shared) = established_fake_route().await;
+        let control = ClientRouteControl::default();
+        *control.state.lock().await = ClientRouteControlState::Connecting;
+        let (complete, completion) = oneshot::channel();
+        let state = Arc::clone(&control.state);
+        control.bootstrap.lock().await.start(async move {
+            completion.await.expect("original bootstrap retained");
+            let task = tokio::spawn(async move {
+                let _ = route.teardown().await;
+                manager
+                    .shutdown()
+                    .await
+                    .map_err(|_| ClientRouteDisconnectError::CleanupPending)
+            });
+            *state.lock().await =
+                ClientRouteControlState::CleanupPending(ClientRouteRetirement::new(task));
+            Err(ClientRouteConnectError::NativeProofUnavailable)
+        });
+        let mut shutdown = Box::pin(control.shutdown_confirmed());
+        tokio::select! {
+            result = &mut shutdown => panic!("bootstrap still incomplete: {result:?}"),
+            () = tokio::task::yield_now() => {}
+        }
+        assert!(matches!(
+            *control.state.lock().await,
+            ClientRouteControlState::Connecting
+        ));
+        complete.send(()).expect("original bootstrap still runs");
+        timeout(TEST_TIMEOUT, shutdown)
+            .await
+            .expect("bounded drain")
+            .expect("exact retirement");
+        assert!(shared.events().iter().any(|event| event == "local.destroy"));
+        assert!(matches!(
+            *control.state.lock().await,
+            ClientRouteControlState::Idle
+        ));
+        assert!(control.bootstrap.lock().await.is_closed());
+        assert_eq!(control.shutdown_confirmed().await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn expired_route_check_finishes_retained_cleanup_after_caller_cancellation() {
+        let control = ClientRouteControl::default();
+        let (complete, completion) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            completion
+                .await
+                .map_err(|_| ClientRouteDisconnectError::CleanupPending)
+        });
+        *control.state.lock().await =
+            ClientRouteControlState::CleanupPending(ClientRouteRetirement::new(task));
+        let mut first = Box::pin(control.retire_expired());
+        tokio::select! {
+            () = &mut first => panic!("unconfirmed retirement returned early"),
+            () = tokio::task::yield_now() => {}
+        }
+        drop(first);
+        complete
+            .send(())
+            .expect("exact owner survived waiter cancellation");
+        timeout(TEST_TIMEOUT, control.retire_expired())
+            .await
+            .expect("retirement observed");
+        assert!(matches!(
+            *control.state.lock().await,
+            ClientRouteControlState::Idle
+        ));
     }
 
     #[tokio::test]

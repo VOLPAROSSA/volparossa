@@ -53,6 +53,9 @@ pub(crate) struct Options {
     /// Exactly two independently selected distinct public compute providers.
     #[arg(long, required_unless_present = "resume", conflicts_with = "resume", value_parser = parse_key)]
     provider_key: Vec<VerifyingKey>,
+    /// Exact inference profile for both assessors; resume uses the original enrollment.
+    #[arg(long, conflicts_with = "resume")]
+    model_profile: Option<ModelProfile>,
     /// Explicit authorization to republish the complete selected public subject in these tasks.
     #[arg(long, required_unless_present = "resume", conflicts_with = "resume",
         value_parser = ["GPL-3.0-only", "CC0-1.0", "CC-BY-4.0", "CC-BY-SA-4.0"])]
@@ -76,6 +79,8 @@ struct Enrollment {
     publisher_key: String,
     providers: [String; 2],
     model_fingerprints: [String; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_profile: Option<ModelProfile>,
     license: String,
     selected_at: u64,
     expires: u64,
@@ -85,6 +90,14 @@ struct Enrollment {
 }
 
 impl Enrollment {
+    fn profile(&self) -> Result<ModelProfile> {
+        match (self.version, self.model_profile) {
+            (1 | 2, None) => Ok(ModelProfile::Smol360),
+            (3, Some(profile)) if profile.supports_rich_inference() => Ok(profile),
+            _ => anyhow::bail!("compute_policy_enrollment_model"),
+        }
+    }
+
     fn question(&self, review: bool) -> &'static str {
         match (self.version, review) {
             (1, false) => assessment::assessment_question(true),
@@ -106,7 +119,7 @@ impl Enrollment {
         use volparossa_content::provider::compute::dataset::PrincipleOutputContract::{
             PrincipleAssessmentV1, PrincipleReviewV1,
         };
-        ensure!(matches!(self.version, 1 | 2), "compute_policy_enrollment");
+        self.profile()?;
         let contract = if question == self.question(false) {
             PrincipleAssessmentV1
         } else if question == self.question(true) {
@@ -114,7 +127,7 @@ impl Enrollment {
         } else {
             anyhow::bail!("compute_policy_fixed_question")
         };
-        Ok((self.version == 2).then_some(contract))
+        Ok((self.version >= 2).then_some(contract))
     }
 }
 
@@ -131,6 +144,16 @@ fn parse_manifest(value: &str) -> Result<[u8; 32], String> {
 
 fn preview(args: &Options) -> Result<Value> {
     ensure!(args.output.is_absolute(), "compute_policy_output_absolute");
+    ensure!(
+        if args.resume {
+            args.model_profile.is_none()
+        } else {
+            args.model_profile
+                .unwrap_or(ModelProfile::Smol360)
+                .supports_rich_inference()
+        },
+        "compute_policy_explicit_model_profile"
+    );
     if !args.resume {
         ensure!(
             args.provider_key.len() == 2 && args.provider_key[0] != args.provider_key[1],
@@ -154,7 +177,7 @@ fn preview(args: &Options) -> Result<Value> {
         "portable_receipts":args.portable_receipts,
         "dataset_version":if args.resume {None} else {Some(4)},
         "structured_output":if args.resume {None} else {Some(true)},
-        "model_profile":"smollm2-360m-v1","resume":args.resume,
+        "model_profile":if args.resume {None} else {Some(args.model_profile.unwrap_or(ModelProfile::Smol360))},"resume":args.resume,
         "subject_limit_bytes":512,"prompt_limit_tokens":1024,
         "raw_json_limit_bytes":2048,"wire_text_limit_bytes":4096,
         "generation_limit_tokens":if args.resume { None } else { Some(512) },
@@ -210,19 +233,24 @@ async fn enroll(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool>
         &download.text,
     )?;
     let mut fingerprints = Vec::new();
+    let profile = args.model_profile.unwrap_or(ModelProfile::Smol360);
     for key in &args.provider_key {
         ensure!(!*cancelled.borrow(), "compute_policy_cancelled");
         let caps = super::capabilities(socket, key).await?;
         ensure!(
-            crate::compute::broker::profile_for_model(&caps.model)? == ModelProfile::Smol360
+            crate::compute::broker::profile_for_model(&caps.model)? == profile
                 && caps.principle_inference_v4,
-            "compute_policy_requires_360_principle_peer"
+            "compute_policy_requires_selected_principle_peer"
         );
         fingerprints.push(caps.model_fingerprint);
     }
     let download_bytes = serde_json::to_vec(&download.receipt)?;
     let enrollment = Enrollment {
-        version: 2,
+        version: if profile == ModelProfile::Smol360 {
+            2
+        } else {
+            3
+        },
         scope,
         source_name: selection.name,
         source_download_sha256: sha(&download_bytes),
@@ -238,6 +266,7 @@ async fn enroll(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool>
         model_fingerprints: fingerprints
             .try_into()
             .map_err(|_| anyhow::anyhow!("compute_policy_peers"))?,
+        model_profile: (profile != ModelProfile::Smol360).then_some(profile),
         license: args.license.clone().context("compute_policy_license")?,
         selected_at: download.verified_at,
         expires: download.expires,

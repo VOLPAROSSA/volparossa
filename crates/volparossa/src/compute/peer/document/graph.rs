@@ -94,7 +94,7 @@ fn load(root: &Path) -> Result<Loaded> {
     let (authority, input, _) = storage::load(&anchor_root)?;
     ensure!(
         !enrollment.grounded_synthesis
-            || (input.model_profile == crate::compute::ModelProfile::Smol360
+            || (input.model_profile.supports_rich_inference()
                 && input.document.len() <= 4096
                 && !input.document.trim().is_empty()),
         "compute_graph_grounded_original_source_bound"

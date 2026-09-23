@@ -14,6 +14,9 @@ pub enum ModelProfile {
     /// Explicit, inference-only 360M profile. Existing 135M adapters are incompatible.
     #[serde(rename = "smollm2-360m-v1")]
     Smol360,
+    /// Explicit, inference-only 1.7B profile with CPU BF16 parameters; no 135M adapters.
+    #[serde(rename = "smollm2-1.7b-v1")]
+    Smol1700,
 }
 
 /// Immutable identity and bounds, not values supplied by a remote model provider.
@@ -43,6 +46,11 @@ impl ModelProfile {
         matches!(self, Self::Default135)
     }
 
+    /// Whether this explicit profile supports the bounded structured inference contracts.
+    pub const fn supports_rich_inference(self) -> bool {
+        matches!(self, Self::Smol360 | Self::Smol1700)
+    }
+
     /// Return the fixed identity and execution bounds of this explicit profile.
     pub const fn spec(self) -> ModelSpec {
         match self {
@@ -66,12 +74,22 @@ impl ModelProfile {
                 max_output_bytes: 4096,
                 max_rows: 1,
             },
+            Self::Smol1700 => ModelSpec {
+                model_id: "HuggingFaceTB/SmolLM2-1.7B-Instruct",
+                revision: "31b70e2e869a7173562077fd711b654946d38674",
+                weights_bytes: 3_422_777_952,
+                weights_sha256: "f55217be716b6a997b97b9d8d7eb6fad02e00858f5010ec24f64603c3a98a0e8",
+                prompt_tokens: 1024,
+                max_new_tokens: 256,
+                max_output_bytes: 4096,
+                max_rows: 1,
+            },
         }
     }
 
     /// Recognize only a complete exact supported base identity, never a similar model name.
     pub fn from_identity(id: &str, revision: &str, bytes: u64, sha: &str) -> Option<Self> {
-        [Self::Default135, Self::Smol360]
+        [Self::Default135, Self::Smol360, Self::Smol1700]
             .into_iter()
             .find(|profile| {
                 let spec = profile.spec();
@@ -88,6 +106,7 @@ impl fmt::Display for ModelProfile {
         formatter.write_str(match self {
             Self::Default135 => "smollm2-135m-v1",
             Self::Smol360 => "smollm2-360m-v1",
+            Self::Smol1700 => "smollm2-1.7b-v1",
         })
     }
 }
@@ -99,6 +118,7 @@ impl FromStr for ModelProfile {
         match value {
             "smollm2-135m-v1" => Ok(Self::Default135),
             "smollm2-360m-v1" => Ok(Self::Smol360),
+            "smollm2-1.7b-v1" => Ok(Self::Smol1700),
             _ => Err("unsupported model profile"),
         }
     }
@@ -111,7 +131,11 @@ mod tests {
     #[test]
     fn profile_names_and_historical_default_are_exact() {
         assert!(ModelProfile::default().is_default());
-        for profile in [ModelProfile::Default135, ModelProfile::Smol360] {
+        for profile in [
+            ModelProfile::Default135,
+            ModelProfile::Smol360,
+            ModelProfile::Smol1700,
+        ] {
             let name = profile.to_string();
             assert_eq!(name.parse::<ModelProfile>().unwrap(), profile);
             assert_eq!(
@@ -123,7 +147,14 @@ mod tests {
                 profile
             );
         }
-        for invalid in ["", "smollm2-360m", "SMOLLM2-360M-V1", "smollm2-360m-v2"] {
+        for invalid in [
+            "",
+            "smollm2-360m",
+            "SMOLLM2-360M-V1",
+            "smollm2-360m-v2",
+            "smollm2-1700m-v1",
+            "smollm2-1.7b-v2",
+        ] {
             assert!(invalid.parse::<ModelProfile>().is_err());
             assert!(serde_json::from_str::<ModelProfile>(&format!("\"{invalid}\"")).is_err());
         }
@@ -135,7 +166,11 @@ mod tests {
 
     #[test]
     fn recognition_requires_all_identity_components_and_preserves_distinct_bounds() {
-        for profile in [ModelProfile::Default135, ModelProfile::Smol360] {
+        for profile in [
+            ModelProfile::Default135,
+            ModelProfile::Smol360,
+            ModelProfile::Smol1700,
+        ] {
             let spec = profile.spec();
             assert_eq!(
                 ModelProfile::from_identity(
@@ -195,5 +230,21 @@ mod tests {
             ),
             (1024, 256, 4096, 1)
         );
+        let larger = ModelProfile::Smol1700.spec();
+        assert_eq!(
+            (
+                larger.prompt_tokens,
+                larger.max_new_tokens,
+                larger.max_output_bytes,
+                larger.max_rows
+            ),
+            (1024, 256, 4096, 1)
+        );
+        assert!(!ModelProfile::Default135.supports_rich_inference());
+        assert!(ModelProfile::Smol360.supports_rich_inference());
+        assert!(ModelProfile::Smol1700.supports_rich_inference());
+        assert!(!ModelProfile::Smol1700.is_default());
+        assert_ne!(new.model_id, larger.model_id);
+        assert_ne!(new.weights_sha256, larger.weights_sha256);
     }
 }

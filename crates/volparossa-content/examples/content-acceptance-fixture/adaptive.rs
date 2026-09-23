@@ -1,28 +1,39 @@
 //! Additive three-provider fixture. Existing two-provider and replication vectors stay fixed.
 
 use super::{
-    CHUNK_BYTES, ChunkId, ChunkStore, DirBuilderExt, Metadata, Path, Publication, Result,
-    SigningKey, Validity, fs, json, limits, publish, reassemble, unix_seconds, write_new,
+    CHUNK_BYTES, CacheLimits, ChunkId, ChunkStore, DirBuilderExt, Metadata, Path, Publication,
+    Result, SigningKey, Validity, fs, json, limits, publish, reassemble, unix_seconds, write_new,
     write_report,
 };
 
-const CHUNKS: usize = 15;
-const SHA256: &str = "26fc4696f0ebcd7e36a3c0a0369e2d843742b3915a222ad57b49cd53020a9011";
+const CHUNKS: usize = 60;
+const SHARD_CHUNKS: usize = CHUNKS / 3;
+const SHA256: &str = "8fd67e1fc14d95b27d5d9be573c6609baf59054a129a669a15a6cd4562b41ecb";
+
+// Give the cold, adaptively admitted third stream a real bulk workload. This changes
+// only this fixture, not worker admission, pacing or the ordinary two-provider vector.
+fn adaptive_limits() -> CacheLimits {
+    CacheLimits {
+        max_bytes: 64 * CHUNK_BYTES as u64,
+        max_entries: 64,
+        ..limits()
+    }
+}
 
 pub(super) fn seed(root: &Path, paths: [&Path; 3]) -> Result<()> {
     fs::DirBuilder::new().mode(0o700).create(root)?;
     let origin = tempfile::tempdir_in(root)?;
     let origin_path = origin.path().to_path_buf();
-    let mut source = ChunkStore::create(&origin.path().join("source"), limits())?;
+    let mut source = ChunkStore::create(&origin.path().join("source"), adaptive_limits())?;
     let mut caches = [
-        ChunkStore::create(paths[0], limits())?,
-        ChunkStore::create(paths[1], limits())?,
-        ChunkStore::create(paths[2], limits())?,
+        ChunkStore::create(paths[0], adaptive_limits())?,
+        ChunkStore::create(paths[1], adaptive_limits())?,
+        ChunkStore::create(paths[2], adaptive_limits())?,
     ];
     let publisher = SigningKey::generate(&mut rand_core::OsRng);
     let trusted = publisher.verifying_key();
     let now = unix_seconds()?;
-    let bytes: Vec<_> = (b'A'..=b'O')
+    let bytes: Vec<_> = (b'A'..b'A' + 60)
         .flat_map(|byte| vec![byte; CHUNK_BYTES])
         .collect();
     let signed = publish(
@@ -55,9 +66,9 @@ pub(super) fn seed(root: &Path, paths: [&Path; 3]) -> Result<()> {
     if restored != bytes
         || ChunkId::digest(&restored).to_string() != SHA256
         || manifest.chunks().len() != CHUNKS
-        || usage
-            .iter()
-            .any(|item| item.entries != 5 || item.bytes != 5 * CHUNK_BYTES as u64)
+        || usage.iter().any(|item| {
+            item.entries != SHARD_CHUNKS || item.bytes != (SHARD_CHUNKS * CHUNK_BYTES) as u64
+        })
     {
         return Err("adaptive three-cache seed mismatch".into());
     }
@@ -107,8 +118,12 @@ mod tests {
         seed(&root, paths.each_ref().map(|path| path.as_path()))?;
         let report: Value =
             serde_json::from_slice(&read_bounded(&root.join("publication.json"), 4096)?)?;
-        assert_eq!(report["bytes"], 3_932_160);
-        assert_eq!(report["chunks"], 15);
+        assert_eq!(limits().max_entries, 16);
+        assert_eq!(limits().max_bytes, 16 * CHUNK_BYTES as u64);
+        assert_eq!(adaptive_limits().max_entries, 64);
+        assert_eq!(adaptive_limits().max_bytes, 64 * CHUNK_BYTES as u64);
+        assert_eq!(report["bytes"], 15_728_640);
+        assert_eq!(report["chunks"], CHUNKS);
         assert_eq!(report["object_sha256"], SHA256);
         assert_eq!(report["publisher_removed"], true);
         assert_eq!(report["publisher_private_key_persisted"], false);
@@ -129,9 +144,9 @@ mod tests {
         assert_eq!(report["created_unix_seconds"], verified.validity().created);
         assert_eq!(report["expires_unix_seconds"], verified.validity().expires);
         let mut caches = [
-            ChunkStore::open(&paths[0], limits())?,
-            ChunkStore::open(&paths[1], limits())?,
-            ChunkStore::open(&paths[2], limits())?,
+            ChunkStore::open(&paths[0], adaptive_limits())?,
+            ChunkStore::open(&paths[1], adaptive_limits())?,
+            ChunkStore::open(&paths[2], adaptive_limits())?,
         ];
         let mut unique = BTreeSet::new();
         for (index, chunk) in verified.chunks().iter().enumerate() {
@@ -142,10 +157,10 @@ mod tests {
             }
         }
         for (label, cache) in ["a", "b", "c"].into_iter().zip(&caches) {
-            assert_eq!(cache.usage().entries, 5);
-            assert_eq!(cache.usage().bytes, 1_310_720);
-            assert_eq!(report[format!("replica_{label}_chunks")], 5);
-            assert_eq!(report[format!("replica_{label}_bytes")], 1_310_720);
+            assert_eq!(cache.usage().entries, SHARD_CHUNKS);
+            assert_eq!(cache.usage().bytes, 5_242_880);
+            assert_eq!(report[format!("replica_{label}_chunks")], SHARD_CHUNKS);
+            assert_eq!(report[format!("replica_{label}_bytes")], 5_242_880);
         }
         let mut bytes = Vec::new();
         reassemble(
@@ -154,7 +169,7 @@ mod tests {
             unix_seconds()?,
             &mut bytes,
         )?;
-        assert_eq!(bytes.len(), 3_932_160);
+        assert_eq!(bytes.len(), 15_728_640);
         assert_eq!(ChunkId::digest(&bytes).to_string(), SHA256);
         assert!(seed(&root, paths.each_ref().map(|path| path.as_path())).is_err());
         Ok(())

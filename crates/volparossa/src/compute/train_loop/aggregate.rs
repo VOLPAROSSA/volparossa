@@ -575,6 +575,58 @@ pub(super) struct Approved {
     reason = "Recheck the complete frozen cohort before granting publication"
 )]
 pub(super) fn reopen_approved(root: &Path, limits: &Limits, at: u64) -> Result<Approved> {
+    reopen_original(root, limits, at, true)
+}
+
+/// Historical approval only: the caller has separately proved that the original
+/// snapshot differs solely in its local candidate extraction. This cannot grant
+/// serving/publication authority for the damaged files. Original bundle, job
+/// output, signed inputs and comparison evidence are still verified normally.
+pub(super) fn reopen_retired_original(root: &Path, limits: &Limits, at: u64) -> Result<Approved> {
+    reopen_original(root, limits, at, false)
+}
+
+fn original_candidate(
+    root: &Path,
+    check_extraction: bool,
+) -> Result<(Vec<u8>, super::storage::Snapshot)> {
+    let bundle = read_file(&root.join("adapter.bundle"), 4 * 1024 * 1024)?;
+    let decoded = AdapterBundle::decode(bundle.clone())?;
+    let files = [
+        ("README.md", decoded.readme()),
+        ("adapter_config.json", decoded.config()),
+        ("adapter_model.safetensors", decoded.weights()),
+    ]
+    .into_iter()
+    .map(|(name, bytes)| {
+        (
+            name.into(),
+            super::storage::FileSnapshot {
+                bytes: bytes.len() as u64,
+                sha256: digest(bytes),
+            },
+        )
+    })
+    .collect();
+    if check_extraction {
+        ensure!(
+            peer_evaluation::adapter_files(&root.join("candidate/import/adapter"))? == files,
+            "aggregate_original_candidate_extraction"
+        );
+    }
+    Ok((bundle, files))
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "Recheck the complete original cohort and approval with an explicit extraction boundary"
+)]
+fn reopen_original(
+    root: &Path,
+    limits: &Limits,
+    at: u64,
+    check_extraction: bool,
+) -> Result<Approved> {
     private_directory(root)?;
     let read = |name: &str| -> Result<Value> {
         Ok(serde_json::from_slice(&read_file(
@@ -722,7 +774,8 @@ pub(super) fn reopen_approved(root: &Path, limits: &Limits, at: u64) -> Result<A
         "aggregate_original_worker_report_changed"
     );
     let candidate = root.join("candidate");
-    let files = peer_evaluation::adapter_files(&candidate.join("import/adapter"))?;
+    let (bundle, files) = original_candidate(root, check_extraction)?;
+    let decoded = AdapterBundle::decode(bundle.clone())?;
     let comparison = peer_evaluation::verify(&candidate)?;
     let compared_selection = read("candidate/comparison/selection.json")?;
     ensure!(
@@ -754,22 +807,8 @@ pub(super) fn reopen_approved(root: &Path, limits: &Limits, at: u64) -> Result<A
             && result["candidate_files"] == serde_json::to_value(&files)?,
         "aggregate_original_result"
     );
-    let bundle = read_file(&root.join("adapter.bundle"), 4 * 1024 * 1024)?;
-    let decoded = AdapterBundle::decode(bundle.clone())?;
     ensure!(
         decoded.dataset_manifest_id() == source.manifest_id
-            && decoded.readme()
-                == read_file(&candidate.join("import/adapter/README.md"), 16 * 1024)?
-            && decoded.config()
-                == read_file(
-                    &candidate.join("import/adapter/adapter_config.json"),
-                    16 * 1024
-                )?
-            && decoded.weights()
-                == read_file(
-                    &candidate.join("import/adapter/adapter_model.safetensors"),
-                    2 * 1024 * 1024
-                )?
             && result["bundle"]
                 == json!({"content_type":ADAPTER_CONTENT_TYPE,"bytes":bundle.len(),
             "sha256":digest(&bundle),"dataset_manifest_id":hex::encode(source.manifest_id),"expires_not_after":expires}),
@@ -1102,6 +1141,47 @@ mod tests {
         let mut selected = serde_json::to_value(plan()).unwrap();
         selected["adapters"].as_array_mut().unwrap().pop();
         assert!(serde_json::from_value::<Plan>(selected).is_err());
+    }
+
+    #[test]
+    fn historical_bundle_identity_never_makes_damaged_extraction_servable() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["candidate", "candidate/import", "candidate/import/adapter"] {
+            directory(&root.path().join(name)).unwrap();
+        }
+        // Inert bundle, not tensor execution or a complete signed cohort approval.
+        let contents = AdapterFiles {
+            readme: b"original readme".to_vec(),
+            config: b"original config".to_vec(),
+            weights: b"original inert weights".to_vec(),
+        };
+        let bundle = AdapterBundle::encode([7; 32], contents).unwrap();
+        write_new(&root.path().join("adapter.bundle"), &bundle).unwrap();
+        let decoded = AdapterBundle::decode(bundle.clone()).unwrap();
+        for (name, bytes) in [
+            ("README.md", decoded.readme()),
+            ("adapter_config.json", decoded.config()),
+            ("adapter_model.safetensors", decoded.weights()),
+        ] {
+            write_new(
+                &root.path().join("candidate/import/adapter").join(name),
+                bytes,
+            )
+            .unwrap();
+        }
+        let original = original_candidate(root.path(), true).unwrap();
+        assert_eq!(original.0, bundle);
+        assert_eq!(original_candidate(root.path(), false).unwrap(), original);
+        let damaged = root
+            .path()
+            .join("candidate/import/adapter/adapter_model.safetensors");
+        fs::write(&damaged, b"locally damaged copy").unwrap();
+        assert!(original_candidate(root.path(), true).is_err());
+        assert_eq!(original_candidate(root.path(), false).unwrap(), original);
+        assert_eq!(fs::read(damaged).unwrap(), b"locally damaged copy");
+        // Historical mode still decodes the actual original bundle, never a saved hash alone.
+        fs::write(root.path().join("adapter.bundle"), b"damaged bundle").unwrap();
+        assert!(original_candidate(root.path(), false).is_err());
     }
 
     #[test]

@@ -251,12 +251,24 @@ An opt-in source-grounded follow-up now keeps the complete original short docume
 generated answers in dependent tasks. Its real execution and offline resume pass, but its
 answers still contain privacy errors; retaining evidence is not the same as reasoning correctly.
 
+An optional `smollm2-1.7b-v1` candidate now connects a larger model to these same task and
+principle-assessment interfaces. It uses explicit CPU BF16 inference, its own memory budget,
+and requires sufficient observed spare memory before accepting work. It neither replaces the
+135M training model nor upgrades existing tasks on resume. Its latest
+[single-worker VM trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35883858055)
+passes execution, memory-limit and cleanup checks. The answer selects the correct route and
+identifies missing performance measurements, but then contradicts the required privacy boundary.
+Reliable reasoning remains unfinished: more parameters and successful execution alone are not
+evidence of better answers.
+
 An owner-enrolled automatic training-loop candidate can combine three trusted publishers'
 adapters, compare the result with its active model and use an approved combination for serving
 and further local training. With the owner's existing publishing configuration, approved
 combinations and local successors can now return to the shared cache through one ordered,
-signed publication channel. Automatic combination, further training, approved serving and
-restart have passed a real VM proof; the extended return-sharing proof is still pending.
+signed publication channel. Automatic combination, further training, approved serving,
+restart and cold retrieval/use of the returned model have passed a real VM proof. The receiving
+model still gives a wrong answer about relay count: successful learning and distribution
+mechanics are not yet evidence of reliable reasoning.
 [How cooperating tasks fit together →](docs/DECENTRALIZED_AGENTS.md#cooperating-public-tasks)
 
 Public work can be split across selected peers, with retained results and bounded recovery

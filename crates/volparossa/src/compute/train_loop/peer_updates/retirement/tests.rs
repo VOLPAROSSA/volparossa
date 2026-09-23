@@ -385,6 +385,7 @@ impl Fixture {
             snapshot: None,
             training: Some(self.store.snapshot_training(1).unwrap()),
             publication: None,
+            retirement: None,
             next_publication_attempt: 0,
         });
         self.state.next_sequence = 2;

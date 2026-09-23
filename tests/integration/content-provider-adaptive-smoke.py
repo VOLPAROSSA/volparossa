@@ -12,10 +12,12 @@ import sys
 BASE = runpy.run_path(str(Path(__file__).with_name("content-provider-https-smoke.py")))
 read, require, ROLES = BASE["read"], BASE["require"], BASE["ROLES"]
 NODES = ("relay3", "relay4", "relay5")
-BYTES, CHUNKS, SHARD_BYTES = 3932160, 15, 1310720
-SHA = "26fc4696f0ebcd7e36a3c0a0369e2d843742b3915a222ad57b49cd53020a9011"
+BYTES, CHUNKS, SHARD_BYTES = 15728640, 60, 5242880
+SHARD_CHUNKS = CHUNKS // len(NODES)
+PAYLOAD_MILESTONES = [262144, 3932160]  # Same 5%-75% interior of each 4x larger shard.
+SHA = "8fd67e1fc14d95b27d5d9be573c6609baf59054a129a669a15a6cd4562b41ecb"
 PREFIX = "content-provider-adaptive"
-REPR_DIGEST = "sha-256=:JvxGlvDrzX42o8CgNp4thDdCs5FaIirVe0nNUwIKkBE=:"
+REPR_DIGEST = "sha-256=:j9Z+H8FNlbJ9XZvlc8Zgm69ZBUoSmmaaFabNRWK0Hss=:"
 
 
 def validate_https_indexes(evidence):
@@ -49,7 +51,7 @@ def validate_https_indexes(evidence):
         cache = publication["cache_before"]
         require(cache == publication["cache_after"] and cache["path"] == binding["cache"]
                 and cache["device"] > 0 and cache["inode"] > 0
-                and cache["entries"] == 5 and cache["bytes"] == SHARD_BYTES
+                and cache["entries"] == SHARD_CHUNKS and cache["bytes"] == SHARD_BYTES
                 and cache["chunk_ids"] == [chunk["sha256"] for chunk in layout[shard::3]]
                 and Path(cache["path"]).parts[-3:] == (f"state-{node}", "content-adaptive", "cache")
                 and Path(binding["manifest_path"]) == Path(cache["path"]).parent / "digest-index" / "manifest.bin"
@@ -141,7 +143,7 @@ def payload_overlap(capture):
     timing = capture["provider_payload_timing"]
     require(capture["capture_role"] == "exit" and timing["enabled"] is True
             and timing["clock"] == "linux-so-timestampns-new" and timing["errors"] == 0
-            and timing["milestones_bytes"] == [65536, 983040]
+            and timing["milestones_bytes"] == PAYLOAD_MILESTONES
             and set(timing["providers"]) == set(NODES),
             "three-provider overlap lacks error-free kernel arrival timestamps")
     windows = [timing["providers"][node] for node in NODES]
@@ -230,9 +232,9 @@ def validate(evidence):
                     for key in ("publisher_hex", "manifest_id"))
             and 0 < publication["created_unix_seconds"] < publication["expires_unix_seconds"]
             and publication["expires_unix_seconds"] - publication["created_unix_seconds"] == 3600
-            and all(publication[f"replica_{label}_chunks"] == 5
+            and all(publication[f"replica_{label}_chunks"] == SHARD_CHUNKS
                     and publication[f"replica_{label}_bytes"] == SHARD_BYTES for label in "abc"),
-            "original 15-unique-chunk, three-disjoint-cache seed authority missing")
+            "original 60-unique-chunk, three-disjoint-cache seed authority missing")
     require(layout["provider_nodes"] == list(NODES) and len(set(peers.values())) == len(peers),
             "adaptive provider identities are not exactly three distinct spare nodes")
     control = layout["control_relay_peer_id"]

@@ -45,6 +45,15 @@ def dataset(review=False):
 
 
 class PrincipleInferenceTests(unittest.TestCase):
+    def test_public_answer_revision_does_not_change_policy_prompts(self):
+        for review in (False, True):
+            source = dataset(review)
+            options = dict(output_contract=source["output_contract"])
+            row = source["inference"][0]
+            original = WORKER.prompt_messages(row, **options)
+            self.assertEqual(WORKER.prompt_messages(row, public_answer=True, **options), original)
+            self.assertNotIn(WORKER.ANSWER_INSTRUCTIONS, original[0]["content"])
+
     def test_exact_public_infer_profile_one_row_and_contract(self):
         for review in (False, True):
             value = dataset(review)

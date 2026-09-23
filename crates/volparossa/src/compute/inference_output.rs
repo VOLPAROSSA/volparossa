@@ -53,7 +53,7 @@ impl Generation {
                 && generation.stop_reason != StopReason::JsonBoundary)
                 || (matches!(generation.version, 2 | 3)
                     && generation.output_contract.is_some()
-                    && generation.model_profile == ModelProfile::Smol360))
+                    && generation.model_profile.supports_rich_inference()))
                 && generation.max_new_tokens == limit
                 && (1..=u64::from(limit)).contains(&tokens)
                 && (generation.stop_reason != StopReason::TokenLimit || tokens == u64::from(limit)),
@@ -135,7 +135,7 @@ pub(super) fn check_dataset_contract(report: &Value, dataset: &[u8]) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::{Generation, StopReason};
+    use super::{Generation, ModelProfile, StopReason};
     use serde_json::{Value, json};
 
     fn output(tokens: u16, reason: &str) -> Value {
@@ -225,6 +225,11 @@ mod tests {
         let generation = Generation::from_output(&row, true).unwrap().unwrap();
         assert!(generation.is_json_boundary());
         assert!(!generation.is_eos());
+        let mut larger = row.clone();
+        larger["generation"]["model_profile"] = "smollm2-1.7b-v1".into();
+        let generation = Generation::from_output(&larger, true).unwrap().unwrap();
+        assert!(generation.is_json_boundary());
+        assert_eq!(generation.model_profile, ModelProfile::Smol1700);
         for (pointer, value) in [
             ("/text", json!("{\"version\":1")),
             ("/text_truncated", json!(true)),

@@ -68,8 +68,8 @@ impl Serving {
         Ok(())
     }
 
-    /// Called only after typed, proven active-adapter corruption without a valid
-    /// approved predecessor. Busy, I/O uncertainty and quality differences do not revoke.
+    /// Withdraw the old selection before committing a proven integrity rollback.
+    /// A byte-integrity failure is not a claim of publisher malice.
     pub(super) fn withdraw(&mut self) -> Result<()> {
         self.publisher.withdraw_current()?;
         self.last = None;
@@ -89,6 +89,7 @@ pub(super) fn local_candidate(
         .iter()
         .find(|cycle| cycle.sequence == sequence)
         .context("serving_loop_latest_missing")?;
+    ensure!(cycle.retirement.is_none(), "serving_loop_retired_successor");
     store.validate_snapshot(
         sequence,
         cycle
@@ -165,6 +166,7 @@ mod tests {
                 snapshot: Some(store.snapshot_cycle(sequence).unwrap()),
                 training: None,
                 publication: None,
+                retirement: None,
                 next_publication_attempt: 0,
             });
         }

@@ -4,6 +4,54 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-23
 
+An explicitly selected `smollm2-1.7b-v1` inference candidate now addresses the observed
+reasoning limitation without replacing the lightweight training model. It pins the original
+SmolLM2-1.7B files, reuses the existing CPU runtime and verifies actual CPU BF16 parameter
+storage. No training, 135M adapter application or silent FP32 fallback is admitted. Public and
+local-private inference, document/graph planning, grounded synthesis and principle-assessment
+interfaces retain the same token and time budgets. Existing 135M/360M defaults and historical
+enrollment encodings remain unchanged. New non-default policy enrollments retain the exact
+profile and original provider fingerprints; resume cannot upgrade either.
+
+The selected larger profile has explicit 5-GiB sampled RSS and 10-GiB address-space bounds;
+pre-launch admission and broker availability require at least 5.5 GiB observed spare memory,
+including cgroup parents. This is not a memory reservation or a hard RSS cap. Owner pressure,
+two-thread limits, isolation and cancellation remain active. A separate 8-GiB single-worker
+`agent-reasoning` VM scenario retains the same original 444-byte public source and question
+used by the earlier flawed graph, plus its actual answer and execution observations. Content
+review remains distinct from execution/EOS. Ninety focused Rust tests, strict production
+Clippy for the CLI/agent/content library, inert Python profile tests and the inert KVM launch
+contract pass. The [first exact-source VM trial on `6786bfa4`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35879772476)
+**fails overall** at the address-space observation. Its real BF16 worker completes in 79.776
+seconds, generates 43 tokens and is reaped; the supervisor observes a 3,908,026,368-byte peak
+RSS under the selected 5-GiB sampled limit. The original answer correctly selects Route A
+because it hides the client address from the exit, but omits Route B's violation, the relay's
+destination boundary and all requested performance evidence. Complete correctness is not
+proved. Isolation/input checks, final owned-object cleanup and unchanged host bytes pass.
+The observer's parser incorrectly rejected padded kernel columns, and it did not retain the
+original row: no retrospective claim about the actual 10-GiB limit is possible. A follow-up
+now retains the raw limits, parsed numbers and PID/start-time binding, while preserving exact
+10-GiB soft/hard validation. The failed run remains failed. The follow-up
+[exact-source VM trial on `3d57f418`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35883858055)
+passes its full single-worker execution checker: original raw limits prove 10-GiB soft/hard,
+170 CPU observations are retained, the BF16 worker completes in 83.956 seconds with 190 EOS
+tokens, and supervisor peak sampled RSS is 4,073,488,384 bytes under the 5-GiB limit. Original
+weights remain unchanged, the child is reaped, cleanup is complete and host hashes match.
+Larger-model peer/policy execution and general answer quality remain open; no model or backend
+ran on the development host.
+
+A small functional follow-up adds the `public-source-parts-v1` instruction to new public
+answers and grounded synthesis: answer all requested parts, separate missing evidence from
+supported conclusions, and treat source text as data rather than instructions. It preserves
+the exact supplied source/question and existing token/time budgets. Tokenizer planning counts
+the same prompt; optimizer/heldout-loss, private, policy and historical source-free synthesis
+prompts remain unchanged. Completed resume results are not rewritten. New reports identify
+the instruction revision without pretending that model-weight fingerprints attest prompts.
+Focused inert tests pass. The real follow-up answer now identifies missing throughput, latency
+and failure measurements, but repeatedly asks whether the exit can handle the client's public
+address, contradicting the source boundary. It also omits Route B's violation. Complete
+correctness and controlled quality improvement are not proved; the original answer is retained.
+
 An owner-enrolled `compute train-loop --aggregate-plan` candidate now connects automatic
 three-publisher discovery, frozen-cohort aggregation and held-out comparison to local adoption,
 serving and the next actual training warmstart. Unchanged cohorts are not recomputed; rollback
@@ -27,11 +75,41 @@ A further executable candidate now connects approved aggregate
 publication to the loop's existing owner-authorized publish settings. Combined and local
 updates share a durable revision order; retries reuse original signed bytes, completed receipts
 can settle interrupted checkpoints, and neither retry nor resume renews authority. Pending
-publications survive reclamation and share the existing bounded drain. The disposable scenario
-is being extended through automatic return-publication and cold exact-weight receiver inference;
-this extended live result is not yet available. Standalone `compute publish-aggregate` remains
-available. General quality, robust corruption rollback for aggregate selections and full B05
-remain open.
+publications survive reclamation and share the existing bounded drain. The
+[complete return-sharing run on `8d4bb840`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35876746847)
+passes exact-source checking of all 204 original files: three real 8/9/10-step contributions,
+aggregation, eight local warmstart updates, automatic aggregate revision 1 and approved local
+revision 2, and a drained monotone publication queue. A separate cold Client retrieves original
+signed revision 2 and its dataset through relay4 and uses the exact returned weights. Restart
+preserves original publication/serving bytes and expiry without another training attempt.
+Eleven actual worker observations, network captures, complete cleanup and unchanged host bytes
+are retained. The receiver's actual eleven-token EOS answer, however, says "There are 2 relays
+in each parallel path." That is factually wrong: each path must have exactly one relay. Local
+serving answered "One path uses 1 relay." These different retained answers do not invalidate the
+weight-transfer evidence, but neither EOS nor improved tiny heldout losses prove sound reasoning.
+Standalone `compute publish-aggregate` remains available. General quality, robust corruption
+rollback for aggregate selections and full B05 remain open.
+
+An integrity-recovery candidate now handles a damaged selected aggregate or approved local
+successor before restart validation, serving de-duplication and subsequent warmstarts. Only
+changes confined to the three extracted adapter files qualify; original bundles, approvals,
+signed sources and snapshots remain immutable. Serving admission is withdrawn before selecting
+the exact still-approved, unexpired predecessor. No predecessor means no base fallback or new
+lease. Retirement survives restart, invalidates unfinished comparisons against the damaged
+baseline, preserves historical counters, pins direct predecessors within bounded retention,
+and removes retired selections from publication retries without recycling revisions. All 97
+focused train-loop tests and strict CLI Clippy pass. These include a complete inert local-to-local
+rollback/withdrawal and historical second-source verification, not real model execution.
+Aggregate recovery still needs the full runtime proof; no completed B05/B07 claim is made.
+The existing disposable `agent-autonomous-aggregation` scenario now includes that candidate's
+local-successor-to-aggregate case after retaining the original training/publication evidence.
+It requires a genuinely approved successor C, damages only its extracted weights, resumes the
+original approved aggregate A twice and submits a protected peer job using exact A weights.
+It then damages A's extraction and requires blocked resume plus withdrawn broker admission:
+the pinned base is not an approved predecessor. Original approval, expiry and counters must
+remain unchanged; one additional bounded inference reuses the existing guest runtime. The new
+phase has not yet passed a live VM run and does not cover successful aggregate-to-aggregate
+rollback or establish general model quality.
 
 A source-grounded synthesis candidate now addresses the observed loss of original evidence
 between model-graph tasks. New 360M `--plan-task-graph --grounded-synthesis` workflows retain
@@ -68,8 +146,35 @@ also retain a relay4 `SHUTDOWN_CLEANUP_FAILED` event, although final owned-objec
 unchanged host bytes pass. This is not a full recovery/B07 or model-quality pass.
 The fixture now selects a real route before each short recovery/restart observation and
 confirms disconnection after reaping its coordinator. This removes the observed overlapping
-bootstrap, not the separate product limitation: closing a CLI socket does not cancel an
-agent-side fetch, and aborting a bootstrap during agent shutdown still needs owned cleanup.
+bootstrap, not the product limitation observed at that revision.
+
+A product follow-up now cancels named/HTTPS download preparation when its local requester
+closes the socket or sends premature transfer data. Request-owned streams and foreground/cache
+guards are released; verified cache chunks remain available for resume. Shared route bootstrap
+now belongs to a retained controller task, not to the cancelled RPC. Daemon shutdown drains
+both main/DNS bootstrap owners before exact retirement while discovery remains available.
+Expired-route retirement also retains its cleanup owner across requester cancellation, and a
+later request can observe its completion. Fifteen focused socket/bootstrap/retirement tests
+and strict agent library/test Clippy pass. The disposable `content-provider` trial now also
+pauses only the exact guest helper, cancels a real named download, requires an independent
+cache-only delivery, then stops the original agent during pending bootstrap and resumes the
+same helper before cleanup. It retains original process identities, receipts and the systemd
+wait result. Sixteen provider checks, including ten inert cancellation cases, pass. Actual
+blocked-helper execution remains pending KVM, not claimed from those inert checks. The legacy
+direct-to-agent-file fetch operations, mailbox and compute request cancellation are outside
+this change.
+
+The [provider run on `3d57f418`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35883871060)
+fails before reaching that cancellation phase: all three providers deliver the original
+3,932,160-byte object, but their interior bulk windows do not overlap simultaneously. Native
+and HTTPS overlap measurements are negative by 396.078 ms and 107.156 ms respectively. The
+ordinary HTTPS, site, user-publication and named phases pass their source-exact checks; final
+cleanup leaves zero owned objects and host hashes match. The failed run remains failed.
+The adaptive-only fixture now supplies 60 unique chunks (15 MiB), twenty per provider (5 MiB).
+Its kernel-timestamp milestones scale by the same factor, preserving the original 5%-75%
+interior-bulk fractions and the strict three-provider overlap requirement. Ordinary two-provider
+vectors, production admission, pacing and timeouts are unchanged. This gives the deliberately
+cold, late-admitted third connection more real payload to overlap; a new live run must prove it.
 
 A new explicit `compute aggregate-adapters` candidate now connects three independently
 authorized public publisher channels to a real worker implementation and the existing held-out

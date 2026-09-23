@@ -162,23 +162,59 @@ runtime and isolation; see [asset and license provenance](../THIRD_PARTY_LICENSE
 | --- | ---: | ---: | ---: | ---: |
 | `smollm2-135m-v1` (default) | 192 tokens | 64 tokens | 1,024 | 4 |
 | `smollm2-360m-v1` | 1,024 tokens | 256 tokens | 4,096 | 1 |
+| `smollm2-1.7b-v1` (optional candidate) | 1,024 tokens | 256 tokens | 4,096 | 1 |
+
+The optional 1.7B profile pins `HuggingFaceTB/SmolLM2-1.7B-Instruct` at
+`31b70e2e869a7173562077fd711b654946d38674`. Its existing CPU backend explicitly loads
+BF16 parameters; the worker checks and reports the actual loaded dtype. There is no silent
+FP32 fallback, automatic installation, training or compatible 135M adapter for this profile.
+The original 135M and 360M profiles retain their existing FP32 execution and model identities.
 
 Select the same `--model-profile` when explicitly provisioning the model, starting its
 `compute serve` broker, and enrolling a new `compute peer document` task. `compute run`
 also accepts it. Discovery filters for the chosen base profile; manual enrollment checks the
 actual peers and pins their common complete model fingerprint before tokenization or publication.
 Resume uses the original profile and fingerprint, not a newly supplied CLI choice. Signed
-packages may still contain four rows, but the ready queue dispatches singleton 360M jobs.
-Legacy batch-barrier enrollment is not supported for that profile.
+packages may still contain four rows, but the ready queue dispatches singleton 360M/1.7B jobs.
+Legacy batch-barrier enrollment is not supported for these profiles.
 
 Synthesis retains complete parent text and the matching profile rather than silently applying
 135M limits. A token-limited or wire-truncated output cannot become a completed answer or new
 dependency. The task-question planner keeps its separate 512-prompt / 384-total-generated-token
 budget and four-attempt limit; selecting a model does not enlarge that planner budget, the
-600-second worker deadline, two-thread bound, or 3-GiB sampled RSS cancellation limit.
+600-second worker deadline or two-thread bound. The 135M/360M profiles keep their 3-GiB sampled
+RSS cancellation and 6-GiB address-space limits. Selecting 1.7B explicitly selects a 5-GiB
+sampled RSS limit and 10-GiB address-space limit. Before launch and when advertising availability,
+it requires at least 5.5 GiB of observed spare memory, using the minimum of host availability
+and observed cgroup parent limits. This is admission, not a memory reservation; existing
+pressure cancellation and owner-priority controls still apply. RSS sampling is not a hard
+cgroup cap or a guarantee that a user never notices load.
 The explicit 360M provision preview downloads 977,655,758 bytes, including the existing runtime
-wheels; no model or runtime is installed on the development host. Full 360M peer execution,
-resource behavior and useful/source-faithful answers remain pending the disposable VM proof.
+wheels; no model or runtime is installed on the development host. The later 360M trials prove
+peer execution but retain factual errors. The first 1.7B single-worker
+[8-GiB disposable VM trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35879772476)
+retains a real BF16 answer: 43 generated tokens in 79.776 seconds of worker execution, with
+3,908,026,368 bytes peak RSS observed by its supervisor. It selects Route A for the correct
+client-address reason, but omits Route B's violation and the requested performance evidence.
+The overall trial fails because its observer rejected the address-space row; the original row
+was not retained, so that run does not prove the actual 10-GiB limit. The observer now accepts
+kernel column padding while retaining original limits and exact PID/start-time identity;
+the numerical requirement is unchanged. The subsequent
+[single-worker trial on `3d57f418`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35883858055)
+passes full execution, raw 10-GiB soft/hard limit, isolation and cleanup checks. It produces
+190 EOS tokens in 83.956 seconds with 4,073,488,384 bytes supervisor-observed peak RSS.
+The answer names the missing performance measurements but then repeatedly treats exposure of
+the client's public address to the exit as a capability to investigate, contradicting the
+privacy requirement. Generally useful reasoning remains unproved. Original source, question
+and answer remain distinct from quality claims.
+
+New public answers and source-grounded synthesis now use the explicit
+`public-source-parts-v1` instruction: address every requested part, treat supplied text as
+untrusted data, distinguish supported conclusions from missing evidence, and avoid repetition.
+Document planning counts this same complete prompt. Optimizer/heldout-loss prompts, private
+and principle-assessment prompts, and historical source-free synthesis remain unchanged;
+completed jobs retain their original reports on resume. The revision appears in new worker
+reports, but it is not part of the model-weight fingerprint and is not proof of answer quality.
 
 `volparossa compute run` is preview-only unless `--execute` is supplied. The current CLI
 supervises one real Python CPU worker in mandatory Bubblewrap network/PID/IPC/mount
@@ -718,11 +754,20 @@ it and inherits the original authority expiry; fresh training data cannot renew 
 The same three manifest IDs are processed once, not on every poll. Revision rollback and
 same-revision equivocation are refused. A completed result can be reopened after restart;
 an interrupted incomplete round is retained as failed rather than silently rerunning the model.
-The journal retains at most eight rounds and protects the active round and pending publications
-from reclamation.
-Expired selections are no longer used; ambiguous/corrupted retained evidence fails closed,
-not as an accusation or automatic ban of the three publishers. Automatic rollback after
-aggregate corruption remains to extend beyond the existing individual-peer recovery path.
+The journal retains at most eight rounds and protects the active round, its direct approved
+predecessor, the selected local successor's aggregate baseline and pending publications from
+reclamation. Expired selections are no longer used.
+
+The integrity-recovery candidate also covers combined adapters and approved local successors.
+Only proven changes confined to the three extracted adapter files qualify: original bundles,
+cohort and approval receipts must still match. The old serving selection is withdrawn before
+returning to its exact still-approved, unexpired predecessor; no valid predecessor means no
+base-model fallback. Interrupted comparisons against the retired version are not reinterpreted.
+Original authority deadlines and training counters remain unchanged; retired versions cannot
+retry publication or recycle an allocated revision. Ambiguous evidence still fails closed,
+not as an accusation or automatic ban of publishers. Focused tests cover inert local rollback,
+withdrawal and historical validation, but real aggregate/successor recovery remains to be
+proved in the disposable VM.
 
 This opt-in mode is mutually exclusive with `--peer-updates`; resume cannot grant an old
 enrollment new publishers or adoption authority. Add the existing `--publish-name`,
@@ -740,9 +785,15 @@ passes: three original trainings, automatic combination/adoption, eight further 
 the actual two-source approval gate, protected serving with the approved successor's exact
 weights, and restart without recomputation. Original bytes, authority deadlines, packet paths
 and complete cleanup are retained. This is a tiny owner-selected evaluation, not a general
-quality benchmark. Compilation and focused checks also pass for the next extension through
-automatic return-publication and cold receiver inference; that extended live proof is pending.
-No general intelligence gain, poisoning resistance or complete B05 is claimed.
+quality benchmark. The [extended automatic return-sharing run on `8d4bb840`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35876746847)
+also passes exact-source checking: the loop signs and contributes aggregate revision 1 and
+approved local successor revision 2 through the same ordered queue, then a cold Client retrieves
+revision 2 and performs inference using its exact weights. Restart retains original signatures,
+revisions, bytes and expiry without retraining or republishing. Cleanup and host-state checks pass.
+The actual cold receiver nevertheless answers "There are 2 relays in each parallel path." This
+contradicts the one-relay-per-path requirement. The proof establishes automatic model return and
+use, not reliable answer quality. No general intelligence gain, poisoning resistance or complete
+B05 is claimed.
 
 ### Using approved successors for new peer jobs
 
@@ -761,7 +812,7 @@ volparossa compute serve --socket /OWNER/broker.sock \
 
 These illustrative directories must already be private and separate from the training-loop,
 model and cache directories. The broker's `--adapter-root` cannot be combined with this mode.
-The inference-only 360M profile rejects `--serving-directory`; its weights cannot accept 135M adapters.
+The inference-only 360M and 1.7B profiles reject `--serving-directory`; their weights cannot accept 135M adapters.
 Attach its protected socket and independently selected dataset publishers through the existing
 `compute peer attach` workflow. Without `--serving-directory`, the broker's fixed-model
 behavior is unchanged; the protocol advertises successor activation only for an opted-in broker.
@@ -1795,7 +1846,12 @@ volparossa compute peer policy-assess \
 
 The owner must have permission to redistribute the public subject under the specified license;
 the source signature does not itself grant that permission. Both peers must already be
-provisioned with the pinned 360M profile and independently trust the owner's context publisher.
+provisioned with the selected exact profile and independently trust the owner's context publisher.
+The default remains 360M. For the optional larger model, pass `--model-profile smollm2-1.7b-v1`
+when starting both brokers and enrolling this workflow. New non-default enrollments explicitly
+retain that selection as version 3; original version-1/2 enrollments remain exactly 360M and
+cannot acquire a different model on resume. Both original complete model fingerprints are
+still bound independently. This selector does not make two copies of a model independent judges.
 Omit `--execute` for an inert preview. Reuse an existing source cache only with `--reuse-cache`.
 No automatic installation, private-file ingestion, training or network-policy signing occurs.
 
@@ -1857,7 +1913,8 @@ This does not complete B06: these concepts are not authorized network-wide polic
 legal determinations, authority membership/quorum, conflict resolution across partitions or
 automatic cache/exit enforcement. The existing threshold-signed destination policy is unchanged.
 
-New assessment workflows use enrollment version 2 and signed
+Default-360M assessment workflows use enrollment version 2; explicitly selected larger models
+use enrollment version 3 with their retained profile. Both use signed
 `application/vnd.volparossa.agent-principle.v4+json` inputs. Each singleton input selects only
 `principle_assessment_v1` or `principle_review_v1`; peers cannot submit arbitrary decoder schemas.
 The owner must explicitly provision the existing pinned optional decoder (`--task-graph-decoder`)

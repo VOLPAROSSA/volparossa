@@ -407,7 +407,7 @@ impl Agent {
         stop_task(&mut mesh_task).await;
         let _ = self.content.stop(&self.discovery_control).await;
         let route_cleanup = stop_discovery_after_retirement(
-            control::disconnect_client_routes(&routes, &dns_routes),
+            control::shutdown_client_routes(&routes, &dns_routes),
             &discovery_shutdown_tx,
             &mut discovery_task,
         )

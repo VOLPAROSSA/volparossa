@@ -109,7 +109,7 @@ impl DerivedDataset {
     pub fn validate_shape(&self) -> Result<(), ComputeError> {
         match (self.version, &self.original_source) {
             (3, None) => {}
-            (5, Some(original)) if self.model_profile == ModelProfile::Smol360 => {
+            (5, Some(original)) if self.model_profile.supports_rich_inference() => {
                 text(original, 4096)?;
             }
             _ => return Err(ComputeError::Invalid),

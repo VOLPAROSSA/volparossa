@@ -20,7 +20,6 @@ use super::{
     spare_capacity::{Budget, Decision},
 };
 
-pub(super) const MAX_RSS_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 pub(super) const MAX_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 const MIN_FREE_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_OBSERVED_PROCESSES: usize = 64;
@@ -184,7 +183,7 @@ pub(super) async fn run(
                 },
                 result = &mut io => break result,
                 _ = ticks.tick() => {
-                    let observation = observe(pid, &options.output, !options.spare_capacity);
+                    let observation = observe(pid, &options.output, !options.spare_capacity, super::resources::limits(options.model_profile).observed_rss);
                     match observation {
                         Ok(rss) => peak_rss = peak_rss.max(rss),
                         Err(error) => break Err(error),
@@ -211,7 +210,7 @@ pub(super) async fn run(
         "version": 1, "sandbox": "bubblewrap-private-user-net-pid-ipc-mount",
         "network_access": false, "gpu_access": false,
         "max_observed_rss_bytes": peak_rss,
-        "rss_limit_bytes": MAX_RSS_BYTES,
+        "rss_limit_bytes": super::resources::limits(options.model_profile).observed_rss,
         "rss_enforcement": "250ms-observed-cancel-not-cgroup-hard-limit",
         "owner_activity_action": "cancel",
         "spare_capacity": options.spare_capacity,
@@ -313,6 +312,16 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
         value.get("device").and_then(Value::as_str) == Some("cpu"),
         "compute_result_device"
     );
+    if request.model_profile == super::ModelProfile::Smol1700 {
+        ensure!(
+            if request.mode == Mode::PlanDocument {
+                value.get("model_parameter_dtype") == Some(&Value::Null)
+            } else {
+                value["model_parameter_dtype"] == "bfloat16"
+            },
+            "compute_result_model_precision"
+        );
+    }
     let updates = value.get("updates_completed").and_then(Value::as_u64);
     match request.mode {
         Mode::Infer
@@ -862,7 +871,7 @@ pub(super) fn headroom() -> Result<()> {
     Ok(())
 }
 
-fn observe(pid: u32, output: &Path, legacy_headroom: bool) -> Result<u64> {
+fn observe(pid: u32, output: &Path, legacy_headroom: bool, rss_limit: u64) -> Result<u64> {
     if legacy_headroom {
         headroom()?;
     }
@@ -884,7 +893,7 @@ fn observe(pid: u32, output: &Path, legacy_headroom: bool) -> Result<u64> {
             Err(error) => return Err(error),
         };
         total += status_kib(&status, "VmRSS:").unwrap_or(0);
-        ensure!(total <= MAX_RSS_BYTES, "compute_memory_budget");
+        ensure!(total <= rss_limit, "compute_memory_budget");
         let descendants = match process_children(&root) {
             Ok(value) => value,
             Err(_) if !root.exists() => continue,
@@ -1119,6 +1128,40 @@ mod tests {
                 .remove("generation");
             assert!(check_result(&reply, &request, ExitStatus::from_raw(0)).is_err());
         }
+    }
+
+    #[test]
+    fn larger_profile_requires_actual_precision_and_distinguishes_tokenizer_only_work() {
+        // Inert protocol evidence only; this does not instantiate a model.
+        let mut request = WorkerRequest {
+            version: 1,
+            id: "abc".into(),
+            mode: Mode::Infer,
+            model_profile: super::super::ModelProfile::Smol1700,
+            model_root: "/model",
+            dataset_path: "/dataset.json",
+            output_root: "/output",
+            adapter_root: None,
+            steps: 1,
+            threads: 2,
+            max_seconds: 600,
+            owner_control: false,
+        };
+        let mut reply = serde_json::json!({"status":"ok","mode":"infer","device":"cpu",
+            "updates_completed":0,"outputs":[{"sample_index":0,"text":"Inert response",
+            "generated_tokens":2,"text_truncated":false,"generation":{"version":1,
+            "model_profile":"smollm2-1.7b-v1","stop_reason":"eos","max_new_tokens":256}}]});
+        for dtype in [Value::Null, Value::from("float32"), Value::from("float16")] {
+            reply["model_parameter_dtype"] = dtype;
+            assert!(check_result(&reply, &request, ExitStatus::from_raw(0)).is_err());
+        }
+        reply["model_parameter_dtype"] = "bfloat16".into();
+        assert!(check_result(&reply, &request, ExitStatus::from_raw(0)).is_ok());
+        request.mode = Mode::PlanDocument;
+        reply["mode"] = "plan_document".into();
+        assert!(check_result(&reply, &request, ExitStatus::from_raw(0)).is_err());
+        reply["model_parameter_dtype"] = Value::Null;
+        assert!(check_result(&reply, &request, ExitStatus::from_raw(0)).is_ok());
     }
 
     #[test]

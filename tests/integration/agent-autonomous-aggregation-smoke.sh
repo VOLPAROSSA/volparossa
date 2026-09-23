@@ -7,14 +7,17 @@ agent_autonomous_aggregation_python() {
     python3 -B "$source_directory/tests/integration/agent-autonomous-aggregation-smoke.py" "$@"
 }
 
-agent_autonomous_aggregation_loop() {
+agent_autonomous_aggregation_loop_start() {
     auto_label=$1
     shift
     auto_pid=$(systemctl show --property=MainPID --value volparossa-alpha-agent@relay4.service)
     case $auto_pid in ''|0|*[!0-9]*) fail AUTONOMOUS_LEARNER_NOT_RUNNING ;; esac
     PHASE=agent-autonomous-aggregation-$auto_label
-    auto_bound=4000s
-    [ "$auto_label" != resume ] || auto_bound=150s
+    case $auto_label in
+        first) auto_bound=4000s ;;
+        resume|recovery-local|recovery-resume|recovery-blocked) auto_bound=150s ;;
+        *) fail AUTONOMOUS_LOOP_LABEL_INVALID ;;
+    esac
     timeout --signal=INT --kill-after=15s "$auto_bound" nsenter --target "$auto_pid" --mount --net \
         unshare --mount --propagation private --mount-proc=/proc \
         setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
@@ -31,6 +34,10 @@ agent_autonomous_aggregation_loop() {
         >"$WORK/agent-autonomous-aggregation-$auto_label.jsonl" \
         2>"$WORK/agent-autonomous-aggregation-$auto_label.err" &
     jobs_batch_pid=$!
+}
+
+agent_autonomous_aggregation_loop() {
+    agent_autonomous_aggregation_loop_start "$@"
     if [ "$auto_label" = resume ]; then
         agent_autonomous_aggregation_python observe-resume "$WORK" "$jobs_batch_pid" \
             || fail AUTONOMOUS_RESTART_NOT_OBSERVED
@@ -150,7 +157,9 @@ agent_autonomous_aggregation_run() {
     agent_autonomous_aggregation_receiver
     agent_adapter_aggregation_network_finish
     agent_autonomous_aggregation_receiver_inference
+    agent_aggregate_recovery_run
     agent_jobs_cleanup || fail AUTONOMOUS_PRIVATE_CLEANUP_FAILED
+    agent_aggregate_recovery_python evidence "$WORK" "$expected_commit" || fail AGGREGATE_RECOVERY_EVIDENCE_INVALID
     agent_autonomous_aggregation_python evidence "$WORK" "$expected_commit" || fail AUTONOMOUS_EVIDENCE_INVALID
     OBSERVED_BLOCKER=NONE
     PHASE=agent-autonomous-aggregation-complete
@@ -161,7 +170,8 @@ agent_autonomous_aggregation_finalize_report() {
         "$REMAINING_OWNED_OBJECTS" "$PHASE" "$OBSERVED_BLOCKER" || return 1
     for auto_log in "$WORK"/agent-adapter-aggregation-*.json "$WORK"/agent-adapter-aggregation-*.err \
         "$WORK"/agent-autonomous-aggregation-*.json "$WORK"/agent-autonomous-aggregation-*.jsonl \
-        "$WORK"/agent-autonomous-aggregation-*.err; do
+        "$WORK"/agent-autonomous-aggregation-*.err "$WORK"/agent-aggregate-recovery-*.json \
+        "$WORK"/agent-aggregate-recovery-*.err; do
         [ ! -f "$auto_log" ] || [ -L "$auto_log" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$auto_log" "$output_directory/$(basename -- "$auto_log")"
     done

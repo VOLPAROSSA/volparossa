@@ -28,8 +28,12 @@ MODEL_ID = "HuggingFaceTB/SmolLM2-135M-Instruct"
 REVISION = "83212e1e2b3cfd6958f3707877bb878945dea8ee"
 DEFAULT_MODEL_PROFILE = "smollm2-135m-v1"
 LARGE_MODEL_PROFILE = "smollm2-360m-v1"
+REASONING_MODEL_PROFILE = "smollm2-1.7b-v1"
 PROFILES = {DEFAULT_MODEL_PROFILE: (MODEL_ID, REVISION),
-            LARGE_MODEL_PROFILE: ("HuggingFaceTB/SmolLM2-360M-Instruct", "a10cc1512eabd3dde888204e902eca88bddb4951")}
+            LARGE_MODEL_PROFILE: ("HuggingFaceTB/SmolLM2-360M-Instruct", "a10cc1512eabd3dde888204e902eca88bddb4951"),
+            REASONING_MODEL_PROFILE: ("HuggingFaceTB/SmolLM2-1.7B-Instruct", "31b70e2e869a7173562077fd711b654946d38674")}
+PROFILE_PINS = {LARGE_MODEL_PROFILE: "model-pins-360m.json", REASONING_MODEL_PROFILE: "model-pins-1.7b.json"}
+PROFILE_WEIGHT_BYTES = {LARGE_MODEL_PROFILE: 723674912, REASONING_MODEL_PROFILE: 3422777952}
 GRAPH_DECODER = {"implementation": "lm-format-enforcer", "version": "0.11.3",
                  "adapter_version": 1, "schema_version": 3,
                  "dependencies": {"interegular": "0.3.3", "pydantic": "1.10.24"}}
@@ -69,8 +73,8 @@ def load_pins(model_profile=DEFAULT_MODEL_PROFILE, task_graph_decoder=False):
     require(model_profile in PROFILES, "unsupported model profile")
     model_id, revision = PROFILES[model_profile]
     pins = json.loads((HERE / "model-pins.json").read_text())
-    if model_profile == LARGE_MODEL_PROFILE:
-        additional = json.loads((HERE / "model-pins-360m.json").read_text())
+    if model_profile in PROFILE_PINS:
+        additional = json.loads((HERE / PROFILE_PINS[model_profile]).read_text())
         require("wheels" not in additional and "source_revisions" not in additional,
                 "model profile must preserve the original runtime lock")
         pins.update(additional)
@@ -87,7 +91,8 @@ def load_pins(model_profile=DEFAULT_MODEL_PROFILE, task_graph_decoder=False):
             require(re.fullmatch(r"[A-Za-z0-9_.+\-]+", name) and name not in names,
                     "invalid/duplicate artifact filename")
             names.add(name)
-            maximum = 723674912 if model_profile == LARGE_MODEL_PROFILE and name == "model.safetensors" else 299_999_999
+            maximum = (PROFILE_WEIGHT_BYTES[model_profile]
+                       if model_profile in PROFILE_WEIGHT_BYTES and name == "model.safetensors" else 299_999_999)
             require(type(item["bytes"]) is int and 0 < item["bytes"] <= maximum,
                     "invalid artifact size")
             require(re.fullmatch(r"[0-9a-f]{64}", item["sha256"]), "invalid SHA256")
@@ -96,7 +101,7 @@ def load_pins(model_profile=DEFAULT_MODEL_PROFILE, task_graph_decoder=False):
                     .endswith("/" + name), "artifact URL/filename mismatch")
     for item in pins["files"]:
         expected_url = f"https://huggingface.co/{model_id}/resolve/{revision}/{item['path']}"
-        if model_profile == LARGE_MODEL_PROFILE and item["path"] == "LICENSE":
+        if model_profile in PROFILE_PINS and item["path"] == "LICENSE":
             expected_url = f"https://huggingface.co/{MODEL_ID}/resolve/{REVISION}/LICENSE"
             require(item["bytes"] == 10172 and item["sha256"] == "59899c6091b540582ed617e8eeaac4919dc985ccfc35459ee9752b699be5205b"
                     and pins.get("license_provenance"), "separate Apache license provenance missing")
@@ -372,7 +377,8 @@ def execute(args, pins):
             "training_performed": False, "runtime_autofetch_enabled": False,
         }
         if pins["model_id"] != MODEL_ID:
-            report["model_profile"] = LARGE_MODEL_PROFILE
+            report["model_profile"] = next(profile for profile, identity in PROFILES.items()
+                                           if identity == (pins["model_id"], pins["revision"]))
         if "task_graph_decoder" in pins:
             report["task_graph_decoder"] = pins["task_graph_decoder"]
         (root / "provision-report.json").write_text(json.dumps(report, indent=2) + "\n")

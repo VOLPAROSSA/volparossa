@@ -131,6 +131,7 @@ fn enrollment(
         publisher_key: key(owner),
         providers: [key(&providers[0]), key(&providers[1])],
         model_fingerprints: [fingerprint.clone(), fingerprint],
+        model_profile: None,
         license: "CC0-1.0".into(),
         selected_at,
         expires,

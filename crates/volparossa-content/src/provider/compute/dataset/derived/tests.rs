@@ -319,6 +319,26 @@ fn grounded_source_authentication_and_selection_keep_original_separate_from_gene
 }
 
 #[test]
+fn grounded_large_profile_keeps_original_source_signature_and_exact_selector() {
+    let signer = SigningKey::from_bytes(&[25; 32]);
+    let original = "Original public source text.";
+    let source = signed(original, "text/plain", &signer, 2000);
+    let mut value = grounded(&source, original);
+    value.model_profile = ModelProfile::Smol1700;
+    let encoded = serde_json::to_string(&value).unwrap();
+    let package = signed(&encoded, GROUNDED_DERIVED_CONTENT_TYPE, &signer, 1900);
+    let verified = verify_source(&package, &signer.verifying_key(), &encoded, 1100).unwrap();
+    let selected: DerivedDataset = serde_json::from_str(&verified.derive(&[0]).unwrap()).unwrap();
+    assert_eq!(selected.model_profile, ModelProfile::Smol1700);
+    assert_eq!(selected.original_source.as_deref(), Some(original));
+    assert_eq!(selected.source_manifest_hex, value.source_manifest_hex);
+    value.original_source.as_mut().unwrap().push('!');
+    let changed = serde_json::to_string(&value).unwrap();
+    let package = signed(&changed, GROUNDED_DERIVED_CONTENT_TYPE, &signer, 1900);
+    assert!(verify_source(&package, &signer.verifying_key(), &changed, 1100).is_err());
+}
+
+#[test]
 fn grounded_requires_exact_original_bytes_signer_expiry_and_ranges() {
     let signer = SigningKey::from_bytes(&[25; 32]);
     let original = "Original public source text.";

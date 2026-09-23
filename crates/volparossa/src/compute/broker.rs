@@ -204,7 +204,7 @@ pub(super) async fn run(options: Serve) -> Result<()> {
 
 fn validate_roots(options: &Serve) -> Result<()> {
     ensure!(
-        !options.principle_inference_v4 || options.model_profile == ModelProfile::Smol360,
+        !options.principle_inference_v4 || options.model_profile.supports_rich_inference(),
         "compute_principle_model_profile"
     );
     ensure!(
@@ -406,6 +406,10 @@ impl Broker {
 
     fn available(&self) -> bool {
         self.budget.current() == Decision::Run
+            && super::resources::admits(
+                self.options.model_profile,
+                self.budget.observation().memory_bytes,
+            )
             && self.jobs.len() < RETAINED_JOBS
             && self.jobs.iter().all(|job| job.execution.is_none())
             && self
@@ -701,6 +705,7 @@ pub(super) fn execution_failure_class(error: &anyhow::Error) -> (&'static str, &
             "MODEL_FILES_NOT_PINNED",
             "UNSUPPORTED_MODEL_FILES",
             "UNSUPPORTED_MODEL_ARCHITECTURE",
+            "MODEL_PARAMETER_DTYPE_MISMATCH",
             "MODEL_TOKENIZER_MISMATCH",
             "MODEL_TOKENIZER_RETURN_TYPE",
             "DOCUMENT_TOKEN_LIMIT_EXCEEDED",
@@ -750,6 +755,8 @@ pub(super) fn execution_failure_class(error: &anyhow::Error) -> (&'static str, &
         "compute_deadline",
         "compute_owner_busy",
         "compute_memory_budget",
+        "compute_model_memory_headroom",
+        "compute_result_model_precision",
         "compute_memory_pressure",
         "compute_owner_pressure",
         "compute_process_bound",

@@ -66,13 +66,21 @@ pub(in crate::compute::train_loop) fn pending_sequences(registry: &Registry) -> 
         .rounds
         .iter()
         .filter(|round| {
-            round
-                .publication
-                .as_ref()
-                .is_some_and(|record| !record.settled())
+            round.retirement.is_none()
+                && round
+                    .publication
+                    .as_ref()
+                    .is_some_and(|record| !record.settled())
         })
         .map(|round| round.sequence)
         .collect()
+}
+
+pub(in crate::compute::train_loop) fn has_retired(registry: &Registry) -> bool {
+    registry
+        .rounds
+        .iter()
+        .any(|round| round.retirement.is_some())
 }
 
 pub(in crate::compute::train_loop) fn has_expired(registry: &Registry) -> bool {
@@ -110,6 +118,11 @@ pub(in crate::compute::train_loop) async fn publish(
         .position(|round| round.sequence == sequence)
         .context("aggregate_publication_round")?;
     let round = &registry.rounds[index];
+    if round.retirement.is_some() {
+        // Preserve any original manifest and allocated revision, but never retry
+        // or re-sign a model after its selected local extraction was retired.
+        return Ok(true);
+    }
     let record = round
         .publication
         .as_ref()

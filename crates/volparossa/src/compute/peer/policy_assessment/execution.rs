@@ -265,7 +265,7 @@ fn load_handle(
             && handle.binding.model_fingerprint == enrolled.model_fingerprints[index]
             && handle.capabilities.model_fingerprint == handle.binding.model_fingerprint
             && crate::compute::broker::profile_for_model(&handle.capabilities.model)?
-                == ModelProfile::Smol360
+                == enrolled.profile()?
             && if enrolled.version == 1 {
                 handle.capabilities.document_inference_v2
             } else {

@@ -113,6 +113,8 @@ print_plan() {
                 '  R4 cold-fetches its enrolled cohort through protected paths inside the real train-loop;' \
                 '  combine effective LoRA updates, require actual heldout approval, then activate the exact aggregate;' \
                 '  verify genuine serving and the next local training warmstart with inherited original expiry;' \
+                '  preserve originals; damage only approved local extraction C, resume exact approved aggregate A, and infer through a protected peer job;' \
+                '  damage A extraction next: require blocked resume and withdrawn broker admission because base is not an approved predecessor;' \
                 '  retain immutable inputs, journal, worker receipts, packets and full cleanup;' \
                 '  isolated 135M workers; no Sybil, general-quality or complete-B05 guarantee.'
             return
@@ -390,6 +392,8 @@ print_plan() {
             '  open by publisher/name in the Client, verify HTTP assets/ranges and SIGTERM spool cleanup (no browser engine);' \
             '  after existing phases, create three separate control-only broker links to R3/R4/R5 and fetch 15 disjoint chunks on a fresh route;' \
             '  require real triple provider payload overlap, exact reconstruction and normal service/route teardown;' \
+            '  pause only the exact guest Client helper via pidfd, cancel a pending named download and require independent cached delivery;' \
+            '  stop the original Client agent while bootstrap is pending, resume that helper before teardown and require successful drain;' \
             '  retain complete privacy captures/cleanup; no general NAT, arbitrary-browser HTTPS or full-C02 claim.'
         return
     fi
@@ -921,7 +925,8 @@ if [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" =
     done
 fi
 if [ "$agent_autonomous_aggregation" = yes ]; then
-    for aggregation_fixture in agent-autonomous-aggregation-smoke.sh agent-autonomous-aggregation-smoke.py; do
+    for aggregation_fixture in agent-autonomous-aggregation-smoke.sh agent-autonomous-aggregation-smoke.py \
+        agent-aggregate-recovery-smoke.sh agent-aggregate-recovery-smoke.py; do
         [ -f "$source_directory/tests/integration/$aggregation_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$aggregation_fixture" ] || exit 69
     done
@@ -943,7 +948,7 @@ if [ "$scenario" = content-provider ]; then
     for provider_fixture in content-provider-smoke.sh content-provider-smoke.py content-network-smoke.py \
         content-provider-https-smoke.sh content-provider-https-smoke.py content-publication-smoke.sh content-named-smoke.sh \
         content-provider-site-smoke.sh content-provider-site-smoke.py \
-        content-provider-adaptive-smoke.sh content-provider-adaptive-smoke.py; do
+        content-provider-adaptive-smoke.sh content-provider-adaptive-smoke.py content-cancellation-smoke.py; do
         if [ ! -f "$source_directory/tests/integration/$provider_fixture" ] \
             || [ -L "$source_directory/tests/integration/$provider_fixture" ]; then
             printf '%s\n' 'content provider fixture unavailable' >&2
@@ -1714,6 +1719,10 @@ cleanup() {
     [ "$FINALIZED" = no ] || exit "$original_status"
     FINALIZED=yes
     trap - EXIT HUP INT TERM
+    # Resume a fixture-paused helper BEFORE any namespace, process or service teardown.
+    if [ "$scenario" = content-provider ] && command -v content_provider_cancellation_resume >/dev/null 2>&1; then
+        content_provider_cancellation_resume || original_status=1
+    fi
     if [ "$scenario" = dns-cache ] && command -v dns_cache_stop_server >/dev/null 2>&1; then
         dns_cache_stop_server || original_status=1
     fi
@@ -2268,6 +2277,8 @@ if [ "$agent_autonomous_aggregation" = yes ]; then
     # Shared aggregation definitions must be loaded before the autonomous wrapper.
     # shellcheck source=tests/integration/agent-autonomous-aggregation-smoke.sh
     . "$source_directory/tests/integration/agent-autonomous-aggregation-smoke.sh"
+    # shellcheck source=tests/integration/agent-aggregate-recovery-smoke.sh
+    . "$source_directory/tests/integration/agent-aggregate-recovery-smoke.sh"
 fi
 if [ "$scenario" = agent-artifact ]; then
     # shellcheck source=tests/integration/agent-artifact-smoke.sh
@@ -2449,6 +2460,7 @@ if [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" =
 fi
 if [ "$agent_autonomous_aggregation" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/agent-autonomous-aggregation-smoke.py" "$WORK/bin/agent-autonomous-aggregation-smoke.py"
+    install -o root -g root -m 0555 "$source_directory/tests/integration/agent-aggregate-recovery-smoke.py" "$WORK/bin/agent-aggregate-recovery-smoke.py"
 fi
 if [ "$agent_train_loop" = yes ]; then
     for loop_script in agent-train-loop-smoke.py agent-train-loop-catalog.py agent-peer-learning-smoke.py content-replication-smoke.py content-replication-capture.py; do
@@ -4022,8 +4034,12 @@ provider_timing_enabled = (content_provider_mode and role == "exit"
 # Capture packet arrival, not socket-drain time: fair queue draining can reorder interfaces.
 # https://docs.kernel.org/networking/timestamping.html#so-timestampns-also-so-timestampns-old-and-so-timestampns-new
 SO_TIMESTAMPNS_NEW = 64
+provider_payload_milestones = ([262144, 3932160]
+    if os.path.basename(output_path) in {"content-provider-adaptive-privacy-exit.json",
+                                      "content-provider-adaptive-https-privacy-exit.json"}
+    else [65536, 983040])
 provider_payload_timing = dict(enabled=provider_timing_enabled, clock="linux-so-timestampns-new",
-    milestones_bytes=[65536, 983040], errors=0,
+    milestones_bytes=provider_payload_milestones, errors=0,
     providers={node: [0, 0] for node in provider_addresses.values()})
 provider_last_timestamp = {node: 0 for node in provider_addresses.values()}
 frame_timestamp_ns = 0

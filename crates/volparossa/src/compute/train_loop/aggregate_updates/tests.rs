@@ -57,6 +57,7 @@ fn round(sequence: u64, phase: Phase, at: u64, expires: u64) -> Round {
         approval: None,
         snapshot: None,
         publication: None,
+        retirement: None,
     }
 }
 

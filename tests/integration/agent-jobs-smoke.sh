@@ -256,6 +256,7 @@ agent_jobs_stop() {
     fi
     if [ "${agent_autonomous_aggregation:-no}" = yes ]; then
         agent_autonomous_aggregation_python cleanup-workers "$WORK" || return 1
+        agent_aggregate_recovery_python cleanup-workers "$WORK" || return 1
     fi
     [ "$jobs_dag_pressure_cleanup_failed" = no ]
 }

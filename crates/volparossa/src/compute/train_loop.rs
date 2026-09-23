@@ -6,6 +6,7 @@ pub(super) mod aggregate_publication;
 mod aggregate_updates;
 mod catalogs;
 mod evaluation;
+mod local_retirement;
 mod peer_evaluation;
 mod peer_updates;
 mod publication;
@@ -186,6 +187,8 @@ struct Cycle {
     training: Option<Snapshot>,
     #[serde(default)]
     publication: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retirement: Option<local_retirement::Record>,
     next_publication_attempt: u64,
 }
 
@@ -437,6 +440,10 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         .transpose()?
         .unwrap_or_else(|| State::new(plan.sources.len()));
     let mut pool = restore_source_pool(&plan, &mut state)?;
+    // Inspect the selected extraction before the general restart validator reads
+    // it. Historical approval bytes remain immutable and are checked separately.
+    local_retirement::recover_active(args, &store, &mut state, &mut serving)?;
+    aggregate_updates::recover_active(args, &store, &mut state, &mut serving)?;
     recover(&store, &mut state, pool.sources.len())?;
     let activity = Activity::new()?;
     prepare_inputs(
@@ -476,20 +483,21 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             .max_cycles
             .is_some_and(|maximum| attempts >= u64::from(maximum))
         {
+            reconcile_selected_adapter(args, &store, &mut state, &mut serving)?;
             publication_drain = Some(
                 publication::drain(args, socket, &store, &mut state, &activity.receiver).await?,
             );
             break;
         }
-        publication::pending(args, socket, &store, &mut state, &activity.receiver).await?;
         if budget.sample() == Decision::Run {
+            // Hashing retained models and retrying their publication remain
+            // background work. Recovery precedes publication and warmstarts.
+            reconcile_selected_adapter(args, &store, &mut state, &mut serving)?;
+            publication::pending(args, socket, &store, &mut state, &activity.receiver).await?;
             if refresh_catalogs(args, socket, &plan, &store, &mut state, &activity.receiver).await?
             {
                 pool = source_pool(&plan, &state);
             }
-            // Local integrity recovery is not driven by a failed retrieval or a
-            // comparison result. It precedes selecting either job's warmstart.
-            reconcile_selected_adapter(args, &store, &mut state, &mut serving)?;
             peer_updates::tick(args, socket, &pool, &store, &mut state, &activity.receiver).await?;
             Box::pin(aggregate_updates::tick(
                 args,
@@ -535,7 +543,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         "peer_update_channels_enabled":state.peer_updates.is_some(),
         "aggregate_updates_enabled":state.aggregate_updates.is_some(),
         "active_aggregate_sequence":state.aggregate_updates.as_ref().and_then(aggregate_updates::active_sequence),
-        "pending_publications":state.cycles.iter().filter(|cycle|matches!(cycle.phase,Phase::Trained|Phase::PublishPending)).count()
+        "pending_publications":state.cycles.iter().filter(|cycle|cycle.retirement.is_none() && matches!(cycle.phase,Phase::Trained|Phase::PublishPending)).count()
             + state.aggregate_updates.as_ref().map_or(0, |registry|aggregate_updates::publication::pending_sequences(registry).len()),
         "publication_drain":publication_drain,"publication_drain_seconds":publication_drain.map(|_|args.max_seconds),
         "private_data_supported":false,"full_b05_claimed":false})
@@ -549,7 +557,9 @@ fn reconcile_selected_adapter(
     state: &mut State,
     serving: &mut Option<serving::Serving>,
 ) -> Result<()> {
-    let recovered =
+    let mut recovered = local_retirement::recover_active(args, store, state, serving)?;
+    recovered |= aggregate_updates::recover_active(args, store, state, serving)?;
+    recovered |=
         checked_integrity_recovery(peer_updates::recover_active(args, store, state), serving)?;
     if let Err(error) = aggregate_updates::reconcile(args, store, state) {
         if let Some(serving) = serving {
@@ -658,7 +668,9 @@ fn recover(store: &Store, state: &mut State, count: usize) -> Result<()> {
             && state.next_sequence > 0
             && state.promoted.checked_add(state.rejected) == Some(state.completed)
             && state.completed < state.next_sequence
-            && (state.latest.is_some() == (state.promoted > 0))
+            && (state.latest.is_some() == (state.promoted > 0)
+                || (state.latest.is_none()
+                    && local_retirement::allows_empty_latest(store, state)?))
             && state.sources.len() == count
             && ((count == 0 && state.cursor == 0) || state.cursor < count)
             && state.cycles.len() <= RETAINED_CYCLES
@@ -707,8 +719,12 @@ fn recover(store: &Store, state: &mut State, count: usize) -> Result<()> {
             )?;
         }
         if let Some(snapshot) = &cycle.snapshot {
-            store.validate_snapshot(cycle.sequence, snapshot)?;
-            let decision = evaluation::verify(store, cycle.sequence)?;
+            let decision = if cycle.retirement.is_some() {
+                local_retirement::verify(store, cycle)?
+            } else {
+                store.validate_snapshot(cycle.sequence, snapshot)?;
+                evaluation::verify(store, cycle.sequence)?
+            };
             ensure!(
                 decision.approved == (cycle.phase != Phase::Rejected)
                     && decision.has_validation() == state.validation.is_some()
@@ -724,11 +740,16 @@ fn recover(store: &Store, state: &mut State, count: usize) -> Result<()> {
                 ),
             "train_loop_snapshot_required"
         );
+        ensure!(
+            cycle.retirement.is_none() || cycle.snapshot.is_some(),
+            "train_loop_retired_snapshot_required"
+        );
     }
     if let Some(latest) = state.latest {
         ensure!(
             state.cycles.iter().any(|cycle| cycle.sequence == latest
                 && cycle.snapshot.is_some()
+                && cycle.retirement.is_none()
                 && cycle.phase != Phase::Rejected),
             "train_loop_latest_missing"
         );
@@ -740,12 +761,22 @@ fn make_room(store: &Store, state: &mut State) -> Result<bool> {
     if state.cycles.len() < RETAINED_CYCLES {
         return Ok(true);
     }
+    let mut protected = local_retirement::protected_sequences(store, state)?;
+    if let Some(sequence) = state
+        .aggregate_updates
+        .as_ref()
+        .and_then(aggregate_updates::pinned_local_predecessor)
+    {
+        protected.insert(sequence);
+    }
     let obsolete = state.cycles.iter().position(|cycle| {
         Some(cycle.sequence) != state.latest
-            && matches!(
-                cycle.phase,
-                Phase::Complete | Phase::Failed | Phase::PublicationExpired | Phase::Rejected
-            )
+            && !protected.contains(&cycle.sequence)
+            && (cycle.retirement.is_some()
+                || matches!(
+                    cycle.phase,
+                    Phase::Complete | Phase::Failed | Phase::PublicationExpired | Phase::Rejected
+                ))
     });
     let Some(index) = obsolete else {
         return Ok(false);
@@ -812,6 +843,7 @@ async fn attempt(
         snapshot: None,
         training: None,
         publication: None,
+        retirement: None,
         next_publication_attempt: 0,
     });
     store.save_state(&serde_json::to_value(&*state)?)?;
@@ -908,6 +940,10 @@ fn current_adapter(args: &Options, store: &Store, state: &State) -> Result<Curre
             .iter()
             .find(|cycle| cycle.sequence == previous)
             .context("train_loop_latest_missing")?;
+        ensure!(
+            cycle.retirement.is_none(),
+            "train_loop_selected_retired_adapter"
+        );
         store.validate_snapshot(
             previous,
             cycle
@@ -937,6 +973,13 @@ fn current_adapter(args: &Options, store: &Store, state: &State) -> Result<Curre
             authority_expires,
         })
     } else {
+        // A rollback to an aggregate can legitimately clear the local pointer.
+        // If that aggregate later expires, do not quietly replace it with base
+        // weights merely because the historical local promotion is retired.
+        ensure!(
+            state.promoted == 0,
+            "train_loop_restored_authority_unavailable"
+        );
         let adapter_root = seed::adapter(args, state)?;
         let kind = if state.seed.is_some() {
             "seed_import"
