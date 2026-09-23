@@ -47,11 +47,20 @@ A further executable candidate now connects approved aggregate
 publication to the loop's existing owner-authorized publish settings. Combined and local
 updates share a durable revision order; retries reuse original signed bytes, completed receipts
 can settle interrupted checkpoints, and neither retry nor resume renews authority. Pending
-publications survive reclamation and share the existing bounded drain. The disposable scenario
-is being extended through automatic return-publication and cold exact-weight receiver inference;
-this extended live result is not yet available. Standalone `compute publish-aggregate` remains
-available. General quality, robust corruption rollback for aggregate selections and full B05
-remain open.
+publications survive reclamation and share the existing bounded drain. The
+[complete return-sharing run on `8d4bb840`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35876746847)
+passes exact-source checking of all 204 original files: three real 8/9/10-step contributions,
+aggregation, eight local warmstart updates, automatic aggregate revision 1 and approved local
+revision 2, and a drained monotone publication queue. A separate cold Client retrieves original
+signed revision 2 and its dataset through relay4 and uses the exact returned weights. Restart
+preserves original publication/serving bytes and expiry without another training attempt.
+Eleven actual worker observations, network captures, complete cleanup and unchanged host bytes
+are retained. The receiver's actual eleven-token EOS answer, however, says "There are 2 relays
+in each parallel path." That is factually wrong: each path must have exactly one relay. Local
+serving answered "One path uses 1 relay." These different retained answers do not invalidate the
+weight-transfer evidence, but neither EOS nor improved tiny heldout losses prove sound reasoning.
+Standalone `compute publish-aggregate` remains available. General quality, robust corruption
+rollback for aggregate selections and full B05 remain open.
 
 A source-grounded synthesis candidate now addresses the observed loss of original evidence
 between model-graph tasks. New 360M `--plan-task-graph --grounded-synthesis` workflows retain

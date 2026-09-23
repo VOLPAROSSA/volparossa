@@ -756,9 +756,15 @@ passes: three original trainings, automatic combination/adoption, eight further 
 the actual two-source approval gate, protected serving with the approved successor's exact
 weights, and restart without recomputation. Original bytes, authority deadlines, packet paths
 and complete cleanup are retained. This is a tiny owner-selected evaluation, not a general
-quality benchmark. Compilation and focused checks also pass for the next extension through
-automatic return-publication and cold receiver inference; that extended live proof is pending.
-No general intelligence gain, poisoning resistance or complete B05 is claimed.
+quality benchmark. The [extended automatic return-sharing run on `8d4bb840`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35876746847)
+also passes exact-source checking: the loop signs and contributes aggregate revision 1 and
+approved local successor revision 2 through the same ordered queue, then a cold Client retrieves
+revision 2 and performs inference using its exact weights. Restart retains original signatures,
+revisions, bytes and expiry without retraining or republishing. Cleanup and host-state checks pass.
+The actual cold receiver nevertheless answers "There are 2 relays in each parallel path." This
+contradicts the one-relay-per-path requirement. The proof establishes automatic model return and
+use, not reliable answer quality. No general intelligence gain, poisoning resistance or complete
+B05 is claimed.
 
 ### Using approved successors for new peer jobs
 
