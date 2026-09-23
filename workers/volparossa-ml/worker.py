@@ -184,7 +184,7 @@ def validate_request(value):
             and value.keys() <= required | optional, "INVALID_REQUEST_FIELDS")
     require(type(value["version"]) is int and value["version"] == VERSION, "UNSUPPORTED_VERSION")
     require(type(value["id"]) is str and HEX32.fullmatch(value["id"]), "INVALID_REQUEST_ID")
-    require(value["mode"] in ("infer", "train", "plan_document", "plan_tasks", "private_infer"), "INVALID_JOB_MODE")
+    require(value["mode"] in ("infer", "train", "plan_document", "plan_tasks", "private_infer", "aggregate_adapter"), "INVALID_JOB_MODE")
     profile_name = value.get("model_profile", DEFAULT_MODEL_PROFILE)
     model_profile(profile_name)
     require(profile_name == DEFAULT_MODEL_PROFILE or (value["mode"] != "train" and "adapter_root" not in value),
@@ -192,6 +192,10 @@ def validate_request(value):
     require(value["mode"] != "plan_document" or "adapter_root" not in value, "DOCUMENT_PLAN_ADAPTER_UNSUPPORTED")
     require(value["mode"] != "plan_tasks" or "adapter_root" not in value, "TASK_PLAN_ADAPTER_UNSUPPORTED")
     require(value["mode"] != "private_infer" or "adapter_root" not in value, "PRIVATE_INFERENCE_ADAPTER_UNSUPPORTED")
+    require(value["mode"] != "aggregate_adapter" or
+            (profile_name == DEFAULT_MODEL_PROFILE and "adapter_root" in value
+             and value.get("steps", 8) == 1 and value.get("owner_control") is True),
+            "AGGREGATION_EXECUTION_SCOPE")
     require("owner_control" not in value or type(value["owner_control"]) is bool,
             "INVALID_OWNER_CONTROL")
     for field in ("model_root", "dataset_path", "output_root", "adapter_root"):
@@ -1791,12 +1795,22 @@ def execute_job(request, session):
     session.progress("preparing")
     model_root, output_root, dataset, data_identity, model_files = prepare_files(request)
     session.check()
+    cohort = None
+    if request["mode"] == "aggregate_adapter":
+        root, metadata = plain_path(request["adapter_root"], True)
+        require(metadata.st_uid == os.geteuid() and not stat.S_IMODE(metadata.st_mode) & 0o022
+                and {path.name for path in root.iterdir()} == {"0", "1", "2"},
+                "AGGREGATION_COHORT_DIRECTORY")
+        cohort = [prepare_adapter(str(root / str(index)), output_root) for index in range(3)]
     prepared_adapter = (prepare_adapter(request["adapter_root"], output_root)
-                        if "adapter_root" in request else None)
+                        if "adapter_root" in request and cohort is None else None)
     configure_offline()
     session.check()
     torch, transformers, peft, versions = load_backend(request["threads"], session)
     session.check()
+    if cohort is not None:
+        return execute_aggregation(request, session, torch, versions, output_root,
+                                   data_identity, model_files, cohort)
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         str(model_root), local_files_only=True, trust_remote_code=False, use_fast=True)
     require(tokenizer.pad_token_id == 2 and tokenizer.eos_token_id == 2, "MODEL_TOKENIZER_MISMATCH")
@@ -1913,6 +1927,34 @@ def execute_job(request, session):
     require(file_hash(model_root / "model.safetensors", profile["files"]["model.safetensors"])["sha256"]
             == profile["hashes"]["model.safetensors"],
             "MODEL_WEIGHTS_CHANGED_ON_DISK")
+    return finish_result(result, output_root, session)
+
+
+def execute_aggregation(request, session, torch, versions, output_root, data_identity, model_files, cohort):
+    # The fixed module performs weight arithmetic, not generation or optimizer training.
+    # It is bundled by the Rust supervisor, never imported from a peer's adapter files.
+    from volparossa_adapter_aggregation import aggregate, AggregationError
+    from safetensors.torch import load_file, save_file
+
+    try:
+        merged = aggregate(torch, load_file, save_file, [item[0] for item in cohort],
+                           output_root / "adapter", session.check, session.progress)
+    except AggregationError as error:
+        raise JobError(str(error)) from error
+    require(merged["input_files"] == [item[1] for item in cohort], "AGGREGATION_INPUT_CHANGED")
+    for root, original_files, _ in cohort:
+        require(all(file_hash(root / name, maximum=ADAPTER_FILES[name]) == metadata
+                    for name, metadata in original_files.items()), "AGGREGATION_INPUT_CHANGED")
+    checkpoint = prepare_adapter(str(output_root / "adapter"), output_root, owned_checkpoint=True)
+    artifacts = [{"relative_path": "adapter/" + name, **metadata}
+                 for name, metadata in sorted(checkpoint[1].items())]
+    result = {"version": VERSION, "id": request["id"], "kind": "result", "status": "ok",
+              "mode": "aggregate_adapter", "backend_versions": versions, "device": "cpu",
+              "threads": request["threads"], "model": {"id": MODEL_ID, "revision": MODEL_REVISION,
+              "files": model_files}, "dataset": data_identity, "updates_completed": 0,
+              "aggregation": merged, "artifacts": artifacts, "model_weights_loaded": False,
+              "better_answers_claimed": False, "network_policy_changed": False,
+              "distributed_training_claimed": False}
     return finish_result(result, output_root, session)
 
 

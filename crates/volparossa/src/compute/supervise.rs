@@ -310,7 +310,11 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
     );
     let updates = value.get("updates_completed").and_then(Value::as_u64);
     match request.mode {
-        Mode::Infer | Mode::PrivateInfer | Mode::PlanDocument | Mode::PlanTasks => {
+        Mode::Infer
+        | Mode::PrivateInfer
+        | Mode::PlanDocument
+        | Mode::PlanTasks
+        | Mode::AggregateAdapter => {
             ensure!(updates == Some(0), "compute_unrequested_training");
         }
         Mode::Train => {
@@ -329,6 +333,17 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
                 );
             }
         }
+    }
+    if request.mode == Mode::AggregateAdapter {
+        ensure!(
+            value["model_weights_loaded"] == false
+                && value["aggregation"]["algorithm"] == "coordinate-median-effective-lora-rank4-v1"
+                && value["aggregation"]["combined_modules"] == 60
+                && value["aggregation"]["input_files"]
+                    .as_array()
+                    .is_some_and(|inputs| inputs.len() == 3),
+            "compute_aggregation_result_scope"
+        );
     }
     if request.mode == Mode::PrivateInfer {
         ensure!(
@@ -483,6 +498,36 @@ fn check_input_adapter(value: &Value, options: &Options) -> Result<()> {
         );
         return Ok(());
     };
+    if options.mode == Mode::AggregateAdapter {
+        ensure!(
+            value.get("input_adapter").is_none(),
+            "compute_aggregation_not_applied"
+        );
+        let inputs = value["aggregation"]["input_files"]
+            .as_array()
+            .context("compute_aggregation_inputs")?;
+        ensure!(inputs.len() == 3, "compute_aggregation_inputs");
+        for (index, input) in inputs.iter().enumerate() {
+            ensure!(
+                input.as_object().is_some_and(|files| files.len() == 3),
+                "compute_aggregation_input_files"
+            );
+            for (name, maximum) in [
+                ("README.md", 16 * 1024),
+                ("adapter_config.json", 16 * 1024),
+                ("adapter_model.safetensors", 2 * 1024 * 1024),
+            ] {
+                let bytes = super::read_file(&root.join(index.to_string()).join(name), maximum)?;
+                ensure!(
+                    input[name]["bytes"].as_u64() == Some(bytes.len() as u64)
+                        && input[name]["sha256"].as_str()
+                            == Some(hex::encode(Sha256::digest(&bytes)).as_str()),
+                    "compute_aggregation_input_hash"
+                );
+            }
+        }
+        return Ok(());
+    }
     let input = &value["input_adapter"];
     ensure!(
         input["applied"] == true
@@ -935,6 +980,58 @@ mod tests {
 
     fn failure_reply(code: &str) -> Value {
         serde_json::json!({"version":1,"id":"abc","kind":"result","status":"error","code":code})
+    }
+
+    #[test]
+    fn aggregation_inputs_are_three_original_hash_sets_not_applied_model_parameters() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let mut inputs = Vec::new();
+        for index in 0..3 {
+            let directory = root.path().join(index.to_string());
+            std::fs::create_dir(&directory).unwrap();
+            let mut files = serde_json::Map::new();
+            for name in [
+                "README.md",
+                "adapter_config.json",
+                "adapter_model.safetensors",
+            ] {
+                let bytes = format!("inert fixture {index} {name}").into_bytes();
+                let path = directory.join(name);
+                std::fs::write(&path, &bytes).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+                files.insert(name.into(), serde_json::json!({"bytes":bytes.len(),"sha256":hex::encode(Sha256::digest(&bytes))}));
+            }
+            inputs.push(Value::Object(files));
+        }
+        let options = Options {
+            mode: Mode::AggregateAdapter,
+            model_profile: crate::compute::ModelProfile::default(),
+            runtime_root: root.path().join("unused-runtime"),
+            model_root: root.path().join("unused-model"),
+            adapter_root: Some(root.path().into()),
+            dataset: root.path().join("unused-input"),
+            output: root.path().join("unused-output"),
+            steps: 1,
+            threads: 2,
+            max_seconds: 600,
+            spare_capacity: true,
+            execute: true,
+        };
+        let report = serde_json::json!({"aggregation":{"input_files":inputs}});
+        check_input_adapter(&report, &options).unwrap();
+        let mut modified = report.clone();
+        modified["aggregation"]["input_files"][1]["README.md"]["sha256"] = "0".repeat(64).into();
+        assert!(check_input_adapter(&modified, &options).is_err());
+        let mut modified = report.clone();
+        modified["input_adapter"] = serde_json::json!({"applied":true});
+        assert!(check_input_adapter(&modified, &options).is_err());
+        let mut modified = report;
+        modified["aggregation"]["input_files"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(check_input_adapter(&modified, &options).is_err());
     }
 
     #[test]

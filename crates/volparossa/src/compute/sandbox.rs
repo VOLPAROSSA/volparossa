@@ -34,17 +34,23 @@ fn source_arguments(source: &str) -> Vec<String> {
 }
 
 fn worker_source() -> String {
-    // Both modules are fixed build inputs, not files supplied by a task or peer.
+    // These modules are fixed build inputs, not files supplied by a task or peer.
     // -I deliberately excludes cwd/PYTHONPATH; install this bundled module only
     // in this interpreter's module table, without creating a disk import path.
     let decoder = serde_json::json!(include_str!(
         "../../../../workers/volparossa-ml/task_graph_decoder.py"
     ));
+    let aggregation = serde_json::json!(include_str!(
+        "../../../../workers/volparossa-ml/adapter_aggregation.py"
+    ));
     format!(
         "import sys as _vp_sys, types as _vp_types\n\
          _vp_decoder = _vp_types.ModuleType('volparossa_task_graph_decoder')\n\
          exec({decoder}, _vp_decoder.__dict__)\n\
-         _vp_sys.modules['volparossa_task_graph_decoder'] = _vp_decoder\n{}",
+         _vp_sys.modules['volparossa_task_graph_decoder'] = _vp_decoder\n\
+         _vp_aggregation = _vp_types.ModuleType('volparossa_adapter_aggregation')\n\
+         exec({aggregation}, _vp_aggregation.__dict__)\n\
+         _vp_sys.modules['volparossa_adapter_aggregation'] = _vp_aggregation\n{}",
         include_str!("../../../../workers/volparossa-ml/worker.py")
     )
 }

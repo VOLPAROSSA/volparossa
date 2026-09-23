@@ -610,6 +610,46 @@ not averaging/merging weights, private offload, poisoning-resistant aggregation,
 planning or a complete continuously self-improving brain. Reusing a small validation set also
 does not establish general quality, diversity, or immunity to malicious updates.
 
+### Combining three public adapter contributions (runtime proof pending)
+
+`compute aggregate-adapters` implements an explicit, bounded next step beyond choosing one
+peer's adapter. Its owner-selected plan names one exact signed training dataset and three
+different trusted adapter publisher keys. Each original bundle and its dataset are fetched
+through the existing protected/cache path and verified independently; cache absence does not
+select a different source. Three keys do not prove three independent or honest parties.
+
+The fixed 135M worker combines **effective LoRA weight deltas**, not the A/B factors directly:
+per module it takes the coordinate-wise median of three `2 × B × A` deltas in FP64, projects
+the result to rank four with SVD, and saves finite FP32 factors. It records original input
+hashes and both rank-truncation and stored-output residuals. This is aggregation with **zero
+optimizer updates**, not a fabricated training run. Owner priority, read-only inputs, the
+existing two-thread resource limit and original worker deadlines remain in force.
+
+A separate, owner-pinned validation-only source then drives actual baseline and candidate
+inference. The candidate must improve the measured loss before a local `adapter.bundle` is
+created. No serving state, publication, whitelist or training-loop counter changes. Original
+inputs, signatures, selection, worker report and comparison remain in the new private directory;
+failure never reuses or overwrites an old attempt. This first version requires the same exact
+training dataset ID for all inputs, not mixed-source or private-data aggregation.
+
+The plan is JSON version 1 with `dataset: {publisher_key, name, revision, manifest_id}` and
+exactly three `adapters: [{publisher_key, name, min_revision}, ...]` entries. Publisher keys and
+manifest IDs are explicit lowercase hex. The validation selection uses the existing train-loop
+Source JSON format with an exact `manifest_id`.
+
+```sh
+volparossa --control-socket /OWNER/agent.sock compute aggregate-adapters \
+  --plan /OWNER/three-publishers.json --directory /OWNER/new-combination \
+  --runtime-root /OWNER/existing-runtime --model-root /OWNER/existing-model \
+  --cache /OWNER/existing-agent-cache --validation-source /OWNER/validation-source.json
+```
+
+Without `--execute` this only previews the plan. Optional `--adapter-root` selects the current
+local baseline instead of the pinned base model. Compilation and inert admission/dispatch
+checks pass; numerical/backend and real three-publisher execution evidence is still pending.
+Neither the median nor one validation set establishes poisoning resistance, general intelligence
+gain or completed B05. Autonomous adoption and signed aggregate publication remain to integrate.
+
 ### Using approved successors for new peer jobs
 
 For the supported 135M training/adapter profile, pass the same existing private `--serving-directory` to

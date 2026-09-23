@@ -46,6 +46,8 @@ pub(crate) enum Command {
     TrainCycle(Box<train_cycle::Options>),
     /// Autonomously cycle through explicitly selected public sources using spare capacity.
     TrainLoop(Box<train_loop::Options>),
+    /// Combine three explicitly trusted public adapters, then compare on pinned heldout data.
+    AggregateAdapters(Box<train_loop::aggregate::Options>),
     /// Explicit same-UID public-inference service using the fixed isolated worker.
     Serve(Box<broker::Serve>),
     /// Attach a local broker or perform a bounded protected peer job exchange.
@@ -67,6 +69,9 @@ pub(crate) enum Mode {
     #[value(skip)]
     #[serde(rename = "private_infer")]
     PrivateInfer,
+    #[value(skip)]
+    #[serde(rename = "aggregate_adapter")]
+    AggregateAdapter,
 }
 
 #[derive(Debug, Args)]
@@ -135,6 +140,9 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::PrivateTask(options) => return private_task::run(&options).await,
         Command::TrainCycle(options) => return train_cycle::run(&options, socket).await,
         Command::TrainLoop(options) => return train_loop::run(&options, socket).await,
+        Command::AggregateAdapters(options) => {
+            return train_loop::aggregate::run(&options, socket).await;
+        }
         Command::Serve(options) => return broker::run(*options).await,
         Command::Peer { command } => return peer::run(*command, socket).await,
     };
@@ -231,6 +239,12 @@ async fn execute(options: &Options, activity: watch::Receiver<bool>) -> Result<V
 
 impl Options {
     fn validate(&self) -> Result<()> {
+        if self.mode == Mode::AggregateAdapter {
+            ensure!(
+                self.adapter_root.is_some() && self.steps == 1 && self.spare_capacity,
+                "compute_aggregation_execution_scope"
+            );
+        }
         if self.mode == Mode::PrivateInfer {
             ensure!(
                 self.adapter_root.is_none() && self.steps == 1 && self.spare_capacity,
@@ -286,6 +300,9 @@ impl Options {
 // Shared by direct execution and Broker::start before a worker is created. Inference-only
 // profiles must pass their strict validator here as well as at the signed RPC boundary.
 fn validate_dataset(mode: Mode, has_adapter: bool, dataset: &[u8]) -> Result<()> {
+    if mode == Mode::AggregateAdapter {
+        ensure!(has_adapter, "compute_aggregation_cohort_required");
+    }
     if mode == Mode::PrivateInfer {
         ensure!(!has_adapter, "compute_private_adapter_forbidden");
         return private_task::validate_input(dataset);
@@ -498,6 +515,47 @@ fn check_message(bytes: &[u8], id: &str) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aggregation_requires_cohort_and_default_public_profile() {
+        let dataset = br#"{"version":1,"visibility":"public","license":"GPL-3.0-only","source_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
+        validate_profile_dataset(
+            Mode::AggregateAdapter,
+            true,
+            dataset,
+            ModelProfile::default(),
+        )
+        .unwrap();
+        assert!(
+            validate_profile_dataset(
+                Mode::AggregateAdapter,
+                false,
+                dataset,
+                ModelProfile::default()
+            )
+            .is_err()
+        );
+        let private = br#"{"version":1,"visibility":"private_local","license":"GPL-3.0-only","source_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
+        assert!(
+            validate_profile_dataset(
+                Mode::AggregateAdapter,
+                true,
+                private,
+                ModelProfile::default()
+            )
+            .is_err()
+        );
+        let inference = br#"{"version":2}"#;
+        assert!(
+            validate_profile_dataset(
+                Mode::AggregateAdapter,
+                true,
+                inference,
+                ModelProfile::default()
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn response_is_bounded_and_bound_to_exact_job() {

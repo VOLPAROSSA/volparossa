@@ -4,6 +4,17 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-23
 
+A new explicit `compute aggregate-adapters` candidate now connects three independently
+authorized public publisher channels to a real worker implementation and the existing held-out
+comparison gate. Original bundles/dataset signatures are retained; all three inputs must bind
+the same exact dataset. The isolated worker computes a coordinate median of effective LoRA
+deltas and a rank-four SVD projection, with no optimizer updates or base-model instantiation.
+It retains input/output hashes and measured reconstruction residuals. Only an actually approved
+baseline/candidate comparison can produce a local bundle; nothing is automatically served or
+published. Six focused Rust checks and 87 pure Python admission/dispatch checks pass. No backend
+or model ran on the development host, and real numerical/three-publisher VM proof is pending.
+This adds executable integration, not completed B05, general quality or poisoning resistance.
+
 The [complete-envelope policy run on `fb574fdb`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35855257313)
 **passes its narrow four-worker pipeline**. Two original assessments finish at 1,003 bytes /
 289 tokens; both opposite-peer reviews now finish at 1,025 bytes / 252 tokens, each at a real

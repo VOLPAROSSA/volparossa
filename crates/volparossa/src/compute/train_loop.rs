@@ -1,6 +1,7 @@
 //! Owner-enabled continuous public training, independent source selection and durable sharing.
 //! Every execution remains bounded; there is no hidden model download or private-cache intake.
 
+pub(super) mod aggregate;
 mod catalogs;
 mod evaluation;
 mod peer_evaluation;

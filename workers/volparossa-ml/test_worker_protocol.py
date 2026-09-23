@@ -341,6 +341,21 @@ class ModelProfileTests(unittest.TestCase):
 
 
 class WorkerProtocolTests(unittest.TestCase):
+    def test_aggregation_is_explicit_owner_controlled_and_not_large_profile_training(self):
+        value = dict(request(), mode="aggregate_adapter", adapter_root="/adapter",
+                     steps=1, owner_control=True)
+        self.assertEqual(WORKER.validate_request(value)["mode"], "aggregate_adapter")
+        WORKER.validate_dataset(dataset(), "aggregate_adapter")
+        for key in ("adapter_root", "owner_control", "steps"):
+            changed = dict(value)
+            changed.pop(key)
+            with self.assertRaises(WORKER.JobError):
+                WORKER.validate_request(changed)
+        for changes in ({"owner_control": False}, {"steps": 2},
+                        {"model_profile": WORKER.LARGE_MODEL_PROFILE}):
+            with self.assertRaises(WORKER.JobError):
+                WORKER.validate_request(dict(value, **changes))
+
     def test_public_planner_progress_contains_only_fixed_stages_and_bounded_counts(self):
         session = WORKER.Session(WORKER.validate_request(dict(request(), mode="plan_tasks")))
         stages = ("hash_before", "decoder_setup", "generation", "token_filter", "validation", "hash_after")
