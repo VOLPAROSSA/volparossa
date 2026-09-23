@@ -49,7 +49,7 @@ within the existing 4,096-byte escaped-text transport envelope. Quotes, individu
 the fourteen principles, source grounding, opposite review and uncertainty requirements remain
 unchanged, as do the 512-token and original worker deadlines. This does not admit oversized
 wire output, repair/truncate a complete judgment, prove the old rejected reviews valid or fix
-the semantic defects observed above. The new envelope still requires real four-stage evidence.
+the semantic defects observed above. The later run above proves the four-stage mechanics only.
 Fourteen focused Rust policy tests, thirteen pure worker tests and the independent fixture
 self-test pass. Historical enrollment-v1 questions remain byte-identical on signed-dataset
 reopen; new enrollment-v2 questions are unchanged. No model was run on the development host.
@@ -136,6 +136,20 @@ code also separates complete-syntax EOS rejection from an empty parser-prefix se
 retaining generated text. All 111 pure decoder/worker checks and three focused Rust diagnostic
 checks pass. This repairs the reproduced source bug; only a new real run can establish its
 effect on planning. No original failed run is relabeled as successful.
+
+The [run on `682bdc27`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35856466271)
+gets past the earlier empty-decoder failure, but consumes all 384 generation tokens without
+completing a graph. The original diagnostic binds one rejected attempt, 391 prompt tokens,
+1,642 output bytes by hash, and `TASK_GRAPH_GENERATION_LIMIT_REACHED` at 412.709 seconds.
+Its generated text is not retained, so no particular question or semantic cause is inferred.
+All 112 original files, worker isolation, cleanup and unchanged host bytes check out; no peer
+task or usable graph was enrolled. The next candidate asks for concise questions and bounds
+**generation only** to 192 UTF-8 bytes per question, leaving the full 512-byte admission format
+unchanged. The model still chooses the tasks and dependencies; nothing is repaired or supplied
+after generation. The schema, Unicode/prefix rules and reported generation limit agree, and
+the 384-token, 896-context-token and 600-second budgets are unchanged. Twelve Rust graph checks,
+36 pure decoder checks, 14 focused worker checks and the inert fixture check pass. This gives
+the full JSON more room within its budget; real completion and B03 remain unproved.
 
 The [policy run on `b80f0b02`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35849851694)
 now preserves the strict `PRINCIPLE_OUTPUT_REASONING` failure from both actual assessors.

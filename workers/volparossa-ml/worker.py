@@ -43,6 +43,7 @@ TASK_PLAN_PROMPT_TOKENS = 512
 TASK_PLAN_NEW_TOKENS = 384
 TASK_PLAN_QUESTION_TOKENS = 192
 TASK_PLAN_CONTEXT_TOKENS = 896
+TASK_GRAPH_GENERATION_QUESTION_BYTES = 192
 TASK_PLAN_MAX_ATTEMPTS = 4
 TASK_PLAN_STRATEGY = "model_questions_source_recovery_v4"
 TASK_GRAPH_STRATEGY = "model_task_graph_constrained_v3"
@@ -63,7 +64,8 @@ TASK_GRAPH_CORRECTIONS = {
     "GRAPH_FIELDS": "Use exactly the top-level fields version (integer 3) and tasks; no other fields.",
     "GRAPH_TASK_COUNT": "Choose between one and four tasks, in a JSON array.",
     "GRAPH_TASK_FIELDS": "Each task must be an object with exactly question and depends_on fields.",
-    "GRAPH_QUESTION_TEXT": "Use nonempty UTF-8 question strings without NUL, at most 512 UTF-8 bytes each.",
+    "GRAPH_QUESTION_TEXT": ("Use nonempty UTF-8 question strings without NUL, at most "
+                            f"{TASK_GRAPH_GENERATION_QUESTION_BYTES} UTF-8 bytes each for generation."),
     "GRAPH_QUESTION_FORM": "Phrase every task as a question ending with a question mark.",
     "GRAPH_GOAL_COPY": "Write narrower research questions; do not repeat the original goal verbatim.",
     "GRAPH_DUPLICATE_QUESTION": "Give each task a different question, ignoring only outer whitespace.",
@@ -1115,6 +1117,7 @@ def task_plan_diagnostic(session, strategy=TASK_PLAN_STRATEGY):
                                       "incomplete_attempt": False}
         if strategy == TASK_GRAPH_STRATEGY:
             session.planner_diagnostic["planner_decoder"] = TASK_GRAPH_DECODER
+            session.planner_diagnostic["generation_question_max_bytes"] = TASK_GRAPH_GENERATION_QUESTION_BYTES
     require(session.planner_diagnostic["strategy"] == strategy, "TASK_PLAN_STRATEGY_CHANGED")
     return session.planner_diagnostic
 
@@ -1271,7 +1274,9 @@ def task_graph_messages(dataset, feedback=None, attempt=1):
         "(an array of distinct earlier task indices, numbered from 0). "
         "An empty depends_on reads the original source; a nonempty depends_on reads those tasks' answers. "
         "Choose the task count and dependencies yourself. Questions must be narrower than the goal, "
-        "must not copy it, and must be at most 512 UTF-8 bytes. No tools, extra fields or examples.")
+        "must not copy it. Use one concise question per task, preferably 8–20 words, "
+        f"at most {TASK_GRAPH_GENERATION_QUESTION_BYTES} UTF-8 bytes. Omit copied context and explanations. "
+        f"Complete the entire JSON within {TASK_PLAN_NEW_TOKENS} tokens. No tools, extra fields or examples.")
     if dataset.get("plan_requirement") == DEPENDENT_ANALYSIS_REQUIREMENT:
         instruction += (" The owner requires dependent analysis: choose two to four tasks, with at least "
                         "one later question that uses an earlier task's result. You choose the questions "
@@ -1302,15 +1307,16 @@ def task_graph_candidate(raw, goal, plan_requirement=None):
 
 def create_task_graph_decoder(tokenizer, dataset, session):
     options = {"graph_goal": dataset["question"],
-               "graph_requirement": dataset.get("plan_requirement"), "ordered_json": True}
+               "graph_requirement": dataset.get("plan_requirement"), "ordered_json": True,
+               "graph_question_max_bytes": TASK_GRAPH_GENERATION_QUESTION_BYTES}
+    session.check()
+    module = sys.modules.get("volparossa_task_graph_decoder")
+    require(module is not None, "TASK_GRAPH_DECODER_UNAVAILABLE")
+    require(module.decoder_metadata() == TASK_GRAPH_DECODER, "TASK_GRAPH_DECODER_VERSION_MISMATCH")
+    schema = module.graph_schema(TASK_GRAPH_GENERATION_QUESTION_BYTES)
     if dataset.get("plan_requirement") == DEPENDENT_ANALYSIS_REQUIREMENT:
-        session.check()
-        module = sys.modules.get("volparossa_task_graph_decoder")
-        require(module is not None, "TASK_GRAPH_DECODER_UNAVAILABLE")
-        require(module.decoder_metadata() == TASK_GRAPH_DECODER, "TASK_GRAPH_DECODER_VERSION_MISMATCH")
-        schema = module.graph_schema()
         schema["properties"]["tasks"]["minItems"] = 2
-        options["schema"] = schema
+    options["schema"] = schema
     return create_constrained_decoder(tokenizer, session,
         lambda raw: task_graph_candidate(raw, dataset["question"], dataset.get("plan_requirement"))[1] is None,
         **options)
@@ -1479,6 +1485,7 @@ def execute_task_plan(request, session, tokenizer, torch, transformers, versions
         plan, raw, prompt_count, generated_count = plan_task_graph(model, tokenizer, torch, transformers, dataset, session, profile_name)
         planning = {"planner_stop_reason": "task_graph", "planner_strategy": TASK_GRAPH_STRATEGY,
                     "planner_decoder": TASK_GRAPH_DECODER,
+                    "generation_question_max_bytes": TASK_GRAPH_GENERATION_QUESTION_BYTES,
                     "planner_structure_generated_by": "model", "planner_task_count": len(plan["tasks"]),
                     "planner_dependency_count": sum(len(task["depends_on"]) for task in plan["tasks"])}
     else:

@@ -315,6 +315,40 @@ fn guarded_graph_preserves_selected_work_and_original_budget() {
 }
 
 #[test]
+fn compact_generation_policy_is_bound_without_rejecting_historical_long_questions() {
+    let input = input();
+    let bytes = serde_json::to_vec(&input).unwrap();
+    for length in [192, 193, 512] {
+        let raw = serde_json::to_vec(&json!({"version":3,"tasks":[
+            {"question":"x".repeat(length-1)+"?","depends_on":[]}
+        ]}))
+        .unwrap();
+        let mut value = report(&input, &bytes, &raw);
+        value["planner_strategy"] = GUARDED_GRAPH_STRATEGY.into();
+        value["planner_decoder"] = decoder();
+        validate_graph_report(&value, &input, &bytes, &raw).unwrap();
+        value["generation_question_max_bytes"] = json!(192);
+        assert_eq!(
+            validate_graph_report(&value, &input, &bytes, &raw).is_ok(),
+            length == 192
+        );
+        for invalid in [json!(null), json!(191), json!(512), json!("192")] {
+            value["generation_question_max_bytes"] = invalid;
+            assert!(validate_graph_report(&value, &input, &bytes, &raw).is_err());
+        }
+    }
+    let mut diagnostic = json!({"strategy":GUARDED_GRAPH_STRATEGY,
+        "planner_decoder":decoder(),"generation_question_max_bytes":192,
+        "attempts":[],"incomplete_attempt":true});
+    assert_eq!(
+        serde_json::to_value(PlanningDiagnostic::from_value(&diagnostic).unwrap()).unwrap(),
+        diagnostic
+    );
+    diagnostic["generation_question_max_bytes"] = json!(512);
+    assert!(PlanningDiagnostic::from_value(&diagnostic).is_err());
+}
+
+#[test]
 fn guarded_graph_rejects_trimmed_goal_copy_without_reinterpreting_old_reports() {
     let input = input();
     let bytes = serde_json::to_vec(&input).unwrap();

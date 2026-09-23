@@ -383,6 +383,86 @@ class DecoderTests(unittest.TestCase):
         self.assertIsNone(rules.advance("\\"))
         self.assertEqual((rules.text_bytes, rules.escape), (512, ""))
 
+    def test_generation_question_cap_keeps_unicode_and_forbidden_completion_rules(self):
+        cap = 192
+        opening = '{"version":3,"tasks":[{"question":"'
+        def walk(raw, goal="Main goal?", requirement=None):
+            rules = DECODER._GraphRules(goal, requirement, question_max_bytes=cap)
+            for character in raw:
+                following = rules.advance(character)
+                self.assertEqual(rules.allows(character), following is not None)
+                if following is None:
+                    return None
+                rules = following
+            return rules
+        for content in ("x" * (cap - 1) + "\\u003f", "x" * (cap - 5) + "\\ud83d\\ude42?",
+                        "x" * (cap - 4) + "?\\u2003", "é" * 95 + "x?"):
+            rules = walk(opening + content + '","depends_on":[]}]}')
+            self.assertIsNotNone(rules)
+            self.assertEqual(rules.phase, "done")
+            self.assertEqual(rules.questions, (json.loads('"' + content + '"').strip(),))
+        for content in ("x" * cap, "\\uDFF", "x" * (cap - 1) + "?\\u000",
+                        "x" * (cap - 1) + "\\u004", "x" * (cap - 4) + "\\ud83",
+                        "\\ud83d\\u004", "é" * 96):
+            self.assertIsNone(walk(opening + content), repr(content))
+        for kind in ("goal", "previous"):
+            head = "x" * (cap - 4)
+            forbidden = head + "漢?"
+            goal = forbidden if kind == "goal" else "Main goal?"
+            prefix = opening
+            if kind == "previous":
+                prefix += forbidden + '","depends_on":[]},{"question":"'
+            rules = walk(prefix + head, goal)
+            self.assertIsNotNone(rules)
+            for spelling in ("漢", "\\u6f22"):
+                self.assertIsNone(walk(prefix + head + spelling, goal))
+            alternative = walk(prefix + head + 'z?","depends_on":[]}]}', goal)
+            self.assertIsNotNone(alternative)
+            self.assertEqual(alternative.questions[-1], head + "z?")
+        # Escaping does not conceal a copied goal under the smaller generation cap.
+        self.assertIsNone(walk(opening + '\\u004dain goal?","depends_on":[]}]}'))
+        for count in (2, 3, 4):
+            tasks = [{"question": chr(65 + index) * (cap - 1) + "?", "depends_on": list(range(index))}
+                     for index in range(count)]
+            raw = json.dumps({"version": 3, "tasks": tasks}, separators=(",", ":"))
+            complete = walk(raw, requirement="dependent_analysis_v1")
+            self.assertIsNotNone(complete)
+            self.assertEqual(complete.phase, "done")
+            self.assertEqual(complete.questions, tuple(task["question"] for task in tasks))
+            self.assertTrue(complete.has_dependency)
+        alphabet = ''.join(chr(code) for code in range(128)) + 'é漢🙂\ud800\udfff'
+        for length in range(cap - 7, cap):
+            rules = walk(opening + "x" * length)
+            self.assertIsNotNone(rules)
+            for character in alphabet:
+                self.assertEqual(rules.allows(character), rules.advance(character) is not None)
+
+    def test_generation_cap_binds_schema_and_each_attempt_without_changing_budgets(self):
+        module = SimpleNamespace(CharacterLevelParserConfig=mock.Mock(return_value=object()), StringParsingState=StringState)
+        with mock.patch.object(DECODER, "_load_backend", return_value=(Parser, Data, Core, TokenList)), \
+                mock.patch.object(DECODER.importlib, "import_module", return_value=module):
+            value = DECODER.GraphDecoder(Tokenizer(), lambda: None, lambda _raw: True,
+                graph_goal="g" * 511 + "?", graph_requirement="dependent_analysis_v1",
+                graph_question_max_bytes=192)
+        self.assertEqual(value.schema["properties"]["tasks"]["items"]["properties"]["question"]["maxLength"], 192)
+        self.assertEqual(value.schema["properties"]["tasks"]["minItems"], 2)
+        self.assertEqual(value.schema["properties"]["tasks"]["maxItems"], 4)
+        self.assertEqual((value.prompt_limit, value.generation_limit, value.output_limit), (512, 384, 16384))
+        first, sibling = value.new_attempt([0], 384), value.new_attempt([0], 16)
+        self.assertEqual(first.enforcer.root_parser.rules.question_max_bytes, 192)
+        self.assertEqual(sibling.enforcer.root_parser.rules.question_max_bytes, 192)
+        self.assertIsNot(first.enforcer.root_parser.rules, sibling.enforcer.root_parser.rules)
+        for options in ({"graph_goal": "Main?", "graph_question_max_bytes": bad}
+                        for bad in (0, 513, True, None, "192")):
+            with mock.patch.object(DECODER, "_load_backend") as loading, \
+                    self.assertRaisesRegex(DECODER.DecoderError, '^TASK_GRAPH_DECODER_ATTEMPT_INVALID$'):
+                DECODER.GraphDecoder(Tokenizer(), lambda: None, lambda _raw: True, **options)
+            loading.assert_not_called()
+        for options in ({"graph_question_max_bytes": 192},
+                        {"graph_goal": "Main?", "graph_question_max_bytes": 192, "schema": DECODER.graph_schema()}):
+            with self.assertRaisesRegex(DECODER.DecoderError, '^TASK_GRAPH_DECODER_ATTEMPT_INVALID$'):
+                DECODER.GraphDecoder(Tokenizer(), lambda: None, lambda _raw: True, **options)
+
     def test_unicode_liveness_preserves_escaped_question_surrogate_and_whitespace_endings(self):
         opening = '{"version":3,"tasks":[{"question":"'
         endings = ("x" * 511 + "\\u003f", "x" * 507 + "\\ud83d\\ude42?",

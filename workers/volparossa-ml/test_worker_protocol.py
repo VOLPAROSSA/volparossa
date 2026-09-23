@@ -1116,10 +1116,21 @@ class WorkerProtocolTests(unittest.TestCase):
         self.assertIn("coordinator adds the exact original goal as a final question afterwards", messages[0]["content"])
         self.assertIn("Do not include that final question as a task, and do not answer it", messages[0]["content"])
         self.assertIn("Choose the task count and dependencies yourself", messages[0]["content"])
+        self.assertIn("preferably 8–20 words", messages[0]["content"])
+        self.assertIn("at most 192 UTF-8 bytes", messages[0]["content"])
+        self.assertIn("Complete the entire JSON within 384 tokens", messages[0]["content"])
         self.assertEqual(WORKER.TASK_GRAPH_STRATEGY, "model_task_graph_constrained_v3")
         self.assertEqual((WORKER.TASK_PLAN_PROMPT_TOKENS, WORKER.TASK_PLAN_NEW_TOKENS,
                           WORKER.TASK_PLAN_MAX_ATTEMPTS), (512, 384, 4))
         self.assertNotIn(original["tasks"][0]["question"], json.dumps(messages))
+        # Generation is deliberately more concise; complete original admission
+        # remains unchanged and never truncates an externally submitted question.
+        long_graph = task_graph_fixture(1)
+        long_graph["tasks"][0]["question"] = "x" * 511 + "?"
+        admitted = copy.deepcopy(long_graph)
+        self.assertIs(WORKER.validate_task_graph(long_graph, source["question"]), long_graph)
+        self.assertEqual(long_graph, admitted)
+        self.assertEqual(WORKER.TASK_PLAN_CONTEXT_TOKENS, 896)
 
     def test_task_graph_decoder_requires_embedded_module_and_never_falls_back(self):
         model, tokenizer, torch, transformers = task_planner_doubles(json.dumps(task_graph_fixture(1)))
@@ -1129,7 +1140,8 @@ class WorkerProtocolTests(unittest.TestCase):
                 WORKER.plan_task_graph(model, tokenizer, torch, transformers, dict(task_plan_input(), version=3), session)
         model.generate.assert_not_called()
         self.assertEqual(session.planner_diagnostic, dict(strategy=WORKER.TASK_GRAPH_STRATEGY,
-            attempts=[], incomplete_attempt=False, planner_decoder=WORKER.TASK_GRAPH_DECODER))
+            attempts=[], incomplete_attempt=False, planner_decoder=WORKER.TASK_GRAPH_DECODER,
+            generation_question_max_bytes=192))
 
     def test_dependent_analysis_input_is_explicit_graph_only_and_default_unchanged(self):
         source = dict(task_plan_input(), version=3)
@@ -1190,7 +1202,8 @@ class WorkerProtocolTests(unittest.TestCase):
         self.assertEqual(options, {"schema": {"properties": {"tasks": {"minItems": 2, "maxItems": 4}}},
                                   "graph_goal": source["question"],
                                   "graph_requirement": WORKER.DEPENDENT_ANALYSIS_REQUIREMENT,
-                                  "ordered_json": True})
+                                  "ordered_json": True, "graph_question_max_bytes": 192})
+        module.graph_schema.assert_called_once_with(192)
         self.assertEqual(WORKER.TASK_GRAPH_DECODER["schema_version"], 3)
         self.assertFalse(args[2](json.dumps(task_graph_fixture(2)).encode()))
         self.assertTrue(args[2](json.dumps(task_graph_fixture(3)).encode()))
@@ -1235,7 +1248,9 @@ class WorkerProtocolTests(unittest.TestCase):
             decoder = WORKER.create_task_graph_decoder(tokenizer, source, session)
             args = module.GraphDecoder.call_args.args
             self.assertEqual(module.GraphDecoder.call_args.kwargs,
-                             {"graph_goal": source["question"], "graph_requirement": None, "ordered_json": True})
+                             {"graph_goal": source["question"], "graph_requirement": None, "ordered_json": True,
+                              "graph_question_max_bytes": 192, "schema": module.graph_schema.return_value})
+            module.graph_schema.assert_called_once_with(192)
             self.assertIs(args[0], tokenizer)
             self.assertEqual(args[1], session.check)
             self.assertTrue(args[2](json.dumps(task_graph_fixture(1)).encode()))
@@ -1483,6 +1498,7 @@ class WorkerProtocolTests(unittest.TestCase):
                     self.assertEqual((result["planner_strategy"],result["planner_structure_generated_by"],result["planner_stop_reason"]),
                         ("model_task_graph_constrained_v3","model","task_graph"))
                     self.assertEqual(result["planner_decoder"], WORKER.TASK_GRAPH_DECODER)
+                    self.assertEqual(result["generation_question_max_bytes"], 192)
                     self.assertEqual((result["planner_task_count"],result["planner_dependency_count"]), (4,5))
                     self.assertEqual(result["model"], dict(id=profile["id"], revision=profile["revision"], files=files))
                     self.assertEqual(result["dataset"]["version"], 3)

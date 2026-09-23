@@ -58,7 +58,8 @@ def select_task_graph():
     SCOPE = ("One actual isolated pinned SmolLM2-360M owner generates an exact raw public task graph from "
         "a synthetic public routing case with explicit privacy facts and absent performance measurements, "
         "under the explicit dependent_analysis_v1 requirement, choosing at least two tasks and one internal dependency "
-        "within four attempts and 384 total generated tokens, with pinned JSON-constrained decoding. "
+        "within four attempts and 384 total generated tokens, with pinned JSON-constrained decoding and a "
+        "192-UTF8-byte generation limit per question (full admission remains 512 bytes). "
         "Local translation adds only stable IDs and an exact "
         "original-question terminal join over model-selected sinks. Actual protected peer jobs consume EOS-complete "
         "parents bound byte-for-byte to their original receipts; original-free completed offline resume preserves planner and receipts. "
@@ -508,11 +509,12 @@ def validate_failure(value,input_raw,source):
         and type(value["source_bytes"]) is int and value["source_bytes"]==len(source)
         and value["child_reaped"] is True and value["plan_enrolled"] is False,"uncorrelated or unsafe planner failure metadata")
     diagnostic=value["planner_diagnostic"]
-    fields={"strategy","attempts","incomplete_attempt"} | ({"planner_decoder"} if TASK_GRAPH else set())
+    fields={"strategy","attempts","incomplete_attempt"} | ({"planner_decoder","generation_question_max_bytes"} if TASK_GRAPH else set())
     require(type(diagnostic) is dict and diagnostic.keys()==fields
         and diagnostic["strategy"]==STRATEGY and type(diagnostic["incomplete_attempt"]) is bool,"invalid planner failure diagnostic")
     if TASK_GRAPH:
-        require(diagnostic["planner_decoder"]==DECODER,"unbound graph decoder diagnostic")
+        require(diagnostic["planner_decoder"]==DECODER and diagnostic["generation_question_max_bytes"]==192,
+            "unbound graph decoder diagnostic")
     accepted,total,_,_=(check_graph_attempts(diagnostic["attempts"]) if TASK_GRAPH else
         check_attempts(diagnostic["attempts"],goal=expected["question"]))
     # Accepted questions do not enroll a plan: later model-integrity or artifact
@@ -552,7 +554,10 @@ def check_planning(raw,source):
         and type(report["planner_generated_tokens"]) is int and 1<=report["planner_generated_tokens"]<=(384 if TASK_GRAPH else 383)
         and all(k not in report for k in ("outputs","baseline_evaluation","input_adapter")),"not an actual bounded pinned-model planner result")
     if TASK_GRAPH:
-        require(report.get("planner_decoder")==DECODER,"unbound actual graph decoder")
+        require(report.get("planner_decoder")==DECODER and report.get("generation_question_max_bytes")==192,
+            "unbound actual graph decoder")
+        require(all(len(task["question"].encode("utf-8"))<=192
+            for task in strict_json(raw["planner-artifact.json"])["tasks"]), "generated question budget differs")
         accepted,total,maximum,_=check_graph_attempts(report["planner_attempts"],raw["planner-artifact.json"])
         require(accepted==1 and "planner_question_stats" not in report
             and report["planner_task_count"]==len(plan["nodes"])-1
@@ -1046,6 +1051,7 @@ def graph_self_test():
         goal_only_planning=False,source_excerpt_complete=True,base_before=dict(parameters=1,sha256="a"*64),
         base_after=dict(parameters=1,sha256="a"*64),generation_limit_reached=False,model_answer_correctness_proven=False,
         planner_stop_reason="task_graph",planner_strategy=STRATEGY,planner_structure_generated_by="model",planner_decoder=DECODER,
+        generation_question_max_bytes=192,
         planner_prompt_tokens=128,planner_generated_tokens=144,planner_attempts=attempts,planner_task_count=3,planner_dependency_count=1,
         dataset=dict(version=3,sha256=sha(input_raw),bytes=len(input_raw),visibility="public",license="GPL-3.0-only",
             question_sha256=sha(QUESTION.encode()),source_sha256=sha(source),source_bytes=len(source),
@@ -1100,7 +1106,7 @@ def graph_self_test():
     input_raw=encoded(planning_input(source))
     failure=dict(version=1,operation="compute_public_task_planning_failure",request_id="a"*32,
         code="TASK_GRAPH_GENERATION_LIMIT",input_sha256=sha(input_raw),source_sha256=sha(source),source_bytes=len(source),
-        planner_diagnostic=dict(strategy=STRATEGY,planner_decoder=DECODER,attempts=[attempt(1,b'partial',384,accepted=False,
+        planner_diagnostic=dict(strategy=STRATEGY,planner_decoder=DECODER,generation_question_max_bytes=192,attempts=[attempt(1,b'partial',384,accepted=False,
             code="GENERATION_LIMIT",stop="token_limit")],incomplete_attempt=False),child_reaped=True,plan_enrolled=False)
     validate_failure(failure,input_raw,source)
     failure["planner_diagnostic"]["incomplete_attempt"]=True

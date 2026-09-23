@@ -105,6 +105,8 @@ pub(in crate::compute) struct GraphDiagnostic {
     incomplete_attempt: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     planner_decoder: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation_question_max_bytes: Option<usize>,
 }
 
 impl GraphDiagnostic {
@@ -112,6 +114,10 @@ impl GraphDiagnostic {
         check_shape(&value["attempts"], 0)?;
         let diagnostic: Self = serde_json::from_value(value.clone())?;
         validate_decoder(&diagnostic.strategy, value.get("planner_decoder"))?;
+        validate_generation_question_limit(
+            &diagnostic.strategy,
+            value.get("generation_question_max_bytes"),
+        )?;
         let summary = checked_attempts(&diagnostic.attempts, &diagnostic.strategy)?;
         if diagnostic.incomplete_attempt {
             ensure!(
@@ -121,6 +127,18 @@ impl GraphDiagnostic {
         }
         Ok(diagnostic)
     }
+}
+
+fn validate_generation_question_limit(strategy: &str, value: Option<&Value>) -> Result<()> {
+    // Historical reports remain readable without inventing a generation policy
+    // that their original worker did not claim. New execution requires this field.
+    ensure!(
+        value.is_none()
+            || (strategy == GUARDED_GRAPH_STRATEGY
+                && value == Some(&json!(super::GENERATED_GRAPH_QUESTION_BYTES))),
+        "compute_task_graph_generation_question_limit"
+    );
+    Ok(())
 }
 
 /// A pinned decoder declaration does not replace graph, source or budget checks.
@@ -259,6 +277,19 @@ pub(in crate::compute) fn validate_graph_report(
     );
     let graph = ModelTaskGraph::decode(artifact, &input.question)?;
     graph.validate_requirement(input)?;
+    validate_generation_question_limit(
+        report["planner_strategy"].as_str().unwrap_or_default(),
+        report.get("generation_question_max_bytes"),
+    )?;
+    if report.get("generation_question_max_bytes").is_some() {
+        ensure!(
+            graph
+                .tasks
+                .iter()
+                .all(|task| task.question.len() <= super::GENERATED_GRAPH_QUESTION_BYTES),
+            "compute_task_graph_generated_question_size"
+        );
+    }
     if report["planner_strategy"] == GUARDED_GRAPH_STRATEGY {
         ensure!(
             graph

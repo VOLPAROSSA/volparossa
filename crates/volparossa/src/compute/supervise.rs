@@ -270,6 +270,11 @@ fn check_task_plan_result(result: &Value, options: &Options) -> Result<()> {
         super::task_plan::MAX_ARTIFACT_BYTES,
     )?;
     if input.version == 3 {
+        ensure!(
+            result["generation_question_max_bytes"]
+                == super::task_plan::GENERATED_GRAPH_QUESTION_BYTES,
+            "compute_task_graph_generation_policy"
+        );
         super::task_plan::validate_graph_report(result, &input, &bytes, &artifact).map(|_| ())
     } else {
         super::task_plan::validate_report(result, &input, &bytes, &artifact).map(|_| ())

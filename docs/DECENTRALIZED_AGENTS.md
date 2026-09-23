@@ -1393,7 +1393,11 @@ Strategy `model_task_graph_constrained_v3` generates the whole JSON under one or
 512 prompt tokens, 384 generated tokens shared across at most four attempts. Each attempt can
 use the remaining total; rejected JSON/schema output consumes its real cost. Only an observed
 whole-JSON boundary or model EOS may complete an accepted proposal, including at the last
-budget token. The exact raw artifact, report and source are bound before enrollment and reused
+budget token. New generation asks for concise 8–20-word questions and enforces 192 UTF-8 bytes
+per question, so a four-task proposal has room for its complete structure. This generation-only
+limit is recorded as `generation_question_max_bytes`; full graph admission and historical
+questions still allow 512 bytes. It does not change task count/edge choices, truncate output,
+or guarantee completion for every tokenizer/language. The exact raw artifact, report and source are bound before enrollment and reused
 on resume without replanning. Existing peer-capacity accounting, source expiry, EOS parent
 requirements, cancellation and offline receipts remain in force. This candidate needs a live
 model-and-peer proof of actual selected dependencies and useful output; pure graph validation

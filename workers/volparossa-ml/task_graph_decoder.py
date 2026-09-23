@@ -49,15 +49,17 @@ def decoder_metadata():
             "dependencies": {"interegular": "0.3.3", "pydantic": "1.10.24"}}
 
 
-def graph_schema():
+def graph_schema(question_max_bytes=512):
     # LMFE's numeric enum path converts numbers to text correctly; its 0.11.3
     # numeric const path does not. No question/task/dependency is preselected.
+    if type(question_max_bytes) is not int or not 1 <= question_max_bytes <= 512:
+        raise DecoderError("TASK_GRAPH_DECODER_ATTEMPT_INVALID")
     return {"type": "object", "required": ["version", "tasks"], "additionalProperties": False,
             "properties": {"version": {"type": "integer", "enum": [3]},
                 "tasks": {"type": "array", "minItems": 1, "maxItems": 4, "items": {
                     "type": "object", "required": ["question", "depends_on"],
                     "additionalProperties": False, "properties": {
-                        "question": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "question": {"type": "string", "minLength": 1, "maxLength": question_max_bytes},
                         "depends_on": {"type": "array", "minItems": 0, "maxItems": 3,
                             "items": {"type": "integer", "enum": [0, 1, 2]}}}}}}}
 
@@ -320,7 +322,10 @@ class _UniquePrinciplesJsonParser:
 class _GraphRules:
     """Immutable prefix state for the one fixed graph schema, not a JSON repairer."""
 
-    def __init__(self, goal, requirement):
+    def __init__(self, goal, requirement, question_max_bytes=512):
+        if type(question_max_bytes) is not int or not 1 <= question_max_bytes <= 512:
+            raise DecoderError("TASK_GRAPH_DECODER_ATTEMPT_INVALID")
+        self.question_max_bytes = question_max_bytes
         self.goal, self.requirement = goal.strip(), requirement
         self.questions, self.parents = (), ()
         self.has_dependency = False
@@ -336,7 +341,7 @@ class _GraphRules:
                 and value not in self.questions and self.escape == "" and self.high_surrogate is None)
 
     def _text_can_finish(self, text, size):
-        if size < 511:
+        if size < self.question_max_bytes - 1:
             return True
         value = text.strip()
         if value and value.endswith("?") and value != self.goal and value not in self.questions:
@@ -344,13 +349,13 @@ class _GraphRules:
         # With one byte left, '?' is the only possible non-whitespace ending.
         # Do not admit a prefix whose only completion copies a forbidden question.
         value = (text + "?").strip()
-        return size == 511 and value != self.goal and value not in self.questions
+        return size == self.question_max_bytes - 1 and value != self.goal and value not in self.questions
 
     def _append_text(self, character):
         if character == "\0" or 0xD800 <= ord(character) <= 0xDFFF:
             return False
         size = self.text_bytes + len(character.encode("utf-8"))
-        if size > 512:
+        if size > self.question_max_bytes:
             return False
         self.text += character
         self.text_bytes = size
@@ -358,7 +363,7 @@ class _GraphRules:
         return self._text_can_finish(self.text, size)
 
     def _scalar_range_can_finish(self, low, high):
-        remaining = 512 - self.text_bytes
+        remaining = self.question_max_bytes - self.text_bytes
         # A scalar that leaves room can still be followed by a question mark.
         # Split the BMP around surrogate code units; NUL is never admissible.
         for first, last, width in ((1, 0x7f, 1), (0x80, 0x7ff, 2), (0x800, 0xd7ff, 3),
@@ -380,7 +385,7 @@ class _GraphRules:
         endings = "?\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
         for character in endings:
             if low <= ord(character) <= high and len(character.encode("utf-8")) == remaining:
-                if self._text_can_finish(self.text + character, 512):
+                if self._text_can_finish(self.text + character, self.question_max_bytes):
                     return True
         return False
 
@@ -426,7 +431,7 @@ class _GraphRules:
                 codepoint = 0x10000 + ((self.high_surrogate - 0xD800) << 10) + codepoint - 0xDC00
                 self.high_surrogate = None
             elif 0xD800 <= codepoint <= 0xDBFF:
-                if self.text_bytes + 4 > 512:
+                if self.text_bytes + 4 > self.question_max_bytes:
                     return False
                 self.high_surrogate = codepoint
                 return True
@@ -502,10 +507,10 @@ class _GraphRules:
         codepoint = ord(character)
         if codepoint < 0x20 or 0xD800 <= codepoint <= 0xDFFF:
             return False
-        if self.text_bytes <= 506:
+        if self.text_bytes <= self.question_max_bytes - 6:
             return True  # Even a four-byte scalar leaves two bytes for completion.
         size = self.text_bytes + len(character.encode("utf-8"))
-        return size <= 512 and self._text_can_finish(self.text + character, size)
+        return size <= self.question_max_bytes and self._text_can_finish(self.text + character, size)
 
 
 class _GraphJsonParser:
@@ -626,12 +631,15 @@ class GraphDecoder:
 
     def __init__(self, tokenizer, check, accepts_graph_bytes, *, schema=None,
                  prompt_limit=512, output_limit=16384, generation_limit=384,
-                 ordered_json=False, graph_goal=None, graph_requirement=None, unique_principles=None):
+                 ordered_json=False, graph_goal=None, graph_requirement=None, unique_principles=None,
+                 graph_question_max_bytes=512):
         # Only compiled worker code supplies this schema/limits, never a dataset.
         # Defaults preserve the original graph profile and historical contract.
         if (type(prompt_limit) is not int or not 1 <= prompt_limit <= 1024
                 or type(output_limit) is not int or not 1 <= output_limit <= 16384
                 or type(generation_limit) is not int or not 1 <= generation_limit <= 512
+                or type(graph_question_max_bytes) is not int or not 1 <= graph_question_max_bytes <= 512
+                or graph_goal is None and graph_question_max_bytes != 512
                 or type(ordered_json) is not bool
                 or schema is not None and type(schema) is not dict):
             raise DecoderError("TASK_GRAPH_DECODER_ATTEMPT_INVALID")
@@ -655,6 +663,7 @@ class GraphDecoder:
                 raise DecoderError("TASK_GRAPH_DECODER_ATTEMPT_INVALID")
             self.unique_principles = choices
         self.graph_goal, self.graph_requirement = graph_goal, graph_requirement
+        self.graph_question_max_bytes = graph_question_max_bytes
         if graph_goal is not None or graph_requirement is not None:
             try:
                 valid_goal = (type(graph_goal) is str and bool(graph_goal.strip()) and "\0" not in graph_goal
@@ -664,7 +673,7 @@ class GraphDecoder:
             if (not valid_goal or graph_requirement not in (None, "dependent_analysis_v1")
                     or (prompt_limit, output_limit, generation_limit) != (512, 16384, 384)):
                 raise DecoderError("TASK_GRAPH_DECODER_ATTEMPT_INVALID")
-            expected = graph_schema()
+            expected = graph_schema(graph_question_max_bytes)
             if graph_requirement:
                 expected["properties"]["tasks"]["minItems"] = 2
             if schema is None:
@@ -747,7 +756,8 @@ class GraphDecoder:
             if self.unique_principles is not None:
                 parser = _UniquePrinciplesJsonParser(parser, self.ordered_string_type, self.unique_principles)
             if self.graph_goal is not None:
-                parser = _GraphJsonParser(parser, _GraphRules(self.graph_goal, self.graph_requirement))
+                parser = _GraphJsonParser(parser, _GraphRules(self.graph_goal, self.graph_requirement,
+                                                            self.graph_question_max_bytes))
             enforcer = self.enforcer(self.data, parser)
         except Exception:
             raise DecoderError("TASK_GRAPH_DECODER_PARSER_FAILED") from None

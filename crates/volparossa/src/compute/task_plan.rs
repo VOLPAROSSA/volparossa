@@ -17,6 +17,7 @@ pub(super) const GRAPH_STRATEGY: &str = "model_task_graph_v1";
 pub(super) const CONSTRAINED_GRAPH_STRATEGY: &str = "model_task_graph_constrained_v2";
 pub(super) const GUARDED_GRAPH_STRATEGY: &str = "model_task_graph_constrained_v3";
 pub(super) const GRAPH_ARTIFACT_NAME: &str = "task-graph.json";
+pub(super) const GENERATED_GRAPH_QUESTION_BYTES: usize = 192;
 const MAX_INPUT_BYTES: usize = 16 * 1024;
 const MAX_EXCERPT_BYTES: usize = 1024;
 
