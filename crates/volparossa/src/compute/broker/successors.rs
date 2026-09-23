@@ -20,9 +20,25 @@ impl Broker {
         self.successor.as_ref().map_or_else(
             || {
                 self.options.serving_directory.is_none()
-                    || self.initial_base == InitialBase::NeverSelected
+                    || (self.initial_base == InitialBase::NeverSelected
+                        && self.options.serving_directory.as_ref().is_some_and(|root| {
+                            matches!(
+                                serving_snapshot::peek(root, &self.options.runtime_root),
+                                Ok(None)
+                            )
+                        }))
             },
-            |snapshot| snapshot.selection.expires_unix_seconds > time,
+            |snapshot| {
+                snapshot.selection.expires_unix_seconds > time
+                    && self.options.serving_directory.as_ref().is_some_and(|root| {
+                        serving_snapshot::admission_allowed(
+                            root,
+                            &self.options.runtime_root,
+                            &snapshot.selection,
+                        )
+                        .unwrap_or(false)
+                    })
+            },
         )
     }
 
@@ -68,6 +84,11 @@ impl Broker {
         // An expired pointer is not a never-selected directory, especially after a
         // restart. Keep an existing valid copy, but never fall back to the base.
         if selection.expires_unix_seconds <= time {
+            return;
+        }
+        if !serving_snapshot::admission_allowed(root, &self.options.runtime_root, &selection)
+            .unwrap_or(false)
+        {
             return;
         }
         if self

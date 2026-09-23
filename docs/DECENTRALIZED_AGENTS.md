@@ -1744,6 +1744,25 @@ unchanged host state. The fix and executor-discovery work are merged in PR #136.
 fixture-layout and import failures remain failed. This scoped recovery
 does not complete B07 or detect all poisoned models.
 
+The active-adapter recovery candidate extends this to a previously approved peer update whose
+local extracted files have changed. It requires the original signed bundle, source and successful
+comparison to remain intact; missing/unsafe files or changed evidence are not reclassified as
+proven model misconduct. The loop retains its immediate approved peer predecessor within the
+existing eight-round bound, or uses its exact approved local predecessor, and rechecks its
+original bytes and expiry before restoring training and serving. A durable local retirement
+record preserves the original approval and the observed difference across restart.
+
+If no valid approved predecessor remains, the loop stops and withdraws its current serving
+selection. A fixed-size owner-bound withdrawal record also stops new admissions against a
+broker's independent copy; old receipts and existing jobs retain their original bindings.
+After withdrawal, a broker may resume only with the exact current, nonwithdrawn approved
+selection, never an implicit base-model fallback or a renewed source lease. These mechanisms
+are local recovery, not publisher bans, semantic rogue-agent detection or network-wide erasure.
+The runtime compiles and its targeted tests pass, including interrupted-validation recovery and
+withdrawal during the broker's initial-base window. The new `agent-active-recovery` disposable
+scenario is being assembled to prove actual adoption, damage, rollback and continued useful
+work. Full B07 remains open.
+
 Network-wide quarantine/replacement follows the automatic decision protocol, with bounded
 evidence, expiry and re-evaluation. A peer cannot erase another user's files or repair their
 host; removal means withdrawing execution/serving authority and deleting only locally owned

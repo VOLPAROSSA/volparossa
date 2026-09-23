@@ -192,3 +192,82 @@ fn runtime_and_single_producer_authority_are_not_transferable() {
         b"not ours to remove"
     );
 }
+
+#[test]
+fn withdrawal_survives_restart_and_requires_an_exact_nonwithdrawn_replacement() {
+    let root = setup();
+    let at = root.path();
+    let published = at.join("published");
+    let runtime = at.join("runtime");
+    let publisher = Publisher::open(&published, &runtime, &"a".repeat(64)).unwrap();
+    let first = publisher
+        .publish(&at.join("adapter"), 100, &provenance(at, 1), 10)
+        .unwrap();
+    let original_pointer = fs::read(published.join("current.json")).unwrap();
+    publisher.withdraw_current().unwrap();
+    let first_withdrawal = fs::read(published.join("withdrawal.json")).unwrap();
+    publisher.withdraw_current().unwrap();
+    assert_eq!(
+        fs::read(published.join("withdrawal.json")).unwrap(),
+        first_withdrawal
+    );
+    assert_eq!(
+        fs::read(published.join("current.json")).unwrap(),
+        original_pointer
+    );
+    assert!(!admission_allowed(&published, &runtime, &first).unwrap());
+    drop(publisher);
+    let publisher = Publisher::open(&published, &runtime, &"a".repeat(64)).unwrap();
+    assert!(!admission_allowed(&published, &runtime, &first).unwrap());
+    assert!(
+        publisher
+            .publish(&at.join("adapter"), 100, &provenance(at, 1), 11)
+            .is_err()
+    );
+    let second = publisher
+        .publish(&at.join("adapter"), 90, &provenance(at, 2), 11)
+        .unwrap();
+    assert!(!admission_allowed(&published, &runtime, &first).unwrap());
+    assert!(admission_allowed(&published, &runtime, &second).unwrap());
+    assert_eq!(second.expires_unix_seconds, 90);
+    // Replacing the single withdrawal record must not reauthorize older copies.
+    publisher.withdraw_current().unwrap();
+    let third = publisher
+        .publish(&at.join("adapter"), 80, &provenance(at, 3), 12)
+        .unwrap();
+    for old in [&first, &second] {
+        assert!(!admission_allowed(&published, &runtime, old).unwrap());
+    }
+    assert!(admission_allowed(&published, &runtime, &third).unwrap());
+    assert_eq!(fs::read_dir(&published).unwrap().count(), 6);
+}
+
+#[test]
+fn withdrawal_rejects_malformed_or_foreign_owner_metadata() {
+    let root = setup();
+    let at = root.path();
+    let published = at.join("published");
+    let runtime = at.join("runtime");
+    let publisher = Publisher::open(&published, &runtime, &"a".repeat(64)).unwrap();
+    let selected = publisher
+        .publish(&at.join("adapter"), 100, &provenance(at, 1), 10)
+        .unwrap();
+    publisher.withdraw_current().unwrap();
+    let path = published.join("withdrawal.json");
+    let original: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for field in ["version", "owner", "selection_id"] {
+        let mut altered = original.clone();
+        match field {
+            "version" => altered[field] = json!(2),
+            "owner" => altered[field]["producer_id"] = json!("b".repeat(64)),
+            _ => altered[field] = json!("invalid"),
+        }
+        fs::write(&path, serde_json::to_vec(&altered).unwrap()).unwrap();
+        assert!(admission_allowed(&published, &runtime, &selected).is_err());
+        assert!(
+            publisher
+                .publish(&at.join("adapter"), 100, &provenance(at, 2), 11)
+                .is_err()
+        );
+    }
+}

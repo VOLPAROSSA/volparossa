@@ -418,7 +418,10 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         &activity.receiver,
     )
     .await?;
-    peer_updates::restore(args, &store, &mut state, &selection)?;
+    checked_integrity_recovery(
+        peer_updates::restore(args, &store, &mut state, &selection),
+        &mut serving,
+    )?;
     if let Some(sequence) = state
         .cycles
         .iter()
@@ -427,9 +430,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     {
         finish_cycle(args, &store, &mut state, sequence, &activity.receiver).await?;
     }
-    if let Some(serving) = &mut serving {
-        serving.reconcile(args, &store, &state)?;
-    }
+    reconcile_selected_adapter(args, &store, &mut state, &mut serving)?;
     let mut budget = Budget::new();
     let mut attempts = 0_u64;
     let mut publication_drain = None;
@@ -449,12 +450,14 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             {
                 pool = source_pool(&plan, &state);
             }
+            // Local integrity recovery is not driven by a failed retrieval or a
+            // comparison result. It precedes selecting either job's warmstart.
+            reconcile_selected_adapter(args, &store, &mut state, &mut serving)?;
             peer_updates::tick(args, socket, &pool, &store, &mut state, &activity.receiver).await?;
-            if let Some(serving) = &mut serving {
-                serving.reconcile(args, &store, &state)?;
-            }
+            reconcile_selected_adapter(args, &store, &mut state, &mut serving)?;
             if let Some(source) = state.select(&pool, args.repeat_sources, now()?) {
                 if make_room(&store, &mut state)? {
+                    reconcile_selected_adapter(args, &store, &mut state, &mut serving)?;
                     attempt(
                         args,
                         socket,
@@ -465,9 +468,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
                         &activity.receiver,
                     )
                     .await?;
-                    if let Some(serving) = &mut serving {
-                        serving.reconcile(args, &store, &state)?;
-                    }
+                    reconcile_selected_adapter(args, &store, &mut state, &mut serving)?;
                     attempts = attempts
                         .checked_add(1)
                         .context("train_loop_attempt_counter")?;
@@ -492,6 +493,41 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         "private_data_supported":false,"full_b05_claimed":false})
     );
     Ok(())
+}
+
+fn reconcile_selected_adapter(
+    args: &Options,
+    store: &Store,
+    state: &mut State,
+    serving: &mut Option<serving::Serving>,
+) -> Result<()> {
+    let recovered =
+        checked_integrity_recovery(peer_updates::recover_active(args, store, state), serving)?;
+    if let Some(serving) = serving {
+        serving.reconcile(args, store, state)?;
+    }
+    if recovered {
+        // A local byte-integrity failure does not establish publisher malice.
+        eprintln!("compute loop_event=active_adapter_predecessor_restored");
+    }
+    Ok(())
+}
+
+fn checked_integrity_recovery<T>(
+    result: Result<T>,
+    serving: &mut Option<serving::Serving>,
+) -> Result<T> {
+    if result
+        .as_ref()
+        .err()
+        .is_some_and(peer_updates::recovery_blocked)
+    {
+        if let Some(serving) = serving {
+            serving.withdraw()?;
+        }
+        eprintln!("compute loop_event=active_adapter_recovery_blocked");
+    }
+    result
 }
 
 fn restore_source_pool(base: &Plan, state: &mut State) -> Result<Plan> {

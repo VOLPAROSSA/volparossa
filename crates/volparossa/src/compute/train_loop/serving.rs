@@ -61,9 +61,17 @@ impl Serving {
         self.last = Some(key);
         Ok(())
     }
+
+    /// Called only after typed, proven active-adapter corruption without a valid
+    /// approved predecessor. Busy, I/O uncertainty and quality differences do not revoke.
+    pub(super) fn withdraw(&mut self) -> Result<()> {
+        self.publisher.withdraw_current()?;
+        self.last = None;
+        Ok(())
+    }
 }
 
-fn local_candidate(
+pub(super) fn local_candidate(
     store: &Store,
     state: &State,
 ) -> Result<Option<(std::path::PathBuf, u64, Value)>> {

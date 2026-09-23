@@ -168,6 +168,7 @@ fn quarantine_consumes_only_exact_revision_and_preserves_accepted_warmstart() {
         imported_at: None,
         baseline: None,
         snapshot: Some(Snapshot::new()),
+        retirement: None,
     };
     let mut pending = accepted.clone();
     pending.sequence = 2;

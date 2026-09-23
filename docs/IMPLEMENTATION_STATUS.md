@@ -2,7 +2,18 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-22
+Last updated: 2026-09-23
+
+The [graph run on `c9b784a1`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35673084743)
+confirms real worker startup with the split-argument bootstrap, but **fails at `compute_deadline`**
+after the baseline phase. Its original 600-second owner budget is unchanged; the artifact retains
+neither generation progress nor the precise decoder subphase. No graph or peer work is proved.
+The concurrent [policy run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35673089855)
+observes both real workers reaching baseline, then `TASK_GRAPH_DECODER_NO_ALLOWED_TOKENS`, with
+546/549 seconds still left at their failed receipts. No output or token count survives, so a
+prefix failure cannot be distinguished from complete-output rejection. Original source-bound
+reviews of all 110 graph and 126 policy files verify cleanup and unchanged host bytes; they
+do not convert either run into a success. B03 and B06 remain incomplete.
 
 The [graph-v3 run on `2a565506`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35671611820)
 **fails before the worker starts**: the original enrollment error is `compute_sandbox_spawn`
@@ -809,6 +820,23 @@ normally into `main` at `08d510d1`. The earlier
 [run on `3240e278`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35602912581)
 remain failed at their fixture-layout guards, before invalid-candidate construction. Neither
 proved quarantine, despite successful cleanup and unchanged-host evidence. B07 remains open.
+
+The new active-adapter recovery candidate addresses a different boundary: a previously approved
+peer adapter's extracted local bytes change while its original signed publication and successful
+comparison remain intact. The loop restores only its exact, still-valid approved predecessor,
+retains a durable local retirement record and keeps the immediate peer predecessor within the
+existing eight-round retention bound. Training and serving reconcile to that predecessor without
+extending source expiry or execution budgets. If none can be verified, a typed fail-closed path
+withdraws the owner selection and stops new broker admissions, including from independent cached
+copies. Existing jobs/receipts are not rewritten. Generic worker failures, network errors, busy
+devices and quality differences do not trigger this retirement or prove publisher malice.
+Interrupted local validation bound to the damaged peer is retained as a failed attempt rather
+than retried against retired bytes or reinterpreted against the restored model. Explicit
+withdrawal also blocks the initial-base admission window before the next scheduled broker copy.
+The affected training-loop, snapshot and broker paths have 60 passing targeted Rust tests,
+including the two interrupted-validation checks and initial-base withdrawal check; scoped strict
+CLI Clippy passes. The new real-model `agent-active-recovery` disposable scenario is being built;
+automatic active recovery and full B07 are not yet claimed as live-proven.
 
 Public-document synthesis: `compute peer document --synthesize` chains
 real peer inference over the checked fragment answers until one answer remains. A separate

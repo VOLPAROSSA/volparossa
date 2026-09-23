@@ -44,6 +44,15 @@ struct Record {
     provenance: Value,
 }
 
+/// Local owner withdrawal, not evidence of misconduct by a model publisher.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct Withdrawal {
+    version: u32,
+    owner: Owner,
+    selection_id: String,
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct Selection {
     pub(super) id: String,
@@ -172,6 +181,11 @@ impl Publisher {
             provenance: provenance.clone(),
         };
         let selected = Selection::from_record(record)?;
+        ensure!(
+            withdrawal(&self.root, &self.owner)?
+                .is_none_or(|record| record.selection_id != selected.id),
+            "serving_snapshot_withdrawn"
+        );
         let current = current(&self.root)?;
         if let Some(previous) = &current {
             ensure!(
@@ -208,26 +222,59 @@ impl Publisher {
         Ok(selected)
     }
 
+    /// Preserve the original pointer/expiry but stop admission, including from
+    /// brokers holding independent copies. Repeating the same withdrawal is inert.
+    pub(super) fn withdraw_current(&self) -> Result<()> {
+        let Some(selected) = current(&self.root)? else {
+            return Ok(());
+        };
+        ensure!(
+            selected.record.owner == self.owner,
+            "serving_snapshot_owner_changed"
+        );
+        let record = Withdrawal {
+            version: 1,
+            owner: self.owner.clone(),
+            selection_id: selected.id,
+        };
+        if withdrawal(&self.root, &self.owner)?.as_ref() == Some(&record) {
+            return Ok(());
+        }
+        self.clean_staging()?;
+        write_new(&self.root.join("withdrawal.pending"), &encoded(&record)?)?;
+        fs::rename(
+            self.root.join("withdrawal.pending"),
+            self.root.join("withdrawal.json"),
+        )?;
+        File::open(&self.root)?.sync_all()?;
+        Ok(())
+    }
+
     fn clean_staging(&self) -> Result<()> {
         let staging = self.root.join("staging");
         if present(&staging)? {
             remove_copy(&staging)?;
         }
-        let pending = self.root.join("current.pending");
-        if present(&pending)? {
-            read_file(&pending, RECORD_LIMIT)?;
-            fs::remove_file(pending)?;
+        for name in ["current.pending", "withdrawal.pending"] {
+            let pending = self.root.join(name);
+            if present(&pending)? {
+                read_file(&pending, RECORD_LIMIT)?;
+                fs::remove_file(pending)?;
+            }
         }
         Ok(())
     }
 
     fn prune_except(&self, keep: Option<&str>) -> Result<()> {
         let entries = fs::read_dir(&self.root)?.collect::<std::io::Result<Vec<_>>>()?;
-        ensure!(entries.len() <= 6, "serving_snapshot_storage_bound");
+        ensure!(entries.len() <= 7, "serving_snapshot_storage_bound");
         for entry in entries {
             let name = entry.file_name();
             let name = name.to_str().context("serving_snapshot_entry")?;
-            if matches!(name, "owner.json" | ".publisher.lock" | "current.json") {
+            if matches!(
+                name,
+                "owner.json" | ".publisher.lock" | "current.json" | "withdrawal.json"
+            ) {
                 continue;
             }
             let id = name
@@ -240,6 +287,36 @@ impl Publisher {
         }
         Ok(())
     }
+}
+
+/// Once the owner withdraws a selection, stale owned copies cannot keep taking
+/// new work. A checked replacement (including an approved predecessor) must be
+/// the actual current selection. One fixed-size record suffices: overwriting it
+/// cannot reauthorize an older broker copy, and no original expiry is extended.
+pub(super) fn admission_allowed(root: &Path, runtime: &Path, selected: &Selection) -> Result<bool> {
+    private_directory(root)?;
+    ensure!(
+        selected.record.owner == owner(runtime, &selected.record.owner.producer_id)?,
+        "serving_snapshot_runtime_changed"
+    );
+    let Some(withdrawn) = withdrawal(root, &selected.record.owner)? else {
+        return Ok(true);
+    };
+    Ok(withdrawn.selection_id != selected.id
+        && peek(root, runtime)?.is_some_and(|current| current.id == selected.id))
+}
+
+fn withdrawal(root: &Path, expected: &Owner) -> Result<Option<Withdrawal>> {
+    let path = root.join("withdrawal.json");
+    if !present(&path)? {
+        return Ok(None);
+    }
+    let record: Withdrawal = serde_json::from_slice(&read_file(&path, RECORD_LIMIT)?)?;
+    ensure!(
+        record.version == 1 && record.owner == *expected && is_hex(&record.selection_id, 64),
+        "serving_snapshot_withdrawal_binding"
+    );
+    Ok(Some(record))
 }
 
 /// Metadata only. Expired selections remain distinguishable from a never-selected

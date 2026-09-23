@@ -99,6 +99,87 @@ fn add_cycle(store: &Store, state: &mut State, sequence: u64, phase: Phase) {
 }
 
 #[test]
+fn restored_selection_reconciles_serving_and_next_training_without_renewing_authority() {
+    // Exercise the runtime boundary after the durable recovery module selected a
+    // predecessor. These are inert files, not training or model-quality evidence.
+    let (root, mut args) = fixture();
+    args.serving_directory = Some(root.path().join("serving"));
+    for directory in [&args.runtime_root, args.serving_directory.as_ref().unwrap()] {
+        fs::DirBuilder::new().mode(0o700).create(directory).unwrap();
+    }
+    let (plan, enrollment) = enrollment(&args).unwrap();
+    let store = Store::open(&args.directory, &enrollment, false).unwrap();
+    let mut serving = serving::Serving::open(&args, &enrollment).unwrap();
+    let mut state = State::new(plan.sources.len());
+    add_cycle(&store, &mut state, 1, Phase::Complete);
+    add_cycle(&store, &mut state, 2, Phase::Complete);
+    state.completed = 2;
+    state.promoted = 2;
+    state.latest = Some(2);
+    reconcile_selected_adapter(&args, &store, &mut state, &mut serving).unwrap();
+    let directory = args.serving_directory.as_ref().unwrap();
+    let newer = super::super::serving_snapshot::peek(directory, &args.runtime_root)
+        .unwrap()
+        .unwrap();
+    let (predecessor, original_expiry, provenance) = {
+        state.latest = Some(1);
+        serving::local_candidate(&store, &state).unwrap().unwrap()
+    };
+    let before = serde_json::to_value(&state).unwrap();
+    reconcile_selected_adapter(&args, &store, &mut state, &mut serving).unwrap();
+    assert_eq!(serde_json::to_value(&state).unwrap(), before);
+    let restored = super::super::serving_snapshot::peek(directory, &args.runtime_root)
+        .unwrap()
+        .unwrap();
+    assert_ne!(restored.id, newer.id);
+    assert_eq!(restored.expires_unix_seconds, original_expiry);
+    assert_eq!(
+        serde_json::to_value(&restored.adapter_files).unwrap(),
+        provenance["adapter_files"]
+    );
+    let current = current_adapter(&args, &store, &state).unwrap();
+    assert_eq!(current.adapter_root.as_ref(), Some(&predecessor));
+    let next = cycle_options(
+        &args,
+        &plan.sources[0],
+        store.cycle_path(state.next_sequence).unwrap(),
+        Some(3),
+        current.adapter_root,
+    )
+    .unwrap();
+    assert_eq!(next.adapter_root, Some(predecessor));
+    assert_eq!(
+        (next.steps, next.threads, next.max_seconds),
+        (args.steps, args.threads, args.max_seconds)
+    );
+    assert!(next.spare_capacity);
+    assert_eq!(next.dataset_name, plan.sources[0].name);
+    // Reconciliation is idempotent, not a fresh selection lease or training cycle.
+    let retained = fs::read(directory.join("current.json")).unwrap();
+    reconcile_selected_adapter(&args, &store, &mut state, &mut serving).unwrap();
+    assert_eq!(fs::read(directory.join("current.json")).unwrap(), retained);
+    assert_eq!(serde_json::to_value(&state).unwrap(), before);
+    let entries = || {
+        fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>()
+    };
+    let original_entries = entries();
+    for code in [
+        "peer_update_import_busy",
+        "compute_deadline",
+        "source_unavailable",
+    ] {
+        assert!(
+            checked_integrity_recovery::<()>(Err(anyhow::anyhow!(code)), &mut serving).is_err()
+        );
+        assert_eq!(fs::read(directory.join("current.json")).unwrap(), retained);
+        assert_eq!(entries(), original_entries);
+    }
+}
+
+#[test]
 fn round_robin_source_choice_and_retry_timing_do_not_consult_cache_inventory() {
     let (_root, args) = fixture();
     let (plan, selected) = enrollment(&args).unwrap();
