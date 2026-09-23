@@ -53,9 +53,7 @@ fn private_root() -> tempfile::TempDir {
 }
 
 fn fresh_nonce() -> [u8; 32] {
-    let mut nonce = [0; 32];
-    OsRng.fill_bytes(&mut nonce);
-    nonce
+    std::array::from_fn(|_| OsRng.next_u32().to_le_bytes()[0])
 }
 
 fn authority(at: u64) -> (Vec<SigningKey>, PolicyContext, Vec<u8>) {
