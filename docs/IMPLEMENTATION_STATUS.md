@@ -188,6 +188,22 @@ cleanup/unchanged-host checks pass separately; they do not establish the combine
 Earlier assessment/follower proofs do not establish this composition, reliable semantic
 judgment, automatic authority membership or B06 completion. A follow-up retains a bounded
 local preflight diagnostic without remote text, new retries or a changed operation deadline.
+
+The separately instrumented [exact `2a431c1` trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35916895065)
+also **fails overall**, but reaches all four original assessments/reviews: their observed
+workers, signed receipts, source/quote bindings and isolation pass the source-exact first
+gate. The cycle then stops in its authority round with
+`policy_round_request_custody_retry_bound`: 64 retained incomplete request-deposit batches.
+The fixture exited before exporting those per-provider deposit records, so their underlying
+handoff failure cannot be attributed to contention or transport from these originals. The
+192,423 captured frames, cleanup and unchanged host state pass separately; no quorum,
+automatic activation, follower restart or full-cycle success is established. The earlier
+preflight failure did not recur, but is not relabelled or retrospectively explained. The
+360M model outputs still misidentify principles and include unfinished prose; their retained
+decision is `undetermined`, not evidence of reliable legal or ethical judgment.
+A fixture-only follow-up retains bounded original cycle/round status and failed deposit
+receipts before returning that same nonzero failure. It neither increases retries/deadlines
+nor claims to repair the as-yet unattributed custody failure.
 The combined fixture requires the original source, four worker receipts, exact bundle, three
 authority owners and one original cycle deadline; its inert checker passes 91 rejection cases.
 All 31 focused assessment/round/cycle CLI tests and strict CLI Clippy pass. Five transfer tests
