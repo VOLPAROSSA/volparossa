@@ -326,12 +326,13 @@ def observe_peers(work,launcher):
             require(item["alive_before_and_after"],"planned worker disappeared during observation")
             write(record(work,f"worker-{len(observed):04d}"),item)
             observed.append(item);seen.add(item["handle"]["binding"]["job_id"])
-        if TASK_GRAPH and observed:
-            # All actually observed workers are retained for ordinary cleanup;
-            # serial graphs do not assert simultaneous independent execution.
-            write(work/"agent-jobs-observation.json",dict(workers=[w["worker"] for w in observed],
-                simultaneous_execution_claimed=False))
         time.sleep(0.025)
+    if TASK_GRAPH and observed:
+        # Individual observations were retained exclusively as they happened.
+        # Publish their cleanup snapshot once, after polling, including partial
+        # coverage before the completeness check. Never replace an earlier run.
+        write(work/"agent-jobs-observation.json",dict(workers=[w["worker"] for w in observed],
+            simultaneous_execution_claimed=False))
     require(not JOBS["alive"](owner) and (overlap or TASK_GRAPH) and {w["graph_node"] for w in observed}==set(range(leaf_count+1)),
         "not every model-derived graph node executed or owner exceeded bound")
     write(record(work,"observation"),dict(owner=owner,owner_reaped=True,workers=observed))
@@ -589,6 +590,37 @@ def check_planning(raw,source):
     return plan,summary
 
 
+def checked_parent_sha256(original,parents):
+    # synthesis::Answer and inference_output::Generation serialize in Rust
+    # struct order, not the sorted-key order used by generic JSON Values.
+    # Compare decoded receipt-derived values AND the exact expected original
+    # encoding, then hash original bytes. Never rewrite retained parents.json.
+    require(strict_json(original)==parents,"generated parent results changed")
+    fields=("text","provider_key","job_id","report_sha256","package_manifest_id","model_fingerprint",
+        "output_index","source_start","source_end","generated_tokens","text_truncated")
+    ordered=[]
+    require(type(parents) is list,"parent list expected")
+    for parent in parents:
+        require(type(parent) is dict and set(fields)<=parent.keys()
+            and parent.keys()<=set(fields)|{"generation"},"unexpected parent fields")
+        value={key:parent[key] for key in fields}
+        generation=parent.get("generation")
+        if generation is not None:
+            fixed=("version","stop_reason","max_new_tokens")
+            require(type(generation) is dict and set(fixed)<=generation.keys()
+                and generation.keys()<=set(fixed)|{"model_profile","output_contract"},"unexpected generation fields")
+            metadata={key:generation[key] for key in fixed}
+            if generation.get("model_profile","smollm2-135m-v1")!="smollm2-135m-v1":
+                metadata["model_profile"]=generation["model_profile"]
+            if generation.get("output_contract") is not None:
+                metadata["output_contract"]=generation["output_contract"]
+            value["generation"]=metadata
+        ordered.append(value)
+    expected=json.dumps(ordered,ensure_ascii=False,allow_nan=False,separators=(",",":")).encode()
+    require(original==expected,"parent bytes differ from original Rust struct encoding")
+    return sha(original)
+
+
 def reduction(raw,prefix,parents,question,authority,source_manifest,layout,executed,response_bytes,node_index,force):
     load=lambda name:json.loads(raw[name]);result=load(prefix+"/result.json");levels=result["synthesis"]["levels"]
     require((1 if force or len(parents)>1 else 0)<=len(levels)<=16,"derived instruction or reduction was omitted")
@@ -601,10 +633,10 @@ def reduction(raw,prefix,parents,question,authority,source_manifest,layout,execu
         for group_index,group in enumerate(level["groups"]):
             group_prefix=prefix+f"/synthesis/level-{number:02d}-group-{group_index:04d}"
             previous=parents[group_index*64:group_index*64+64]
-            require(raw[group_prefix+"/parents.json"]==encoded(previous),"generated parent results changed")
+            original_parent_sha256=checked_parent_sha256(raw[group_prefix+"/parents.json"],previous)
             saved=load(group_prefix+"/group.json")
             require(saved["version"]==1 and saved["level"]==number and saved["parent_offset"]==group_index*64
-                and saved["parents_sha256"]==sha(encoded(previous)) and saved["source_manifest_id"]==authority["source_manifest_id"]
+                and saved["parents_sha256"]==original_parent_sha256 and saved["source_manifest_id"]==authority["source_manifest_id"]
                 and authority["selected_at_unix_seconds"]<=saved["created_at_unix_seconds"]<authority["expires_at_unix_seconds"],"model-derived publication renewed source authority")
             combined,rows=SYNTH["expected_rows"](previous,load(group_prefix+"/document-plan.json")["parts"],question,group_index*64)
             GRAPH["planner"](raw,group_prefix+"/",combined,question,True,model_profile=MODEL_PROFILE)
@@ -872,9 +904,42 @@ def profile_self_test():
             else:raise AssertionError("incomplete/wrong-profile or escaped-oversized parent accepted")
 
 
+def parent_bytes_self_test():
+    # Literal struct-order oracle, independent of the receipt dict's key order.
+    # Includes UTF-8, JSON escaping, legacy omission, both model profiles and
+    # the optional generation contract; no worker/model execution.
+    prefix=(b'[{"text":"caf\xc3\xa9 \\"quoted\\"\\n",'
+        b'"provider_key":"peer","job_id":"job","report_sha256":"report",'
+        b'"package_manifest_id":"manifest","model_fingerprint":"model",'
+        b'"output_index":0,"source_start":0,"source_end":7,"generated_tokens":1,"text_truncated":false')
+    generations=(b'',b',"generation":{"version":1,"stop_reason":"eos","max_new_tokens":64}',
+        b',"generation":{"version":1,"stop_reason":"eos","max_new_tokens":256,"model_profile":"smollm2-360m-v1"}',
+        b',"generation":{"version":3,"stop_reason":"json_boundary","max_new_tokens":512,"model_profile":"smollm2-360m-v1","output_contract":"principle_assessment_v1"}')
+    for generation in generations:
+        original=prefix+generation+b'}]'
+        decoded=strict_json(original)
+        parents=[dict(reversed(list(decoded[0].items())))]
+        if "generation" in parents[0]:
+            parents[0]["generation"]=dict(reversed(list(parents[0]["generation"].items())))
+        assert checked_parent_sha256(original,parents)==sha(original)
+        assert encoded(parents)!=original
+        for invalid in (encoded(parents),original+b'\n',original.replace(b'"output_index":0',b'"output_index":0.0'),
+            original.replace(b'"text_truncated":false',b'"text_truncated":0'),
+            original.replace(b'"source_end":7',b'"source_end":7,"source_end":7'),
+            original.replace(b'caf\xc3\xa9',b'changed')):
+            try:checked_parent_sha256(invalid,parents)
+            except ValueError:pass
+            else:raise AssertionError("modified/non-Rust original parent bytes accepted")
+        changed=copy.deepcopy(parents);changed[0]["job_id"]="other"
+        try:checked_parent_sha256(original,changed)
+        except ValueError:pass
+        else:raise AssertionError("parent bytes detached from original receipt accepted")
+
+
 def self_test():
     # Inert schema/graph reconstruction only, not fabricated model or peer execution.
     profile_self_test()
+    parent_bytes_self_test()
     intro=b"# VOLPAROSSA\n\nPublic introduction.\n\n"
     assert public_intro(intro+b"[Network](#network)\n")==intro
     for original in (intro,b"wrong\n\n[Network](",intro.rstrip()+b"[Network](",b"# VOLPAROSSA\n"+b"x"*1024+b"\n\n[Network]("):
@@ -1008,10 +1073,69 @@ def self_test():
     print("source-grounded model-planning v4 proposal, exact goal-copy rejection, recovery accounting and failure export controls PASS; no tokenizer/model/network executed")
 
 
+def peer_observation_self_test():
+    # Entirely inert process/file doubles: repeated polling must not recreate
+    # the exclusive cleanup snapshot or lose original per-worker handle hashes.
+    from unittest import mock
+    work=Path("/opt/va.inert");root=root_path(work);aggregate=work/"agent-jobs-observation.json"
+    paths=[root/f"node-{n:04d}/package-0000/work/package-0000/attempt-0000/job-0.json" for n in range(5)]
+    handles={path:dict(provider_key="provider",binding=dict(job_id=f"job-{n}",row_indices=[0],
+        dataset_sha256=f"dataset-{n}")) for n,path in enumerate(paths)}
+    workers=[dict(worker=dict(pid=100+n),owned_processes=[dict(pid=100+n)]) for n in range(5)]
+    files={work/"agent-jobs-layout.json":dict(provider_nodes=["relay4"],provider_keys=dict(relay4="provider")),
+        root/"graph-plan.json":dict(nodes=[{} for _ in range(5)]),**handles}
+    expected_hashes={path:dict(bytes=len(encoded(value)),sha256=sha(encoded(value))) for path,value in handles.items()}
+    for available,existing in ((5,False),(4,False),(5,True)):
+        tick=[0];clock=[0];stored={};writes=[]
+        sentinel=b"original observation, never replaced"
+        if existing:stored[aggregate]=sentinel
+        def exclusive(path,value):
+            if path in stored:raise FileExistsError(str(path))
+            stored[path]=encoded(value);writes.append(path)
+        def glob(path,pattern):
+            assert path==root
+            if "synthesis" in pattern:return []
+            # Initial empty poll, then one worker, an unchanged poll, and later
+            # serial workers plus a final unchanged poll before owner exit.
+            return paths[:min(max(tick[0]-1,1) if tick[0] else 0,available)]
+        def alive(identity):return tick[0]<8 if identity=={"pid":42} else True
+        def nano():clock[0]+=1;return clock[0]
+        with mock.patch.dict(JOBS,guest_work=lambda _:None,identity=lambda pid:dict(pid=pid),
+                broker_pid=lambda _:7,alive=alive,
+                worker_snapshot=lambda _work,_node,_broker,dataset:copy.deepcopy(workers[int(dataset.rsplit("-",1)[1])]),
+                file_hash=lambda path,_maximum:copy.deepcopy(expected_hashes[path])), \
+            mock.patch.dict(globals(),TASK_GRAPH=True,read=lambda path:copy.deepcopy(files[path]),write=exclusive), \
+            mock.patch.object(Path,"glob",glob), \
+            mock.patch.object(time,"monotonic",lambda:float(tick[0])), \
+            mock.patch.object(time,"monotonic_ns",nano), \
+            mock.patch.object(time,"sleep",lambda _:tick.__setitem__(0,tick[0]+1)):
+            try:observe_peers(work,42)
+            except FileExistsError:
+                assert existing and stored[aggregate]==sentinel
+            except ValueError as error:
+                assert available==4 and str(error)=="not every model-derived graph node executed or owner exceeded bound"
+            else:assert available==5 and not existing
+        expected=[record(work,f"worker-{n:04d}") for n in range(available)]
+        assert writes[:available]==expected and len(set(writes))==len(writes)
+        for n,path in enumerate(expected):
+            item=strict_json(stored[path])
+            assert item["handle"]==handles[paths[n]] and item["handle_file"]==expected_hashes[paths[n]]
+            assert item["worker"]==workers[n] and item["alive_before_and_after"] is True
+        if not existing:
+            assert writes.count(aggregate)==1 and strict_json(stored[aggregate])==dict(
+                workers=workers[:available],simultaneous_execution_claimed=False)
+        final=record(work,"observation")
+        assert (final in stored)==(available==5 and not existing)
+        if final in stored:
+            assert strict_json(stored[final])["workers"]==[strict_json(stored[path]) for path in expected]
+
+
 def graph_self_test():
+    parent_bytes_self_test()
     # Pure schema, exact-byte retention and accounting. No generated task is
     # supplied to the live planner by this test or the execution helper.
     profile_self_test()
+    peer_observation_self_test()
     source=GRAPH_SOURCE
     selected=planning_input(source)
     assert selected["version"]==3 and selected["plan_requirement"]==PLAN_REQUIREMENT

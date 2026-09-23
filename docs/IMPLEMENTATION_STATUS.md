@@ -170,6 +170,21 @@ the 384-token, 896-context-token and 600-second budgets are unchanged. Twelve Ru
 36 pure decoder checks, 14 focused worker checks and the inert fixture check pass. This gives
 the full JSON more room within its budget; real completion and B03 remain unproved.
 
+The [compact-generation run on `d3a86b56`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35859759653)
+now produces a complete original 808-byte graph in 213 generated tokens / 198.290 seconds.
+Four model-selected tasks and dependencies are translated into five nodes including the
+original-question terminal join. The retained result records five completed EOS answers.
+The overall run still fails: the fixture writes its exclusive aggregate worker-observation
+file again on the next polling iteration, raising `FileExistsError`. Only the first two live
+worker observations survive, so full observation and original-free offline replay remain
+unproved. The correction writes that aggregate once when observation ends, preserving each
+original worker record. The dependency reader also compared Rust's fixed field order with a
+key-sorted reserialization; it now binds the actual canonical parent bytes and their hashes.
+Both inert fixture modes pass. The corrected reader validates the five jobs against all 114
+retained original raw files; that retrospective check does not replace the missing live gates.
+The actual questions and answers also contain incorrect routing
+claims; executable task cooperation is not sound decomposition or answer quality. B03 stays open.
+
 The [policy run on `b80f0b02`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35849851694)
 now preserves the strict `PRINCIPLE_OUTPUT_REASONING` failure from both actual assessors.
 Both reached a parsed response but no accepted judgment, cross-review or portable bundle;
