@@ -81,7 +81,7 @@ PROTOCOL_ERRORS = frozenset(("busy", "invalid_request", "handshake_required", "n
 PROCESS_STATES = {b"R": "running", b"S": "sleeping", b"D": "disk_sleep", b"Z": "zombie",
                   b"T": "stopped", b"t": "tracing_stop", b"X": "dead", b"x": "dead",
                   b"I": "idle", b"P": "parked", b"W": "waking"}
-LIFETIME_POINTS = frozenset(("first_result_frame_byte", "cancel_terminal_frame_byte", "disconnect_cleanup"))
+LIFETIME_POINTS = frozenset(("first_result_frame_byte", "cancel_terminal_frame_byte", "disconnect_cleanup", "browser_completion"))
 
 
 def safe_failure(error):
@@ -406,15 +406,20 @@ def check_report(value, revision):
             and value["exported_answer_is_authorized_synthetic_test_data"] is True
             and value["raw_private_input_exported"] is False and value["raw_worker_report_exported"] is False,
             "private fixture scope or completion differs")
+    check_answer(value["answer"], value["test_canary"])
+    check_report_common(value, "first_result_frame_byte")
+
+
+def check_report_common(value, boundary_point):
+    require(boundary_point in ("first_result_frame_byte", "browser_completion"), "unknown result boundary")
     check_provision(value["provision"])
     TRAIN["check_isolation"](value["isolation"])
     check_snapshot(value["snapshot"])
-    check_answer(value["answer"], value["test_canary"])
     require(value["on_disk_model_before"] == value["on_disk_model_after"] == MODEL["model"]["base_weights"],
             "actual pinned model changed")
     require(value["public_rejection"] == dict(error="compute_public_data_required", exit_nonzero=True,
             stdout_empty=True, output_absent=True, runtime_lease_absent=True), "private input reached public execution")
-    require(value["result_boundary"] == dict(observation_point="first_result_frame_byte", ephemeral_children=0,
+    require(value["result_boundary"] == dict(observation_point=boundary_point, ephemeral_children=0,
             original=value["snapshot"]["original"], observed_worker_lifetimes_ended=True)
             and value["original_after"] == value["snapshot"]["original"] and value["runtime_lock_released"] is True,
             "private snapshot lifetime or original input preservation differs")
@@ -441,7 +446,7 @@ def check_bundle(path, revision):
                 == value["host_state"][f"{when}_sha256"], "original guest state differs")
 
 
-def execute(output, revision):
+def execute(output, revision, browser_proof=False):
     TRAIN["guest_guard"]()
     require(output == Path("/home/vpci/alpha-output") and re.fullmatch(r"[0-9a-f]{40}", revision), "wrong exact guest run")
     provision, jobs = Path("/home/vpci/private-ml-provision"), Path("/home/vpci/private-ml-jobs")
@@ -455,8 +460,22 @@ def execute(output, revision):
         full_b04_claimed=False, confidential_remote_execution_claimed=False,
         exported_answer_is_authorized_synthetic_test_data=True, raw_private_input_exported=False,
         raw_worker_report_exported=False, phase="provision")
+    browser_module, browser = None, None
+    report_name = NAME
+    if browser_proof:
+        browser_module = runpy.run_path(str(HERE / "agent-private-task-browser.py"))
+        browser = browser_module["BrowserFixture"](globals())
+        report_name = browser_module["NAME"]
+        result.update(report_kind="volparossa-agent-private-browser", proof_version=1,
+                      scope=browser_module["SCOPE"], raw_model_answer_exported=False)
+        del result["exported_answer_is_authorized_synthetic_test_data"]
     process, observer, members, fallback, clients = None, None, [], False, []
     try:
+        if browser is not None:
+            result["phase"] = "private-browser-provision"
+            browser.provision(output, result)
+            browser.preflight(output, result)
+        result["phase"] = "provision"
         with (output / f"{NAME}-provision.log").open("w") as log:
             subprocess.run([sys.executable, "-B", str(TRAIN["ML"] / "provision.py"), "--execute", "--yes",
                 "--disposable-guest", "--model-profile", PROFILE, "--root", str(provision),
@@ -587,23 +606,30 @@ def execute(output, revision):
 
             result["phase"] = "private-service-infer-and-observe"
             diagnostics_offset = (jobs / "private.stderr").stat().st_size
-            stream, caps = connect_service(socket_path, process)
-            clients.append(stream)
-            require(caps == service["capabilities"], "capabilities changed after cancellation")
-            deadline = time.monotonic() + 610
-            request_id = send_request(stream, dict(type="submit", question=private_input["question"], context=private_input["context"]))
-            service_response(stream, request_id, "admitted", time.monotonic() + 5)
-            result["isolation"], result["snapshot"] = observed(output, "inference")
-            result["phase"] = "private-service-inference-terminal-cleanup"
-            final, result["result_boundary"] = service_response(stream, request_id, "result", deadline,
-                lambda: at_result(work_parent, original, initial, result["isolation"],
-                                  diagnostic=result.setdefault("lifetime_observations", {})))
-            result["answer"] = final["result"]
-            stream.close()
-            # Preserve actual incomplete output honestly for diagnosis, never as PASS.
-            write(output / f"{NAME}-answer.json", result["answer"])
+            if browser is not None:
+                browser.infer(output, revision, socket_path, work_parent, process, canary, observed, result)
+                # The browser separately observes decoded-result-before-panel-render. This
+                # second core observation is explicitly later, not the v2 first-byte boundary.
+                result["result_boundary"] = at_result(work_parent, original, initial, result["isolation"],
+                    "browser_completion", diagnostic=result.setdefault("lifetime_observations", {}))
+            else:
+                stream, caps = connect_service(socket_path, process)
+                clients.append(stream)
+                require(caps == service["capabilities"], "capabilities changed after cancellation")
+                deadline = time.monotonic() + 610
+                request_id = send_request(stream, dict(type="submit", question=private_input["question"], context=private_input["context"]))
+                service_response(stream, request_id, "admitted", time.monotonic() + 5)
+                result["isolation"], result["snapshot"] = observed(output, "inference")
+                result["phase"] = "private-service-inference-terminal-cleanup"
+                final, result["result_boundary"] = service_response(stream, request_id, "result", deadline,
+                    lambda: at_result(work_parent, original, initial, result["isolation"],
+                                      diagnostic=result.setdefault("lifetime_observations", {})))
+                result["answer"] = final["result"]
+                stream.close()
+                # Preserve actual incomplete output honestly for diagnosis, never as PASS.
+                write(output / f"{NAME}-answer.json", result["answer"])
+                check_answer(result["answer"], canary)
             write(output / f"{NAME}-result_boundary.json", result["result_boundary"])
-            check_answer(result["answer"], canary)
             service["one_eos_job"] = True
             result["owner_controls"] = owner_controls((jobs / "private.stderr").read_bytes()[diagnostics_offset:])
             write(output / f"{NAME}-owner_controls.json", result["owner_controls"])
@@ -656,6 +682,10 @@ def execute(output, revision):
                     require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid(), "private cleanup root changed")
                     shutil.rmtree(owned)
         remaining += sum(p.exists() for p in (provision, jobs))
+        if browser is not None:
+            result["browser_cleanup"] = browser.cleanup()
+            remaining += result["browser_cleanup"]["remaining_owned_objects"]
+            fallback |= result["browser_cleanup"]["fallback_signals_used"]
         result["cleanup"] = dict(complete=remaining == 0, remaining_owned_objects=remaining,
             guest_model_and_job_roots_removed=not provision.exists() and not jobs.exists(),
             observed_worker_lifetimes_ended=not any(TRAIN["alive"](p) for p in members), fallback_signals_used=fallback)
@@ -667,12 +697,15 @@ def execute(output, revision):
         result["success"] = "observed_blocker" not in result and remaining == 0 and not fallback and before == after
         if result["success"]:
             try:
-                check_report(result, revision)
+                if browser_module is not None:
+                    browser_module["check_report"](result, revision, globals())
+                else:
+                    check_report(result, revision)
                 result["phase"] = "complete"
             except (ValueError, KeyError, TypeError):
                 result["success"] = False
                 result["observed_blocker"] = "PROOF_BINDING_FAILED"
-        write(output / f"{NAME}-smoke.json", result)
+        write(output / f"{report_name}-smoke.json", result)
     return 0 if result["success"] else 1
 
 
@@ -835,18 +868,30 @@ def main():
     if sys.argv[1:] == ["self-test"]:
         self_test()
         return 0
-    if len(sys.argv) == 4 and sys.argv[1] == "execute":
+    if len(sys.argv) == 4 and sys.argv[1] in ("execute", "execute-browser"):
         def interrupted(_signal, _frame):
             raise InterruptedError("private fixture interrupted")
         signal.signal(signal.SIGTERM, interrupted)
         signal.signal(signal.SIGHUP, interrupted)
-        return execute(Path(sys.argv[2]), sys.argv[3])
+        return execute(Path(sys.argv[2]), sys.argv[3], sys.argv[1] == "execute-browser")
     if len(sys.argv) == 7 and sys.argv[1] == "observe":
         return observe_diagnosed(int(sys.argv[2]), *(Path(x) for x in sys.argv[3:]))
     if len(sys.argv) == 4 and sys.argv[1] == "report":
         check_bundle(Path(sys.argv[2]), sys.argv[3])
         print("actual local-private synthetic Q/A report PASS; no confidential remote claim")
         return 0
+    if len(sys.argv) == 4 and sys.argv[1] == "report-browser":
+        browser = runpy.run_path(str(HERE / "agent-private-task-browser.py"))
+        browser["check_bundle"](Path(sys.argv[2]), sys.argv[3], globals())
+        print("combined actual ESR sidebar/private-service/pinned-model proof PASS; no Firefox 157 build claim")
+        return 0
+    if len(sys.argv) == 5 and sys.argv[1] == "failure-browser":
+        browser = runpy.run_path(str(HERE / "agent-private-task-browser.py"))
+        write(Path(sys.argv[2]) / f"{browser['NAME']}-smoke.json", dict(report_kind="volparossa-agent-private-browser",
+            proof_version=1, source_revision=sys.argv[3], success=False, scope=browser["SCOPE"], phase=sys.argv[4],
+            observed_blocker="GUEST_PHASE_INCOMPLETE", full_b04_claimed=False,
+            confidential_remote_execution_claimed=False, raw_model_answer_exported=False))
+        return 1
     if len(sys.argv) == 5 and sys.argv[1] == "failure":
         write(Path(sys.argv[2]) / f"{NAME}-smoke.json", dict(report_kind="volparossa-agent-private-task",
             proof_version=2, source_revision=sys.argv[3], success=False, scope=SCOPE, phase=sys.argv[4],

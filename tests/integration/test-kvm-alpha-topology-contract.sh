@@ -174,6 +174,50 @@ with tempfile.TemporaryDirectory(prefix='volparossa-private-export-') as directo
     assert captured['success'] is False and captured['cleanup']['verified'] is False
 PYTHON_PRIVATE_EXPORT
 
+# The browser scenario is separate from the original first-byte v2 proof. It keeps
+# model/control/cleanup checks and exports only exact sanitized panel provenance.
+"$HOST" --preview --scenario agent-private-browser | grep -F 'Private-browser:' >/dev/null
+sh "$HERE/agent-private-task-smoke.sh" --preview --browser | grep -F 'no system Firefox installation' >/dev/null
+grep -F 'exec sh tests/integration/agent-private-task-smoke.sh --execute --yes --expected-commit "$expected_commit" --browser' "$HOST" >/dev/null
+grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-private-browser'" "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-private-task-smoke.py report-browser "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
+python3 -B "$HERE/agent-private-task-browser.py" self-test
+python3 -B - "$HOST" <<'PYTHON_PRIVATE_BROWSER_EXPORT'
+from pathlib import Path
+import json
+import sys
+import tempfile
+
+text = Path(sys.argv[1]).read_text()
+driver = text.split("<<'GUEST_DRIVER_SCRIPT'\n", 1)[1].split('\nGUEST_DRIVER_SCRIPT', 1)[0]
+assert driver.index('if [ "$scenario" = agent-private-browser ]; then') < driver.index('printf \'%s  volparossa-mpquic\\n\'')
+code = text.split("<<'GUEST_DIAGNOSTICS_PYTHON'\n", 1)[1].split('\nGUEST_DIAGNOSTICS_PYTHON', 1)[0]
+module = dict(__name__='private_browser_fixture_contract')
+exec(compile(code, 'private_browser_fixture_diagnostics', 'exec'), module)
+with tempfile.TemporaryDirectory(prefix='volparossa-private-browser-export-') as directory:
+    base = Path(directory)
+    home = base / 'home'; published = home / 'alpha-output'
+    published.mkdir(parents=True)
+    safe = ('agent-private-browser-smoke.json', 'agent-private-browser-panel.json',
+            'agent-private-browser-preflight.json', 'agent-private-browser-startup-only.log',
+            'agent-private-browser-provision.json', 'agent-private-task-provision.json',
+            'agent-private-task-isolation.json', 'agent-private-task-snapshot.json',
+            'agent-private-task-owner_controls.json', 'agent-private-task-provision.log',
+            'agent-private-task-result_boundary.json', 'agent-private-task-private_service.json')
+    unsafe = ('agent-private-task-answer.json', 'agent-private-browser-answer.json',
+              'agent-private-browser-input.json', 'agent-private-browser-firefox.log',
+              'agent-private-browser-profile.json', 'agent-private-browser-arbitrary.json')
+    for name in safe + unsafe:
+        (published / name).write_text('{}')
+    archive = module['collect'](home, base / 'opt', 'a' * 40, 'agent-private-browser', 1,
+                                cgroups=base / 'cgroups', proc=base / 'proc')
+    captured = json.loads((archive.parent / 'vm-incomplete.json').read_text())
+    names = {entry['file'] for entry in captured['diagnostics']['files']}
+    assert {f'published/{name}' for name in safe} <= names
+    assert not {f'published/{name}' for name in unsafe} & names
+print('Private-browser exact source/runtime and privacy export contract PASS; no browser/model executed')
+PYTHON_PRIVATE_BROWSER_EXPORT
+
 [ -f "$WORKFLOW" ] && [ ! -L "$WORKFLOW" ]
 grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'private-storage-peer'" "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/private-storage-peer-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null

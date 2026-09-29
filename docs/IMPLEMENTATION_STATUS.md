@@ -22,9 +22,12 @@ The default-extension bundle is integrated by
 uBlock Origin, Decentraleyes and Adaptive Tab Bar Color install signed and active in the
 isolated ESR 140.16.0 runtime, and disabling/removing them survives restart. Twelve offline
 checks and unchanged privacy-default checks pass; this is not a Firefox 157 source-build proof.
-Daemon attachment, browser-scoped kill switch (requested off by default), cache integration
-and the private-compute sidebar remain unfinished. Core defaults for other consumers are
-not weakened by the requested browser availability fallback.
+The [combined browser/core run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36614266330)
+now passes: the real ESR sidebar renders one synthetic EOS answer from the actual private
+360M worker after observed cleanup. This is not the Firefox 157 source build or native provider
+selector. Daemon network attachment, browser-scoped kill switch (requested off by default)
+and cache integration remain unfinished. Core defaults for other consumers are not weakened
+by the requested browser availability fallback.
 
 [Signal integration](https://github.com/VOLPAROSSA/volparossa-chat/pull/1) now has a pinned
 Desktop/libsignal source baseline and explicit device/session/backup contracts, not a
@@ -1208,6 +1211,131 @@ proof above remains evidence only for that historical source and stdout boundary
 relabeled as IPC evidence. B04, confidential offload and browser-UI integration remain open.
 See [service usage](DECENTRALIZED_AGENTS.md#application-local-private-compute-ipc) and the
 [local wire contract](../crates/volparossa/src/compute/private_serve/WIRE.md).
+
+Original combined browser proof candidate (2026-09-29): the explicit `agent-private-browser` VM scenario
+pins browser integration source `68bec6de8d39321f810419ad254dd2e7e2ad66a1` and Debian ESR
+140.16.0, then submits the final private question through the actual Gecko sidebar and this
+same private service/model. It retains real Cancel/Disconnect checks and uses a separate
+decoded-result-before-panel-render cleanup boundary; the original v2 first-frame-byte proof
+is unchanged. Source pins, pure report checks and the static KVM/export contract pass.
+Combined live execution was initially pending; the later source-exact pass is recorded below.
+This is not a Firefox 157 build, native provider-selector
+integration, general answer-quality evidence or completed B04. Raw answers, private inputs,
+browser profiles and logs are excluded from the exported browser proof.
+The [first combined run on `db5059e7`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36594499298)
+failed during browser runtime staging, before model provision or any combined inference.
+Its original eight-file artifact reports `SUBPROCESS_FAILED`, not the staging stderr;
+ordinary cleanup and unchanged host-state bytes pass. Original ZIP SHA-256:
+`837ce198645fe9f8a7b4902765f2d52f50066beaeed0d471c7cd5399659aa276`.
+Separately, workspace extraction of the exact pinned Debian package reproduced a missing
+`/etc/firefox-esr` error when staging followed `browser/defaults/syspref` in a readonly-host
+sandbox with empty private `/etc`. Browser `d37b74ec` excludes that host-specific preference
+link, retaining strict handling of other runtime dependencies. The same extraction now
+stages successfully with all four pinned runtime hashes unchanged; two new staging tests
+pass. This independently reproduced defect is consistent with the failed stage, not a
+recovery of its suppressed stderr. The first run stays failed; it does not establish combined execution.
+
+The [next run on `3c4ec9ff`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36596525068)
+passes pinned runtime/model provision and the actual private-service Cancel/Disconnect
+checks, but **fails** at `private-browser-admission` before the browser admission marker.
+Its generic `CHECK_FAILED` does not distinguish sidebar startup, socket connection or another
+browser-side failure; suppressed browser logs are not reconstructed from that code. The 11
+original files are retained, ZIP SHA-256
+`a836f1128f10fc234b491f1fbd0170acca97ba155c8e0c2b863fda7e6763c378`.
+Browser cleanup completes without fallback signals; final core cleanup uses fallback signals,
+so this is not an ordinary-cleanup pass. Final host-state bytes are unchanged. No combined
+model answer, panel-render or completed browser integration is proved by this failed run.
+The follow-up retains fixed browser phase/error codes and process/deadline state inside the
+existing bounded report, never raw prompts, answers or logs. Local probes of the exact ESR
+sidebar, actual panel and module reach admission through an isolated read-only Unix-socket
+bind; their deliberately failing synthetic protocol peer is not a real-model proof. The
+new diagnostics preserve all existing acceptance gates and time limits. Five focused model-
+smoke checks, core report/diagnostic checks and the static KVM contract pass; the original
+VM failure still needs a source-exact diagnostic run, not an inferred cause.
+
+The [diagnostic run on `354229a6`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36599723295)
+also **fails** before admission. Real Cancel/Disconnect again pass, while the retained
+browser phase is now `marionette-connect`, with `CHECK_FAILED` and an exited Python smoke
+process. This narrows the failure to browser startup/test-control connection; it does not
+distinguish Firefox exiting from the inner 40-second connection deadline. The outer 55-second
+deadline has not elapsed. The artifact does not retain Firefox's own return code or startup
+stderr. All 11 original files remain unchanged, ZIP SHA-256
+`c982c8e1217cf248bc06ec3281746b16cc427a1cf4aaf2d014cd1a5bac01ec5b`.
+Browser cleanup is ordinary; core cleanup again uses fallback signals, and host state is
+unchanged. No combined model execution or panel result follows from this diagnostic.
+The next source-bound candidate preserves the actual Firefox exit code, startup duration and
+fixed loader/profile/sandbox/permission/memory signal flags separately from the wrapper's
+status. Raw browser logs remain private and are removed. Six focused browser-model smoke
+checks and the core diagnostic checks pass; exact ESR launches also reached Marionette in
+isolated read-only namespaces both with ordinary and hidden system fonts. Those local launches
+do not reproduce or explain the guest failure, and no deadline or package change is inferred.
+
+The [run on `3ade064c`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36602792924)
+now distinguishes the failure: Firefox is still alive after 40,059 ms, but Marionette never
+connects. The later wrapper exit 1 is not a Firefox crash. All five retained startup-log
+categories are false; no module import, sidebar or browser Submit is reached. Real core
+Cancel/Disconnect and final cleanup pass, with fallback signals needed for core shutdown
+and unchanged host state. The original 11 files remain unchanged, ZIP SHA-256
+`a382c3ce5442ff456cc15ee3f3300d6d8b9289383ecb41c1063b4df9a51169df`.
+The next candidate runs an isolated, empty-profile `about:blank` startup **before** model
+provisioning. Only that separate input-free run may retain a bounded 16 KiB startup log,
+fixed process facts and loopback/listener state; combined private-session logs remain excluded.
+Four new browser checks, six existing model-harness checks and core schema/export checks pass.
+The 40-second startup deadline, browser privacy settings and sandbox are unchanged. This is
+diagnostic coverage, not a demonstrated startup fix or completed browser/model integration.
+
+The [empty-startup run on `69ce99a0`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36607457567)
+fails before model provisioning: the exact Firefox process remains alive after 40,002 ms,
+loopback is up, but neither IPv4 nor IPv6 has the test-control listener. The input-free
+424-byte log reports missing `libGL.so.1` and a software-compositor warning. An isolated
+local probe hides that exact library using a child-only read-only mount: both warnings
+occur, yet the same runtime opens a real session in about 3.2 seconds. Missing GL alone
+is therefore not a demonstrated explanation or justification for a package/deadline change.
+All 11 original files remain unchanged, ZIP SHA-256
+`9d742e147d9a8f90dd8d25dae06c52255aca77a44026fad6c5a959bec4221174`.
+Owned-process/profile cleanup completes; guest-parent state is byte-identical. The next
+source pin enables Firefox startup trace only in the separate empty profile, still capped
+at 16 KiB. Combined private-session logging, privacy settings and sandbox stay unchanged.
+
+The [trace-enabled run on `543e4c2d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36610233935)
+also fails during the empty startup: 40,002 ms, Firefox alive, loopback up, no test-control
+listener and no startup trace beyond the same graphics warnings. It reaches no model or
+private IPC. All eleven original files are retained, ZIP SHA-256
+`3a46fc615bdebb0c025a28759f1e8115b2aea4f5394c08bd721d28aad61462f8`;
+the temporary process/profile are removed and guest-parent snapshots are byte-identical.
+
+A local controlled reproduction now identifies an early profile-root prerequisite: with
+only a read-only empty `.mozilla` root substituted, the exact runtime hangs for 40 seconds
+before Marionette initialization. Merely supplying empty `firefox` and `firefox-esr`
+directories in that isolated root permits a real session in 2.574 seconds. The pinned
+startup code initializes global appdata even when `--profile` is explicit; its unavailable
+profile dialog is invisible headlessly. The browser fix supplies a fresh per-run appdata
+mount, without changing `HOME`, existing home contents or host permissions. Both runners
+verify that exact mount and remove it with their temporary profiles. A bounded anonymous
+home metadata layer also handles machines where the `.mozilla` mountpoint does not exist.
+Thirteen focused checks and real fixed startup probes (2.681 seconds, and 3.389 seconds
+with a pristine read-only home containing the staged repository) pass with clean exit and
+cleanup. This source pin leaves the 40-second deadline, sandbox, runtime, privacy defaults
+and private-session log boundary unchanged. Those local startup results alone do not establish
+the combined browser/model integration.
+
+**Combined browser/core PASS (2026-09-29):** [run 36614266330](https://github.com/VOLPAROSSA/volparossa/actions/runs/36614266330)
+on core `5beb8d2d79e44d2b4d2e4e3bb20aa4e67701e03b`, with browser source
+`4b1fdbe105c5cc23154778664c8d9fca9ef2454b` and the exact Debian ESR 140.16.0 runtime,
+passes the complete `agent-private-browser` checker. Empty-profile startup takes 1,961 ms.
+After actual private-service Cancel/Disconnect checks, the real Gecko sidebar submits to
+the pinned local SmolLM2-360M worker and renders the synthetic canary as text, with EOS and
+12 generated tokens. At `decoded_result_before_panel_render`, the observer records zero
+ephemeral children and ended worker lifetimes; this is not the earlier first-frame-byte
+IPC observation point. Input/model isolation, ordinary cleanup without fallback signals,
+removal of browser/profile/appdata and model/job roots, and unchanged host state pass.
+No private prompt or raw model answer is exported. The 19 original artifacts remain immutable;
+ZIP SHA-256: `8da26ef025ff2a539124693ecd098c2e3d8a9d47a34102b8b1351278d8842925`.
+Both host-state snapshots have SHA-256
+`7293aa05b9868c420b2634dcecec728da9a9b8b276cd8e090e8b91d2bd441766`.
+Earlier failures above remain failed, not relabeled. This proves the bounded ESR panel → real
+core → local model path, **not** a Firefox 157 build, its patched native provider selector,
+general answer quality, confidential peer execution or completed B04.
 
 Current dependency-ready candidate: a single incremental provider queue now owns source and
 derived graph work. Each durable package completion triggers a dependency scan; newly ready
