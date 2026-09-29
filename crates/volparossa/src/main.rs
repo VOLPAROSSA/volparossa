@@ -6,6 +6,7 @@ mod control;
 mod doctor;
 mod policy_bootstrap;
 mod secret;
+mod storage;
 
 use std::{
     fs,
@@ -57,6 +58,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    /// Explicit private ciphertext storage (local provider development commands).
+    Storage {
+        #[command(subcommand)]
+        command: storage::Command,
+    },
     /// Explicit, isolated public-data model inference and training (development backend).
     Compute {
         #[command(subcommand)]
@@ -263,6 +269,7 @@ async fn main() -> Result<()> {
 
 async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
+        CliCommand::Storage { command } => storage::run(command),
         CliCommand::Init {
             identity,
             passphrase_file,
