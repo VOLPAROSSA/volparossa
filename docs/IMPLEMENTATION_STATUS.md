@@ -89,7 +89,21 @@ other participants' live data. Existing custody needs verified independent repla
 release. Unavailable replacement capacity must appear as **pending drain**, not freed space.
 Current payload quotas and receipts do not implement this adaptive distributed controller.
 
-- [ ] Real multi-node proof of the candidate's protected peer storage path and seven CLI commands.
+The [live peer-storage run on `434ed112`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36589770066)
+**passes**. The exact-source report checker accepts the original 93-file artifact bundle
+(ZIP SHA-256 `80d1353d3844b82d75e5b554f4ab89ca538fc70248b9c6ab71d20f9d1f175370`).
+The seven CLI commands transfer 524,326 synthetic opaque bytes in three chunks to one
+independently pinned provider through the protected route, with 16 completed Exit MPTCP/TLS
+operations. A fresh-process Progress and committed retry preserve the archive/lease; the
+same store is closed/reopened and restored twice after removing the original source. Full
+length/hash, non-consuming reads, no-clobber, renewal and idempotent deletion pass, leaving
+zero leases and charged bytes. Drained privacy observations report no direct Client-to-Exit
+traffic or packet drops; scoped private cleanup, full topology cleanup and byte-identical
+host state pass. This proves neither archive encryption nor independent replicas, whole-agent
+restart, interrupted network upload, distributed contribution accounting or Signal integration.
+
+- [x] Source-exact disposable multi-node proof of the protected single-provider storage path
+  and seven CLI commands (`434ed112`, run `36589770066`).
 - [ ] Least-authority application enrollment beyond the versioned administrative agent IPC.
 - [ ] Independent-node interrupted-upload resume, source-offline restore and measured custody.
 - [ ] Replica placement/repair and physical-usage contribution control, including safe

@@ -135,8 +135,13 @@ The explicit disposable `private-storage-peer` scenario now exercises the seven 
 three-chunk opaque fixture upload, committed retry, provider-store close/reopen, source removal,
 two complete non-consuming restores, renewal and idempotent deletion. It requires actual
 protected Exit flow completions, privacy capture checks and full host-state-preserving cleanup.
-Three fixture checks and the static runner/export contract pass; **the live VM result is still
-pending**. This scenario does not substitute for interrupted-upload proof, a Signal archive,
+The [live VM run on `434ed112`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36589770066)
+**passes**: 524,326 synthetic opaque bytes travel in three chunks to a distinct provider,
+with 16 completed Exit MPTCP/TLS operations. Reopening the same store preserves the committed
+copy; both restores verify the full length/hash after the original source is removed.
+Renewal, idempotent deletion, zero remaining leases/charged bytes, privacy capture checks,
+complete teardown and unchanged host state pass. This scenario does not substitute for
+interrupted-upload proof, a Signal archive,
 encryption implementation, independent replicas or distributed contribution accounting.
 
 `volparossa storage peer` adds seven commands: **serve, grant, deposit, progress, restore,
@@ -144,8 +149,9 @@ renew and delete**. Unlike `storage local`, these use the running agent's versio
 control interface. The provider attaches the durable store to its explicit content-service
 endpoint; the consumer asks the agent for the independently pinned provider through the
 normal protected route. There is no direct TCP/HTTP fallback or alternate unprotected
-connection if that route is unavailable. This is implemented candidate wiring, **not yet
-proof of a successful multi-node storage transfer over the real overlay**.
+connection if that route is unavailable. The source-exact run above proves the bounded
+single-provider path in a disposable multi-node topology, not independent-device availability
+or a complete replicated backup service.
 
 The current socket is an administrative interface, not a completed least-authority API for
 arbitrary applications. Owner signing authority stays in the CLI: the agent receives a
