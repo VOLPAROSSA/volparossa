@@ -19,6 +19,7 @@ http.workspace = true
 prost.workspace = true
 rand_chacha_10.workspace = true
 rustix.workspace = true
+rusqlite.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true

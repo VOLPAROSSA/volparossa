@@ -57,20 +57,34 @@ eleven generated privacy-observer checks pass. The fixture also fixes one format
 source test and uses a freshly generated nonce in the helper test; no runtime check is removed.
 The new source still needs its own disposable live run. No refill or alpha completion is claimed.
 
-Firefox integration is being developed separately in
-[VOLPAROSSA/volparossa-browser](https://github.com/VOLPAROSSA/volparossa-browser).
-Its requested browser-specific kill switch defaults off; this does not weaken core defaults
-for other consumers. Daemon attachment, full-protocol enforcement and the compute UI remain
-unfinished. The first isolated Firefox ESR 140.16 smoke verifies 18 privacy defaults,
-actual Strict tracking protection and persistent user choices, not a completed browser.
+The first [Firefox integration PR](https://github.com/VOLPAROSSA/volparossa-browser/pull/1)
+is merged (`bab677ba`): isolated ESR 140.16 privacy defaults and native Strict tracking
+protection passed a real browser smoke, including preservation of user choices after restart.
+Daemon attachment, browser-scoped kill switch (requested off by default), cache integration
+and complete native-sidebar/model integration remain unfinished. The private-compute
+transport/panel candidate is in [browser PR #2](https://github.com/VOLPAROSSA/volparossa-browser/pull/2),
+with a matching private-service candidate in [core PR #167](https://github.com/VOLPAROSSA/volparossa/pull/167).
+Protocol and isolated Gecko tests are not a full Firefox build or combined inference proof.
+Core defaults for other consumers are not weakened by the requested browser availability fallback.
 
-The newly requested [Signal integration](https://github.com/VOLPAROSSA/volparossa-chat)
-is a separate client of this core. Its scope is Signal-protocol encrypted delivery between
-compatible clients without Signal's delivery servers, while retaining ordinary Signal use,
-plus private chunked backups with reciprocal storage contribution. Existing VOLPAROSSA
-encrypted messages are not Signal interoperability. Durable private storage leases,
-contribution accounting, Signal identity/device/session binding and backup restore remain
-unfinished; public cache custody is not evidence for those features.
+[Signal integration](https://github.com/VOLPAROSSA/volparossa-chat/pull/1) now has a pinned
+Desktop/libsignal source baseline and explicit device/session/backup contracts, not a
+working modified client. Ordinary Signal compatibility, authenticated direct ciphertext
+delivery, linked-device synchronization and native encrypted snapshot restore need actual
+implementation and proof. Existing core private messages are not Signal interoperability.
+
+The separate [local private-storage milestone](PRIVATE_STORAGE.md) is integrated by
+[PR #166](https://github.com/VOLPAROSSA/volparossa/pull/166), normal merge `b9bc83dd`, after
+Quality and CodeQL passed. It implements a local non-evicting
+ciphertext store, durable pre-upload reservations, bounded streamed chunks, verified restore,
+renewal and explicit deletion. `storage local` deliberately claims no network transport,
+replication or verified reciprocal credit. Message ACKs cannot consume these backup leases.
+Actual remote storage, including recovery copies and counted overhead, must eventually be
+matched by usable contributed capacity; a local payload quota alone does not establish it.
+Five focused library tests and four real CLI-process tests pass. An explicit 1 GiB
+disk-backed smoke also passes: bounded-chunk write, store close/reopen, full-length/full-hash
+restore and explicit deletion. The data is synthetic opaque bytes, not an encrypted Signal
+snapshot. This proves local persistence at that size, not cloud backup or alpha completion.
 
 ## Earlier milestone evidence
 
