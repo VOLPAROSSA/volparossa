@@ -57,11 +57,12 @@ headroom, and never present an in-progress transfer as freed space. If suitable 
 capacity is unavailable, retain existing custody and expose a **pending drain** instead of
 claiming the lower target has already been achieved.
 
-This availability-aware placement, repair, handoff and automatic contribution controller
-is a requirement for the next networked work, **not implemented by the current local store,
-authenticated stream library, peer commands or explicit replica-set candidate**. Reopening
-a provider with `--reuse-store` preserves its original capacity and free-space floor; it is not a resize
-operation. No replication factor or coding scheme is prescribed here.
+Availability-aware placement, repair and the automatic contribution controller remain
+requirements, **not completed by the current storage primitives**. Explicit owner-coordinated
+handoff and the local admission-target control below are building blocks, not automatic
+migration or verified network-wide reciprocity. Reopening a provider with `--reuse-store`
+preserves its original capacity/free-space floor and its current admission target; it does
+not choose a new target. No replication factor or coding scheme is prescribed here.
 
 ## First executable slice: local provider storage
 
@@ -78,6 +79,8 @@ peers, advertise capacity, enforce network-wide reciprocity or export Signal bac
 - `status --store ...` distinguishes pending reservations and committed ciphertext.
   These are local payload bytes per stored copy; SQLite/filesystem overhead is not
   represented as verified remote usage and is protected separately by free-space checks.
+- `target --store ... --target-bytes N` changes only the durable admission target described
+  below. It never removes a lease or changes the store's original hard payload quota.
 - `restore --store ... --lease HEX --output /absolute/new-file` verifies reconstruction
   and publishes a new mode-0600 output only after success. Existing output is not replaced;
   restoring twice does not consume the lease.
@@ -96,6 +99,62 @@ The local trial uses synthetic opaque bytes and does not demonstrate Signal-form
 multi-node availability, replication, recovery after loss of all credentials, or working
 cloud backup. A provider's restore must eventually be guarded by an authenticated, private
 lease capability; a local lease identifier alone is not a remote authentication scheme.
+
+## Local admission target and pending drain
+
+The explicit owner can now lower the target **below retained custody** without invalidating
+existing leases. This is local payload admission control, not an automatic computation of
+the contribution owed for remote physical storage. Five new real-store/provider checks,
+the real-process local CLI check, the framed Unix-IPC/service check and two local protocol
+checks pass. Strict all-target/all-feature Clippy for content, local control, agent and CLI
+also passes. No new live-network contribution-resize proof is claimed here.
+
+For an offline owned store:
+
+```sh
+volparossa storage local target --store /absolute/private-store --target-bytes 1073741824
+volparossa storage local status --store /absolute/private-store
+```
+
+The store must not already be held open by the provider service; its exclusive ownership
+lock is not bypassed. For a running provider, use its existing administrative control socket
+and independently pin the **local** provider key:
+
+```sh
+volparossa --control-socket /absolute/control/agent.sock storage peer admission \
+  --provider-key LOCAL_PROVIDER_KEY_HEX --target-bytes 1073741824
+volparossa --control-socket /absolute/control/agent.sock storage peer admission \
+  --provider-key LOCAL_PROVIDER_KEY_HEX
+```
+
+Despite the `peer` command group, these two operations affect only the already attached
+local provider. They open no remote route, accept no caller-selected store path, and reject
+a different provider key. Omitting `--target-bytes` reads status. The active store's existing
+bounded disk worker performs the mutation; no listener or participation role is enabled.
+
+Status separates `capacity_bytes` (original hard quota), `target_bytes`, pending reservations,
+committed payload, `retained_payload_bytes`, `pending_drain_bytes` and
+`available_for_new_reservations_bytes`. For example, 2 GiB retained with a 1 GiB target reports
+1 GiB pending drain and zero new-admission allowance. The existing 2 GiB is still retained,
+not claimed as released. New reservations that do not fit are rejected, not queued; existing
+reserved uploads, exact idempotent retries, valid restores and renewals keep their authority.
+Partial and expired undeleted copies remain fully counted. Reads do not consume custody.
+
+Zero closes new admission; increasing the target cannot exceed the original hard quota.
+Neither change alters lease identities, ownership, retention, ciphertext or the filesystem
+free-space floor. Lowering the target never deletes another owner's archive. Only a separate
+authorized deletion, including the existing owner-coordinated verified handoff, can reduce
+retained obligations; without that, pending drain remains pending.
+
+Store schema version 2 persists the target. Opening an exclusively owned version-1 store
+atomically migrates its schema/version, initializing the target to its original hard quota.
+Older executables reject version 2 rather than silently ignoring a lowered target. Reopening
+with current code preserves the target, and a target below usage is not store corruption.
+
+These counters exclude measured SQLite/filesystem/migration overhead. Admission allowance
+is **not free disk space**, available replacement custody, automatic migration or verified
+1:1 contribution. Status explicitly reports these limitations; the automatic remote-usage
+reconciler and safe distributed drain orchestration remain unfinished.
 
 ## Current authorized, resumable library slice
 

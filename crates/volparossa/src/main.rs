@@ -755,7 +755,9 @@ fn print_response(response: ControlResponse) -> Result<()> {
         Payload::ContentPolicy(receipt) => {
             println!("{}", serde_json::to_string_pretty(&receipt)?);
         }
-        Payload::PrivateStorageReady(_) | Payload::PrivateStorageGrant(_) => {
+        Payload::PrivateStorageReady(_)
+        | Payload::PrivateStorageGrant(_)
+        | Payload::PrivateStorageAdmission(_) => {
             anyhow::bail!("private storage reply requires its scoped storage command")
         }
         Payload::BrowserGatewayGranted(_) => {

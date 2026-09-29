@@ -23,6 +23,7 @@ use tokio::{
 };
 
 use super::{
+    StorageAdmissionStatus,
     protocol::{
         MAX_AUTH_SECONDS, MAX_CHALLENGE_BYTES, MAX_GRANT_BYTES, MAX_RECEIPT_BYTES,
         MAX_REQUEST_BYTES, ProtocolError, SignedStorageGrant, SignedStorageReceipt,
@@ -107,6 +108,35 @@ impl StorageService {
             provider: Arc::new(Mutex::new(provider)),
             disk_slot: Arc::new(Semaphore::new(1)),
         }
+    }
+
+    /// Inspect or set the local provider owner's admission target on the existing disk slot.
+    /// `None` inspects; `Some` persists a target without revoking any lease. The enclosing
+    /// local control API must authenticate the service owner; this is not a remote operation.
+    /// A cancelled caller cannot release an in-flight blocking operation's disk permit.
+    ///
+    /// # Errors
+    /// Rejects a busy disk slot, invalid target/accounting or database failure. A lost reply
+    /// does not undo a durable update: inspect the same store to reconcile it.
+    pub async fn admission(
+        &self,
+        target: Option<u64>,
+    ) -> Result<StorageAdmissionStatus, WireError> {
+        let permit = Arc::clone(&self.disk_slot)
+            .try_acquire_owned()
+            .map_err(|_| WireError::Busy)?;
+        let provider = Arc::clone(&self.provider);
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut provider = provider.lock().map_err(|_| WireError::Store)?;
+            match target {
+                Some(bytes) => provider.set_admission_target(bytes),
+                None => provider.admission_status(),
+            }
+            .map_err(|_| WireError::Store)
+        })
+        .await
+        .map_err(|_| WireError::Store)?
     }
 
     /// Execute exactly one operation after the enclosing selector has been validated.

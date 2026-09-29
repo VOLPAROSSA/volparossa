@@ -99,6 +99,121 @@ fn create(path: &std::path::Path, key: &SigningKey, capacity: u64) -> PrivateSto
 #[test]
 #[allow(
     clippy::too_many_lines,
+    reason = "one signed owner lifecycle proves that lowering admission preserves every retained lease operation"
+)]
+fn provider_admission_drain_keeps_signed_existing_reserve_retry_and_lease_rights() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("ciphertext");
+    let mut entropy = [0; 32];
+    getrandom::fill(&mut entropy).unwrap();
+    let provider = SigningKey::from_bytes(&entropy);
+    getrandom::fill(&mut entropy).unwrap();
+    let owner = SigningKey::from_bytes(&entropy);
+    let bytes = b"opaque encrypted archive";
+    let authorization = grant(&provider, &owner, 1024, 4);
+    let archive = target(61, bytes);
+    let mut backend = create(&path, &provider, 1024);
+    let reserve = StorageOperation::Reserve {
+        expires_at: NOW + 600,
+    };
+    let execute = |backend: &mut PrivateStorageProvider, target, operation, payload: &[u8]| {
+        backend.apply(
+            &request(&provider, &owner, &authorization, target, operation, NOW),
+            payload,
+            NOW,
+        )
+    };
+    let first = execute(&mut backend, archive, reserve, &[])
+        .unwrap()
+        .receipt;
+    let closed = backend.set_admission_target(0).unwrap();
+    assert_eq!(closed.pending_drain_bytes, bytes.len() as u64);
+    drop(backend);
+
+    let mut backend = open(&path, &provider);
+    assert_eq!(backend.admission_status().unwrap(), closed);
+    let resumed = execute(&mut backend, archive, reserve, &[])
+        .unwrap()
+        .receipt;
+    assert_eq!(resumed.lease_id, first.lease_id);
+    assert_eq!(backend.admission_status().unwrap(), closed);
+    assert!(matches!(
+        execute(&mut backend, target(62, bytes), reserve, &[]),
+        Err(ProviderError::Storage(StorageError::Quota))
+    ));
+    let bound = StorageTarget {
+        lease_id: Some(first.lease_id),
+        ..archive
+    };
+    execute(
+        &mut backend,
+        bound,
+        StorageOperation::Append {
+            offset: 0,
+            length: u32::try_from(bytes.len()).unwrap(),
+            sha256: hash(bytes),
+        },
+        bytes,
+    )
+    .unwrap();
+    assert_eq!(
+        execute(&mut backend, bound, StorageOperation::Finalize, &[])
+            .unwrap()
+            .receipt
+            .state,
+        ReceiptState::Committed
+    );
+    let committed = execute(&mut backend, archive, reserve, &[])
+        .unwrap()
+        .receipt;
+    assert_eq!(committed.state, ReceiptState::Committed);
+    assert_eq!(committed.lease_id, first.lease_id);
+    execute(
+        &mut backend,
+        bound,
+        StorageOperation::Renew {
+            expires_at: NOW + 900,
+        },
+        &[],
+    )
+    .unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            execute(
+                &mut backend,
+                bound,
+                StorageOperation::ReadRange {
+                    offset: 0,
+                    length: bytes.len() as u64,
+                },
+                &[]
+            )
+            .unwrap()
+            .payload,
+            bytes
+        );
+    }
+    assert_eq!(
+        backend.admission_status().unwrap().pending_drain_bytes,
+        bytes.len() as u64
+    );
+    execute(&mut backend, bound, StorageOperation::Delete, &[]).unwrap();
+    let empty = backend.admission_status().unwrap();
+    assert_eq!(empty.retained_payload_bytes, 0);
+    assert_eq!(empty.pending_drain_bytes, 0);
+    assert_eq!(empty.target_bytes, 0);
+    assert!(matches!(
+        execute(&mut backend, archive, reserve, &[]),
+        Err(ProviderError::Deleted)
+    ));
+    backend.set_admission_target(1024).unwrap();
+    execute(&mut backend, target(62, bytes), reserve, &[]).unwrap();
+    assert_eq!(backend.usage().unwrap().leases, 1);
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
     reason = "one complete durable upload, reopen and restore lifecycle"
 )]
 fn provider_reopen_resumes_one_owned_copy_and_fresh_retry_reports_actual_state() {

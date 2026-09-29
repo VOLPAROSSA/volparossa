@@ -272,3 +272,73 @@ fn storage_local_quota_rejection_preserves_the_existing_lease_and_ciphertext() {
     );
     assert_accounting(root, 0, original.len());
 }
+
+#[test]
+fn storage_local_target_shrinks_without_eviction_and_reopens_with_pending_drain() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let bytes = vec![0x31; 2048];
+    fs::write(root.join("input"), &bytes).unwrap();
+    init(root, 3 * bytes.len());
+    let first = successful(root, &deposit_arguments("input", &digest(&bytes)));
+    let second = successful(root, &deposit_arguments("input", &digest(&bytes)));
+    let first_lease = first["lease_id"].as_str().unwrap();
+    let second_lease = second["lease_id"].as_str().unwrap();
+    let changed = successful(
+        root,
+        &["target", "--store", "store", "--target-bytes", "2048"],
+    );
+    assert_eq!(changed["capacity_bytes"], 6144);
+    assert_eq!(changed["target_bytes"], 2048);
+    assert_eq!(changed["retained_payload_bytes"], 4096);
+    assert_eq!(changed["pending_drain_bytes"], 2048);
+    assert_eq!(changed["pending_drain"], true);
+    assert_eq!(changed["available_for_new_reservations_bytes"], 0);
+    assert_eq!(changed["automatic_migration"], false);
+    assert_eq!(changed["metadata_overhead_measured"], false);
+    assert_eq!(
+        status(root),
+        changed,
+        "fresh process retains the same durable target and custody"
+    );
+    rejected(root, &deposit_arguments("input", &digest(&bytes)));
+    successful(root, &restore_arguments(first_lease, "first-restored"));
+    successful(root, &restore_arguments(second_lease, "second-restored"));
+    assert_eq!(fs::read(root.join("first-restored")).unwrap(), bytes);
+    assert_eq!(fs::read(root.join("second-restored")).unwrap(), bytes);
+    assert_eq!(
+        status(root),
+        changed,
+        "reads never drain or consume custody"
+    );
+    rejected(
+        root,
+        &["target", "--store", "store", "--target-bytes", "6145"],
+    );
+    assert_eq!(status(root), changed, "invalid target never changes limits");
+    successful(
+        root,
+        &["delete", "--store", "store", "--lease", first_lease],
+    );
+    let drained = status(root);
+    assert_eq!(drained["retained_payload_bytes"], 2048);
+    assert_eq!(drained["pending_drain_bytes"], 0);
+    assert_eq!(drained["pending_drain"], false);
+    assert_eq!(drained["target_bytes"], 2048);
+    successful(root, &["target", "--store", "store", "--target-bytes", "0"]);
+    rejected(root, &deposit_arguments("input", &digest(&bytes)));
+    successful(
+        root,
+        &restore_arguments(second_lease, "zero-target-restore"),
+    );
+    assert_eq!(fs::read(root.join("zero-target-restore")).unwrap(), bytes);
+    successful(
+        root,
+        &["target", "--store", "store", "--target-bytes", "6144"],
+    );
+    successful(root, &deposit_arguments("input", &digest(&bytes)));
+    let grown = status(root);
+    assert_eq!(grown["retained_payload_bytes"], 4096);
+    assert_eq!(grown["available_for_new_reservations_bytes"], 2048);
+    assert_eq!(grown["pending_drain"], false);
+}
