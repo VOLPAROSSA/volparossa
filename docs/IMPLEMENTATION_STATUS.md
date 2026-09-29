@@ -1019,8 +1019,18 @@ The new supervisor candidate retains exact descendant PID/start-time identities 
 launcher exit and waits for those lifetimes within the existing three-second cleanup bound.
 It never signals observed PIDs or follows reused PIDs; incomplete observation still produces
 `CleanupUnconfirmed` and quarantines admission. The fixture now preserves sanitized lifetime
-state on failure without changing its strict completion gate. **The live model/IPC proof
-remains incomplete**, including cancellation and disconnection. The original `9d870440` direct-CLI
+state on failure without changing its strict completion gate.
+The [fresh run on `a34c2e64`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36588840049)
+**passes** the version-2 live model/IPC proof. All 16 original exported files and the exact-source
+report checker were reviewed. The pinned 360M worker returns the synthetic identifier with EOS
+after 12 tokens. Cancel and Disconnect each end the observed sandbox/worker lifetimes and
+release the runtime lock; the successful answer is delivered only after the observed lifetimes
+end and temporary inputs/reports disappear, checked at the first result-frame byte. Socket
+permissions, busy admission, readonly mounts, isolated networking, public-input rejection,
+unchanged owner input/model, complete ordinary cleanup without fallback signals and identical
+host-state bytes pass. The original artifact ZIP has SHA-256
+`6b1a9613b0bf368f4805776dff9d9af97abd3fc6e67d5ec481ba02de1aa15798`.
+The two earlier failed IPC runs remain failed and immutable. The original `9d870440` direct-CLI
 proof above remains evidence only for that historical source and stdout boundary; it is not
 relabeled as IPC evidence. B04, confidential offload and browser-UI integration remain open.
 See [service usage](DECENTRALIZED_AGENTS.md#application-local-private-compute-ipc) and the

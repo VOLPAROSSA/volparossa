@@ -1824,12 +1824,16 @@ Private text belongs in bounded message bodies, never URLs, logs, public cache o
 Web pages must not receive the socket or a generic command bridge; model output is untrusted
 text. There is no automatic peer/cloud fallback.
 
-Six local protocol/lifecycle tests pass, including actual Unix framing—not real inference.
-The new version-2 `agent-private-task` KVM fixture is prepared to prove one actual EOS answer
-over this interface, Cancel/Disconnect cleanup and result delivery only after cleanup.
-**That source-exact live proof is pending.** The earlier `9d870440` proof remains a historical
-file-oriented CLI result, not evidence for this socket or a Firefox UI. No B04 completion is
-claimed.
+Six local protocol/lifecycle tests pass, including actual Unix framing. The version-2
+[`agent-private-task` KVM run on `a34c2e64`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36588840049)
+also passes with a real pinned 360M worker: a synthetic note's identifier is returned with EOS
+over this interface, after observed worker cleanup. Actual Cancel and Disconnect each stop
+their isolated worker and release the runtime lock. Readonly inputs/model, owner controls,
+public-path rejection, complete temporary cleanup and unchanged host network state are checked.
+This proves the bounded core IPC lane, **not a Firefox UI, confidential remote execution,
+general answer quality or completed B04**. The earlier `9d870440` proof remains a historical
+file-oriented CLI result, not relabeled socket evidence. Failed earlier IPC runs are retained
+in [the implementation record](IMPLEMENTATION_STATUS.md).
 
 ## Fully automatic whitelist/blacklist decisions
 
