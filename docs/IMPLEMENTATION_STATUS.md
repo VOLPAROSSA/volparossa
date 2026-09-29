@@ -3394,7 +3394,20 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   upstream answer and then fails `DNS_CACHE_CAPTURE_INCOMPLETE`. Original artifacts are retained;
   guest hosts and final host-state bytes are unchanged and topology cleanup completes.
   The capture failure is a shared observer callback's unsupported `frame` keyword; the current
-  adapter fix passes five focused DNS capture/report tests but still needs a new live run.
+  adapter fix passes five focused DNS capture/report tests. The
+  [version-2 run on `6aaa5c95`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36598970370)
+  now passes the separate protected A/AAAA upstream/peer/local-cache and unsigned-fallback
+  report, including a rebuild from its original raw evidence, drained captures and host cleanup.
+  That fixture does not use private Unbound as its upstream. The native preflight still fails:
+  unsigned recursion passes (2,192 ms), and exact child reaping passes on timeout and caller
+  cancellation, but signed and bogus questions return `Unavailable` at the 4.5-second work
+  deadline. No native signed proof-cache linkage or actual `Bogus` verdict is claimed.
+  All 276 original artifact files remain unchanged; see the fallback document for their hash.
+  No default switch or reciprocal deployment proof follows from these partial results.
+  A separate `reciprocity-private-dns` fixture now preserves four all-role agent lifetimes
+  and concurrent real UDP routes while checking normal protected DNS, private native worker
+  ownership, independent local-cache reuse, drained captures and complete guest-only uplink
+  cleanup. Its five inert tests and static wrapper contract pass; live execution is pending.
 
 The positive DNSSEC cache is now composed into the normal agent: the same bounded RAM resolver
 serves protected DNS, TCP resolution, general UDP and browser-QUIC destination pinning. Its peer

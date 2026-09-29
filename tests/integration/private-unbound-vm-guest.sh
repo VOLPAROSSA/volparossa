@@ -11,7 +11,7 @@ printf '%s\n' \
     'Stops only the probe-owned native child through pidfd to verify timeout/cancel reaping.' \
     'No developer-host networking changes; no Client route or reciprocal privacy claim.'
 [ "${1:---preview}" = --execute ] || exit 0
-[ "$#" -eq 2 ] || exit 64
+[ "$#" -eq 2 ] || { [ "$#" -eq 3 ] && [ "$3" = --provision-only ]; } || exit 64
 [ "$(id -u)" -ne 0 ] || exit 77
 [ "$(hostname)" = volparossa-alpha ] && [ "$(systemd-detect-virt)" = kvm ] || exit 77
 # shellcheck source=/dev/null
@@ -37,6 +37,10 @@ cmake -S native/volparossa-dns-worker -B native/volparossa-dns-worker/build \
 cmake --build native/volparossa-dns-worker/build --parallel 2
 sudo -n install -d /usr/libexec
 sudo -n install -m 0755 native/volparossa-dns-worker/build/volparossa-dns-worker /usr/libexec/volparossa-dns-worker
+if [ "${3:-}" = --provision-only ]; then
+    printf '%s\n' 'Pinned private DNS worker provisioned in disposable guest; no resolution or reciprocal proof claimed.'
+    exit 0
+fi
 parent_mntns=$(readlink /proc/self/ns/mnt)
 sudo -n env VOLPAROSSA_PRIVATE_DNS_PARENT_MNTNS="$parent_mntns" \
     unshare --mount --propagation private -- \

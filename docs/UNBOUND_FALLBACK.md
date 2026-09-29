@@ -217,6 +217,35 @@ Guest hosts and final host-state bytes remain unchanged, and topology cleanup co
 Original ZIP SHA-256: `10e197cc29b4598a90962e92026f2fbd24c075833e2b223b1238840a282921e7`.
 These partial observations are real resolver evidence, not a passing full fallback/deployment proof.
 
+The [version-2 run on `6aaa5c95`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36598970370)
+also **fails overall**. Its separate protected DNS-cache report now passes: real A/AAAA
+upstream validation, peer retrieval, local reuse and unsigned fallback, with drained privacy
+captures, complete cleanup and unchanged guest host state. The exact-source report checker
+and a rebuild from the original raw evidence both pass. This does not prove Unbound supplied
+those shared packets: that existing C05 fixture uses its separately verified upstream.
+
+The native preflight returns an unsigned answer in 2,192 ms and proves exact native-child
+reaping on timeout (4,501 ms) and caller cancellation (1,502 ms), while the caller remains
+alive. Its signed and deliberately bogus questions instead return `Unavailable` at 4,502 ms
+and 4,501 ms. Neither a validated signed answer nor a native `Bogus` verdict was obtained;
+these deadline results are not relabelled as those missing proofs. The raw worker response
+and recursive packet progress were not retained, so the particular upstream delay is unknown.
+The original 276-file artifact remains unchanged (ZIP SHA-256
+`dac9505dd913fbeac4f30ca15a6772e4504cc94e0a24fc3068d4de16073d45b1`).
+Native proof-cache linkage and simultaneous reciprocal deployment remain incomplete;
+the default is still `system`.
+
+The new `reciprocity-private-dns` scenario is an executable candidate, not a live PASS.
+It retains the same four all-role agents and concurrent native UDP flows from the reciprocal
+fixture, then requires an ordinary protected application lookup to use the actually selected
+Exit's private worker and a second lookup to reuse independently validated local proof.
+Four owned guest-only TAPs supply independent DNS uplinks; DROP-only containment prevents
+fixture addresses or forwarded sessions from escaping over those TAPs. It adds no product
+firewall exemption and changes neither the developer host nor the VM parent's networking.
+Separate drained packet captures, exact worker ownership, original UDP lifetimes, TAP/process
+cleanup and unchanged host state remain mandatory. Five focused inert fixture tests and the
+static wrapper contract pass; no real reciprocal private-DNS result is claimed yet.
+
 Focused tests cover configuration rejection, bounded CNAME/TTL/provenance parsing, malformed and
 negative responses, rebinding rejection, and an actual framed TCP backend in a disposable test
 namespace. That backend uses controlled DNS responses, **not an executed Unbound daemon**.
