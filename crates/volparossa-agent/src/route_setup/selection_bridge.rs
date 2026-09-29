@@ -1972,6 +1972,105 @@ fn established_route_hard_expiry(
 }
 
 impl CompletedClientNativeProbe {
+    /// Consume a freshly completed disposable sampler solely to add a path to its original
+    /// Exit/control pair. This does not mint another session or a replacement route.
+    pub(super) fn into_extension_relay(
+        mut self,
+        parent: &RouteSetupRequest,
+        relay_node: [u8; 32],
+        relay_peer: libp2p::PeerId,
+    ) -> Result<ActorBoundRelayProof, ClientNativeProbeError> {
+        let mut plan = self
+            .batch
+            .route_plan
+            .take()
+            .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+        if !self.sampler_destroyed
+            || self.batch.committed_owner.is_some()
+            || plan.native_proof_state != NativeProofState::Required
+            || self.batch.proofs.len() != plan.prospective_relays.len()
+        {
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
+        let control = &plan.forwarded_exit.control.identity;
+        let exit = &plan.forwarded_exit.exit.identity;
+        if control.wire_node_id != parent.control.identity.wire_node_id
+            || control.peer_id != parent.control.identity.peer_id
+            || control.public_key != parent.control.identity.public_key
+            || exit.wire_node_id != parent.exit.wire_node_id
+            || exit.peer_id != parent.exit.peer_id
+            || exit.public_key != parent.exit.public_key
+            || exit.policy_hash != parent.parameters.policy_hash
+        {
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
+        let mut measured_relays = HashSet::new();
+        let first = &self
+            .batch
+            .proofs
+            .first()
+            .ok_or(ClientNativeProbeError::HelperCorrelation)?
+            .proof;
+        let client_runtime = first.client_helper_runtime_id();
+        let exit_runtime = first.exit_helper_runtime_id();
+        for measured in &self.batch.proofs {
+            let actual = &measured.proof;
+            let data = actual.data_relay();
+            if actual.control().node_id != control.wire_node_id
+                || actual.control().peer_id != control.peer_id.to_bytes()
+                || actual.exit().node_id != exit.wire_node_id
+                || actual.exit().peer_id != exit.peer_id.to_bytes()
+                || actual.client_helper_runtime_id() != client_runtime
+                || actual.exit_helper_runtime_id().as_bytes() != exit_runtime.as_bytes()
+                || !actual
+                    .exit_helper_runtime_id()
+                    .is_same_signed_attempt(&exit_runtime)
+                || !measured_relays.insert((data.node_id.clone(), data.peer_id.clone()))
+            {
+                return Err(ClientNativeProbeError::HelperCorrelation);
+            }
+            let path = plan
+                .prospective_relays
+                .iter_mut()
+                .find(|path| {
+                    path.relay.identity.wire_node_id.as_slice() == data.node_id
+                        && path.relay.identity.peer_id.to_bytes() == data.peer_id
+                })
+                .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+            path.proof
+                .bind_client_native_round_trip(measured.round_trip_micros)
+                .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+        }
+        let index = plan
+            .prospective_relays
+            .iter()
+            .position(|path| {
+                path.relay.identity.wire_node_id == relay_node
+                    && path.relay.identity.peer_id == relay_peer
+            })
+            .ok_or(ClientNativeProbeError::HelperCorrelation)?;
+        let selected = plan.prospective_relays.swap_remove(index);
+        let mut requirements = selected.proof.static_requirements.clone();
+        let now = crate::unix_millis();
+        requirements.now = UnixTime::from_secs(now / 1_000);
+        selected
+            .proof
+            .revalidate_at(now, &requirements, selected.proof.evidence_batch_id)
+            .map_err(|_| ClientNativeProbeError::HelperCorrelation)?;
+        if selected.proof.relay.identity.policy_expires_at_ms < parent.parameters.expires_at_ms
+            || parent.paths.iter().any(|old| {
+                let prior = &old.proof;
+                selected.proof.diversity.conflicts_with(&prior.diversity)
+                    || selected.proof.relay.identity.wire_node_id
+                        == prior.relay.identity.wire_node_id
+                    || selected.proof.relay.identity.peer_id == prior.relay.identity.peer_id
+                    || selected.proof.relay.identity.public_key == prior.relay.identity.public_key
+            })
+        {
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
+        Ok(selected.proof)
+    }
     /// Borrow the exact committed sampler owner for terminal confirmed destruction.
     pub(crate) fn runtime_owner(
         &self,

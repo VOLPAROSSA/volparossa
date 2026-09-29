@@ -14,6 +14,8 @@
 #![allow(dead_code)] // The production actor is live; restart-recovery APIs remain private.
 
 mod actor;
+mod path_extension;
+pub(crate) use path_extension::DurablePathExtension;
 
 // This affine surface and its opaque, non-authoritative custody digest remain crate-private.
 #[allow(unused_imports)]
@@ -670,12 +672,16 @@ impl DurableWireguardResource {
         self.hard_expires_at_unix.get()
     }
 
+    pub(crate) const fn setup_expires_at_unix(&self) -> u64 {
+        self.setup_expires_at_unix.get()
+    }
+
     /// Project the exact durable resource into the private worker-v3 lease descriptor.
     ///
     /// This is deliberately private to the ownership module: production callers receive a
     /// complete descriptor only through the affine `DurableMayOwnPrepare` owner and cannot
     /// substitute a path, role, address, expiry or public ownership marker.
-    fn internal_lease_plan_v3(&self) -> Result<InternalLeasePlan, JournalError> {
+    pub(crate) fn internal_lease_plan_v3(&self) -> Result<InternalLeasePlan, JournalError> {
         let (path_id, role) = self.key();
         let role = match volparossa_routing::WireguardRole::try_from(role)
             .map_err(|_| JournalError::InvalidRecord)?
@@ -1176,6 +1182,7 @@ struct OwnershipRecord {
     absent_origin: Option<AbsentOrigin>,
     reconcile: Option<ReconcileBinding>,
     recovery_evidence: Option<PrepareRecoveryEvidenceV1>,
+    extensions: Vec<DurablePathExtension>,
 }
 
 impl OwnershipRecord {
@@ -1205,6 +1212,7 @@ impl OwnershipRecord {
         if canonical != self.plan {
             return Err(JournalError::InvalidRecord);
         }
+        self.validate_extensions()?;
         Ok(())
     }
 
@@ -1410,6 +1418,7 @@ pub(crate) fn durable_wireguard_resource_for_test(
         setup_expires_at_unix: NonZeroU64::new(1_000 + u64::from(ownership_seed))?,
         hard_expires_at_unix: NonZeroU64::new(2_000 + u64::from(ownership_seed))?,
         plan: ClosedPlan::new(context_role, paths).ok()?,
+        extensions: Vec::new(),
         phase: OwnershipPhase::Intent,
         absent_origin: None,
         reconcile: None,
@@ -1440,12 +1449,13 @@ impl fmt::Debug for OwnershipRecord {
             .field("absent_origin", &self.absent_origin)
             .field("reconcile", &self.reconcile)
             .field("recovery_evidence", &self.recovery_evidence)
+            .field("extensions", &"<redacted>")
             .finish()
     }
 }
 
 #[derive(Debug, thiserror::Error)]
-enum JournalError {
+pub(crate) enum JournalError {
     #[error("journal I/O failed")]
     Io(#[from] io::Error),
     #[error("journal record is invalid")]
@@ -1536,7 +1546,16 @@ impl JournalSnapshot {
         self.validate()?;
         let mut encoded = Vec::with_capacity(128 + self.records.len() * 192);
         encoded.extend_from_slice(&JOURNAL_MAGIC);
-        put_u16(&mut encoded, JOURNAL_VERSION);
+        let version = if self
+            .records
+            .values()
+            .any(|record| !record.extensions.is_empty())
+        {
+            5
+        } else {
+            JOURNAL_VERSION
+        };
+        put_u16(&mut encoded, version);
         encoded.extend_from_slice(&self.journal_epoch_id.0);
         put_u64(&mut encoded, self.revision);
         put_u64(&mut encoded, self.next_generation);
@@ -1546,6 +1565,9 @@ impl JournalSnapshot {
         );
         for record in self.records.values() {
             encode_record(&mut encoded, record);
+            if version == 5 {
+                path_extension::encode_extensions(&mut encoded, &record.extensions);
+            }
             if encoded.len() + DIGEST_BYTES > MAX_JOURNAL_BYTES {
                 return Err(JournalError::Capacity);
             }
@@ -1571,7 +1593,11 @@ impl JournalSnapshot {
         }
 
         let mut decoder = Decoder::new(payload);
-        if decoder.take::<8>()? != JOURNAL_MAGIC || decoder.u16()? != JOURNAL_VERSION {
+        if decoder.take::<8>()? != JOURNAL_MAGIC {
+            return Err(JournalError::Corrupt);
+        }
+        let version = decoder.u16()?;
+        if version != JOURNAL_VERSION && version != 5 {
             return Err(JournalError::Corrupt);
         }
         let journal_epoch_id =
@@ -1585,7 +1611,10 @@ impl JournalSnapshot {
         let mut records = BTreeMap::new();
         let mut previous = None;
         for _ in 0..record_count {
-            let record = decode_record(&mut decoder)?;
+            let mut record = decode_record(&mut decoder)?;
+            if version == 5 {
+                record.extensions = path_extension::decode_extensions(&mut decoder)?;
+            }
             if previous.is_some_and(|value| value >= record.ownership_id) {
                 return Err(JournalError::Corrupt);
             }
@@ -1773,6 +1802,7 @@ fn decode_record(decoder: &mut Decoder<'_>) -> Result<OwnershipRecord, JournalEr
         absent_origin,
         reconcile,
         recovery_evidence,
+        extensions: Vec::new(),
     };
     record.validate().map_err(|_| JournalError::Corrupt)?;
     Ok(record)
@@ -2282,6 +2312,7 @@ impl OwnershipJournal {
             setup_expires_at_unix: intent.setup_expires_at_unix,
             hard_expires_at_unix: intent.hard_expires_at_unix,
             plan: intent.plan,
+            extensions: Vec::new(),
             phase: OwnershipPhase::Intent,
             absent_origin: None,
             reconcile: None,
@@ -3422,6 +3453,55 @@ fn ensure_absent(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn additive_extension_preserves_original_plan_markers_and_v4_bytes() {
+        let original = record(epoch(3), 5, 7, 9, 1, OwnershipPhase::MayOwnPrepare);
+        let old = snapshot_with(vec![original.clone()]);
+        let v4 = old.encode().expect("legacy snapshot");
+        assert_eq!(
+            u16::from_be_bytes(v4[8..10].try_into().unwrap()),
+            JOURNAL_VERSION
+        );
+        assert_eq!(JournalSnapshot::decode(&v4).unwrap().encode().unwrap(), v4);
+        let resources = original.durable_wireguard_resources().unwrap();
+        let mut changed = original.clone();
+        changed.extensions.push(DurablePathExtension {
+            extension_id: [17; 16],
+            path_id: 3,
+            setup_expires_at_unix: 175,
+        });
+        changed.validate().unwrap();
+        assert_eq!(changed.plan, original.plan);
+        assert_eq!(changed.durable_wireguard_resources().unwrap(), resources);
+        let extension = changed.extension_resource(changed.extensions[0]).unwrap();
+        assert_eq!(extension.hard_expires_at_unix(), 200);
+        assert_eq!(extension.setup_expires_at_unix(), 175);
+        let restart = path_extension::RestartExtension::from_resource(&extension)
+            .unwrap()
+            .resource(
+                changed.context_id.0,
+                volparossa_routing::ContextRole::Client,
+            )
+            .unwrap();
+        assert_eq!(restart, extension);
+        assert!(resources.iter().all(|old| {
+            old.interface() != restart.interface()
+                && old.ownership_alias() != restart.ownership_alias()
+        }));
+        let v5 = snapshot_with(vec![changed]).encode().unwrap();
+        assert_eq!(u16::from_be_bytes(v5[8..10].try_into().unwrap()), 5);
+        assert_eq!(JournalSnapshot::decode(&v5).unwrap().encode().unwrap(), v5);
+        let mut duplicate = original.clone();
+        duplicate.extensions.push(DurablePathExtension {
+            extension_id: [17; 16],
+            path_id: 1,
+            setup_expires_at_unix: 175,
+        });
+        assert!(duplicate.validate().is_err());
+        duplicate.extensions[0].path_id = 3;
+        duplicate.extensions[0].setup_expires_at_unix = 201;
+        assert!(duplicate.validate().is_err());
+    }
     use std::{
         collections::BTreeMap,
         fs,
@@ -3627,6 +3707,7 @@ mod tests {
             setup_expires_at_unix: nz(100),
             hard_expires_at_unix: nz(200),
             plan: client_plan(&[1, 2]),
+            extensions: Vec::new(),
             phase,
             absent_origin: (phase == OwnershipPhase::Absent)
                 .then_some(AbsentOrigin::NeverDispatched),

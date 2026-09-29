@@ -35,6 +35,9 @@ const MAX_LOCAL_PATH_LEASES: usize = 64;
 const MAX_PENDING_NATIVE_AUTHORIZATIONS: usize = 64;
 const MAX_PROTOCOL_PATHS: u32 = 8;
 
+mod extension;
+pub use extension::VerifiedRouteExtension;
+
 /// Exact client-selected scope for one relay path.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RelayPathIntent {
@@ -1585,6 +1588,25 @@ impl ReservationCoordinator {
             .relay_authorizations
             .get(expected_path_index)
             .ok_or(CoordinatorError::Scope("relay authorization index"))?;
+        self.verify_relay_response_inner(
+            expected_authorization,
+            bundle.finalized_bundle_hash,
+            signed_relay_reservation,
+            expected_relay_node_id,
+            authenticated_relay_peer_id,
+            now_ms,
+        )
+    }
+
+    fn verify_relay_response_inner(
+        &mut self,
+        expected_authorization: &[u8],
+        finalized_bundle_hash: [u8; KEY_BYTES],
+        signed_relay_reservation: &[u8],
+        expected_relay_node_id: [u8; KEY_BYTES],
+        authenticated_relay_peer_id: &[u8],
+        now_ms: u64,
+    ) -> Result<VerifiedRelayGrant, CoordinatorError> {
         let (relay, exit) = verify_relay_reservation(
             signed_relay_reservation,
             now_ms,
@@ -1641,7 +1663,7 @@ impl ReservationCoordinator {
                 control_relay_node_id: fixed(&message.control_relay_node_id, "relay control node")?,
                 control_relay_peer_id: message.control_relay_peer_id.clone(),
                 exit_peer_id: message.exit_peer_id.clone(),
-                finalized_bundle_hash: bundle.finalized_bundle_hash,
+                finalized_bundle_hash,
                 relay_client_endpoint,
                 expires_at_ms: message.expires_at_ms,
             })

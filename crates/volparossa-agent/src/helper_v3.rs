@@ -14,6 +14,9 @@ pub(crate) use downlink_sharing::{
 mod wifi_mesh;
 pub(crate) use wifi_mesh::RuntimeBoundWifiMesh;
 
+#[path = "helper_v3/path_extension.rs"]
+mod path_extension;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
@@ -479,6 +482,8 @@ pub(crate) struct RuntimeBoundPreparedLeaseBatch {
     prepare: PrepareLeaseBatch,
     prepared: PreparedLeaseBatch,
     phase: RuntimeLeasePhase,
+    // Additive ownership: never rewrite the original closed Prepare plan or its proof.
+    extensions: BTreeMap<[u8; 16], path_extension::PathExtensionState>,
 }
 
 /// Destruction-only authority for one context, retained across consuming protocol joins.
@@ -515,6 +520,7 @@ impl RuntimeBoundPreparedLeaseBatch {
             prepare,
             prepared,
             phase: RuntimeLeasePhase::Prepared,
+            extensions: BTreeMap::new(),
         })
     }
 

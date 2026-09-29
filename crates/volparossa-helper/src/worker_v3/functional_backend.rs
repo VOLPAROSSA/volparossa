@@ -170,6 +170,7 @@ use receive_accounting::OpenAccountingEntry;
 mod downlink_sender;
 use downlink_sender::BudgetLeaseState;
 use uplink_sharing::OpenSharingEntry;
+mod path_extension;
 mod wifi_mesh;
 use wifi_mesh::OpenMeshEntry;
 
@@ -381,6 +382,8 @@ struct FunctionalLeaseRole {
 }
 
 struct OpenLeaseEntry {
+    extensions: BTreeMap<[u8; 16], path_extension::OpenExtension>,
+    route_identity: Option<path_extension::RouteIdentity>,
     key: OpenLineageKey,
     context_role: ContextRole,
     worker: Option<WorkerGenerationOwnership>,
@@ -783,6 +786,8 @@ impl FunctionalAlphaLeaseBackend {
                 durable: None,
                 durable_prepare_terminal: None,
                 wireguard: Vec::new(),
+                extensions: BTreeMap::new(),
+                route_identity: None,
                 prepare: PrepareLeases {
                     route_context_id: key.context_id.to_vec(),
                     leases: Vec::new(),
@@ -1073,6 +1078,7 @@ impl FunctionalAlphaLeaseBackend {
             )
         };
         let required_budget_paths = plan.receive_budget_required_paths.clone();
+        let route_identity = path_extension::original_identity(&activations, now_ms)?;
         if let Err(error) = self.register_receive_tuples(key, &activations, operation_deadline) {
             return Err(self.cleanup_after_failure(key, deadline, error).await);
         }
@@ -1116,6 +1122,7 @@ impl FunctionalAlphaLeaseBackend {
                         &required_budget_paths,
                     );
                     entry.activated = activated;
+                    entry.route_identity = Some(route_identity);
                     entry.phase = OpenLeasePhase::Activated;
                     true
                 } else {
@@ -1619,7 +1626,7 @@ impl FunctionalAlphaLeaseBackend {
                 let Ok(plan) = DeadWorkerCleanupPlan::new(
                     key.context_id,
                     entry.context_role,
-                    entry.prepare.clone(),
+                    path_extension::cleanup_plan(entry),
                 ) else {
                     return false;
                 };
@@ -1671,6 +1678,9 @@ impl FunctionalAlphaLeaseBackend {
                 return false;
             };
             if entry.birth_may_exist.len() != entry.wireguard.len() {
+                return false;
+            }
+            if !path_extension::cleanup_parent_extensions(entry, deadline) {
                 return false;
             }
             if entry.birth_may_exist.iter().all(|may_exist| !*may_exist) {
@@ -2773,6 +2783,41 @@ impl FunctionalAlphaLeaseBackend {
 }
 
 impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
+    fn prepare_path_extension(
+        self: Arc<Self>,
+        request: BackendRequest<volparossa_routing::PreparePathExtension>,
+    ) -> BackendFuture<BackendCompletion<PreparedKernelLease>> {
+        let (completion, value) = request.into_parts();
+        let binding = completion.binding();
+        Box::pin(async move { completion.complete(self.prepare_extension(binding, value).await) })
+    }
+
+    fn activate_path_extension(
+        self: Arc<Self>,
+        request: BackendRequest<volparossa_routing::ActivatePathExtension>,
+    ) -> BackendFuture<BackendCompletion<KernelCounters>> {
+        let (completion, value) = request.into_parts();
+        let binding = completion.binding();
+        Box::pin(async move { completion.complete(self.activate_extension(binding, value).await) })
+    }
+
+    fn commit_path_extension(
+        self: Arc<Self>,
+        request: BackendRequest<volparossa_routing::CommitPathExtension>,
+    ) -> BackendFuture<BackendCompletion<KernelCounters>> {
+        let (completion, value) = request.into_parts();
+        let binding = completion.binding();
+        Box::pin(async move { completion.complete(self.commit_extension(binding, value).await) })
+    }
+
+    fn abort_path_extension(
+        self: Arc<Self>,
+        request: BackendRequest<volparossa_routing::AbortPathExtension>,
+    ) -> BackendFuture<BackendCompletion<()>> {
+        let (completion, value) = request.into_parts();
+        let binding = completion.binding();
+        Box::pin(async move { completion.complete(self.abort_extension(binding, value).await) })
+    }
     fn apply_downlink_budget(
         self: Arc<Self>,
         request: BackendRequest<volparossa_routing::ApplyDownlinkBudget>,
@@ -3574,17 +3619,16 @@ fn validate_mptcp_endpoint_binding(
         ContextRole::Unspecified | ContextRole::Relay => return Err(BackendError::Invalid),
     };
     let exact = entry.phase == OpenLeasePhase::Committed
-        && entry.wireguard.iter().any(|wireguard| {
-            wireguard.resource().key() == (u8::try_from(path_id).unwrap_or(0), role)
-        })
-        && entry
-            .prepared
-            .iter()
-            .any(|lease| (lease.path_id, lease.role) == (path_id, role))
-        && entry
-            .activated
-            .iter()
-            .any(|lease| (lease.prepared.path_id, lease.prepared.role) == (path_id, role));
+        && (path_extension::committed_path(entry, path_id, role)
+            || (entry.wireguard.iter().any(|wireguard| {
+                wireguard.resource().key() == (u8::try_from(path_id).unwrap_or(0), role)
+            }) && entry
+                .prepared
+                .iter()
+                .any(|lease| (lease.path_id, lease.role) == (path_id, role))
+                && entry.activated.iter().any(|lease| {
+                    (lease.prepared.path_id, lease.prepared.role) == (path_id, role)
+                })));
     if !exact {
         return Err(BackendError::Invalid);
     }
@@ -6165,6 +6209,8 @@ pub(super) mod tests {
         let prepare = internal_prepare_plan(wireguard.resource(), key, &lease);
         OpenLeaseEntry {
             key,
+            extensions: BTreeMap::new(),
+            route_identity: None,
             context_role: role.context,
             worker: None,
             recovery: None,
@@ -6211,6 +6257,8 @@ pub(super) mod tests {
             .expect("relay prepare projection");
         OpenLeaseEntry {
             key,
+            extensions: BTreeMap::new(),
+            route_identity: None,
             context_role: ContextRole::Relay,
             worker: None,
             recovery: None,

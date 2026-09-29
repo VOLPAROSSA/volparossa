@@ -10,12 +10,18 @@
 
 #[path = "v3/downlink.rs"]
 mod downlink;
+#[path = "v3/path_extension.rs"]
+mod path_extension;
 mod wifi_mesh;
 pub use downlink::{
     AppliedDownlinkBudget, ApplyDownlinkBudget, DestroyReceiveAccounting,
     DestroyedReceiveAccounting, InspectReceiveAccounting, InstallReceiveAccounting,
     InstalledReceiveAccounting, ManagedReceiveCounter, ReceiveAccountingSnapshot,
     ReceiveByteCounters, validate_downlink_response,
+};
+pub use path_extension::{
+    AbortPathExtension, ActivatePathExtension, ActivatedPathExtension, CommitPathExtension,
+    CommittedPathExtension, PreparePathExtension, PreparedPathExtension,
 };
 pub use wifi_mesh::{
     DestroyWifiMesh, DestroyedWifiMesh, InspectWifiMesh, InstallWifiMesh, InstalledWifiMesh,
@@ -74,7 +80,7 @@ pub struct HelperRequest {
     /// Strict operation allowlist.
     #[prost(
         oneof = "helper_request::Operation",
-        tags = "20, 21, 22, 23, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47"
+        tags = "20, 21, 22, 23, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51"
     )]
     pub operation: Option<helper_request::Operation>,
 }
@@ -95,6 +101,18 @@ pub mod helper_request {
     /// Exactly one typed operation.
     #[derive(Clone, PartialEq, Oneof)]
     pub enum Operation {
+        /// Prepare one additive path in a committed context.
+        #[prost(message, tag = "48")]
+        PreparePathExtension(super::PreparePathExtension),
+        /// Activate only an independently owned extension.
+        #[prost(message, tag = "49")]
+        ActivatePathExtension(super::ActivatePathExtension),
+        /// Prove the new path without recommitting the original plan.
+        #[prost(message, tag = "50")]
+        CommitPathExtension(super::CommitPathExtension),
+        /// Abort only the specified extension.
+        #[prost(message, tag = "51")]
+        AbortPathExtension(super::AbortPathExtension),
         /// Apply a signed adjacent Relay's short-lived budget to its exact owned Exit lease.
         #[prost(message, tag = "43")]
         ApplyDownlinkBudget(super::ApplyDownlinkBudget),
@@ -825,7 +843,7 @@ pub struct HelperResponse {
     /// Operation-specific success output; absent on failure.
     #[prost(
         oneof = "helper_response::Outcome",
-        tags = "20, 21, 22, 23, 27, 28, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46"
+        tags = "20, 21, 22, 23, 27, 28, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 48, 49, 50"
     )]
     pub outcome: Option<helper_response::Outcome>,
 }
@@ -845,6 +863,15 @@ pub mod helper_response {
     /// Exactly one successful outcome.
     #[derive(Clone, PartialEq, Oneof)]
     pub enum Outcome {
+        /// One prepared additive path.
+        #[prost(message, tag = "48")]
+        PreparedPathExtension(super::PreparedPathExtension),
+        /// One activated additive path.
+        #[prost(message, tag = "49")]
+        ActivatedPathExtension(super::ActivatedPathExtension),
+        /// One committed additive path.
+        #[prost(message, tag = "50")]
+        CommittedPathExtension(super::CommittedPathExtension),
         /// Exact lease-bound sender queue update, never an unlimited expiry fallback.
         #[prost(message, tag = "43")]
         AppliedDownlinkBudget(super::AppliedDownlinkBudget),
@@ -1466,6 +1493,10 @@ pub fn descriptor_fd_binding(value: &HelperResponse) -> Result<[u8; 32], HelperP
 /// # Errors
 ///
 /// Returns an error when the request is invalid.
+#[allow(
+    clippy::too_many_lines,
+    reason = "exhaustive operator-safe preview for the typed helper operation allowlist"
+)]
 pub fn safe_preview(value: &HelperRequest) -> Result<String, HelperProtocolError> {
     use helper_request::Operation;
     validate_request(value)?;
@@ -1474,6 +1505,10 @@ pub fn safe_preview(value: &HelperRequest) -> Result<String, HelperProtocolError
         .as_ref()
         .ok_or(HelperProtocolError::Invalid("missing operation"))?;
     let mut output = match operation {
+        Operation::PreparePathExtension(_) => "prepare one additive route path".to_owned(),
+        Operation::ActivatePathExtension(_) => "activate one additive route path".to_owned(),
+        Operation::CommitPathExtension(_) => "prove and commit one additive route path".to_owned(),
+        Operation::AbortPathExtension(_) => "abort only one additive route path".to_owned(),
         Operation::PrepareLeaseBatch(value) => format!(
             "prepare {:?} context; paths={}; endpoints={}",
             ContextRole::try_from(value.role)
@@ -1576,6 +1611,10 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
         .as_ref()
         .ok_or(HelperProtocolError::Invalid("missing operation"))?
     {
+        Operation::PreparePathExtension(operation) => path_extension::validate_prepare(operation),
+        Operation::ActivatePathExtension(operation) => path_extension::validate_activate(operation),
+        Operation::CommitPathExtension(operation) => path_extension::validate_commit(operation),
+        Operation::AbortPathExtension(operation) => path_extension::validate_abort(operation),
         Operation::PrepareLeaseBatch(operation) => validate_prepare(operation),
         Operation::ActivateLeaseBatch(operation) => {
             context(&operation.route_context_id)?;
@@ -2029,6 +2068,9 @@ fn validate_response(value: &HelperResponse) -> Result<(), HelperProtocolError> 
 fn validate_outcome(value: &helper_response::Outcome) -> Result<(), HelperProtocolError> {
     use helper_response::Outcome;
     match value {
+        Outcome::PreparedPathExtension(value) => path_extension::validate_prepared(value),
+        Outcome::ActivatedPathExtension(value) => path_extension::validate_activated(value),
+        Outcome::CommittedPathExtension(value) => path_extension::validate_committed(value),
         Outcome::PreparedLeaseBatch(value) => {
             handle(&value.context_handle)?;
             validate_identity_set(&value.leases, |lease| {

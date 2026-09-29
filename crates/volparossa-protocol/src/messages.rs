@@ -88,6 +88,12 @@ pub enum ControlMessageType {
     DnsCacheQuery = 31,
     /// Correlated opaque DNSSEC proof; peer signatures do not establish DNS authority.
     DnsCacheReply = 32,
+    /// Ephemeral session request to add or abandon exactly one path of its existing route.
+    RouteExtensionRequest = 33,
+    /// Exit acknowledgement retaining the original route authority and hard expiry.
+    RouteExtension = 34,
+    /// New Relay's exact helper commit for one additive path, never a new route identity.
+    RouteExtensionRelayCommit = 35,
 }
 
 /// Data transport authorized by a reservation.

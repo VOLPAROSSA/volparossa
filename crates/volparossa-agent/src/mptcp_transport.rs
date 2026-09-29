@@ -18,6 +18,7 @@ use volparossa_routing::{
 use volparossa_wireguard::{WireGuardError, overlay_addresses};
 
 use crate::helper::{AcquiredTransportSocket, HelperClient, HelperClientError};
+use crate::mptcp_flow_runtime::client_refill::ClientRefillObservations;
 
 /// Route-local Exit listener port shared by the authenticated readiness signal and helper request.
 pub(crate) const PRODUCTION_MPTCP_EXIT_PORT: u16 = 44_443;
@@ -34,6 +35,7 @@ pub struct ClientMptcpTransport {
     required_subflows: usize,
     active_paths: Vec<u32>,
     certificate_der: Option<Vec<u8>>,
+    refill_observations: Option<ClientRefillObservations>,
 }
 
 /// One independently owned connected stream borrowed from a live route-level MPTCP transport.
@@ -42,11 +44,17 @@ pub(crate) struct ClientMptcpFlowTransport {
     stream: MptcpStream,
     certificate_der: Vec<u8>,
     required_subflows: usize,
+    observations: ClientRefillObservations,
 }
 
 impl ClientMptcpFlowTransport {
-    pub(crate) fn into_tls_parts(self) -> (MptcpStream, Vec<u8>, usize) {
-        (self.stream, self.certificate_der, self.required_subflows)
+    pub(crate) fn into_tls_parts(self) -> (MptcpStream, Vec<u8>, usize, ClientRefillObservations) {
+        (
+            self.stream,
+            self.certificate_der,
+            self.required_subflows,
+            self.observations,
+        )
     }
 }
 
@@ -151,6 +159,35 @@ impl ExitMptcpListenerSignal {
 }
 
 impl ClientMptcpTransport {
+    /// Retain the additive signed selection without changing the original subflow readiness
+    /// floor or replacing any live socket. The Exit decides when to signal the new address.
+    pub(crate) fn register_extension(
+        &mut self,
+        path: u32,
+        selected: &[u32],
+    ) -> Result<(), MptcpTransportError> {
+        let signal = self
+            .signal
+            .as_mut()
+            .ok_or(MptcpTransportError::InvalidMetadata)?;
+        if !extension_paths_match(&signal.selected_path_ids, path, selected) {
+            return Err(MptcpTransportError::InvalidMetadata);
+        }
+        self.refill_observations
+            .as_ref()
+            .ok_or(MptcpTransportError::InvalidMetadata)?
+            .extend(selected)
+            .map_err(|_| MptcpTransportError::InvalidMetadata)?;
+        signal.selected_path_ids = selected.to_vec();
+        Ok(())
+    }
+
+    pub(crate) fn refill_needed(&self, now: Instant) -> bool {
+        self.refill_observations
+            .as_ref()
+            .is_some_and(|observations| observations.refill_needed(now))
+    }
+
     /// Acquire and adopt the exact connected MPTCP descriptor for a verified Exit signal.
     ///
     /// The helper creates the socket inside the committed Client route namespace. Both endpoint
@@ -173,6 +210,12 @@ impl ClientMptcpTransport {
             selected_paths,
         )?;
         transport.certificate_der = Some(certificate_der);
+        transport.refill_observations = Some(ClientRefillObservations::new(
+            signal.route_context_id,
+            signal.port,
+            &signal.selected_path_ids,
+            &signal.initial_active_path_ids,
+        ));
         transport.signal = Some(signal);
         Ok(transport)
     }
@@ -206,6 +249,7 @@ impl ClientMptcpTransport {
             required_subflows,
             active_paths: Vec::new(),
             certificate_der: None,
+            refill_observations: None,
         })
     }
 
@@ -229,6 +273,10 @@ impl ClientMptcpTransport {
     ) -> Result<ClientMptcpFlowTransport, MptcpTransportError> {
         let certificate_der = self
             .certificate_der
+            .clone()
+            .ok_or(MptcpTransportError::InvalidMetadata)?;
+        let observations = self
+            .refill_observations
             .clone()
             .ok_or(MptcpTransportError::InvalidMetadata)?;
         // Route preparation connects this first socket before application TLS starts.
@@ -255,6 +303,7 @@ impl ClientMptcpTransport {
             stream,
             certificate_der,
             required_subflows: self.required_subflows,
+            observations,
         })
     }
 
@@ -364,6 +413,7 @@ pub(crate) struct ExitMptcpTransport {
     route_context_id: Vec<u8>,
     context_handle: Vec<u8>,
     active_paths: Vec<u32>,
+    retired_paths: BTreeSet<u32>,
     selected_paths: Vec<u32>,
     initial_paths: Vec<u32>,
     listener_port: u16,
@@ -409,6 +459,7 @@ impl ExitMptcpTransport {
             route_context_id: signal.route_context_id.to_vec(),
             context_handle,
             active_paths,
+            retired_paths: BTreeSet::new(),
             selected_paths: signal.selected_path_ids,
             initial_paths: paths,
             listener_port: signal.port,
@@ -433,10 +484,47 @@ impl ExitMptcpTransport {
     }
 
     pub(crate) fn warm_path(&self) -> Option<u32> {
-        self.selected_paths
-            .iter()
-            .copied()
-            .find(|path| !self.initial_paths.contains(path) && !self.active_paths.contains(path))
+        self.selected_paths.iter().copied().find(|path| {
+            !self.initial_paths.contains(path)
+                && !self.active_paths.contains(path)
+                && !self.retired_paths.contains(path)
+        })
+    }
+
+    pub(crate) fn can_register_extension(&self, path: u32, selected: &[u32]) -> bool {
+        extension_paths_match(&self.selected_paths, path, selected)
+    }
+
+    pub(crate) fn extension_growth_scope(
+        &self,
+        path: u32,
+        selected: &[u32],
+    ) -> Option<crate::mptcp_flow_runtime::path_growth::PathScope> {
+        self.can_register_extension(path, selected).then(|| {
+            crate::mptcp_flow_runtime::path_growth::PathScope::new(
+                self.route_context_id
+                    .as_slice()
+                    .try_into()
+                    .expect("verified context ID"),
+                self.listener_port,
+                selected,
+                &self.initial_paths,
+            )
+        })
+    }
+
+    /// A helper-committed, separately authenticated path becomes eligible for observed growth.
+    /// This does not signal `ADD_ADDR` or claim that it has carried any application bytes.
+    pub(crate) fn register_extension(
+        &mut self,
+        path: u32,
+        selected: &[u32],
+    ) -> Result<(), MptcpTransportError> {
+        if !self.can_register_extension(path, selected) {
+            return Err(MptcpTransportError::InvalidMetadata);
+        }
+        self.selected_paths = selected.to_vec();
+        Ok(())
     }
 
     pub(crate) async fn activate_warm(
@@ -484,6 +572,9 @@ impl ExitMptcpTransport {
             })
             .await?;
         self.active_paths.retain(|active| *active != path);
+        // The helper keeps the exact WireGuard lease for final Destroy, but this unsuccessful
+        // warm trial must not be immediately signalled again ahead of a newly discovered path.
+        self.retired_paths.insert(path);
         Ok(())
     }
 
@@ -654,6 +745,24 @@ fn selected_path_ids(
     Ok(paths.into_iter().collect())
 }
 
+/// Identity checks belong to the signed route/helper owners. This projection admits only an
+/// exact existing set (lost reply) or one added path, never replacement, shrinking or reordering.
+fn extension_paths_match(current: &[u32], path: u32, selected: &[u32]) -> bool {
+    if !(1..=8).contains(&path) || current.len() > 8 {
+        return false;
+    }
+    if current.contains(&path) {
+        return current == selected;
+    }
+    if current.len() >= 8 {
+        return false;
+    }
+    let mut expected = current.to_vec();
+    expected.push(path);
+    expected.sort_unstable();
+    expected == selected
+}
+
 /// The connected/listening socket already owns the first selected path. Registering it again can
 /// create a duplicate subflow on that path and satisfy a multipath count without using the second
 /// Relay, so only the remaining paths enter the kernel path-manager endpoint set.
@@ -684,6 +793,17 @@ pub enum MptcpTransportError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mptcp_extension_projection_accepts_one_addition_and_exact_lost_reply() {
+        assert!(extension_paths_match(&[1, 2], 3, &[1, 2, 3]));
+        assert!(extension_paths_match(&[1, 2, 3], 3, &[1, 2, 3]));
+        assert!(!extension_paths_match(&[1, 2, 3], 3, &[1, 2]));
+        assert!(!extension_paths_match(&[1, 2], 3, &[1, 3]));
+        assert!(!extension_paths_match(&[1, 2], 3, &[1, 2, 3, 4]));
+        assert!(!extension_paths_match(&[1, 2], 3, &[3, 1, 2]));
+        assert!(!extension_paths_match(&[1, 2], 9, &[1, 2, 9]));
+    }
 
     fn mptcp_info(total_subflows: u8, fallback: bool) -> MptcpInfo {
         MptcpInfo {

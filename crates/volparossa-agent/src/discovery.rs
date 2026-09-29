@@ -8,6 +8,8 @@ mod downlink;
 mod native_ready;
 mod preselection_observation;
 mod preselection_sampler;
+mod route_extension;
+mod route_extension_relay;
 mod route_retire;
 
 pub(crate) use content::ContentDiscoveryError;
@@ -135,7 +137,8 @@ use crate::{
         start_production_single_path_udp_exit,
     },
     mptcp_flow_runtime::{
-        ProductionMptcpExitCleanup, ProductionMptcpExitCompletion, ProductionMptcpExitRuntime,
+        MptcpExitPathControl, ProductionMptcpExitCleanup, ProductionMptcpExitCompletion,
+        ProductionMptcpExitRuntime,
     },
     mptcp_transport::{ExitMptcpListenerSignal, ExitMptcpTransport, PRODUCTION_MPTCP_EXIT_PORT},
     roles::RoleStore,
@@ -199,8 +202,9 @@ pub(crate) struct DiscoveryRuntimeResources {
 
 /// Route-policy-only input for one actor-owned client preselection attempt.
 ///
-/// No peer, target, endpoint, Exit, request, or dispatch identity can cross this boundary. The
-/// discovery actor derives every network target from its own freshly revalidated snapshot.
+/// The discovery actor derives every network target from its own freshly revalidated snapshot.
+/// An established-route restriction may discard candidates, but cannot add peers, endpoints,
+/// dispatch identity or authority absent from that actor-owned snapshot.
 pub(crate) struct ClientPreselectionParameters {
     transport: Transport,
     address_family: ObservationAddressFamily,
@@ -210,6 +214,7 @@ pub(crate) struct ClientPreselectionParameters {
     minimum_other_relays: usize,
     maximum_other_relays: usize,
     requested_candidate_bound: usize,
+    restriction: Option<route_extension::PreselectionRestriction>,
 }
 
 #[allow(
@@ -240,6 +245,7 @@ impl ClientPreselectionParameters {
             minimum_other_relays,
             maximum_other_relays,
             requested_candidate_bound,
+            restriction: None,
         }
     }
 
@@ -393,6 +399,27 @@ impl DiscoveryControlHandle {
             .await
             .map_err(|_| ClientPreselectionError::Timeout)?
             .map_err(|_| ClientPreselectionError::Closed)?
+    }
+
+    /// Restrict a fresh actor-owned sample to an established Exit/control pair and two relays.
+    /// These IDs are filters, not target authority: missing current peers fail closed.
+    pub(crate) async fn prepare_client_preselection_for_route(
+        &self,
+        mut parameters: ClientPreselectionParameters,
+        exit_node: [u8; 32],
+        exit_peer: Libp2pPeerId,
+        control_node: [u8; 32],
+        control_peer: Libp2pPeerId,
+        data_relays: Vec<([u8; 32], Libp2pPeerId)>,
+    ) -> Result<PreparedPreselectionEvidence, ClientPreselectionError> {
+        parameters.restriction = Some(route_extension::PreselectionRestriction {
+            exit_node,
+            exit_peer,
+            control_node,
+            control_peer,
+            data_relays,
+        });
+        self.prepare_client_preselection(parameters).await
     }
 
     pub(crate) async fn resolve_direct_relay(
@@ -963,6 +990,8 @@ pub(crate) struct ActiveProductionMptcpExitRoute {
     reservation_id: [u8; FORWARD_ID_BYTES],
     expires_at_ms: u64,
     cleanup_not_before_ms: u64,
+    path_control: Option<MptcpExitPathControl>,
+    extensions: HashMap<[u8; FORWARD_ID_BYTES], route_extension::LiveExtension>,
 }
 
 struct MptcpExitRuntimeCompletionEvent {
@@ -2389,6 +2418,7 @@ impl DiscoveryRuntime {
             minimum_other_relays,
             maximum_other_relays,
             requested_candidate_bound,
+            restriction,
         } = parameters;
 
         let captured_at_ms = unix_millis();
@@ -2435,6 +2465,15 @@ impl DiscoveryRuntime {
             minimum_other_relays,
             maximum_other_relays,
         );
+        let snapshot = if let Some(restriction) = restriction {
+            let Some(snapshot) = restriction.apply(snapshot) else {
+                let _ = reply.send(Err(ClientPreselectionError::Unavailable));
+                return;
+            };
+            snapshot
+        } else {
+            snapshot
+        };
         let snapshot = match narrow_route_candidate_snapshot(snapshot, scope) {
             Ok(snapshot) => snapshot,
             Err(failure) => {
@@ -5670,8 +5709,14 @@ impl DiscoveryRuntime {
                     },
                 ..
             } => {
-                self.answer_exit_forward_upstream(peer, connection_id, request, channel, state)
-                    .await;
+                Box::pin(self.answer_exit_forward_upstream(
+                    peer,
+                    connection_id,
+                    request,
+                    channel,
+                    state,
+                ))
+                .await;
             }
             request_response::Event::Message {
                 peer,
@@ -5747,8 +5792,24 @@ impl DiscoveryRuntime {
                     return;
                 }
                 match request.validated_operation() {
-                    Ok(DatapathRelayOperation::ExecuteProbe) => {
+                    Ok(
+                        DatapathRelayOperation::ExecuteProbe
+                        | DatapathRelayOperation::ExtensionProbe,
+                    ) => {
                         self.answer_production_execute_probe(
+                            authenticated_client_peer,
+                            &request,
+                            channel,
+                            state,
+                        )
+                        .await;
+                        return;
+                    }
+                    Ok(
+                        DatapathRelayOperation::ExtensionCommit
+                        | DatapathRelayOperation::ExtensionAbort,
+                    ) => {
+                        self.answer_route_extension_relay(
                             authenticated_client_peer,
                             &request,
                             channel,
@@ -5887,23 +5948,25 @@ impl DiscoveryRuntime {
         channel: request_response::ResponseChannel<DatapathRelayResponse>,
         state: &Arc<RwLock<AgentState>>,
     ) {
+        let Ok(
+            operation @ (DatapathRelayOperation::ExecuteProbe
+            | DatapathRelayOperation::ExtensionProbe),
+        ) = request.validated_operation()
+        else {
+            return;
+        };
         macro_rules! reject {
             ($code:literal) => {{
                 tracing::warn!(rejection = $code, "production Relay ExecuteProbe rejected");
                 log_relay_forward_admission(Some(state), $code);
-                self.send_native_datapath_unavailable(
-                    request,
-                    DatapathRelayOperation::ExecuteProbe,
-                    channel,
-                );
+                self.send_native_datapath_unavailable(request, operation, channel);
                 return;
             }};
         }
         let now_ms = unix_millis();
         let local_peer = *self.service.local_peer_id();
         let request_valid = request.validate().is_ok();
-        let scope_matches =
-            datapath_request_scope_matches(request, DatapathRelayOperation::ExecuteProbe, now_ms);
+        let scope_matches = datapath_request_scope_matches(request, operation, now_ms);
         let remote_client = authenticated_client_peer != local_peer;
         let relay_role = self.roles.relay;
         let relay_service = self.relay_service.is_some();
@@ -6087,7 +6150,7 @@ impl DiscoveryRuntime {
         };
         let Ok(response) = DatapathRelayResponse::granted(
             request.request_id().to_vec(),
-            DatapathRelayOperation::ExecuteProbe,
+            operation,
             self.local_node_id.to_vec(),
             local_peer.to_bytes(),
             signed_result,
@@ -6553,6 +6616,13 @@ impl DiscoveryRuntime {
         {
             reject!("UDP_SESSION_RELAY_HELPER_COMMIT_REJECTED");
         }
+        if self.relay_service.as_mut().is_none_or(|service| {
+            service
+                .mark_tunnel_established(route.accepted.reservation_id(), unix_millis())
+                .is_err()
+        }) {
+            reject!("UDP_SESSION_RELAY_LIVE_RESERVATION_REJECTED");
+        }
         let attempt_deadline =
             rpc_deadline(request.deadline_unix_ms(), EXIT_FORWARD_UPSTREAM_TIMEOUT);
         let Ok(outbound_id) = self
@@ -6803,6 +6873,13 @@ impl DiscoveryRuntime {
         {
             reject!("MPTCP_SESSION_RELAY_HELPER_COMMIT_REJECTED");
         }
+        if self.relay_service.as_mut().is_none_or(|service| {
+            service
+                .mark_tunnel_established(route.accepted.reservation_id(), unix_millis())
+                .is_err()
+        }) {
+            reject!("MPTCP_SESSION_RELAY_LIVE_RESERVATION_REJECTED");
+        }
         let attempt_deadline =
             rpc_deadline(request.deadline_unix_ms(), EXIT_FORWARD_UPSTREAM_TIMEOUT);
         let Ok(outbound_id) = self
@@ -7040,6 +7117,13 @@ impl DiscoveryRuntime {
             .is_err()
         {
             reject!("MPQUIC_SESSION_RELAY_HELPER_COMMIT_REJECTED");
+        }
+        if self.relay_service.as_mut().is_none_or(|service| {
+            service
+                .mark_tunnel_established(route.accepted.reservation_id(), unix_millis())
+                .is_err()
+        }) {
+            reject!("MPQUIC_SESSION_RELAY_LIVE_RESERVATION_REJECTED");
         }
         let attempt_deadline =
             rpc_deadline(request.deadline_unix_ms(), EXIT_FORWARD_UPSTREAM_TIMEOUT);
@@ -9478,12 +9562,12 @@ impl DiscoveryRuntime {
             reject!("EXIT_FORWARD_EXIT_SCOPE_REJECTED");
         }
         if operation == ExitForwardOperation::MptcpSessionStart {
-            self.begin_production_mptcp_exit_session(
+            Box::pin(self.begin_production_mptcp_exit_session(
                 authenticated_control_relay,
                 &request,
                 channel,
                 state,
-            )
+            ))
             .await;
             return;
         }
@@ -9493,6 +9577,16 @@ impl DiscoveryRuntime {
                 &request,
                 channel,
                 state,
+            )
+            .await;
+            return;
+        }
+        if operation == ExitForwardOperation::ExtendRoute {
+            self.begin_route_extension_forward(
+                authenticated_control_relay,
+                connection_id,
+                request,
+                channel,
             )
             .await;
             return;
@@ -9607,6 +9701,7 @@ impl DiscoveryRuntime {
             | ExitForwardOperation::MptcpSessionStart
             | ExitForwardOperation::MpquicSessionStart
             | ExitForwardOperation::AdjacentReceiveBudget
+            | ExitForwardOperation::ExtendRoute
             | ExitForwardOperation::RouteRetire
             | ExitForwardOperation::Unspecified => None,
         };
@@ -10759,6 +10854,8 @@ impl DiscoveryRuntime {
                     reservation_id,
                     expires_at_ms: 0,
                     cleanup_not_before_ms: 0,
+                    path_control: None,
+                    extensions: HashMap::new(),
                 };
                 self.active_production_mptcp_exit_routes
                     .insert(route_context_id, active);
@@ -10770,13 +10867,26 @@ impl DiscoveryRuntime {
         let active = ActiveProductionMptcpExitRoute {
             canonical_start: pending.canonical_start.clone(),
             encoded_signal: encoded_signal.clone(),
+            path_control: Some(runtime.path_control()),
             runtime: Some(runtime),
             cleanup: None,
             runtime_started: false,
             reservation_id,
             expires_at_ms,
             cleanup_not_before_ms: 0,
+            extensions: HashMap::new(),
         };
+        if self.exit_service.as_mut().is_none_or(|service| {
+            service
+                .mark_route_established(&reservation_id, unix_millis())
+                .is_err()
+        }) {
+            self.retire_active_mptcp_exit_route(route_context_id, active)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_LIVE_RESERVATION_REJECTED").await;
+            return;
+        }
         if self
             .active_production_mptcp_exit_routes
             .contains_key(&route_context_id)
@@ -14238,6 +14348,15 @@ fn datapath_request_scope_matches(
         DatapathRelayOperation::ExecuteProbe => {
             execute_probe_scope_matches(request, now_ms, &mut replay)
         }
+        DatapathRelayOperation::ExtensionProbe => {
+            route_extension_relay::extension_probe_scope_matches(request, now_ms)
+        }
+        DatapathRelayOperation::ExtensionCommit => {
+            route_extension_relay::extension_commit_scope_matches(request, now_ms)
+        }
+        DatapathRelayOperation::ExtensionAbort => {
+            route_extension_relay::extension_abort_scope_matches(request, now_ms)
+        }
         DatapathRelayOperation::ReservePath => {
             reserve_path_scope_matches(request, now_ms, &mut replay)
         }
@@ -15679,6 +15798,9 @@ fn forward_request_scope_matches(
         return false;
     };
     match operation {
+        ExitForwardOperation::ExtendRoute => {
+            route_extension::forward_scope_matches(request, now_ms)
+        }
         ExitForwardOperation::CapacityHold => {
             let Ok(verified) = verify_control_message::<ExitCapacityHoldRequest>(
                 request.canonical_request(),

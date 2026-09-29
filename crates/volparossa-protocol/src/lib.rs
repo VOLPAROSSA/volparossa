@@ -14,7 +14,13 @@ mod native_route;
 mod native_route_credential;
 mod preselection_observation;
 mod reservation_requests;
+mod route_extension;
 mod route_retire;
+
+pub use route_extension::{
+    MAX_ROUTE_EXTENSION_BYTES, RouteExtension, RouteExtensionPhase, RouteExtensionRelayCommit,
+    RouteExtensionRequest, RouteExtensionScope,
+};
 
 pub use route_retire::{
     MAX_ROUTE_RETIRE_BYTES, MAX_ROUTE_RETIRE_LIFETIME_MS, RetirementReceipt, RouteRetire,

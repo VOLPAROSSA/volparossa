@@ -29,6 +29,7 @@ for script in "$GUEST" "$HOST"; do
     "$script" --preview --scenario mixed-link | grep -Fi 'mixed-link' >/dev/null
     "$script" --preview --scenario mpquic-growth | grep -Fi 'MPQUIC' >/dev/null
     "$script" --preview --scenario mptcp-growth | grep -Fi 'MPTCP' >/dev/null
+    "$script" --preview --scenario mptcp-refill | grep -Fi 'refill' >/dev/null
     "$script" --preview --scenario sharing | grep -Fi 'sharing' >/dev/null
     "$script" --preview --scenario uplink-link | grep -Fi 'uplink-link' >/dev/null
     "$script" --preview --scenario crash-recovery | grep -Fi 'crash-recovery' >/dev/null
@@ -1123,6 +1124,8 @@ grep -F 'mptcp_growth_run' "$GUEST" >/dev/null
 grep -F 'mptcp_growth_cleanup' "$GUEST" >/dev/null
 grep -F 'Require real two-to-three MPTCP payload growth' "$WORKFLOW" >/dev/null
 python3 -B "$HERE/test-mptcp-growth-smoke.py"
+sh -n "$HERE/mptcp-refill-smoke.sh"
+python3 -B "$HERE/test-mptcp-refill-smoke.py"
 python3 -B "$HERE/test-wifi-link-smoke.py"
 sh -n "$HERE/uplink-link-smoke.sh"
 python3 -B "$HERE/test-uplink-link-smoke.py"

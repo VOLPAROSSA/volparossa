@@ -116,6 +116,7 @@ mod downlink_sender;
 mod forwarding_bootstrap;
 mod functional_backend;
 mod ipv6_forwarding;
+mod path_extension;
 mod relay_fence;
 mod restart_reaper;
 pub(crate) use dead_worker_reaper::{
@@ -1922,6 +1923,7 @@ fn relay_activation_specification(
 }
 
 struct WorkerContext<Kernel> {
+    extensions: BTreeMap<ContextId, path_extension::WorkerExtension>,
     route_context_id: ContextId,
     role: RoutingContextRole,
     bound_path_id: Option<u8>,
@@ -2321,6 +2323,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
     #[cfg(test)]
     const fn new(route_context_id: ContextId, role: RoutingContextRole, kernel: Kernel) -> Self {
         Self {
+            extensions: BTreeMap::new(),
             route_context_id,
             role,
             bound_path_id: None,
@@ -2361,6 +2364,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         };
         Some(Self {
             route_context_id,
+            extensions: BTreeMap::new(),
             role,
             bound_path_id: matches!(role, RoutingContextRole::Relay).then_some(path_id),
             relay_fence: Some(relay_fence),
@@ -2876,6 +2880,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         let ownership = ownerships
             .iter()
             .find(|ownership| ownership.resource.key() == (path_id, expected_role as i32))
+            .or_else(|| self.extension_committed_lease(path_id, expected_role as i32))
             .ok_or(InternalWorkerResult::Invalid)?;
         let proof = ownership.proof.ok_or(InternalWorkerResult::Invalid)?;
         let live = current_unix_seconds()
@@ -3041,6 +3046,12 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
     }
 
     fn destroy(&mut self, deadline: HardDeadline) -> WorkerDestroyOutcome {
+        let extensions = self.extensions.keys().copied().collect::<Vec<_>>();
+        for id in extensions {
+            if self.abort_extension(id, deadline) != InternalWorkerResult::Ok {
+                return WorkerDestroyOutcome::CleanupIncomplete;
+            }
+        }
         if let Some(manager) = self.mptcp.as_ref() {
             if manager.cleanup().is_err() || deadline.ensure_remaining().is_err() {
                 return WorkerDestroyOutcome::CleanupIncomplete;
@@ -4078,6 +4089,13 @@ fn child_loop(
         let (request, deadline) = receive_deadline_bound_worker_request(channel, expected_parent)?;
         let operation = request.operation.as_ref().ok_or(WorkerV3Error::Invalid)?;
         let (result, outcome, exit, descriptor) = match operation {
+            internal_worker_request::Operation::PathExtension(value) => {
+                let (result, outcome, exit) = match context.as_mut() {
+                    Some(context) => context.extension_operation(value, &mut keys, deadline)?,
+                    None => (InternalWorkerResult::NotFound, None, false),
+                };
+                (result, outcome, exit, None)
+            }
             internal_worker_request::Operation::Initialise(initialise) => {
                 let (result, outcome, exit) = initialise_child_context(
                     &mut context,
@@ -4284,6 +4302,9 @@ fn request_context(request: &InternalWorkerRequest) -> Result<ContextId, WorkerV
     use internal_worker_request::Operation;
 
     let bytes = match request.operation.as_ref().ok_or(WorkerV3Error::Invalid)? {
+        Operation::PathExtension(value) => {
+            value.context_id().map_err(|_| WorkerV3Error::Invalid)?
+        }
         Operation::Initialise(value) => &value.route_context_id,
         Operation::PrepareLeases(value) => &value.route_context_id,
         Operation::ActivateLeases(value) => &value.route_context_id,
@@ -7939,7 +7960,8 @@ fn transition(
             StablePhase::Prepared,
             Some(Operation::ActivateClientIngress(_) | Operation::ActivateLeases(_)),
         ) => Ok((StablePhase::Activated, false)),
-        (StablePhase::Activated, Some(Operation::ProbeCommitLeases(_))) => {
+        (StablePhase::Committed, Some(Operation::PathExtension(_)))
+        | (StablePhase::Activated, Some(Operation::ProbeCommitLeases(_))) => {
             Ok((StablePhase::Committed, false))
         }
         (
@@ -12605,6 +12627,7 @@ impl WorkerCoordinator {
 #[cfg(test)]
 mod tests {
     mod live_relay_cleanup;
+    mod path_extension;
     use std::{
         env, fs,
         io::Read,

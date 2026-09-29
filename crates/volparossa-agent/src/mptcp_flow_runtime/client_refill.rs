@@ -1,0 +1,299 @@
+//! Route-local refill demand from weak observations of actual authenticated Client sockets.
+//!
+//! This is demand, not authority: discovery, signed reservations and helper ownership still
+//! authorize every new path. No FD is duplicated and no observation keeps an application alive.
+
+use std::{
+    collections::BTreeMap,
+    io,
+    net::{IpAddr, Ipv6Addr, SocketAddr},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use tokio::time::Instant;
+use volparossa_mptcp::MptcpSubflowInfo;
+use volparossa_tcp_proxy::Tls13MptcpStream;
+use volparossa_wireguard::overlay_addresses;
+
+use super::{
+    MAXIMUM_CONCURRENT_MPTCP_FLOWS,
+    observed::{FlowObserver, ObservationSlot, ObservedTls},
+};
+
+const MAXIMUM_PATHS: usize = 8;
+const STALLED: Duration = Duration::from_secs(3);
+const SUSTAINED_DEGRADATION: Duration = Duration::from_secs(2);
+const WARM_GRACE: Duration = Duration::from_secs(10);
+const ATTEMPT_COOLDOWN: Duration = Duration::from_secs(30);
+
+#[derive(Clone)]
+pub(crate) struct ClientRefillObservations(Arc<Mutex<State>>);
+
+struct Scope {
+    context: [u8; 16],
+    port: u16,
+    // Client local first, Exit remote second: the inverse of the Exit growth observer.
+    tuples: BTreeMap<u32, (Ipv6Addr, Ipv6Addr)>,
+    initial: Vec<u32>,
+}
+
+impl Scope {
+    fn new(context: [u8; 16], port: u16, selected: &[u32], initial: &[u32]) -> Self {
+        let tuples = selected
+            .iter()
+            .map(|path| {
+                let addresses =
+                    overlay_addresses(context, u8::try_from(*path).expect("verified path ID"))
+                        .expect("verified route overlay");
+                (*path, (addresses.client, addresses.exit))
+            })
+            .collect();
+        Self {
+            context,
+            port,
+            tuples,
+            initial: initial.to_vec(),
+        }
+    }
+
+    fn bind(&self, samples: &[MptcpSubflowInfo]) -> Option<BTreeMap<u32, MptcpSubflowInfo>> {
+        if samples.is_empty() || samples.len() > self.tuples.len() || samples.len() > MAXIMUM_PATHS
+        {
+            return None;
+        }
+        let mut result = BTreeMap::new();
+        for sample in samples {
+            let (path, _) = self.tuples.iter().find(|(_, (local, remote))| {
+                sample.local.ip() == IpAddr::V6(*local)
+                    && sample.local.port() != 0
+                    && sample.remote == SocketAddr::new(IpAddr::V6(*remote), self.port)
+            })?;
+            if result.insert(*path, *sample).is_some() {
+                return None;
+            }
+        }
+        Some(result)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Previous {
+    sample: MptcpSubflowInfo,
+    first_seen: Instant,
+    last_progress: Option<Instant>,
+}
+
+#[derive(Default)]
+struct History {
+    // Missing previously observed paths remain here, bounded by the signed selected set.
+    previous: BTreeMap<u32, Previous>,
+    candidate: Option<(u32, Instant)>,
+}
+
+impl History {
+    fn demand(&mut self, samples: &[MptcpSubflowInfo], scope: &Scope, now: Instant) -> bool {
+        let Some(bound) = scope.bind(samples) else {
+            *self = Self::default();
+            return false;
+        };
+        let mut progressing = Vec::new();
+        let mut lossy = Vec::new();
+        for (path, sample) in &bound {
+            let old = self.previous.get(path).filter(|old| {
+                old.sample.subflow_id == sample.subflow_id
+                    && old.sample.local == sample.local
+                    && old.sample.remote == sample.remote
+                    && old.sample.bytes_acked <= sample.bytes_acked
+                    && old.sample.bytes_received <= sample.bytes_received
+                    && old.sample.total_retransmissions <= sample.total_retransmissions
+                    && old.sample.data_segments_sent <= sample.data_segments_sent
+            });
+            let progressed = sample.tcp_state == 1
+                && old.is_some_and(|old| {
+                    sample.bytes_acked > old.sample.bytes_acked
+                        || sample.bytes_received > old.sample.bytes_received
+                });
+            if progressed {
+                progressing.push(*path);
+            }
+            // These are local sender retransmissions. For a download they are NOT evidence
+            // of remote sender loss; failed/missing/stalled productive subflows are observed
+            // separately below, without inventing receiver retransmission counters.
+            if old.is_some_and(|old| {
+                let sent = sample.data_segments_sent - old.sample.data_segments_sent;
+                let retrans = sample.total_retransmissions - old.sample.total_retransmissions;
+                sent > 0 && u64::from(retrans) * 10 >= u64::from(sent)
+            }) {
+                lossy.push(*path);
+            }
+            let first_seen = old.map_or(now, |old| old.first_seen);
+            let last_progress = if progressed {
+                Some(now)
+            } else {
+                old.and_then(|old| old.last_progress)
+            };
+            self.previous.insert(
+                *path,
+                Previous {
+                    sample: *sample,
+                    first_seen,
+                    last_progress,
+                },
+            );
+        }
+        // Never combine different flows' samples. Every initial path must have actually
+        // carried bytes on this same metaconnection before any degradation can demand refill.
+        let primed = scope.initial.len() >= 2
+            && scope.initial.iter().all(|path| {
+                self.previous
+                    .get(path)
+                    .is_some_and(|old| old.last_progress.is_some())
+            });
+        let risky = scope.initial.iter().copied().find(|path| {
+            self.previous.get(path).is_some_and(|old| {
+                lossy.contains(path)
+                    || (old.last_progress.is_some()
+                        && (bound.get(path).is_none_or(|sample| sample.tcp_state != 1)
+                            || now.duration_since(old.last_progress.expect("checked progress"))
+                                >= STALLED))
+            })
+        });
+        let ready = primed
+            && risky.is_some_and(|risky| {
+                // No refill on an idle connection: another selected path must be carrying bytes
+                // now. A stalled path alone is not claimed to prove packet loss or extra goodput.
+                progressing
+                    .iter()
+                    .any(|path| *path != risky && !lossy.contains(path))
+            });
+        if !ready {
+            self.candidate = None;
+            return false;
+        }
+        let risky = risky.expect("checked risky path");
+        let since = match self.candidate {
+            Some((previous, since)) if previous == risky => since,
+            _ => {
+                self.candidate = Some((risky, now));
+                now
+            }
+        };
+        // A never-observed dormant path is not exhausted. Give every preselected or freshly
+        // added warm path its real trial; useful warm traffic suppresses further additions.
+        let warm_unhelpful = scope
+            .tuples
+            .keys()
+            .filter(|path| !scope.initial.contains(path))
+            .all(|path| {
+                self.previous.get(path).is_some_and(|old| {
+                    !progressing.contains(path)
+                        && now.duration_since(old.last_progress.unwrap_or(old.first_seen))
+                            >= WARM_GRACE
+                })
+            });
+        warm_unhelpful && now.duration_since(since) >= SUSTAINED_DEGRADATION
+    }
+}
+
+struct Flow {
+    observer: FlowObserver,
+    history: History,
+}
+
+struct State {
+    scope: Scope,
+    flows: Vec<Flow>,
+    last_attempt: Option<Instant>,
+}
+
+impl State {
+    fn admit_attempt(&mut self, demand: bool, now: Instant) -> bool {
+        if !demand
+            || self.scope.tuples.len() >= MAXIMUM_PATHS
+            || self
+                .last_attempt
+                .is_some_and(|last| now.duration_since(last) < ATTEMPT_COOLDOWN)
+        {
+            return false;
+        }
+        // Charge failed or empty discovery attempts too, not only successful installations.
+        self.last_attempt = Some(now);
+        true
+    }
+}
+
+impl ClientRefillObservations {
+    pub(crate) fn new(context: [u8; 16], port: u16, selected: &[u32], initial: &[u32]) -> Self {
+        Self(Arc::new(Mutex::new(State {
+            scope: Scope::new(context, port, selected, initial),
+            flows: Vec::new(),
+            last_attempt: None,
+        })))
+    }
+
+    pub(crate) fn attach(&self, stream: Tls13MptcpStream) -> io::Result<ObservedTls> {
+        let (slot, observer) = ObservationSlot::new();
+        let stream = slot.attach_owned(stream)?;
+        let mut state = self
+            .0
+            .lock()
+            .map_err(|_| io::Error::other("MPTCP refill observer poisoned"))?;
+        state.flows.retain(|flow| flow.observer.is_live());
+        if state.flows.len() < MAXIMUM_CONCURRENT_MPTCP_FLOWS {
+            state.flows.push(Flow {
+                observer,
+                history: History::default(),
+            });
+        }
+        // Telemetry admission must not abort an independently authorized flow. Over-cap flows
+        // keep functioning but supply no refill evidence; no unbounded observer is allocated.
+        Ok(stream)
+    }
+
+    pub(crate) fn extend(&self, selected: &[u32]) -> io::Result<()> {
+        let mut state = self
+            .0
+            .lock()
+            .map_err(|_| io::Error::other("MPTCP refill observer poisoned"))?;
+        if !(state.scope.tuples.len()..=state.scope.tuples.len() + 1).contains(&selected.len())
+            || selected.len() > MAXIMUM_PATHS
+            || !state
+                .scope
+                .tuples
+                .keys()
+                .all(|path| selected.contains(path))
+        {
+            return Err(io::Error::other(
+                "MPTCP refill selection changed existing paths",
+            ));
+        }
+        state.scope = Scope::new(
+            state.scope.context,
+            state.scope.port,
+            selected,
+            &state.scope.initial,
+        );
+        Ok(())
+    }
+
+    pub(crate) fn refill_needed(&self, now: Instant) -> bool {
+        let Ok(mut state) = self.0.lock() else {
+            return false;
+        };
+        let State { scope, flows, .. } = &mut *state;
+        let mut demand = false;
+        flows.retain_mut(|flow| {
+            match flow.observer.observe(scope.tuples.len().min(MAXIMUM_PATHS)) {
+                Ok(Some(samples)) => demand |= flow.history.demand(&samples, scope, now),
+                Ok(None) => return false,
+                Err(_) => flow.history = History::default(),
+            }
+            true
+        });
+        state.admit_attempt(demand, now)
+    }
+}
+
+#[cfg(test)]
+mod tests;

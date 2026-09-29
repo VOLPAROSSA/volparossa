@@ -2,7 +2,57 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-24
+Last updated: 2026-09-29
+
+## Current integration and active work
+
+Automatic authority rounds and the four-job assessment cycle are integrated by
+[PR #163](https://github.com/VOLPAROSSA/volparossa/pull/163), normal merge `f4e6aa79`,
+after Quality and all CodeQL analyses passed on `c4060377`. This also prevents local
+passphrase-reader errors from entering the public CLI report channel. It does not change
+the earlier model-quality limitations or promote uncertain judgments to sound reasoning.
+The original README banner is integrated by [PR #164](https://github.com/VOLPAROSSA/volparossa/pull/164).
+
+The live-relay-refill candidate adds signed +1 path extensions to an existing Client/Exit
+context. It retains the original reservation, Exit and hard expiry; newly owned WireGuard
+resources have their own Prepare/Activate/Commit/Abort lifecycle and durable cleanup markers.
+The Exit receives a real adjacent downlink budget before committing the new path. The
+discovery actor yields while that handshake completes, rather than preventing its own budget
+messages from being processed. New paths are warm candidates, not claimed active subflows.
+
+Real same-flow kernel observations drive nomination: idle flows or still-useful warm paths do
+not authorize growth. Failed nominations rotate independently of allocated path IDs, and
+under-capacity advertisements are excluded without treating advertisements as measurements.
+Fresh A1/native sampling, reservation and exact-parent authorization remain required. The
+current signed per-context limit remains eight path identities, including aborted attempts;
+this slice does not remove that implementation bound or implement unlimited connections.
+
+Six targeted helper extension tests, four Exit extension tests, 34 agent MPTCP tests
+(including five client-refill observation tests) and 11 agent extension tests pass locally;
+the selectors overlap and are not an independent aggregate count. Strict all-target,
+all-feature Clippy passes for the nine affected crates. These are not a live datapath proof.
+A separate `mptcp-refill` disposable scenario is prepared to require exhaustion of the
+original warm path, a newly eligible fourth relay path,
+the same MPTCP socket/context, actual bytes on that new path, retained original paths, full
+payload verification, privacy captures and complete cleanup. Existing `mptcp-growth` evidence
+keeps its original, narrower meaning. No new refill VM run or alpha-completion claim is made.
+
+Firefox integration is being developed separately in
+[VOLPAROSSA/volparossa-browser](https://github.com/VOLPAROSSA/volparossa-browser).
+Its requested browser-specific kill switch defaults off; this does not weaken core defaults
+for other consumers. Daemon attachment, full-protocol enforcement and the compute UI remain
+unfinished. The first isolated Firefox ESR 140.16 smoke verifies 18 privacy defaults,
+actual Strict tracking protection and persistent user choices, not a completed browser.
+
+The newly requested [Signal integration](https://github.com/VOLPAROSSA/volparossa-chat)
+is a separate client of this core. Its scope is Signal-protocol encrypted delivery between
+compatible clients without Signal's delivery servers, while retaining ordinary Signal use,
+plus private chunked backups with reciprocal storage contribution. Existing VOLPAROSSA
+encrypted messages are not Signal interoperability. Durable private storage leases,
+contribution accounting, Signal identity/device/session binding and backup restore remain
+unfinished; public cache custody is not evidence for those features.
+
+## Earlier milestone evidence
 
 The completed development milestone is integrated into `main` by
 [PR #150](https://github.com/VOLPAROSSA/volparossa/pull/150), merge `322c45b9`, after the
@@ -16,8 +66,8 @@ integrated by [PR #160](https://github.com/VOLPAROSSA/volparossa/pull/160), norm
 `e87f1933`, after Quality, CodeQL and both source-exact network proofs passed.
 Neither integration nor execution proves reliable model reasoning.
 
-The next integration candidate reunites automatic authority rounds, the four-job assessment
-cycle and both retrieval-admission fixes with this current main-line cache implementation.
+The PR #163 integration reunited automatic authority rounds, the four-job assessment
+cycle and both retrieval-admission fixes with the main-line cache implementation.
 It preserves custody discovery's tag 37 alongside the authority inbox's tag 36, the standalone
 1.7B fixture and all retention checks. The production crate sources, dependency pins and
 policy-cycle network scripts match `24765ee9`, whose original complete-cycle proof below

@@ -180,6 +180,52 @@ fn capability_request(grant: &ClientSessionCapability) -> RouteRetire {
 }
 
 impl DiscoveryRuntime {
+    /// Close only this newly added Relay's admission after a verified extension abort.
+    /// The original Exit and other Relays are deliberately not sent a retirement request.
+    pub(super) fn begin_extension_relay_retirement(
+        &mut self,
+        context: ContextId,
+        client: Libp2pPeerId,
+        request: &RouteRetire,
+        parent: &ExitReservation,
+    ) -> bool {
+        if request != &exit_request(parent) || parent.route_context_id.as_slice() != context {
+            return false;
+        }
+        let Some(scope) = self.route_retire.relay.get_mut(&context) else {
+            let Ok(exit_peer) = Libp2pPeerId::from_bytes(&parent.exit_peer_id) else {
+                return false;
+            };
+            let Some(exit_node) = fixed_bytes(&parent.exit_node_id) else {
+                return false;
+            };
+            // Abort may overtake the original ReservePath RPC. Retain the bounded tombstone
+            // before acknowledging absence, so delayed admission cannot recreate the owner.
+            return self.insert_relay_retirement(
+                context,
+                RelayScope {
+                    request: request.clone(),
+                    client_peer: client,
+                    exit_peer,
+                    exit_node,
+                    expires_at_ms: parent.expires_at_ms,
+                    retiring: true,
+                    complete: true,
+                },
+            );
+        };
+        if scope.client_peer != client
+            || scope.request != *request
+            || scope.exit_peer.to_bytes() != parent.exit_peer_id
+            || scope.exit_node.as_slice() != parent.exit_node_id
+            || scope.expires_at_ms != parent.expires_at_ms
+        {
+            return false;
+        }
+        scope.retiring = true;
+        true
+    }
+
     pub(super) fn retired_relay_datapath(&self, request: &DatapathRelayRequest) -> bool {
         let context = match request.validated_operation() {
             Ok(DatapathRelayOperation::ReservePath) => {
@@ -218,6 +264,11 @@ impl DiscoveryRuntime {
 
     pub(super) fn retired_exit_forward(&self, request: &ExitForwardRequest) -> bool {
         let context = match request.validated_operation() {
+            Ok(ExitForwardOperation::ExtendRoute) => decoded_signed_payload::<
+                volparossa_protocol::RouteExtensionRequest,
+            >(request.canonical_request())
+            .and_then(|request| request.scope?.parent().ok())
+            .and_then(|parent| fixed_bytes(&parent.route_context_id)),
             Ok(ExitForwardOperation::FinalizeReservation) => {
                 decoded_signed_payload::<ExitReservationFinalizeRequest>(
                     request.canonical_request(),

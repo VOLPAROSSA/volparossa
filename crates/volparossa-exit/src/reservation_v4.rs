@@ -17,6 +17,9 @@ use volparossa_protocol::{
 )]
 use super::*;
 
+pub(super) mod extension;
+pub use extension::AcceptedRouteExtension;
+
 /// Exit-signed coupled capability and short capacity-hold response.
 #[derive(Clone)]
 pub struct AcceptedExitCapacityHold {
@@ -429,6 +432,8 @@ impl ExitService {
             self.ledger_mut()?
                 .reserve(allocation, unix_seconds(now_ms))?;
             let state = ExitReservationState {
+                signed_exit_reservation: Vec::new(),
+                extensions: HashMap::new(),
                 phase: ExitReservationPhase::Held,
                 route_context_id,
                 client_session_id: fixed(&request.client_session_id, "client session id")?,
@@ -1375,6 +1380,8 @@ impl ExitService {
             live.phase = ExitReservationPhase::Finalized;
             live.finalize_id = Some(finalize_id);
             live.finalized_bundle_hash = Some(bundle_hash);
+            live.signed_exit_reservation
+                .clone_from(&response.accepted.encoded);
             live.paths = path_states;
             live.permits.clear();
             Ok((response, reservation_key, identity_owner))

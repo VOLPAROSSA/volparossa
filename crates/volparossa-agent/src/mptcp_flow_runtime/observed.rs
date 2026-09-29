@@ -11,7 +11,12 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use volparossa_mptcp::MptcpSubflowInfo;
 use volparossa_tcp_proxy::Tls13MptcpStream;
 
-pub(super) struct ObservedTls(Arc<Mutex<Tls13MptcpStream>>);
+pub(crate) struct ObservedTls {
+    stream: Arc<Mutex<Tls13MptcpStream>>,
+    // Client flows carry their own observation lifetime. Accepted Exit flows already own an
+    // external slot while authentication is pending, and leave this field empty.
+    observation: Option<ObservationSlot>,
+}
 
 type SocketObservation = Mutex<Option<Weak<Mutex<Tls13MptcpStream>>>>;
 
@@ -38,7 +43,16 @@ impl ObservationSlot {
             return Err(io::Error::other("MPTCP flow observer already attached"));
         }
         *slot = Some(Arc::downgrade(&shared));
-        Ok(ObservedTls(shared))
+        Ok(ObservedTls {
+            stream: shared,
+            observation: None,
+        })
+    }
+
+    pub(super) fn attach_owned(self, stream: Tls13MptcpStream) -> io::Result<ObservedTls> {
+        let mut observed = self.attach(stream)?;
+        observed.observation = Some(self);
+        Ok(observed)
     }
 }
 
@@ -81,7 +95,7 @@ impl AsyncRead for ObservedTls {
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let mut stream = self
-            .0
+            .stream
             .lock()
             .map_err(|_| io::Error::other("MPTCP observer poisoned"))?;
         Pin::new(&mut *stream).poll_read(cx, buffer)
@@ -95,7 +109,7 @@ impl AsyncWrite for ObservedTls {
         buffer: &[u8],
     ) -> Poll<io::Result<usize>> {
         let mut stream = self
-            .0
+            .stream
             .lock()
             .map_err(|_| io::Error::other("MPTCP observer poisoned"))?;
         Pin::new(&mut *stream).poll_write(cx, buffer)
@@ -103,7 +117,7 @@ impl AsyncWrite for ObservedTls {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let mut stream = self
-            .0
+            .stream
             .lock()
             .map_err(|_| io::Error::other("MPTCP observer poisoned"))?;
         Pin::new(&mut *stream).poll_flush(cx)
@@ -111,7 +125,7 @@ impl AsyncWrite for ObservedTls {
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let mut stream = self
-            .0
+            .stream
             .lock()
             .map_err(|_| io::Error::other("MPTCP observer poisoned"))?;
         Pin::new(&mut *stream).poll_shutdown(cx)

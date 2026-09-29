@@ -35,6 +35,10 @@ use volparossa_routing::{
 };
 use zeroize::Zeroizing;
 
+#[path = "engine_v3/path_extension.rs"]
+mod path_extension;
+use path_extension::ExtensionRecord;
+
 #[path = "engine_v3/uplink_sharing.rs"]
 mod uplink_sharing;
 use uplink_sharing::SharingRecord;
@@ -283,6 +287,7 @@ pub(crate) enum ContextPhase {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OperationKind {
+    PathExtension,
     DownlinkBudget,
     Prepare,
     Activate,
@@ -374,6 +379,10 @@ pub(crate) enum BackendPhase {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BackendAction {
+    PreparePathExtension,
+    ActivatePathExtension,
+    CommitPathExtension,
+    AbortPathExtension,
     ApplyDownlinkBudget,
     Prepare,
     Activate,
@@ -596,8 +605,10 @@ struct ContextRecord {
     phase: ContextPhase,
     activated_at_unix: Option<u64>,
     leases: BTreeMap<(u32, i32), LeaseRecord>,
+    extensions: BTreeMap<[u8; 16], ExtensionRecord>,
 }
 
+#[derive(Clone)]
 struct LeaseRecord {
     handle: [u8; HELPER_HANDLE_BYTES],
     public_key: [u8; 32],
@@ -668,6 +679,26 @@ pub(crate) enum BackendError {
 /// unavailable backend. A complete production adapter still requires integration tests for all of
 /// these properties.
 pub(crate) trait AsyncLeaseBackend: Send + Sync {
+    fn prepare_path_extension(
+        self: Arc<Self>,
+        request: BackendRequest<volparossa_routing::PreparePathExtension>,
+    ) -> BackendFuture<BackendCompletion<PreparedKernelLease>>;
+
+    fn activate_path_extension(
+        self: Arc<Self>,
+        request: BackendRequest<volparossa_routing::ActivatePathExtension>,
+    ) -> BackendFuture<BackendCompletion<KernelCounters>>;
+
+    fn commit_path_extension(
+        self: Arc<Self>,
+        request: BackendRequest<volparossa_routing::CommitPathExtension>,
+    ) -> BackendFuture<BackendCompletion<KernelCounters>>;
+
+    fn abort_path_extension(
+        self: Arc<Self>,
+        request: BackendRequest<volparossa_routing::AbortPathExtension>,
+    ) -> BackendFuture<BackendCompletion<()>>;
+
     fn apply_downlink_budget(
         self: Arc<Self>,
         request: BackendRequest<volparossa_routing::ApplyDownlinkBudget>,
@@ -819,6 +850,38 @@ pub(crate) trait AsyncLeaseBackend: Send + Sync {
 struct UnavailableLeaseBackend;
 
 impl AsyncLeaseBackend for UnavailableLeaseBackend {
+    fn prepare_path_extension(
+        self: Arc<Self>,
+        request: BackendRequest<volparossa_routing::PreparePathExtension>,
+    ) -> BackendFuture<BackendCompletion<PreparedKernelLease>> {
+        let (completion, _) = request.into_parts();
+        Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
+    }
+
+    fn activate_path_extension(
+        self: Arc<Self>,
+        request: BackendRequest<volparossa_routing::ActivatePathExtension>,
+    ) -> BackendFuture<BackendCompletion<KernelCounters>> {
+        let (completion, _) = request.into_parts();
+        Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
+    }
+
+    fn commit_path_extension(
+        self: Arc<Self>,
+        request: BackendRequest<volparossa_routing::CommitPathExtension>,
+    ) -> BackendFuture<BackendCompletion<KernelCounters>> {
+        let (completion, _) = request.into_parts();
+        Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
+    }
+
+    fn abort_path_extension(
+        self: Arc<Self>,
+        request: BackendRequest<volparossa_routing::AbortPathExtension>,
+    ) -> BackendFuture<BackendCompletion<()>> {
+        let (completion, _) = request.into_parts();
+        Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
+    }
+
     fn prepare(
         self: Arc<Self>,
         request: BackendRequest<PrepareLeaseBatch>,
@@ -1502,6 +1565,22 @@ impl HelperEngine {
         }
 
         let result = match request.operation.as_ref() {
+            Some(helper_request::Operation::PreparePathExtension(value)) => {
+                self.prepare_path_extension_async(request, request_id, digest, value, sender)
+                    .await
+            }
+            Some(helper_request::Operation::ActivatePathExtension(value)) => {
+                self.activate_path_extension_async(request, request_id, digest, value, sender)
+                    .await
+            }
+            Some(helper_request::Operation::CommitPathExtension(value)) => {
+                self.commit_path_extension_async(request, request_id, digest, value, sender)
+                    .await
+            }
+            Some(helper_request::Operation::AbortPathExtension(value)) => {
+                self.abort_path_extension_async(request, request_id, digest, value, sender)
+                    .await
+            }
             Some(helper_request::Operation::PrepareLeaseBatch(value)) => {
                 self.prepare_async(request, request_id, digest, value, sender)
                     .await
@@ -2765,6 +2844,7 @@ impl HelperEngine {
                 phase: ContextPhase::Prepared,
                 activated_at_unix: None,
                 leases: records,
+                extensions: BTreeMap::new(),
             },
         );
         state
@@ -4870,7 +4950,20 @@ impl HelperEngine {
                 let mut state = self.inner.state.lock().await;
                 let now = expiry_now(self.inner.clock.as_ref());
                 let Some(target) = expired_reap_target(&state, now, false) else {
-                    return ReapOutcome::Complete;
+                    drop(state);
+                    return if self.reap_path_extensions().await {
+                        ReapOutcome::Complete
+                    } else {
+                        ReapOutcome::Failure(Box::new(execution(
+                            response(
+                                request,
+                                HelperResult::CleanupIncomplete,
+                                "EXPIRED_EXTENSION_CLEANUP_INCOMPLETE",
+                                None,
+                            ),
+                            None,
+                        )))
+                    };
                 };
                 let Some(token) = begin_operation(
                     &mut state,
@@ -5088,7 +5181,8 @@ impl HelperEngine {
                 let mut state = self.inner.state.lock().await;
                 let now = expiry_now(self.inner.clock.as_ref());
                 let Some(target) = expired_reap_target(&state, now, true) else {
-                    return true;
+                    drop(state);
+                    return self.reap_path_extensions().await;
                 };
                 let (request_id, digest) = maintenance_reap_correlation(target.lineage);
                 let Some(token) = begin_operation(
@@ -5349,6 +5443,10 @@ impl HelperEngine {
                 && state.contexts.values().all(|context| {
                     context.handle != handle
                         && context.leases.values().all(|lease| lease.handle != handle)
+                        && context
+                            .extensions
+                            .values()
+                            .all(|extension| extension.handle != handle)
                 })
                 && state.ingress.as_ref().is_none_or(|ingress| {
                     ingress.ingress_handle != handle
@@ -5942,6 +6040,10 @@ fn insert_cache(state: &mut EngineState, request_id: [u8; 16], value: CachedResp
 
 fn request_context_id(request: &HelperRequest) -> Option<[u8; 16]> {
     let value = match request.operation.as_ref()? {
+        helper_request::Operation::PreparePathExtension(value) => &value.route_context_id,
+        helper_request::Operation::ActivatePathExtension(value) => &value.route_context_id,
+        helper_request::Operation::CommitPathExtension(value) => &value.route_context_id,
+        helper_request::Operation::AbortPathExtension(value) => &value.route_context_id,
         helper_request::Operation::PrepareLeaseBatch(value) => &value.route_context_id,
         helper_request::Operation::ActivateLeaseBatch(value) => &value.route_context_id,
         helper_request::Operation::CommitLeaseBatch(value) => &value.route_context_id,
@@ -6196,6 +6298,10 @@ mod tests {
         fail_mesh_install: AtomicBool,
         fail_mesh_destroy: AtomicBool,
         substitute_mesh_binding: AtomicBool,
+        extension_bindings: StdMutex<Vec<BackendBinding>>,
+        extension_aborts: StdMutex<Vec<volparossa_routing::AbortPathExtension>>,
+        invalid_extension_prepare: AtomicBool,
+        fail_extension_abort: AtomicBool,
     }
 
     impl FakeBackend {
@@ -6216,6 +6322,109 @@ mod tests {
     }
 
     impl AsyncLeaseBackend for FakeBackend {
+        fn prepare_path_extension(
+            self: Arc<Self>,
+            request: BackendRequest<volparossa_routing::PreparePathExtension>,
+        ) -> BackendFuture<BackendCompletion<PreparedKernelLease>> {
+            let (completion, request) = request.into_parts();
+            self.extension_bindings
+                .lock()
+                .expect("extension bindings")
+                .push(completion.binding());
+            Box::pin(async move {
+                self.prepare_entered.store(true, Ordering::Release);
+                loop {
+                    let notified = self.prepare_release.notified();
+                    if !self.block_prepare.load(Ordering::Acquire)
+                        || self.prepare_released.load(Ordering::Acquire)
+                    {
+                        break;
+                    }
+                    notified.await;
+                }
+                let lease = request.lease.expect("validated extension plan");
+                completion.complete(Ok(PreparedKernelLease {
+                    path_id: lease.path_id,
+                    role: lease.role,
+                    public_key: if self.invalid_extension_prepare.load(Ordering::Acquire) {
+                        [0; 32]
+                    } else {
+                        [u8::try_from(lease.path_id).expect("fixture path"); 32]
+                    },
+                    public_endpoint: PublicUdpEndpoint {
+                        address: vec![8, 8, 8, 8],
+                        port: 50_000 + lease.path_id,
+                    },
+                    evidence: UnderlayEvidence::DirectAssigned,
+                }))
+            })
+        }
+
+        fn activate_path_extension(
+            self: Arc<Self>,
+            request: BackendRequest<volparossa_routing::ActivatePathExtension>,
+        ) -> BackendFuture<BackendCompletion<KernelCounters>> {
+            let (completion, request) = request.into_parts();
+            self.extension_bindings
+                .lock()
+                .expect("extension bindings")
+                .push(completion.binding());
+            Box::pin(async move {
+                let lease = request.lease.expect("validated extension activation");
+                completion.complete(Ok(KernelCounters {
+                    path_id: lease.path_id,
+                    role: lease.role,
+                    latest_handshake_unix: 0,
+                    received_bytes: 10,
+                    transmitted_bytes: 20,
+                }))
+            })
+        }
+
+        fn commit_path_extension(
+            self: Arc<Self>,
+            request: BackendRequest<volparossa_routing::CommitPathExtension>,
+        ) -> BackendFuture<BackendCompletion<KernelCounters>> {
+            let (completion, request) = request.into_parts();
+            self.extension_bindings
+                .lock()
+                .expect("extension bindings")
+                .push(completion.binding());
+            Box::pin(async move {
+                let lease = request.lease.expect("validated extension commit");
+                let increment = self.proof_increment.load(Ordering::Relaxed);
+                completion.complete(Ok(KernelCounters {
+                    path_id: lease.path_id,
+                    role: lease.role,
+                    latest_handshake_unix: 151,
+                    received_bytes: 10 + increment,
+                    transmitted_bytes: 20 + increment,
+                }))
+            })
+        }
+
+        fn abort_path_extension(
+            self: Arc<Self>,
+            request: BackendRequest<volparossa_routing::AbortPathExtension>,
+        ) -> BackendFuture<BackendCompletion<()>> {
+            let (completion, request) = request.into_parts();
+            self.extension_bindings
+                .lock()
+                .expect("extension bindings")
+                .push(completion.binding());
+            self.extension_aborts
+                .lock()
+                .expect("extension aborts")
+                .push(request);
+            Box::pin(async move {
+                completion.complete(if self.fail_extension_abort.load(Ordering::Acquire) {
+                    Err(BackendError::CleanupIncomplete)
+                } else {
+                    Ok(())
+                })
+            })
+        }
+
         fn install_wifi_mesh(
             self: Arc<Self>,
             request: MeshBackendRequest<volparossa_routing::InstallWifiMesh>,
@@ -6960,6 +7169,254 @@ mod tests {
             address: address.to_vec(),
             port,
         }
+    }
+
+    fn extension_prepare(prepared: &PreparedLeaseBatch, id: u8, path: u32) -> HelperRequest {
+        request(
+            id,
+            helper_request::Operation::PreparePathExtension(
+                volparossa_routing::PreparePathExtension {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle.clone(),
+                    extension_id: vec![id; 16],
+                    lease: Some(LeasePlan {
+                        path_id: path,
+                        role: WireguardRole::Client as i32,
+                    }),
+                    setup_expires_at_unix: 150,
+                    traversal_hints: Vec::new(),
+                },
+            ),
+        )
+    }
+
+    fn extension_abort(prepared: &PreparedLeaseBatch, id: u8, extension_id: u8) -> HelperRequest {
+        request(
+            id,
+            helper_request::Operation::AbortPathExtension(volparossa_routing::AbortPathExtension {
+                route_context_id: vec![7; 16],
+                context_handle: prepared.context_handle.clone(),
+                extension_id: vec![extension_id; 16],
+            }),
+        )
+    }
+
+    async fn extension_context_identity(
+        engine: &HelperEngine,
+    ) -> (BackendLineage, u64, ContextPhase, usize) {
+        let state = engine.inner.state.lock().await;
+        let context = &state.contexts[&[7; 16]];
+        (
+            context_backend_lineage([7; 16], context),
+            context.generation,
+            context.phase,
+            context.leases.len(),
+        )
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one full extension lifecycle and immutable original-authority comparison"
+    )]
+    async fn path_extension_commit_and_lost_reply_abort_preserve_original_authority() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(backend.clone(), clock.clone());
+        let original = commit_client_context(&engine, &backend).await;
+        let before = extension_context_identity(&engine).await;
+        // The initial setup window ended, but its committed paths and hard deadline remain live.
+        clock.0.store(130, Ordering::Relaxed);
+        let prepared = engine.execute(extension_prepare(&original, 40, 2)).await;
+        assert_eq!(prepared.result, HelperResult::Ok as i32);
+        let Some(helper_response::Outcome::PreparedPathExtension(extension)) = prepared.outcome
+        else {
+            panic!("extension prepared");
+        };
+        assert_eq!(extension_context_identity(&engine).await, before);
+        let lease = extension.lease.expect("new lease");
+        let activated = engine
+            .execute(request(
+                41,
+                helper_request::Operation::ActivatePathExtension(
+                    volparossa_routing::ActivatePathExtension {
+                        route_context_id: vec![7; 16],
+                        context_handle: original.context_handle.clone(),
+                        extension_id: extension.extension_id.clone(),
+                        lease: Some(LeaseActivation {
+                            lease_handle: lease.lease_handle.clone(),
+                            path_id: 2,
+                            role: WireguardRole::Client as i32,
+                            peer_public_key: vec![9; 32],
+                            peer_endpoint: Some(PublicUdpEndpoint {
+                                address: vec![1, 1, 1, 1],
+                                port: 51_821,
+                            }),
+                            maximum_up_mbps: 0,
+                            maximum_down_mbps: 0,
+                            signed_relay_reservation: Vec::new(),
+                            signed_client_relay_request: Vec::new(),
+                        }),
+                        signed_route_extension: vec![1],
+                    },
+                ),
+            ))
+            .await;
+        assert_eq!(activated.result, HelperResult::Ok as i32);
+        assert_eq!(extension_context_identity(&engine).await, before);
+        let committed = engine
+            .execute(request(
+                42,
+                helper_request::Operation::CommitPathExtension(
+                    volparossa_routing::CommitPathExtension {
+                        route_context_id: vec![7; 16],
+                        context_handle: original.context_handle.clone(),
+                        extension_id: extension.extension_id,
+                        lease: Some(LeaseCommit {
+                            lease_handle: lease.lease_handle,
+                            path_id: 2,
+                            role: WireguardRole::Client as i32,
+                        }),
+                    },
+                ),
+            ))
+            .await;
+        assert_eq!(committed.result, HelperResult::Ok as i32);
+        assert_eq!(
+            extension_context_identity(&engine).await,
+            (before.0, before.1, before.2, 2)
+        );
+        assert_eq!(
+            engine
+                .execute(extension_abort(&original, 43, 40))
+                .await
+                .result,
+            HelperResult::Ok as i32
+        );
+        assert_eq!(extension_context_identity(&engine).await, before);
+        assert_eq!(
+            engine
+                .execute(extension_abort(&original, 44, 40))
+                .await
+                .result,
+            HelperResult::Ok as i32
+        );
+        assert_eq!(backend.extension_aborts.lock().expect("aborts").len(), 1);
+        assert!(backend.destroyed.lock().expect("old paths").is_empty());
+        for binding in backend.extension_bindings.lock().expect("bindings").iter() {
+            assert_eq!(binding.lineage, before.0);
+            assert_eq!(binding.phase, BackendPhase::Committed);
+        }
+    }
+
+    #[tokio::test]
+    async fn path_extension_bad_proof_aborts_only_new_path_and_retains_path_identity() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(backend.clone(), clock.clone());
+        let original = commit_client_context(&engine, &backend).await;
+        let before = extension_context_identity(&engine).await;
+        clock.0.store(130, Ordering::Relaxed);
+        backend
+            .invalid_extension_prepare
+            .store(true, Ordering::Release);
+        assert_eq!(
+            engine
+                .execute(extension_prepare(&original, 40, 2))
+                .await
+                .result,
+            HelperResult::CleanupIncomplete as i32
+        );
+        assert_eq!(extension_context_identity(&engine).await, before);
+        assert_eq!(backend.extension_aborts.lock().expect("aborts").len(), 1);
+        backend
+            .invalid_extension_prepare
+            .store(false, Ordering::Release);
+        assert_eq!(
+            engine
+                .execute(extension_prepare(&original, 41, 2))
+                .await
+                .result,
+            HelperResult::AlreadyExists as i32
+        );
+        assert_eq!(
+            engine
+                .execute(extension_prepare(&original, 42, 3))
+                .await
+                .result,
+            HelperResult::Ok as i32
+        );
+        assert_eq!(
+            engine
+                .execute(extension_prepare(&original, 43, 4))
+                .await
+                .result,
+            HelperResult::Capacity as i32
+        );
+        clock.0.store(151, Ordering::Relaxed);
+        assert!(engine.reap_expired_cleanup().await);
+        assert_eq!(extension_context_identity(&engine).await, before);
+        assert_eq!(backend.extension_aborts.lock().expect("aborts").len(), 2);
+        assert!(backend.destroyed.lock().expect("old paths").is_empty());
+    }
+
+    #[tokio::test]
+    async fn path_extension_late_prepare_completion_is_aborted_without_original_destroy() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine =
+            fake_engine_with_timeout(backend.clone(), clock.clone(), Duration::from_millis(20));
+        let original = commit_client_context(&engine, &backend).await;
+        let before = extension_context_identity(&engine).await;
+        clock.0.store(130, Ordering::Relaxed);
+        backend.prepare_entered.store(false, Ordering::Release);
+        backend.block_prepare.store(true, Ordering::Release);
+        let operation = extension_prepare(&original, 40, 2);
+        let executing = engine.clone();
+        let task = tokio::spawn(async move { executing.execute(operation).await });
+        wait_for_prepare_entry(&backend).await;
+        let response = tokio::time::timeout(Duration::from_millis(250), task)
+            .await
+            .expect("bounded ambiguity response")
+            .expect("request task");
+        assert_eq!(response.result, HelperResult::CleanupIncomplete as i32);
+        assert_eq!(response.diagnostic_code, "BACKEND_RESULT_AMBIGUOUS");
+        backend.release_prepare();
+        wait_for_supervisor_settlement(&engine).await;
+        assert_eq!(extension_context_identity(&engine).await, before);
+        assert_eq!(backend.extension_aborts.lock().expect("aborts").len(), 1);
+        assert!(backend.destroyed.lock().expect("old paths").is_empty());
+    }
+
+    #[tokio::test]
+    async fn path_extension_failed_abort_retains_cleanup_ownership_without_destroying_old_paths() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(backend.clone(), clock.clone());
+        let original = commit_client_context(&engine, &backend).await;
+        let before = extension_context_identity(&engine).await;
+        clock.0.store(130, Ordering::Relaxed);
+        assert_eq!(
+            engine
+                .execute(extension_prepare(&original, 40, 2))
+                .await
+                .result,
+            HelperResult::Ok as i32
+        );
+        backend.fail_extension_abort.store(true, Ordering::Release);
+        assert_eq!(
+            engine
+                .execute(extension_abort(&original, 41, 40))
+                .await
+                .result,
+            HelperResult::CleanupIncomplete as i32
+        );
+        assert_eq!(extension_context_identity(&engine).await, before);
+        backend.fail_extension_abort.store(false, Ordering::Release);
+        assert!(engine.reap_expired_cleanup().await);
+        assert_eq!(extension_context_identity(&engine).await, before);
+        assert_eq!(backend.extension_aborts.lock().expect("aborts").len(), 2);
+        assert!(backend.destroyed.lock().expect("old paths").is_empty());
     }
 
     fn client_ingress_receipts() -> Vec<volparossa_routing::IngressSocketReceipt> {
