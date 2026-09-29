@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-23
+Last updated: 2026-09-24
 
 The completed development milestone is integrated into `main` by
 [PR #150](https://github.com/VOLPAROSSA/volparossa/pull/150), merge `322c45b9`, after the
@@ -15,6 +15,17 @@ Automatic public-copy maintenance and origin-authenticated HTTPS checksum downlo
 integrated by [PR #160](https://github.com/VOLPAROSSA/volparossa/pull/160), normal merge
 `e87f1933`, after Quality, CodeQL and both source-exact network proofs passed.
 Neither integration nor execution proves reliable model reasoning.
+
+The next integration candidate reunites automatic authority rounds, the four-job assessment
+cycle and both retrieval-admission fixes with this current main-line cache implementation.
+It preserves custody discovery's tag 37 alongside the authority inbox's tag 36, the standalone
+1.7B fixture and all retention checks. The production crate sources, dependency pins and
+policy-cycle network scripts match `24765ee9`, whose original complete-cycle proof below
+passes. That historical source binding is retained, not relabelled as a new integration run.
+Thirty-two focused policy CLI tests, the local inbox protocol test, both custody FIFO tests
+and strict all-target Clippy for the five affected crates pass on this integration tree.
+The inert policy/reasoning checks, three failure-diagnostic checks, seven retention checks and
+scoped formatting/shell checks pass without running a model or changing host networking.
 
 The integrated HTTPS slice adds explicit `--checksum-path` to `fetch-https` and
 `browser-download`. The consumer authenticates a same-directory SHA-256 document itself,
@@ -126,7 +137,9 @@ completion remain open. The earlier `6ac301ee` failure is not relabelled.
 A subsequent `compute peer policy-follow --execute` candidate automatically refreshes one
 owner-enrolled native publisher/name channel and applies only quorum-verified decisions for
 its exact enrolled subject/framework under the node's own current policy configuration.
-The peer must actually contribute its signed named wrapper; custody alone is not a name index.
+The selected signed wrapper must be registered in the serving peer's live name-enabled registry;
+raw cached chunks alone are not a named publication. Complete custody admission can register
+the original publisher's wrapper; it does not create a wrapper under a different peer's name.
 The bounded serial loop retains original wrapper/decision/epoch bytes and transport/application
 receipts, enforces publication and decision revision floors, and skips unchanged publications.
 SIGINT/SIGTERM stops its own work without disconnecting shared consumers. `--resume` requires
@@ -144,10 +157,119 @@ object-policy CLI tests pass, including four new follower checks, along with str
 Clippy, scoped formatting and shell checks. Its inert Python self-test
 passes with 81 rejection cases. The separate
 [automatic-consumer proof on `3f30a5f9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35899595361)
-is pending. Neither the failed `6ac301ee` nor the passing manual-import `4d438099` proves that
-new automatic flow.
+passes its complete committed checker against 208 unchanged original files. Before publication,
+the same live follower records an actual failed poll with an empty cache and no applied decision.
+It subsequently fetches 605 original quorum bytes through protected peer transport with no
+origin bytes and applies once; combination itself did not apply. Actual Client and receiving
+agent restarts retain the original decision, epoch and expiry, and cached subject access remains
+withheld. The 101,947 privacy frames, follower reaping, complete cleanup and unchanged host
+state pass. The model reasoning errors remain visible. Neither the failed `6ac301ee` nor the
+passing manual-import `4d438099` is substituted for this separate automatic proof.
 This is selected-channel automation, not a complete global feed, new authority membership,
 independent semantic accuracy or B06 completion.
+
+The next development candidate adds `compute peer policy-round` and `policy-authority`.
+A finite coordinator packages the original assessment bundle and unchanged proposal, delivers
+them through protected public custody, collects separately selected single-authority replies,
+and publishes only after verifying the node's existing full quorum. Each authority independently
+replays the four original signed transcripts and keeps its signing identity local; the coordinator
+has only its content-publisher identity. A typed local inbox reads the active contribution registry
+without opening agent-owned storage in the CLI or requiring a service-only node to become a
+consumer. A durable per-identity reservation rejects same-revision conflicts and rollback before
+signing. The result can be contributed locally or deposited at explicitly enrolled publication
+peers, preserving the original wrapper, decision and expiry. This starts from a completed original
+assessment bundle; automatic initiation of new model assessments is not claimed. Thirty-five
+focused policy, wire, registry, CLI and isolated custody-lifecycle checks pass locally. Strict
+Clippy passes for the five affected crates and the guarded development-identity helper. The
+disposable fixture now exercises three separate authority owners and a genuinely parallel cold
+follower; its inert checker passes with 86 rejection cases. The source-exact
+[three-authority trial on `75e7ff52`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35907082514)
+**failed overall** at the receiving agent's post-restart cache-access probe: it returned
+`CONTENT_INVALID` instead of the required `CONTENT_POLICY`. Original evidence nevertheless
+records four real model jobs, three separately owned endorsements, verified quorum publication,
+cold follower retrieval of 605 peer bytes with no origin bytes, and Client restart persistence.
+Its 100,994 privacy frames and cleanup/unchanged-host checks pass. The receiving-agent check
+remains failed; the original error does not identify the underlying cache error. The candidate
+fix authenticates a transfer manifest and checks its object policy before opening its cache,
+so a busy cache cannot mask a valid withholding decision. A real locked-cache test covers that
+ordering. Model reasoning errors and an `undetermined` final decision remain visible; this is
+not a claim of reliable semantic judgment or a passing full trial.
+
+A subsequent `compute peer policy-cycle` candidate removes the manual handoff between model
+work and that authority round. It acquires one independently selected public native source,
+executes the original two assessments and two cross-reviews, replays their exact signed bundle,
+and passes it directly to the existing independent-authority round. One durable enrollment
+binds all selections and the original total deadline. Resuming observes existing handles and
+may start previously unstarted subsequent stages, but never replaces ambiguous/submitted work.
+Cancellation reaches the existing job protocol; unconfirmed remote termination stays explicit.
+The current quorum is checked before model work and again by the signing round. No authority
+private key or human-supplied verdict enters the coordinator. The combined cycle's first
+[exact-source network trial on `4eb06de2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35910694773)
+**fails overall**: assessment-0 returns `preflight_unavailable` before retaining a job handle;
+assessment-1 completes, but the two cross-reviews and authority round do not execute. The
+original specific preflight error was discarded, so discovery, resource pressure or a local
+failure cannot retrospectively be selected as the cause. The retained packet captures and
+cleanup/unchanged-host checks pass separately; they do not establish the combined cycle.
+Earlier assessment/follower proofs do not establish this composition, reliable semantic
+judgment, automatic authority membership or B06 completion. A follow-up retains a bounded
+local preflight diagnostic without remote text, new retries or a changed operation deadline.
+
+The separately instrumented [exact `2a431c1` trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35916895065)
+also **fails overall**, but reaches all four original assessments/reviews: their observed
+workers, signed receipts, source/quote bindings and isolation pass the source-exact first
+gate. The cycle then stops in its authority round with
+`policy_round_request_custody_retry_bound`: 64 retained incomplete request-deposit batches.
+The fixture exited before exporting those per-provider deposit records, so their underlying
+handoff failure cannot be attributed to contention or transport from these originals. The
+192,423 captured frames, cleanup and unchanged host state pass separately; no quorum,
+automatic activation, follower restart or full-cycle success is established. The earlier
+preflight failure did not recur, but is not relabelled or retrospectively explained. The
+360M model outputs still misidentify principles and include unfinished prose; their retained
+decision is `undetermined`, not evidence of reliable legal or ethical judgment.
+A fixture-only follow-up retains bounded original cycle/round status and failed deposit
+receipts before returning that same nonzero failure. It neither increases retries/deadlines
+nor claims to repair the as-yet unattributed custody failure.
+
+The [instrumented `2e2787f7` trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35920386749)
+still **fails overall**, but retains all 64 original deposit records: 179 of 192 provider
+observations are `CONTENT_BUSY (InvalidState)`. The other 13 have completed handoffs and
+independently verified provider signatures, all from R3; R4/R5 never receive a completed
+deposit. The round stops about 124 seconds into its original 600-second window, not because
+that deadline was exhausted. Four real model jobs, their original source/transcript bindings,
+164,090 privacy frames, cleanup and unchanged host state pass separately; no quorum or
+whole-cycle success is established. Receipts identify the busy admission, not its competing
+caller. Inspecting the foreground custody code identifies its immediate `retrieval.try_lock`
+refusal; the concurrently enrolled Client policy follower uses that same retrieval mutex.
+A focused fix lets foreground custody join the existing named-retrieval FIFO inside its
+original operation timeout, policy watch and requester-disconnect cancellation. The separate
+background lane, original leases, model work, round deadline and retry bound are unchanged.
+Two focused FIFO/cancellation tests, the two existing named-admission tests, the two background
+custody tests and strict agent all-target Clippy pass.
+
+The [actual FIFO-fixed `24765ee9` cycle](https://github.com/VOLPAROSSA/volparossa/actions/runs/35923988944)
+now passes the full unchanged source-exact checker against 213 original files. Its first
+deposit reaches all three providers with zero failed handoffs, followed by three original
+authority endorsements. Four distinct model workers, the selected source and complete signed
+transcripts remain bound to the same original cycle; the 600-second round and 3000-second
+cycle windows are unchanged. A cold follower obtains the 605-byte decision through peers and
+both original-node and receiving-node restart checks pass. Offline replay preserves the same
+results with stopped brokers and no new model work. The observed outcome is `undetermined` /
+`withhold_exact_cached_object`, not a general Internet-whitelist update. All 151,960 privacy
+frames, complete cleanup and unchanged host state pass. Original model mistakes remain visible:
+Mansuetudo is called generosity, Acedia envy, reasons can be labels and some counterargument
+or uncertainty text is unfinished. Neither sound legal/ethical judgment, independent model
+opinions, arbitrary subject selection nor complete B06/global governance is established.
+Earlier failed trials remain failed; the FIFO fix repairs their observed admission blocker
+in this actual workload, rather than increasing its retry or resource budgets.
+
+The combined fixture requires the original source, four worker receipts, exact bundle, three
+authority owners and one original cycle deadline; its inert checker passes 91 rejection cases.
+All 31 focused assessment/round/cycle CLI tests and strict CLI Clippy pass. Five transfer tests
+pass, including policy refusal while the actual cache is locked. Named retrieval now waits FIFO
+behind an existing retrieval within its unchanged total deadline, rather than rejecting a
+source fetch when a follower is active. Two focused admission tests pass, covering serialization,
+requester disconnect and deadline cleanup; no detached waiting work or extra network jobs are used.
+Strict agent Clippy, scoped Rust formatting, fixture ShellCheck and topology shell syntax pass.
 
 An explicitly selected `smollm2-1.7b-v1` inference candidate now addresses the observed
 reasoning limitation without replacing the lightweight training model. It pins the original
@@ -215,6 +337,28 @@ Focused inert tests pass. The real follow-up answer now identifies missing throu
 and failure measurements, but repeatedly asks whether the exit can handle the client's public
 address, contradicting the source boundary. It also omits Route B's violation. Complete
 correctness and controlled quality improvement are not proved; the original answer is retained.
+
+A subsequent candidate fixes a concrete admission mismatch: the worker already accepts the
+rich-inference 360M/1.7B profiles for version-4 principle inputs, but local `compute run` still
+rejected 1.7B. The gate now uses the same capability predicate while preserving inference-only,
+no-adapter, public-input and fixed-contract restrictions. Five focused admission tests pass.
+The existing 8-GiB single-worker fixture is now directed at one real, signed public principle
+assessment with the current framework and explicitly provisioned pinned JSON decoder. The
+unchanged 1024-token prompt, 512-token structured generation, 2048-byte JSON, 192-byte field and
+600-second limits remain in force. The
+[exact-source trial on `44eec3b9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35912302153)
+passes its original execution checker: one real BF16 worker produces 293 tokens in 62.132
+seconds, with 4,596,285,440 bytes of observed peak RSS, the actual 10-GiB address-space limit,
+original signed inputs, child reaping and unchanged host state. Its answer correctly connects
+Mansuetudo to gentleness and voluntary cooperation, but invents absence of ulterior motives
+under Humanitas and infers humility not established by the source. It also chooses `allow`
+while reporting material uncertainty. The original answer remains visible; this is not a
+general semantic/legal pass, independent cross-review or policy activation. The changed
+question/pipeline prevents attributing differences solely to model size. The distributed
+cycle remains on its original 360M source.
+The scoped CLI build/Clippy, inert fixture checks and an actual offline CLI preparation pass:
+the current framework and three freshly signed public publications verify unchanged. No model,
+backend provisioning or network work ran on the development host; temporary input was removed.
 
 An owner-enrolled `compute train-loop --aggregate-plan` candidate now connects automatic
 three-publisher discovery, frozen-cohort aggregation and held-out comparison to local adoption,

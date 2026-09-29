@@ -70,6 +70,10 @@ print_plan() {
                 'VOLPAROSSA public policy-assessment plan:' \
                 '  bind one public native subject to its original publication and protected peer jobs;' \
                 '  observe four real 360M assessments, retain exact original worker receipts and replay offline;' \
+                '  R3, R4 and R5 each hold one existing development authority key and run an independent local-inbox owner;' \
+                '  one Client round delivers the original request through protected custody and retrieves three signed replies;' \
+                '  deposit the original quorum wrapper on R4; a cold, parallel Client follower automatically verifies and applies it;' \
+                '  use three UDP-only ac/ap control links, protected body paths, node-key isolation and complete owner cleanup;' \
                 '  invalid or unknown model output fails; no text repair or forced policy verdict;' \
                 '  no production whitelist change, legal guarantee or full-B06 claim.'
             return
@@ -2651,7 +2655,7 @@ for forbidden in 10.241.20.2 10.241.21.2 10.241.22.2 10.241.23.2 \
     fi
 done
 CLIENT_EXIT_ROUTE_ABSENT=true
-if [ "$scenario" = content-provider ] || [ "$scenario" = content-custody ]; then
+if [ "$scenario" = content-provider ] || [ "$scenario" = content-custody ] || [ "$agent_policy_assessment" = yes ]; then
     # Fixture reachability, not selection injection: the original actor starts with this
     # network already in place. Providers remain reachable via the Exit and actual broker.
     ip netns exec "$CLIENT" nft -f - <<'CONTENT_ADAPTIVE_FILTER'
@@ -3335,7 +3339,7 @@ launch_agent() {
         # not read the publisher's files merely because both use the same UID.
         set -- "--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay3 $WORK/state-relay5"
     fi
-    if [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
+    if [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ] || [ "$agent_policy_assessment" = yes ]; then
         # Fixed public model provisioning remains visible; peer source/adapters do not.
         case $node in
             relay3) set -- "--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay4 $WORK/state-relay5" ;;
@@ -4219,7 +4223,9 @@ def stop(*_unused):
 
 signal.signal(signal.SIGTERM, stop)
 signal.signal(signal.SIGINT, stop)
-deadline = time.monotonic() + 1800
+# Public compute cycles can use four worker leases plus an authority round.
+# Keep observing their whole finite owner window; normal teardown still stops us early.
+deadline = time.monotonic() + (3300 if content_provider_mode else 1800)
 
 
 def is_ipv4_multicast(address):

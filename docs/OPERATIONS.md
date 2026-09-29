@@ -738,7 +738,8 @@ Local/browser JSON uses `authentication_scope: "origin-checksum"`. The separate
 to count resource bytes only. Neither includes HTTP/TLS overhead. End-to-end timing includes
 both authority requests; a peer hit is not a claim of zero origin traffic or speedup. The
 [original source-exact trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35919185330)
-proves this bounded profile; the isolated integration port still needs its own trial.
+and [fresh integration trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35921899178)
+prove this bounded profile, now integrated by PR #160. Broad browser caching remains incomplete.
 
 ### HTTPS origin-digest downloads
 
@@ -1125,9 +1126,10 @@ SIGINT/SIGTERM ends the owner loop and closes its in-flight exchange; the origin
 copies may still be served until their original expiry while holders remain available.
 Maintenance does not continue while the owner is offline. The
 [original source-exact trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35916493141)
-demonstrates holder loss/replacement and subsequent retrieval without the publisher's source;
-the isolated integration port requires fresh verification. Neither proves globally fair
-placement or permanent site availability.
+and [fresh integration trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35921884371)
+demonstrate holder loss/replacement and subsequent retrieval without the publisher's source.
+The Client node stays online; neither proves globally fair placement or permanent site availability.
+This function is integrated by PR #160.
 
 ### Repairing a holder's partial public copies
 

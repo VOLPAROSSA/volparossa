@@ -2,6 +2,7 @@
 //! Queue entries contain no URL, recipient key, output path or reusable HTTPS authority.
 
 mod custody;
+mod local;
 mod publication;
 
 use std::{collections::VecDeque, path::PathBuf, sync::Arc, time::Duration};

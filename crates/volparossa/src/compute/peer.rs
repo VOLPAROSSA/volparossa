@@ -71,6 +71,12 @@ pub(crate) enum Command {
     PolicyImport(Box<policy_assessment::object_policy::distribution::Import>),
     /// Follow one explicitly enrolled public decision feed using this node's own authority.
     PolicyFollow(Box<policy_assessment::object_policy::follow::Options>),
+    /// Send one original public assessment for independent endorsements and publish its quorum.
+    PolicyRound(Box<policy_assessment::object_policy::round::Options>),
+    /// Independently replay selected cached requests and offer this authority's endorsement.
+    PolicyAuthority(Box<policy_assessment::object_policy::round::authority::Options>),
+    /// Assess one selected public object, cross-review it and publish its verified policy quorum.
+    PolicyCycle(Box<policy_assessment::cycle::Options>),
 }
 
 #[derive(Debug, Args)]
@@ -294,6 +300,15 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         }
         Command::PolicyFollow(args) => {
             return policy_assessment::object_policy::follow::run(&args, socket).await;
+        }
+        Command::PolicyRound(args) => {
+            return policy_assessment::object_policy::round::run(&args, socket).await;
+        }
+        Command::PolicyAuthority(args) => {
+            return policy_assessment::object_policy::round::authority::run(&args, socket).await;
+        }
+        Command::PolicyCycle(args) => {
+            return Box::pin(policy_assessment::cycle::run(&args, socket)).await;
         }
     };
     println!("{}", serde_json::to_string(&report)?);

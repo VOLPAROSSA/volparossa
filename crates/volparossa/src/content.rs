@@ -28,6 +28,7 @@ mod named_download;
 pub(crate) mod peer_update;
 pub(crate) mod policy_bundle;
 pub(crate) mod policy_decision;
+pub(crate) mod policy_exchange;
 mod private_message;
 pub(crate) mod public_text;
 mod retain;
@@ -354,6 +355,13 @@ pub(crate) const POLICY_DECISION_CONTENT_TYPE: &str = "application/vnd.volpaross
 
 impl Publish {
     pub(crate) fn policy_decision(args: PolicyDecisionPublication) -> Self {
+        Self::policy_object(args, POLICY_DECISION_CONTENT_TYPE)
+    }
+
+    pub(super) fn policy_object(
+        args: PolicyDecisionPublication,
+        content_type: &'static str,
+    ) -> Self {
         Self {
             input: args.input,
             cache: args.cache,
@@ -362,7 +370,7 @@ impl Publish {
             manifest: args.manifest,
             name: args.name,
             revision: args.revision,
-            content_type: POLICY_DECISION_CONTENT_TYPE.to_owned(),
+            content_type: content_type.to_owned(),
             lifetime_seconds: MAX_VALIDITY_SECONDS,
             expires_not_after: Some(args.expires_not_after),
             identity: Some(args.identity),
@@ -811,7 +819,12 @@ pub(crate) fn unlock_signer(
     passphrase_file: Option<&Path>,
 ) -> Result<SigningKey> {
     let identity_path = identity_path.map_or_else(super::default_identity_path, Path::to_path_buf);
-    let passphrase = super::secret::read_passphrase(passphrase_file, false)?;
+    // Keep secret-input failures out of the public metadata/report error channel. In particular,
+    // do not forward private passphrase-file paths or arbitrary underlying reader diagnostics.
+    // Only the successful secret value crosses this boundary, into the identity unlock below.
+    let Ok(passphrase) = super::secret::read_passphrase(passphrase_file, false) else {
+        bail!("cannot read content identity passphrase");
+    };
     let identity = IdentityStore::new(identity_path)
         .load(&passphrase)
         .context("cannot unlock existing node identity; content commands never create one")?;
@@ -912,6 +925,20 @@ fn ensure_new_output(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unlock_signer_redacts_passphrase_input_errors() {
+        let directory = tempfile::tempdir().expect("private test directory");
+        let passphrase_path = directory.path().join("private-passphrase-filename");
+        let Err(error) = unlock_signer(None, Some(&passphrase_path)) else {
+            panic!("missing passphrase file must fail closed");
+        };
+        assert_eq!(
+            format!("{error:#}"),
+            "cannot read content identity passphrase"
+        );
+        assert!(!format!("{error:?}").contains("private-passphrase-filename"));
+    }
+
     use super::*;
     use clap::Parser as _;
     use std::os::unix::fs::PermissionsExt as _;

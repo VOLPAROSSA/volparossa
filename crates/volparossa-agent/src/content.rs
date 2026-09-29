@@ -14,6 +14,8 @@ mod custody_discovery;
 mod https;
 mod mailbox;
 mod named;
+#[cfg(test)]
+mod named_admission_tests;
 mod object_policy;
 mod parallel;
 mod recent;
@@ -33,7 +35,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use socket2::SockRef;
 use tokio::{
     net::TcpListener,
-    sync::{Mutex, RwLock, watch},
+    sync::{Mutex, MutexGuard, RwLock, watch},
     task::{JoinHandle, JoinSet},
     time::{interval, timeout},
 };
@@ -70,6 +72,16 @@ async fn provider_snapshot(
     maximum_wait: Duration,
 ) -> Result<PublicationRegistry, tokio::time::error::Elapsed> {
     timeout(maximum_wait, async { registry.lock().await.clone() }).await
+}
+
+/// FIFO admission shares the caller's existing operation deadline. The local control
+/// server bounds live requests; waiting creates no cache, peer stream or background task.
+/// A requester leaving before readiness must also leave the mutex queue immediately.
+async fn named_retrieval<'a>(
+    retrieval: &'a Mutex<()>,
+    stream: &mut tokio::net::UnixStream,
+) -> Result<MutexGuard<'a, ()>, ContentError> {
+    cancellation::until_requester_closed(stream, async { Ok(retrieval.lock().await) }).await
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -595,14 +607,15 @@ impl ContentRuntime {
     ) -> Result<(), ContentError> {
         let allow_replication = !request.cache_only;
         let foreground = self.foreground.enter();
-        let retrieval = self.retrieval.try_lock().map_err(|_| ContentError::Busy)?;
-        let result = timeout(
-            OPERATION_TIMEOUT,
-            named::download(request, context, stream, request_id, ready_sent),
-        )
+        let result = timeout(OPERATION_TIMEOUT, async {
+            // A concurrent follower refresh cannot reject a selected source download
+            // merely because it currently owns retrieval. Waiting consumes the same
+            // 600-second budget as the protected lookup and actual body transfer.
+            let _retrieval = named_retrieval(&self.retrieval, stream).await?;
+            named::download(request, context, stream, request_id, ready_sent).await
+        })
         .await
         .map_err(|_| ContentError::Unavailable)?;
-        drop(retrieval);
         drop(foreground);
         if result.is_ok() && allow_replication {
             self.start_replication(context).await;

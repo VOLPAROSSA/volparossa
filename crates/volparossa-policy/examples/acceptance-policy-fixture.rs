@@ -157,10 +157,12 @@ fn authority_identity(
     let source = root.parent().ok_or("missing source owner")?;
     let client = source.parent().ok_or("missing client owner")?;
     let work = client.parent().ok_or("missing disposable root")?;
+    let authority_node = format!("state-relay{}", index + 3);
     if uid == 0
         || root.file_name() != Some(std::ffi::OsStr::new(&expected_name))
         || source.file_name() != Some(std::ffi::OsStr::new("compute-source"))
-        || client.file_name() != Some(std::ffi::OsStr::new("state-client"))
+        || (client.file_name() != Some(std::ffi::OsStr::new("state-client"))
+            && client.file_name() != Some(std::ffi::OsStr::new(&authority_node)))
         || work.parent() != Some(Path::new("/opt"))
         || !work
             .file_name()

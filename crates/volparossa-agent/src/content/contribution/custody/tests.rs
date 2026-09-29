@@ -160,6 +160,98 @@ fn context(root: &Path) -> (ControlContext, watch::Sender<bool>, JoinHandle<()>)
     )
 }
 
+fn local_request(
+    signed: &SignedManifest,
+) -> volparossa_local_control::ContentLocalFetchNameRequest {
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&signed.publisher_key_hint()).unwrap();
+    let manifest = signed.verify(&key, now()).unwrap();
+    volparossa_local_control::ContentLocalFetchNameRequest {
+        publisher_key: key.to_bytes().to_vec(),
+        name: manifest.metadata().name.clone(),
+        min_revision: manifest.metadata().revision,
+        expected_content_type: manifest.metadata().content_type.clone(),
+        max_object_bytes: manifest.length().max(1),
+    }
+}
+
+async fn local_inbox(context: &ControlContext, signed: &SignedManifest, bytes: &[u8], root: &Path) {
+    use volparossa_local_control::{control_response::Payload, read_response};
+    assert!(
+        !context.state.read().await.roles().client,
+        "local inbox requires no consumer role"
+    );
+    let directory = tempfile::tempdir_in(root).unwrap();
+    let mut destination = ChunkStore::create(
+        &directory.path().join("local-reader"),
+        configured_limits(&context.config.content_contribution),
+    )
+    .unwrap();
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&signed.publisher_key_hint()).unwrap();
+    let manifest = signed.verify(&key, now()).unwrap();
+    let (mut client, mut server) = tokio::net::UnixStream::pair().unwrap();
+    let mut ready_sent = false;
+    let sender = context.content.fetch_local_name(
+        local_request(signed),
+        context,
+        &mut server,
+        &[71; 16],
+        &mut ready_sent,
+    );
+    let receiver = async {
+        let ready = read_response(&mut client).await.unwrap();
+        assert_eq!(ready.request_id, vec![71; 16]);
+        assert_eq!(ready.diagnostic_code, "LOCAL_NAMED_CONTENT_TRANSFER_READY");
+        let Some(Payload::NamedContentTransferReady(ready)) = ready.payload else {
+            panic!("original native readiness");
+        };
+        assert_eq!(ready.manifest, signed.encode());
+        assert!(ready.cache_only);
+        volparossa_content::transfer::pull_from_peer(
+            &mut client,
+            &manifest,
+            &mut destination,
+            TransferLimits::default(),
+        )
+        .await
+        .unwrap();
+        let response = read_response(&mut client).await.unwrap();
+        assert_eq!(response.diagnostic_code, "CONTENT_OK");
+        let Some(Payload::Content(receipt)) = response.payload else {
+            panic!("content receipt");
+        };
+        assert_eq!(receipt.bytes, manifest.length());
+        assert_eq!(receipt.peer_bytes, 0);
+        assert_eq!(receipt.providers_used, 0);
+        assert!(receipt.provider_peer_ids.is_empty());
+    };
+    let (sent, ()) = tokio::join!(sender, receiver);
+    sent.unwrap();
+    assert!(ready_sent);
+    let mut actual = Vec::new();
+    reassemble(&manifest, &mut [&mut destination], now(), &mut actual).unwrap();
+    assert_eq!(actual, bytes);
+    assert!(!context.content.foreground.active());
+}
+
+async fn local_inbox_unavailable(context: &ControlContext, signed: &SignedManifest) {
+    let (_client, mut server) = tokio::net::UnixStream::pair().unwrap();
+    let mut ready_sent = false;
+    assert!(
+        context
+            .content
+            .fetch_local_name(
+                local_request(signed),
+                context,
+                &mut server,
+                &[72; 16],
+                &mut ready_sent
+            )
+            .await
+            .is_err()
+    );
+    assert!(!ready_sent);
+}
+
 async fn backend(context: &ControlContext) -> Backend {
     let runtime = context.content.contribution.lock().await.clone().unwrap();
     let current = context.content.service.lock().await;
@@ -289,6 +381,8 @@ async fn scenario() {
     assert!(!context.content.foreground.active());
     assert!(original.replication.try_background_slot().is_some());
 
+    local_inbox(&context, &signed, &payload, directory.path()).await;
+
     // Begin using the actual Backend implementation and keep its live transfer owners across
     // the actual ContentRuntime::stop call. This cancelled retry must not resurrect service.
     let mut pending = original
@@ -304,6 +398,7 @@ async fn scenario() {
     assert!(context.content.foreground.active());
     assert!(original.replication.try_background_slot().is_none());
     context.content.stop(&context.discovery).await.unwrap();
+    local_inbox_unavailable(&context, &signed).await;
     assert!(pending.commit().await.is_err());
     assert!(!context.content.foreground.active());
     assert!(original.replication.try_background_slot().is_some());
@@ -350,6 +445,7 @@ async fn scenario() {
     .await;
     assert_eq!(retained.state(), CustodyState::Complete);
     assert_eq!(retained.original_expiry(), manifest.validity().expires);
+    local_inbox(&context, &signed, &payload, directory.path()).await;
     let mut destination = ChunkStore::create(&directory.path().join("consumer"), limits).unwrap();
     let mut stream = connection(&context).await;
     let progress = pull_publication(

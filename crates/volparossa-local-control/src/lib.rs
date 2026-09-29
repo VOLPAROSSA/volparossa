@@ -18,10 +18,10 @@ mod custody;
 mod mailbox;
 pub use content::{
     ContentCacheLimits, ContentExportRequest, ContentFetchNameRequest, ContentFetchRequest,
-    ContentImportRequest, ContentPolicyApplyRequest, ContentPolicyOutcome, ContentPolicyReceipt,
-    ContentReceipt, ContentReplicationConfig, ContentServeRequest, ContentTransferReady,
-    HttpsContentFetchRequest, HttpsContentTransferReady, HttpsSourceStrategy,
-    NamedContentTransferReady,
+    ContentImportRequest, ContentLocalFetchNameRequest, ContentPolicyApplyRequest,
+    ContentPolicyOutcome, ContentPolicyReceipt, ContentReceipt, ContentReplicationConfig,
+    ContentServeRequest, ContentTransferReady, HttpsContentFetchRequest, HttpsContentTransferReady,
+    HttpsSourceStrategy, NamedContentTransferReady,
 };
 pub use custody::{
     ContentCustodyDiscoverRequest, ContentCustodyDiscovered, ContentCustodyProvider,
@@ -56,7 +56,7 @@ pub struct ControlRequest {
     /// One allowlisted operation.
     #[prost(
         oneof = "control_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 37"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37"
     )]
     pub operation: Option<control_request::Operation>,
 }
@@ -69,8 +69,8 @@ pub mod control_request {
         ComputeAttachRequest, ComputeDiscoverRequest, ComputeRemoteRequest, ConnectRequest,
         ContentCustodyDiscoverRequest, ContentCustodyRequest, ContentExportRequest,
         ContentFetchNameRequest, ContentFetchRequest, ContentImportRequest,
-        ContentPolicyApplyRequest, ContentServeRequest, Empty, HttpsContentFetchRequest, LogQuery,
-        MailboxRemoteRequest, MailboxServeRequest, RoleChange,
+        ContentLocalFetchNameRequest, ContentPolicyApplyRequest, ContentServeRequest, Empty,
+        HttpsContentFetchRequest, LogQuery, MailboxRemoteRequest, MailboxServeRequest, RoleChange,
     };
 
     /// Exactly one supported CLI-to-agent operation.
@@ -133,6 +133,9 @@ pub mod control_request {
         /// Resolve a trusted native publisher/name and deliver on this same local socket.
         #[prost(message, tag = "28")]
         ContentFetchName(ContentFetchNameRequest),
+        /// Resolve and deliver from the configured local public contribution registry only.
+        #[prost(message, tag = "36")]
+        ContentLocalFetchName(ContentLocalFetchNameRequest),
         /// Explicitly start a durable mailbox provider using an owned cache.
         #[prost(message, tag = "29")]
         MailboxServe(MailboxServeRequest),
@@ -729,6 +732,7 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
         control_request::Operation::ContentFetchHttps(request) => request.validate()?,
         control_request::Operation::ContentDownloadHttps(request) => request.validate_download()?,
         control_request::Operation::ContentFetchName(request) => request.validate()?,
+        control_request::Operation::ContentLocalFetchName(request) => request.validate()?,
         control_request::Operation::MailboxServe(request) => request.validate()?,
         control_request::Operation::MailboxRemote(request) => request.validate()?,
         control_request::Operation::ContentCustody(request) => request.validate()?,

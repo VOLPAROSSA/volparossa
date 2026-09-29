@@ -6,15 +6,60 @@ use super::*;
 pub(super) struct Stage {
     name: String,
     state: &'static str,
+    preflight_diagnostic: Option<&'static str>,
     execution_complete: bool,
     pub(super) answer: Option<(String, assessment::Evidence)>,
 }
 
 impl Stage {
-    pub(super) fn summary(&self, valid: bool) -> Value {
-        json!({"stage":self.name,"state":self.state,"execution_complete":self.execution_complete,
-            "answer_complete":self.answer.is_some(),"structured_judgment_valid":valid})
+    fn new(name: &str, state: &'static str) -> Self {
+        Self {
+            name: name.into(),
+            state,
+            preflight_diagnostic: None,
+            execution_complete: false,
+            answer: None,
+        }
     }
+
+    pub(super) fn summary(&self, valid: bool) -> Value {
+        let mut summary = json!({"stage":self.name,"state":self.state,"execution_complete":self.execution_complete,
+            "answer_complete":self.answer.is_some(),"structured_judgment_valid":valid});
+        if let Some(diagnostic) = self.preflight_diagnostic {
+            summary["preflight_diagnostic"] = diagnostic.into();
+        }
+        summary
+    }
+}
+
+// Keep actionable local failure classes without retaining arbitrary remote text,
+// source contents or local paths. Complete historical stage projections are unchanged.
+fn preflight_diagnostic(error: Option<&anyhow::Error>) -> &'static str {
+    let Some(error) = error else {
+        return "compute_policy_preflight_missing_handle";
+    };
+    for cause in error.chain() {
+        let message = cause.to_string();
+        for code in [
+            "compute_distribute_capability_probe_timeout",
+            "compute_distribute_capability_probe_unavailable",
+            "compute_distribute_cancelled_before_submit",
+            "compute_distribute_peer_busy",
+            "compute_distribute_incompatible_models",
+            "compute_peer_document_not_supported",
+            "compute_peer_source_expired",
+            "compute_directory_not_private",
+            "compute_directory_symlink",
+        ] {
+            if message == code {
+                return code;
+            }
+        }
+    }
+    if error.downcast_ref::<std::io::Error>().is_some() {
+        return "compute_policy_preflight_local_io";
+    }
+    "compute_policy_preflight_other"
 }
 
 #[allow(
@@ -31,12 +76,7 @@ pub(super) async fn run(
     question: &str,
     cancelled: &watch::Receiver<bool>,
 ) -> Result<Stage> {
-    let mut stage = Stage {
-        name: name.into(),
-        state: "not_submitted",
-        execution_complete: false,
-        answer: None,
-    };
+    let mut stage = Stage::new(name, "not_submitted");
     let stage_root = args.output.join(name);
     if !storage::exists(&stage_root)? && (*cancelled.borrow() || now()? >= enrolled.expires) {
         stage.state = "cancelled_or_source_expired";
@@ -68,6 +108,7 @@ pub(super) async fn run(
         let submitted = batch::report_with_activity(&options, socket, cancelled).await;
         if !storage::exists(&handle_path)? {
             stage.state = "preflight_unavailable";
+            stage.preflight_diagnostic = Some(preflight_diagnostic(submitted.as_ref().err()));
             return Ok(stage);
         }
         // The durable handle, not success of the transport or aggregate result, controls replay.
@@ -182,12 +223,7 @@ pub(super) fn replay(
     );
     check_proof(&stage_root, enrolled, &handle, &status, Some(requester))?;
     completed(
-        Stage {
-            name: name.into(),
-            state: "complete",
-            execution_complete: false,
-            answer: None,
-        },
+        Stage::new(name, "complete"),
         handle,
         status,
         enrolled,
@@ -324,4 +360,40 @@ fn receipts(root: &Path, handle: &JobHandle, selected_at: u64) -> Result<Option<
         current = Some(checked);
     }
     Ok(current)
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn preflight_keeps_fixed_local_cause_without_remote_text_or_changed_complete_projection() {
+        let error = anyhow::anyhow!("compute_distribute_capability_probe_timeout")
+            .context("private path or untrusted outer message");
+        assert_eq!(
+            preflight_diagnostic(Some(&error)),
+            "compute_distribute_capability_probe_timeout"
+        );
+        assert_eq!(
+            preflight_diagnostic(Some(&anyhow::anyhow!("untrusted secret text"))),
+            "compute_policy_preflight_other"
+        );
+        assert_eq!(
+            preflight_diagnostic(None),
+            "compute_policy_preflight_missing_handle"
+        );
+        let mut stage = Stage {
+            name: "assessment-0".into(),
+            state: "preflight_unavailable",
+            preflight_diagnostic: Some(preflight_diagnostic(Some(&error))),
+            execution_complete: false,
+            answer: None,
+        };
+        assert_eq!(
+            stage.summary(false)["preflight_diagnostic"],
+            "compute_distribute_capability_probe_timeout"
+        );
+        stage.preflight_diagnostic = None;
+        assert!(stage.summary(false).get("preflight_diagnostic").is_none());
+    }
 }

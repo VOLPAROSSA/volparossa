@@ -3,6 +3,9 @@
 //! No name is advertised in discovery. Replies retain original signed envelopes; neither a
 //! provider nor the highest observed revision proves global freshness or HTTPS authority.
 
+#[cfg(test)]
+mod local_tests;
+
 use ed25519_dalek::VerifyingKey;
 use prost::Message;
 use tokio::{
@@ -112,6 +115,66 @@ pub enum NameResolution {
     /// Two independently verified envelopes at the same revision with different IDs.
     /// A provider's bare assertion can never create this result or a durable conflict pin.
     Conflict(Box<[NameCandidate; 2]>),
+}
+
+impl PublicationRegistry {
+    /// Resolve only this explicitly enabled registry, including original signed custody
+    /// replicas. This bounded metadata scan performs no cache or network I/O.
+    ///
+    /// # Errors
+    /// Rejects invalid retained signatures or expired selection deadlines. The caller must
+    /// preserve its own revision floor; this observation does not establish global freshness.
+    pub fn resolve_local_name(
+        &self,
+        query: &NameQuery,
+        now_unix: u64,
+    ) -> Result<NameResolution, ProviderError> {
+        let session = SelectorSession::new(TransferLimits::default())?;
+        let selected = select(self, query, now_unix, &session)?;
+        match selected.as_slice() {
+            [] => Ok(NameResolution::Missing),
+            [signed] => Ok(NameResolution::Candidate(Box::new(candidate(
+                &signed.encode(),
+                query,
+                now_unix,
+            )?))),
+            [first, second] => Ok(NameResolution::Conflict(Box::new([
+                candidate(&first.encode(), query, now_unix)?,
+                candidate(&second.encode(), query, now_unix)?,
+            ]))),
+            _ => Err(ProviderError::Registry),
+        }
+    }
+
+    /// Open only the already registered owned cache for an exact original local candidate.
+    /// No caller path is adopted. Release the handle after the bounded transfer; opening alone
+    /// is not proof of complete chunks, and the caller must observe live policy withdrawal.
+    ///
+    /// # Errors
+    /// Rejects disabled lookup, missing/replaced/expired/withheld/private metadata and an
+    /// unowned, corrupt or busy cache. Every chunk remains verified by the ordinary transfer.
+    pub fn open_local_candidate(
+        &self,
+        selected: &NameCandidate,
+        now_unix: u64,
+    ) -> Result<crate::ChunkStore, ProviderError> {
+        let entry = self
+            .entries
+            .get(selected.manifest.manifest_id())
+            .ok_or(ProviderError::Missing)?;
+        if !self.name_lookup
+            || entry
+                .signed
+                .as_deref()
+                .is_none_or(|signed| signed.encode() != selected.signed.encode())
+            || entry.manifest.metadata().content_type == PRIVATE_MESSAGE_CONTENT_TYPE
+            || !self.object_policy.allows_now(&entry.manifest)
+        {
+            return Err(ProviderError::Unavailable);
+        }
+        entry.manifest.check_time(now_unix)?;
+        Ok(crate::ChunkStore::open(&entry.root, entry.limits)?)
+    }
 }
 
 /// Ask one provider through a caller-supplied protected stream; never dial or choose a route.

@@ -19,6 +19,93 @@ fn limits() -> CacheLimits {
     }
 }
 
+#[test]
+fn withheld_public_export_is_policy_before_busy_cache_or_payload_io() {
+    use volparossa_content::object_policy::{ObjectPolicyGate, ObjectRule, ObjectSubject};
+
+    let root = tempfile::tempdir().unwrap();
+    let cache = root.path().join("held-custody-cache");
+    let mut held = ChunkStore::create(&cache, limits()).unwrap();
+    let publisher = SigningKey::generate(&mut rand_core::OsRng);
+    let bytes = b"original public subject";
+    let signed = publish(
+        &mut bytes.as_slice(),
+        Publication {
+            length: bytes.len() as u64,
+            metadata: Metadata {
+                name: "withheld-subject".into(),
+                revision: 1,
+                content_type: "text/plain".into(),
+            },
+            validity: Validity {
+                created: now(),
+                expires: now() + 300,
+            },
+        },
+        &publisher,
+        &mut held,
+    )
+    .unwrap();
+    let manifest = signed.verify(&publisher.verifying_key(), now()).unwrap();
+    let request = ContentExportRequest {
+        manifest: signed.encode(),
+        publisher_key: publisher.verifying_key().to_bytes().to_vec(),
+        cache: cache.to_str().unwrap().into(),
+        limits: Some(wire_limits()),
+        allow_public_content: true,
+    };
+    // This is a real owned ChunkStore lock, not an injected storage error.
+    assert!(matches!(
+        prepare(Some(Operation::ContentExport(request.clone())), None),
+        Err(ContentError::Invalid)
+    ));
+    let gate = ObjectPolicyGate::default();
+    gate.set_epoch(Some([42; 32]));
+    gate.install(ObjectRule {
+        subject: ObjectSubject::from_manifest(&manifest),
+        policy_hash: [42; 32],
+        // Both threshold-verified Deny and Undetermined install this same withheld rule.
+        allow: false,
+        expires_at_ms: (now() + 300) * 1000,
+    })
+    .unwrap();
+    let Err(error) = prepare(Some(Operation::ContentExport(request.clone())), Some(&gate)) else {
+        panic!("withheld object opened its cache");
+    };
+    assert!(matches!(error, ContentError::Policy));
+    let response = content_response(vec![9; 16], Err(error));
+    assert_eq!(response.result, ControlResult::Policy as i32);
+    assert_eq!(response.diagnostic_code, "CONTENT_POLICY");
+    assert!(matches!(response.payload, Some(Payload::Ack(_))));
+    assert_eq!(held.usage().bytes, bytes.len() as u64);
+    let mut invalid = request;
+    *invalid.manifest.last_mut().unwrap() ^= 1;
+    assert!(
+        matches!(
+            prepare(Some(Operation::ContentExport(invalid)), Some(&gate)),
+            Err(ContentError::Invalid)
+        ),
+        "invalid signatures are rejected before object-policy admission"
+    );
+    // Withheld import also refuses before creating a new private destination.
+    let incoming = root.path().join("must-not-be-created");
+    assert!(matches!(
+        prepare(
+            Some(Operation::ContentImport(ContentImportRequest {
+                manifest: signed.encode(),
+                publisher_key: publisher.verifying_key().to_bytes().to_vec(),
+                cache: incoming.to_str().unwrap().into(),
+                limits: Some(wire_limits()),
+                allow_public_content: true,
+                contribute: false,
+            })),
+            Some(&gate)
+        ),
+        Err(ContentError::Policy)
+    ));
+    assert!(!incoming.exists());
+}
+
 #[tokio::test]
 async fn public_publication_handoff_echoes_mode_without_private_or_missing_service_success() {
     let fixture = Fixture::new();
