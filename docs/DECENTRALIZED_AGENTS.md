@@ -1835,6 +1835,15 @@ general answer quality or completed B04**. The earlier `9d870440` proof remains 
 file-oriented CLI result, not relabeled socket evidence. Failed earlier IPC runs are retained
 in [the implementation record](IMPLEMENTATION_STATUS.md).
 
+A separate [combined browser/core run on `5beb8d2d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36614266330)
+now passes with browser integration `4b1fdbe` and the real ESR 140.16.0 sidebar. The actual
+private service and pinned 360M worker return one synthetic canary answer with EOS after
+12 tokens; the panel renders it as text only after the decoded-result observer confirms
+zero ephemeral children and ended worker lifetimes. Real Cancel/Disconnect, isolation,
+ordinary cleanup without fallback signals and unchanged host state also pass. No private
+prompt or raw model answer is exported. This extends the proven IPC lane into the ESR panel,
+not the Firefox 157 source build/native provider selector, general answer quality or full B04.
+
 ## Fully automatic whitelist/blacklist decisions
 
 The existing [whitelist](WHITELIST.md) already enforces threshold-signed **destination/port**

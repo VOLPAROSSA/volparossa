@@ -22,9 +22,12 @@ The default-extension bundle is integrated by
 uBlock Origin, Decentraleyes and Adaptive Tab Bar Color install signed and active in the
 isolated ESR 140.16.0 runtime, and disabling/removing them survives restart. Twelve offline
 checks and unchanged privacy-default checks pass; this is not a Firefox 157 source-build proof.
-Daemon attachment, browser-scoped kill switch (requested off by default), cache integration
-and the private-compute sidebar remain unfinished. Core defaults for other consumers are
-not weakened by the requested browser availability fallback.
+The [combined browser/core run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36614266330)
+now passes: the real ESR sidebar renders one synthetic EOS answer from the actual private
+360M worker after observed cleanup. This is not the Firefox 157 source build or native provider
+selector. Daemon network attachment, browser-scoped kill switch (requested off by default)
+and cache integration remain unfinished. Core defaults for other consumers are not weakened
+by the requested browser availability fallback.
 
 [Signal integration](https://github.com/VOLPAROSSA/volparossa-chat/pull/1) now has a pinned
 Desktop/libsignal source baseline and explicit device/session/backup contracts, not a
@@ -1144,13 +1147,14 @@ relabeled as IPC evidence. B04, confidential offload and browser-UI integration 
 See [service usage](DECENTRALIZED_AGENTS.md#application-local-private-compute-ipc) and the
 [local wire contract](../crates/volparossa/src/compute/private_serve/WIRE.md).
 
-Combined browser proof candidate (2026-09-29): the explicit `agent-private-browser` VM scenario
+Original combined browser proof candidate (2026-09-29): the explicit `agent-private-browser` VM scenario
 pins browser integration source `68bec6de8d39321f810419ad254dd2e7e2ad66a1` and Debian ESR
 140.16.0, then submits the final private question through the actual Gecko sidebar and this
 same private service/model. It retains real Cancel/Disconnect checks and uses a separate
 decoded-result-before-panel-render cleanup boundary; the original v2 first-frame-byte proof
 is unchanged. Source pins, pure report checks and the static KVM/export contract pass.
-**Combined live execution is pending.** This is not a Firefox 157 build, native provider-selector
+Combined live execution was initially pending; the later source-exact pass is recorded below.
+This is not a Firefox 157 build, native provider-selector
 integration, general answer-quality evidence or completed B04. Raw answers, private inputs,
 browser profiles and logs are excluded from the exported browser proof.
 The [first combined run on `db5059e7`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36594499298)
@@ -1164,7 +1168,7 @@ sandbox with empty private `/etc`. Browser `d37b74ec` excludes that host-specifi
 link, retaining strict handling of other runtime dependencies. The same extraction now
 stages successfully with all four pinned runtime hashes unchanged; two new staging tests
 pass. This independently reproduced defect is consistent with the failed stage, not a
-recovery of its suppressed stderr. The first run stays failed; combined execution remains pending.
+recovery of its suppressed stderr. The first run stays failed; it does not establish combined execution.
 
 The [next run on `3c4ec9ff`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36596525068)
 passes pinned runtime/model provision and the actual private-service Cancel/Disconnect
@@ -1247,8 +1251,26 @@ home metadata layer also handles machines where the `.mozilla` mountpoint does n
 Thirteen focused checks and real fixed startup probes (2.681 seconds, and 3.389 seconds
 with a pristine read-only home containing the staged repository) pass with clean exit and
 cleanup. This source pin leaves the 40-second deadline, sandbox, runtime, privacy defaults
-and private-session log boundary unchanged. A new combined guest proof is still pending;
-these local startup results are not a completed browser/model integration.
+and private-session log boundary unchanged. Those local startup results alone do not establish
+the combined browser/model integration.
+
+**Combined browser/core PASS (2026-09-29):** [run 36614266330](https://github.com/VOLPAROSSA/volparossa/actions/runs/36614266330)
+on core `5beb8d2d79e44d2b4d2e4e3bb20aa4e67701e03b`, with browser source
+`4b1fdbe105c5cc23154778664c8d9fca9ef2454b` and the exact Debian ESR 140.16.0 runtime,
+passes the complete `agent-private-browser` checker. Empty-profile startup takes 1,961 ms.
+After actual private-service Cancel/Disconnect checks, the real Gecko sidebar submits to
+the pinned local SmolLM2-360M worker and renders the synthetic canary as text, with EOS and
+12 generated tokens. At `decoded_result_before_panel_render`, the observer records zero
+ephemeral children and ended worker lifetimes; this is not the earlier first-frame-byte
+IPC observation point. Input/model isolation, ordinary cleanup without fallback signals,
+removal of browser/profile/appdata and model/job roots, and unchanged host state pass.
+No private prompt or raw model answer is exported. The 19 original artifacts remain immutable;
+ZIP SHA-256: `8da26ef025ff2a539124693ecd098c2e3d8a9d47a34102b8b1351278d8842925`.
+Both host-state snapshots have SHA-256
+`7293aa05b9868c420b2634dcecec728da9a9b8b276cd8e090e8b91d2bd441766`.
+Earlier failures above remain failed, not relabeled. This proves the bounded ESR panel → real
+core → local model path, **not** a Firefox 157 build, its patched native provider selector,
+general answer quality, confidential peer execution or completed B04.
 
 Current dependency-ready candidate: a single incremental provider queue now owns source and
 derived graph work. Each durable package completion triggers a dependency scan; newly ready
