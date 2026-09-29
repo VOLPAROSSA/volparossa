@@ -102,6 +102,16 @@ readiness, timing, injected loss, application hash or cleanup gate. Synthetic re
 cover the nomination; no passing live refill is claimed. The failed original report retains
 complete disposable cleanup and unchanged host state.
 
+The [run on `258c049e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36596674960)
+still **fails** at fresh-path admission. Its new native measurement reaches real helper
+Commit, followed by additive Client/Exit path-4 Prepare and immediate Abort. The Exit
+verifier incorrectly required that retained path 4 equal the fresh two-path sample's ordinal
+1 or 2. The correction scopes that projection to the exact signed extension parent/permit
+and complete fresh native batch; original-route ordinal, privacy, timing and payload/hash
+requirements remain intact. No passing live refill is claimed. Fixture cleanup/A15 pass,
+but the separate Client `SHUTDOWN_CLEANUP_FAILED` diagnostic remains unresolved in this
+artifact. See [the scoped evidence notes](MPTCP_REFILL.md).
+
 The first [Firefox integration PR](https://github.com/VOLPAROSSA/volparossa-browser/pull/1)
 is merged (`bab677ba`): isolated ESR 140.16 privacy defaults and native Strict tracking
 protection passed a real browser smoke, including preservation of user choices after restart.

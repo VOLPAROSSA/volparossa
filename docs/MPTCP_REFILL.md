@@ -101,3 +101,27 @@ that both nominated paths work; telemetry does not replace that authority. All t
 loss injection, original socket identity, payload/hash and cleanup requirements remain
 unchanged. Focused synthetic nomination tests accompany this correction; a successful
 new live refill is still pending.
+
+[Run 36596674960 on `258c049e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36596674960)
+remains **failed** at `MPTCP_REFILL_FRESH_PATH_MISSING`. The real fresh two-path native
+measurement now reaches helper Commit on the Client, Exit and R4. Afterwards the original
+Client and Exit prepare additive path 4, then immediately abort it before R4's route
+reservation. The expanded R4 capture contains two WireGuard data datagrams on each leg,
+consistent with the native probe, not the required fourth-path application payload.
+
+The Exit's native-evidence verifier compared the new sample's ordinal (1 or 2) with the
+established route's new path ID (4), so this valid extension could never pass that check.
+The correction keeps initial-route ordinal equality and introduces a separate extension
+binding: exact signed parent and permit, retained path, unchanged actors/control/Exit/
+policy/transport, post-permit measurements, and both distinct members of the same completed
+native batch. It does not rewrite signed native scopes or substitute advertisements for
+measurement. Focused synthetic authority/batch regressions accompany the change; no new
+successful live refill or application hash is claimed.
+
+The final fixture reports complete teardown with zero owned leftovers and matching A15
+host-state hashes. Expanded Client, Exit and R4 captures have no direct Client-to-Exit or
+unexpected outer packets, no capture drops and no truncation. These limited observations
+do not replace the unfinished full refill acceptance. The Client still separately reports
+`SHUTDOWN_CLEANUP_FAILED`; its retained 400-row diagnostic tail does not identify that
+failure's precise cleanup phase. The immutable original ZIP SHA-256 is
+`f37ceb83b2c1f2122befeb164b80bc0d5e89909347ac50926073a909bd2cc8c3`.

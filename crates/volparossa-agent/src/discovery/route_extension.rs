@@ -1,5 +1,8 @@
 //! Fresh signed path additions reach an existing Exit only through its original control relay.
 
+mod evidence;
+pub(super) use evidence::ExtensionEvidenceBinding;
+
 use volparossa_exit::AcceptedRouteExtension;
 use volparossa_protocol::{RouteExtensionPhase, RouteExtensionRequest, RouteExtensionScope};
 use volparossa_wireguard::ExitEndpointLease;
@@ -412,7 +415,15 @@ impl DiscoveryRuntime {
             .and_then(|extension| extension.lease);
         self.recent_native_exit_evidence
             .retain(|evidence| evidence.expires_at_ms > now);
-        let verifier = ExactNativeExitEvidenceVerifier::new(&self.recent_native_exit_evidence, now);
+        let verifier = if phase == RouteExtensionPhase::Authorize {
+            ExactNativeExitEvidenceVerifier::for_extension(
+                &self.recent_native_exit_evidence,
+                now,
+                &request,
+            )?
+        } else {
+            ExactNativeExitEvidenceVerifier::new(&self.recent_native_exit_evidence, now)
+        };
         let identity = &self.identity;
         let accepted = self
             .exit_service

@@ -815,6 +815,7 @@ struct ExactNativeExitEvidenceVerifier {
     tickets: Vec<RecentNativeExitEvidence>,
     consumed: Mutex<HashSet<[u8; 32]>>,
     now_ms: u64,
+    extension: Option<route_extension::ExtensionEvidenceBinding>,
 }
 
 impl ExactNativeExitEvidenceVerifier {
@@ -823,7 +824,23 @@ impl ExactNativeExitEvidenceVerifier {
             tickets: tickets.to_vec(),
             consumed: Mutex::new(HashSet::new()),
             now_ms,
+            extension: None,
         }
+    }
+
+    fn for_extension(
+        tickets: &[RecentNativeExitEvidence],
+        now_ms: u64,
+        request: &volparossa_protocol::RouteExtensionRequest,
+    ) -> Option<Self> {
+        Some(Self {
+            tickets: tickets.to_vec(),
+            consumed: Mutex::new(HashSet::new()),
+            now_ms,
+            extension: Some(route_extension::ExtensionEvidenceBinding::new(
+                request, now_ms,
+            )?),
+        })
     }
 
     fn consumed(&self) -> HashSet<[u8; 32]> {
@@ -849,6 +866,8 @@ impl ProbeEvidenceVerifier for ExactNativeExitEvidenceVerifier {
                     &result,
                     evidence,
                     self.now_ms,
+                    self.extension.as_ref(),
+                    &self.tickets,
                 )
         });
         let evidence_id =
@@ -14221,6 +14240,40 @@ fn native_exit_ticket_matches_standard_result(
     result: &RelayProbeResult,
     evidence: &ProbeEvidence<'_>,
     now_ms: u64,
+    extension: Option<&route_extension::ExtensionEvidenceBinding>,
+    tickets: &[RecentNativeExitEvidence],
+) -> bool {
+    let Some(permit) = decoded_signed_payload::<RelayProbePermit>(&result.relay_probe_permit)
+    else {
+        return false;
+    };
+    evidence.signed_permit() == result.relay_probe_permit
+        && evidence.path_id() == permit.path_id
+        && evidence.transport() as i32 == ticket.scope.transport
+        && evidence.address_family() as i32 == ticket.scope.address_family
+        && native_exit_ticket_matches_result(ticket, result, &permit, now_ms)
+        && native_exit_path_binding_matches(ticket, result, &permit, now_ms, extension, tickets)
+}
+
+fn native_exit_path_binding_matches(
+    ticket: &RecentNativeExitEvidence,
+    result: &RelayProbeResult,
+    permit: &RelayProbePermit,
+    now_ms: u64,
+    extension: Option<&route_extension::ExtensionEvidenceBinding>,
+    tickets: &[RecentNativeExitEvidence],
+) -> bool {
+    extension.map_or_else(
+        || permit.path_id == ticket.scope.candidate_ordinal,
+        |binding| binding.matches(ticket, tickets, result, permit, now_ms),
+    )
+}
+
+fn native_exit_ticket_matches_result(
+    ticket: &RecentNativeExitEvidence,
+    result: &RelayProbeResult,
+    permit: &RelayProbePermit,
+    now_ms: u64,
 ) -> bool {
     let Some(data_relay) = ticket.scope.data_relay.as_ref() else {
         return false;
@@ -14231,8 +14284,7 @@ fn native_exit_ticket_matches_standard_result(
     let Some(exit) = ticket.scope.exit.as_ref() else {
         return false;
     };
-    let Some(permit) = decoded_signed_payload::<RelayProbePermit>(&result.relay_probe_permit)
-    else {
+    let (Some(client_relay), Some(relay_exit)) = (&result.client_relay, &result.relay_exit) else {
         return false;
     };
     let valid_leg = |leg: &ProbeLegEvidence| {
@@ -14268,11 +14320,8 @@ fn native_exit_ticket_matches_standard_result(
         && result.policy_hash == ticket.scope.policy_hash
         && result.transport == ticket.scope.transport
         && result.address_family == ticket.scope.address_family
-        && evidence.path_id() == ticket.scope.candidate_ordinal
-        && evidence.transport() as i32 == ticket.scope.transport
-        && evidence.address_family() as i32 == ticket.scope.address_family
-        && valid_leg(evidence.client_relay())
-        && valid_leg(evidence.relay_exit())
+        && valid_leg(client_relay)
+        && valid_leg(relay_exit)
 }
 
 fn native_probe_leg_evidence(
