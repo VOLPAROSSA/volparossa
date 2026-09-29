@@ -120,6 +120,14 @@ protected-overlay acceptance run. [Operator usage and reconciliation](PRIVATE_ST
 describe the explicit workflow; placement, adaptive contribution and acknowledged drain remain
 separate unfinished work.
 
+The independent `private-storage-replicas` acceptance scenario is wired and **awaits a live
+exact-source run**. It requires two actual provider stores over the protected route, full
+2x-copy accounting, source removal, first-service withdrawal, two verified survivor restores,
+same-store reopen, selected-copy deletion with another survivor restore and zero final charge.
+Separate upload/failover/final captures and unchanged host/private cleanup are mandatory.
+Its three pure report/cleanup tests and KVM static contract pass; they do not establish runtime
+success, independent hardware, automatic repair, reciprocity or Signal interoperability.
+
 - [x] Source-exact disposable multi-node proof of the protected single-provider storage path
   and seven CLI commands (`434ed112`, run `36589770066`).
 - [x] Explicit replica-set commands: focused local two-store resume, accounting and failover checks.

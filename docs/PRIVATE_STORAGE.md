@@ -336,6 +336,18 @@ restore failover and preservation of the surviving copy. This
 fixture is not an actual two-provider protected-overlay run, independent-device availability
 proof or Signal snapshot validation.
 
+The separate disposable **`private-storage-replicas`** scenario is now wired for the next
+live run; **its runtime result is pending**. It attaches two explicitly pinned stores, checks
+the full two-copy charge, removes the source and actually stops the first provider's content
+service before two survivor restores. It then reopens that same store, deletes only its copy,
+restores the survivor again and explicitly removes the final copy. Three phase-specific
+protected-path/privacy captures, exact-source report validation and private/host cleanup are
+required. The original passing single-provider scenario remains unchanged. Replica-only
+fixture bounds allow 420 seconds per failover restore and 900 seconds per private phase;
+each core exchange retains its original 120-second limit, without automatic operation retries.
+Three new report/cleanup tests and the KVM static contract pass; neither executes the live
+network scenario. Service withdrawal is not proof of separate physical failure domains.
+
 ## Next end-to-end proof
 
 Extend the passing single-provider topology to the explicit replica-set commands with two
