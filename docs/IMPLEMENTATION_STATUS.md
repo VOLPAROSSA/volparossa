@@ -29,6 +29,15 @@ selector. Daemon network attachment, browser-scoped kill switch (requested off b
 and cache integration remain unfinished. Core defaults for other consumers are not weakened
 by the requested browser availability fallback.
 
+The [scoped TCP gateway candidate](BROWSER_NETWORK.md) now connects operator-delegated
+application scopes to the existing MPTCP route API. A separate UID/capability-authenticated
+Unix attachment owns its own loopback CONNECT endpoint and route controller; EOF/expiry
+does not disconnect other apps or the main/DNS controllers. Three CLI, one protocol and
+five agent checks plus strict CLI/local-control/agent Clippy pass. These establish executable
+wiring and local boundaries, not live Firefox payloads, two simultaneously carrying app
+routes, a browser-wide kill switch, or direct fallback. The disposable combined proof remains
+pending; other core security defaults are unchanged.
+
 [Signal integration](https://github.com/VOLPAROSSA/volparossa-chat/pull/1) now has a pinned
 Desktop/libsignal source baseline and explicit device/session/backup contracts, not a
 working modified client. Ordinary Signal compatibility, authenticated direct ciphertext

@@ -1,5 +1,6 @@
 //! VOLPAROSSA user-facing command-line interface.
 
+mod browser;
 mod compute;
 mod content;
 mod control;
@@ -58,6 +59,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    /// Issue explicit, short-lived browser access to an exact overlay destination.
+    Browser {
+        #[command(subcommand)]
+        command: browser::Command,
+    },
     /// Explicit private ciphertext storage, locally or through protected provider routes.
     Storage {
         #[command(subcommand)]
@@ -269,6 +275,7 @@ async fn main() -> Result<()> {
 
 async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
+        CliCommand::Browser { command } => browser::run(command, &cli.control_socket).await,
         CliCommand::Storage { command } => storage::run(command, &cli.control_socket).await,
         CliCommand::Init {
             identity,
@@ -750,6 +757,9 @@ fn print_response(response: ControlResponse) -> Result<()> {
         }
         Payload::PrivateStorageReady(_) | Payload::PrivateStorageGrant(_) => {
             anyhow::bail!("private storage reply requires its scoped storage command")
+        }
+        Payload::BrowserGatewayGranted(_) => {
+            anyhow::bail!("browser capability requires its explicit private output command")
         }
         Payload::Roles(roles) => {
             println!("client: {}", roles.client);

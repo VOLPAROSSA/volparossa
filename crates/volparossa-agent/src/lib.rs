@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod advertisement;
+mod browser_gateway;
 mod client_ingress;
 mod client_udp_turns;
 mod control;
@@ -205,6 +206,12 @@ impl Agent {
     {
         let (listener, socket_guard) =
             bind_control_socket(&self.paths.control_socket)?.into_parts();
+        let mut app_socket = self.paths.control_socket.as_os_str().to_os_string();
+        app_socket.push(".apps");
+        let app_socket = std::path::PathBuf::from(app_socket);
+        let (app_listener, app_socket_guard) = bind_control_socket(&app_socket)?.into_parts();
+        let browser_gateway =
+            browser_gateway::BrowserGateway::new(app_socket, self.paths.mpquic_socket.clone());
         let roles = self.state.read().await.roles();
         let sharing =
             match UplinkSharingRuntime::start(self.helper.clone(), &self.config.sharing, roles)
@@ -297,6 +304,7 @@ impl Agent {
         let routes = production_client_routes(&self.paths, &self.state);
         let dns_routes = production_client_routes(&self.paths, &self.state);
         let control_context = ControlContext {
+            browser_gateway: browser_gateway.clone(),
             content: self.content.clone(),
             state: Arc::clone(&self.state),
             config: Arc::clone(&self.config),
@@ -310,6 +318,14 @@ impl Agent {
             control_context.clone(),
             shutdown_rx.clone(),
         ));
+        let app_context = control_context.clone();
+        let app_gateway = browser_gateway.clone();
+        let app_shutdown = shutdown_rx.clone();
+        let mut app_task = tokio::spawn(async move {
+            app_gateway
+                .serve(app_listener, app_context, app_shutdown)
+                .await
+        });
         let discovery_state = Arc::clone(&self.state);
         let mut discovery_task =
             tokio::spawn(self.discovery.run(discovery_state, discovery_shutdown_rx));
@@ -383,6 +399,7 @@ impl Agent {
                 Err(_) => Err(AgentError::Task),
             },
             _ = &mut discovery_task => Err(AgentError::Task),
+            _ = &mut app_task => Err(AgentError::Task),
             _ = &mut maintenance_task => Err(AgentError::Task),
             _ = &mut path_health_task => Err(AgentError::Task),
             result = &mut contribution_task => match result {
@@ -404,6 +421,7 @@ impl Agent {
         // unwind and the exact client route receives its remote destruction acknowledgements.
         let _ = shutdown_tx.send(true);
         stop_task(&mut control_task).await;
+        stop_task(&mut app_task).await;
         stop_task(&mut maintenance_task).await;
         stop_task(&mut path_health_task).await;
         stop_task(&mut contribution_task).await;
@@ -416,7 +434,11 @@ impl Agent {
         stop_task(&mut mesh_task).await;
         let _ = self.content.stop(&self.discovery_control).await;
         let route_cleanup = stop_discovery_after_retirement(
-            control::shutdown_client_routes(&routes, &dns_routes),
+            async {
+                let apps = browser_gateway.shutdown_confirmed().await;
+                let shared = control::shutdown_client_routes(&routes, &dns_routes).await;
+                apps.and(shared)
+            },
             &discovery_shutdown_tx,
             &mut discovery_task,
         )
@@ -459,6 +481,7 @@ impl Agent {
         // Retain the exclusive daemon socket through sharing/ingress retirement, so a new
         // participant cannot start between teardown and the last owned-resource cleanup.
         drop(socket_guard);
+        drop(app_socket_guard);
         if route_cleanup.is_err() {
             return Err(AgentError::ShutdownCleanup);
         }

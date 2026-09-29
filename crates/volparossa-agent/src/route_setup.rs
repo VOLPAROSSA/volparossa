@@ -1139,6 +1139,11 @@ pub(crate) enum ClientRouteConnectError {
 }
 
 impl ClientRouteControl {
+    #[cfg(test)]
+    pub(crate) async fn admission_closed_for_test(&self) -> bool {
+        self.bootstrap.lock().await.is_closed()
+    }
+
     pub(crate) fn new(mpquic_socket: PathBuf) -> Self {
         Self {
             state: Arc::new(Mutex::new(ClientRouteControlState::Idle)),
