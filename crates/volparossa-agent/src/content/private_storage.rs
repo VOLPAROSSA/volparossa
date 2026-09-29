@@ -20,7 +20,8 @@ use volparossa_content::{
     provider::{ProviderEndpoint, PublicationRegistry},
 };
 use volparossa_local_control::{
-    CONTROL_PROTOCOL_VERSION, ContentReceipt, ControlResponse, ControlResult, PrivateStorageGrant,
+    CONTROL_PROTOCOL_VERSION, ContentReceipt, ControlResponse, ControlResult,
+    PrivateStorageAdmission, PrivateStorageAdmissionRequest, PrivateStorageGrant,
     PrivateStorageGrantRequest, PrivateStorageReady, PrivateStorageRemoteRequest,
     PrivateStorageServeRequest, control_response::Payload, write_response,
 };
@@ -47,6 +48,48 @@ struct SelectedProvider {
 }
 
 impl ContentRuntime {
+    /// Administrative local operation on the exact attached store, never a peer request.
+    /// No key, caller-selected path, policy bypass or automatic lease eviction is introduced.
+    pub(crate) async fn private_storage_admission(
+        &self,
+        request: &PrivateStorageAdmissionRequest,
+    ) -> Result<PrivateStorageAdmission, ContentError> {
+        if request.provider_key != self.signer.verifying_key().as_bytes() {
+            return Err(ContentError::Invalid);
+        }
+        let current = self.service.try_lock().map_err(|_| ContentError::Busy)?;
+        let active = current.as_ref().ok_or(ContentError::Unavailable)?;
+        if active.task.is_finished() || *active.stop.borrow() {
+            return Err(ContentError::Unavailable);
+        }
+        let storage = active
+            .registry
+            .try_lock()
+            .map_err(|_| ContentError::Busy)?
+            .private_storage()
+            .ok_or(ContentError::Unavailable)?;
+        // Keep attachment identity stable while the bounded disk-slot operation runs.
+        // The blocking closure retains its slot/owner even if this local waiter disconnects.
+        let status = timeout(EXCHANGE_TIMEOUT, storage.admission(request.target_bytes))
+            .await
+            .map_err(|_| ContentError::Unavailable)?
+            .map_err(|error| match error {
+                wire::WireError::Busy => ContentError::Busy,
+                _ => ContentError::Unavailable,
+            })?;
+        Ok(PrivateStorageAdmission {
+            provider_key: self.signer.verifying_key().to_bytes().to_vec(),
+            capacity_bytes: status.capacity_bytes,
+            target_bytes: status.target_bytes,
+            reserved_bytes: status.reserved_bytes,
+            committed_bytes: status.committed_bytes,
+            leases: status.leases,
+            retained_payload_bytes: status.retained_payload_bytes,
+            pending_drain_bytes: status.pending_drain_bytes,
+            available_for_new_reservations_bytes: status.available_for_new_reservations_bytes,
+        })
+    }
+
     pub(crate) async fn private_storage_serve(
         &self,
         request: PrivateStorageServeRequest,

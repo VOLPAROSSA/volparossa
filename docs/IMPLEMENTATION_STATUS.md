@@ -92,6 +92,19 @@ other participants' live data. Existing custody needs verified independent repla
 release. Unavailable replacement capacity must appear as **pending drain**, not freed space.
 Current payload quotas and receipts do not implement this adaptive distributed controller.
 
+New local admission-target slice: `storage local target/status` operates an offline owned
+store; `storage peer admission --provider-key LOCAL_KEY [--target-bytes N]` controls the
+already attached local provider through typed administrative IPC, not a remote peer.
+The durable target may fall below retained payload: new reservations are rejected when
+they do not fit, while existing leases/uploads/restores remain intact and excess custody
+is shown as `pending_drain_bytes`. Zero closes admission; the original hard quota and
+free-space floor remain unchanged. Schema 2 atomically migrates owned version-1 stores
+with their original quota as the initial target; older binaries reject schema 2. No target
+change deletes another owner's archive or claims freed disk, measured overhead, automatic
+migration or completed 1:1 reciprocity. Five new backend checks, two actual CLI/IPC checks,
+two protocol checks and strict four-crate Clippy pass; no network resize proof is claimed.
+See [commands and scope](PRIVATE_STORAGE.md#local-admission-target-and-pending-drain).
+
 The [live peer-storage run on `434ed112`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36589770066)
 **passes**. The exact-source report checker accepts the original 93-file artifact bundle
 (ZIP SHA-256 `80d1353d3844b82d75e5b554f4ab89ca538fc70248b9c6ab71d20f9d1f175370`).

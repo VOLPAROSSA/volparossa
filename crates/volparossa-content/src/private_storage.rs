@@ -12,6 +12,7 @@
 //! free-space floor is enforced. Complete payload space is reserved durably before writing.
 //! Failed uploads retain their reservation; expired leases remain charged until deletion.
 
+mod admission;
 mod archive;
 mod disk;
 mod lease;
@@ -20,6 +21,7 @@ pub mod provider;
 mod resumable;
 pub mod wire;
 
+pub use admission::StorageAdmissionStatus;
 pub use resumable::{ArchiveRange, MAX_RANGE_BYTES, MAX_RANGE_CHUNKS, UploadProgress};
 
 use std::{fmt, fs::File, str::FromStr};
@@ -33,7 +35,7 @@ pub const MAX_CAPACITY_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 /// Maximum new lease interval. Renewal changes the lease, never immutable archive identity.
 pub const MAX_LEASE_SECONDS: u64 = 31 * 24 * 60 * 60;
 const MAX_LEASES: u64 = 256;
-const VERSION: i64 = 1;
+const VERSION: i64 = 2;
 const APPLICATION_ID: i64 = 0x5650_5331;
 
 /// Explicit, persisted local contribution limits, not proof of network-wide contribution.

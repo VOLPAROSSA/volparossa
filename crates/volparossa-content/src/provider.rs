@@ -327,6 +327,12 @@ impl PublicationRegistry {
         self.private_storage.is_some()
     }
 
+    /// Clone the exact attached service for local operator control; no new store is opened.
+    #[must_use]
+    pub fn private_storage(&self) -> Option<Arc<crate::private_storage::wire::StorageService>> {
+        self.private_storage.as_ref().map(Arc::clone)
+    }
+
     /// Attach explicitly configured public custody; cloned snapshots share its service owner.
     pub fn set_custody(&mut self, service: Arc<custody::CustodyService>) {
         self.custody = Some(service);
