@@ -265,6 +265,22 @@ product IPv6, internal WireGuard paths and all acceptance gates remain unchanged
 decision checks pass. This fixture candidate is not evidence of the original runner's
 IPv6 state or a demonstrated correction of the signed/bogus failures.
 
+The [IPv6-observed run on `4930f8e9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36605711028)
+now **passes all five native preflight cases** with the exact same native worker hash as
+`84be45ac`: signed recursion plus independent proof/local reuse in 1,436 ms, unsigned recursion
+in 440 ms, a real `Bogus` verdict in 937 ms, timeout reaping in 4,501 ms and caller-cancel
+reaping in 1,503 ms. The runner actually reports no IPv6 route to the fixed root selector,
+so only QEMU outer IPv6 is disabled; product and internal-overlay IPv6 are unchanged.
+The exact-source native report checker passes and no extended diagnostic is needed.
+This supports the outer-uplink explanation without changing validation or resolution budgets.
+
+The workflow still **fails overall**, now in the separate protected C05 phase at
+`dns-cache-warm-a-aaaa` / `DNS_CACHE_NORMAL_ROUTE_UNAVAILABLE`. That route failure is not
+relabelled as a native validation failure or a successful combined deployment. The original
+167-file artifact is retained, ZIP SHA-256
+`52cab14a548df4c1ca48405a4cbd8ba6ddf2494efbf6022fc259922f3c0d82ba`.
+Cleanup completes and guest-parent snapshots are byte-identical.
+
 The new `reciprocity-private-dns` scenario is an executable candidate, not a live PASS.
 It retains the same four all-role agents and concurrent native UDP flows from the reciprocal
 fixture, then requires an ordinary protected application lookup to use the actually selected
@@ -275,6 +291,13 @@ firewall exemption and changes neither the developer host nor the VM parent's ne
 Separate drained packet captures, exact worker ownership, original UDP lifetimes, TAP/process
 cleanup and unchanged host state remain mandatory. Five focused inert fixture tests and the
 static wrapper contract pass; no real reciprocal private-DNS result is claimed yet.
+
+Its [first live run on `4930f8e9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36605721961)
+fails during topology setup, before any reciprocal DNS lookup: the owned slirp uplink reports
+`cannot pivot_root to /tmp` / `create_sandbox failed`. Sandbox and seccomp are not disabled
+to bypass this result. Original 16-file artifact ZIP SHA-256:
+`74796b2199c6f7cf767c8f412a61cc789cf35578444a11c2948d03e0af3c030d`.
+The uplink/topology cleanup and unchanged guest-parent state pass; the deployment gate stays open.
 
 Focused tests cover configuration rejection, bounded CNAME/TTL/provenance parsing, malformed and
 negative responses, rebinding rejection, and an actual framed TCP backend in a disposable test

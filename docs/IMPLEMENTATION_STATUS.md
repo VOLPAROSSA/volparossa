@@ -3413,10 +3413,21 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   No native `Bogus` verdict, native-to-peer proof or reciprocal deployment is claimed.
   All 298 original files, including unchanged-host and cleanup evidence, remain retained;
   the fallback document records their ZIP hash. Default selection remains unchanged.
+  The [IPv6-observed run on `4930f8e9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36605711028)
+  **passes all five native cases** with unchanged worker bytes: signed independent cache
+  linkage (1,436 ms), unsigned recursion (440 ms), actual `Bogus` rejection (937 ms), timeout
+  and caller-cancel reaping. The runner proves no route for outer IPv6; the fixture disables
+  only that QEMU option. The exact-source native checker passes. The overall run still fails
+  in the separate C05 warm-A/AAAA phase with `DNS_CACHE_NORMAL_ROUTE_UNAVAILABLE`; combined
+  protected deployment remains incomplete. Its original 167 files and cleanup evidence remain.
   A separate `reciprocity-private-dns` fixture now preserves four all-role agent lifetimes
   and concurrent real UDP routes while checking normal protected DNS, private native worker
   ownership, independent local-cache reuse, drained captures and complete guest-only uplink
   cleanup. Its five inert tests and static wrapper contract pass; live execution is pending.
+  The [first reciprocal live run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36605721961)
+  then fails before DNS at `PRIVATE_DNS_UPLINK_ENDED`: the guest-only slirp sandbox cannot
+  pivot into `/tmp`. Uplink/topology cleanup and unchanged guest-parent state pass. This
+  establishes neither reciprocal DNS success nor a reason to disable the sandbox.
 
 The positive DNSSEC cache is now composed into the normal agent: the same bounded RAM resolver
 serves protected DNS, TCP resolution, general UDP and browser-QUIC destination pinning. Its peer

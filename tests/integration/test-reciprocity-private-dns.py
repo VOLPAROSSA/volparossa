@@ -3,8 +3,12 @@
 """Inert report/parser/containment tests, never substitute for the live KVM proof."""
 import copy
 import importlib.util
+import json
+import os
 from pathlib import Path
+import platform
 import socket
+import subprocess
 import unittest
 from unittest import mock
 
@@ -138,6 +142,64 @@ class ReciprocalPrivateDnsTests(unittest.TestCase):
         self.assertIn("--exit-fd=", source)
         self.assertNotIn("--api-socket", source)
         self.assertIn('default_routes(namespace) == state["original"]', source)
+
+    def test_slirp_mount_isolation_precedes_unchanged_sandbox_and_owned_fds(self):
+        argv = FIXTURE.UPLINK.slirp_command("owned-fixture-client", 17, 19)
+        self.assertEqual(argv[:6], ["unshare", "--mount", "--propagation", "private", "--", "slirp4netns"])
+        self.assertEqual(argv[6:], [
+            "--netns-type=path", "--disable-host-loopback", "--disable-dns",
+            "--enable-sandbox", "--enable-seccomp", "--cidr=10.242.93.0/24", "--mtu=1500",
+            "--ready-fd=17", "--exit-fd=19", "/run/netns/owned-fixture-client", "dnsup0",
+        ])
+        # unshare must exec the owned slirp child, not fork a new untracked supervisor
+        # or move its Internet-side sockets into the fixture's isolated namespace.
+        self.assertNotIn("--fork", argv)
+        self.assertNotIn("--net", argv)
+
+    @unittest.skipUnless(os.environ.get("VOLPAROSSA_MOUNT_REGRESSION") == "1",
+                         "opt-in anonymous user/mount namespace reproduction; no networking")
+    def test_shared_tmp_pivot_fails_without_recursive_child_isolation(self):
+        self.assertIn(platform.machine(), ("x86_64", "amd64"))
+        before = Path("/proc/self/mountinfo").read_bytes()
+        snippet = r'''
+import ctypes, errno, json, os, sys
+libc = ctypes.CDLL(None, use_errno=True)
+libc.mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
+                      ctypes.c_ulong, ctypes.c_void_p]
+libc.unshare.argtypes = [ctypes.c_int]
+def mount(source, target, kind, flags):
+    if libc.mount(source, target, kind, flags, None) != 0:
+        raise OSError(ctypes.get_errno(), "anonymous mount failed")
+def isolate():
+    if libc.unshare(0x00020000) != 0:
+        raise OSError(ctypes.get_errno(), "anonymous mount namespace failed")
+# The OUTER unshare already detached every inherited mount from host propagation.
+# Only now synthesize a shared /tmp inside this throwaway user/mount namespace.
+mount(b"tmpfs", b"/tmp", b"tmpfs", 2 | 4 | 8)
+mount(None, b"/tmp", None, 1 << 20)
+if sys.argv[1] == "fixed":
+    isolate()
+    mount(None, b"/", None, (1 << 18) | 16384)
+# Relevant upstream v1.2.3 sandbox.c sequence, with no TAP or network calls.
+isolate()
+mount(None, b"/", None, 1 << 18)
+mount(b"tmpfs", b"/tmp", b"tmpfs", 2 | 4 | 8)
+os.mkdir("/tmp/old")
+os.chdir("/tmp")
+result = libc.syscall(155, ctypes.c_char_p(b"."), ctypes.c_char_p(b"old"))
+error = ctypes.get_errno() if result else 0
+print(json.dumps({"pivot_succeeded": result == 0, "errno": error}))
+'''
+        for variant in ("original", "fixed"):
+            result = subprocess.run([
+                "unshare", "--user", "--map-root-user", "--mount", "--propagation", "private", "--",
+                "python3", "-B", "-c", snippet, variant,
+            ], text=True, capture_output=True, timeout=10, check=True)
+            self.assertEqual(result.stderr, "")
+            self.assertEqual(json.loads(result.stdout), {
+                "pivot_succeeded": variant == "fixed", "errno": 0 if variant == "fixed" else 22,
+            })
+        self.assertEqual(Path("/proc/self/mountinfo").read_bytes(), before)
 
 
 if __name__ == "__main__":

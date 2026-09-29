@@ -78,6 +78,20 @@ def default_routes(namespace):
     return json.loads(command("ip", "-n", namespace, "-j", "route", "show", "default"))
 
 
+def slirp_command(namespace, ready_fd, exit_fd):
+    # slirp4netns v1.2.3 sandbox.c makes only / non-recursively private.
+    # An inherited shared /tmp can therefore make its pivot_root fail. Isolate
+    # the entire CHILD mount tree before retaining slirp's sandbox and seccomp;
+    # never change propagation in the fixture parent or disable the sandbox.
+    return [
+        "unshare", "--mount", "--propagation", "private", "--",
+        "slirp4netns", "--netns-type=path", "--disable-host-loopback", "--disable-dns",
+        "--enable-sandbox", "--enable-seccomp", "--cidr=" + CIDR, "--mtu=1500",
+        f"--ready-fd={ready_fd}", f"--exit-fd={exit_fd}",
+        "/run/netns/" + namespace, TAP,
+    ]
+
+
 def execute(work, namespaces):
     guard(work, namespaces)
     states, failures = [], []
@@ -103,12 +117,9 @@ def execute(work, namespaces):
                                text=True, check=True, timeout=5)
                 state["filter"] = True
                 with (work / f"reciprocity-private-dns-uplink-{node}.log").open("xb") as log:
-                    state["child"] = subprocess.Popen([
-                        "slirp4netns", "--netns-type=path", "--disable-host-loopback", "--disable-dns",
-                        "--enable-sandbox", "--enable-seccomp", "--cidr=" + CIDR, "--mtu=1500",
-                        f"--ready-fd={ready_w}", f"--exit-fd={exit_r}",
-                        "/run/netns/" + namespace, TAP,
-                    ], pass_fds=(ready_w, exit_r), stdout=log, stderr=subprocess.STDOUT)
+                    state["child"] = subprocess.Popen(
+                        slirp_command(namespace, ready_w, exit_r),
+                        pass_fds=(ready_w, exit_r), stdout=log, stderr=subprocess.STDOUT)
                 os.close(ready_w)
                 ready_w = None
                 os.close(exit_r)
