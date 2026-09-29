@@ -2301,6 +2301,32 @@ mod tests {
 
     #[test]
     fn acquire_response_and_late_fd_share_one_absolute_deadline_and_close_queued_fd() {
+        const ISOLATED_CHILD: &str = "VOLPAROSSA_QUEUED_WORKER_FD_TEST_CHILD";
+        if env::var_os(ISOLATED_CHILD).is_none() {
+            // Other parallel tests fork workers. CLOEXEC does not prevent their pre-exec
+            // children from temporarily owning this test's socket queue and queued SCM_RIGHTS
+            // descriptor. Create these descriptors only after exec in a single-test process,
+            // where dropping the channel really does release its last process-local owner.
+            let output = Command::new("/proc/self/exe")
+                .args([
+                    "--exact",
+                    "worker_transport::tests::acquire_response_and_late_fd_share_one_absolute_deadline_and_close_queued_fd",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(ISOLATED_CHILD, "1")
+                .stdin(Stdio::null())
+                .output()
+                .expect("spawn isolated queued-worker-FD test");
+            assert!(
+                output.status.success(),
+                "isolated queued-worker-FD test failed\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
         let expected = current_expected_credentials();
         let request = acquire_request(InternalTransportSocketKind::QuicUdpUnconnected);
         let response = response(&request, InternalWorkerResult::Ok);

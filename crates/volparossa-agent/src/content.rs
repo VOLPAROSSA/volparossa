@@ -18,6 +18,7 @@ mod named;
 mod named_admission_tests;
 mod object_policy;
 mod parallel;
+mod private_storage;
 mod recent;
 mod replication;
 mod replication_budget;

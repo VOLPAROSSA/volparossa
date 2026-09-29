@@ -234,15 +234,18 @@ copy and counted overhead. A 1 GB archive with two full copies therefore require
 holding someone else's live data is released only after an acknowledged handoff to verified,
 independent replacements. Without those replacements, it remains visibly **pending drain**.
 
-The core now has durable, resumable storage with provider-granted, owner-authenticated
-operations and a stream library for attachment to existing protected connections. Uploads
-reserve their full capacity, resume after restart and verify the original ciphertext before
-commit. Restores do not consume the backup; deletion retries cannot bring it back.
-A real 1 GiB local trial passes restart/resume and two complete hash-verified restores.
+The core has durable, resumable storage with provider-issued grants and owner-signed operations.
+A real **1 GiB local trial** passes restart/resume and two complete hash-verified restores.
+The next candidate adds `storage peer serve/grant/deposit/progress/restore/renew/delete`
+through the agent's protected-route interface: a private owner journal retains the exact
+archive and lease across retries; restores are verified, non-consuming and never overwrite
+an existing output. These commands accept **already encrypted** archives; they do not encrypt
+plaintext or turn private backups into public-cache or training material.
 
-Actual peer attachment, application IPC, adaptive contribution accounting, redundancy repair
-and native Signal backup restore remain open. The current local and framed-stream proofs
-are steps toward decentralized cloud backup, not a completed cloud service.
+The peer wiring still needs a real multi-node overlay proof. Least-authority application
+enrollment, adaptive contribution accounting and safe drain, redundancy repair and native
+Signal backup restore remain open. The local and framed-stream results are steps toward
+decentralized cloud backup, not a completed cloud service.
 
 [Private storage scope and commands →](docs/PRIVATE_STORAGE.md)
 

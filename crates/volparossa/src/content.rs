@@ -30,6 +30,7 @@ pub(crate) mod policy_bundle;
 pub(crate) mod policy_decision;
 pub(crate) mod policy_exchange;
 mod private_message;
+pub(crate) use private_message::Unlock as IdentityUnlock;
 pub(crate) mod public_text;
 mod retain;
 mod site;

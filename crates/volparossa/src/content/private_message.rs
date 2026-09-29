@@ -32,7 +32,7 @@ impl Unlock {
         }
     }
 
-    pub(super) fn signer(&self) -> Result<ed25519_dalek::SigningKey> {
+    pub(crate) fn signer(&self) -> Result<ed25519_dalek::SigningKey> {
         unlock_signer(self.identity.as_deref(), self.passphrase_file.as_deref())
     }
 }
