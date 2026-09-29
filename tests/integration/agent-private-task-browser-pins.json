@@ -1,9 +1,9 @@
 {
   "version": 1,
   "repository": "https://github.com/VOLPAROSSA/volparossa-browser",
-  "revision": "d37b74eceb527465499bcd366c9a4930b63218b2",
+  "revision": "68bec6de8d39321f810419ad254dd2e7e2ad66a1",
   "files": {
-    "scripts/smoke_compute_model.py": {"bytes": 20762, "sha256": "409439a7ef4d7c6a7657cd545599062f7a77ca2bd328ba34bf056620fb4cf084"},
+    "scripts/smoke_compute_model.py": {"bytes": 26389, "sha256": "d279b201e12e1097f77b80977473b6246fa06c0e66ed38bfaaf4565536f6448e"},
     "scripts/smoke_privacy.py": {"bytes": 15728, "sha256": "917d66faaeb6f80890c557ae3904bfee96b5fabc94e428776d83d1dc08fba283"},
     "scripts/stage_firefox.py": {"bytes": 6888, "sha256": "7e14fe685ef0dcd3ffa0c412c0cea1088f1e779776d8be0841a1ab046c071a02"},
     "integration/VolparossaCompute.sys.mjs": {"bytes": 10594, "sha256": "60c34936c0c0a3537e797dcd1c73be4f767c277aaad2c998fc39cbb5e958527b"},

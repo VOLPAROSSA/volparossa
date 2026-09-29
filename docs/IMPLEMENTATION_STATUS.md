@@ -1145,7 +1145,7 @@ See [service usage](DECENTRALIZED_AGENTS.md#application-local-private-compute-ip
 [local wire contract](../crates/volparossa/src/compute/private_serve/WIRE.md).
 
 Combined browser proof candidate (2026-09-29): the explicit `agent-private-browser` VM scenario
-pins browser integration source `d37b74eceb527465499bcd366c9a4930b63218b2` and Debian ESR
+pins browser integration source `68bec6de8d39321f810419ad254dd2e7e2ad66a1` and Debian ESR
 140.16.0, then submits the final private question through the actual Gecko sidebar and this
 same private service/model. It retains real Cancel/Disconnect checks and uses a separate
 decoded-result-before-panel-render cleanup boundary; the original v2 first-frame-byte proof
@@ -1165,6 +1165,24 @@ link, retaining strict handling of other runtime dependencies. The same extracti
 stages successfully with all four pinned runtime hashes unchanged; two new staging tests
 pass. This independently reproduced defect is consistent with the failed stage, not a
 recovery of its suppressed stderr. The first run stays failed; combined execution remains pending.
+
+The [next run on `3c4ec9ff`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36596525068)
+passes pinned runtime/model provision and the actual private-service Cancel/Disconnect
+checks, but **fails** at `private-browser-admission` before the browser admission marker.
+Its generic `CHECK_FAILED` does not distinguish sidebar startup, socket connection or another
+browser-side failure; suppressed browser logs are not reconstructed from that code. The 11
+original files are retained, ZIP SHA-256
+`a836f1128f10fc234b491f1fbd0170acca97ba155c8e0c2b863fda7e6763c378`.
+Browser cleanup completes without fallback signals; final core cleanup uses fallback signals,
+so this is not an ordinary-cleanup pass. Final host-state bytes are unchanged. No combined
+model answer, panel-render or completed browser integration is proved by this failed run.
+The follow-up retains fixed browser phase/error codes and process/deadline state inside the
+existing bounded report, never raw prompts, answers or logs. Local probes of the exact ESR
+sidebar, actual panel and module reach admission through an isolated read-only Unix-socket
+bind; their deliberately failing synthetic protocol peer is not a real-model proof. The
+new diagnostics preserve all existing acceptance gates and time limits. Five focused model-
+smoke checks, core report/diagnostic checks and the static KVM contract pass; the original
+VM failure still needs a source-exact diagnostic run, not an inferred cause.
 
 Current dependency-ready candidate: a single incremental provider queue now owns source and
 derived graph work. Each durable package completion triggers a dependency scan; newly ready

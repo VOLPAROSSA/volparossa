@@ -13,6 +13,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 
@@ -32,6 +33,22 @@ SCOPE = ("v1 combined pinned ESR sidebar -> actual private-serve -> pinned 360M 
 PANEL_SCOPE = dict(firefox157_build_proven=False, native_provider_selector_proven=False,
     standalone_model_authenticity_proven=False, general_answer_quality_proven=False,
     public_peer_execution_proven=False, private_prompt_exported=False, raw_model_answer_exported=False)
+STATUS_PHASES = frozenset((
+    "wrapper-launch", "namespace-validation", "browser-start", "marionette-connect",
+    "marionette-session", "script-start", "module-import", "sidebar-initialize",
+    "sidebar-show", "sidebar-document", "panel-create", "broker-connect",
+    "capabilities-received", "submit-admitted", "result-received", "result-cleanup-verified",
+    "panel-render-check", "panel-cleanup", "script-complete", "result-validation",
+    "browser-stop", "private-log-check", "report-write", "complete",
+))
+STATUS_ERRORS = frozenset((
+    "CHECK_FAILED", "OS_ERROR", "SUBPROCESS_FAILED", "RUNTIME_FAILED", "INTERRUPTED",
+    "SCRIPT_FAILED", "UNCLASSIFIED", "BROKER_BUSY", "BROKER_INVALID_REQUEST",
+    "BROKER_HANDSHAKE_REQUIRED", "BROKER_NO_SUCH_TASK", "BROKER_CANCELLED",
+    "BROKER_EXECUTION_FAILED", "BROKER_CLEANUP_UNCONFIRMED", "MODULE_UNAVAILABLE",
+    "MODULE_NOT_CONFIGURED", "MODULE_INVALID_RESPONSE", "MODULE_INVALID_QUESTION",
+    "MODULE_INVALID_CONTEXT", "MODULE_CLEANUP_UNCONFIRMED",
+))
 
 
 def require(condition, message="private browser proof binding failed"):
@@ -42,6 +59,36 @@ def require(condition, message="private browser proof binding failed"):
 def digest(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def check_browser_status(value):
+    require(type(value) is dict and set(value) == {"version", "phase", "failure"}
+            and type(value["version"]) is int and value["version"] == 1
+            and value["phase"] in STATUS_PHASES
+            and (value["failure"] is None or value["failure"] in STATUS_ERRORS))
+    return value
+
+
+def browser_diagnostic(report_root, process, deadline):
+    code = process.poll() if process is not None else None
+    result = dict(process_state="not_started" if process is None else "running" if code is None else "exited",
+        exit_code=code, deadline_elapsed=time.monotonic() >= deadline, status_state="absent")
+    path = report_root / "browser-status.json"
+    try:
+        info = path.lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size <= 4096)
+        with path.open("rb") as source:
+            data = source.read(4097)
+        require(len(data) <= 4096)
+        result["status"] = check_browser_status(json.loads(data))
+        result["status_state"] = "valid"
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, KeyError, TypeError):
+        # Never export malformed status fields, raw logs, exception messages or paths.
+        result["status_state"] = "invalid"
+    return result
 
 
 def load_pins():
@@ -185,6 +232,15 @@ class BrowserFixture:
                 require(len(self.members) <= 64)
 
     def infer(self, output, revision, socket_path, work_parent, service, canary, observed, result):
+        self.deadline = time.monotonic() + 55
+        try:
+            self._infer(output, revision, socket_path, work_parent, service, canary, observed, result)
+        finally:
+            # Captured in the existing main report before cleanup removes the private root.
+            # This diagnoses browser exit/timeout/module/broker errors; it is not success proof.
+            result["browser_diagnostics"] = browser_diagnostic(ROOT / "build/model-proof", self.process, self.deadline)
+
+    def _infer(self, output, revision, socket_path, work_parent, service, canary, observed, result):
         report_root = ROOT / "build/model-proof"
         result["phase"] = "private-browser-admission"
         with (ROOT / "runner.log").open("xb") as diagnostics:
@@ -195,6 +251,7 @@ class BrowserFixture:
                 "--service-pid", str(service.pid), "--core-revision", revision, "--canary", canary],
                 stdout=diagnostics, stderr=subprocess.STDOUT)
             deadline = time.monotonic() + 55
+            self.deadline = deadline
             marker = report_root / "admitted.json"
             while not marker.is_file():
                 self.track()
@@ -204,6 +261,7 @@ class BrowserFixture:
             result["isolation"], result["snapshot"] = observed(output, "inference")
             result["phase"] = "private-browser-inference-and-render"
             deadline = time.monotonic() + 650
+            self.deadline = deadline
             while self.process.poll() is None:
                 self.track()
                 require(time.monotonic() < deadline)
@@ -298,7 +356,34 @@ def self_test():
             pass
         else:
             raise ValueError("unbound/private browser evidence accepted")
-    print("private-browser exact source/runtime, result boundary and 14 report rejection controls PASS; no browser/model executed")
+    with tempfile.TemporaryDirectory(prefix="private-browser-status-") as temporary:
+        root = Path(temporary)
+        class Process:
+            def __init__(self, code):
+                self.code = code
+            def poll(self):
+                return self.code
+        result = browser_diagnostic(root, Process(None), time.monotonic() + 60)
+        require(result == dict(process_state="running", exit_code=None, deadline_elapsed=False, status_state="absent"))
+        status_path = root / "browser-status.json"
+        status_path.write_text(json.dumps(dict(version=1, phase="broker-connect", failure="MODULE_UNAVAILABLE")))
+        status_path.chmod(0o600)
+        result = browser_diagnostic(root, Process(1), time.monotonic() + 60)
+        require(result == dict(process_state="exited", exit_code=1, deadline_elapsed=False,
+            status_state="valid", status=dict(version=1, phase="broker-connect", failure="MODULE_UNAVAILABLE")))
+        require(browser_diagnostic(root, Process(None), time.monotonic() - 1)["deadline_elapsed"] is True)
+        for bad in (
+            dict(version=1, phase="broker-connect", failure="PRIVATE-not-for-export"),
+            dict(version=1, phase="private input", failure=None),
+            dict(version=1, phase="broker-connect", failure=None, answer="private answer"),
+            dict(version=True, phase="broker-connect", failure=None),
+        ):
+            status_path.write_text(json.dumps(bad))
+            result = browser_diagnostic(root, Process(1), time.monotonic() + 60)
+            require(result["status_state"] == "invalid" and "status" not in result)
+        status_path.write_bytes(b"x" * 4097)
+        require(browser_diagnostic(root, None, time.monotonic() + 60)["status_state"] == "invalid")
+    print("private-browser exact source/runtime, result boundary, 14 rejection controls and fixed private-free diagnostics PASS; no browser/model executed")
 
 
 if __name__ == "__main__":
