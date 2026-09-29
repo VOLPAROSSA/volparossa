@@ -29,6 +29,12 @@ pub enum DnsResolverError {
     /// No permitted answer was available within the fixed time/resource bounds.
     #[error("DNS resolution unavailable")]
     Unavailable,
+    /// The explicitly trusted local fallback returned NXDOMAIN, not a shareable proof.
+    #[error("DNS name does not exist")]
+    NameNotFound,
+    /// The explicitly trusted local fallback returned no address for this family.
+    #[error("DNS address data absent")]
+    NoData,
 }
 
 /// One normalized positive address question; debug output deliberately omits its name.
@@ -248,6 +254,11 @@ pub enum DnsAnswerSource {
     UpstreamValidated,
     /// Existing trusted OS resolver semantics, without a shared DNSSEC-proof claim.
     TrustedFallback,
+    /// Explicit local Unbound response; not independently validated peer evidence.
+    TrustedUnbound {
+        /// AD asserted by that configured trusted validator, never by a cache peer.
+        authenticated_data: bool,
+    },
 }
 
 /// Usable addresses with a monotone remaining TTL and explicit proof/fallback provenance.

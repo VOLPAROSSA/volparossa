@@ -3259,6 +3259,14 @@ that two-line ordering is corrected without changing behavior. No full Quality p
 
 ## Latest DNS integration checkpoint
 
+- [ ] Protected deployed Unbound fallback and adaptive fastest-source selection: an explicit
+  Exit-side backend/configuration is implemented, with targeted parser and isolated TCP test
+  coverage added. It retains real fallback TTLs/CNAME bounds and never calls the OS resolver
+  after selecting Unbound. Unbound AD is trusted-local provenance, not independent peer proof.
+  A genuine Unbound execution and simultaneous Client+Exit service-isolation/privacy proof are
+  still required; no package installation, host DNS change or new packaged default is claimed.
+  See [Unbound fallback scope and readiness](UNBOUND_FALLBACK.md).
+
 The positive DNSSEC cache is now composed into the normal agent: the same bounded RAM resolver
 serves protected DNS, TCP resolution, general UDP and browser-QUIC destination pinning. Its peer
 backend uses signed, bounded cache-only RPC and a generic provider capability, not DNS names in

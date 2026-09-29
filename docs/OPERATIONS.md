@@ -293,6 +293,13 @@ in the agent's network namespace; VOLPAROSSA does not install or reconfigure it.
 after an explicit configuration change. A null endpoint retains peer-proof reuse and the existing
 OS-resolution fallback; `enabled: false` retains the old resolver path without cache exchange.
 
+An explicit [Exit-side Unbound fallback](UNBOUND_FALLBACK.md) can instead be selected with
+`fallback: { mode: unbound, endpoint: '127.0.0.1:5335' }` and `upstream: null`. In that mode
+resolver errors never fall through to OS resolution. The endpoint must already be provisioned
+and protected: loopback alone is not sufficient isolation, and a normal Unbound service account
+does not automatically work with simultaneous Client+Exit ingress. This backend does not install
+Unbound or change the packaged default; see the linked readiness limits before opting in.
+
 Peer signatures authenticate the transport peer, not the DNS answer. Every usable peer proof must
 validate against the built-in DNSSEC root anchors. Unsigned, missing or unsupported evidence falls
 back to existing resolution and is not shared as validated data. Cache peers never perform an

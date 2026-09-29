@@ -4,6 +4,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ConfigError, validation};
 
+/// Explicit Exit-side fallback; configuring it never installs or starts a resolver.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DnsFallbackConfig {
+    /// Preserve the existing OS resolver behavior for existing configurations.
+    #[default]
+    System,
+    /// Use only an operator-provisioned trusted Exit-side Unbound service on a high loopback port.
+    Unbound {
+        /// This endpoint needs deployment isolation; loopback alone is not access control.
+        endpoint: SocketAddr,
+    },
+}
+
 /// Positive DNSSEC sharing uses RAM only and never changes the host's DNS configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -14,6 +28,8 @@ pub struct DnsCacheConfig {
     /// Explicit trusted recursive DNS endpoint for collecting authenticated proof material.
     /// None selects no new upstream; ordinary system resolution remains the fallback.
     pub upstream: Option<SocketAddr>,
+    /// Explicit fallback selection; Unbound failure never falls through to the OS resolver.
+    pub fallback: DnsFallbackConfig,
 }
 
 impl Default for DnsCacheConfig {
@@ -21,12 +37,27 @@ impl Default for DnsCacheConfig {
         Self {
             enabled: true,
             upstream: None,
+            fallback: DnsFallbackConfig::System,
         }
     }
 }
 
 impl DnsCacheConfig {
     pub(crate) fn validate(self) -> Result<(), ConfigError> {
+        if let DnsFallbackConfig::Unbound { endpoint } = self.fallback {
+            if !self.enabled || self.upstream.is_some() {
+                return Err(validation(
+                    "dns_cache.fallback",
+                    "Unbound requires enabled cache and no separate upstream",
+                ));
+            }
+            if !endpoint.ip().is_loopback() || endpoint.port() <= 1024 {
+                return Err(validation(
+                    "dns_cache.fallback.endpoint",
+                    "requires an explicit loopback endpoint above port 1024",
+                ));
+            }
+        }
         if let Some(upstream) = self.upstream {
             if !self.enabled {
                 return Err(validation(
@@ -70,6 +101,7 @@ mod tests {
             let value = DnsCacheConfig {
                 enabled: true,
                 upstream: Some(value.parse().unwrap()),
+                fallback: DnsFallbackConfig::System,
             };
             assert!(value.validate().is_err());
         }
@@ -82,5 +114,53 @@ mod tests {
             .is_err()
         );
         assert!(serde_yaml::from_str::<DnsCacheConfig>("trust_peer_keys: true").is_err());
+    }
+
+    #[test]
+    fn unbound_is_explicit_loopback_only_and_never_a_second_hidden_upstream() {
+        let configured: DnsCacheConfig =
+            serde_yaml::from_str("fallback: { mode: unbound, endpoint: '127.0.0.1:5335' }")
+                .unwrap();
+        assert!(configured.validate().is_ok());
+        assert_eq!(
+            DnsCacheConfig::default().fallback,
+            DnsFallbackConfig::System
+        );
+        for endpoint in [
+            "127.0.0.1:53",
+            "127.0.0.1:0",
+            "0.0.0.0:5335",
+            "1.1.1.1:5335",
+        ] {
+            let value = DnsCacheConfig {
+                fallback: DnsFallbackConfig::Unbound {
+                    endpoint: endpoint.parse().unwrap(),
+                },
+                ..configured
+            };
+            assert!(value.validate().is_err());
+        }
+        assert!(
+            DnsCacheConfig {
+                enabled: false,
+                ..configured
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            DnsCacheConfig {
+                upstream: Some("127.0.0.53:53".parse().unwrap()),
+                ..configured
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            serde_yaml::from_str::<DnsCacheConfig>(
+                "fallback: { mode: unbound, endpoint: '127.0.0.1:5335', allow_os_fallback: true }",
+            )
+            .is_err()
+        );
     }
 }

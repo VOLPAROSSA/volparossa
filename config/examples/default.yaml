@@ -99,6 +99,8 @@ udp:
 dns_cache:
   enabled: true
   upstream: null
+  fallback:
+    mode: system
 
 # Explicit public-content storage/serving consent. An enabled relay with a policy-authorized
 # hostname may start empty and automatically retain verified native/cooperative-HTTPS downloads.

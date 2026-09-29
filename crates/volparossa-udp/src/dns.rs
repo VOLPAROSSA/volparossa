@@ -13,7 +13,7 @@ use hickory_proto::{
 };
 
 pub mod resolver;
-use resolver::{DnsQuestion, DnsResolutionScope, ExitResolver};
+use resolver::{DnsQuestion, DnsResolutionScope, DnsResolverError, ExitResolver};
 
 /// Largest DNS request or response accepted by the protected DNS vertical.
 pub const MAX_DNS_MESSAGE_BYTES: usize = 4_096;
@@ -168,24 +168,32 @@ impl ExitDnsBridge {
             }
             let question = DnsQuestion::new(query.name(), query.query_type())
                 .map_err(|_| UdpError::ResolutionFailed)?;
-            let answer = resolver
-                .resolve(&question, &resolution_scope)
-                .await
-                .map_err(|_| UdpError::ResolutionFailed)?;
+            let answer = resolver.resolve(&question, &resolution_scope).await;
             let now_ms = unix_millis()?;
             if now_ms >= expires_at_ms {
                 return Err(UdpError::Expired);
             }
-            let remaining_seconds = expires_at_ms.saturating_sub(now_ms) / 1_000;
-            let ttl = u32::try_from(remaining_seconds)
-                .unwrap_or(u32::MAX)
-                .min(MAX_DNS_BINDING_TTL_SECONDS)
-                .min(answer.ttl_seconds());
-            // Never round an expired proof or sub-second route lifetime up to a fresh second.
-            if ttl == 0 {
-                return Err(UdpError::Expired);
-            }
-            let response = build_response(&request, &expected_name, answer.addresses(), ttl)?;
+            let response = match answer {
+                Ok(answer) => {
+                    let remaining_seconds = expires_at_ms.saturating_sub(now_ms) / 1_000;
+                    let ttl = u32::try_from(remaining_seconds)
+                        .unwrap_or(u32::MAX)
+                        .min(MAX_DNS_BINDING_TTL_SECONDS)
+                        .min(answer.ttl_seconds());
+                    // Never round an expired proof or sub-second route lifetime up to a fresh second.
+                    if ttl == 0 {
+                        return Err(UdpError::Expired);
+                    }
+                    build_response(&request, &expected_name, answer.addresses(), ttl)?
+                }
+                Err(DnsResolverError::NameNotFound) => {
+                    build_negative_response(&request, &expected_name, ResponseCode::NXDomain)?
+                }
+                Err(DnsResolverError::NoData) => {
+                    build_negative_response(&request, &expected_name, ResponseCode::NoError)?
+                }
+                Err(_) => return Err(UdpError::ResolutionFailed),
+            };
             if response.len() > limits.maximum_payload_bytes() {
                 return Err(UdpError::ResourceLimit);
             }
@@ -204,6 +212,33 @@ impl ExitDnsBridge {
         association.close();
         result
     }
+}
+
+// A trusted fallback denial is not a portable DNSSEC proof. No SOA/AD/cache lifetime is
+// invented; retain the exact policy-bound question and transaction ID in this one reply.
+fn build_negative_response(
+    request: &[u8],
+    expected_name: &str,
+    code: ResponseCode,
+) -> Result<Vec<u8>, UdpError> {
+    if !matches!(code, ResponseCode::NXDomain | ResponseCode::NoError) {
+        return Err(UdpError::InvalidBinding("DNS negative response"));
+    }
+    let (message, query) = parse_query_message(request)?;
+    if query.name() != expected_name {
+        return Err(UdpError::InvalidBinding("signed DNS name"));
+    }
+    let mut response = Message::new();
+    response
+        .set_id(message.id())
+        .set_message_type(MessageType::Response)
+        .set_recursion_desired(message.recursion_desired())
+        .set_recursion_available(true)
+        .set_response_code(code)
+        .add_query(message.queries()[0].clone());
+    response
+        .to_vec()
+        .map_err(|_| UdpError::InvalidBinding("DNS response wire"))
 }
 
 fn build_response(
@@ -266,11 +301,11 @@ mod tests {
     };
 
     use hickory_proto::{
-        op::{Message, MessageType, Query},
+        op::{Message, MessageType, Query, ResponseCode},
         rr::{Name, RData, RecordType},
     };
 
-    use super::{DnsQueryType, build_response, parse_dns_query};
+    use super::{DnsQueryType, build_negative_response, build_response, parse_dns_query};
 
     #[test]
     fn bounded_dns_a_and_aaaa_roundtrip_preserves_question_and_short_binding() {
@@ -328,5 +363,28 @@ mod tests {
         let mut txt = Message::new();
         txt.add_query(Query::query(name, RecordType::TXT));
         assert!(parse_dns_query(&txt.to_vec().unwrap()).is_err());
+    }
+
+    #[test]
+    fn trusted_negative_replies_keep_question_without_invented_dnssec_or_cache_ttl() {
+        let mut request = Message::new();
+        request.set_id(17).add_query(Query::query(
+            Name::from_str("allowed.example.").unwrap(),
+            RecordType::A,
+        ));
+        let raw = request.to_vec().unwrap();
+        for code in [ResponseCode::NXDomain, ResponseCode::NoError] {
+            let response =
+                Message::from_vec(&build_negative_response(&raw, "allowed.example", code).unwrap())
+                    .unwrap();
+            assert_eq!(response.id(), 17);
+            assert_eq!(response.queries(), request.queries());
+            assert_eq!(response.response_code(), code);
+            assert!(!response.authentic_data());
+            assert!(response.answers().is_empty() && response.name_servers().is_empty());
+        }
+        assert!(
+            build_negative_response(&raw, "different.example", ResponseCode::NXDomain).is_err()
+        );
     }
 }

@@ -46,7 +46,7 @@ use tokio::{
     sync::{RwLock, Semaphore, watch},
     task::{JoinHandle, JoinSet},
 };
-use volparossa_config::Config;
+use volparossa_config::{Config, DnsFallbackConfig};
 use volparossa_identity::IdentityStore;
 use volparossa_inspection::InspectionError;
 use volparossa_local_control::LogLevel;
@@ -159,10 +159,16 @@ impl Agent {
             },
         )?;
         if config.dns_cache.enabled {
-            discovery.configure_dns_cache(Arc::new(ExitResolver::new(
+            let mut resolver = ExitResolver::new(
                 config.dns_cache.upstream,
                 Some(discovery_control.dns_peer_backend()),
-            )));
+            );
+            if let DnsFallbackConfig::Unbound { endpoint } = config.dns_cache.fallback {
+                resolver = resolver
+                    .with_unbound_fallback(endpoint)
+                    .map_err(|_| AgentError::UnsafeConfig)?;
+            }
+            discovery.configure_dns_cache(Arc::new(resolver));
         }
         state.log(LogLevel::Info, "AGENT_INITIALIZED", unix_millis());
         if policy_failed {

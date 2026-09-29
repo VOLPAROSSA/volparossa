@@ -5,6 +5,7 @@
 
 mod proof;
 mod types;
+mod unbound;
 
 pub use types::{
     DnsAnswerSource, DnsPeerBackend, DnsPeerFuture, DnsProofBundle, DnsQuestion,
@@ -60,7 +61,7 @@ pub struct DnsResolutionCounts {
     pub peer_validated: u64,
     /// Completed resolutions from newly validated recursive evidence.
     pub upstream_validated: u64,
-    /// Completed existing-resolver fallbacks, never a DNSSEC validation claim.
+    /// Completed OS or explicit Unbound fallbacks, never an independent DNSSEC proof claim.
     pub trusted_fallback: u64,
 }
 
@@ -76,6 +77,7 @@ struct ResolutionCounters {
 #[derive(Clone)]
 pub struct ExitResolver {
     recursive: Option<SocketAddr>,
+    unbound_fallback: Option<SocketAddr>,
     peers: Option<Arc<dyn DnsPeerBackend>>,
     cache: Arc<Mutex<Cache>>,
     pending: Arc<Semaphore>,
@@ -94,11 +96,28 @@ impl ExitResolver {
     pub fn new(recursive: Option<SocketAddr>, peers: Option<Arc<dyn DnsPeerBackend>>) -> Self {
         Self {
             recursive,
+            unbound_fallback: None,
             peers,
             cache: Arc::default(),
             pending: Arc::new(Semaphore::new(32)),
             counts: Arc::default(),
         }
+    }
+
+    /// Replace OS fallback with one explicitly trusted local Unbound endpoint.
+    /// Independent positive-proof collection uses this same endpoint; only that existing
+    /// verification path may populate the shared cache. This does not install a daemon,
+    /// alter routing, prove service readiness, or make a loopback listener private.
+    ///
+    /// # Errors
+    /// Rejects non-loopback/privileged endpoints or a conflicting recursive endpoint.
+    pub fn with_unbound_fallback(mut self, endpoint: SocketAddr) -> Result<Self, DnsResolverError> {
+        if !endpoint.ip().is_loopback() || endpoint.port() <= 1024 || self.recursive.is_some() {
+            return Err(DnsResolverError::InvalidScope);
+        }
+        self.recursive = Some(endpoint);
+        self.unbound_fallback = Some(endpoint);
+        Ok(self)
     }
 
     /// Snapshot successful resolution sources without any browsing history or identifiers.
@@ -116,7 +135,9 @@ impl ExitResolver {
             DnsAnswerSource::LocalValidated => &self.counts.local,
             DnsAnswerSource::PeerValidated => &self.counts.peer,
             DnsAnswerSource::UpstreamValidated => &self.counts.upstream,
-            DnsAnswerSource::TrustedFallback => &self.counts.fallback,
+            DnsAnswerSource::TrustedFallback | DnsAnswerSource::TrustedUnbound { .. } => {
+                &self.counts.fallback
+            }
         };
         let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
             Some(count.saturating_add(1))
@@ -127,7 +148,8 @@ impl ExitResolver {
     /// Resolve one positive address family within one five-second deadline.
     ///
     /// Invalid, missing, unsigned, and unsupported peer proofs are ignored, then the
-    /// configured recursive collector or existing OS resolver is used independently.
+    /// configured recursive collector and selected trusted fallback are used independently.
+    /// Explicit Unbound mode never falls through to OS resolution, including negative/error replies.
     /// # Errors
     /// Returns a detail-free error if no permitted address is resolved within the bound.
     pub async fn resolve(
@@ -180,6 +202,12 @@ impl ExitResolver {
                     return Ok(self.record(answer));
                 }
             }
+        }
+        if let Some(endpoint) = self.unbound_fallback {
+            return timeout_at(deadline, unbound::resolve(question, endpoint))
+                .await
+                .map_err(|_| DnsResolverError::Unavailable)?
+                .map(|answer| self.record(answer));
         }
         let name = format!("{}.", question.name());
         let resolved = timeout_at(deadline, lookup_host((name.as_str(), 0)))
