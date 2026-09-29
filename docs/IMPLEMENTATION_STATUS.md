@@ -102,8 +102,28 @@ traffic or packet drops; scoped private cleanup, full topology cleanup and byte-
 host state pass. This proves neither archive encryption nor independent replicas, whole-agent
 restart, interrupted network upload, distributed contribution accounting or Signal integration.
 
+The next **owner-local replica-set candidate** adds
+`storage replicas create/deposit/status/progress/restore/renew/delete`, reusing the existing
+authenticated peer transfer path with two to eight explicitly pinned provider/grant pairs.
+Its bounded private manifest retains immutable per-provider journals, persists uncertainty
+before exchanges and resumes the same archive identities. Restore tries another retained
+copy when a provider fails and publishes only a fully length/hash-verified new file; reads
+never consume copies. Delete names exactly one provider and does not roll back other copies.
+Accounting separates logical length from reserved, committed and uncertain full-copy payload
+charges; expired or unconfirmed-deleted copies remain charged. It does not measure metadata
+overhead or prove reciprocity, independent failure domains, automatic repair or safe handoff.
+
+All **three targeted replica tests pass** (7.36 seconds), including two real SQLite providers
+over local Unix/framed streams with lost confirmations, durable reopen, resume, failover
+and surviving-copy retention. This candidate has not yet passed a two-provider
+protected-overlay acceptance run. [Operator usage and reconciliation](PRIVATE_STORAGE.md#replica-set-candidate-explicit-copies-and-restore-failover)
+describe the explicit workflow; placement, adaptive contribution and acknowledged drain remain
+separate unfinished work.
+
 - [x] Source-exact disposable multi-node proof of the protected single-provider storage path
   and seven CLI commands (`434ed112`, run `36589770066`).
+- [x] Explicit replica-set commands: focused local two-store resume, accounting and failover checks.
+- [ ] Protected two-provider replica-set restore-failover acceptance proof.
 - [ ] Least-authority application enrollment beyond the versioned administrative agent IPC.
 - [ ] Independent-node interrupted-upload resume, source-offline restore and measured custody.
 - [ ] Replica placement/repair and physical-usage contribution control, including safe

@@ -66,13 +66,26 @@ pub(super) async fn deposit(args: Deposit, socket: &Path) -> Result<serde_json::
             Journal::new(&grant, length, expected, expires)?,
         )?
     };
+    deposit_retained(socket, &grant, &signer, &mut retained, &mut input).await?;
+    Ok(report("deposit", &retained.journal))
+}
+
+/// Reuse one unlocked owner and the exact original journal; never allocate a new archive on retry.
+pub(super) async fn deposit_retained(
+    socket: &Path,
+    grant: &VerifiedStorageGrant,
+    signer: &SigningKey,
+    retained: &mut LockedJournal,
+    input: &mut File,
+) -> Result<()> {
+    let length = retained.journal.ciphertext_bytes;
     ensure!(
         retained.journal.last_state != Some(ReceiptState::Deleted as i32),
         "this archive was explicitly deleted; resume cannot resurrect it"
     );
-    let initial = observe_or_reserve(socket, &grant, &signer, &mut retained).await?;
+    let initial = observe_or_reserve(socket, grant, signer, retained).await?;
     if initial == ReceiptState::Committed {
-        return Ok(report("deposit", &retained.journal));
+        return Ok(());
     }
     let mut offset = retained.journal.last_stored_bytes;
     ensure!(
@@ -93,8 +106,8 @@ pub(super) async fn deposit(args: Deposit, socket: &Path) -> Result<serde_json::
         };
         let reply = remote(
             socket,
-            &grant,
-            &signer,
+            grant,
+            signer,
             retained.journal.target()?,
             operation,
             &chunk[..count],
@@ -111,8 +124,8 @@ pub(super) async fn deposit(args: Deposit, socket: &Path) -> Result<serde_json::
     }
     let reply = remote(
         socket,
-        &grant,
-        &signer,
+        grant,
+        signer,
         retained.journal.target()?,
         StorageOperation::Finalize,
         &[],
@@ -124,7 +137,7 @@ pub(super) async fn deposit(args: Deposit, socket: &Path) -> Result<serde_json::
     );
     retained.journal.apply(reply.receipt.result())?;
     retained.save()?;
-    Ok(report("deposit", &retained.journal))
+    Ok(())
 }
 
 pub(super) async fn existing(
@@ -140,7 +153,6 @@ pub(super) async fn existing(
         .grant(&args.provider_key, &signer.verifying_key())?;
     // Only explicit deposit --resume may repeat Reserve to reconcile a lost first reply.
     // Progress, renewal and deletion must not allocate an unseen initial reservation.
-    let target = known_target(&retained.journal)?;
     let (name, operation) = if delete {
         ("delete", StorageOperation::Delete)
     } else if let Some(lifetime) = renewal {
@@ -153,10 +165,21 @@ pub(super) async fn existing(
     } else {
         ("progress", StorageOperation::Progress)
     };
-    let reply = remote(socket, &grant, &signer, target, operation, &[]).await?;
-    retained.journal.apply(reply.receipt.result())?;
-    retained.save()?;
+    operate_retained(socket, &grant, &signer, &mut retained, operation).await?;
     Ok(report(name, &retained.journal))
+}
+
+pub(super) async fn operate_retained(
+    socket: &Path,
+    grant: &VerifiedStorageGrant,
+    signer: &SigningKey,
+    retained: &mut LockedJournal,
+    operation: StorageOperation,
+) -> Result<()> {
+    let target = known_target(&retained.journal)?;
+    let reply = remote(socket, grant, signer, target, operation, &[]).await?;
+    retained.journal.apply(reply.receipt.result())?;
+    retained.save()
 }
 
 pub(super) fn known_target(journal: &Journal) -> Result<StorageTarget> {
@@ -175,11 +198,23 @@ pub(super) async fn restore(args: Restore, socket: &Path) -> Result<serde_json::
     let grant = retained
         .journal
         .grant(&args.existing.provider_key, &signer.verifying_key())?;
+    restore_retained(socket, &grant, &signer, &mut retained, &args.output).await?;
+    Ok(report("restore", &retained.journal))
+}
+
+pub(super) async fn restore_retained(
+    socket: &Path,
+    grant: &VerifiedStorageGrant,
+    signer: &SigningKey,
+    retained: &mut LockedJournal,
+    destination: &Path,
+) -> Result<()> {
+    state::new_output(destination)?;
     let target = known_target(&retained.journal)?;
     let reply = remote(
         socket,
-        &grant,
-        &signer,
+        grant,
+        signer,
         target,
         StorageOperation::Progress,
         &[],
@@ -191,8 +226,7 @@ pub(super) async fn restore(args: Restore, socket: &Path) -> Result<serde_json::
     );
     retained.journal.apply(reply.receipt.result())?;
     retained.save()?;
-    let parent = args
-        .output
+    let parent = destination
         .parent()
         .context("missing restore output parent")?;
     let mut output = tempfile::NamedTempFile::new_in(parent)?;
@@ -205,8 +239,8 @@ pub(super) async fn restore(args: Restore, socket: &Path) -> Result<serde_json::
         let length = (retained.journal.ciphertext_bytes - offset).min(MAX_RANGE_BYTES);
         let reply = remote(
             socket,
-            &grant,
-            &signer,
+            grant,
+            signer,
             retained.journal.target()?,
             StorageOperation::ReadRange { offset, length },
             &[],
@@ -227,11 +261,11 @@ pub(super) async fn restore(args: Restore, socket: &Path) -> Result<serde_json::
     );
     output.as_file().sync_all()?;
     output
-        .persist_noclobber(&args.output)
+        .persist_noclobber(destination)
         .map_err(|error| error.error)
         .context("cannot expose verified restore without overwriting an existing file")?;
     File::open(parent)?.sync_all()?;
-    Ok(report("restore", &retained.journal))
+    Ok(())
 }
 
 async fn observe_or_reserve(
@@ -261,7 +295,7 @@ async fn observe_or_reserve(
     Ok(reply.receipt.result().state)
 }
 
-fn requested_expiry(grant: &VerifiedStorageGrant, lifetime: u64) -> Result<u64> {
+pub(super) fn requested_expiry(grant: &VerifiedStorageGrant, lifetime: u64) -> Result<u64> {
     ensure!(
         lifetime <= grant.limits().max_retention_seconds,
         "requested lease exceeds provider retention permission"
@@ -274,7 +308,7 @@ fn requested_expiry(grant: &VerifiedStorageGrant, lifetime: u64) -> Result<u64> 
     Ok(expires)
 }
 
-fn checked_input(path: &Path, expected: [u8; 32]) -> Result<(File, u64)> {
+pub(super) fn checked_input(path: &Path, expected: [u8; 32]) -> Result<(File, u64)> {
     super::super::require_absolute(path)?;
     let mut file = OpenOptions::new()
         .read(true)
