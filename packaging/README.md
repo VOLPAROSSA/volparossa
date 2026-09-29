@@ -11,6 +11,15 @@ refuses to overwrite an existing candidate.
 SOURCE_DATE_EPOCH=1767225600 ./packaging/build-deb.sh --build
 ```
 
+Private Unbound is an optional, separate `volparossa-private-dns-worker` companion,
+not a new dependency of this existing core build. In a provisioned Debian 13 amd64
+environment with `libunbound-dev >= 1.26.1`, pkg-config and `dns-root-data`, run
+`sh packaging/build-private-dns-worker-deb.sh --preview` or explicit `--build`.
+It installs no packages/services itself and creates a companion archive containing
+only the fixed inherited-pipe worker and notices. Explicit private DNS configuration
+fails startup if the companion or root-anchor files are absent/unsafe. The default
+remains `system`; see [private Unbound readiness](../docs/UNBOUND_FALLBACK.md).
+
 If `SOURCE_DATE_EPOCH` is absent, the script uses the latest Git commit timestamp and falls back to
 zero in an uncommitted source tree. A release should build the same committed source twice in clean
 Debian 13 environments and compare SHA-256 digests. Locked Cargo sources and the audited native

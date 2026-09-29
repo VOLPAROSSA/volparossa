@@ -35,6 +35,12 @@ pub enum DnsResolverError {
     /// The explicitly trusted local fallback returned no address for this family.
     #[error("DNS address data absent")]
     NoData,
+    /// The private Unbound validator rejected DNSSEC authentication.
+    #[error("DNS authentication rejected")]
+    Bogus,
+    /// The owned private resolver child could not be confirmed reaped in time.
+    #[error("DNS worker cleanup unconfirmed")]
+    CleanupUnconfirmed,
 }
 
 /// One normalized positive address question; debug output deliberately omits its name.
@@ -243,7 +249,7 @@ impl DnsProofBundle {
     }
 }
 
-/// How a usable answer was obtained; fallback is never labelled DNSSEC-validated.
+/// How a usable answer was obtained; local validator verdicts are not portable peer proofs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DnsAnswerSource {
     /// Locally retained independently validated evidence.
@@ -258,6 +264,11 @@ pub enum DnsAnswerSource {
     TrustedUnbound {
         /// AD asserted by that configured trusted validator, never by a cache peer.
         authenticated_data: bool,
+    },
+    /// Direct result from the owned private libunbound worker, not a portable peer proof.
+    PrivateUnbound {
+        /// The local library's secure verdict; never inferred merely from a wire AD bit.
+        dnssec_secure: bool,
     },
 }
 

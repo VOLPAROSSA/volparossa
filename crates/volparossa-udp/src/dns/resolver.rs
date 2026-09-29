@@ -3,6 +3,7 @@
 //! Peer messages are evidence, never policy or trust-anchor authority. Cache state is
 //! RAM-only. DNSSEC proves signature validity, not a remote observer's first-seen time.
 
+mod private_unbound;
 mod proof;
 mod types;
 mod unbound;
@@ -78,6 +79,7 @@ struct ResolutionCounters {
 pub struct ExitResolver {
     recursive: Option<SocketAddr>,
     unbound_fallback: Option<SocketAddr>,
+    private_unbound: Option<private_unbound::PrivateUnbound>,
     peers: Option<Arc<dyn DnsPeerBackend>>,
     cache: Arc<Mutex<Cache>>,
     pending: Arc<Semaphore>,
@@ -97,6 +99,7 @@ impl ExitResolver {
         Self {
             recursive,
             unbound_fallback: None,
+            private_unbound: None,
             peers,
             cache: Arc::default(),
             pending: Arc::new(Semaphore::new(32)),
@@ -112,12 +115,40 @@ impl ExitResolver {
     /// # Errors
     /// Rejects non-loopback/privileged endpoints or a conflicting recursive endpoint.
     pub fn with_unbound_fallback(mut self, endpoint: SocketAddr) -> Result<Self, DnsResolverError> {
-        if !endpoint.ip().is_loopback() || endpoint.port() <= 1024 || self.recursive.is_some() {
+        if !endpoint.ip().is_loopback()
+            || endpoint.port() <= 1024
+            || self.recursive.is_some()
+            || self.private_unbound.is_some()
+        {
             return Err(DnsResolverError::InvalidScope);
         }
         self.recursive = Some(endpoint);
         self.unbound_fallback = Some(endpoint);
         Ok(self)
+    }
+
+    /// Use the fixed packaged libunbound worker through inherited pipes only.
+    /// No worker is started until an authorized Exit caller needs fallback;
+    /// explicit configuration never changes host DNS or enables participation.
+    /// Missing binaries/anchors, validation failure and cleanup failure stay closed.
+    ///
+    /// # Errors
+    /// Rejects a second configured upstream or fallback backend.
+    pub fn with_private_unbound_fallback(mut self) -> Result<Self, DnsResolverError> {
+        if self.recursive.is_some()
+            || self.unbound_fallback.is_some()
+            || self.private_unbound.is_some()
+        {
+            return Err(DnsResolverError::InvalidScope);
+        }
+        self.private_unbound = Some(private_unbound::PrivateUnbound::new());
+        Ok(self)
+    }
+
+    /// Check fixed root-owned companion/anchor files without starting a process or query.
+    /// This is installation readiness, not proof of library loading or recursive connectivity.
+    pub fn private_unbound_assets_installed() -> bool {
+        private_unbound::assets_installed()
     }
 
     /// Snapshot successful resolution sources without any browsing history or identifiers.
@@ -135,9 +166,9 @@ impl ExitResolver {
             DnsAnswerSource::LocalValidated => &self.counts.local,
             DnsAnswerSource::PeerValidated => &self.counts.peer,
             DnsAnswerSource::UpstreamValidated => &self.counts.upstream,
-            DnsAnswerSource::TrustedFallback | DnsAnswerSource::TrustedUnbound { .. } => {
-                &self.counts.fallback
-            }
+            DnsAnswerSource::TrustedFallback
+            | DnsAnswerSource::TrustedUnbound { .. }
+            | DnsAnswerSource::PrivateUnbound { .. } => &self.counts.fallback,
         };
         let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
             Some(count.saturating_add(1))
@@ -207,6 +238,12 @@ impl ExitResolver {
             return timeout_at(deadline, unbound::resolve(question, endpoint))
                 .await
                 .map_err(|_| DnsResolverError::Unavailable)?
+                .map(|answer| self.record(answer));
+        }
+        if let Some(backend) = &self.private_unbound {
+            return backend
+                .resolve(question, deadline)
+                .await
                 .map(|answer| self.record(answer));
         }
         let name = format!("{}.", question.name());

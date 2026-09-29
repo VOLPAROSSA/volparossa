@@ -163,11 +163,20 @@ impl Agent {
                 config.dns_cache.upstream,
                 Some(discovery_control.dns_peer_backend()),
             );
-            if let DnsFallbackConfig::Unbound { endpoint } = config.dns_cache.fallback {
-                resolver = resolver
+            resolver = match config.dns_cache.fallback {
+                DnsFallbackConfig::System => resolver,
+                DnsFallbackConfig::Unbound { endpoint } => resolver
                     .with_unbound_fallback(endpoint)
-                    .map_err(|_| AgentError::UnsafeConfig)?;
-            }
+                    .map_err(|_| AgentError::UnsafeConfig)?,
+                DnsFallbackConfig::UnboundPrivate {} => {
+                    if !ExitResolver::private_unbound_assets_installed() {
+                        return Err(AgentError::PrivateDnsWorkerUnavailable);
+                    }
+                    resolver
+                        .with_private_unbound_fallback()
+                        .map_err(|_| AgentError::UnsafeConfig)?
+                }
+            };
             discovery.configure_dns_cache(Arc::new(resolver));
         }
         state.log(LogLevel::Info, "AGENT_INITIALIZED", unix_millis());
@@ -1753,6 +1762,11 @@ pub enum AgentError {
     /// Configuration file type, mode, or size was unsafe.
     #[error("agent configuration file is unsafe")]
     UnsafeConfig,
+    /// Explicit private DNS needs the optional fixed worker and distribution trust anchors.
+    #[error(
+        "private DNS companion or root anchors unavailable; provision volparossa-private-dns-worker and dns-root-data"
+    )]
+    PrivateDnsWorkerUnavailable,
     /// State directory or role file was unsafe.
     #[error("agent role state is invalid")]
     Roles(#[from] roles::RoleStoreError),
@@ -1811,6 +1825,7 @@ impl AgentError {
             Self::Path(_) => "PATH_INVALID",
             Self::Io(_) => "LOCAL_IO_FAILED",
             Self::Config(_) | Self::UnsafeConfig => "CONFIG_INVALID",
+            Self::PrivateDnsWorkerUnavailable => "DNS_PRIVATE_WORKER_UNAVAILABLE",
             Self::Roles(_) => "ROLE_STATE_INVALID",
             Self::Credential(_) => "IDENTITY_CREDENTIAL_FAILED",
             Self::Identity(_) => "IDENTITY_LOAD_FAILED",

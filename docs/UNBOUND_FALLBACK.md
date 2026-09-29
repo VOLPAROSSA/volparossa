@@ -1,8 +1,61 @@
-# Explicit Exit-side Unbound fallback
+# Exit-side Unbound fallback
 
 This slice adds a bounded resolver backend, not an installed resolver service or a completed
 reciprocal Client+Exit deployment. Existing configurations retain the system-resolver fallback.
 No host DNS, routes, firewall, services or trust anchors are changed automatically.
+
+## Private packaged worker candidate
+
+The private mode removes the listener altogether:
+
+```yaml
+dns_cache:
+  enabled: true
+  upstream: null
+  fallback:
+    mode: unbound_private
+```
+
+This starts the fixed source-built `/usr/libexec/volparossa-dns-worker` only when
+an authorized Exit lookup needs fallback. The worker communicates through
+inherited pipes, retains the existing agent UID, and performs real libunbound
+recursion/validation. No new UID exemption, root operation, DNS listener, helper
+command or resolver service is added. Local applications cannot submit requests
+to an agent-owned public DNS socket because this backend has none. Missing
+binary/library/anchors, DNSSEC bogus, timeout and unavailable answers never fall
+through to the OS resolver. An unconfirmed child cleanup quarantines the backend.
+
+The separate opt-in `volparossa-private-dns-worker` companion package includes
+this executable and requires `libunbound8` >= 1.26.1 plus `dns-root-data`; it does
+**not** require the standalone Unbound daemon. The core package and its existing
+Ubuntu-hosted package-build job retain their previous dependencies. Build the
+companion only in a provisioned Debian 13 environment using
+`sh packaging/build-private-dns-worker-deb.sh --build`; preview is non-writing.
+Building requires `libunbound-dev`, pkg-config, a C compiler and CMake.
+Explicit private configuration rejects absent/unsafe worker or root-anchor files
+at agent startup as `DNS_PRIVATE_WORKER_UNAVAILABLE`; no configuration parsing
+performs filesystem access and no missing companion silently enables OS fallback.
+The worker reads only the fixed Debian root hints and trust anchor; it does not
+load `resolv.conf`, `hosts`, arbitrary configuration, or private path arguments.
+Updating distribution trust anchors remains an operator/package responsibility.
+
+Private lookup order is independently verified RAM cache → bounded peer lookup →
+private recursion within the original five-second deadline. At most two native
+children may run; the last 500 ms is reserved for exact child termination/reaping.
+No successful or negative result is returned before that child's successful wait.
+The native `secure` verdict is recorded as `PrivateUnbound { dnssec_secure }`,
+not as a shareable proof or a wire AD assertion. Rebinding checks, exact address
+pinning and route expiry remain enforced. Each query has a fresh process: a
+persistent libunbound cache, adaptive fastest-source selection, and independent
+proof extraction through the private worker are **not** claimed by this slice.
+
+See [the native boundary and versioned pipe protocol](../native/volparossa-dns-worker/README.md)
+and [opt-in configuration](../config/examples/unbound-private-exit.yaml).
+Native compilation against the hash-checked Debian library passes. Three focused
+protocol/real inert-process lifecycle tests and the strict private configuration
+test pass, together with affected-crate all-target Clippy. They do not prove recursive DNS or a deployed
+reciprocal Client+Exit path. The default stays `system` until the disposable
+real-resolver/privacy/cleanup proof below passes.
 
 ## Opt in only to an already-protected endpoint
 
@@ -74,8 +127,8 @@ and exposing a loopback listener could give local applications an unprotected DN
 This change adds neither exemption nor firewall bypass. An operator must supply the protected
 Exit-side service boundary before using this option on a reciprocal node.
 
-The intended packaged default requires a private resolver worker/library or typed helper-managed
-isolation, plus a simultaneous Client+Exit datapath proof. Until then the default stays `system`.
+The intended packaged default requires the private worker above to pass a
+simultaneous Client+Exit datapath proof. Until then the default stays `system`.
 No `resolv.conf` replacement, systemd-resolved change, or automatic package/service activation is
 part of this feature.
 

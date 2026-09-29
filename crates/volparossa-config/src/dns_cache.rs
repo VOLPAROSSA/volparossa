@@ -16,6 +16,8 @@ pub enum DnsFallbackConfig {
         /// This endpoint needs deployment isolation; loopback alone is not access control.
         endpoint: SocketAddr,
     },
+    /// Packaged Exit-owned libunbound worker, with private inherited pipes and no DNS listener.
+    UnboundPrivate {},
 }
 
 /// Positive DNSSEC sharing uses RAM only and never changes the host's DNS configuration.
@@ -44,6 +46,14 @@ impl Default for DnsCacheConfig {
 
 impl DnsCacheConfig {
     pub(crate) fn validate(self) -> Result<(), ConfigError> {
+        if matches!(self.fallback, DnsFallbackConfig::UnboundPrivate {})
+            && (!self.enabled || self.upstream.is_some())
+        {
+            return Err(validation(
+                "dns_cache.fallback",
+                "private Unbound requires enabled cache and no separate upstream",
+            ));
+        }
         if let DnsFallbackConfig::Unbound { endpoint } = self.fallback {
             if !self.enabled || self.upstream.is_some() {
                 return Err(validation(
@@ -162,5 +172,41 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn private_unbound_never_accepts_a_worker_path_or_second_upstream() {
+        let configured: DnsCacheConfig =
+            serde_yaml::from_str("fallback: { mode: unbound_private }").unwrap();
+        assert!(configured.validate().is_ok());
+        assert_eq!(configured.fallback, DnsFallbackConfig::UnboundPrivate {});
+        assert!(
+            DnsCacheConfig {
+                enabled: false,
+                ..configured
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            DnsCacheConfig {
+                upstream: Some("127.0.0.53:53".parse().unwrap()),
+                ..configured
+            }
+            .validate()
+            .is_err()
+        );
+        for field in [
+            "executable: /tmp/custom",
+            "endpoint: '127.0.0.1:5335'",
+            "allow_os_fallback: true",
+        ] {
+            assert!(
+                serde_yaml::from_str::<DnsCacheConfig>(&format!(
+                    "fallback: {{ mode: unbound_private, {field} }}"
+                ))
+                .is_err()
+            );
+        }
     }
 }

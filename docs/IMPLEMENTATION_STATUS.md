@@ -3260,11 +3260,18 @@ that two-line ordering is corrected without changing behavior. No full Quality p
 ## Latest DNS integration checkpoint
 
 - [ ] Protected deployed Unbound fallback and adaptive fastest-source selection: an explicit
-  Exit-side backend/configuration is implemented, with targeted parser and isolated TCP test
-  coverage added. It retains real fallback TTLs/CNAME bounds and never calls the OS resolver
-  after selecting Unbound. Unbound AD is trusted-local provenance, not independent peer proof.
-  A genuine Unbound execution and simultaneous Client+Exit service-isolation/privacy proof are
-  still required; no package installation, host DNS change or new packaged default is claimed.
+  Exit-side TCP backend/configuration is implemented, with targeted parser and isolated TCP
+  evidence. The private inherited-pipe worker candidate now adds genuine libunbound calls,
+  fixed packaged paths, at most two owned children, deadline/cancellation cleanup and a separate
+  native secure verdict. Its ABI build against hash-verified Debian libunbound 1.26.1 passes;
+  three pure protocol/real inert-process tests and strict configuration checks pass, not
+  substituted for recursive DNS; affected-crate all-target Clippy also passes.
+  Both explicit modes preserve real fallback TTLs and never call the OS resolver after selection.
+  Neither local AD nor a private-library verdict is independent shareable peer proof. Real
+  recursion/validation and simultaneous Client+Exit privacy/cleanup execution are still required.
+  There is no persistent libunbound cache, adaptive racing, host package installation/DNS change
+  or default switch. A separate optional Debian 13 companion builder declares the private worker
+  and dependencies; existing core package construction/dependencies remain unchanged.
   See [Unbound fallback scope and readiness](UNBOUND_FALLBACK.md).
 
 The positive DNSSEC cache is now composed into the normal agent: the same bounded RAM resolver
