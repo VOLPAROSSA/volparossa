@@ -78,6 +78,10 @@ OBSERVER_STAGES = frozenset(("guard", "owner", "snapshot-wait", "snapshot-bindin
 PROTOCOL_EVENTS = frozenset(("capabilities", "admitted", "result", "error", "cancel_requested"))
 PROTOCOL_ERRORS = frozenset(("busy", "invalid_request", "handshake_required", "no_such_task",
                              "cancelled", "execution_failed", "cleanup_unconfirmed"))
+PROCESS_STATES = {b"R": "running", b"S": "sleeping", b"D": "disk_sleep", b"Z": "zombie",
+                  b"T": "stopped", b"t": "tracing_stop", b"X": "dead", b"x": "dead",
+                  b"I": "idle", b"P": "parked", b"W": "waking"}
+LIFETIME_POINTS = frozenset(("first_result_frame_byte", "cancel_terminal_frame_byte", "disconnect_cleanup"))
 
 
 def safe_failure(error):
@@ -226,7 +230,43 @@ def owner_controls(raw):
                 pressure_injected=False, all_owner_activity_claimed=False)
 
 
-def at_result(work_parent, original, expected, isolation, point="first_result_frame_byte"):
+def process_lifetime_state(member, raw):
+    """Interpret only an already-pinned identity and a fixed kernel state; never export comm."""
+    require(type(member) is dict and set(member) == {"pid", "start_ticks"}
+            and all(type(member[key]) is int and member[key] > 0 for key in member),
+            "invalid private lifetime identity")
+    require(type(raw) is bytes and 0 < len(raw) <= 8192, "invalid private lifetime stat")
+    head, separator, tail = raw.rpartition(b") ")
+    fields = tail.split()
+    require(separator and len(fields) >= 20 and head.split(b" (", 1)[0] == str(member["pid"]).encode(),
+            "invalid private lifetime stat")
+    same = int(fields[19]) == member["start_ticks"]
+    return dict(same_lifetime=same, state=PROCESS_STATES.get(fields[0], "unrecognized") if same else "pid_reused")
+
+
+def lifetime_observation(isolation, point):
+    require(point in LIFETIME_POINTS and len(isolation["owned_processes"]) <= 64,
+            "invalid private lifetime observation")
+    members = []
+    for member in isolation["owned_processes"]:
+        if member == isolation["cli"]:
+            continue  # The long-lived private service and its threads are not model lifetimes.
+        observed = dict(pid=member["pid"], start_ticks=member["start_ticks"],
+                        role="model_worker" if member == isolation.get("worker") else "sandbox_member")
+        try:
+            with Path(f"/proc/{member['pid']}/stat").open("rb") as stream:
+                observed.update(process_lifetime_state(member, stream.read(8193)))
+        except FileNotFoundError:
+            observed.update(same_lifetime=False, state="absent")
+        members.append(observed)
+    return dict(version=1, observation_point=point, members=members)
+
+
+def at_result(work_parent, original, expected, isolation, point="first_result_frame_byte", diagnostic=None):
+    if diagnostic is not None:
+        # Save before assertions: the failed run must distinguish a still-running child
+        # from a zombie, without exporting command lines, private text or worker reports.
+        diagnostic[point] = lifetime_observation(isolation, point)
     require(not list(work_parent.iterdir()), "private temporary input/report still present at result")
     require(identity(original) == expected, "original private input changed")
     require(not any(TRAIN["alive"](p) for p in isolation["owned_processes"] if p != isolation["cli"]),
@@ -524,7 +564,8 @@ def execute(output, revision):
                     require(acknowledgement["task_id"] == request_id, "cancel targeted another task")
                     result["phase"] = "private-service-cancel-terminal-cleanup"
                     terminal, boundary = service_response(stream, request_id, "error", time.monotonic() + 10,
-                        lambda: at_result(work_parent, original, initial, isolated, "cancel_terminal_frame_byte"))
+                        lambda: at_result(work_parent, original, initial, isolated, "cancel_terminal_frame_byte",
+                                          result.setdefault("lifetime_observations", {})))
                     require(terminal["code"] == "cancelled", "cancel did not end through verified cleanup")
                     proof.update(cancel_acknowledged=True, terminal_code=terminal["code"], cleanup=boundary)
                     stream.close()
@@ -533,10 +574,12 @@ def execute(output, revision):
                     stream.close()
                     deadline = time.monotonic() + 10
                     while list(work_parent.iterdir()) or any(TRAIN["alive"](p) for p in isolated["owned_processes"] if p != isolated["cli"]):
+                        result.setdefault("lifetime_observations", {})["disconnect_cleanup"] = lifetime_observation(isolated, "disconnect_cleanup")
                         require(time.monotonic() < deadline and process.poll() is None, "disconnect did not reap the owned worker")
                         time.sleep(0.05)
                     proof.update(connection_closed_by_owner=True,
-                        cleanup=at_result(work_parent, original, initial, isolated, "disconnect_cleanup"))
+                        cleanup=at_result(work_parent, original, initial, isolated, "disconnect_cleanup",
+                                          result.setdefault("lifetime_observations", {})))
                 result["phase"] = f"private-service-{mechanism}-runtime-unlock"
                 runtime_unlocked(lock)
                 proof["runtime_lock_released"] = True
@@ -553,7 +596,8 @@ def execute(output, revision):
             result["isolation"], result["snapshot"] = observed(output, "inference")
             result["phase"] = "private-service-inference-terminal-cleanup"
             final, result["result_boundary"] = service_response(stream, request_id, "result", deadline,
-                lambda: at_result(work_parent, original, initial, result["isolation"]))
+                lambda: at_result(work_parent, original, initial, result["isolation"],
+                                  diagnostic=result.setdefault("lifetime_observations", {})))
             result["answer"] = final["result"]
             stream.close()
             # Preserve actual incomplete output honestly for diagnosis, never as PASS.
@@ -719,6 +763,31 @@ def self_test():
         expected = identity(original)
         isolated = {"owned_processes": [], "cli": {"pid": 0}}
         at_result(work, original, expected, isolated)
+        current = TRAIN["identity"](os.getpid())
+        observed = {}
+        owned_service = dict(owned_processes=[current], cli=current, worker=current)
+        at_result(work, original, expected, owned_service, diagnostic=observed)
+        require(observed["first_result_frame_byte"]["members"] == [], "service owner counted as model lifetime")
+        owned_worker = dict(owned_processes=[current], cli={"pid": 0}, worker=current)
+        try:
+            at_result(work, original, expected, owned_worker, diagnostic=observed)
+        except ValueError as error:
+            require(safe_failure(error) == "RESULT_WORKER_ALIVE", "live process passed private completion boundary")
+        else:
+            raise ValueError("live process passed private completion boundary")
+        member = observed["first_result_frame_byte"]["members"][0]
+        require(member["pid"] == current["pid"] and member["start_ticks"] == current["start_ticks"]
+                and member["role"] == "model_worker" and member["same_lifetime"] is True
+                and member["state"] in PROCESS_STATES.values(), "private lifetime failure evidence missing")
+        fields = [b"0"] * 20
+        fields[0], fields[19] = b"Z", str(current["start_ticks"]).encode()
+        raw_stat = str(current["pid"]).encode() + b" (" + secret.encode() + b") " + b" ".join(fields)
+        zombie = process_lifetime_state(current, raw_stat)
+        require(zombie == dict(same_lifetime=True, state="zombie") and secret not in json.dumps(zombie),
+                "zombie lifetime or private process text handled incorrectly")
+        reused = dict(current, start_ticks=current["start_ticks"] + 1)
+        require(process_lifetime_state(reused, raw_stat) == dict(same_lifetime=False, state="pid_reused"),
+                "reused PID mistaken for original private worker")
         (work / "retained-input").mkdir(mode=0o700)
         try:
             at_result(work, original, expected, isolated)

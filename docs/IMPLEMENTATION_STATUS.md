@@ -1008,8 +1008,19 @@ signals; this is not successful ordinary cancellation/cleanup. The ten original 
 files and their ZIP (`f75468aecfb22ce6e0e76b481c5523a839757e9bc1c47819cc1664e3f198fdef`)
 remain unchanged. The cause is not established. A diagnostic-only fixture update now records
 fixed phase/failure codes and sanitized observer status in the existing report without private
-inputs, raw errors or worker output; acceptance checks are unchanged. **The live model/IPC
-proof remains incomplete**, including cancellation and disconnection. The original `9d870440` direct-CLI
+inputs, raw errors or worker output; acceptance checks are unchanged.
+The [diagnostic run on `a4aa143c`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36583791452)
+also **fails**: the observer completed successfully and cancellation was acknowledged, but
+`RESULT_WORKER_ALIVE` rejected a retained sandbox lifetime at the first terminal-frame byte.
+Temporary input removal and the original owner's unchanged input were checked first. The
+old artifact does not distinguish a runnable worker from a dying launcher or zombie; its ZIP
+(`03ed5bcb1e22e06b4d43f2b51aa33bc5a17c6c6c0d783a71e99f8a05dbb7ac45`) remains unchanged.
+The new supervisor candidate retains exact descendant PID/start-time identities across
+launcher exit and waits for those lifetimes within the existing three-second cleanup bound.
+It never signals observed PIDs or follows reused PIDs; incomplete observation still produces
+`CleanupUnconfirmed` and quarantines admission. The fixture now preserves sanitized lifetime
+state on failure without changing its strict completion gate. **The live model/IPC proof
+remains incomplete**, including cancellation and disconnection. The original `9d870440` direct-CLI
 proof above remains evidence only for that historical source and stdout boundary; it is not
 relabeled as IPC evidence. B04, confidential offload and browser-UI integration remain open.
 See [service usage](DECENTRALIZED_AGENTS.md#application-local-private-compute-ipc) and the
