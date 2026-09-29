@@ -19105,9 +19105,16 @@ mod tests {
             .0;
         let handler = braced_item(production, "async fn handle_exit_forward_upstream_event(");
         assert!(handler.contains("connection_id,"));
-        assert!(handler.contains(
-            "self.answer_exit_forward_upstream(peer, connection_id, request, channel, state)"
-        ));
+        // Boxing this large future may reflow the same call. Check the exact ordered
+        // owners, not rustfmt's whitespace or optional trailing argument comma.
+        let compact_handler: String = handler.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            compact_handler.contains(
+                "self.answer_exit_forward_upstream(peer,connection_id,request,channel,state,)"
+            ) || compact_handler.contains(
+                "self.answer_exit_forward_upstream(peer,connection_id,request,channel,state)"
+            )
+        );
 
         let caller = braced_item(production, "fn prepare_native_probe_permit_response(");
         assert_eq!(

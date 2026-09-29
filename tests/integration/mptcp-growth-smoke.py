@@ -17,7 +17,11 @@ read, require, text = COMMON["read"], COMMON["require"], COMMON["text"]
 PREFIX = "mptcp-growth"
 BODY_BYTES = 32 * 1024 * 1024
 MIN_DELTA = 65536
-RELAY_IPS = {"42.158.0.1": "relay0", "44.160.1.1": "relay1", "45.161.2.1": "relay2"}
+# R3 is also eligible while the fixture draws a route: the topology explicitly raises
+# its capacity so it can be the distinct control relay. Recognizing its actual endpoint
+# is not permission to accept it in the final {R0,R1,R2} data-path set below.
+RELAY_IPS = {"42.158.0.1": "relay0", "44.160.1.1": "relay1", "45.161.2.1": "relay2",
+             "48.164.4.1": "relay3"}
 
 
 def command(args):
@@ -101,6 +105,26 @@ def kernel_sample(raw, layout, role):
                 subflows=sorted(records, key=lambda row: row["path_id"]))
 
 
+def relay_endpoint(output, *, role, pid, namespace, path):
+    """Classify one owned WG endpoint; retain failure context, never the WG peer key."""
+    context = dict(role=role, pid=pid, netns=namespace, path_id=path["path_id"],
+                   interface=path[f"{role}_interface"])
+    lines = output.splitlines()
+    if len(lines) != 1 or len(lines[0].split()) != 2:
+        raise ValueError("MPTCP_OWNER_AMBIGUOUS_WG_PEER " + json.dumps(context, sort_keys=True))
+    physical = lines[0].split()[1]
+    # This diagnostic is persisted before the caller disconnects the rejected draw.
+    # Limit and JSON-escape only the endpoint, never include the original wg output.
+    context["endpoint"] = physical[:96]
+    address, separator, port = physical.rpartition(":")
+    if (len(physical) > 96 or not separator or not re.fullmatch(r"[0-9]{1,5}", port)
+            or not 0 < int(port) <= 65535):
+        raise ValueError("MPTCP_OWNER_INVALID_RELAY_ENDPOINT " + json.dumps(context, sort_keys=True))
+    if address not in RELAY_IPS:
+        raise ValueError("MPTCP_OWNER_UNKNOWN_RELAY_ENDPOINT " + json.dumps(context, sort_keys=True))
+    return physical, RELAY_IPS[address]
+
+
 def owner_namespaces(layout):
     result = {}
     for role in ("client", "exit"):
@@ -130,13 +154,10 @@ def owner_namespaces(layout):
                     name = path[f"{role}_interface"]
                     # Never record WG keys: endpoints only supply exact physical relay bindings.
                     output = command(["nsenter", "-t", str(pid), "-n", "wg", "show", name, "endpoints"])
-                    lines = output.splitlines()
-                    require(len(lines) == 1 and len(lines[0].split()) == 2, "ambiguous WireGuard peer")
-                    physical = lines[0].split()[1]
-                    address, port = physical.rsplit(":", 1)
-                    require(address in RELAY_IPS and 0 < int(port) <= 65535, "unselected physical relay endpoint")
+                    physical, relay = relay_endpoint(output, role=role, pid=pid,
+                                                     namespace=namespace, path=path)
                     paths.append(dict(path_id=path["path_id"], interface=name,
-                                      ifindex=actual[name]["ifindex"], relay_node=RELAY_IPS[address], endpoint=physical))
+                                      ifindex=actual[name]["ifindex"], relay_node=relay, endpoint=physical))
                 stat = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
                 matches.append(dict(unit=unit, cgroup=group, pid=pid, start_ticks=stat[19],
                                     netns=namespace, paths=paths))

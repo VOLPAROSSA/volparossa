@@ -17,8 +17,41 @@ spec.loader.exec_module(G)
 G.RELAY_IPS = {**G.RELAY_IPS, "49.165.5.1": "relay4"}
 read, text, require = G.read, G.text, G.require
 PREFIX = "mptcp-refill"
+ACCEPTANCE_VERSION = 2
 BODY_BYTES = 256 * 1024 * 1024
-ROLES = ("client", "relay0", "relay1", "relay2", "relay4", "exit")
+ORIGINAL_RELAYS = {"relay0", "relay1", "relay2", "relay3"}
+ROLES = ("client", "relay0", "relay1", "relay2", "relay3", "relay4", "exit")
+
+
+def selected(value, peers):
+    # Four eligible relays permit any three data relays plus one distinct control relay.
+    # Growth's historical {R0,R1,R2} acceptance is intentionally not changed.
+    snapshot = G.COMMON["paths"](value)
+    rows = snapshot["paths"]
+    require(len(rows) == 2 and all(row["state"] == 1 and row["user_bytes"] == 0
+            and row["acked_transport_bytes"] == row["smoothed_rtt_us"] == 0 for row in rows)
+            and {row["exit_peer_id"] for row in rows} == {peers["exit"]}
+            and len({row["relay_peer_id"] for row in rows}) == 2
+            and {row["relay_peer_id"] for row in rows} <= {peers[node] for node in ORIGINAL_RELAYS},
+            "need two distinct initial Reachable paths from R0-R3, never the fresh R4")
+    snapshot["source"] = "initial committed selection only; kernel measurements prove data"
+    return snapshot
+
+
+def original_relays(owners):
+    require(set(owners) == {"client", "exit"}, "original endpoint owner coverage invalid")
+    mappings = []
+    for role in ("client", "exit"):
+        owner = owners[role]
+        rows = owner["paths"]
+        require(owner["unit"] == f"volparossa-alpha-helper@{role}.service"
+                and len(rows) == 3 and {p["path_id"] for p in rows} == {1, 2, 3}
+                and len({p["relay_node"] for p in rows}) == 3
+                and {p["relay_node"] for p in rows} <= ORIGINAL_RELAYS,
+                "need three distinct original relays from R0-R3; fresh R4 must be absent")
+        mappings.append({p["path_id"]: p["relay_node"] for p in rows})
+    require(mappings[0] == mappings[1], "original Client and Exit bind different relays")
+    return set(mappings[0].values())
 
 
 def stable(before, after):
@@ -49,6 +82,8 @@ def layout_valid(layout, count):
 
 
 def validate(e):
+    require(e.get("acceptance_version") == ACCEPTANCE_VERSION, "wrong refill acceptance version")
+    original = original_relays(e["owners_initial"])
     layout_valid(e["layout_initial"], 3)
     layout_valid(e["layout_refilled"], 4)
     require(e["layout_initial"]["context"] == e["selection"]["route_context_id"]
@@ -65,8 +100,6 @@ def validate(e):
                 "initial helper owner or original path count invalid")
         require(all(old[k] == new[k] for k in ("unit", "cgroup", "pid", "start_ticks", "netns")),
                 "original helper namespace owner replaced")
-        require({p["relay_node"] for p in old["paths"]} == {"relay0", "relay1", "relay2"},
-                "fresh Relay was present in initial owned path set")
         require(len(new["paths"]) == 4 and next(p for p in new["paths"] if p["path_id"] == 4)["relay_node"] == "relay4",
                 "new path does not terminate on independently contributed R4")
         for path in new["paths"]:
@@ -136,7 +169,7 @@ def validate(e):
                 and during[0]["handle"] == ("7b01:" if key == "risky" else "7b02:")
                 and during[0]["drops"] > 0 and abs(during[0]["options"]["loss-random"]["loss"] - 1) < 0.000001,
                 "missing actual owned 100percent impairment drops")
-    require(set(e["rate_limits"]) == {"relay0", "relay1", "relay2", "relay4"}, "download profile missing")
+    require(set(e["rate_limits"]) == ORIGINAL_RELAYS | {"relay4"}, "download profile missing")
     for phases in e["rate_limits"].values():
         for stage in ("before", "after"):
             G.COMMON["qdisc"](phases[stage], False)
@@ -166,6 +199,13 @@ def validate(e):
             require(r4["client_leg_wireguard_data_datagrams"] > 16 and r4["exit_leg_wireguard_data_datagrams"] > 16
                     and captures["client"]["relay4_wireguard_data_datagrams"] > 16
                     and captures["exit"]["relay4_wireguard_data_datagrams"] > 16, "both fresh R4 WG legs lack real data")
+        else:
+            for node in original:
+                require(captures[node]["client_leg_wireguard_data_datagrams"] > 16
+                        and captures[node]["exit_leg_wireguard_data_datagrams"] > 16
+                        and captures["client"][f"{node}_wireguard_data_datagrams"] > 16
+                        and captures["exit"][f"{node}_wireguard_data_datagrams"] > 16,
+                        "both original selected WG legs lack real data")
     seed = b"volparossa-download:a04:" + bytes.fromhex(e["run_id"])
     block = (seed * (65536 // len(seed) + 1))[:65536]
     digest = hashlib.sha256()
@@ -198,14 +238,15 @@ def build(work):
             "initial_progress", "warm", "warm_progress", "retired", "refilled", "refilled_progress", "injection",
             "exposure", "client", "server", "cleanup")
     e = {key: read(work / f"{PREFIX}-{key.replace('_', '-')}.json") for key in keys}
-    e.update(success=True, run_id=read(work / f"{PREFIX}-run.json")["run_id"], expected_peers=read(work / "a01-expected-peers.json"),
+    e.update(success=True, acceptance_version=ACCEPTANCE_VERSION,
+             run_id=read(work / f"{PREFIX}-run.json")["run_id"], expected_peers=read(work / "a01-expected-peers.json"),
              qdiscs={key: {stage: json.loads(text(work / f"{PREFIX}-{key}-{stage}.json")) for stage in ("before", "during", "after")}
                      for key in ("risky", "warm")},
              rate_limits={f"relay{i}": {s: json.loads(text(work / f"{PREFIX}-rate-{i}-{s}.json")) for s in ("before", "during", "after")}
-                          for i in (0, 1, 2, 4)},
+                          for i in (0, 1, 2, 3, 4)},
              privacy={phase: {role: read(work / f"{PREFIX}-{phase}-privacy-{role}.json") for role in ROLES}
                       for phase in ("initial", "expanded")})
-    raw = G.selected(text(work / f"{PREFIX}-selection.txt"), e["expected_peers"])
+    raw = selected(text(work / f"{PREFIX}-selection.txt"), e["expected_peers"])
     for phase, capacity in (("before", 1), ("after", 32)):
         config = text(work / f"{PREFIX}-r4-config-{phase}.yaml")
         require(re.findall(r"^  relay_(?:upload|download)_limit_mbps: (\d+)$", config, re.M) == [str(capacity)] * 2,
@@ -221,7 +262,9 @@ def build(work):
 
 def main(args):
     if len(args) == 4 and args[0] == "select":
-        result = G.selected(text(Path(args[1])), read(Path(args[2])))
+        result = selected(text(Path(args[1])), read(Path(args[2])))
+    elif len(args) == 2 and args[0] == "original-relays":
+        original_relays(read(Path(args[1]))); return
     elif len(args) == 3 and args[0] == "owners":
         result = G.owner_namespaces(read(Path(args[1])))
     elif len(args) == 4 and args[0] == "sample":
@@ -236,6 +279,7 @@ def main(args):
         path = Path(args[1]); report = read(path)
         require(re.fullmatch(r"[0-9a-f]{40}", args[2]) and report["source_revision"] == args[2]
                 and report["schema_version"] == 1 and report["report_kind"] == "volparossa-mptcp-refill-runtime"
+                and report.get("acceptance_version") == ACCEPTANCE_VERSION
                 and report["success"] is True and report["phase"] == "mptcp-refill-complete"
                 and report["cleanup"] == dict(complete=True, remaining_owned_objects=0)
                 and report["observed_blocker"] in (None, "NONE"), "wrong source or failed cleanup")
@@ -250,7 +294,7 @@ def main(args):
         require(report["transfer"] == e == read(path.parent / f"{PREFIX}-evidence.json")
                 and report["run_id"] == e["run_id"], "report differs from original evidence"); return
     else:
-        raise ValueError("usage: select PATHS PEERS OUT | owners LAYOUT OUT | sample OWNERS LAYOUT OUT | progress BEFORE AFTER COUNT | path-progress BEFORE AFTER PATH | evidence WORK OUT | report REPORT SHA")
+        raise ValueError("usage: select PATHS PEERS OUT | original-relays OWNERS | owners LAYOUT OUT | sample OWNERS LAYOUT OUT | progress BEFORE AFTER COUNT | path-progress BEFORE AFTER PATH | evidence WORK OUT | report REPORT SHA")
     Path(args[-1]).write_text(json.dumps(result, sort_keys=True) + "\n", encoding="ascii")
     if args[0] == "sample":
         require(all("kernel" in result[r] for r in ("client", "exit")), "incomplete raw kernel snapshot retained")

@@ -65,7 +65,7 @@ class Capture:
 
 
 def buffered_observer(extra_unread_packet=False, clock=None, idle=False,
-                      role="relay1", frames=None):
+                      role="relay1", frames=None, refill=False):
     """Execute the complete generated collector with actual queue semantics, not packet parsing."""
     order = []
 
@@ -121,6 +121,7 @@ def buffered_observer(extra_unread_packet=False, clock=None, idle=False,
     with tempfile.TemporaryDirectory(prefix="volparossa-privacy-drain-") as directory:
         output = Path(directory) / "capture.json"
         args = ["privacy-observer.py", role, str(output), str(Path(directory) / "ready"),
+                *(["--mptcp-refill"] if refill else []),
                 *(capture.interface for capture in captures)]
         with (
             patch("sys.argv", args), patch("socket.socket", side_effect=captures),
@@ -132,6 +133,36 @@ def buffered_observer(extra_unread_packet=False, clock=None, idle=False,
 
 
 class PrivacyObserverTests(unittest.TestCase):
+    def test_refill_r3_observer_and_both_endpoint_counters_preserve_privacy_boundaries(self):
+        def frame(source, destination):
+            ipv4 = bytearray(20)
+            ipv4[0] = 0x45
+            ipv4[9] = socket.IPPROTO_UDP
+            ipv4[12:16] = socket.inet_aton(source)
+            ipv4[16:20] = socket.inet_aton(destination)
+            return (b"\0" * 12 + b"\x08\x00" + ipv4
+                    + struct.pack("!HHHH", 20000, 30000, 44, 0)
+                    + struct.pack("<I", 4) + b"\0" * 32)
+
+        client_frame = frame("43.159.1.1", "48.164.4.1")
+        exit_frame = frame("48.164.4.1", "46.162.3.1")
+        frames = {"r3c": [client_frame], "r3x": [exit_frame], "underlay": []}
+        record, _ = buffered_observer(role="relay3", frames=frames, refill=True)
+        self.assertEqual(record["client_leg_wireguard_data_datagrams"], 1)
+        self.assertEqual(record["exit_leg_wireguard_data_datagrams"], 1)
+        self.assertEqual(record["unexpected_outer_packets"], 0)
+        self.assertEqual(record["packet_socket_drops"], 0)
+        self.assertFalse(record["truncated"])
+        frames["r3x"].append(frame("48.164.4.1", "47.163.4.2"))
+        forbidden, _ = buffered_observer(role="relay3", frames=frames, refill=True)
+        self.assertEqual(forbidden["internet_destination_outer_packets"], 1)
+        self.assertEqual(forbidden["unexpected_outer_packets"], 1)
+        for role, interface, packet in (("client", "cr3", client_frame), ("exit", "xr3", exit_frame)):
+            endpoint, _ = buffered_observer(role=role, frames={interface: [packet]}, refill=True)
+            self.assertEqual(endpoint["relay3_wireguard_data_datagrams"], 1)
+        with self.assertRaisesRegex(SystemExit, "invalid privacy observer arguments"):
+            buffered_observer(role="relay3", frames=frames)
+
     def test_actual_relay0_collector_observes_both_wg_legs_and_forbidden_destination(self):
         def frame(source, destination):
             ipv4 = bytearray(20)

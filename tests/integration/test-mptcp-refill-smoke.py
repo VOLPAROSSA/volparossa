@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import runpy
+import subprocess
 import tempfile
 import unittest
 
@@ -17,7 +18,9 @@ def fixture():
     old = OLD["fixture"]()
     e = {k: copy.deepcopy(old[k]) for k in ("run_id", "expected_peers", "selection", "client", "server")}
     e["expected_peers"]["relay4"] = "peer4"
+    e["expected_peers"]["relay3"] = "peer3"
     e["success"] = True
+    e["acceptance_version"] = C["ACCEPTANCE_VERSION"]
     e["layout_initial"] = old["layout"]
     e["layout_refilled"] = copy.deepcopy(old["layout"])
     p = dict(path_id=4, client_address="fd42:1:4::1", exit_address="fd42:1:4::3", client_interface="vpc4", exit_interface="vpx4")
@@ -43,16 +46,21 @@ def fixture():
         during=[dict(kind="netem", handle=handle, root=True, drops=10, options={"loss-random": {"loss": 1}})],
         after=[dict(kind="noqueue", handle="0:")]) for key, handle in (("risky", "7b01:"), ("warm", "7b02:"))}
     e["rate_limits"] = copy.deepcopy(old["rate_limits"])
+    e["rate_limits"]["relay3"] = copy.deepcopy(e["rate_limits"]["relay0"])
     e["rate_limits"]["relay4"] = copy.deepcopy(e["rate_limits"]["relay0"])
     for phases in e["rate_limits"].values():
         phases["during"][0]["handle"] = "7b03:"
     e["privacy"] = old["privacy"]
     for phase in ("initial", "expanded"):
-        fourth = copy.deepcopy(e["privacy"][phase]["relay0"])
-        fourth.update(capture_role="relay4", interfaces=["r4c", "r4x", "underlay"])
-        fourth["interface_statistics"] = {k.replace("r0", "r4"): v for k, v in fourth["interface_statistics"].items()}
-        e["privacy"][phase]["relay4"] = fourth
+        for number in (3, 4):
+            additional = copy.deepcopy(e["privacy"][phase]["relay0"])
+            additional.update(capture_role=f"relay{number}", interfaces=[f"r{number}c", f"r{number}x", "underlay"])
+            additional["interface_statistics"] = {k.replace("r0", f"r{number}"): v
+                                                  for k, v in additional["interface_statistics"].items()}
+            e["privacy"][phase][f"relay{number}"] = additional
         for role in ("client", "exit"):
+            for number in range(4):
+                e["privacy"][phase][role][f"relay{number}_wireguard_data_datagrams"] = 100
             e["privacy"][phase][role]["relay4_wireguard_data_datagrams"] = 100 if phase == "expanded" else 0
     seed = b"volparossa-download:a04:" + bytes.fromhex(e["run_id"])
     block = (seed * (65536 // len(seed) + 1))[:65536]
@@ -75,7 +83,11 @@ def raw_files(e):
             "initial_progress", "warm", "warm_progress", "retired", "refilled", "refilled_progress", "injection",
             "exposure", "client", "server", "cleanup")
     files = {f"{prefix}-{key.replace('_', '-')}.json": e[key] for key in keys}
-    files[f"{prefix}-selection.txt"] = OLD["raw_files"](OLD["fixture"]())["mptcp-growth-selection.txt"]
+    files[f"{prefix}-selection.txt"] = "".join(
+        f"context={p['route_context_id']} path={p['path_id']} relay={p['relay_peer_id']} "
+        f"exit={p['exit_peer_id']} state={p['state']} rtt_us={p['smoothed_rtt_us']} "
+        f"bytes={p['user_bytes']} acked_transport_bytes={p['acked_transport_bytes']}\n"
+        for p in e["selection"]["paths"])
     for phase, captures in e["privacy"].items():
         for role, capture in captures.items():
             files[f"{prefix}-{phase}-privacy-{role}.json"] = capture
@@ -101,6 +113,82 @@ class RefillEvidence(unittest.TestCase):
     def test_valid_synthetic_schema_not_runtime_evidence(self):
         C["validate"](self.evidence)
 
+    def test_any_three_distinct_original_relays_including_r3_active_or_warm_are_accepted(self):
+        addresses = {node: address for address, node in C["G"].RELAY_IPS.items()}
+        for numbers in ((0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3), (3, 1, 2), (0, 3, 2)):
+            with self.subTest(numbers=numbers):
+                evidence = copy.deepcopy(self.evidence)
+                for snapshot in ("owners_initial", "owners_refilled"):
+                    for role in ("client", "exit"):
+                        for row in evidence[snapshot][role]["paths"][:3]:
+                            node = f"relay{numbers[row['path_id'] - 1]}"
+                            row.update(relay_node=node, endpoint=f"{addresses[node]}:41001")
+                for row in evidence["selection"]["paths"]:
+                    row["relay_peer_id"] = evidence["expected_peers"][f"relay{numbers[row['path_id'] - 1]}"]
+                evidence["injection"].update(risky_interface=f"xr{numbers[0]}", warm_interface=f"xr{numbers[2]}")
+                C["validate"](evidence)
+                source = raw_files(evidence)["mptcp-refill-selection.txt"]
+                self.assertEqual(C["selected"](source, evidence["expected_peers"])["paths"], evidence["selection"]["paths"])
+
+    def test_fresh_r4_is_never_accepted_initially_or_replaced_by_r3(self):
+        for snapshot, index, node, address in (("owners_initial", 2, "relay4", "49.165.5.1"),
+                                             ("owners_refilled", 3, "relay3", "48.164.4.1"),
+                                             ("owners_initial", 2, "relay0", "42.158.0.1")):
+            evidence = copy.deepcopy(self.evidence)
+            for role in ("client", "exit"):
+                evidence[snapshot][role]["paths"][index].update(relay_node=node, endpoint=f"{address}:41001")
+            with self.assertRaises(ValueError):
+                C["validate"](evidence)
+        evidence = copy.deepcopy(self.evidence)
+        evidence["selection"]["paths"][0]["relay_peer_id"] = evidence["expected_peers"]["relay4"]
+        with self.assertRaises(ValueError):
+            C["selected"](raw_files(evidence)["mptcp-refill-selection.txt"], evidence["expected_peers"])
+
+    def test_r3_capture_rate_and_acceptance_version_cannot_be_omitted(self):
+        for mutate in (
+            lambda e: e["privacy"]["initial"].pop("relay3"),
+            lambda e: e["privacy"]["expanded"]["relay3"].update(interfaces=["r3c", "underlay"]),
+            lambda e: e["rate_limits"].pop("relay3"),
+            lambda e: e.update(acceptance_version=1),
+            lambda e: e.pop("acceptance_version"),
+        ):
+            evidence = copy.deepcopy(self.evidence)
+            mutate(evidence)
+            with self.assertRaises(ValueError):
+                C["validate"](evidence)
+
+    def test_selected_r3_needs_payload_on_both_physical_wg_legs(self):
+        evidence = copy.deepcopy(self.evidence)
+        for snapshot in ("owners_initial", "owners_refilled"):
+            for role in ("client", "exit"):
+                evidence[snapshot][role]["paths"][2].update(relay_node="relay3", endpoint="48.164.4.1:41001")
+        evidence["injection"]["warm_interface"] = "xr3"
+        for capture, counter in (("relay3", "client_leg_wireguard_data_datagrams"),
+                                 ("relay3", "exit_leg_wireguard_data_datagrams"),
+                                 ("client", "relay3_wireguard_data_datagrams"),
+                                 ("exit", "relay3_wireguard_data_datagrams")):
+            changed = copy.deepcopy(evidence)
+            changed["privacy"]["initial"][capture][counter] = 0
+            with self.assertRaisesRegex(ValueError, "original selected WG legs"):
+                C["validate"](changed)
+
+    def test_shell_preserves_exact_selection_stage_failure(self):
+        # Source definitions only and replace selection before calling run. The terminating
+        # fail stub ensures no network/application function can execute in this unit test.
+        script = str(Path(__file__).with_name("mptcp-refill-smoke.sh"))
+        for suffix in ("CONNECT_UNAVAILABLE", "SELECTION_INVALID", "OWNER_EVIDENCE_UNAVAILABLE",
+                       "ORIGINAL_RELAY_SET_INVALID"):
+            blocker = f"MPTCP_REFILL_{suffix}"
+            result = subprocess.run(["sh", "-c", '''
+                . "$1"
+                expected=$2
+                mptcp_refill_select() { mref_selection_blocker=$expected; return 1; }
+                fail() { printf '%s\\n' "$1"; exit 77; }
+                mptcp_refill_run
+            ''', "refill-selection-test", script, blocker], capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 77, result.stderr)
+            self.assertEqual(result.stdout.strip(), blocker)
+
     def test_raw_rebuild_and_source_bound_report(self):
         e = self.evidence
         with tempfile.TemporaryDirectory() as temporary:
@@ -112,7 +200,8 @@ class RefillEvidence(unittest.TestCase):
             for phase in ("before", "after"):
                 (work / f"host-state-{phase}.json").write_bytes(host)
             revision = "c" * 40
-            report = dict(schema_version=1, report_kind="volparossa-mptcp-refill-runtime", source_revision=revision,
+            report = dict(schema_version=1, acceptance_version=C["ACCEPTANCE_VERSION"],
+                report_kind="volparossa-mptcp-refill-runtime", source_revision=revision,
                 run_id=e["run_id"], success=True, phase="mptcp-refill-complete", observed_blocker="NONE", transfer=e,
                 cleanup=dict(complete=True, remaining_owned_objects=0),
                 host_state=dict(success=True, unchanged=True, before_sha256=hashlib.sha256(host).hexdigest(),

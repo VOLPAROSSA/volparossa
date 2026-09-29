@@ -9,8 +9,17 @@ mptcp_refill_check() {
 
 mptcp_refill_stop_captures() {
     mref_capture_status=0
+    if [ -n "${mref_r3_capture_pid:-}" ]; then
+        kill -TERM "$mref_r3_capture_pid" 2>/dev/null || true
+    fi
     if [ -n "${mref_r4_capture_pid:-}" ]; then
         kill -TERM "$mref_r4_capture_pid" 2>/dev/null || true
+    fi
+    if [ -n "${mref_r3_capture_pid:-}" ]; then
+        wait "$mref_r3_capture_pid" || mref_capture_status=1
+        mref_r3_capture_pid=
+    fi
+    if [ -n "${mref_r4_capture_pid:-}" ]; then
         wait "$mref_r4_capture_pid" || mref_capture_status=1
         mref_r4_capture_pid=
     fi
@@ -22,6 +31,11 @@ mptcp_refill_stop_captures() {
 
 mptcp_refill_captures() {
     start_privacy_observers "mptcp-refill-$1-privacy" || return 1
+    ip netns exec "$R3" python3 "$WORK/bin/privacy-observer.py" relay3 \
+        "$WORK/mptcp-refill-$1-privacy-relay3.json" "$WORK/mptcp-refill-$1-privacy-relay3.ready" \
+        --mptcp-refill r3c r3x underlay >"$WORK/mptcp-refill-$1-privacy-relay3.log" 2>&1 &
+    mref_r3_capture_pid=$!
+    wait_observer "$mref_r3_capture_pid" "$WORK/mptcp-refill-$1-privacy-relay3.ready" || return 1
     ip netns exec "$R4" python3 "$WORK/bin/privacy-observer.py" relay4 \
         "$WORK/mptcp-refill-$1-privacy-relay4.json" "$WORK/mptcp-refill-$1-privacy-relay4.ready" \
         --mptcp-refill r4c r4x underlay >"$WORK/mptcp-refill-$1-privacy-relay4.log" 2>&1 &
@@ -37,7 +51,7 @@ mptcp_refill_cleanup() {
             warm) mref_owned=${mref_warm_owned:-false}; mref_interface=${mref_warm_interface:-}; mref_handle=7b02: ;;
         esac
         [ "$mref_owned" = true ] || continue
-        case $mref_interface in xr0|xr1|xr2) ;; *) return 1 ;; esac
+        case $mref_interface in xr0|xr1|xr2|xr3) ;; *) return 1 ;; esac
         ip netns exec "$EXIT_NODE" tc -j -s qdisc show dev "$mref_interface" \
             >"$WORK/mptcp-refill-$mref_kind-cleanup.json" || return 1
         if jq -e --arg handle "$mref_handle" 'length == 1 and .[0].kind == "netem" and .[0].handle == $handle' \
@@ -53,7 +67,7 @@ mptcp_refill_cleanup() {
         case $mref_kind in risky) mref_risky_owned=false ;; warm) mref_warm_owned=false ;; esac
     done
     for mref_number in ${mref_rate_owned:-}; do
-        case $mref_number in 0) mref_ns=$R0 ;; 1) mref_ns=$R1 ;; 2) mref_ns=$R2 ;; 4) mref_ns=$R4 ;; *) return 1 ;; esac
+        case $mref_number in 0) mref_ns=$R0 ;; 1) mref_ns=$R1 ;; 2) mref_ns=$R2 ;; 3) mref_ns=$R3 ;; 4) mref_ns=$R4 ;; *) return 1 ;; esac
         ip netns exec "$mref_ns" tc -j qdisc show dev "r${mref_number}c" \
             >"$WORK/mptcp-refill-rate-$mref_number-cleanup.json" || return 1
         if jq -e 'length == 1 and .[0].kind == "tbf" and .[0].handle == "7b03:"' \
@@ -87,13 +101,31 @@ mptcp_refill_progress() {
     return 1
 }
 
+mptcp_refill_record_selection_failure() {
+    printf 'draw=%s blocker=%s\n' "$mref_draw" "$mref_selection_blocker" \
+        >>"$WORK/mptcp-refill-selection-attempts.log"
+    case $mref_selection_blocker in
+        MPTCP_REFILL_CONNECT_UNAVAILABLE) mref_error=connect ;;
+        MPTCP_REFILL_SELECTION_INVALID) mref_error=selection ;;
+        MPTCP_REFILL_OWNER_EVIDENCE_UNAVAILABLE) mref_error=owners ;;
+        MPTCP_REFILL_ORIGINAL_RELAY_SET_INVALID) mref_error=original-relays ;;
+        *) return 1 ;;
+    esac
+    if [ -f "$WORK/mptcp-refill-$mref_error.err" ]; then
+        head -c 2048 "$WORK/mptcp-refill-$mref_error.err" >>"$WORK/mptcp-refill-selection-attempts.log"
+    fi
+}
+
 mptcp_refill_select() {
     mref_deadline=$(($(date +%s) + 600))
     mref_draw=0
+    mref_selection_blocker=MPTCP_REFILL_CONNECT_UNAVAILABLE
     while [ "$mref_draw" -lt 64 ] && [ "$(date +%s)" -lt "$mref_deadline" ]; do
+        mref_selection_blocker=MPTCP_REFILL_CONNECT_UNAVAILABLE
         if timeout --signal=TERM --kill-after=5s 90s "$binary_directory/volparossa" \
             --control-socket "$WORK/runtime-client/control/agent.sock" connect --transport mptcp \
             >"$WORK/mptcp-refill-connect.out" 2>"$WORK/mptcp-refill-connect.err"; then
+            mref_selection_blocker=MPTCP_REFILL_SELECTION_INVALID
             "$binary_directory/volparossa" --control-socket "$WORK/runtime-client/control/agent.sock" paths \
                 >"$WORK/mptcp-refill-selection.txt" || return 1
             if mptcp_refill_check select "$WORK/mptcp-refill-selection.txt" "$WORK/a01-expected-peers.json" \
@@ -103,14 +135,19 @@ mptcp_refill_select() {
                     >"$WORK/mptcp-refill-layout-initial.json" || return 1
                 "$WORK/bin/examples/http3-acceptance-fixture" route-layout "$mref_context" 4 \
                     >"$WORK/mptcp-refill-layout-refilled.json" || return 1
+                mref_selection_blocker=MPTCP_REFILL_OWNER_EVIDENCE_UNAVAILABLE
                 if mptcp_refill_check owners "$WORK/mptcp-refill-layout-initial.json" \
-                    "$WORK/mptcp-refill-owners-initial.json" 2>"$WORK/mptcp-refill-owners.err" \
-                    && jq -e 'all(.[]; ([.paths[].relay_node] | sort) == ["relay0","relay1","relay2"])' \
-                        "$WORK/mptcp-refill-owners-initial.json" >/dev/null; then return 0; fi
+                    "$WORK/mptcp-refill-owners-initial.json" 2>"$WORK/mptcp-refill-owners.err"; then
+                    mref_selection_blocker=MPTCP_REFILL_ORIGINAL_RELAY_SET_INVALID
+                    if mptcp_refill_check original-relays "$WORK/mptcp-refill-owners-initial.json" \
+                        2>"$WORK/mptcp-refill-original-relays.err"; then return 0; fi
+                fi
             fi
+            mptcp_refill_record_selection_failure || return 1
             benchmark_disconnect_route mptcp-refill-draw || return 1
             mref_draw=$((mref_draw + 1))
         else
+            mptcp_refill_record_selection_failure || return 1
             a01_transient_connect_unavailable "$WORK/mptcp-refill-connect.err" || return 1
         fi
         sleep 1
@@ -120,13 +157,13 @@ mptcp_refill_select() {
 
 mptcp_refill_run() {
     PHASE=mptcp-refill-selection
-    mptcp_refill_select || fail MPTCP_REFILL_ORIGINAL_ROUTE_UNAVAILABLE
+    mptcp_refill_select || fail "$mref_selection_blocker"
     jq -n --arg run "$RUN_ID" '{run_id:$run}' >"$WORK/mptcp-refill-run.json"
     mref_risky=$(jq -er '.paths[0].path_id' "$WORK/mptcp-refill-selection.json")
     mref_warm=$(jq -er '[1,2,3] - [.paths[].path_id] | .[0]' "$WORK/mptcp-refill-selection.json")
     mref_risky_node=$(jq -er --argjson p "$mref_risky" '.exit.paths[] | select(.path_id == $p) | .relay_node' "$WORK/mptcp-refill-owners-initial.json")
     mref_warm_node=$(jq -er --argjson p "$mref_warm" '.exit.paths[] | select(.path_id == $p) | .relay_node' "$WORK/mptcp-refill-owners-initial.json")
-    case $mref_risky_node:$mref_warm_node in relay[012]:relay[012]) ;; *) fail MPTCP_REFILL_INJECTION_SCOPE_INVALID ;; esac
+    case $mref_risky_node:$mref_warm_node in relay[0123]:relay[0123]) ;; *) fail MPTCP_REFILL_INJECTION_SCOPE_INVALID ;; esac
     mref_risky_interface=xr${mref_risky_node#relay}; mref_warm_interface=xr${mref_warm_node#relay}
     for mref_kind in risky warm; do
         case $mref_kind in risky) mref_interface=$mref_risky_interface ;; warm) mref_interface=$mref_warm_interface ;; esac
@@ -138,8 +175,8 @@ mptcp_refill_run() {
         '{risky_path:$risky,warm_path:$warm,risky_interface:$r,warm_interface:$w,namespace_role:"exit",initial_loss_percent:15,final_loss_percent:100}' \
         >"$WORK/mptcp-refill-injection.json"
     mref_rate_owned=
-    for mref_number in 0 1 2 4; do
-        case $mref_number in 0) mref_ns=$R0 ;; 1) mref_ns=$R1 ;; 2) mref_ns=$R2 ;; 4) mref_ns=$R4 ;; esac
+    for mref_number in 0 1 2 3 4; do
+        case $mref_number in 0) mref_ns=$R0 ;; 1) mref_ns=$R1 ;; 2) mref_ns=$R2 ;; 3) mref_ns=$R3 ;; 4) mref_ns=$R4 ;; esac
         ip netns exec "$mref_ns" tc -j qdisc show dev "r${mref_number}c" >"$WORK/mptcp-refill-rate-$mref_number-before.json"
         jq -e 'length == 1 and .[0].kind == "noqueue" and .[0].handle == "0:"' "$WORK/mptcp-refill-rate-$mref_number-before.json" >/dev/null \
             || fail MPTCP_REFILL_FOREIGN_QDISC
@@ -262,11 +299,11 @@ mptcp_refill_finalize_report() {
     jq -cn --arg revision "$expected_commit" --arg run_id "$RUN_ID" --arg phase "$PHASE" --arg blocker "$OBSERVED_BLOCKER" \
         --argjson status "$1" --argjson evidence "$mref_evidence" --argjson complete "$CLEANUP_COMPLETE" \
         --argjson remaining "$REMAINING_OWNED_OBJECTS" --slurpfile host "$WORK/a15-evidence.json" '
-        {schema_version:1,report_kind:"volparossa-mptcp-refill-runtime",source_revision:$revision,run_id:$run_id,phase:$phase,
+        {schema_version:1,acceptance_version:2,report_kind:"volparossa-mptcp-refill-runtime",source_revision:$revision,run_id:$run_id,phase:$phase,
          success:($status == 0 and $evidence.success == true and $complete and $remaining == 0 and $host[0].unchanged == true),
          transfer:$evidence,observed_blocker:(if $blocker == "" then null else $blocker end),
          cleanup:{complete:$complete,remaining_owned_objects:$remaining},host_state:($host[0] | del(.acceptance_id)),
-         scope:"same application and MPTCP meta socket adds an eligible Relay outside the original owned path set; kernel/WG observations, not exported signed capability inspection; no speed or full-alpha claim"}' \
+         scope:"v2: three distinct original relays from R0-R3; same application and MPTCP meta socket adds fresh R4 outside that set; kernel/WG observations, not exported signed capability inspection; no speed or full-alpha claim"}' \
         >"$WORK/mptcp-refill-smoke.json" || return 1
     for mref_artifact in "$WORK"/mptcp-refill-*.json "$WORK"/mptcp-refill-*.txt "$WORK"/mptcp-refill-*.yaml \
         "$WORK"/mptcp-refill-*.out "$WORK"/mptcp-refill-*.err "$WORK"/mptcp-refill-*.log; do

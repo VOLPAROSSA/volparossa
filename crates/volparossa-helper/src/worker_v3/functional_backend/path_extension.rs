@@ -734,7 +734,7 @@ mod tests {
                 route.exit_key(),
                 now,
                 original_parent.expires_at_ms,
-                [41; 32],
+                volparossa_protocol::generate_nonce(),
                 TimePolicy::default(),
             )
             .expect("signed extension"),

@@ -326,8 +326,8 @@ print_plan() {
         return
     fi
     if [ "$scenario" = mptcp-refill ]; then
-        printf '%s\n' 'VOLPAROSSA same-flow fresh Relay refill:' \
-            '  initial two active plus one warm Relay, original authority allows four paths;' \
+        printf '%s\n' 'VOLPAROSSA same-flow fresh Relay refill (acceptance v2):' \
+            '  any three distinct original Relays from R0-R3: two active plus one warm; authority allows four paths;' \
             '  impair one initial path and the already observed warm path only on disposable links;' \
             '  expose R4 capacity 1 to 32 Mbps after warm retirement; require real new A1/native admission;' \
             '  preserve original MPTCP socket and verify fresh R4 payload plus full 256 MiB hash;' \
@@ -4020,7 +4020,7 @@ direct_lan_relay1 = interfaces[:1] == ["--direct-lan-relay1"]
 if direct_lan_relay1:
     interfaces.pop(0)
 if (role not in {"client", "relay0", "relay1", "relay2", "exit"}
-        and not (role == "relay4" and refill_mode)
+        and not (role in {"relay3", "relay4"} and refill_mode)
         and not (role == "content-control" and content_control_pairs)) or not interfaces:
     raise SystemExit("invalid privacy observer arguments")
 client_addresses = {"43.159.1.1"}
@@ -4055,6 +4055,7 @@ counters = {
     "unexpected_outer_tuple_overflow_packets": 0,
 }
 if refill_mode:
+    counters["relay3_wireguard_data_datagrams"] = 0
     counters["relay4_wireguard_data_datagrams"] = 0
 link_down_interfaces = {}
 unexpected_outer_tuples = {}
@@ -4400,9 +4401,11 @@ for readable in capture_rounds():
                     destination,
                 } == {"43.159.1.1", "45.161.2.1"}:
                     counters["relay2_wireguard_data_datagrams"] += 1
+                if refill_mode and is_wireguard_data and interface == "cr3" and {source, destination} == {"43.159.1.1", "48.164.4.1"}:
+                    counters["relay3_wireguard_data_datagrams"] += 1
                 if refill_mode and is_wireguard_data and interface == "cr4" and {source, destination} == {"43.159.1.1", "49.165.5.1"}:
                     counters["relay4_wireguard_data_datagrams"] += 1
-            elif role in {"relay0", "relay1", "relay2"} or (role == "relay4" and refill_mode):
+            elif role in {"relay0", "relay1", "relay2"} or (role in {"relay3", "relay4"} and refill_mode):
                 # The Relay underlay also carries the fixed discovery topology. These public
                 # addresses are control-plane peers, not the forbidden Internet destination
                 # 47.163.4.2 whose appearance in an outer header is counted separately above.
@@ -4435,6 +4438,10 @@ for readable in capture_rounds():
                         "10.241.21.1",
                         "10.241.21.2",
                     }
+                elif role == "relay3":
+                    client_interface, exit_interface = "r3c", "r3x"
+                    relay_public = "48.164.4.1"
+                    allowed = topology_control_public | {"10.241.13.1", "10.241.13.2", "10.241.23.1", "10.241.23.2"}
                 elif role == "relay4":
                     client_interface, exit_interface = "r4c", "r4x"
                     relay_public = "49.165.5.1"
@@ -4497,6 +4504,8 @@ for readable in capture_rounds():
                     destination,
                 } == {"45.161.2.1", "46.162.3.1"}:
                     counters["relay2_wireguard_data_datagrams"] += 1
+                if refill_mode and is_wireguard_data and interface == "xr3" and {source, destination} == {"48.164.4.1", "46.162.3.1"}:
+                    counters["relay3_wireguard_data_datagrams"] += 1
                 if refill_mode and is_wireguard_data and interface == "xr4" and {source, destination} == {"49.165.5.1", "46.162.3.1"}:
                     counters["relay4_wireguard_data_datagrams"] += 1
 

@@ -35,7 +35,27 @@ A separate `mptcp-refill` disposable scenario is prepared to require exhaustion 
 original warm path, a newly eligible fourth relay path,
 the same MPTCP socket/context, actual bytes on that new path, retained original paths, full
 payload verification, privacy captures and complete cleanup. Existing `mptcp-growth` evidence
-keeps its original, narrower meaning. No new refill VM run or alpha-completion claim is made.
+keeps its original, narrower meaning.
+
+The [first refill run on `ab0a1e6f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36575021665)
+remains **failed**. The connect command returned `ok`; the fixture then rejected an unknown
+physical relay endpoint while collecting owned namespaces. The old report's generic
+`MPTCP_REFILL_ORIGINAL_ROUTE_UNAVAILABLE` is not evidence that route creation failed.
+Cleanup completed with zero owned objects and unchanged host state, but no transfer proof.
+Only post-disconnect network diagnostics were retained, so the exact rejected endpoint cannot
+be reconstructed. R3 is demonstrably eligible in this topology but absent from the old
+classifier; that omission is not proof of the literal endpoint seen in the failed run.
+
+The next candidate uses explicit refill acceptance version 2: any three distinct original
+relays from R0–R3, with R4 still absent initially and required as the exact fresh fourth path.
+It captures/shapes all R0–R4 and requires both physical WireGuard legs of every selected
+original relay, plus the fresh R4 path, to carry real data. Same socket/context, retained
+interfaces, substantial per-path byte progress, full payload hash and owned cleanup remain
+mandatory. Bounded per-draw diagnostics record the actual failed selection stage and unknown
+endpoint before disconnect, without WireGuard keys. Nine refill, nine historical growth and
+eleven generated privacy-observer checks pass. The fixture also fixes one formatting-sensitive
+source test and uses a freshly generated nonce in the helper test; no runtime check is removed.
+The new source still needs its own disposable live run. No refill or alpha completion is claimed.
 
 Firefox integration is being developed separately in
 [VOLPAROSSA/volparossa-browser](https://github.com/VOLPAROSSA/volparossa-browser).

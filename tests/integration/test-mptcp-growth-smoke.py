@@ -105,6 +105,40 @@ def raw_files(evidence):
 
 
 class MptcpGrowthEvidence(unittest.TestCase):
+    def test_eligible_control_relay_can_be_classified_without_accepting_it_as_data_path(self):
+        path = dict(path_id=3, client_interface="vpc3", exit_interface="vpe3")
+        self.assertEqual(CHECK["relay_endpoint"]("not-recorded-key 48.164.4.1:41001\n",
+                         role="client", pid=1234, namespace="5678", path=path),
+                         ("48.164.4.1:41001", "relay3"))
+        evidence = fixture()
+        evidence["owners"]["client"]["paths"][2].update(relay_node="relay3", endpoint="48.164.4.1:41001")
+        with self.assertRaisesRegex(ValueError, "three distinct owned relay paths missing"):
+            CHECK["validate"](evidence)
+
+    def test_unknown_wg_endpoint_keeps_owned_context_before_disconnect_but_not_peer_key(self):
+        path = dict(path_id=2, client_interface="vpc2", exit_interface="vpe2")
+        for endpoint in ("10.241.11.2:41001", "46.162.3.1:41001", "203.0.113.99:41001"):
+            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError) as raised:
+                CHECK["relay_endpoint"](f"never-export-this-wg-key {endpoint}\n",
+                    role="client", pid=1234, namespace="5678", path=path)
+            message = str(raised.exception)
+            self.assertTrue(message.startswith("MPTCP_OWNER_UNKNOWN_RELAY_ENDPOINT "))
+            self.assertNotIn("never-export-this-wg-key", message)
+            self.assertEqual(json.loads(message.split(" ", 1)[1]), dict(
+                role="client", pid=1234, netns="5678", path_id=2, interface="vpc2", endpoint=endpoint))
+
+    def test_wg_endpoint_port_and_peer_ambiguity_stay_fail_closed(self):
+        path = dict(path_id=1, client_interface="vpc1", exit_interface="vpe1")
+        for endpoint in ("42.158.0.1:0", "42.158.0.1:65536", "42.158.0.1:-1",
+                         "42.158.0.1:x", "x" * 200):
+            with self.subTest(endpoint=endpoint), self.assertRaisesRegex(ValueError, "INVALID_RELAY_ENDPOINT"):
+                CHECK["relay_endpoint"](f"secret-key {endpoint}\n",
+                    role="exit", pid=1234, namespace="5678", path=path)
+        with self.assertRaisesRegex(ValueError, "AMBIGUOUS_WG_PEER") as raised:
+            CHECK["relay_endpoint"]("secret-one 42.158.0.1:41001\nsecret-two 44.160.1.1:41001\n",
+                role="exit", pid=1234, namespace="5678", path=path)
+        self.assertNotIn("secret", str(raised.exception))
+
     @classmethod
     def setUpClass(cls):
         cls.evidence = fixture()
