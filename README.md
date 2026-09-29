@@ -223,20 +223,26 @@ or permission to redistribute everything a user receives.
 
 ### Private cloud storage, separate from the cache
 
-The developing cloud-storage service retains **application-encrypted backups**, not public
+The developing cloud-storage service is designed for **application-encrypted backups**, not public
 content or training data. Storage peers hold opaque chunks; recovery keys stay with the owner.
 Message delivery and backup retention are separate: reading a message may acknowledge its
 delivery, but restoring a backup must not consume or delete that backup.
 
-Contribution follows actual usage: each participant offers at least as much usable storage
-as they consume remotely, including recovery copies and counted overhead. A 1 GB archive
-with two full copies therefore requires roughly 2 GB plus overhead—not merely 1 GB.
+The contribution design follows **actual remote physical usage**, including every recovery
+copy and counted overhead. A 1 GB archive with two full copies therefore requires roughly
+2 GB plus overhead—not merely 1 GB. If usage falls, the contribution target falls too; space
+holding someone else's live data is released only after an acknowledged handoff to verified,
+independent replacements. Without those replacements, it remains visibly **pending drain**.
 
-The first local-provider implementation reserves capacity before upload, verifies streamed
-chunks, retains data across restart and supports non-consuming restore, renewal and explicit
-deletion. A 1 GiB local disk-backed trial passes. Protected peer transfer, distributed
-contribution accounting, redundancy repair and native Signal backup restore are still open;
-local storage is not yet decentralized cloud backup.
+The core now has durable, resumable storage with provider-granted, owner-authenticated
+operations and a stream library for attachment to existing protected connections. Uploads
+reserve their full capacity, resume after restart and verify the original ciphertext before
+commit. Restores do not consume the backup; deletion retries cannot bring it back.
+A real 1 GiB local trial passes restart/resume and two complete hash-verified restores.
+
+Actual peer attachment, application IPC, adaptive contribution accounting, redundancy repair
+and native Signal backup restore remain open. The current local and framed-stream proofs
+are steps toward decentralized cloud backup, not a completed cloud service.
 
 [Private storage scope and commands →](docs/PRIVATE_STORAGE.md)
 

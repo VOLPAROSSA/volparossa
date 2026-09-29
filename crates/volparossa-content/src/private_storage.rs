@@ -2,8 +2,10 @@
 //!
 //! This store does not encrypt or recognize Signal formats. It preserves opaque bytes and
 //! checks caller-pinned SHA-256 identities. It neither publishes content nor enrolls it for
-//! compute/training. No remote transport, network-wide contribution credit or replication
-//! guarantee is supplied by this local-only API.
+//! compute/training. The local store supplies no network-wide contribution credit or
+//! replication guarantee. The separate protocol/provider/wire modules authenticate bounded
+//! owner operations and retain durable ownership; their caller must supply an independently
+//! authenticated protected stream. They do not establish overlay routes or global reciprocity.
 //!
 //! Each lease owns its own physical ciphertext copy: no cross-lease deduplication changes
 //! accounting. Payload capacity excludes SQLite/filesystem overhead, for which a separate
@@ -13,6 +15,12 @@
 mod archive;
 mod disk;
 mod lease;
+pub mod protocol;
+pub mod provider;
+mod resumable;
+pub mod wire;
+
+pub use resumable::{ArchiveRange, MAX_RANGE_BYTES, MAX_RANGE_CHUNKS, UploadProgress};
 
 use std::{fmt, fs::File, str::FromStr};
 
