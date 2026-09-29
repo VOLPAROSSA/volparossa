@@ -299,6 +299,46 @@ to bypass this result. Original 16-file artifact ZIP SHA-256:
 `74796b2199c6f7cf767c8f412a61cc789cf35578444a11c2948d03e0af3c030d`.
 The uplink/topology cleanup and unchanged guest-parent state pass; the deployment gate stays open.
 
+The [mount-isolated run on `71d0567d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36609662468)
+gets all four sandboxed uplinks and concurrent native UDP contexts running, but still **fails**
+with `PRIVATE_DNS_SUBPROCESS_TIMEOUT`. The fixture's first protected-DNS connect command hits
+its 20-second subprocess limit while admission reports the preselection owner busy; the Client
+then reports `CONNECT_DNS_ROUTE_READY` just after that boundary. No application DNS question
+or private resolver child is observed in this run. This is not proof of reciprocal DNS reuse.
+The candidate gives only that ordinary connect operation its existing 75-second caller budget;
+it does not extend the product's signed flow lifetime or count an expired UDP window as passing.
+The complete 147-file original artifact is retained, ZIP SHA-256
+`c1b5f3f0a692b4ef32d4bc5dca052e60c746eecb3f2c185126197c0a63b6017c`.
+Uplink/topology cleanup passes with zero leftovers and byte-identical host snapshots.
+
+### Bounded protected DNS connection reuse
+
+The Client can now keep a successful UDP DNS association for subsequent questions about
+the **same canonical name**, from the same application source and original resolver tuple,
+under the same policy and selected Relay/Exit. For example, A and AAAA need not create two
+separate routes. Only one question is outstanding; responses must match its transaction ID
+and complete question. Name, application, resolver or policy changes require a new ordinary
+route. TCP DNS retains its one-shot behavior.
+
+Reuse never refreshes signed authorization: the original expiry, a 30-second idle bound and
+a maximum of 16 sequential questions all apply. The Client owns idle retirement even without
+another application request. The Exit also accepts only bounded questions for the original
+signed name, and invalid correlation or resolution fails closed. No browsing history is stored.
+
+Three targeted Rust checks cover A/AAAA correlation, changed owners/policy and unextended
+expiry/request limits. The C05 fixture now keeps a real application socket open for each
+A/AAAA pair and observes actual cumulative bytes on that same route, with separate captures
+and source counters. Explicit retirement still separates Exit changes and the offline-cache
+phase. This is a functional candidate pending a new source-exact live run, not a relabelled
+pass of the original failed route selection.
+
+The reciprocal fixture likewise keeps one real UDP socket for its warm A lookup and
+subsequent A cache hit. PID, socket cookie, source port, sequence and cumulative route
+bytes must agree across separate capture/metric phases. Both answers and the unchanged
+four-node agent/UDP-context snapshots must precede an actual final echo on every original
+flow. One natural 30-second DNS-association retirement is then observed outside that
+concurrent window, without extending signed authorization or disconnecting the other flow.
+
 Focused tests cover configuration rejection, bounded CNAME/TTL/provenance parsing, malformed and
 negative responses, rebinding rejection, and an actual framed TCP backend in a disposable test
 namespace. That backend uses controlled DNS responses, **not an executed Unbound daemon**.

@@ -43,8 +43,8 @@ reciprocity_private_dns_run() {
     wait "$PRIVATE_DNS_RUN_PID" || private_dns_status=$?
     PRIVATE_DNS_RUN_PID=
     [ "$private_dns_status" -eq 0 ] || fail PRIVATE_DNS_RECIPROCAL_PROOF_FAILED
-    # Ensure every original UDP flow gets a post-DNS echo before its normal stop barrier.
-    sleep 0.5
+    # Python verified each actual post-DNS echo before setting the existing stop
+    # barrier, then observed shared DNS-association idle cleanup outside that window.
 }
 
 reciprocity_private_dns_stop() {

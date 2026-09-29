@@ -1246,7 +1246,35 @@ pub(crate) struct PolicyAuthorizedDnsIngress {
     expires_at_ms: u64,
 }
 
+/// Plain in-memory correlation metadata, never route/signing authority.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct DnsIngressIdentity {
+    source: SocketAddr,
+    resolver: SocketAddr,
+    hostname: String,
+    policy_hash: [u8; 32],
+}
+
 impl PolicyAuthorizedDnsIngress {
+    pub(crate) fn reuse_identity(&self) -> DnsIngressIdentity {
+        DnsIngressIdentity {
+            source: self.source,
+            resolver: self.resolver,
+            hostname: self.hostname.clone(),
+            policy_hash: self.policy_hash,
+        }
+    }
+
+    pub(crate) fn dns_payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    pub(crate) fn is_current(&self, policy: &VerifiedManifest, now_ms: u64) -> bool {
+        now_ms < self.expires_at_ms
+            && self.policy_hash.ct_eq(policy.policy_hash()).unwrap_u8() == 1
+            && policy.authorize_dns_name(now_ms, &self.hostname).is_ok()
+    }
+
     pub(crate) fn authorize(
         source: SocketAddr,
         resolver: SocketAddr,

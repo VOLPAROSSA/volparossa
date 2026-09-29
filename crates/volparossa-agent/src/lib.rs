@@ -1089,7 +1089,19 @@ async fn run_client_dns_ingress(
         return;
     };
     loop {
+        let retirement = routes.reusable_dns_retirement_deadline().await;
         let ready = tokio::select! {
+            () = async {
+                if let Some(deadline) = retirement {
+                    tokio::time::sleep_until(deadline).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                let _transaction = routes.lock_dns_transaction().await;
+                routes.retire_expired().await;
+                continue;
+            }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     routes.disconnect().await;
@@ -1171,21 +1183,32 @@ async fn run_client_dns_ingress(
                 transaction
             },
         };
-        if Box::pin(routes.ensure_single_udp(&config, &discovery, &helper))
-            .await
-            .is_err()
-        {
-            state.write().await.log(
-                LogLevel::Warn,
-                "INGRESS_DNS_ROUTE_UNAVAILABLE",
-                unix_millis(),
-            );
+        // Admission may have waited for another query; don't reuse a revoked policy snapshot.
+        let Some(policy) = state.read().await.active_policy(unix_millis()) else {
+            routes.disconnect().await;
             continue;
-        }
-        if Box::pin(routes.activate_dns_ingress(ingress, &policy, unix_millis()))
-            .await
-            .is_err()
-        {
+        };
+        let sent_query = match routes.try_send_reusable_dns(&ingress, &policy).await {
+            Ok(true) => true,
+            Ok(false) => {
+                if Box::pin(routes.ensure_single_udp(&config, &discovery, &helper))
+                    .await
+                    .is_err()
+                {
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "INGRESS_DNS_ROUTE_UNAVAILABLE",
+                        unix_millis(),
+                    );
+                    continue;
+                }
+                Box::pin(routes.activate_reusable_dns_ingress(ingress, &policy, unix_millis()))
+                    .await
+                    .is_ok()
+            }
+            Err(_) => false,
+        };
+        if !sent_query {
             routes.disconnect().await;
             state
                 .write()
@@ -1223,7 +1246,9 @@ async fn run_client_dns_ingress(
             )
             .await
             .is_ok();
-        routes.disconnect().await;
+        if !sent {
+            routes.disconnect().await;
+        }
         state.write().await.log(
             if sent { LogLevel::Info } else { LogLevel::Warn },
             if sent {
@@ -1372,9 +1397,12 @@ async fn run_client_dns_tcp_ingress(
                     transaction
                 },
             };
-            if Box::pin(routes.ensure_single_udp(&config, &discovery, &helper))
-                .await
-                .is_err()
+            // UDP may retain a same-name association between queries. A TCP request
+            // explicitly retires that owner first and keeps its original one-shot behavior.
+            if routes.disconnect_reusable_dns().await.is_err()
+                || Box::pin(routes.ensure_single_udp(&config, &discovery, &helper))
+                    .await
+                    .is_err()
                 || Box::pin(routes.activate_dns_ingress(ingress, &policy, unix_millis()))
                     .await
                     .is_err()

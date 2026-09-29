@@ -13,6 +13,7 @@
 
 mod bootstrap;
 mod browser_failure;
+mod dns_reuse;
 mod path_growth;
 mod path_telemetry;
 mod retirement;
@@ -24,6 +25,7 @@ pub(crate) use selection_bridge::{
 
 use bootstrap::BootstrapOwner;
 use browser_failure::BrowserFailureStage;
+use dns_reuse::ReusableDns;
 use path_growth::{GrowthDecision, WarmPathGrowth};
 use path_telemetry::PathTelemetry;
 
@@ -322,6 +324,8 @@ impl EstablishedClientRoute {
                 ClientTransportState::NativeUdp(active)
                     if active.flow_expired(wall_now_ms, monotonic_now)
             )
+            || matches!(&self.transport, ClientTransportState::UdpActive(active)
+                if active.reusable_dns.as_ref().is_some_and(|dns| dns.expired(wall_now_ms, monotonic_now)))
     }
 
     const fn progress(&self) -> ClientRouteProgress {
@@ -2088,6 +2092,28 @@ impl ClientRouteControl {
         policy: &VerifiedManifest,
         now_ms: u64,
     ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        Box::pin(self.activate_dns_ingress_mode(ingress, policy, now_ms, false)).await
+    }
+
+    pub(crate) async fn activate_reusable_dns_ingress(
+        &self,
+        ingress: PolicyAuthorizedDnsIngress,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        Box::pin(self.activate_dns_ingress_mode(ingress, policy, now_ms, true)).await
+    }
+
+    #[allow(clippy::too_many_lines)] // Keep consuming activation and cleanup ownership together.
+    async fn activate_dns_ingress_mode(
+        &self,
+        ingress: PolicyAuthorizedDnsIngress,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+        reusable: bool,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        let reusable_input =
+            reusable.then(|| (ingress.reuse_identity(), ingress.dns_payload().to_vec()));
         self.retire_expired_route(now_ms, Instant::now()).await;
         let previous = {
             let mut state = self.state.lock().await;
@@ -2145,11 +2171,21 @@ impl ClientRouteControl {
             return Err(ClientRouteConnectError::UdpIngressUnavailable);
         };
         let (flow, signed_authorization) = authorized.activation();
+        let reusable_dns = reusable_input.map(|(identity, request)| {
+            Box::new(ReusableDns::new(
+                identity,
+                request,
+                flow.expires_at_ms(),
+                now_ms,
+                Instant::now(),
+            ))
+        });
         match ready
             .activate(flow, signed_authorization, MAXIMUM_CALL_DURATION, now_ms)
             .await
         {
             Ok(mut active) => {
+                active.reusable_dns = reusable_dns;
                 active.return_path = Some(ClientUdpReturnPath {
                     application: authorized.source(),
                     remote: authorized.destination(),
@@ -2336,6 +2372,9 @@ impl ClientRouteControl {
             .await
             .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
             .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        if let Some(dns) = &mut active.reusable_dns {
+            dns.accept_response(&payload, crate::unix_millis(), Instant::now())?;
+        }
         active.observation.record_received(payload.len())?;
         self.replace_agent_path_projection(ClientPathProjection::Dns(active.observation.project()))
             .await?;
@@ -5587,6 +5626,7 @@ pub(crate) struct ActiveProductionUdpRoute {
     route: ProductionRoute,
     observation: DnsPathObservation,
     return_path: Option<ClientUdpReturnPath>,
+    reusable_dns: Option<Box<ReusableDns>>,
 }
 
 struct DnsPathObservation {
@@ -6179,6 +6219,7 @@ impl CertificateBoundProductionUdpRoute {
                     received_bytes: 0,
                 },
                 return_path: None,
+                reusable_dns: None,
             }),
             Err(_error) => Err(ProductionUdpActivationFailure {
                 route,
@@ -6199,6 +6240,7 @@ impl ActiveProductionUdpRoute {
             client,
             observation: _,
             return_path: _,
+            reusable_dns: _,
         } = self;
         client.shutdown().await;
         route

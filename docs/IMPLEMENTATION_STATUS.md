@@ -3428,6 +3428,13 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   then fails before DNS at `PRIVATE_DNS_UPLINK_ENDED`: the guest-only slirp sandbox cannot
   pivot into `/tmp`. Uplink/topology cleanup and unchanged guest-parent state pass. This
   establishes neither reciprocal DNS success nor a reason to disable the sandbox.
+  The new protected UDP-DNS reuse candidate retains the exact application/resolver/name,
+  policy and original selected route for at most 16 sequential questions, 30 idle seconds
+  and the original signed expiry. One outstanding question requires exact response-ID and
+  question correlation; changed bindings get a new ordinary route, and TCP stays one-shot.
+  Three focused Rust tests pass. C05 now observes A/AAAA on one actual application socket
+  and route with separate captures, then explicitly retires before Exit/offline phases.
+  Eight focused fixture checks pass; source-exact live proof is pending.
 
 The positive DNSSEC cache is now composed into the normal agent: the same bounded RAM resolver
 serves protected DNS, TCP resolution, general UDP and browser-QUIC destination pinning. Its peer

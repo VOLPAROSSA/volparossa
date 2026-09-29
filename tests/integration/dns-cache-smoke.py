@@ -23,6 +23,8 @@ def module(filename, name):
 WIRE = module("dns-cache-fixture.py", "dns_fixture")
 CAPTURE = module("dns-cache-capture.py", "dns_capture")
 PHASES = CAPTURE.PHASES
+PAIRS = (("warm-a-a", "warm-a-aaaa"), ("peer-b-a", "peer-b-aaaa"),
+         ("local-b-a", "local-b-aaaa"))
 METRICS = tuple("volparossa_dns_" + suffix for suffix in (
     "upstream_validated_total", "peer_validated_total", "local_validated_total",
     "trusted_fallback_total", "cache_miss_replies_total"))
@@ -69,6 +71,12 @@ def metrics():
 
 
 def query(name, family):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as application:
+        application.bind(("0.0.0.0", 0))
+        return query_on_socket(name, family, application, 1)
+
+
+def query_on_socket(name, family, application, sequence):
     WIRE.require_isolated()
     require(name in (WIRE.CANDIDATE, "destination.volparossa.test") and family in ("A", "AAAA"), "fixed DNS question")
     kind = 1 if family == "A" else 28
@@ -76,10 +84,10 @@ def query(name, family):
     question = WIRE.name_wire(name) + struct.pack("!HH", kind, 1)
     request = struct.pack("!6H", transaction, 0x0100, 1, 0, 0, 0) + question
     started = time.monotonic()
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as application:
-        application.settimeout(30)
-        application.sendto(request, ("9.9.9.9", 53))
-        response, source = application.recvfrom(4097)
+    started_at_ms = int(time.time() * 1000)
+    application.settimeout(30)
+    application.sendto(request, ("9.9.9.9", 53))
+    response, source = application.recvfrom(4097)
     require(source == ("9.9.9.9", 53) and 12 <= len(response) <= 4096, "DNS transparent source/size")
     header = struct.unpack_from("!6H", response)
     require(header[0] == transaction and header[1] & 0x8000 and not header[1] & 0x7A0F
@@ -103,12 +111,49 @@ def query(name, family):
             "application_protocol": "UDP", "resolver": {"ip": "9.9.9.9", "port": 53},
             "response_source": {"ip": source[0], "port": source[1]},
             "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "started_at_unix_ms": started_at_ms,
             "completed_at_unix_ms": int(time.time() * 1000),
             "request_bytes": len(request), "response_bytes": len(response),
+            "application_socket": socket_identity(application), "request_sequence": sequence,
             "response_sha256": hashlib.sha256(response).hexdigest(), "ad_used_as_proof": False}
 
 
-def selection(text, peers, wanted):
+def socket_identity(application):
+    # Linux SO_COOKIE identifies the same actual open socket, not merely a reused port.
+    cookie = struct.unpack("=Q", application.getsockopt(socket.SOL_SOCKET, 57, 8))[0]
+    address, port = application.getsockname()
+    return {"pid": os.getpid(), "cookie": cookie, "bound_ip": address, "bound_port": port}
+
+
+def query_pair(name, directory, *, repeat=False):
+    WIRE.require_isolated()
+    require(directory.is_dir() and not directory.is_symlink()
+            and directory.stat().st_uid == os.getuid()
+            and directory.stat().st_mode & 0o777 == 0o700, "owned pair control directory")
+
+    def emit(filename, value):
+        target = directory / filename
+        require(not target.exists(), "duplicate pair output")
+        temporary = directory / (filename + ".part")
+        write(temporary, value)
+        temporary.rename(target)
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as application:
+        application.bind(("0.0.0.0", 0))
+        emit("ready.json", socket_identity(application))
+        phases = (("warm", "A"), ("local", "A")) if repeat else (("A", "A"), ("AAAA", "AAAA"))
+        for sequence, (phase, family) in enumerate(phases, 1):
+            trigger = directory / (phase + ".go")
+            deadline = time.monotonic() + 30
+            while not trigger.exists():
+                require(time.monotonic() < deadline, "pair application idle deadline")
+                time.sleep(0.02)
+            require(not trigger.is_symlink() and trigger.is_file() and trigger.stat().st_size == 0,
+                    "pair trigger shape")
+            emit(phase + ".json", query_on_socket(name, family, application, sequence))
+
+
+def selection(text, peers, wanted, previous=None, received_bytes=0):
     require(len(text) <= 65536 and wanted in ("exit", "exit2"), "selection bound")
     rows = [line for line in text.splitlines() if line]
     if not rows:
@@ -123,8 +168,14 @@ def selection(text, peers, wanted):
     result = {"route_context_id": context, "path_id": int(path), "relay_peer_id": relay,
               "relay_node": relays[relay], "exit_peer_id": exit_peer, "exit_node": exits[exit_peer],
               "transport": "protected-dns", "state": int(state), "rtt_us": int(rtt), "reported_bytes": int(count)}
-    require(result["state"] == 1 and result["rtt_us"] == result["reported_bytes"] == 0,
-            "DNS prewarm must report reachability without invented traffic or RTT")
+    if previous is None:
+        require(result["state"] == 1 and result["rtt_us"] == result["reported_bytes"] == 0,
+                "DNS prewarm must report reachability without invented traffic or RTT")
+    else:
+        require(type(received_bytes) is int and 0 < received_bytes <= 8192,
+                "bounded actual DNS response bytes")
+        require(result == dict(previous, state=3, reported_bytes=received_bytes),
+                "DNS reuse must retain exact route and actual received payload count")
     # Both Exits have actual adjacent links to every admitted data relay in this scenario.
     return (0 if result["exit_node"] == wanted else 2), result
 
@@ -156,8 +207,10 @@ def validate_phase(phase, evidence, expected, peers):
             and route["relay_peer_id"] == peers[route["relay_node"]] and route["transport"] == "protected-dns",
             "ordinary DNS route changed endpoint")
     require(re.fullmatch(r"[0-9a-f]{32}", route["route_context_id"]) and route["route_context_id"] != "0" * 32
-            and 1 <= route["path_id"] <= 8 and route["state"] == 1
-            and route["rtt_us"] == route["reported_bytes"] == 0, "DNS route identity/readiness")
+            and 1 <= route["path_id"] <= 8 and route["rtt_us"] == 0
+            and ((route["state"] == 1 and route["reported_bytes"] == 0) if not phase.endswith("aaaa")
+                 else (route["state"] == 3 and 12 <= route["reported_bytes"] <= 4096)),
+            "DNS route identity/readiness")
     CAPTURE.validate_layout(layout)
     require(layout == {"phase": phase, "exit_node": wanted, "relays": {route["relay_node"]: PUBLIC[route["relay_node"]]}},
             "capture route correlation")
@@ -168,6 +221,18 @@ def validate_phase(phase, evidence, expected, peers):
             and app["resolver"] == app["response_source"] == {"ip": "9.9.9.9", "port": 53}
             and app["ad_used_as_proof"] is False and app["ttls"] and all(0 < ttl <= 30 for ttl in app["ttls"]),
             "ordinary DNS answer differs from actual root-validated source")
+    identity = app["application_socket"]
+    require(app["application_protocol"] == "UDP"
+            and type(app["response_bytes"]) is int and 12 <= app["response_bytes"] <= 4096
+            and app["request_sequence"] == (2 if family == "AAAA" else 1)
+            and set(identity) == {"pid", "cookie", "bound_ip", "bound_port"}
+            and type(identity["pid"]) is int and identity["pid"] > 0
+            and type(identity["cookie"]) is int and 0 < identity["cookie"] < 2**64
+            and identity["bound_ip"] == "0.0.0.0" and 0 < identity["bound_port"] <= 65535,
+            "missing actual UDP application socket identity")
+    require(evidence["selection_after"] == dict(route, state=3,
+            reported_bytes=route["reported_bytes"] + app["response_bytes"]),
+            "DNS response not observed on same selected association")
     before, after = evidence["metrics_before"][wanted], evidence["metrics_after"][wanted]
     mode = "upstream_validated" if phase.startswith("warm-") else "peer_validated" if phase.startswith("peer-") \
         else "trusted_fallback" if phase == "unsigned-b" else "local_validated"
@@ -205,13 +270,15 @@ def build_evidence(work):
     for phase in PHASES:
         prefix = "dns-cache-" + phase
         value = {key: read(work / (prefix + "-" + key.replace("_", "-") + ".json"))
-                 for key in ("selection", "application", "layout", "metrics_before", "metrics_after")}
+                 for key in ("selection", "selection_after", "application", "layout", "metrics_before", "metrics_after")}
         value["captures"] = {role: read(work / (prefix + "-capture-" + role + ".json"))
                              for role in ("client", "exit", "exit2", "destination", value["selection"]["relay_node"])}
         result["phases"][phase] = value
     stopped = read(work / "dns-cache-peer-stopped.json")
     result["peer_stopped"] = stopped
     result["upstream"] = {phase: read(work / ("dns-cache-" + phase + "-upstream.json")) for phase in PHASES}
+    result["retirements"] = {group: read(work / ("dns-cache-" + group + "-retirement.json"))
+                             for group in ("warm-a", "peer-b", "unsigned-b", "local-b")}
     validate_evidence(result)
     return result
 
@@ -234,6 +301,23 @@ def validate_evidence(evidence):
     require(evidence["peer_stopped"] == {"node": "exit", "agent_active": False, "main_pid": 0},
             "cache peer not genuinely stopped")
     require(set(evidence["upstream"]) == set(PHASES), "missing bounded upstream observations")
+    for first, second in PAIRS:
+        one, two = (evidence["phases"][phase] for phase in (first, second))
+        require(two["selection"] == one["selection_after"]
+                and one["application"]["application_socket"] == two["application"]["application_socket"]
+                and 0 <= two["application"]["started_at_unix_ms"]
+                    - one["application"]["completed_at_unix_ms"] < 30000,
+                "A/AAAA did not use the same live UDP association within its idle bound")
+    require(set(evidence["retirements"]) == {"warm-a", "peer-b", "unsigned-b", "local-b"},
+            "missing explicit inter-group retirement")
+    contexts = set()
+    for group, last in (("warm-a", "warm-a-aaaa"), ("peer-b", "peer-b-aaaa"),
+                        ("unsigned-b", "unsigned-b"), ("local-b", "local-b-aaaa")):
+        context = evidence["phases"][last]["selection"]["route_context_id"]
+        require(context not in contexts and evidence["retirements"][group] == {
+            "route_context_id": context, "disconnected": True, "remaining_path_rows": 0},
+            "old DNS context reused across explicit retirement or Exit switch")
+        contexts.add(context)
     for phase, value in evidence["phases"].items():
         validate_phase(phase, value, expected, evidence["expected_peers"])
         if phase != "unsigned-b":
@@ -266,12 +350,23 @@ if __name__ == "__main__":
             print(json.dumps(metrics(), sort_keys=True))
         elif mode == "query":
             print(json.dumps(query(args[0], args[1]), sort_keys=True))
+        elif mode == "query-pair":
+            query_pair(args[0], Path(args[1]))
+        elif mode == "query-repeat":
+            query_pair(args[0], Path(args[1]), repeat=True)
         elif mode == "select":
             with Path(args[0]).open(encoding="ascii") as paths:
                 status, value = selection(paths.read(65537), read(Path(args[1])), args[2])
             if value is not None:
                 write(Path(args[3]), value)
             raise SystemExit(status)
+        elif mode == "reuse":
+            previous = read(Path(args[3]))
+            received_bytes = previous["reported_bytes"] + read(Path(args[4]))["response_bytes"]
+            with Path(args[0]).open(encoding="ascii") as paths:
+                status, value = selection(paths.read(65537), read(Path(args[1])), args[2], previous, received_bytes)
+            require(status == 0, "original DNS association unavailable")
+            write(Path(args[5]), value)
         elif mode == "evidence":
             write(Path(args[1]), build_evidence(Path(args[0])))
         elif mode == "report":

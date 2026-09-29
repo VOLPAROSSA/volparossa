@@ -9,6 +9,7 @@ from pathlib import Path
 import platform
 import socket
 import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -24,6 +25,10 @@ def valid_report():
               for i, node in enumerate(nodes)}
     contexts = {node: str(i + 1) * 32 for i, node in enumerate(nodes)}
     counters = {metric: 0 for metric in FIXTURE.DNS.METRICS}
+    shared_idle = dict(mode="shared_association_idle", configured_idle_ms=30_000,
+        route_context_id="a" * 32, after_request_sequence=2,
+        present_after_response=True, within_concurrent_window=False,
+        observed_after_response_ms=30_010, within_original_lifetime=True)
     phases = {}
     for phase, source in (("warm", "upstream_validated"), ("local", "local_validated")):
         captures = {}
@@ -40,10 +45,18 @@ def valid_report():
         before = {node: counters.copy() for node in nodes}
         after = copy.deepcopy(before)
         after["exit"]["volparossa_dns_" + source + "_total"] += 1
-        phases[phase] = dict(phase=phase, selected=dict(exit_node="exit", relay_node="relay0", exit_peer_id="exit-peer"),
-            application=dict(name="iana.org", family="A", addresses=["192.0.43.8"], ad_used_as_proof=False),
+        selected = dict(exit_node="exit", relay_node="relay0", exit_peer_id="exit-peer",
+            relay_peer_id="relay0-peer", path_id=1, route_context_id="a" * 32,
+            state=1 if phase == "warm" else 3, reported_bytes=0 if phase == "warm" else 58)
+        phases[phase] = dict(phase=phase, selected=selected,
+            selected_after=dict(selected, state=3, reported_bytes=selected["reported_bytes"] + 58),
+            application=dict(name="iana.org", family="A", addresses=["192.0.43.8"], ad_used_as_proof=False,
+                application_protocol="UDP", request_sequence=1 if phase == "warm" else 2, response_bytes=58,
+                resolver=dict(ip="9.9.9.9", port=53), response_source=dict(ip="9.9.9.9", port=53),
+                application_socket=dict(pid=123, cookie=456, bound_ip="0.0.0.0", bound_port=45001)),
             metrics_before=before, metrics_after=after, captures=captures, exit_agent=agents["exit"],
-            route_retired=True, native_workers_reaped=True, workers=[])
+            route_retired=True, native_workers_reaped=True, workers=[],
+            retirement=copy.deepcopy(shared_idle))
         if phase == "warm":
             phases[phase]["workers"] = [dict(pid=200, start_ticks=101, parent_pid=agents["exit"]["pid"], uid=1000,
                 netns_inode=agents["exit"]["netns_inode"], inherited_private_pipes=True,
@@ -52,7 +65,9 @@ def valid_report():
         scope=FIXTURE.SCOPE, success=True,
         evidence=dict(success=True, same_agents=True, same_udp_contexts=True, agents_before=copy.deepcopy(agents),
             agents_after=copy.deepcopy(agents), udp_contexts_before=contexts.copy(), udp_contexts_after=contexts.copy(),
-            started_ns=20, completed_ns=30, **phases),
+            started_ns=20, completed_ns=30, echo_stop_requested_ns=41, idle_cleanup_completed_ns=60,
+            post_dns_echo_confirmed=True, application_reaped=True,
+            shared_association_idle=copy.deepcopy(shared_idle), **phases),
         reciprocity=dict(success=True, source_revision="a" * 40,
             flows=[dict(client_node=node, route_context_id=contexts[node], application=dict(first_echo_ns=10, last_echo_ns=40)) for node in nodes],
             nodes=[dict(node=node, roles=dict(client=True, relay=True, exit=True), agent_pid_before=agents[node]["pid"],
@@ -86,6 +101,19 @@ class ReciprocalPrivateDnsTests(unittest.TestCase):
         self.assertEqual(packet("exit", "dnsup0", dst="10.242.93.3")["plaintext_dns_packets"], 1)
         self.assertEqual(packet("client", "underlay", src="43.159.1.1", dst="46.162.3.1", sport=43000, dport=44443)["direct_client_exit_packets"], 1)
 
+    def test_idle_retirement_requires_retained_response_and_original_udp_context(self):
+        original, selected = "1" * 32, "2" * 32
+        native = f"context={original} path=1 relay=relay2-peer exit=exit-peer state=4 rtt_us=10 bytes=100\n"
+        dns = f"context={selected} path=1 relay=relay0-peer exit=exit-peer state=3 rtt_us=0 bytes=58\n"
+        self.assertTrue(FIXTURE.dns_context_present(native + dns, original, selected, 58))
+        self.assertFalse(FIXTURE.dns_context_present(native, original, selected, 58))
+        self.assertTrue(FIXTURE.dns_context_present(dns, original, selected, 58, require_original=False))
+        self.assertFalse(FIXTURE.dns_context_present("", original, selected, 58, require_original=False))
+        for wrong in ("", dns, native + dns + dns, native + dns.replace("bytes=58", "bytes=0"),
+                      native + dns.replace(selected, "3" * 32)):
+            with self.subTest(wrong=wrong), self.assertRaises(ValueError):
+                FIXTURE.dns_context_present(wrong, original, selected, 58)
+
     def test_wait_only_for_exact_original_route_before_new_dns_publication(self):
         peers = {node: node + "-peer" for node in FIXTURE.NODES}
         original = "1" * 32
@@ -99,6 +127,41 @@ class ReciprocalPrivateDnsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 FIXTURE.wait_selection(lambda: text, peers, original)
 
+    def test_repeat_owner_reaps_process_when_a_phase_fails(self):
+        process = mock.Mock(pid=123)
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        def start(argv, **_kwargs):
+            directory = Path(argv[-1])
+            (directory / "ready.json").write_text(json.dumps({
+                "pid": 123, "cookie": 456, "bound_port": 45001, "bound_ip": "0.0.0.0"}))
+            return process
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            (work / "client-fixtures").mkdir()
+            with mock.patch.object(FIXTURE.os, "chown"), \
+                 mock.patch.object(FIXTURE.subprocess, "Popen", side_effect=start), \
+                 self.assertRaisesRegex(ValueError, "synthetic phase failure"):
+                with FIXTURE.repeat_application(work, 1000, 1000, "owned-fixture", {}) as actual:
+                    self.assertIs(actual[0], process)
+                    raise ValueError("synthetic phase failure")
+        process.terminate.assert_called_once()
+        process.wait.assert_called_once_with(timeout=3)
+
+    def test_local_repeat_observes_actual_same_route_and_warm_response_count(self):
+        peers = {node: node + "-peer" for node in FIXTURE.NODES}
+        original = "1" * 32
+        native = f"context={original} path=1 relay=relay2-peer exit=exit-peer state=4 rtt_us=10 bytes=100\n"
+        dns = "context=" + "2" * 32 + " path=1 relay=relay0-peer exit=exit-peer state=1 rtt_us=0 bytes=0\n"
+        first = FIXTURE.selection(native + dns, peers, original)
+        active = dns.replace("state=1", "state=3").replace("bytes=0", "bytes=58")
+        self.assertEqual(FIXTURE.selection(native + active, peers, original, first, 58),
+                         dict(first, state=3, reported_bytes=58))
+        for wrong in (dns, active.replace("2" * 32, "3" * 32),
+                      active.replace("relay0-peer", "relay2-peer"), active.replace("bytes=58", "bytes=116")):
+            with self.assertRaises(ValueError):
+                FIXTURE.selection(native + wrong, peers, original, first, 58)
+
     def test_report_keeps_native_privacy_cleanup_and_simultaneous_role_requirements(self):
         valid = valid_report()
         FIXTURE.check_report(valid, "a" * 40)
@@ -108,6 +171,19 @@ class ReciprocalPrivateDnsTests(unittest.TestCase):
             (("evidence", "udp_contexts_after", "client"), "f" * 32),
             (("evidence", "warm", "workers"), []),
             (("evidence", "warm", "native_workers_reaped"), False),
+            (("evidence", "warm", "retirement", "present_after_response"), False),
+            (("evidence", "warm", "retirement", "within_concurrent_window"), True),
+            (("evidence", "local", "retirement", "within_concurrent_window"), True),
+            (("evidence", "warm", "retirement", "within_original_lifetime"), False),
+            (("evidence", "warm", "retirement", "observed_after_response_ms"), 5_000),
+            (("evidence", "warm", "retirement", "observed_after_response_ms"), 35_001),
+            (("evidence", "local", "application", "request_sequence"), 1),
+            (("evidence", "local", "application", "application_socket", "cookie"), 999),
+            (("evidence", "local", "application", "application_socket", "pid"), 999),
+            (("evidence", "local", "application", "application_socket", "bound_port"), 999),
+            (("evidence", "local", "selected", "reported_bytes"), 0),
+            (("evidence", "local", "selected_after", "reported_bytes"), 58),
+            (("evidence", "application_reaped"), False),
             (("evidence", "warm", "workers", 0, "uid"), 0),
             (("evidence", "warm", "workers", 0, "inherited_private_pipes"), False),
             (("evidence", "warm", "captures", "exit", "recursive_request_packets"), 0),
@@ -118,6 +194,9 @@ class ReciprocalPrivateDnsTests(unittest.TestCase):
             (("evidence", "local", "selected", "exit_peer_id"), "different-peer"),
             (("evidence", "local", "metrics_after", "exit", "volparossa_dns_local_validated_total"), 0),
             (("evidence", "completed_ns"), 50),
+            (("evidence", "post_dns_echo_confirmed"), False),
+            (("evidence", "echo_stop_requested_ns"), 29),
+            (("evidence", "idle_cleanup_completed_ns"), 40),
         )
         for path, replacement in mutations:
             changed = copy.deepcopy(valid)
