@@ -4,7 +4,9 @@
 
 import copy
 import importlib.util
+import os
 from pathlib import Path
+import struct
 import unittest
 
 SPEC = importlib.util.spec_from_file_location(
@@ -79,6 +81,55 @@ class ReportContract(unittest.TestCase):
             PROOF.validate(changed, REVISION)
         self.assertEqual(changed["cases"]["bogus"]["error"], "Unavailable")
         self.assertEqual(changed["cases"]["bogus"]["elapsed_ms"], 4501)
+
+    def test_extra_native_diagnostic_never_replaces_failed_primary_acceptance(self):
+        changed = synthetic_report()
+        changed["cases"]["signed"].update(case_passed=False, error="Unavailable", verdict="unavailable")
+        changed["diagnostics"] = dict(acceptance_evidence=False,
+            cases=dict(signed=dict(native_status="positive", native_secure_flag=True,
+                                   primary_reply_elapsed_ms=7000, native_worker_reaped=True)))
+        self.assertEqual(PROOF.diagnostic_cases(changed["cases"]), ["signed"])
+        with self.assertRaises(RuntimeError):
+            PROOF.validate(changed, REVISION)
+        changed["cases"]["bogus"].update(case_passed=False, error="Unavailable")
+        changed["cases"]["timeout"].update(case_passed=False, error="Unavailable")
+        self.assertEqual(PROOF.diagnostic_cases(changed["cases"]), ["signed", "bogus"])
+        changed["cases"]["signed"]["error"] = "InvalidProof"
+        self.assertEqual(PROOF.diagnostic_cases(changed["cases"]), ["bogus"])
+
+    def test_diagnostic_frame_is_exact_bound_and_exports_no_raw_packet(self):
+        name, nonce = b"iana.org", os.urandom(16)
+        header = bytearray(44)
+        header[:8], header[16:32] = PROOF.NATIVE_MAGIC, nonce
+        header[9] = 1
+        header[10:12] = struct.pack("!H", 1)
+        header[12:16] = struct.pack("!I", 60)
+        header[36:40] = struct.pack("!I", 12)
+        header[40:44] = struct.pack("!HH", 1, len(name))
+        frame = header + name + b"\xc0\x00\x2b\x08" + b"\0" * 12
+        summary = PROOF.native_reply_summary(frame, name, nonce)
+        self.assertEqual(summary, dict(native_status="positive", native_secure_flag=True,
+            address_count=1, ttl_seconds=60, raw_packet_bytes=12))
+        for index, replacement in ((0, b"invalid!"), (8, b"\x05"), (9, b"\x02"),
+                                   (10, struct.pack("!H", 17)), (12, b"\0" * 4),
+                                   (16, os.urandom(16)), (32, struct.pack("!I", 1)),
+                                   (36, struct.pack("!I", 4097)), (40, struct.pack("!H", 28)),
+                                   (42, struct.pack("!H", len(name) + 1)), (44, b"x")):
+            bad = frame.copy()
+            bad[index:index + len(replacement)] = replacement
+            with self.subTest(index=index), self.assertRaises(RuntimeError):
+                PROOF.native_reply_summary(bad, name, nonce)
+        for bad in (frame[:-1], frame + b"x", b"", frame[:43]):
+            with self.assertRaises(RuntimeError):
+                PROOF.native_reply_summary(bad, name, nonce)
+        for status in range(1, 5):
+            negative = header.copy()
+            negative[8], negative[9:16], negative[36:40] = status, b"\0" * 7, b"\0" * 4
+            result = PROOF.native_reply_summary(negative + name, name, nonce)
+            self.assertEqual(result["native_status"], ("unavailable", "nxdomain", "nodata", "bogus")[status - 1])
+            negative[9] = 1
+            with self.assertRaises(RuntimeError):
+                PROOF.native_reply_summary(negative + name, name, nonce)
 
 
 if __name__ == "__main__":

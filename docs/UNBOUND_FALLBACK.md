@@ -234,6 +234,12 @@ The original 276-file artifact remains unchanged (ZIP SHA-256
 `dac9505dd913fbeac4f30ca15a6772e4504cc94e0a24fc3068d4de16073d45b1`).
 Native proof-cache linkage and simultaneous reciprocal deployment remain incomplete;
 the default is still `system`.
+The follow-up preflight retains all five original gates. Only after a signed or bogus case
+returns `Unavailable`, it may run one separate 30-second native timing diagnostic per failed
+case. These fixed-question guest-only observations retain no raw packet or log, have their
+own bounded child cleanup, and explicitly cannot count as acceptance or extend the normal
+five-second resolution budget. Six focused report/protocol checks pass; timing results are
+still pending.
 
 The new `reciprocity-private-dns` scenario is an executable candidate, not a live PASS.
 It retains the same four all-role agents and concurrent native UDP flows from the reciprocal

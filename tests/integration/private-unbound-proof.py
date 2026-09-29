@@ -11,6 +11,7 @@ import pwd
 import selectors
 import signal
 import socket
+import struct
 import subprocess
 import tempfile
 import time
@@ -18,6 +19,9 @@ import time
 
 WORKER = Path("/usr/libexec/volparossa-dns-worker")
 CASES = ("signed", "unsigned", "bogus", "timeout", "cancel")
+DIAGNOSTIC_NAMES = {"signed": b"iana.org", "bogus": b"dnssec-failed.org"}
+NATIVE_MAGIC = b"VPDNS002"
+NATIVE_MAX_REPLY = 44 + 253 + 16 * 16 + 4096
 
 
 def require(condition, code):
@@ -122,6 +126,109 @@ def run_case(probe, case):
             os.close(handle)
 
 
+def diagnostic_cases(cases):
+    return [case for case in DIAGNOSTIC_NAMES if cases.get(case, {}).get("case_passed") is False
+            and cases[case].get("error") == "Unavailable"]
+
+
+def native_reply_length(header, name, nonce):
+    """Diagnostic decoding only, not DNSSEC validation or usable answer authority."""
+    require(len(header) == 44 and header[:8] == NATIVE_MAGIC
+            and header[16:32] == nonce and header[32:36] == b"\0" * 4
+            and struct.unpack("!H", header[40:42])[0] == 1
+            and struct.unpack("!H", header[42:44])[0] == len(name), "NATIVE_FRAME_SCOPE")
+    status, secure = header[8:10]
+    count = struct.unpack("!H", header[10:12])[0]
+    ttl = struct.unpack("!I", header[12:16])[0]
+    packet_bytes = struct.unpack("!I", header[36:40])[0]
+    require(status <= 4 and secure <= 1 and count <= 16 and packet_bytes <= 4096,
+            "NATIVE_FRAME_BOUNDS")
+    if status == 0:
+        require(count > 0 and ttl > 0, "NATIVE_FRAME_POSITIVE")
+    else:
+        require(secure == count == ttl == packet_bytes == 0, "NATIVE_FRAME_ERROR_FIELDS")
+    return 44 + len(name) + count * 4 + packet_bytes
+
+
+def native_reply_summary(frame, name, nonce):
+    require(44 <= len(frame) <= NATIVE_MAX_REPLY, "NATIVE_FRAME_BOUNDS")
+    require(native_reply_length(frame[:44], name, nonce) == len(frame)
+            and frame[44:44 + len(name)] == name, "NATIVE_FRAME_BINDING")
+    return dict(native_status=("positive", "unavailable", "nxdomain", "nodata", "bogus")[frame[8]],
+                native_secure_flag=bool(frame[9]), address_count=struct.unpack("!H", frame[10:12])[0],
+                ttl_seconds=struct.unpack("!I", frame[12:16])[0],
+                raw_packet_bytes=struct.unpack("!I", frame[36:40])[0])
+
+
+def run_native_diagnostic(case):
+    """One fresh native context, only after the ordinary case failed Unavailable.
+
+    This extra guest-only observation never changes the normal 5s caller/500ms
+    cleanup bounds, validates no DNSSEC proof and cannot make acceptance pass.
+    """
+    require(case in DIAGNOSTIC_NAMES, "NATIVE_DIAGNOSTIC_CASE")
+    name, nonce = DIAGNOSTIC_NAMES[case], os.urandom(16)
+    request = NATIVE_MAGIC + struct.pack("!HHI", 1, len(name), 0) + nonce + name
+    account = pwd.getpwnam("vpci")
+    result = dict(case=case, acceptance_evidence=False, independent_dnssec_proof=False,
+                  max_seconds=30, native_worker_reaped=False, reply_complete=False,
+                  outcome="process_error")
+    started = time.monotonic()
+    deadline = started + 30
+    process = None
+    try:
+        process = subprocess.Popen([str(WORKER)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, user=account.pw_uid, group=account.pw_gid,
+                                   extra_groups=[], env={}, close_fds=True)
+        process.stdin.write(request)
+        process.stdin.close()
+        frame = bytearray()
+        with selectors.DefaultSelector() as readable:
+            readable.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not readable.select(timeout=remaining):
+                    result["outcome"] = "timeout_after_reply" if result["reply_complete"] else "no_result_timeout"
+                    break
+                chunk = os.read(process.stdout.fileno(), NATIVE_MAX_REPLY + 1 - len(frame))
+                if not chunk:
+                    if not result["reply_complete"]:
+                        result["outcome"] = "early_eof"
+                        break
+                    process.wait(timeout=max(.001, deadline - time.monotonic()))
+                    result["outcome"] = "native_reply" if process.returncode == 0 else "process_error"
+                    break
+                frame.extend(chunk)
+                require(len(frame) <= NATIVE_MAX_REPLY, "NATIVE_FRAME_BOUNDS")
+                if len(frame) >= 44:
+                    length = native_reply_length(frame[:44], name, nonce)
+                    require(len(frame) <= length, "NATIVE_FRAME_TRAILING")
+                    if len(frame) == length:
+                        result.update(native_reply_summary(frame, name, nonce), reply_complete=True,
+                                      primary_reply_elapsed_ms=round((time.monotonic() - started) * 1000))
+    except RuntimeError:
+        result["outcome"] = "protocol_error"
+    except subprocess.TimeoutExpired:
+        result["outcome"] = "timeout_after_reply" if result["reply_complete"] else "no_result_timeout"
+    except (OSError, ValueError, subprocess.SubprocessError):
+        result["outcome"] = "process_error"
+    finally:
+        result["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+            try:
+                process.wait(timeout=1)
+                result["native_worker_reaped"] = True
+                result["native_exit_code"] = process.returncode
+            except subprocess.TimeoutExpired:
+                result["outcome"] = "cleanup_unconfirmed"
+            for pipe in (process.stdin, process.stdout):
+                if pipe is not None:
+                    pipe.close()
+    return result
+
+
 def validate(report, revision):
     require(report.get("schema") == 2 and report.get("source_revision") == revision,
             "REPORT_REVISION")
@@ -205,6 +312,13 @@ def execute(probe, output, revision):
                 if result.get("case_passed") is not True and report["failure"] is None:
                     report["failure"] = result.get("fixture_error", f"PROBE_{case.upper()}_UNEXPECTED_RESULT")
             report["native_cache_linkage_proven"] = report["cases"]["signed"].get("case_passed") is True
+            # Run after every unchanged ordinary case so these separate cold
+            # contexts cannot warm or replace any acceptance observation.
+            selected = diagnostic_cases(report["cases"])
+            if selected:
+                report["diagnostics"] = dict(acceptance_evidence=False,
+                    scope="fixed-question native primary timing only; no production deadline or proof substitution",
+                    cases={case: run_native_diagnostic(case) for case in selected})
     except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
         # Fixed fixture errors only; no worker stderr or question output is retained.
         report["failure"] = str(error) if isinstance(error, RuntimeError) else type(error).__name__
