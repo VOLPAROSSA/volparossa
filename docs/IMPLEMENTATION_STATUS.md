@@ -3382,7 +3382,7 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   independent validation and retention; original TTL, privacy and worker-cleanup bounds remain.
   Both explicit modes preserve real fallback TTLs and never call the OS resolver after selection.
   Neither local AD nor a private-library verdict is independent shareable peer proof. Real
-  recursion/validation and simultaneous Client+Exit privacy/cleanup execution are still required.
+  recursion/validation now passes below; simultaneous Client+Exit privacy/cleanup remains open.
   There is no persistent libunbound cache, adaptive racing, host package installation/DNS change
   or default switch. A separate optional Debian 13 companion builder declares the private worker
   and dependencies; existing core package construction/dependencies remain unchanged.
@@ -3434,7 +3434,18 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   question correlation; changed bindings get a new ordinary route, and TCP stays one-shot.
   Three focused Rust tests pass. C05 now observes A/AAAA on one actual application socket
   and route with separate captures, then explicitly retires before Exit/offline phases.
-  Eight focused fixture checks pass; source-exact live proof is pending.
+  Eight focused fixture checks pass. The [run on `859c9e90`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36613320245)
+  now passes the full C05 workflow: all five live native-Unbound cases and the separate
+  protected A/AAAA upstream/peer/offline-local/unsigned phases pass both exact-source checkers.
+  Same-socket byte progression, captures, explicit retirement, zero leftovers and unchanged
+  host state are verified in 275 retained original files. See the fallback document for hashes.
+  Its [separate reciprocal run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36613323557)
+  still fails: warm private recursion takes 1,610 ms and same-association local reuse 3 ms
+  without a new child, but status polling blocks during retirement and the Exit captures
+  contain unparsed TAP frames/an unrecognized mDNS source. Incoming DNS packets also cross
+  the phase boundary without new outgoing queries. Four echo applications and final cleanup
+  pass, not the full combined privacy/lifetime gate. Missing report checkpoints are not
+  reconstructed as a PASS. All 169 originals remain retained; the default stays unchanged.
 
 The positive DNSSEC cache is now composed into the normal agent: the same bounded RAM resolver
 serves protected DNS, TCP resolution, general UDP and browser-QUIC destination pinning. Its peer

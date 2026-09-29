@@ -61,6 +61,8 @@ def valid_report():
             phases[phase]["workers"] = [dict(pid=200, start_ticks=101, parent_pid=agents["exit"]["pid"], uid=1000,
                 netns_inode=agents["exit"]["netns_inode"], inherited_private_pipes=True,
                 effective_capabilities=0, no_new_privileges=True)]
+        else:
+            phases[phase]["residual_unattributed_dns_response_packets"] = 0
     return dict(version=1, report_kind="volparossa-reciprocity-private-dns", source_revision="a" * 40,
         scope=FIXTURE.SCOPE, success=True,
         evidence=dict(success=True, same_agents=True, same_udp_contexts=True, agents_before=copy.deepcopy(agents),
@@ -234,6 +236,61 @@ class ReciprocalPrivateDnsTests(unittest.TestCase):
         # or move its Internet-side sockets into the fixture's isolated namespace.
         self.assertNotIn("--fork", argv)
         self.assertNotIn("--net", argv)
+
+    def test_idle_observation_retains_completed_phases_and_never_equates_timeout_with_absence(self):
+        original, selected = "1" * 32, "2" * 32
+        dns = f"context={selected} path=1 relay=relay0-peer exit=exit-peer state=3 rtt_us=0 bytes=84\n"
+        paths = mock.Mock(side_effect=[subprocess.TimeoutExpired("fixture-status", 2), dns, ""])
+        evidence = dict(success=False, application_reaped=True, post_dns_echo_confirmed=True,
+                        local=dict(selected_after=dict(reported_bytes=84)))
+        with tempfile.TemporaryDirectory() as temporary, \
+             mock.patch.object(FIXTURE.time, "monotonic", return_value=10), \
+             mock.patch.object(FIXTURE.time, "sleep"):
+            work = Path(temporary)
+            completed = FIXTURE.wait_idle_retirement(paths, original, selected, 84, 45, evidence,
+                lambda: FIXTURE.checkpoint(work, evidence, "idle_cleanup_observation"))
+            saved = FIXTURE.read(work / "reciprocity-private-dns-evidence.json")
+        self.assertEqual(completed, 10)
+        self.assertEqual(paths.call_count, 3)
+        self.assertEqual(saved["idle_cleanup_observation"]["status_timeouts"], 1)
+        self.assertEqual(saved["idle_cleanup_observation"]["completed_status_reads"], 2)
+        self.assertIs(saved["idle_cleanup_observation"]["context_present"], False)
+        self.assertEqual(saved["local"], evidence["local"])
+        self.assertTrue(saved["application_reaped"] and saved["post_dns_echo_confirmed"])
+        self.assertFalse(saved["success"])
+
+        paths = mock.Mock(side_effect=subprocess.TimeoutExpired("fixture-status", 1))
+        with tempfile.TemporaryDirectory() as temporary, \
+             mock.patch.object(FIXTURE.time, "monotonic", side_effect=[10, 10, 12]):
+            work = Path(temporary)
+            with self.assertRaisesRegex(ValueError, "PRIVATE_DNS_IDLE_RETIREMENT_TIMEOUT"):
+                FIXTURE.wait_idle_retirement(paths, original, selected, 84, 11, evidence,
+                    lambda: FIXTURE.checkpoint(work, evidence, "idle_cleanup_observation"))
+            saved = FIXTURE.read(work / "reciprocity-private-dns-evidence.json")
+        paths.assert_called_once_with(1)
+        self.assertIsNone(saved["idle_cleanup_observation"]["context_present"])
+        self.assertFalse(saved["success"])
+        self.assertTrue(saved["post_dns_echo_confirmed"])
+
+    def test_local_reuse_keeps_unattributed_inbound_responses_but_never_new_recursion(self):
+        report = valid_report()
+        phase = report["evidence"]["local"]
+        phase["captures"]["exit"]["recursive_response_packets"] = 3
+        phase["captures"]["exit"]["recursive_response_payload_bytes"] = 300
+        phase["residual_unattributed_dns_response_packets"] = 3
+        FIXTURE.check_report(report, "a" * 40)
+        for path, value in ((["residual_unattributed_dns_response_packets"], 0),
+                            (["captures", "exit", "recursive_request_packets"], 1),
+                            (["captures", "client", "recursive_response_packets"], 1),
+                            (["captures", "exit", "forbidden_packets"], 1),
+                            (["workers"], [dict(pid=1)])):
+            changed = copy.deepcopy(report)
+            item = changed["evidence"]["local"]
+            for part in path[:-1]:
+                item = item[part]
+            item[path[-1]] = value
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                FIXTURE.check_report(changed, "a" * 40)
 
     @unittest.skipUnless(os.environ.get("VOLPAROSSA_MOUNT_REGRESSION") == "1",
                          "opt-in anonymous user/mount namespace reproduction; no networking")

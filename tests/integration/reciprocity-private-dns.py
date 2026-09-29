@@ -46,6 +46,13 @@ def write(path, value):
     UPLINK.write(path, value)
 
 
+def checkpoint(work, result, stage):
+    # Preserve already measured facts before later observer/cleanup failures. This is
+    # never success: the complete phase, privacy and retirement gates still run below.
+    result["observation_stage"] = stage
+    write(work / "reciprocity-private-dns-evidence.json", result)
+
+
 def identity(pid):
     raw = Path(f"/proc/{pid}/stat").read_text()
     fields = raw[raw.rindex(") ") + 2:].split()
@@ -158,6 +165,34 @@ def complete_capture(value, node, phase):
                 and stats["packet_socket_packets"] == stats["observed_frames"], "PRIVATE_DNS_CAPTURE_DRAIN")
 
 
+def wait_idle_retirement(paths, original, selected, response_bytes, deadline, result, save):
+    observation = dict(completed_status_reads=0, status_timeouts=0, context_present=None)
+    result["idle_cleanup_observation"] = observation
+    save()
+    while True:
+        remaining = deadline - time.monotonic()
+        require(remaining > 0, "PRIVATE_DNS_IDLE_RETIREMENT_TIMEOUT")
+        started = time.monotonic()
+        try:
+            text = paths(min(2, remaining))
+        except subprocess.TimeoutExpired:
+            # A missing observation is not evidence of an absent route. Retry only
+            # inside the original total cleanup budget, retaining the failure count.
+            observation["status_timeouts"] += 1
+            observation["context_present"] = None
+        else:
+            observation["completed_status_reads"] += 1
+            observation["context_present"] = dns_context_present(
+                text, original, selected, response_bytes, require_original=False)
+        observed = time.monotonic()
+        observation["last_status_elapsed_ms"] = int((observed - started) * 1000)
+        save()
+        require(observed <= deadline, "PRIVATE_DNS_IDLE_RETIREMENT_TIMEOUT")
+        if observation["context_present"] is False:
+            return observed
+        time.sleep(.05)
+
+
 def validate_phase(value, phase):
     require(value["phase"] == phase and value["application"]["name"] == "iana.org"
             and value["application"]["family"] == "A"
@@ -194,6 +229,13 @@ def validate_phase(value, phase):
         if phase == "warm" and node == selected["exit_node"]:
             require(requests > 0 and responses > 0 and capture["recursive_response_payload_bytes"] > 0,
                     "PRIVATE_DNS_RECURSION_MISSING")
+        elif phase == "local" and node == selected["exit_node"]:
+            # Closing the native worker does not drain packets already in the
+            # recursive uplink. These remain counted, not used as answer evidence
+            # or attributed to a particular earlier request without a packet match.
+            require(requests == 0 and responses >= 0
+                    and value["residual_unattributed_dns_response_packets"] == responses,
+                    "PRIVATE_DNS_UNEXPECTED_RECURSION")
         else:
             require(requests == responses == 0, "PRIVATE_DNS_UNEXPECTED_RECURSION")
     require(value["route_retired"] is True and value["native_workers_reaped"] is True,
@@ -403,13 +445,18 @@ def run(work, binary, uid, gid, namespaces):
                 write(work / "reciprocity-private-dns-evidence.json", result)
                 require(stopped, "PRIVATE_DNS_CAPTURE_STOP")
             data["captures"] = {node: read(Path(str(prefix) + f"-capture-{node}.json")) for node in NODES}
+            if phase == "local":
+                data["residual_unattributed_dns_response_packets"] = data["captures"][selected["exit_node"]]["recursive_response_packets"]
+            checkpoint(work, result, phase + "_captures_complete")
         require(application.wait(timeout=3) == 0, "PRIVATE_DNS_APPLICATION_FAILED")
         result["application_reaped"] = True
+        checkpoint(work, result, "application_reaped")
 
     # All DNS work and identity snapshots must still lie inside the original
     # native flow lifetime. Natural association cleanup is measured separately.
     result["agents_after"] = agents()
     result["same_agents"] = result["agents_after"] == before
+    checkpoint(work, result, "agents_after")
     after = {}
     for node in NODES:
         paths = cli(node, "paths", timeout=2)
@@ -423,6 +470,7 @@ def run(work, binary, uid, gid, namespaces):
     result["same_udp_contexts"] = after == original
     require(result["same_agents"] and result["same_udp_contexts"], "PRIVATE_DNS_RECIPROCAL_LIFETIME_CHANGED")
     result["completed_ns"] = time.monotonic_ns()
+    checkpoint(work, result, "concurrent_window_complete")
     time.sleep(.5)
     result["echo_stop_requested_ns"] = time.monotonic_ns()
     (work / "reciprocity-app/stop").write_text("stop\n", encoding="ascii")
@@ -436,18 +484,15 @@ def run(work, binary, uid, gid, namespaces):
         require(echo["success"] is True and echo["last_echo_ns"] >= result["completed_ns"],
                 "PRIVATE_DNS_POST_DNS_ECHO_MISSING")
     result["post_dns_echo_confirmed"] = True
+    checkpoint(work, result, "post_dns_echo_confirmed")
 
     # Both phase reports reference ONE real retirement, after sequence 2. No
     # disconnect IPC, fresh route lottery, second idle wait or fabricated zero bytes.
     deadline = min(response_observed_at + 35, original_lifetime_bound)
-    while True:
-        remaining = deadline - time.monotonic()
-        require(remaining > 0, "PRIVATE_DNS_IDLE_RETIREMENT_TIMEOUT")
-        if not dns_context_present(cli("client", "paths", timeout=min(2, remaining)), original["client"],
-                initial_selection["route_context_id"], received_bytes, require_original=False):
-            break
-        time.sleep(.05)
-    retired_at = time.monotonic()
+    retired_at = wait_idle_retirement(
+        lambda timeout: cli("client", "paths", timeout=timeout), original["client"],
+        initial_selection["route_context_id"], received_bytes, deadline, result,
+        lambda: checkpoint(work, result, "idle_cleanup_observation"))
     retirement = dict(mode="shared_association_idle", configured_idle_ms=30_000,
         route_context_id=initial_selection["route_context_id"], after_request_sequence=2,
         present_after_response=True, within_concurrent_window=False,

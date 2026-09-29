@@ -200,6 +200,7 @@ jobs:
           python3 -B tests/integration/test-dns-cache-smoke.py
           sh -n tests/integration/reciprocity-private-dns.sh
           python3 -B tests/integration/test-reciprocity-private-dns.py
+          python3 -B tests/integration/test-reciprocity-private-dns-capture.py
 
       - name: Install official Ubuntu VM tools
         run: |

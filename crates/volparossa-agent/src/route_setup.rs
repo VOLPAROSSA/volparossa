@@ -188,7 +188,12 @@ pub(crate) enum ClientRouteDisconnectError {
     CleanupPending,
 }
 
+#[derive(Clone)]
 struct ClientRouteRetirement {
+    owner: Arc<Mutex<ClientRouteRetirementOwner>>,
+}
+
+struct ClientRouteRetirementOwner {
     task: tokio::task::JoinHandle<Result<(), ClientRouteDisconnectError>>,
     completed: Option<Result<(), ClientRouteDisconnectError>>,
 }
@@ -196,23 +201,29 @@ struct ClientRouteRetirement {
 impl ClientRouteRetirement {
     fn new(task: tokio::task::JoinHandle<Result<(), ClientRouteDisconnectError>>) -> Self {
         Self {
-            task,
-            completed: None,
+            owner: Arc::new(Mutex::new(ClientRouteRetirementOwner {
+                task,
+                completed: None,
+            })),
         }
     }
 
-    async fn confirm(&mut self, wait: Duration) -> Result<(), ClientRouteDisconnectError> {
-        if let Some(result) = self.completed {
-            return result;
-        }
-        let result = timeout(wait, &mut self.task)
-            .await
-            .map_err(|_| ClientRouteDisconnectError::CleanupPending)?
-            .unwrap_or(Err(ClientRouteDisconnectError::CleanupPending));
-        // Do not poll a consumed JoinHandle again. A failed owner remains fail-closed rather
-        // than being replaced by Idle or by an unscoped helper cleanup request.
-        self.completed = Some(result);
-        result
+    async fn confirm(&self, wait: Duration) -> Result<(), ClientRouteDisconnectError> {
+        timeout(wait, async {
+            let mut owner = self.owner.lock().await;
+            if let Some(result) = owner.completed {
+                return result;
+            }
+            let result = (&mut owner.task)
+                .await
+                .unwrap_or(Err(ClientRouteDisconnectError::CleanupPending));
+            // Do not poll a consumed JoinHandle again. A failed owner remains fail-closed
+            // and cancellation drops only this waiter, never the retained cleanup task.
+            owner.completed = Some(result);
+            result
+        })
+        .await
+        .map_err(|_| ClientRouteDisconnectError::CleanupPending)?
     }
 }
 
@@ -1193,10 +1204,15 @@ impl ClientRouteControl {
             };
             *state = self.start_retirement(established);
         }
-        if let ClientRouteControlState::CleanupPending(retirement) = &mut *state {
-            if retirement.confirm(MAXIMUM_CALL_DURATION).await.is_ok() {
-                *state = ClientRouteControlState::Idle;
-            }
+        let retirement = match &*state {
+            ClientRouteControlState::CleanupPending(retirement) => Some(retirement.clone()),
+            _ => None,
+        };
+        drop(state);
+        if let Some(retirement) = retirement {
+            let _ = self
+                .confirm_retirement(&retirement, MAXIMUM_CALL_DURATION)
+                .await;
         }
     }
 
@@ -2703,11 +2719,28 @@ impl ClientRouteControl {
                 *state = self.start_retirement(established);
             }
         }
-        let ClientRouteControlState::CleanupPending(retirement) = &mut *state else {
+        let ClientRouteControlState::CleanupPending(retirement) = &*state else {
             unreachable!("exact retirement owner retained")
         };
+        let retirement = retirement.clone();
+        drop(state);
+        self.confirm_retirement(&retirement, wait).await
+    }
+
+    /// Cleanup may await remote peers and the helper. Status queries must not wait behind
+    /// those operations; new route admission still sees `CleanupPending` until exact success.
+    async fn confirm_retirement(
+        &self,
+        retirement: &ClientRouteRetirement,
+        wait: Duration,
+    ) -> Result<(), ClientRouteDisconnectError> {
         retirement.confirm(wait).await?;
-        *state = ClientRouteControlState::Idle;
+        let mut state = self.state.lock().await;
+        if matches!(&*state, ClientRouteControlState::CleanupPending(current)
+            if Arc::ptr_eq(&current.owner, &retirement.owner))
+        {
+            *state = ClientRouteControlState::Idle;
+        }
         Ok(())
     }
 }
@@ -11007,6 +11040,51 @@ mod tests {
         assert!(matches!(
             *control.state.lock().await,
             ClientRouteControlState::Idle
+        ));
+    }
+
+    #[tokio::test]
+    async fn client_retirement_wait_keeps_paths_responsive_without_early_idle() {
+        let control = ClientRouteControl::default();
+        let (complete, completion) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            completion
+                .await
+                .map_err(|_| ClientRouteDisconnectError::CleanupPending)
+        });
+        let original = ClientRouteRetirement::new(task);
+        *control.state.lock().await = ClientRouteControlState::CleanupPending(original.clone());
+        let mut cleanup = Box::pin(control.disconnect_with_wait(TEST_TIMEOUT));
+        tokio::select! {
+            result = &mut cleanup => panic!("unconfirmed cleanup returned {result:?}"),
+            () = tokio::task::yield_now() => {}
+        }
+        timeout(
+            Duration::from_millis(100),
+            control.refresh_mpquic_path_summaries(),
+        )
+        .await
+        .expect("Paths must not wait for the retained remote/helper cleanup")
+        .expect("no live MPQUIC owner to refresh");
+        assert!(matches!(&*control.state.lock().await,
+            ClientRouteControlState::CleanupPending(current)
+            if Arc::ptr_eq(&current.owner, &original.owner)));
+        complete.send(()).expect("exact cleanup task remains owned");
+        cleanup.await.expect("exact completion can enter Idle");
+        assert!(matches!(
+            *control.state.lock().await,
+            ClientRouteControlState::Idle
+        ));
+
+        // A delayed second waiter for this completed owner must not overwrite a newer state.
+        *control.state.lock().await = ClientRouteControlState::Connecting;
+        control
+            .confirm_retirement(&original, TEST_TIMEOUT)
+            .await
+            .unwrap();
+        assert!(matches!(
+            *control.state.lock().await,
+            ClientRouteControlState::Connecting
         ));
     }
 

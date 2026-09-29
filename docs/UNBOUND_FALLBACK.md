@@ -311,6 +311,34 @@ The complete 147-file original artifact is retained, ZIP SHA-256
 `c1b5f3f0a692b4ef32d4bc5dca052e60c746eecb3f2c185126197c0a63b6017c`.
 Uplink/topology cleanup passes with zero leftovers and byte-identical host snapshots.
 
+The [bounded-reuse run on `859c9e90`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36613320245)
+**passes the complete C05 workflow**, including both unchanged exact-source report checkers.
+All five native private-Unbound cases pass: independently validated signed recursion/local
+reuse (673 ms), unsigned recursion (821 ms), a real Bogus verdict (2,312 ms), timeout reaping
+(4,500 ms) and cancellation reaping (1,503 ms). The separate protected-network phases prove
+A/AAAA delivery on the same actual application socket and route, independently verified
+proof fetched by a different Exit, non-shareable unsigned fallback, and local reuse after
+the original proof-serving Exit is actually stopped. Group retirement, capture completeness,
+privacy checks, zero owned leftovers and byte-identical host state all pass. The 275-file
+original artifact is retained, ZIP SHA-256
+`389b25478906eb89a058359b01a8fe09f9637c59797bd8022c396be28d710111`.
+The C05 peer proof and live native-worker preflight are separate checks, not one claim that
+every production reciprocal deployment is now ready. The default therefore remains unchanged.
+
+The [reciprocal run on the same source](https://github.com/VOLPAROSSA/volparossa/actions/runs/36613323557)
+still **fails**. Its real protected warm lookup takes 1,610 ms through the selected Exit's
+unprivileged private worker; the same socket's local-cache repeat takes 3 ms, with no new
+worker, exact upstream/local metric increments and cumulative response bytes 42 then 84.
+It subsequently times out while reading route status during idle cleanup. Additionally,
+the preserved Exit captures contain two unparsed TAP frames in the warm phase and one
+unrecognized mDNS source in the local phase. Three incoming DNS response packets, but no
+outgoing DNS requests, also cross the local-phase boundary; their individual provenance is
+not proved. These capture errors are not silently accepted as a privacy PASS. Some completed
+pre-cleanup observations were not checkpointed in the failed report and are not invented.
+All four original echo applications report success; final fixture cleanup and host-state
+comparison pass, but the complete combined gate remains open. Original 169-file artifact
+ZIP SHA-256: `a27b2a97d4b04ff501b85852069bdad26c0340c4779f7fc74efb54b2e06b734b`.
+
 ### Bounded protected DNS connection reuse
 
 The Client can now keep a successful UDP DNS association for subsequent questions about
@@ -329,8 +357,8 @@ Three targeted Rust checks cover A/AAAA correlation, changed owners/policy and u
 expiry/request limits. The C05 fixture now keeps a real application socket open for each
 A/AAAA pair and observes actual cumulative bytes on that same route, with separate captures
 and source counters. Explicit retirement still separates Exit changes and the offline-cache
-phase. This is a functional candidate pending a new source-exact live run, not a relabelled
-pass of the original failed route selection.
+phase. The source-exact C05 run at `859c9e90` above now passes this sequence; the original
+failed route-selection runs remain failed.
 
 The reciprocal fixture likewise keeps one real UDP socket for its warm A lookup and
 subsequent A cache hit. PID, socket cookie, source port, sequence and cumulative route
@@ -339,6 +367,18 @@ four-node agent/UDP-context snapshots must precede an actual final echo on every
 flow. One natural 30-second DNS-association retirement is then observed outside that
 concurrent window, without extending signed authorization or disconnecting the other flow.
 
+The next reciprocal candidate moves remote/helper retirement confirmation outside the
+route-state mutex. Status remains responsive while the exact cleanup owner is retained;
+only that owner's confirmed success can publish Idle. The original cleanup deadline is
+unchanged. Fixture checkpoints now retain completed observations before a later failure,
+and a timed-out status read remains unknown rather than proving route absence. Capture
+decoding admits only canonical ARP between this fixture's exact private TAP endpoints on
+that TAP, and preserves the existing Exit mDNS aliases. Locally observed inbound recursive
+responses remain counted as unattributed residual packets: a cache-hit phase must still
+have zero outgoing recursive queries, an exact local-cache counter increment and no new
+native worker. These source fixes do not retrospectively identify the rejected packets or
+the exact retirement owner in the failed `859c9e90` run.
+
 Focused tests cover configuration rejection, bounded CNAME/TTL/provenance parsing, malformed and
 negative responses, rebinding rejection, and an actual framed TCP backend in a disposable test
 namespace. That backend uses controlled DNS responses, **not an executed Unbound daemon**.
@@ -346,10 +386,11 @@ On 2026-09-29, both configuration tests and all ten focused DNS tests pass, incl
 isolated TCP exchange. Strict Clippy passes for the affected config, UDP and agent crates
 with all targets/features. Reproduce with `cargo test -p volparossa-config -p volparossa-udp
 --lib dns`; this does not install Unbound or change the host resolver.
-They do not prove deployed Unbound validation, private listener ownership, reciprocal-role
-routing, fastest-source choice, or the complete requested fallback feature.
+Those focused checks alone do not prove deployed Unbound validation, private listener
+ownership, reciprocal-role routing, fastest-source choice, or the complete fallback feature.
 
-A subsequent disposable integration must run genuine Unbound, exercise signed/unsigned/bogus,
-CNAME/NXDOMAIN/expiry cases, exclude unprotected Client queries, retain privacy captures and prove
-cleanup plus unchanged host state. Documentation must retain this incomplete status until that
-evidence exists.
+The genuine-Unbound signed/unsigned/bogus and timeout/cancellation preflight plus protected
+C05 cache sequence now have the separate live evidence above. The combined four-role private
+Unbound route, remaining CNAME/NXDOMAIN/expiry cases and fastest-source selection still need
+their relevant evidence. The full fallback request remains incomplete; the default backend
+has not been switched on the strength of these partial results.

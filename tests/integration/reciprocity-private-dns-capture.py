@@ -20,7 +20,67 @@ BASE = load("reciprocity-smoke.py", "private_dns_reciprocity")
 ENGINE = load("content-replication-capture.py", "private_dns_capture_engine")
 NODES = BASE.NODES
 TAP_ADDRESS = "10.242.93.100"
+TAP_GATEWAY = "10.242.93.2"
 TAP = "dnsup0"
+_BASE_HEADER_SAMPLE = ENGINE.fixture_header_sample
+
+
+def decode_frame_on_interface(frame, iface):
+    # Only this owned TAP's ARP is outside the original 10.241 fixture. Keep the
+    # common parser unchanged, including fragment rejection on all IP traffic.
+    if len(frame) >= 14 and frame[12:14] == b"\x08\x06" and iface == TAP:
+        if not 42 <= len(frame) <= 60 or any(frame[42:]) \
+                or frame[14:20] != b"\x00\x01\x08\x00\x06\x04" \
+                or struct.unpack_from("!H", frame, 20)[0] not in (1, 2):
+            raise ValueError("private DNS TAP ARP shape")
+        source, destination = (socket.inet_ntoa(frame[offset:offset + 4]) for offset in (28, 38))
+        if {source, destination} != {TAP_ADDRESS, TAP_GATEWAY}:
+            raise ValueError("private DNS TAP ARP endpoints")
+        if frame[6:12] != frame[22:28] or not any(frame[6:12]) or frame[6] & 1:
+            raise ValueError("private DNS TAP ARP sender")
+        return None  # Neighbour traffic, not IP/DNS/application data.
+    return ENGINE.decode_frame(frame)
+
+
+def fixture_header_sample(packet, iface, frame):
+    if packet is not None:
+        return _BASE_HEADER_SAMPLE(packet, iface, frame)
+    # These are fixed parse categories and known fixture aliases only. They do
+    # not admit packets and do not export raw bytes or unrecognized addresses.
+    result = {"interface": iface, "parse": "unavailable"}
+    result["ethernet_kind"] = ({b"\x08\x06": "arp", b"\x08\x00": "ipv4", b"\x86\xdd": "ipv6"}
+                               .get(frame[12:14], "other") if len(frame) >= 14 else "short")
+    reasons = {
+        "private DNS TAP ARP shape": "tap_arp_shape",
+        "private DNS TAP ARP endpoints": "tap_arp_endpoints",
+        "private DNS TAP ARP sender": "tap_arp_sender",
+        "short Ethernet frame": "ethernet_short",
+        "unsupported ARP frame": "arp_shape",
+        "ARP endpoint outside the disposable fixture": "arp_endpoints",
+        "short IPv4 header": "ipv4_short",
+        "invalid or fragmented IPv4 capture": "ipv4_invalid_or_fragmented",
+        "short IPv6 header": "ipv6_short",
+        "truncated IPv6 capture": "ipv6_truncated",
+        "short IPv6 hop-by-hop header": "ipv6_extension_short",
+        "invalid IPv6 hop-by-hop header": "ipv6_extension_invalid",
+        "unexpected Ethernet protocol": "ethernet_protocol",
+        "short UDP header": "udp_short",
+        "truncated UDP datagram": "udp_truncated",
+        "short TCP header": "tcp_short",
+        "invalid TCP data offset": "tcp_offset",
+    }
+    try:
+        decode_frame_on_interface(frame, iface)
+    except ValueError as error:
+        result["reason"] = reasons.get(str(error), "unclassified")
+    else:
+        result["reason"] = "unclassified"
+    if result["ethernet_kind"] == "arp" and len(frame) >= 42:
+        result["arp_operation"] = {1: "request", 2: "reply"}.get(struct.unpack_from("!H", frame, 20)[0], "other")
+        for field, offset in (("source", 28), ("destination", 38)):
+            result[field] = ENGINE.FIXTURE_ADDRESS_LABELS.get(
+                socket.inet_ntoa(frame[offset:offset + 4]), "outside_fixed_fixture")
+    return result
 
 
 def validate_layout(layout):
@@ -96,12 +156,18 @@ def classify(layout, role, protocol, src, sport, dst, dport, payload, iface, *, 
 ENGINE.validate_layout = validate_layout
 ENGINE.role_node = role_node
 ENGINE.classify = classify
+ENGINE.decode_frame_on_interface = decode_frame_on_interface
+ENGINE.fixture_header_sample = fixture_header_sample
 ENGINE.COUNTERS += ("recursive_request_packets", "recursive_response_packets",
     "recursive_request_payload_bytes", "recursive_response_payload_bytes", "plaintext_dns_packets",
     "concurrent_echo_packets", "plaintext_echo_packets", "concurrent_wireguard_packets")
 for node, metadata in NODES.items():
-    ENGINE.MDNS_INTERFACE_ADDRESSES[node, metadata["egress_interface"]] = {
-        metadata["uplink"], metadata["uplink"].rsplit(".", 1)[0] + ".2"}
+    ENGINE.MDNS_INTERFACE_ADDRESSES.setdefault((node, metadata["egress_interface"]), set()).update({
+        metadata["uplink"], metadata["uplink"].rsplit(".", 1)[0] + ".2"})
+ENGINE.FIXTURE_ADDRESS_LABELS.update({
+    TAP_ADDRESS: "private_dns.tap", TAP_GATEWAY: "private_dns.gateway",
+    "47.163.4.1": "exit.xd.alias", "47.163.4.2": "destination.dx.alias",
+})
 
 if __name__ == "__main__":
     ENGINE.main(sys.argv[1:])
