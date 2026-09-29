@@ -1201,6 +1201,20 @@ checks and the core diagnostic checks pass; exact ESR launches also reached Mari
 isolated read-only namespaces both with ordinary and hidden system fonts. Those local launches
 do not reproduce or explain the guest failure, and no deadline or package change is inferred.
 
+The [run on `3ade064c`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36602792924)
+now distinguishes the failure: Firefox is still alive after 40,059 ms, but Marionette never
+connects. The later wrapper exit 1 is not a Firefox crash. All five retained startup-log
+categories are false; no module import, sidebar or browser Submit is reached. Real core
+Cancel/Disconnect and final cleanup pass, with fallback signals needed for core shutdown
+and unchanged host state. The original 11 files remain unchanged, ZIP SHA-256
+`a382c3ce5442ff456cc15ee3f3300d6d8b9289383ecb41c1063b4df9a51169df`.
+The next candidate runs an isolated, empty-profile `about:blank` startup **before** model
+provisioning. Only that separate input-free run may retain a bounded 16 KiB startup log,
+fixed process facts and loopback/listener state; combined private-session logs remain excluded.
+Four new browser checks, six existing model-harness checks and core schema/export checks pass.
+The 40-second startup deadline, browser privacy settings and sandbox are unchanged. This is
+diagnostic coverage, not a demonstrated startup fix or completed browser/model integration.
+
 Current dependency-ready candidate: a single incremental provider queue now owns source and
 derived graph work. Each durable package completion triggers a dependency scan; newly ready
 tasks join that same queue while unrelated original worker leases remain occupied. Workflow

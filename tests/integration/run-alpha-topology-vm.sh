@@ -837,9 +837,11 @@ def collect(home, opt, revision, scenario, guest_status,
                 "agent-private-task-stdout_boundary.json", "agent-private-task-provision.log",
                 "agent-private-task-result_boundary.json", "agent-private-task-private_service.json"))
         if scenario == "agent-private-browser":
-            # Separate exact allowlist: neither a browser profile/log nor a raw answer is exported.
+            # Only the separate empty-profile startup log is public diagnostic data.
+            # Never export the combined private session's log/profile or raw answer.
             candidates.extend((root / name, f"{label}/{name}") for name in (
                 "agent-private-browser-smoke.json", "agent-private-browser-panel.json",
+                "agent-private-browser-preflight.json", "agent-private-browser-startup-only.log",
                 "agent-private-browser-provision.json", "agent-private-task-provision.json",
                 "agent-private-task-isolation.json", "agent-private-task-snapshot.json",
                 "agent-private-task-owner_controls.json", "agent-private-task-provision.log",

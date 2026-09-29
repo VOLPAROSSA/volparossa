@@ -474,6 +474,7 @@ def execute(output, revision, browser_proof=False):
         if browser is not None:
             result["phase"] = "private-browser-provision"
             browser.provision(output, result)
+            browser.preflight(output, result)
         result["phase"] = "provision"
         with (output / f"{NAME}-provision.log").open("w") as log:
             subprocess.run([sys.executable, "-B", str(TRAIN["ML"] / "provision.py"), "--execute", "--yes",

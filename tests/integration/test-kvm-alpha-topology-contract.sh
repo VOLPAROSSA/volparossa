@@ -194,6 +194,7 @@ with tempfile.TemporaryDirectory(prefix='volparossa-private-browser-export-') as
     home = base / 'home'; published = home / 'alpha-output'
     published.mkdir(parents=True)
     safe = ('agent-private-browser-smoke.json', 'agent-private-browser-panel.json',
+            'agent-private-browser-preflight.json', 'agent-private-browser-startup-only.log',
             'agent-private-browser-provision.json', 'agent-private-task-provision.json',
             'agent-private-task-isolation.json', 'agent-private-task-snapshot.json',
             'agent-private-task-owner_controls.json', 'agent-private-task-provision.log',

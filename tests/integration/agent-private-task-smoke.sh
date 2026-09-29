@@ -32,9 +32,11 @@ plan() {
         printf '%s\n' \
             '  browser variant: download only the exact source-manifest files and SHA256-pinned ESR package inside the guest;' \
             '  extract/stage in a fresh owned guest directory; no system Firefox installation;' \
+            '  before model provisioning, require the same isolated empty-profile about:blank startup;' \
+            '  retain only that separate startup log (at most 16KiB) with fixed process/listener facts;' \
             '  replace only the final Python Submit with the real ESR sidebar using actual private-serve;' \
             '  observe cleanup at decoded-result-before-panel-render and again after browser completion;' \
-            '  export no raw answer, browser profile or browser log; remove the entire owned browser root;' \
+            '  export no raw answer, browser profile or private-session log; remove the entire owned browser root;' \
             '  this is not a Firefox 157 source build or native provider-selector proof.'
     else
         printf '%s\n' '  v2 private-task retains its original first-result-frame-byte cleanup check and authorized synthetic answer.'
