@@ -164,6 +164,14 @@ new three-real-store framed-transport handoff with lost Reserve, readback and De
 retained charge, reopen and repeated restores. This is separate from the passing two-provider
 overlay evidence above; no new live handoff proof is claimed.
 
+A separate `private-storage-handoff` scenario is now executable: six protected phases
+cover A/B upload, stopped A with three copies still charged, same-intent retry after
+reopening A, repeated independent reads from B and C, and acknowledged deletion. It
+requires the real owner CLI, full replacement readback, exact store identities and
+per-phase route/privacy/completion evidence. Five handoff checks and three dispatch/export
+checks pass locally; a new source-exact live run is pending. It does not claim automatic
+contribution resizing, repair, independent hardware or Signal backup integration.
+
 - [x] Source-exact disposable multi-node proof of the protected single-provider storage path
   and seven CLI commands (`434ed112`, run `36589770066`).
 - [x] Explicit replica-set commands: focused local two-store resume, accounting and failover checks.
