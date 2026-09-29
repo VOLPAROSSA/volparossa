@@ -6,7 +6,8 @@ use super::super::super::{
 };
 use super::*;
 use volparossa_protocol::{
-    FinalizedRelayPath, ProbeAddressFamily, generate_nonce, sign_control_message,
+    FinalizedRelayPath, ProbeAddressFamily, generate_nonce, node_id_from_public_key,
+    sign_control_message,
 };
 use volparossa_test_support::SignedRouteFixture;
 
@@ -160,6 +161,11 @@ fn fixture() -> Fixture {
     second.scope.candidate_ordinal = 2;
     second.scope.probe_id = generate_nonce()[..16].to_vec();
     second.scope.challenge_hash = generate_nonce().to_vec();
+    let session_public_key = ed25519_dalek::SigningKey::from_bytes(&generate_nonce())
+        .verifying_key()
+        .to_bytes();
+    second.scope.client_session_id = node_id_from_public_key(&session_public_key).to_vec();
+    second.scope.client_session_public_key = session_public_key.to_vec();
     second.scope.data_relay = Some(actor(
         sample.relay_node_id(1).unwrap().to_vec(),
         sample.relay_peer_id(1).unwrap().to_vec(),
@@ -208,6 +214,14 @@ fn accepted(fixture: &Fixture, binding: Option<&ExtensionEvidenceBinding>) -> bo
 #[test]
 fn extension_evidence_maps_fresh_batch_ordinal_one_to_path_four_only_with_exact_authority() {
     let mut fixture = fixture();
+    assert_ne!(
+        fixture.tickets[0].scope.client_session_id, fixture.tickets[1].scope.client_session_id,
+        "the actual sampler mints a distinct ephemeral identity for each path"
+    );
+    assert_ne!(
+        fixture.tickets[0].scope.client_session_public_key,
+        fixture.tickets[1].scope.client_session_public_key
+    );
     let binding = ExtensionEvidenceBinding::new(&fixture.request, fixture.now).unwrap();
     assert!(accepted(&fixture, Some(&binding)));
     assert!(
@@ -273,7 +287,7 @@ fn extension_evidence_rejects_parent_permit_path_and_fresh_batch_substitution() 
             tickets[1].scope.attempt_id[0] ^= 1;
         },
         |tickets: &mut Vec<RecentNativeExitEvidence>| {
-            tickets[1].scope.client_session_id[0] ^= 1;
+            tickets[1].scope.policy_version += 1;
         },
         |tickets: &mut Vec<RecentNativeExitEvidence>| {
             tickets[0].measured_at_ms = 0;

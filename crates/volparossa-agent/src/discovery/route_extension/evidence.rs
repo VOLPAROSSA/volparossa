@@ -8,7 +8,7 @@ use volparossa_protocol::{
     verify_control_message,
 };
 
-use super::super::RecentNativeExitEvidence;
+use super::super::{RecentNativeExitEvidence, native_ready};
 
 pub(in super::super) struct ExtensionEvidenceBinding {
     permit: Vec<u8>,
@@ -129,21 +129,12 @@ fn same_complete_batch(
             let Some(relay) = candidate.data_relay.as_ref() else {
                 return false;
             };
-            candidate.required_path_count == 2
+            // Reuse the Ready collector's exact common-attempt comparison. Session
+            // identities, probe IDs and challenges are independently signed per path;
+            // requiring their equality would reject the real sampler's fresh keys.
+            native_ready::same_attempt(candidate, scope)
+                && candidate.required_path_count == 2
                 && (1..=2).contains(&candidate.candidate_ordinal)
-                && candidate.candidate_set_hash == scope.candidate_set_hash
-                && candidate.client_session_id == scope.client_session_id
-                && candidate.client_session_public_key == scope.client_session_public_key
-                && candidate.control == scope.control
-                && candidate.exit == scope.exit
-                && candidate.policy_hash == scope.policy_hash
-                && candidate.policy_version == scope.policy_version
-                && candidate.policy_expires_at_ms == scope.policy_expires_at_ms
-                && candidate.transport == scope.transport
-                && candidate.address_family == scope.address_family
-                && candidate.attempt_expires_at_ms == scope.attempt_expires_at_ms
-                && candidate.reserved_up_mbps == scope.reserved_up_mbps
-                && candidate.reserved_down_mbps == scope.reserved_down_mbps
                 && entry.authenticated_data_relay_node_id.as_slice() == relay.node_id
                 && entry.authenticated_data_relay_peer_id == relay.peer_id
                 && entry.measured_at_ms >= permit_created_ms
