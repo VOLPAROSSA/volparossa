@@ -105,10 +105,75 @@ traffic or packet drops; scoped private cleanup, full topology cleanup and byte-
 host state pass. This proves neither archive encryption nor independent replicas, whole-agent
 restart, interrupted network upload, distributed contribution accounting or Signal integration.
 
+The **replica-set candidate** adds
+`storage replicas create/deposit/status/progress/restore/renew/delete`, reusing the existing
+authenticated peer transfer path with two to eight explicitly pinned provider/grant pairs.
+Its bounded private manifest retains immutable per-provider journals, persists uncertainty
+before exchanges and resumes the same archive identities. Restore tries another retained
+copy when a provider fails and publishes only a fully length/hash-verified new file; reads
+never consume copies. Delete names exactly one provider and does not roll back other copies.
+Accounting separates logical length from reserved, committed and uncertain full-copy payload
+charges; expired or unconfirmed-deleted copies remain charged. It does not measure metadata
+overhead or prove reciprocity, independent failure domains, automatic repair or safe handoff.
+
+All **three targeted replica tests pass** (7.36 seconds), including two real SQLite providers
+over local Unix/framed streams with lost confirmations, durable reopen, resume, failover
+and surviving-copy retention. [Operator usage and reconciliation](PRIVATE_STORAGE.md#replica-set-candidate-explicit-copies-and-restore-failover)
+describe the explicit workflow; placement, adaptive contribution and acknowledged drain remain
+separate unfinished work.
+
+The [live two-provider replica run on `bff536e2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36602808623)
+**passes** at exact source `bff536e2e2fe781be89d573ec264afa2ddacc3f0`. The original
+110-file bundle passes the report checker; rebuilding evidence from the separately retained
+phase files exactly reproduces both the aggregate evidence and report contents. ZIP SHA-256:
+`3bc47fb9d80e8406cb773e47e733b3d8f76d5aecba8887016c6bacce43d73d46`.
+Two actual stores with distinct pinned identities in separate disposable namespaces each
+retain 524,326 synthetic opaque bytes / three chunks: 1,048,652 charged payload bytes in total.
+After source removal and the first provider's real service withdrawal, the second supplies
+two full length/hash-verified, non-consuming restores. The unavailable copy stays charged.
+Reopening the same first store preserves its identities; deleting only that copy leaves the
+survivor restorable once more. Idempotent deletion of the final copy leaves both stores with
+zero leases and charged bytes.
+
+Upload, failover and finalization have independent drained, zero-drop captures and respectively
+18, 4 and 6 completed Exit MPTCP/TLS operations on the unchanged protected route. The stopped
+provider supplies zero response payload during failover; only the survivor supplies restored
+bytes. Captures reject direct Client-to-Exit/provider bypasses, and isolation checks prevent
+the Client from reading either provider store locally. Private fixture cleanup and topology
+cleanup pass with zero owned objects left; guest-parent network snapshots are byte-identical.
+This proves explicit two-store service failover, not independent hardware/failure domains,
+whole-agent restart, interrupted overlay upload, archive encryption, Signal restore,
+automatic placement/repair, measured metadata overhead or reciprocal contribution control.
+
+The [first replica run on `ba38a6a5`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36600197974)
+**fails during final evidence assembly**, not during the CLI upload or restores. Its retained
+phase outputs record two committed copies (524,326 bytes each), source removal, two verified
+non-consuming restores with the first service stopped, same-store reopen, selected-copy
+deletion, a further survivor restore and zero final charge. Private/topology cleanup and
+unchanged host state pass. The evidence builder rejects the intended two-element deleted-usage
+array because it reused an object-only reader. Its exporter also omitted the phase capture,
+route and completion files, so those observations cannot be independently reconstructed from
+this artifact. This is not a completed replica acceptance PASS. All 85 original files remain
+unchanged (ZIP SHA-256 `d3d67e02e7f8b81fadb414cea87ef0de449404021f47d36d820de80d0afc2fcb`).
+
+The next owner-coordinated candidate adds `storage replicas replace`: a durable,
+resumable A/B-to-B/C handoff through the same protected operations. It retrieves and hashes
+the surviving copy, retains the exact replacement identity across retries, and fully reads
+back C before signing Delete for A alone. Unconfirmed operations remain charged and pending;
+temporary third-copy storage is not presented as released capacity. This is explicit owner
+orchestration, not automatic provider discovery, contribution resize or permission to move
+another owner's data. The four focused replica tests pass (11.27 seconds), including the
+new three-real-store framed-transport handoff with lost Reserve, readback and Delete replies,
+retained charge, reopen and repeated restores. This is separate from the passing two-provider
+overlay evidence above; no new live handoff proof is claimed.
+
 - [x] Source-exact disposable multi-node proof of the protected single-provider storage path
   and seven CLI commands (`434ed112`, run `36589770066`).
+- [x] Explicit replica-set commands: focused local two-store resume, accounting and failover checks.
+- [x] Protected two-provider replica-set restore-failover acceptance proof
+  (`bff536e2`, run `36602808623`), including all three capture phases and cleanup.
 - [ ] Least-authority application enrollment beyond the versioned administrative agent IPC.
-- [ ] Independent-node interrupted-upload resume, source-offline restore and measured custody.
+- [ ] Independent-node interrupted-upload resume, source-device-offline restore and measured custody.
 - [ ] Replica placement/repair and physical-usage contribution control, including safe
   2 GB-to-1 GB handoff and pending drain.
 - [ ] Native Signal encrypted snapshot export/import, including its attachments and recovery keys.
