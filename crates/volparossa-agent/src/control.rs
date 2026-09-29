@@ -202,6 +202,7 @@ async fn process_connection(
                 | control_request::Operation::ContentFetchName(_)
                 | control_request::Operation::ContentLocalFetchName(_)
                 | control_request::Operation::MailboxRemote(_)
+                | control_request::Operation::PrivateStorageRemote(_)
                 | control_request::Operation::ContentCustody(_)
                 | control_request::Operation::ComputeRemote(_)
         )
@@ -240,6 +241,16 @@ async fn process_connection(
             }
             Some(control_request::Operation::MailboxRemote(remote)) => {
                 Box::pin(context.content.mailbox_remote(
+                    remote.clone(),
+                    &context,
+                    &mut stream,
+                    &request.request_id,
+                    &mut ready_sent,
+                ))
+                .await
+            }
+            Some(control_request::Operation::PrivateStorageRemote(remote)) => {
+                Box::pin(context.content.private_storage_remote(
                     remote.clone(),
                     &context,
                     &mut stream,
@@ -321,6 +332,7 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
         | control_request::Operation::ContentFetchName(_)
         | control_request::Operation::ContentLocalFetchName(_)
         | control_request::Operation::MailboxRemote(_)
+        | control_request::Operation::PrivateStorageRemote(_)
         | control_request::Operation::ContentCustody(_)
         | control_request::Operation::ContentCustodyDiscover(_)
         | control_request::Operation::ComputeRemote(_)
@@ -366,6 +378,28 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
             request_id,
             context.content.mailbox_serve(request, context).await,
         ),
+        control_request::Operation::PrivateStorageServe(request) => content_response(
+            request_id,
+            context
+                .content
+                .private_storage_serve(request, context)
+                .await,
+        ),
+        control_request::Operation::PrivateStorageGrant(request) => {
+            match context
+                .content
+                .private_storage_grant(&request, context)
+                .await
+            {
+                Ok(grant) => response(
+                    request_id,
+                    ControlResult::Ok,
+                    "PRIVATE_STORAGE_GRANT",
+                    control_response::Payload::PrivateStorageGrant(grant),
+                ),
+                Err(error) => content_response(request_id, Err(error)),
+            }
+        }
         control_request::Operation::ContentFetch(request) => content_response(
             request_id,
             Box::pin(context.content.fetch(request, context)).await,

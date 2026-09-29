@@ -2,7 +2,115 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-24
+Last updated: 2026-09-29
+
+## Current integration and active work
+
+Automatic authority rounds and the four-job assessment cycle are integrated by
+[PR #163](https://github.com/VOLPAROSSA/volparossa/pull/163), merge `f4e6aa79`, after
+normal Quality/CodeQL checks passed. Model-quality limitations remain unchanged.
+The original README banner is integrated by [PR #164](https://github.com/VOLPAROSSA/volparossa/pull/164).
+Fresh live MPTCP relay refill is a separate candidate in
+[PR #165](https://github.com/VOLPAROSSA/volparossa/pull/165); local tests do not establish
+the pending real fourth-path proof or remove its eight-path-identity lifetime bound.
+
+The first [Firefox integration PR](https://github.com/VOLPAROSSA/volparossa-browser/pull/1)
+is merged (`bab677ba`): isolated ESR 140.16 privacy defaults and native Strict tracking
+protection passed a real browser smoke, including preservation of user choices after restart.
+The default-extension bundle is integrated by
+[browser PR #3](https://github.com/VOLPAROSSA/volparossa-browser/pull/3), merge `6cdd2bb2`:
+uBlock Origin, Decentraleyes and Adaptive Tab Bar Color install signed and active in the
+isolated ESR 140.16.0 runtime, and disabling/removing them survives restart. Twelve offline
+checks and unchanged privacy-default checks pass; this is not a Firefox 157 source-build proof.
+Daemon attachment, browser-scoped kill switch (requested off by default), cache integration
+and the private-compute sidebar remain unfinished. Core defaults for other consumers are
+not weakened by the requested browser availability fallback.
+
+[Signal integration](https://github.com/VOLPAROSSA/volparossa-chat/pull/1) now has a pinned
+Desktop/libsignal source baseline and explicit device/session/backup contracts, not a
+working modified client. Ordinary Signal compatibility, authenticated direct ciphertext
+delivery, linked-device synchronization and native encrypted snapshot restore need actual
+implementation and proof. Existing core private messages are not Signal interoperability.
+
+The [private-storage local/library milestone](PRIVATE_STORAGE.md) combines the non-evicting
+local ciphertext store with resumable uploads, provider-issued bounded grants, owner-signed
+fresh-challenge operations and durable provider/owner/archive/lease bindings. Lease creation
+and ownership registration are atomic; deletion retains a durable tombstone so retries cannot
+revive a removed copy. Full payload capacity remains charged for pending, partial, committed
+and expired copies until explicit deletion. Reads do not consume or renew a backup, and
+message ACKs cannot consume its lease. The framed library accepts an already protected stream;
+it does not establish or demonstrate an actual protected peer route itself. Provider keys
+must be trusted independently, and signed receipts are not proof of future custody or credit.
+It is integrated by [PR #168](https://github.com/VOLPAROSSA/volparossa/pull/168), normal merge
+`021e396c`, after Quality and CodeQL checks passed.
+
+That baseline's focused evidence passes: **13 library tests** (four authentication/protocol, five real
+SQLite provider and four framed-duplex tests) plus **eight resumable-storage tests**. These
+cover real signatures, durable ownership/quota checks, transactional rollback, restart/resume
+and framed transfer using in-process streams—not independent remote peers. The earlier five
+local lifecycle and four real CLI-process tests remain evidence for `storage local`, not a
+remote CLI. The manual **1 GiB resumable trial passed in 93.04 seconds on 2026-09-29**: half
+upload, close/reopen, idempotent retry, remaining upload, finalization, another reopen and two
+bounded-range restores with complete length/SHA-256 checks. The committed copy survives both
+restores. This synthetic opaque archive is not a Signal snapshot; the trial proves local
+disk-backed resumption at that size, not decentralized backup or alpha completion.
+
+The follow-up **peer-storage candidate** adds a typed versioned administrative agent handoff
+and `storage peer serve/grant/deposit/progress/restore/renew/delete`. The provider attaches
+its owned store to the explicit policy-authorized content endpoint and issues bounded grants;
+the consumer independently pins that provider key, then signs each fresh challenge locally.
+The agent bridges the exact protected provider connection, and CLI success additionally
+requires its final correlated `CONTENT_OK`; there is no direct-socket fallback.
+
+Before Reserve, the CLI persists a locked `0700` state directory and `0600` journal binding
+the original provider/grant/owner, random archive ID, full length/hash and requested deadline.
+Upload uses 256 KiB chunks. Explicit `deposit --resume` reconciles a known lease with signed
+Progress or repeats an initially unconfirmed Reserve with the same archive ID. Ordinary
+progress/renew/delete refuse an unknown lease rather than allocate storage. Restore reads
+at most 16 MiB per range, verifies complete length/SHA-256 and publishes a new `0600` file
+without consuming the copy. Reusing a store retains its persisted limits; no resize or
+drain is performed. Owner signing keys and passphrases are not handed to the agent; the
+explicit already-encrypted acknowledgement is not itself encryption or a plaintext detector.
+
+Focused CLI-unit checks pass for explicit argument scope, private locked-journal
+reopen/binding, unknown-lease refusal and private-file handling. A local Unix-IPC fixture
+with actual signed frames and SQLite passes lost-Reserve-terminal retry, two-chunk upload,
+Progress/Finalize, two non-consuming reads and Renew/Delete. Three agent grant/attachment
+and two local-control checks also pass. These are separate from the baseline evidence
+above and **not a real-overlay acceptance result**. The current administrative socket is
+also not a finished per-application authority boundary;
+see [shared-core application lifecycle](APPLICATION_LIFECYCLE.md). Signal encryption,
+snapshot export/import and application integration are not supplied by opaque file storage.
+
+The agreed contribution rule matches **actual remote physical usage**, including every replica
+and counted overhead, with usable local contribution; pending reservations stay separately
+visible. A measured drop from 2 GB to 1 GB lowers the target accordingly, but cannot evict
+other participants' live data. Existing custody needs verified independent replacements and acknowledged handoff before
+release. Unavailable replacement capacity must appear as **pending drain**, not freed space.
+Current payload quotas and receipts do not implement this adaptive distributed controller.
+
+The [live peer-storage run on `434ed112`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36589770066)
+**passes**. The exact-source report checker accepts the original 93-file artifact bundle
+(ZIP SHA-256 `80d1353d3844b82d75e5b554f4ab89ca538fc70248b9c6ab71d20f9d1f175370`).
+The seven CLI commands transfer 524,326 synthetic opaque bytes in three chunks to one
+independently pinned provider through the protected route, with 16 completed Exit MPTCP/TLS
+operations. A fresh-process Progress and committed retry preserve the archive/lease; the
+same store is closed/reopened and restored twice after removing the original source. Full
+length/hash, non-consuming reads, no-clobber, renewal and idempotent deletion pass, leaving
+zero leases and charged bytes. Drained privacy observations report no direct Client-to-Exit
+traffic or packet drops; scoped private cleanup, full topology cleanup and byte-identical
+host state pass. This proves neither archive encryption nor independent replicas, whole-agent
+restart, interrupted network upload, distributed contribution accounting or Signal integration.
+
+- [x] Source-exact disposable multi-node proof of the protected single-provider storage path
+  and seven CLI commands (`434ed112`, run `36589770066`).
+- [ ] Least-authority application enrollment beyond the versioned administrative agent IPC.
+- [ ] Independent-node interrupted-upload resume, source-offline restore and measured custody.
+- [ ] Replica placement/repair and physical-usage contribution control, including safe
+  2 GB-to-1 GB handoff and pending drain.
+- [ ] Native Signal encrypted snapshot export/import, including its attachments and recovery keys.
+
+## Earlier milestone evidence
 
 The completed development milestone is integrated into `main` by
 [PR #150](https://github.com/VOLPAROSSA/volparossa/pull/150), merge `322c45b9`, after the
@@ -16,8 +124,8 @@ integrated by [PR #160](https://github.com/VOLPAROSSA/volparossa/pull/160), norm
 `e87f1933`, after Quality, CodeQL and both source-exact network proofs passed.
 Neither integration nor execution proves reliable model reasoning.
 
-The next integration candidate reunites automatic authority rounds, the four-job assessment
-cycle and both retrieval-admission fixes with this current main-line cache implementation.
+The PR #163 integration reunited automatic authority rounds, the four-job assessment
+cycle and both retrieval-admission fixes with the main-line cache implementation.
 It preserves custody discovery's tag 37 alongside the authority inbox's tag 36, the standalone
 1.7B fixture and all retention checks. The production crate sources, dependency pins and
 policy-cycle network scripts match `24765ee9`, whose original complete-cycle proof below

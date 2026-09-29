@@ -18,6 +18,7 @@ mod named;
 mod named_admission_tests;
 mod object_policy;
 mod parallel;
+mod private_storage;
 mod recent;
 mod replication;
 mod replication_budget;
@@ -427,6 +428,7 @@ impl ContentRuntime {
                         let registry = registry.lock().await;
                         if !registry.has_live_publications(now())
                             && !registry.has_mailbox()
+                            && !registry.has_private_storage()
                             && !registry.has_custody()
                             && !registry.has_compute()
                         {

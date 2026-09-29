@@ -15,6 +15,7 @@ for mutual review, content policy and recovery across the network, cache and com
 [Network-layer](#network-layer-one-network-many-paths) ·
 [Cache-layer](#cache-layer-content-that-travels-with-the-network) ·
 [Compute-layer](#compute-layer-a-cooperative-brain) ·
+[Applications](#one-core-multiple-applications) ·
 [7 Virtues](#governed-by-7-virtues) ·
 [Progress](#development-status) · [Get started](#developing-volparossa)
 
@@ -45,6 +46,24 @@ learn and cooperate on suitable tasks. The [seven virtues](#governed-by-7-virtue
 shared compass for agent behavior and policy decisions throughout the design.
 
 Together, these are the project's direction—not a claim that every integration is finished.
+
+### One core, multiple applications
+
+VOLPAROSSA is a reusable core/daemon, not a network stack tied to a single application.
+Versioned interfaces let separate clients share its connectivity, content and compute services:
+
+- **[VOLPAROSSA Browser](https://github.com/VOLPAROSSA/volparossa-browser)** connects Firefox to
+  the core. Privacy defaults are the first verified slice; network/cache attachment and the
+  private AI sidebar are still being integrated. The requested browser-specific kill switch
+  starts off, allowing visible ordinary-Internet fallback when the overlay is unavailable;
+  this does not weaken other consumers' core defaults or permit policy-bypass fallback.
+- **[VOLPAROSSA Chat](https://github.com/VOLPAROSSA/volparossa-chat)** will retain Signal's
+  protocol, identities and encryption while adding decentralized delivery between compatible
+  devices and private backup storage. Direct, mixed and ordinary Signal delivery must be
+  distinguished across linked devices. Its current source baseline is not a working fork.
+
+These applications have their own repositories and lifecycles. The reusable functionality
+belongs here, so future applications can use it without duplicating the network.
 
 ---
 
@@ -190,8 +209,8 @@ the diagram does not imply that every source must be contacted.*
   [checksum-file](docs/OPERATIONS.md#https-checksum-file-downloads) modes authenticate the origin
   before using peer content. No interception CA, TLS bypass or automatic sharing of private
   responses is introduced. A [checksum-file extension](docs/OPERATIONS.md#https-checksum-file-downloads)
-  adds an explicit path for public downloads without those metadata formats; its integrated
-  network proof is still pending.
+  adds an explicit path for public downloads without those metadata formats. Its narrow
+  integrated network proof passes; arbitrary browser HTTPS sharing remains unfinished.
 
 The aim is faster retrieval and less origin-server traffic **when peers are advantageous**.
 Some constrained-uplink tests show a benefit; others show that the origin is faster. Peer caching
@@ -201,6 +220,34 @@ or permission to redistribute everything a user receives.
 
 [Content design and scope →](docs/CONTENT_NETWORK_PROPOSAL.md) ·
 [Publishing, retrieval and mailboxes →](docs/OPERATIONS.md#offline-content-commands)
+
+### Private cloud storage, separate from the cache
+
+The developing cloud-storage service is designed for **application-encrypted backups**, not public
+content or training data. Storage peers hold opaque chunks; recovery keys stay with the owner.
+Message delivery and backup retention are separate: reading a message may acknowledge its
+delivery, but restoring a backup must not consume or delete that backup.
+
+The contribution design follows **actual remote physical usage**, including every recovery
+copy and counted overhead. A 1 GB archive with two full copies therefore requires roughly
+2 GB plus overhead—not merely 1 GB. If usage falls, the contribution target falls too; space
+holding someone else's live data is released only after an acknowledged handoff to verified,
+independent replacements. Without those replacements, it remains visibly **pending drain**.
+
+The core has durable, resumable storage with provider-issued grants and owner-signed operations.
+A real **1 GiB local trial** passes restart/resume and two complete hash-verified restores.
+The next candidate adds `storage peer serve/grant/deposit/progress/restore/renew/delete`
+through the agent's protected-route interface: a private owner journal retains the exact
+archive and lease across retries; restores are verified, non-consuming and never overwrite
+an existing output. These commands accept **already encrypted** archives; they do not encrypt
+plaintext or turn private backups into public-cache or training material.
+
+The peer wiring still needs a real multi-node overlay proof. Least-authority application
+enrollment, adaptive contribution accounting and safe drain, redundancy repair and native
+Signal backup restore remain open. The local and framed-stream results are steps toward
+decentralized cloud backup, not a completed cloud service.
+
+[Private storage scope and commands →](docs/PRIVATE_STORAGE.md)
 
 ---
 
