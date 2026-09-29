@@ -94,6 +94,10 @@ pub enum ControlMessageType {
     RouteExtension = 34,
     /// New Relay's exact helper commit for one additive path, never a new route identity.
     RouteExtensionRelayCommit = 35,
+    /// Ephemeral session query for the retained route's actual Exit endpoint state.
+    MptcpPathsRequest = 36,
+    /// Exit response to one exact path-state query, not a replacement route grant.
+    MptcpPathsState = 37,
 }
 
 /// Data transport authorized by a reservation.

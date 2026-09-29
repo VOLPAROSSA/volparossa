@@ -16,10 +16,10 @@ use tokio::{
     task::JoinSet,
     time::{Instant, MissedTickBehavior, interval, timeout},
 };
-use volparossa_linux_uapi::{SystemdListenFdSet, send_fd_with_binding};
+use volparossa_linux_uapi::{SystemdListenFdSet, receive_fd_with_binding, send_fd_with_binding};
 use volparossa_routing::{
     HelperRequest, MAX_HELPER_FRAME, decode_request, descriptor_fd_binding, encode_response,
-    helper_response, safe_preview,
+    helper_request, helper_response, request_descriptor_fd_binding, safe_preview,
 };
 use zeroize::Zeroizing;
 
@@ -582,7 +582,27 @@ async fn process_connection(
         };
         let preview = safe_preview(&request).unwrap_or_else(|_| "invalid typed request".to_owned());
         tracing::info!(operation = %preview, "helper request accepted");
-        let execution = engine.execute_with_descriptor(request).await;
+        let descriptor = if matches!(
+            request.operation.as_ref(),
+            Some(helper_request::Operation::UpdateMptcpSubflow(_))
+        ) {
+            let binding = request_descriptor_fd_binding(&request)
+                .map_err(|_| ConnectionError::InvalidFrame)?;
+            Some(
+                timeout(
+                    REQUEST_TIMEOUT,
+                    receive_bound_request_descriptor(&stream, &binding),
+                )
+                .await
+                .map_err(|_| ConnectionError::Timeout)?
+                .map_err(|_| ConnectionError::InvalidFrame)?,
+            )
+        } else {
+            None
+        };
+        let execution = engine
+            .execute_with_input_descriptor(request, descriptor)
+            .await;
         tracing::info!(
             result = execution.response.result,
             diagnostic_code = execution.response.diagnostic_code,
@@ -591,6 +611,21 @@ async fn process_connection(
         write_execution(&mut stream, execution).await?;
     }
     Ok(())
+}
+
+async fn receive_bound_request_descriptor(
+    stream: &UnixStream,
+    binding: &[u8],
+) -> io::Result<std::os::fd::OwnedFd> {
+    loop {
+        stream.readable().await?;
+        match stream.try_io(Interest::READABLE, || {
+            receive_fd_with_binding(stream, binding)
+        }) {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            result => return result,
+        }
+    }
 }
 
 async fn write_execution(
@@ -714,6 +749,28 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn mptcp_subflow_request_descriptor_is_received_only_with_exact_binding() {
+        for matching in [true, false] {
+            let (client, server) = UnixStream::pair().unwrap();
+            let (sent, mut peer) = StdUnixStream::pair().unwrap();
+            let descriptor = Arc::new(OwnedFd::from(sent));
+            let sender_task = tokio::spawn(async move {
+                send_bound_descriptor(&client, &descriptor, &[1; 32])
+                    .await
+                    .unwrap();
+            });
+            let binding = if matching { [1; 32] } else { [2; 32] };
+            let received = receive_bound_request_descriptor(&server, &binding).await;
+            assert_eq!(received.is_ok(), matching);
+            sender_task.await.unwrap();
+            drop(received);
+            peer.set_nonblocking(true).unwrap();
+            let mut byte = [0];
+            assert_eq!(peer.read(&mut byte).unwrap(), 0);
+        }
+    }
+
+    #[tokio::test]
     async fn peer_credentials_and_bounded_frame_work_without_network_changes() {
         let (mut client, server) = UnixStream::pair().expect("socket pair");
         let engine = HelperEngine::new([4; 32], 1_000);
@@ -835,6 +892,11 @@ mod tests {
                     descriptor_kind: kind as i32,
                     local: Some(transport_address([10, 77, 0, 2], 42_000)),
                     remote,
+                    mptcp_flow_handle: if kind == TransportSocketKind::MptcpConnected {
+                        vec![9; 32]
+                    } else {
+                        Vec::new()
+                    },
                 },
             )),
         };

@@ -27,6 +27,7 @@ mod kernel;
 mod lease_spec;
 #[allow(dead_code)] // V3 endpoint ownership remains isolated until worker-v3 wiring lands.
 mod mptcp_endpoint;
+mod mptcp_flow;
 mod ownership_journal;
 mod runtime;
 mod server;

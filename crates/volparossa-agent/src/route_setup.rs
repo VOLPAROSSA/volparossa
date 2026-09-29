@@ -15,6 +15,7 @@ mod bootstrap;
 mod browser_failure;
 mod extension;
 mod live_refill;
+mod mptcp_paths;
 mod path_growth;
 mod path_telemetry;
 mod retirement;
@@ -10103,6 +10104,7 @@ mod tests {
                 | ExitForwardOperation::AdjacentReceiveBudget
                 | ExitForwardOperation::RouteRetire
                 | ExitForwardOperation::ExtendRoute
+                | ExitForwardOperation::MptcpPaths
                 | ExitForwardOperation::Unspecified => {
                     return Err(FakeTransportError::Definitive);
                 }
@@ -10480,6 +10482,7 @@ mod tests {
                 | ExitForwardOperation::AdjacentReceiveBudget
                 | ExitForwardOperation::RouteRetire
                 | ExitForwardOperation::ExtendRoute
+                | ExitForwardOperation::MptcpPaths
                 | ExitForwardOperation::Unspecified => return Err(RealTransportError),
             };
             ExitForwardResponse::granted(

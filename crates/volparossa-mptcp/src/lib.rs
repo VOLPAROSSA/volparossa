@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-pub use netlink::MptcpNetlinkClient;
+pub use netlink::{MptcpEvent, MptcpEventKind, MptcpEventSubscription, MptcpNetlinkClient};
 pub use socket::{MptcpListener, MptcpStream, connect, listen, probe_kernel_support};
 pub use volparossa_linux_uapi::{MptcpInfo, MptcpSubflowInfo, mptcp_info, mptcp_subflow_info};
 

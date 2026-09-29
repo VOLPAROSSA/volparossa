@@ -29,6 +29,7 @@ const CLIENT_SUBFLOW_READY_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// A genuinely negotiated client MPTCP stream plus the exact helper-owned selected paths.
 pub struct ClientMptcpTransport {
     initial_stream: Option<MptcpStream>,
+    initial_flow_handle: Vec<u8>,
     signal: Option<ExitMptcpListenerSignal>,
     route_context_id: Vec<u8>,
     context_handle: Vec<u8>,
@@ -45,15 +46,63 @@ pub(crate) struct ClientMptcpFlowTransport {
     certificate_der: Vec<u8>,
     required_subflows: usize,
     observations: ClientRefillObservations,
+    paths: ClientMptcpFlowPaths,
+}
+
+/// Flow handle alone is not authority: each command also presents this flow's real meta FD.
+pub(crate) struct ClientMptcpFlowPaths {
+    helper: HelperClient,
+    context: Vec<u8>,
+    handle: Vec<u8>,
+    flow: [u8; 32],
+    initial: Vec<u32>,
+}
+
+impl ClientMptcpFlowPaths {
+    pub(crate) async fn ensure_initial(
+        &self,
+        stream: &volparossa_tcp_proxy::Tls13MptcpStream,
+    ) -> Result<(), MptcpTransportError> {
+        // TLS has exchanged real bytes, so the MP_CAPABLE connection is fully established.
+        // The primary already exists; create only the other signed initial paths.
+        for path in self.initial.iter().skip(1) {
+            self.helper
+                .update_mptcp_subflow(
+                    volparossa_routing::UpdateMptcpSubflow {
+                        route_context_id: self.context.clone(),
+                        context_handle: self.handle.clone(),
+                        mptcp_flow_handle: self.flow.to_vec(),
+                        path_id: *path,
+                        action: volparossa_routing::MptcpSubflowAction::Ensure as i32,
+                    },
+                    stream.try_clone_owned_fd()?,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) const fn flow_handle(&self) -> [u8; 32] {
+        self.flow
+    }
 }
 
 impl ClientMptcpFlowTransport {
-    pub(crate) fn into_tls_parts(self) -> (MptcpStream, Vec<u8>, usize, ClientRefillObservations) {
+    pub(crate) fn into_tls_parts(
+        self,
+    ) -> (
+        MptcpStream,
+        Vec<u8>,
+        usize,
+        ClientRefillObservations,
+        ClientMptcpFlowPaths,
+    ) {
         (
             self.stream,
             self.certificate_der,
             self.required_subflows,
             self.observations,
+            self.paths,
         )
     }
 }
@@ -188,6 +237,19 @@ impl ClientMptcpTransport {
             .and_then(|observations| observations.refill_sample_path(now))
     }
 
+    pub(crate) async fn reconcile_paths(
+        &self,
+        helper: &HelperClient,
+        state: &volparossa_protocol::MptcpPathsState,
+    ) -> Result<(), MptcpTransportError> {
+        self.refill_observations
+            .as_ref()
+            .ok_or(MptcpTransportError::InvalidMetadata)?
+            .reconcile(helper, &self.context_handle, state)
+            .await?;
+        Ok(())
+    }
+
     /// Acquire and adopt the exact connected MPTCP descriptor for a verified Exit signal.
     ///
     /// The helper creates the socket inside the committed Client route namespace. Both endpoint
@@ -222,10 +284,10 @@ impl ClientMptcpTransport {
 
     /// Adopts a committed helper descriptor and retains the exact selected path requirement.
     ///
-    /// The Exit signals every additional address before the Client connects. Linux then derives
-    /// the matching Client source from the exact per-path route and records it as an implicit local
-    /// endpoint. Registering that same source again returns `EINVAL`; readiness below still requires
-    /// every selected subflow to be genuinely active before application payload is accepted.
+    /// The helper issues descriptor-bound flow authority for the private Client path manager.
+    /// After TLS establishes the original socket, the flow owner explicitly requests each other
+    /// signed initial path. Readiness still requires genuine subflows before application payload
+    /// is accepted; a netlink acknowledgement alone never satisfies it.
     ///
     /// # Errors
     ///
@@ -240,9 +302,14 @@ impl ClientMptcpTransport {
     ) -> Result<Self, MptcpTransportError> {
         let paths = selected_path_ids(selected_paths)?;
         let required_subflows = paths.len();
+        let initial_flow_handle = acquired.metadata().mptcp_flow_handle.clone();
+        if initial_flow_handle.len() != 32 || initial_flow_handle.iter().all(|byte| *byte == 0) {
+            return Err(MptcpTransportError::InvalidMetadata);
+        }
         let stream = adopt_client_stream(acquired)?;
         Ok(Self {
             initial_stream: Some(stream),
+            initial_flow_handle,
             signal: None,
             route_context_id,
             context_handle,
@@ -288,8 +355,8 @@ impl ClientMptcpTransport {
             .initial_stream
             .take()
             .filter(|stream| pending_stream_usable(stream.as_tcp_stream()));
-        let stream = if let Some(stream) = initial {
-            stream
+        let (stream, flow) = if let Some(stream) = initial {
+            (stream, std::mem::take(&mut self.initial_flow_handle))
         } else {
             let signal = self
                 .signal
@@ -297,18 +364,34 @@ impl ClientMptcpTransport {
                 .ok_or(MptcpTransportError::InvalidMetadata)?;
             let request = client_acquire_request(signal, self.context_handle.clone(), local_port)?;
             let acquired = helper.acquire_transport_socket(request).await?;
-            adopt_client_stream(acquired)?
+            let flow = acquired.metadata().mptcp_flow_handle.clone();
+            (adopt_client_stream(acquired)?, flow)
+        };
+        let signal = self
+            .signal
+            .as_ref()
+            .ok_or(MptcpTransportError::InvalidMetadata)?;
+        let paths = ClientMptcpFlowPaths {
+            helper: helper.clone(),
+            context: self.route_context_id.clone(),
+            handle: self.context_handle.clone(),
+            flow: flow
+                .try_into()
+                .map_err(|_| MptcpTransportError::InvalidMetadata)?,
+            initial: signal.initial_active_path_ids.clone(),
         };
         Ok(ClientMptcpFlowTransport {
             stream,
             certificate_der,
             required_subflows: self.required_subflows,
             observations,
+            paths,
         })
     }
 
     /// Releases every explicitly owned endpoint before the adopted stream and route are dropped.
-    /// Client-side additional sources are kernel-implicit, so this set is normally empty.
+    /// Per-flow subflows disappear with their exact meta socket; no observer retains its FD.
+    /// The namespace endpoint set is normally empty on the explicit Client path manager.
     ///
     /// # Errors
     ///
@@ -417,6 +500,15 @@ pub(crate) struct ExitMptcpTransport {
     selected_paths: Vec<u32>,
     initial_paths: Vec<u32>,
     listener_port: u16,
+    path_state_revision: u64,
+    path_state_available: bool,
+}
+
+/// Confirmed Exit endpoint lifecycle only; this is not proof of subflow traffic.
+pub(crate) struct ExitMptcpPathState {
+    pub(crate) revision: u64,
+    pub(crate) active: Vec<u32>,
+    pub(crate) retired: Vec<u32>,
 }
 
 impl ExitMptcpTransport {
@@ -463,6 +555,22 @@ impl ExitMptcpTransport {
             selected_paths: signal.selected_path_ids,
             initial_paths: paths,
             listener_port: signal.port,
+            path_state_revision: 1,
+            path_state_available: true,
+        })
+    }
+
+    pub(crate) fn path_state(&self) -> Option<ExitMptcpPathState> {
+        if !self.path_state_available {
+            return None;
+        }
+        let mut active = self.active_paths.clone();
+        active.push(*self.initial_paths.first()?);
+        active.sort_unstable();
+        Some(ExitMptcpPathState {
+            revision: self.path_state_revision,
+            active,
+            retired: self.retired_paths.iter().copied().collect(),
         })
     }
 
@@ -538,6 +646,7 @@ impl ExitMptcpTransport {
         // Record intent before the RPC: a cancelled/ambiguous helper reply must not lose the
         // exact endpoint cleanup obligation. The route owner stops further growth on any error.
         self.active_paths.push(path);
+        self.path_state_available = false;
         helper
             .add_mptcp_endpoint(AddMptcpEndpoint {
                 route_context_id: self.route_context_id.clone(),
@@ -548,6 +657,8 @@ impl ExitMptcpTransport {
                 listener_port: 0,
             })
             .await?;
+        self.path_state_revision += 1;
+        self.path_state_available = true;
         Ok(())
     }
 
@@ -564,6 +675,7 @@ impl ExitMptcpTransport {
         {
             return Err(MptcpTransportError::InvalidMetadata);
         }
+        self.path_state_available = false;
         helper
             .remove_mptcp_endpoint(RemoveMptcpEndpoint {
                 route_context_id: self.route_context_id.clone(),
@@ -575,6 +687,8 @@ impl ExitMptcpTransport {
         // The helper keeps the exact WireGuard lease for final Destroy, but this unsuccessful
         // warm trial must not be immediately signalled again ahead of a newly discovered path.
         self.retired_paths.insert(path);
+        self.path_state_revision += 1;
+        self.path_state_available = true;
         Ok(())
     }
 

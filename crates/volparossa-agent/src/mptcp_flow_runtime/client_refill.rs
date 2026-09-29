@@ -1,10 +1,11 @@
 //! Route-local refill demand from weak observations of actual authenticated Client sockets.
 //!
 //! This is demand, not authority: discovery, signed reservations and helper ownership still
-//! authorize every new path. No FD is duplicated and no observation keeps an application alive.
+//! authorize every new path. Only a bounded helper command temporarily pins a live descriptor;
+//! no observation keeps an application alive between maintenance ticks.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io,
     net::{IpAddr, Ipv6Addr, SocketAddr},
     sync::{Arc, Mutex},
@@ -207,12 +208,15 @@ impl History {
 struct Flow {
     observer: FlowObserver,
     history: History,
+    handle: [u8; 32],
+    applied: BTreeSet<u32>,
 }
 
 struct State {
     scope: Scope,
     flows: Vec<Flow>,
     last_attempt: Option<Instant>,
+    path_snapshot: Option<volparossa_protocol::MptcpPathsState>,
 }
 
 impl State {
@@ -237,10 +241,15 @@ impl ClientRefillObservations {
             scope: Scope::new(context, port, selected, initial),
             flows: Vec::new(),
             last_attempt: None,
+            path_snapshot: None,
         })))
     }
 
-    pub(crate) fn attach(&self, stream: Tls13MptcpStream) -> io::Result<ObservedTls> {
+    pub(crate) fn attach(
+        &self,
+        stream: Tls13MptcpStream,
+        handle: [u8; 32],
+    ) -> io::Result<ObservedTls> {
         let (slot, observer) = ObservationSlot::new();
         let stream = slot.attach_owned(stream)?;
         let mut state = self
@@ -249,14 +258,109 @@ impl ClientRefillObservations {
             .map_err(|_| io::Error::other("MPTCP refill observer poisoned"))?;
         state.flows.retain(|flow| flow.observer.is_live());
         if state.flows.len() < MAXIMUM_CONCURRENT_MPTCP_FLOWS {
+            let applied = state.scope.initial.iter().copied().collect();
             state.flows.push(Flow {
                 observer,
                 history: History::default(),
+                handle,
+                applied,
             });
         }
         // Telemetry admission must not abort an independently authorized flow. Over-cap flows
         // keep functioning but supply no refill evidence; no unbounded observer is allocated.
         Ok(stream)
+    }
+
+    /// Reconcile only authenticated Exit endpoint state against the locally committed path set.
+    /// At most eight owner-bound commands are issued per tick; the socket observation is weak.
+    pub(crate) async fn reconcile(
+        &self,
+        helper: &crate::helper::HelperClient,
+        context_handle: &[u8],
+        snapshot: &volparossa_protocol::MptcpPathsState,
+    ) -> io::Result<()> {
+        {
+            let mut state = self
+                .0
+                .lock()
+                .map_err(|_| io::Error::other("MPTCP observer poisoned"))?;
+            if !valid_path_state(&state.scope, state.path_snapshot.as_ref(), snapshot) {
+                return Err(io::Error::other("MPTCP authenticated path state conflicts"));
+            }
+            state.path_snapshot = Some(snapshot.clone());
+        }
+        for _ in 0..MAXIMUM_PATHS {
+            let command = {
+                let mut state = self
+                    .0
+                    .lock()
+                    .map_err(|_| io::Error::other("MPTCP observer poisoned"))?;
+                state.flows.retain(|flow| flow.observer.is_live());
+                let mut next = None;
+                for flow in &state.flows {
+                    let retirement = snapshot
+                        .retired_path_ids
+                        .iter()
+                        .find(|path| flow.applied.contains(path))
+                        .copied();
+                    let addition = snapshot
+                        .active_path_ids
+                        .iter()
+                        .find(|path| !flow.applied.contains(path))
+                        .copied();
+                    let Some((path, action)) = retirement
+                        .map(|id| (id, volparossa_routing::MptcpSubflowAction::Retire))
+                        .or_else(|| {
+                            addition.map(|id| (id, volparossa_routing::MptcpSubflowAction::Ensure))
+                        })
+                    else {
+                        continue;
+                    };
+                    if let Some(descriptor) = flow.observer.pin_descriptor()? {
+                        next = Some((flow.handle, path, action, descriptor));
+                        break;
+                    }
+                }
+                next
+            };
+            let Some((handle, path, action, descriptor)) = command else {
+                break;
+            };
+            let result = helper
+                .update_mptcp_subflow(
+                    volparossa_routing::UpdateMptcpSubflow {
+                        route_context_id: snapshot.route_context_id.clone(),
+                        context_handle: context_handle.to_vec(),
+                        mptcp_flow_handle: handle.to_vec(),
+                        path_id: path,
+                        action: action as i32,
+                    },
+                    descriptor,
+                )
+                .await;
+            let mut state = self
+                .0
+                .lock()
+                .map_err(|_| io::Error::other("MPTCP observer poisoned"))?;
+            if let Some(flow) = state.flows.iter_mut().find(|flow| flow.handle == handle) {
+                if !flow.observer.is_live() {
+                    continue;
+                }
+                result.map_err(|_| io::Error::other("MPTCP owned path command failed"))?;
+                match action {
+                    volparossa_routing::MptcpSubflowAction::Ensure => {
+                        flow.applied.insert(path);
+                    }
+                    volparossa_routing::MptcpSubflowAction::Retire => {
+                        flow.applied.remove(&path);
+                    }
+                    volparossa_routing::MptcpSubflowAction::Unspecified => {
+                        unreachable!("closed local action")
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn extend(&self, selected: &[u32]) -> io::Result<()> {
@@ -306,6 +410,42 @@ impl ClientRefillObservations {
             None
         }
     }
+}
+
+fn valid_path_state(
+    scope: &Scope,
+    previous: Option<&volparossa_protocol::MptcpPathsState>,
+    next: &volparossa_protocol::MptcpPathsState,
+) -> bool {
+    use volparossa_protocol::ControlPayload as _;
+    if next.validate().is_err()
+        || next.route_context_id.as_slice() != scope.context
+        || !scope
+            .initial
+            .iter()
+            .all(|id| next.active_path_ids.contains(id))
+        || next
+            .active_path_ids
+            .iter()
+            .chain(&next.retired_path_ids)
+            .any(|id| !scope.tuples.contains_key(id))
+    {
+        return false;
+    }
+    previous.is_none_or(|old| {
+        next.revision >= old.revision
+            && old
+                .retired_path_ids
+                .iter()
+                .all(|id| next.retired_path_ids.contains(id))
+            && old
+                .active_path_ids
+                .iter()
+                .all(|id| next.active_path_ids.contains(id) || next.retired_path_ids.contains(id))
+            && (next.revision != old.revision
+                || (next.active_path_ids == old.active_path_ids
+                    && next.retired_path_ids == old.retired_path_ids))
+    })
 }
 
 #[cfg(test)]

@@ -125,3 +125,87 @@ do not replace the unfinished full refill acceptance. The Client still separatel
 `SHUTDOWN_CLEANUP_FAILED`; its retained 400-row diagnostic tail does not identify that
 failure's precise cleanup phase. The immutable original ZIP SHA-256 is
 `f37ceb83b2c1f2122befeb164b80bc0d5e89909347ac50926073a909bd2cc8c3`.
+
+[Run 36604968363 on `0f58f2f2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36604968363)
+remains **failed**, at `MPTCP_REFILL_APPLICATION_ENDED`. This is not a failed or truncated
+download: the retained Client completion record contains all 268,435,456 response bytes,
+and its SHA-256 matches the deterministic fixture's expected
+`9b3d1401c16ffa448d8225f14258f08c4e0fcc49b3e2e87cdb78d1ea0114f244`.
+The response completes in 306.43 seconds while the fixture is still waiting for a fourth
+subflow. The Client process exit status and separate destination completion record were
+not retained at that early failure boundary; neither is inferred from the generic blocker.
+
+The original warm path 2 first joins and carries application bytes, then retires under
+the required injected loss. Fresh extension path 4 now reaches **Prepare, Activate and
+Commit on both the original Client and Exit**, with its new WireGuard interfaces retained
+alongside the original interfaces. The Exit adds its new MPTCP endpoint at 17:37:45 UTC,
+then removes it about eleven seconds later because no useful subflow appears. Thus the
+corrected native-evidence projection has progressed through real extension admission,
+but helper Commit still does not establish fourth-path application traffic.
+
+The new bounded diagnostics localize the failure after endpoint installation: Exit
+`AddAddrTx` increases from 2 to 3, but Client `AddAddr` and `MPJoinSynTx` remain at 2,
+as does Exit `EchoAdd`. No new JOIN attempt or JOIN error is observed. Both owned
+namespaces report a 120-second `add_addr_timeout`. The original primary path 1 remains
+100% blackholed, while healthy path 3 completes the download. R4's two physical legs
+each contain only two WireGuard data datagrams, not the required application-scale bytes.
+
+This exposes a limitation of the current kernel-managed announcement strategy. In the
+fixture's [Linux 6.12.105 path manager](https://github.com/gregkh/linux/blob/v6.12.105/net/mptcp/pm_netlink.c),
+`mptcp_pm_nl_addr_send_ack_avoid_list` chooses the first subflow that passes
+[`__mptcp_subflow_active`](https://github.com/gregkh/linux/blob/v6.12.105/net/mptcp/protocol.h):
+that check requires an established/joined TCP state, not useful progress or absence of
+loss. A blackholed primary can therefore carry the announcement even while the data
+scheduler uses a healthy sibling. The saved counters establish that the new announcement
+did not reach the Client; they are not a decrypted packet trace of its exact selected
+subflow. The native kernel retry interval also exceeds the unchanged warm-probe interval.
+The required primary-path failure, all timers and all fourth-path acceptance gates remain
+unchanged. An owner-bound Client userspace path-manager integration is under investigation;
+kernel congestion control, scheduling, retransmission and reassembly would remain in use.
+No such integration or passing fresh-refill datapath is claimed here.
+
+Disposable teardown reports zero owned leftovers and unchanged host state. Retained R4
+privacy observations contain no direct Client-to-Exit or unexpected destination outer
+traffic and no capture drops/truncation, but full refill acceptance still fails. Separately,
+the Client reports `SHUTDOWN_CLEANUP_FAILED` and retirement exchanges report outbound dial
+failures; eventual fixture cleanup does not make agent shutdown clean. The immutable
+original ZIP SHA-256 is
+`f2aa60c0077325192487d98b66892863a7922b1df60be89713e58f2e202bf0a4`.
+
+## Client-owned subflow control candidate
+
+The candidate now selects Linux userspace path management only inside each authenticated,
+new Client worker network namespace, before its first MPTCP socket. The fixed bootstrap
+checks that this namespace differs from the parent and reads back `pm_type=1`; it never
+changes the host or an existing socket's path-manager mode. Exit namespaces retain their
+kernel path manager. Linux still performs all scheduling, congestion control, retransmission
+and reassembly: this is not a TCP replacement or an mptcpd dependency.
+
+Additional subflows are requested through a typed helper operation. A helper-issued opaque
+flow handle is bound to the real connected socket's cookie, kernel token, original tuple,
+namespace and context generation. Each mutation temporarily passes that actual socket
+descriptor, held only until the worker command completes. The helper derives both addresses
+from the already committed path; callers cannot supply addresses, ports or kernel tokens.
+The original primary subflow cannot be removed through this interface. Kernel event and
+command acknowledgement handling are bounded; neither is treated as application traffic.
+
+The Client receives short-lived signed active/retired path snapshots from its original Exit
+through the original control relay. They must match the retained signed reservation exactly,
+the same authenticated connection lineage and a monotone committed path lifecycle. Only
+then may an initial, warm or newly committed path get a subflow. Unavailable snapshots do
+not invent activation, and contradictory snapshots fail closed. Fresh paths still require
+the ordinary discovery, native evidence, reservations and Client/Relay/Exit ownership steps.
+
+The current helper ledger is limited to 64 issued flow handles per context generation,
+not unlimited sequential sockets; it retains metadata rather than data descriptors and is
+cleared by context destruction. Propagating exact closed-flow lifetimes back to that ledger
+is follow-up work. The unchanged primary-loss, fresh-path byte threshold, complete download
+hash and privacy/cleanup acceptance gates must still pass in a new live run before this
+candidate counts as working fresh refill.
+
+Targeted local checks pass: ten subflow/descriptor checks (including the existing real
+two-subflow disposable-kernel test), the Client monotone snapshot lifecycle, kernel-event
+parser, private-namespace bootstrap predicate, two signed snapshot protocol checks and
+the schema-tag parity check. Four-crate all-target/all-feature strict Clippy, formatting
+and fourteen unchanged refill-fixture checks also pass. These do not substitute for a
+new live userspace-PM/fresh-fourth-path run.

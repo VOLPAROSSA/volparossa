@@ -66,7 +66,7 @@ fn unavailable() -> ClientRouteConnectError {
     ClientRouteConnectError::RouteAdmissionUnavailable
 }
 
-fn session(
+pub(super) fn session(
     route: &mut EstablishedRoute<ReservationSession>,
 ) -> Result<&mut ReservationCoordinator, ClientRouteConnectError> {
     route
@@ -106,7 +106,7 @@ fn next_path_id(
     (1..=permit_limit).find(|id| !selected.contains(id) && !attempted.contains(id))
 }
 
-async fn authorities(
+pub(super) async fn authorities(
     route: &EstablishedRoute<ReservationSession>,
     discovery: &DiscoveryControlHandle,
 ) -> Result<RouteSetupAuthorities, ClientRouteConnectError> {

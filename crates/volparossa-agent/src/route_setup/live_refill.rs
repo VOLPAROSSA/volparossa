@@ -58,6 +58,22 @@ impl ClientRouteControl {
         if route.established.pending_extension.is_some() {
             return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
         }
+        if let Some(agent) = &self.agent_state {
+            let agent = agent.read().await;
+            if !agent.roles().client
+                || agent.active_policy(now_ms).is_none_or(|policy| {
+                    *policy.policy_hash() != route.established.request.parameters.policy_hash
+                })
+            {
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            }
+        }
+        if let Some(snapshot) = route.mptcp_path_state(discovery).await {
+            transport
+                .reconcile_paths(&established.helper, &snapshot)
+                .await
+                .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        }
         if route.established.request.parameters.expires_at_ms
             <= now_ms.saturating_add(MAXIMUM_PHASE_LIFETIME_MS)
             || route.established.exit_bundle.path_count()
@@ -69,16 +85,6 @@ impl ClientRouteControl {
         let Some(buddy_path) = transport.refill_sample_path(Instant::now()) else {
             return Ok(ClientPathMaintenance::Unchanged);
         };
-        if let Some(agent) = &self.agent_state {
-            let agent = agent.read().await;
-            if !agent.roles().client
-                || agent.active_policy(now_ms).is_none_or(|policy| {
-                    *policy.policy_hash() != route.established.request.parameters.policy_hash
-                })
-            {
-                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
-            }
-        }
         let Ok(snapshot) = discovery
             .route_candidate_snapshot(config.network.candidate_pool_size)
             .await

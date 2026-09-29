@@ -614,7 +614,10 @@ impl ContentRuntime {
             // merely because it currently owns retrieval. Waiting consumes the same
             // 600-second budget as the protected lookup and actual body transfer.
             let _retrieval = named_retrieval(&self.retrieval, stream).await?;
-            named::download(request, context, stream, request_id, ready_sent).await
+            Box::pin(named::download(
+                request, context, stream, request_id, ready_sent,
+            ))
+            .await
         })
         .await
         .map_err(|_| ContentError::Unavailable)?;

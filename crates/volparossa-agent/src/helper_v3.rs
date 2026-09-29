@@ -692,6 +692,59 @@ pub struct HelperClient {
 }
 
 impl HelperClient {
+    /// Request one exact owned subflow operation while presenting the live MPTCP meta socket.
+    /// The temporary descriptor is dropped on acknowledgement, cancellation or timeout.
+    pub(crate) async fn update_mptcp_subflow(
+        &self,
+        value: volparossa_routing::UpdateMptcpSubflow,
+        descriptor: OwnedFd,
+    ) -> Result<(), HelperClientError> {
+        let id = random_request_id(&[]);
+        let request = HelperRequest {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            request_id: id.to_vec(),
+            operation: Some(helper_request::Operation::UpdateMptcpSubflow(value)),
+        };
+        let digest = operation_digest(&request).map_err(HelperClientError::Protocol)?;
+        let frame = Zeroizing::new(encode_request(&request).map_err(HelperClientError::Protocol)?);
+        let binding = volparossa_routing::request_descriptor_fd_binding(&request)
+            .map_err(HelperClientError::Protocol)?;
+        timeout(HELPER_TIMEOUT, async {
+            let mut stream = self.connect_authenticated().await?;
+            stream
+                .write_all(&frame)
+                .await
+                .map_err(HelperClientError::Io)?;
+            stream.flush().await.map_err(HelperClientError::Io)?;
+            loop {
+                stream.writable().await.map_err(HelperClientError::Io)?;
+                match stream.try_io(Interest::WRITABLE, || {
+                    volparossa_linux_uapi::send_fd_with_binding(&stream, &descriptor, &binding)
+                }) {
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    result => {
+                        result.map_err(HelperClientError::DescriptorHandoff)?;
+                        break;
+                    }
+                }
+            }
+            let response = read_response(&mut stream)
+                .await
+                .map_err(HelperClientError::Protocol)?;
+            validate_correlation(&response, &id, &digest)?;
+            let result = HelperResult::try_from(response.result)
+                .map_err(|_| HelperClientError::Correlation)?;
+            if result != HelperResult::Ok {
+                return Err(HelperClientError::Rejected(result));
+            }
+            if !matches!(response.outcome, Some(helper_response::Outcome::Empty(_))) {
+                return Err(HelperClientError::Correlation);
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| HelperClientError::Timeout)?
+    }
     /// Construct a client for packaging-controlled paths.
     #[must_use]
     pub fn new(socket: PathBuf, cleanup_token: PathBuf) -> Self {
@@ -1331,12 +1384,13 @@ impl HelperClient {
         &self,
         value: AcquireTransportSocket,
     ) -> Result<AcquiredTransportSocket, HelperClientError> {
-        let expected = TransportSocketReady {
+        let mut expected = TransportSocketReady {
             path_id: value.path_id,
             role: value.role,
             descriptor_kind: value.descriptor_kind,
             local: value.expected_local.clone(),
             remote: value.expected_remote.clone(),
+            mptcp_flow_handle: Vec::new(),
         };
         let execution = self
             .execute_operation(
@@ -1344,7 +1398,23 @@ impl HelperClient {
                 DescriptorExpectation::Transport,
             )
             .await?;
-        if execution.outcome != helper_response::Outcome::TransportSocketReady(expected.clone()) {
+        let helper_response::Outcome::TransportSocketReady(actual) = execution.outcome else {
+            return Err(HelperClientError::Correlation);
+        };
+        let needs_handle = expected.role == volparossa_routing::WireguardRole::Client as i32
+            && expected.descriptor_kind
+                == volparossa_routing::TransportSocketKind::MptcpConnected as i32;
+        if (needs_handle
+            && (actual.mptcp_flow_handle.len() != 32
+                || actual.mptcp_flow_handle.iter().all(|byte| *byte == 0)))
+            || (!needs_handle && !actual.mptcp_flow_handle.is_empty())
+        {
+            return Err(HelperClientError::Correlation);
+        }
+        expected
+            .mptcp_flow_handle
+            .clone_from(&actual.mptcp_flow_handle);
+        if actual != expected {
             return Err(HelperClientError::Correlation);
         }
         let descriptor = execution.descriptor.ok_or(HelperClientError::Correlation)?;
@@ -2297,6 +2367,15 @@ mod tests {
             descriptor_kind: value.descriptor_kind,
             local: value.expected_local.clone(),
             remote: value.expected_remote.clone(),
+            mptcp_flow_handle: if value.role == WireguardRole::Client as i32
+                && value.descriptor_kind == TransportSocketKind::MptcpConnected as i32
+            {
+                let mut handle = vec![0; 32];
+                OsRng.fill_bytes(&mut handle);
+                handle
+            } else {
+                Vec::new()
+            },
         };
         let mut response = HelperResponse {
             protocol_version: HELPER_PROTOCOL_VERSION,
@@ -3583,6 +3662,7 @@ mod tests {
                     descriptor_kind: request.descriptor_kind,
                     local: request.expected_local,
                     remote: request.expected_remote,
+                    mptcp_flow_handle: acquired.metadata().mptcp_flow_handle.clone(),
                 }
             );
             let flags = FdFlag::from_bits_truncate(

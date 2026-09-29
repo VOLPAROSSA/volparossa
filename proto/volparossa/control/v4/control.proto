@@ -51,6 +51,8 @@ enum ControlMessageType {
   CONTROL_MESSAGE_TYPE_ROUTE_EXTENSION_REQUEST = 33;
   CONTROL_MESSAGE_TYPE_ROUTE_EXTENSION = 34;
   CONTROL_MESSAGE_TYPE_ROUTE_EXTENSION_RELAY_COMMIT = 35;
+  CONTROL_MESSAGE_TYPE_MPTCP_PATHS_REQUEST = 36;
+  CONTROL_MESSAGE_TYPE_MPTCP_PATHS_STATE = 37;
 }
 
 // Zero is a proto3 default only and is rejected by the signed-payload validator.
@@ -100,6 +102,26 @@ message RouteExtensionRelayCommit {
   bytes authorization_sha256 = 6;
   bytes confirmation_sha256 = 7;
   uint64 hard_expires_at_ms = 8;
+}
+
+// Session-signed query for retained original MPTCP authority. The receiver must
+// match the complete parent to its verified, committed reservation.
+message MptcpPathsRequest {
+  bytes signed_exit_reservation = 1;
+}
+
+// Exit-signed, at most five-second lifecycle snapshot. This authorizes no new
+// endpoint or destination and is not proof that subflows carried application data.
+// Each path list is strictly sorted, disjoint, and bounded by the signed route.
+message MptcpPathsState {
+  bytes request_sha256 = 1;
+  bytes route_context_id = 2;
+  bytes reservation_id = 3;
+  bytes exit_node_id = 4;
+  uint64 hard_expires_at_ms = 5;
+  uint64 revision = 6;
+  repeated uint32 active_path_ids = 7;
+  repeated uint32 retired_path_ids = 8;
 }
 
 // Cache-only IN/A or IN/AAAA; names never enter the capability DHT.

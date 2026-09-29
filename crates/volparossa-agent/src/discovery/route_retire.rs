@@ -264,6 +264,11 @@ impl DiscoveryRuntime {
 
     pub(super) fn retired_exit_forward(&self, request: &ExitForwardRequest) -> bool {
         let context = match request.validated_operation() {
+            Ok(ExitForwardOperation::MptcpPaths) => decoded_signed_payload::<
+                volparossa_protocol::MptcpPathsRequest,
+            >(request.canonical_request())
+            .and_then(|request| request.parent().ok())
+            .and_then(|parent| fixed_bytes(&parent.route_context_id)),
             Ok(ExitForwardOperation::ExtendRoute) => decoded_signed_payload::<
                 volparossa_protocol::RouteExtensionRequest,
             >(request.canonical_request())

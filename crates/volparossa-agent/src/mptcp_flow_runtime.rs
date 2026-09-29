@@ -599,7 +599,8 @@ pub(crate) async fn activate_production_mptcp_client_flow(
     signed_open_tcp: &[u8],
     now_ms: u64,
 ) -> Result<ActiveProductionMptcpClientFlow, ProductionMptcpClientFailure> {
-    let (mptcp, certificate_der, required_subflows, observations) = transport.into_tls_parts();
+    let (mptcp, certificate_der, required_subflows, observations, paths) =
+        transport.into_tls_parts();
     if expected_certificate_sha256.len() != 32
         || Sha256::digest(&certificate_der).as_slice() != expected_certificate_sha256
     {
@@ -631,6 +632,11 @@ pub(crate) async fn activate_production_mptcp_client_flow(
             ProductionMptcpClientError::Tls,
         ));
     };
+    if paths.ensure_initial(&stream).await.is_err() {
+        return Err(ProductionMptcpClientFailure::new(
+            ProductionMptcpClientError::Stream,
+        ));
+    }
     if let Err(cause) = prime_open_tcp_and_wait_for_subflows(
         &mut stream,
         signed_open_tcp,
@@ -642,7 +648,7 @@ pub(crate) async fn activate_production_mptcp_client_flow(
         return Err(ProductionMptcpClientFailure::new(cause));
     }
     let stream = observations
-        .attach(stream)
+        .attach(stream, paths.flow_handle())
         .map_err(|_| ProductionMptcpClientFailure::new(ProductionMptcpClientError::Stream))?;
     Ok(ActiveProductionMptcpClientFlow { stream })
 }

@@ -57,6 +57,23 @@ impl ObservationSlot {
 }
 
 impl FlowObserver {
+    pub(super) fn pin_descriptor(&self) -> io::Result<Option<std::os::fd::OwnedFd>> {
+        let Some(slot) = self.0.upgrade() else {
+            return Ok(None);
+        };
+        let Some(stream) = slot
+            .lock()
+            .map_err(|_| io::Error::other("MPTCP observer poisoned"))?
+            .as_ref()
+            .and_then(Weak::upgrade)
+        else {
+            return Ok(None);
+        };
+        let stream = stream
+            .lock()
+            .map_err(|_| io::Error::other("MPTCP observer poisoned"))?;
+        stream.try_clone_owned_fd().map(Some)
+    }
     pub(super) fn is_live(&self) -> bool {
         self.0.strong_count() > 0
     }

@@ -38,6 +38,10 @@ use zeroize::Zeroizing;
 #[path = "engine_v3/path_extension.rs"]
 mod path_extension;
 use path_extension::ExtensionRecord;
+#[path = "engine_v3/mptcp_subflow.rs"]
+mod mptcp_subflow;
+pub(crate) use mptcp_subflow::BackendMptcpSubflow;
+use mptcp_subflow::{IssuedMptcpFlow, MAX_MPTCP_FLOWS_PER_CONTEXT};
 
 #[path = "engine_v3/uplink_sharing.rs"]
 mod uplink_sharing;
@@ -389,6 +393,7 @@ pub(crate) enum BackendAction {
     Probe,
     Destroy,
     AcquireTransportSocket,
+    UpdateMptcpSubflow,
     AddMptcpEndpoint,
     RemoveMptcpEndpoint,
 }
@@ -446,6 +451,7 @@ pub(crate) struct BackendProbe {
 enum MptcpEndpointMutation {
     Add(AddMptcpEndpoint),
     Remove(RemoveMptcpEndpoint),
+    Subflow(BackendMptcpSubflow),
 }
 
 /// One non-cloneable backend input. Engine rollback authority remains in `OperationOwner`.
@@ -606,6 +612,7 @@ struct ContextRecord {
     activated_at_unix: Option<u64>,
     leases: BTreeMap<(u32, i32), LeaseRecord>,
     extensions: BTreeMap<[u8; 16], ExtensionRecord>,
+    mptcp_flows: BTreeMap<[u8; 32], IssuedMptcpFlow>,
 }
 
 #[derive(Clone)]
@@ -679,6 +686,13 @@ pub(crate) enum BackendError {
 /// unavailable backend. A complete production adapter still requires integration tests for all of
 /// these properties.
 pub(crate) trait AsyncLeaseBackend: Send + Sync {
+    fn update_mptcp_subflow(
+        self: Arc<Self>,
+        request: BackendRequest<BackendMptcpSubflow>,
+    ) -> BackendFuture<BackendCompletion<()>> {
+        let (completion, _) = request.into_parts();
+        Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
+    }
     fn prepare_path_extension(
         self: Arc<Self>,
         request: BackendRequest<volparossa_routing::PreparePathExtension>,
@@ -1280,10 +1294,27 @@ impl HelperEngine {
     /// actually returned. A timeout publishes ambiguity but does not cancel or detach that task;
     /// the supervisor retains the affine operation owner and performs exact rollback settlement.
     pub(crate) async fn execute_with_descriptor(&self, request: HelperRequest) -> HelperExecution {
+        self.execute_with_input_descriptor(request, None).await
+    }
+
+    /// The transient request descriptor stays owned through the supervisor/backend completion.
+    pub(crate) async fn execute_with_input_descriptor(
+        &self,
+        request: HelperRequest,
+        descriptor: Option<OwnedFd>,
+    ) -> HelperExecution {
         if operation_digest(&request).is_err() {
             return execution(invalid_response(&request), None);
         }
         if fixed::<16>(&request.request_id).is_none() {
+            return execution(invalid_response(&request), None);
+        }
+        if descriptor.is_some()
+            != matches!(
+                request.operation.as_ref(),
+                Some(helper_request::Operation::UpdateMptcpSubflow(_))
+            )
+        {
             return execution(invalid_response(&request), None);
         }
         let fallback = execution(
@@ -1298,7 +1329,7 @@ impl HelperEngine {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let engine = self.clone();
         tokio::spawn(async move {
-            engine.supervise(request, sender).await;
+            engine.supervise(request, descriptor, sender).await;
         });
         receiver.await.unwrap_or(fallback)
     }
@@ -1306,6 +1337,7 @@ impl HelperEngine {
     async fn supervise(
         &self,
         request: HelperRequest,
+        descriptor: Option<OwnedFd>,
         sender: tokio::sync::oneshot::Sender<HelperExecution>,
     ) {
         let _operation_guard = self.inner.operation_gate.lock().await;
@@ -1313,7 +1345,7 @@ impl HelperEngine {
             return;
         }
         let mut sender = Some(sender);
-        let result = self.execute_serial(&request, &mut sender).await;
+        let result = self.execute_serial(&request, descriptor, &mut sender).await;
         if let (Some(sender), Some(result)) = (sender.take(), result) {
             let _ = sender.send(result);
         }
@@ -1323,10 +1355,27 @@ impl HelperEngine {
     async fn execute_serial(
         &self,
         request: &HelperRequest,
+        descriptor: Option<OwnedFd>,
         sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
     ) -> Option<HelperExecution> {
         let digest = operation_digest(request).unwrap_or([0; 32]);
         let request_id = fixed::<16>(&request.request_id)?;
+        // Even a cached successful reply requires this exact issued live meta socket.
+        // A flow handle alone, or a descriptor from another generation, is not authority.
+        if let Some(helper_request::Operation::UpdateMptcpSubflow(value)) =
+            request.operation.as_ref()
+        {
+            let Some(descriptor) = descriptor.as_ref() else {
+                return Some(execution(invalid_response(request), None));
+            };
+            if self
+                .validate_mptcp_flow_input(value, descriptor)
+                .await
+                .is_none()
+            {
+                return Some(execution(invalid_response(request), None));
+            }
+        }
         let is_reconciliation = matches!(
             request.operation.as_ref(),
             Some(helper_request::Operation::ReconcileExpiredPrepare(_))
@@ -1565,6 +1614,17 @@ impl HelperEngine {
         }
 
         let result = match request.operation.as_ref() {
+            Some(helper_request::Operation::UpdateMptcpSubflow(value)) => {
+                self.update_mptcp_subflow_async(
+                    request,
+                    request_id,
+                    digest,
+                    value,
+                    descriptor.expect("validated descriptor operation"),
+                    sender,
+                )
+                .await
+            }
             Some(helper_request::Operation::PreparePathExtension(value)) => {
                 self.prepare_path_extension_async(request, request_id, digest, value, sender)
                     .await
@@ -2845,6 +2905,7 @@ impl HelperEngine {
                 activated_at_unix: None,
                 leases: records,
                 extensions: BTreeMap::new(),
+                mptcp_flows: BTreeMap::new(),
             },
         );
         state
@@ -4265,6 +4326,15 @@ impl HelperEngine {
                     None,
                 ));
             }
+            if descriptor_kind == RoutingTransportSocketKind::MptcpConnected
+                && value.role == WireguardRole::Client as i32
+                && context.mptcp_flows.len() >= MAX_MPTCP_FLOWS_PER_CONTEXT
+            {
+                return Some(execution(
+                    response(request, HelperResult::Capacity, "MPTCP_FLOW_CAPACITY", None),
+                    None,
+                ));
+            }
             let now = expiry_now(self.inner.clock.as_ref());
             if !deadline_live(
                 now,
@@ -4438,6 +4508,25 @@ impl HelperEngine {
                 None,
             ));
         }
+        let Some(mptcp_flow_handle) =
+            self.register_mptcp_flow(&mut state, context_id, value, &descriptor)
+        else {
+            drop(state);
+            drop(descriptor);
+            let cleanup = self.rollback_context(token, request, sender).await;
+            if cleanup.response_sent {
+                return None;
+            }
+            return Some(execution(
+                response(
+                    request,
+                    HelperResult::CleanupIncomplete,
+                    "MPTCP_FLOW_IDENTITY_UNAVAILABLE",
+                    None,
+                ),
+                None,
+            ));
+        };
         state.transport_acquire_request_ids.insert(
             request_id,
             TransportAcquireRequestRecord {
@@ -4459,6 +4548,7 @@ impl HelperEngine {
             descriptor_kind: value.descriptor_kind,
             local: value.expected_local.clone(),
             remote: value.expected_remote.clone(),
+            mptcp_flow_handle,
         };
         Some(execution(
             response(
@@ -4602,6 +4692,13 @@ impl HelperEngine {
                 let request = BackendRequest::new(binding, value);
                 self.call_backend(binding.call_deadline, move || {
                     backend.remove_mptcp_endpoint(request)
+                })
+                .await
+            }
+            MptcpEndpointMutation::Subflow(value) => {
+                let request = BackendRequest::new(binding, value);
+                self.call_backend(binding.call_deadline, move || {
+                    backend.update_mptcp_subflow(request)
                 })
                 .await
             }
@@ -5442,6 +5539,7 @@ impl HelperEngine {
                 && !reserved.contains(&handle)
                 && state.contexts.values().all(|context| {
                     context.handle != handle
+                        && !context.mptcp_flows.contains_key(&handle)
                         && context.leases.values().all(|lease| lease.handle != handle)
                         && context
                             .extensions
@@ -6040,6 +6138,7 @@ fn insert_cache(state: &mut EngineState, request_id: [u8; 16], value: CachedResp
 
 fn request_context_id(request: &HelperRequest) -> Option<[u8; 16]> {
     let value = match request.operation.as_ref()? {
+        helper_request::Operation::UpdateMptcpSubflow(value) => &value.route_context_id,
         helper_request::Operation::PreparePathExtension(value) => &value.route_context_id,
         helper_request::Operation::ActivatePathExtension(value) => &value.route_context_id,
         helper_request::Operation::CommitPathExtension(value) => &value.route_context_id,
@@ -7987,7 +8086,6 @@ mod tests {
         let prepared = commit_client_context(&engine, &backend).await;
 
         for (request_id, kind) in [
-            (10, volparossa_routing::TransportSocketKind::MptcpConnected),
             (11, volparossa_routing::TransportSocketKind::MptcpListener),
             (
                 12,
@@ -8028,7 +8126,7 @@ mod tests {
             drop(first);
             drop(second);
         }
-        assert_eq!(backend.transport_calls.load(Ordering::Relaxed), 3);
+        assert_eq!(backend.transport_calls.load(Ordering::Relaxed), 2);
 
         let mut wrong_handle = AcquireTransportSocket {
             route_context_id: vec![7; 16],
@@ -8083,6 +8181,40 @@ mod tests {
                 .is_empty(),
             "confirmed Destroy must purge every descriptorless Acquire replay binding"
         );
+    }
+
+    #[tokio::test]
+    async fn mptcp_subflow_capability_never_issued_for_fake_unix_descriptor() {
+        let backend = Arc::new(FakeBackend::default());
+        let engine = fake_engine(
+            Arc::clone(&backend),
+            Arc::new(FixedClock(AtomicU64::new(100))),
+        );
+        let prepared = commit_client_context(&engine, &backend).await;
+        let mut acquire = acquire_request_for(&prepared, 70);
+        let Some(helper_request::Operation::AcquireTransportSocket(value)) =
+            acquire.operation.as_mut()
+        else {
+            unreachable!()
+        };
+        value.descriptor_kind = RoutingTransportSocketKind::MptcpConnected as i32;
+        value.expected_remote = Some(transport_address([10, 77, 0, 3], 443));
+        let rejected = engine.execute_with_descriptor(acquire).await;
+        assert_eq!(
+            rejected.response.result,
+            HelperResult::CleanupIncomplete as i32
+        );
+        assert_eq!(
+            rejected.response.diagnostic_code,
+            "MPTCP_FLOW_IDENTITY_UNAVAILABLE"
+        );
+        assert!(rejected.descriptor.is_none());
+        assert!(engine.inner.state.lock().await.contexts.is_empty());
+        let mut peers = backend.transport_peers.lock().expect("fake peers");
+        let peer = peers.first_mut().expect("one issued fake descriptor");
+        peer.set_nonblocking(true).unwrap();
+        let mut byte = [0];
+        assert_eq!(peer.read(&mut byte).unwrap(), 0);
     }
 
     #[tokio::test]

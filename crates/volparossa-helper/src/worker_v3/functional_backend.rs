@@ -170,6 +170,7 @@ use receive_accounting::OpenAccountingEntry;
 mod downlink_sender;
 use downlink_sender::BudgetLeaseState;
 use uplink_sharing::OpenSharingEntry;
+mod mptcp_subflow;
 mod path_extension;
 mod wifi_mesh;
 use wifi_mesh::OpenMeshEntry;
@@ -2783,6 +2784,16 @@ impl FunctionalAlphaLeaseBackend {
 }
 
 impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
+    fn update_mptcp_subflow(
+        self: Arc<Self>,
+        request: BackendRequest<crate::engine::BackendMptcpSubflow>,
+    ) -> BackendFuture<BackendCompletion<()>> {
+        let (completion, value) = request.into_parts();
+        let binding = completion.binding();
+        Box::pin(
+            async move { completion.complete(self.update_mptcp_subflow_one(binding, value).await) },
+        )
+    }
     fn prepare_path_extension(
         self: Arc<Self>,
         request: BackendRequest<volparossa_routing::PreparePathExtension>,
@@ -3587,7 +3598,9 @@ fn validate_mptcp_endpoint_binding(
     let key = OpenLineageKey::from(binding.lineage);
     if !matches!(
         action,
-        BackendAction::AddMptcpEndpoint | BackendAction::RemoveMptcpEndpoint
+        BackendAction::AddMptcpEndpoint
+            | BackendAction::RemoveMptcpEndpoint
+            | BackendAction::UpdateMptcpSubflow
     ) || binding.action != action
         || binding.phase != BackendPhase::Committed
         || binding.prior_phase != Some(ContextPhase::Committed)

@@ -36,6 +36,7 @@ const MAX_PENDING_NATIVE_AUTHORIZATIONS: usize = 64;
 const MAX_PROTOCOL_PATHS: u32 = 8;
 
 mod extension;
+mod mptcp_paths;
 pub use extension::VerifiedRouteExtension;
 
 /// Exact client-selected scope for one relay path.

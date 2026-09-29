@@ -10,8 +10,11 @@
 
 #[path = "v3/downlink.rs"]
 mod downlink;
+#[path = "v3/mptcp_subflow.rs"]
+mod mptcp_subflow;
 #[path = "v3/path_extension.rs"]
 mod path_extension;
+pub use mptcp_subflow::{MptcpSubflowAction, UpdateMptcpSubflow, request_descriptor_fd_binding};
 mod wifi_mesh;
 pub use downlink::{
     AppliedDownlinkBudget, ApplyDownlinkBudget, DestroyReceiveAccounting,
@@ -80,7 +83,7 @@ pub struct HelperRequest {
     /// Strict operation allowlist.
     #[prost(
         oneof = "helper_request::Operation",
-        tags = "20, 21, 22, 23, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51"
+        tags = "20, 21, 22, 23, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52"
     )]
     pub operation: Option<helper_request::Operation>,
 }
@@ -101,6 +104,9 @@ pub mod helper_request {
     /// Exactly one typed operation.
     #[derive(Clone, PartialEq, Oneof)]
     pub enum Operation {
+        /// Mutate one helper-derived subflow with a correlated live meta descriptor.
+        #[prost(message, tag = "52")]
+        UpdateMptcpSubflow(super::UpdateMptcpSubflow),
         /// Prepare one additive path in a committed context.
         #[prost(message, tag = "48")]
         PreparePathExtension(super::PreparePathExtension),
@@ -1136,6 +1142,9 @@ pub struct TransportSocketReady {
     /// Kernel-validated peer for connected MPTCP only.
     #[prost(message, optional, tag = "5")]
     pub remote: Option<TransportSocketAddress>,
+    /// Descriptorless live-flow capability for Client connected MPTCP only.
+    #[prost(bytes = "vec", tag = "6")]
+    pub mptcp_flow_handle: Vec<u8>,
 }
 
 /// One helper-selected ingress socket prepared before policy activation.
@@ -1505,6 +1514,7 @@ pub fn safe_preview(value: &HelperRequest) -> Result<String, HelperProtocolError
         .as_ref()
         .ok_or(HelperProtocolError::Invalid("missing operation"))?;
     let mut output = match operation {
+        Operation::UpdateMptcpSubflow(_) => "update one owned live MPTCP subflow".to_owned(),
         Operation::PreparePathExtension(_) => "prepare one additive route path".to_owned(),
         Operation::ActivatePathExtension(_) => "activate one additive route path".to_owned(),
         Operation::CommitPathExtension(_) => "prove and commit one additive route path".to_owned(),
@@ -1611,6 +1621,7 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
         .as_ref()
         .ok_or(HelperProtocolError::Invalid("missing operation"))?
     {
+        Operation::UpdateMptcpSubflow(operation) => mptcp_subflow::validate(operation),
         Operation::PreparePathExtension(operation) => path_extension::validate_prepare(operation),
         Operation::ActivatePathExtension(operation) => path_extension::validate_activate(operation),
         Operation::CommitPathExtension(operation) => path_extension::validate_commit(operation),
@@ -2120,6 +2131,13 @@ fn validate_outcome(value: &helper_response::Outcome) -> Result<(), HelperProtoc
         }
         Outcome::TransportSocketReady(value) => {
             path_role(value.path_id, value.role)?;
+            if value.role == WireguardRole::Client as i32
+                && value.descriptor_kind == TransportSocketKind::MptcpConnected as i32
+            {
+                handle(&value.mptcp_flow_handle)?;
+            } else if !value.mptcp_flow_handle.is_empty() {
+                return Err(HelperProtocolError::Invalid("unexpected MPTCP flow handle"));
+            }
             validate_transport_tuple(
                 value.descriptor_kind,
                 value.local.as_ref(),
@@ -2823,6 +2841,13 @@ mod tests {
                     descriptor_kind: value.descriptor_kind,
                     local: value.expected_local.clone(),
                     remote: value.expected_remote.clone(),
+                    mptcp_flow_handle: if value.role == WireguardRole::Client as i32
+                        && value.descriptor_kind == TransportSocketKind::MptcpConnected as i32
+                    {
+                        vec![9; 32]
+                    } else {
+                        Vec::new()
+                    },
                 },
             )),
         }

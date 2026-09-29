@@ -32,6 +32,9 @@ use volparossa_protocol::{
 const NOW: u64 = 1_700_000_000_000;
 const EXPIRY: u64 = NOW + 60_000;
 
+#[path = "protocol/mptcp_paths.rs"]
+mod mptcp_paths;
+
 fn adjacent_budget_fixture() -> (SigningKey, SigningKey, Vec<u8>, AdjacentReceiveBudget) {
     let exit = SigningKey::from_bytes(&[2; 32]);
     let relay = SigningKey::from_bytes(&[3; 32]);
@@ -1710,6 +1713,8 @@ fn assert_preselection_message_type_tags(schema: &str, messages: &str) {
         "ROUTE_EXTENSION_REQUEST",
         "ROUTE_EXTENSION",
         "ROUTE_EXTENSION_RELAY_COMMIT",
+        "MPTCP_PATHS_REQUEST",
+        "MPTCP_PATHS_STATE",
     ];
     let rust_names = [
         "Unspecified",
@@ -1748,6 +1753,8 @@ fn assert_preselection_message_type_tags(schema: &str, messages: &str) {
         "RouteExtensionRequest",
         "RouteExtension",
         "RouteExtensionRelayCommit",
+        "MptcpPathsRequest",
+        "MptcpPathsState",
     ];
     assert_eq!(schema_enum.matches(';').count(), names.len());
     assert_eq!(

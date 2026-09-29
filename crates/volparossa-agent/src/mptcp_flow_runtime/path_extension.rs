@@ -13,7 +13,7 @@ use volparossa_routing::{
 };
 
 use super::path_growth::WarmGrowth;
-use crate::mptcp_transport::ExitMptcpTransport;
+use crate::mptcp_transport::{ExitMptcpPathState, ExitMptcpTransport};
 use crate::{
     helper::{
         HelperClient, HelperClientError, RuntimeBoundDownlinkBudgetTarget,
@@ -39,6 +39,7 @@ pub(crate) struct MptcpExitPathControl {
 }
 
 enum Operation {
+    Snapshot,
     Prepare(PreparePathExtension),
     Activate(ActivatePathExtension),
     Commit(CommitPathExtension),
@@ -52,6 +53,7 @@ enum Operation {
 }
 
 enum Response {
+    Snapshot(ExitMptcpPathState),
     Prepared(PreparedPathExtension),
     Activated(ActivatedPathExtension),
     Committed(CommittedPathExtension),
@@ -67,6 +69,15 @@ pub(super) struct PathCommand {
 }
 
 impl MptcpExitPathControl {
+    pub(crate) async fn snapshot(&self) -> Result<ExitMptcpPathState, HelperClientError> {
+        match tokio::time::timeout(Duration::from_secs(2), self.call(Operation::Snapshot))
+            .await
+            .map_err(|_| HelperClientError::Timeout)??
+        {
+            Response::Snapshot(value) => Ok(value),
+            _ => Err(HelperClientError::Correlation),
+        }
+    }
     /// Export only queue-update authority after the exact new lease has activated.
     pub(crate) async fn downlink_budget_target(
         &self,
@@ -221,6 +232,10 @@ impl PathCommand {
             return;
         }
         let result = match self.operation {
+            Operation::Snapshot => transport
+                .path_state()
+                .map(Response::Snapshot)
+                .ok_or(HelperClientError::Correlation),
             Operation::Prepare(value) => helper
                 .prepare_path_extension(owner, value)
                 .await

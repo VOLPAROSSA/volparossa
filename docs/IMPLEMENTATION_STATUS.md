@@ -123,6 +123,20 @@ hypothesis. The fixture now retains those bounded observations without changing 
 timers or acceptance gates. Cleanup completes with zero owned objects and unchanged host
 state. This run does not verify the fresh-evidence ordinal correction or prove live refill.
 
+The [run on `0f58f2f2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36604968363)
+remains **failed**, at `MPTCP_REFILL_APPLICATION_ENDED`, although the Client's complete
+256-MiB response matches the expected fixture hash. Original warm-path activation and
+retirement succeed; fresh path 4 now reaches real Client/Exit Prepare, Activate and Commit.
+The Exit installs its fourth-path endpoint, but the new ADD_ADDR is not observed at the
+Client and no fourth JOIN starts before the endpoint retires. Linux's current kernel-PM
+announcement selection can still use an established but blackholed primary; the retained
+120-second announcement retry interval exceeds the unchanged warm-probe interval. This
+is not fourth-path application proof or a reason to weaken the primary-failure fixture.
+An exact owned Client userspace-PM seam is now implemented as an unproved candidate, without
+replacing kernel scheduling/retransmission; it has a 64-issued-flow/context-generation bound.
+Disposable teardown and host-state checks pass for the original run; separate agent
+shutdown/retirement failures remain visible. See [the exact evidence and limitations](MPTCP_REFILL.md).
+
 The first [Firefox integration PR](https://github.com/VOLPAROSSA/volparossa-browser/pull/1)
 is merged (`bab677ba`): isolated ESR 140.16 privacy defaults and native Strict tracking
 protection passed a real browser smoke, including preservation of user choices after restart.

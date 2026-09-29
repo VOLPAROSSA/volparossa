@@ -1,5 +1,61 @@
 use super::*;
 
+#[test]
+fn client_path_state_allows_only_committed_monotone_exit_lifecycle() {
+    let original = scope();
+    let mut snapshot = volparossa_protocol::MptcpPathsState {
+        request_sha256: vec![1; 32],
+        route_context_id: original.context.to_vec(),
+        reservation_id: vec![2; 16],
+        exit_node_id: vec![3; 32],
+        hard_expires_at_ms: 1_000_000,
+        revision: 1,
+        active_path_ids: vec![1, 2],
+        retired_path_ids: Vec::new(),
+    };
+    assert!(valid_path_state(&original, None, &snapshot));
+    let initial = snapshot.clone();
+    snapshot.active_path_ids.push(3);
+    assert!(
+        !valid_path_state(&original, Some(&initial), &snapshot),
+        "same revision cannot change state"
+    );
+    snapshot.revision = 2;
+    assert!(valid_path_state(&original, Some(&initial), &snapshot));
+    let warm = snapshot.clone();
+    snapshot.revision = 3;
+    snapshot.active_path_ids = vec![1, 2];
+    assert!(
+        !valid_path_state(&original, Some(&warm), &snapshot),
+        "disappeared path needs retirement"
+    );
+    snapshot.retired_path_ids = vec![3];
+    assert!(valid_path_state(&original, Some(&warm), &snapshot));
+    let retired = snapshot.clone();
+    snapshot.revision = 4;
+    snapshot.active_path_ids.push(4);
+    assert!(
+        !valid_path_state(&original, Some(&retired), &snapshot),
+        "remote state cannot grant an uncommitted path"
+    );
+    let extended = Scope::new(original.context, original.port, &[1, 2, 3, 4], &[1, 2]);
+    assert!(valid_path_state(&extended, Some(&retired), &snapshot));
+    let fresh = snapshot.clone();
+    snapshot.revision = 5;
+    snapshot.active_path_ids = vec![1, 3, 4];
+    snapshot.retired_path_ids = vec![2];
+    assert!(
+        !valid_path_state(&extended, Some(&fresh), &snapshot),
+        "initial path removal and retired path resurrection forbidden"
+    );
+    snapshot = fresh.clone();
+    snapshot.route_context_id[0] ^= 1;
+    assert!(!valid_path_state(&extended, Some(&fresh), &snapshot));
+    snapshot = fresh.clone();
+    snapshot.revision = 1;
+    assert!(!valid_path_state(&extended, Some(&fresh), &snapshot));
+}
+
 // Synthetic kernel-observation decision tests, not a claim of a live MPTCP datapath.
 fn scope() -> Scope {
     Scope::new([7; 16], 44443, &[1, 2, 3], &[1, 2])

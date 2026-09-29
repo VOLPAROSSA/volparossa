@@ -5,6 +5,7 @@ mod content;
 pub(crate) use content::DiscoveredContentProvider;
 mod dns_cache;
 mod downlink;
+mod mptcp_paths;
 mod native_ready;
 mod preselection_observation;
 mod preselection_sampler;
@@ -1011,6 +1012,7 @@ pub(crate) struct ActiveProductionMptcpExitRoute {
     cleanup_not_before_ms: u64,
     path_control: Option<MptcpExitPathControl>,
     extensions: HashMap<[u8; FORWARD_ID_BYTES], route_extension::LiveExtension>,
+    path_state_replay: ReplayCache,
 }
 
 struct MptcpExitRuntimeCompletionEvent {
@@ -9613,6 +9615,11 @@ impl DiscoveryRuntime {
             .await;
             return;
         }
+        if operation == ExitForwardOperation::MptcpPaths {
+            self.answer_mptcp_paths(authenticated_control_relay, connection_id, request, channel)
+                .await;
+            return;
+        }
         let local_peer_bytes = local_peer.to_bytes();
         let responses = match operation {
             ExitForwardOperation::FetchExitAdvertisement => self
@@ -9724,6 +9731,7 @@ impl DiscoveryRuntime {
             | ExitForwardOperation::MpquicSessionStart
             | ExitForwardOperation::AdjacentReceiveBudget
             | ExitForwardOperation::ExtendRoute
+            | ExitForwardOperation::MptcpPaths
             | ExitForwardOperation::RouteRetire
             | ExitForwardOperation::Unspecified => None,
         };
@@ -10878,6 +10886,8 @@ impl DiscoveryRuntime {
                     cleanup_not_before_ms: 0,
                     path_control: None,
                     extensions: HashMap::new(),
+                    path_state_replay: ReplayCache::new(64)
+                        .expect("nonzero bounded replay capacity"),
                 };
                 self.active_production_mptcp_exit_routes
                     .insert(route_context_id, active);
@@ -10897,6 +10907,7 @@ impl DiscoveryRuntime {
             expires_at_ms,
             cleanup_not_before_ms: 0,
             extensions: HashMap::new(),
+            path_state_replay: ReplayCache::new(64).expect("nonzero bounded replay capacity"),
         };
         if self.exit_service.as_mut().is_none_or(|service| {
             service
@@ -15863,6 +15874,7 @@ fn forward_request_scope_matches(
         ExitForwardOperation::ExtendRoute => {
             route_extension::forward_scope_matches(request, now_ms)
         }
+        ExitForwardOperation::MptcpPaths => mptcp_paths::forward_scope_matches(request, now_ms),
         ExitForwardOperation::CapacityHold => {
             let Ok(verified) = verify_control_message::<ExitCapacityHoldRequest>(
                 request.canonical_request(),
