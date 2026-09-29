@@ -2,7 +2,43 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-24
+Last updated: 2026-09-29
+
+## Current integration and active work
+
+Automatic authority rounds and the four-job assessment cycle are integrated by
+[PR #163](https://github.com/VOLPAROSSA/volparossa/pull/163), merge `f4e6aa79`, after
+normal Quality/CodeQL checks passed. Model-quality limitations remain unchanged.
+The original README banner is integrated by [PR #164](https://github.com/VOLPAROSSA/volparossa/pull/164).
+Fresh live MPTCP relay refill is a separate candidate in
+[PR #165](https://github.com/VOLPAROSSA/volparossa/pull/165); local tests do not establish
+the pending real fourth-path proof or remove its eight-path-identity lifetime bound.
+
+The first [Firefox integration PR](https://github.com/VOLPAROSSA/volparossa-browser/pull/1)
+is merged (`bab677ba`): isolated ESR 140.16 privacy defaults and native Strict tracking
+protection passed a real browser smoke, including preservation of user choices after restart.
+Daemon attachment, browser-scoped kill switch (requested off by default), cache integration
+and the private-compute sidebar remain unfinished. Core defaults for other consumers are
+not weakened by the requested browser availability fallback.
+
+[Signal integration](https://github.com/VOLPAROSSA/volparossa-chat/pull/1) now has a pinned
+Desktop/libsignal source baseline and explicit device/session/backup contracts, not a
+working modified client. Ordinary Signal compatibility, authenticated direct ciphertext
+delivery, linked-device synchronization and native encrypted snapshot restore need actual
+implementation and proof. Existing core private messages are not Signal interoperability.
+
+The separate [private-storage candidate](PRIVATE_STORAGE.md) implements a local non-evicting
+ciphertext store, durable pre-upload reservations, bounded streamed chunks, verified restore,
+renewal and explicit deletion. `storage local` deliberately claims no network transport,
+replication or verified reciprocal credit. Message ACKs cannot consume these backup leases.
+Actual remote storage, including recovery copies and counted overhead, must eventually be
+matched by usable contributed capacity; a local payload quota alone does not establish it.
+Five focused library tests and four real CLI-process tests pass. An explicit 1 GiB
+disk-backed smoke also passes: bounded-chunk write, store close/reopen, full-length/full-hash
+restore and explicit deletion. The data is synthetic opaque bytes, not an encrypted Signal
+snapshot. This proves local persistence at that size, not cloud backup or alpha completion.
+
+## Earlier milestone evidence
 
 The completed development milestone is integrated into `main` by
 [PR #150](https://github.com/VOLPAROSSA/volparossa/pull/150), merge `322c45b9`, after the
@@ -16,8 +52,8 @@ integrated by [PR #160](https://github.com/VOLPAROSSA/volparossa/pull/160), norm
 `e87f1933`, after Quality, CodeQL and both source-exact network proofs passed.
 Neither integration nor execution proves reliable model reasoning.
 
-The next integration candidate reunites automatic authority rounds, the four-job assessment
-cycle and both retrieval-admission fixes with this current main-line cache implementation.
+The PR #163 integration reunited automatic authority rounds, the four-job assessment
+cycle and both retrieval-admission fixes with the main-line cache implementation.
 It preserves custody discovery's tag 37 alongside the authority inbox's tag 36, the standalone
 1.7B fixture and all retention checks. The production crate sources, dependency pins and
 policy-cycle network scripts match `24765ee9`, whose original complete-cycle proof below
