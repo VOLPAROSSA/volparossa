@@ -41,6 +41,44 @@ pub(crate) struct Options {
     execute: bool,
 }
 
+/// Owner-selected execution configuration. Incoming requests cannot select paths,
+/// executables, model assets or resource limits.
+#[derive(Clone, Debug)]
+pub(super) struct ExecutionConfig {
+    pub runtime_root: PathBuf,
+    pub model_root: PathBuf,
+    pub work_parent: PathBuf,
+    pub model_profile: ModelProfile,
+    pub threads: u16,
+    pub max_seconds: u16,
+}
+
+impl From<&Options> for ExecutionConfig {
+    fn from(args: &Options) -> Self {
+        Self {
+            runtime_root: args.runtime_root.clone(),
+            model_root: args.model_root.clone(),
+            work_parent: args.work_parent.clone(),
+            model_profile: args.model_profile,
+            threads: args.threads,
+            max_seconds: args.max_seconds,
+        }
+    }
+}
+
+impl ExecutionConfig {
+    pub(super) fn validate(&self) -> Result<()> {
+        ensure!(
+            (1..=2).contains(&self.threads) && (1..=600).contains(&self.max_seconds),
+            "compute_private_budget"
+        );
+        super::private_directory(&self.runtime_root)?;
+        super::private_directory(&self.model_root)?;
+        super::private_directory(&self.work_parent)?;
+        Ok(())
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Input {
@@ -114,7 +152,12 @@ struct Staged {
 }
 
 impl Staged {
+    #[cfg(test)]
     fn new(args: &Options, input: &[u8]) -> Result<Self> {
+        Self::from_config(&ExecutionConfig::from(args), input)
+    }
+
+    fn from_config(args: &ExecutionConfig, input: &[u8]) -> Result<Self> {
         super::private_directory(&args.work_parent)?;
         let directory = tempfile::Builder::new()
             .prefix("private-task-")
@@ -262,33 +305,21 @@ pub(super) async fn run(args: &Options) -> Result<()> {
 }
 
 async fn run_inner(args: &Options) -> Result<()> {
-    ensure!(
-        (1..=2).contains(&args.threads) && (1..=600).contains(&args.max_seconds),
-        "compute_private_budget"
-    );
-    super::private_directory(&args.runtime_root)?;
-    super::private_directory(&args.model_root)?;
-    super::private_directory(&args.work_parent)?;
+    let config = ExecutionConfig::from(args);
+    config.validate()?;
     let input = read_input(&args.input)?;
     if !args.execute {
         println!("{}", preview(args));
         return Ok(());
     }
-    let staged = Staged::new(args, &input)?;
     let (owner, activity) = watch::channel(true);
     let interrupt = tokio::spawn(async move {
         let _ = tokio::signal::ctrl_c().await;
         let _ = owner.send(false);
     });
-    let result = async {
-        staged.options.validate()?;
-        let report = super::execute(&staged.options, activity).await?;
-        validate_report(&report, &input, args.model_profile)?;
-        summary(&report, args.model_profile)
-    }
-    .await;
+    let result = execute_bytes(&config, input, activity).await;
     interrupt.abort();
-    let result = staged.finish(result)?;
+    let result = result?;
     // Only the owner-requested answer is printed, after confirmed process and file cleanup.
     println!("{result}");
     ensure!(
@@ -296,6 +327,27 @@ async fn run_inner(args: &Options) -> Result<()> {
         "compute_private_answer_incomplete"
     );
     Ok(())
+}
+
+/// The private service and the file-oriented CLI share the exact staging, sandbox,
+/// report binding and cleanup path. No public broker or retained result is involved.
+pub(super) async fn execute_bytes(
+    config: &ExecutionConfig,
+    input: Vec<u8>,
+    activity: watch::Receiver<bool>,
+) -> Result<Value> {
+    validate_input(&input)?;
+    config.validate()?;
+    ensure!(*activity.borrow(), "compute_owner_busy");
+    let staged = Staged::from_config(config, &input)?;
+    let result = async {
+        staged.options.validate()?;
+        let report = super::execute(&staged.options, activity).await?;
+        validate_report(&report, &input, config.model_profile)?;
+        summary(&report, config.model_profile)
+    }
+    .await;
+    staged.finish(result)
 }
 
 #[cfg(test)]

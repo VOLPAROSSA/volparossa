@@ -1090,6 +1090,60 @@ network-state bytes remain identical. The original failed run remains failed and
 This verifies the bounded local private lane, not confidential distributed computation,
 private training, general answer accuracy or full B04.
 
+New application-local private-service candidate (2026-09-29): `compute private-serve`
+exposes a separate same-owner mode-0600 Unix socket below an owned mode-0700 directory.
+Its versioned, length-bounded private JSON interface accepts capabilities, question/context
+submission and same-connection cancellation—not paths, executables, model choices or public
+compute jobs. At most eight connections share one execution slot. It reuses the actual
+`private-task` staging, isolated executor, input/model report binding and cleanup path;
+disconnect/shutdown cancels the owned worker before releasing admission, while unconfirmed
+cleanup quarantines further jobs. Results stay on the originating connection, with no public
+cache, training, cloud fallback or retained-result lookup. Six focused local protocol/lifecycle
+tests pass, including real Unix framing and admission/cancellation controls. These tests do
+**not** execute a model or prove Firefox integration.
+
+The new `agent-private-task` fixture requires **proof version 2** and
+`private_service.version = 1`: observed Cancel and Disconnect worker lifetimes followed by one
+actual pinned 360M EOS answer over IPC, cleanup at the first result-frame byte, exact socket
+removal and unchanged host state. It reuses one explicit guest provision rather than adding a
+second complete inference run. Pure fixture, shell and static KVM/export-allowlist checks pass.
+The [first live IPC run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36580027127)
+on `331e9a1e` failed in `private-service-cancel`: owner-only socket modes, same-owner access,
+capabilities and global busy admission were observed, but the original report retained only
+`ValueError`, not a precise failure or worker-isolation proof. It exports no completed IPC
+answer. Cleanup removed all owned objects and preserved host-state bytes, but used fallback
+signals; this is not successful ordinary cancellation/cleanup. The ten original artifact
+files and their ZIP (`f75468aecfb22ce6e0e76b481c5523a839757e9bc1c47819cc1664e3f198fdef`)
+remain unchanged. The cause is not established. A diagnostic-only fixture update now records
+fixed phase/failure codes and sanitized observer status in the existing report without private
+inputs, raw errors or worker output; acceptance checks are unchanged.
+The [diagnostic run on `a4aa143c`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36583791452)
+also **fails**: the observer completed successfully and cancellation was acknowledged, but
+`RESULT_WORKER_ALIVE` rejected a retained sandbox lifetime at the first terminal-frame byte.
+Temporary input removal and the original owner's unchanged input were checked first. The
+old artifact does not distinguish a runnable worker from a dying launcher or zombie; its ZIP
+(`03ed5bcb1e22e06b4d43f2b51aa33bc5a17c6c6c0d783a71e99f8a05dbb7ac45`) remains unchanged.
+The new supervisor candidate retains exact descendant PID/start-time identities across
+launcher exit and waits for those lifetimes within the existing three-second cleanup bound.
+It never signals observed PIDs or follows reused PIDs; incomplete observation still produces
+`CleanupUnconfirmed` and quarantines admission. The fixture now preserves sanitized lifetime
+state on failure without changing its strict completion gate.
+The [fresh run on `a34c2e64`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36588840049)
+**passes** the version-2 live model/IPC proof. All 16 original exported files and the exact-source
+report checker were reviewed. The pinned 360M worker returns the synthetic identifier with EOS
+after 12 tokens. Cancel and Disconnect each end the observed sandbox/worker lifetimes and
+release the runtime lock; the successful answer is delivered only after the observed lifetimes
+end and temporary inputs/reports disappear, checked at the first result-frame byte. Socket
+permissions, busy admission, readonly mounts, isolated networking, public-input rejection,
+unchanged owner input/model, complete ordinary cleanup without fallback signals and identical
+host-state bytes pass. The original artifact ZIP has SHA-256
+`6b1a9613b0bf368f4805776dff9d9af97abd3fc6e67d5ec481ba02de1aa15798`.
+The two earlier failed IPC runs remain failed and immutable. The original `9d870440` direct-CLI
+proof above remains evidence only for that historical source and stdout boundary; it is not
+relabeled as IPC evidence. B04, confidential offload and browser-UI integration remain open.
+See [service usage](DECENTRALIZED_AGENTS.md#application-local-private-compute-ipc) and the
+[local wire contract](../crates/volparossa/src/compute/private_serve/WIRE.md).
+
 Current dependency-ready candidate: a single incremental provider queue now owns source and
 derived graph work. Each durable package completion triggers a dependency scan; newly ready
 tasks join that same queue while unrelated original worker leases remain occupied. Workflow

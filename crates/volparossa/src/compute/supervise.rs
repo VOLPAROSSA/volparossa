@@ -1,5 +1,7 @@
 //! Owner-controlled lifecycle and bounded observations, outside the model worker.
 
+mod lifetime;
+
 use std::{
     collections::BTreeSet, fmt, fs::File, io::Read, os::unix::process::ExitStatusExt, path::Path,
     process::ExitStatus, time::Duration,
@@ -131,6 +133,8 @@ pub(super) async fn run(
     mut owner_idle: watch::Receiver<bool>,
 ) -> Result<Value> {
     let pid = child.id().context("compute_child_id")?;
+    let mut private_lifetimes =
+        (options.mode == Mode::PrivateInfer).then(|| lifetime::OwnedLifetimes::capture(pid));
     let mut stdin = child.stdin.take().context("compute_child_stdin")?;
     let stdout = child.stdout.take().context("compute_child_stdout")?;
     let stderr = child.stderr.take().context("compute_child_stderr")?;
@@ -145,6 +149,10 @@ pub(super) async fn run(
     let mut budget = Budget::new();
     let controls = options.spare_capacity.then(Controls::default);
     let result = async {
+        if let Some(lifetimes) = private_lifetimes.as_mut() {
+            lifetimes.as_mut().map_err(|_| anyhow::anyhow!("compute_private_process_observation"))?
+                .refresh()?;
+        }
         if let Some(controls) = &controls {
             let action = pressure_action(&mut budget)?;
             input.extend(controls.issue(action, &request.id)?.context("compute_initial_control")?);
@@ -183,6 +191,10 @@ pub(super) async fn run(
                 },
                 result = &mut io => break result,
                 _ = ticks.tick() => {
+                    if let Some(lifetimes) = private_lifetimes.as_mut() {
+                        lifetimes.as_mut().map_err(|_| anyhow::anyhow!("compute_private_process_observation"))?
+                            .refresh()?;
+                    }
                     let observation = observe(pid, &options.output, !options.spare_capacity, super::resources::limits(options.model_profile).observed_rss);
                     match observation {
                         Ok(rss) => peak_rss = peak_rss.max(rss),
@@ -201,12 +213,24 @@ pub(super) async fn run(
             }
         }
     }.await;
-    if result.is_err() {
-        reap_failed_child(&mut child, options.mode).await?;
+    let mut result = confirm_cleanup(&mut child, options.mode, result, private_lifetimes).await?;
+    result["supervisor"] = supervisor_report(options, peak_rss, controls.as_ref(), &budget);
+    if options.mode == Mode::PlanTasks {
+        check_task_plan_result(&result, options)?;
+    } else if options.mode == Mode::PrivateInfer {
+        let input = super::read_file(&options.dataset, super::MAX_DATASET_BYTES)?;
+        super::private_task::validate_report(&result, &input, options.model_profile)?;
     }
-    // Only this post-cleanup boundary can expose typed worker failure evidence to callers.
-    let mut result = result.map_err(reaped_failure)?;
-    result["supervisor"] = serde_json::json!({
+    Ok(result)
+}
+
+fn supervisor_report(
+    options: &Options,
+    peak_rss: u64,
+    controls: Option<&Controls>,
+    budget: &Budget,
+) -> Value {
+    serde_json::json!({
         "version": 1, "sandbox": "bubblewrap-private-user-net-pid-ipc-mount",
         "network_access": false, "gpu_access": false,
         "max_observed_rss_bytes": peak_rss,
@@ -223,21 +247,47 @@ pub(super) async fn run(
         "child_reaped": true,
         "distributed_execution_claimed": false,
         "private_training_claimed": false
-    });
-    if options.mode == Mode::PlanTasks {
-        check_task_plan_result(&result, options)?;
-    } else if options.mode == Mode::PrivateInfer {
-        let input = super::read_file(&options.dataset, super::MAX_DATASET_BYTES)?;
-        super::private_task::validate_report(&result, &input, options.model_profile)?;
-    }
-    Ok(result)
+    })
 }
 
-async fn reap_failed_child(child: &mut Child, mode: Mode) -> Result<()> {
+async fn confirm_cleanup(
+    child: &mut Child,
+    mode: Mode,
+    result: Result<Value>,
+    mut private_lifetimes: Option<Result<lifetime::OwnedLifetimes>>,
+) -> Result<Value> {
+    // Retain exact sandbox descendant lifetimes before killing its launcher. Waiting only
+    // for the launcher does not prove that dying/reparented namespace children have gone.
+    let cleanup_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    if let Some(Ok(lifetimes)) = private_lifetimes.as_mut() {
+        let _ = lifetimes.refresh(); // A failed capture poisons confirmation, never cleanup.
+    }
+    if result.is_err() {
+        reap_failed_child(child, mode, cleanup_deadline).await?;
+    }
+    if let Some(lifetimes) = private_lifetimes {
+        let confirmed = match lifetimes {
+            Ok(lifetimes) => lifetimes.wait_closed(cleanup_deadline).await.is_ok(),
+            Err(_) => false,
+        };
+        if !confirmed {
+            return Err(super::private_task::CleanupUnconfirmed.into());
+        }
+    }
+    // Only this post-cleanup boundary can expose typed worker failure evidence to callers.
+    result.map_err(reaped_failure)
+}
+
+async fn reap_failed_child(
+    child: &mut Child,
+    mode: Mode,
+    deadline: tokio::time::Instant,
+) -> Result<()> {
     // Killing the exact live bwrap parent kills its sandbox child (die-with-parent).
-    // PID namespace teardown kills/reaps descendants; no host process-group scan.
+    // Private execution also waits for the retained descendant lifetimes above; no host
+    // process-group scan or signalling of a PID learned from a later /proc observation.
     let _ = child.start_kill();
-    let reaped = tokio::time::timeout(Duration::from_secs(3), child.wait())
+    let reaped = tokio::time::timeout_at(deadline, child.wait())
         .await
         .context("compute_reap_deadline")
         .and_then(|result| result.context("compute_reap"));
