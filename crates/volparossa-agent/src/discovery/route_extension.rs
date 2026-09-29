@@ -442,6 +442,16 @@ impl DiscoveryRuntime {
         let consumed = verifier.consumed();
         self.recent_native_exit_evidence
             .retain(|evidence| !consumed.contains(&evidence.evidence_id));
+        if matches!(
+            phase,
+            RouteExtensionPhase::Authorize | RouteExtensionPhase::Commit
+        ) {
+            // Record the exact accepted Relay before exposing its authorization/commit reply.
+            // On failure no successful reply escapes; existing helper ownership remains armed.
+            // Abort does not erase this destruction-only scope: an ambiguous admission can
+            // still need a whole-route retirement receipt after the live runtime disappears.
+            self.retain_exit_extension_retirement(scope, &accepted)?;
+        }
         match phase {
             RouteExtensionPhase::Probe => {
                 let extensions = &mut self

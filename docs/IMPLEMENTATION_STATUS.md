@@ -132,8 +132,9 @@ Client and no fourth JOIN starts before the endpoint retires. Linux's current ke
 announcement selection can still use an established but blackholed primary; the retained
 120-second announcement retry interval exceeds the unchanged warm-probe interval. This
 is not fourth-path application proof or a reason to weaken the primary-failure fixture.
-An exact owned Client userspace-PM seam is now implemented as an unproved candidate, without
-replacing kernel scheduling/retransmission; it has a 64-issued-flow/context-generation bound.
+An exact owned Client userspace-PM seam is now implemented, without replacing kernel
+scheduling/retransmission; it has a 64-issued-flow/context-generation bound. Later partial
+fourth-path data evidence is recorded below; normal retirement is not yet accepted.
 Disposable teardown and host-state checks pass for the original run; separate agent
 shutdown/retirement failures remain visible. See [the exact evidence and limitations](MPTCP_REFILL.md).
 
@@ -152,6 +153,17 @@ evidence. A fixture-only, exact-interface-bound parser correction passes ten gro
 fifteen refill checks; no lifetime, loss or byte requirements change. Original cleanup
 and unchanged host state pass. Its 118-file artifact remains failed: partial Client
 snapshot reconstruction is not a passed transfer or fresh-fourth-path proof.
+
+Run `36620197695` on `9c1eaff1` now completes the full 256-MiB download with the expected
+hash at both ends and adds fresh path 4 to the same meta socket (124,080 received /
+122,760 acknowledged bytes in its checked progress interval). Original warm retirement
+and retained capture drain/basic privacy checks pass. The run still **fails** normal
+disconnect: Exit retirement admission never included the new Relay, so R4 cannot obtain
+its cleanup receipt although Client/Exit helper contexts are destroyed. A bounded,
+exact-accepted-extension retirement-authority correction and real two-hop regression are
+implemented; the targeted two-hop regression, formatting and strict agent Clippy pass.
+The fresh live transfer/retirement proof remains pending. The original 167-file run remains failed;
+successful disposable teardown and unchanged host state do not replace product cleanup.
 
 The first [Firefox integration PR](https://github.com/VOLPAROSSA/volparossa-browser/pull/1)
 is merged (`bab677ba`): isolated ESR 140.16 privacy defaults and native Strict tracking

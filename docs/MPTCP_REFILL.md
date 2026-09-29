@@ -263,3 +263,44 @@ The original 118 files remain unchanged (ZIP SHA-256
 Disposable cleanup reports zero remaining owned objects; before/after host-state hashes
 match at `96425b125ebfe54dd4520dd41cc437387594b268b2ead134a323b798da45ab48`.
 A fresh live run is required to establish anything beyond the corrected observer.
+
+### Fourth-path data succeeds; normal retirement still fails
+
+[Run `36620197695` on `9c1eaff1`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36620197695)
+reaches `mptcp-refill-completion`, but remains **failed** at
+`MPTCP_REFILL_DISCONNECT_FAILED` / `CLIENT_CLEANUP_PENDING`. The same application completes
+all 268,435,456 bytes with the expected hash in both Client and destination receipts.
+Read-only rechecking of the original snapshots passes initial two-path and warm three-path
+progress, exact warm retirement, all eight raw projections and unchanged meta-socket
+lifetimes. Fresh path 4 gains 124,080 Client receive bytes and 122,760 Exit acknowledged
+bytes during the same transfer, both above the unchanged 65,536-byte gate. Fourteen retained
+captures pass their drain and basic privacy-boundary checks. These are partial original
+observations, not a successful full acceptance report or a throughput-improvement claim.
+
+The Client helper confirms `CONTEXT_DESTROYED`; the Exit helper also confirms destruction
+and then exact absence. Original Relay/control retirement receipts complete, but R4's
+upstream retirement remains unconfirmed. The source-level cause is concrete: Exit retirement
+membership contains only the original Finalize relays and control relay, while extension
+installation never records the newly authorized Relay. Its later valid retirement request
+therefore fails the retained-peer check even after live Exit owners have disappeared.
+
+The correction keeps original Finalize membership unchanged and retains a separate,
+bounded set of exact accepted extension scopes before an Authorize/Commit reply can escape.
+It requires the same parent/context, session, policy, expiry and Relay identity; only the
+opaque Exit service result may reach that production registration seam. There are at most
+eight extension records, matching existing transaction limits. An aborted or ambiguously
+acknowledged extension keeps destruction-only authority for eventual parent cleanup; it
+does not gain forwarding rights. Unknown/substituted peers and new admission after
+retirement remain rejected. Registration failure returns no successful extension reply
+and preserves existing helper cleanup ownership. A targeted real two-hop actor regression
+is added; its admission setup models an already accepted extension, not native probe proof.
+The exact two-hop actor regression, agent formatting and strict all-target agent Clippy
+pass after rebuilding in a branch-specific target directory. An earlier shared-target
+attempt used stale dependency artifacts from another worktree and is not verification.
+A fresh real transfer-and-retirement run remains necessary; the original run stays failed.
+
+All 167 original files remain unchanged, ZIP SHA-256
+`6b892b35cb799354816deba49ba656271ab457a3a569084507033a7c60cd1dab`.
+Disposable teardown reports zero remaining owned objects and unchanged host SHA-256
+`440fffc060d0624a44e1e5d24072598a1c837b9f4c9e3d89dbe3f05836eb61d8`;
+the product's failed normal disconnect/shutdown is not concealed by that later cleanup.

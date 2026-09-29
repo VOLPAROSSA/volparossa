@@ -12,10 +12,14 @@ use super::{
     decoded_signed_payload, fixed_bytes, generate_nonce, node_id_from_public_key, oneshot,
     request_response, sign_control_message_with, signed_envelope_matches_peer, unix_millis,
 };
-use std::{collections::BTreeSet, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 use volparossa_protocol::{
-    ClientSessionCapability, MAX_ROUTE_RETIRE_BYTES, RetirementReceipt, RouteRetire,
-    VerifiedControlMessage, route_retire_request_hash, verify_control_message,
+    ClientSessionCapability, MAX_ROUTE_RETIRE_BYTES, RetirementReceipt, RouteExtension,
+    RouteExtensionPhase, RouteExtensionScope, RouteRetire, VerifiedControlMessage,
+    route_retire_request_hash, verify_control_message,
 };
 
 type ContextId = [u8; FORWARD_ID_BYTES];
@@ -45,9 +49,59 @@ struct RelayScope {
 struct ExitScope {
     request: RouteRetire,
     relays: BTreeSet<Libp2pPeerId>,
+    // Keep original Finalize membership immutable. Accepted extensions add only bounded
+    // destruction authority, retained even after their helper/runtime owners disappear.
+    extensions: BTreeMap<ContextId, RouteExtensionScope>,
     expires_at_ms: u64,
     retiring: bool,
     complete: bool,
+}
+
+impl ExitScope {
+    fn retain_extension(
+        &mut self,
+        expected: &RouteExtensionScope,
+        accepted: &RouteExtension,
+    ) -> Option<()> {
+        let parent = expected.parent().ok()?;
+        let id = fixed_bytes(&expected.extension_id)?;
+        let peer = Libp2pPeerId::from_bytes(&expected.relay_peer_id).ok()?;
+        if accepted.scope.as_ref() != Some(expected)
+            || !matches!(
+                RouteExtensionPhase::try_from(accepted.phase),
+                Ok(RouteExtensionPhase::Authorize | RouteExtensionPhase::Commit)
+            )
+            || accepted.hard_expires_at_ms != self.expires_at_ms
+            || parent.expires_at_ms != self.expires_at_ms
+            || exit_request(&parent) != self.request
+            || peer_node(peer)?.as_slice() != expected.relay_node_id
+            || self.relays.contains(&peer)
+        {
+            return None;
+        }
+        if let Some(existing) = self.extensions.get(&id) {
+            return (existing == expected).then_some(());
+        }
+        if self.retiring
+            || self.complete
+            || self.extensions.len() >= 8
+            || self.extensions.values().any(|scope| {
+                scope.path_id == expected.path_id || scope.relay_peer_id == expected.relay_peer_id
+            })
+        {
+            return None;
+        }
+        self.extensions.insert(id, expected.clone());
+        Some(())
+    }
+
+    fn permits_relay(&self, peer: Libp2pPeerId) -> bool {
+        self.relays.contains(&peer)
+            || self
+                .extensions
+                .values()
+                .any(|scope| scope.relay_peer_id == peer.to_bytes())
+    }
 }
 
 struct PendingClient {
@@ -577,12 +631,33 @@ impl DiscoveryRuntime {
             ExitScope {
                 request: scope,
                 relays,
+                extensions: BTreeMap::new(),
                 expires_at_ms: grant.expires_at_ms,
                 retiring: false,
                 complete: false,
             },
         );
         Some(())
+    }
+
+    /// Retain destruction-only membership before returning an accepted new Relay authority.
+    /// The opaque result can only come from the Exit service's verified extension transaction.
+    pub(super) fn retain_exit_extension_retirement(
+        &mut self,
+        expected: &RouteExtensionScope,
+        accepted: &volparossa_exit::AcceptedRouteExtension,
+    ) -> Option<()> {
+        let parent = expected.parent().ok()?;
+        if parent.exit_node_id != self.local_node_id
+            || parent.exit_peer_id != self.service.local_peer_id().to_bytes()
+        {
+            return None;
+        }
+        let context = fixed_bytes(&parent.route_context_id)?;
+        self.route_retire
+            .exit
+            .get_mut(&context)?
+            .retain_extension(expected, accepted.message())
     }
 
     pub(super) fn answer_route_retire(
@@ -745,7 +820,7 @@ impl DiscoveryRuntime {
         let scope = self.route_retire.exit.get_mut(&context)?;
         if request.validate().is_err()
             || scope.request != *verified.message()
-            || !scope.relays.contains(&peer)
+            || !scope.permits_relay(peer)
             || request.control_relay_peer_id() != peer.to_bytes()
             || request.control_relay_node_id() != peer_node(peer)?
             || request.exit_node_id() != self.local_node_id
