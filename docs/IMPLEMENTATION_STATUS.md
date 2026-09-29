@@ -1228,6 +1228,28 @@ Owned-process/profile cleanup completes; guest-parent state is byte-identical. T
 source pin enables Firefox startup trace only in the separate empty profile, still capped
 at 16 KiB. Combined private-session logging, privacy settings and sandbox stay unchanged.
 
+The [trace-enabled run on `543e4c2d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36610233935)
+also fails during the empty startup: 40,002 ms, Firefox alive, loopback up, no test-control
+listener and no startup trace beyond the same graphics warnings. It reaches no model or
+private IPC. All eleven original files are retained, ZIP SHA-256
+`3a46fc615bdebb0c025a28759f1e8115b2aea4f5394c08bd721d28aad61462f8`;
+the temporary process/profile are removed and guest-parent snapshots are byte-identical.
+
+A local controlled reproduction now identifies an early profile-root prerequisite: with
+only a read-only empty `.mozilla` root substituted, the exact runtime hangs for 40 seconds
+before Marionette initialization. Merely supplying empty `firefox` and `firefox-esr`
+directories in that isolated root permits a real session in 2.574 seconds. The pinned
+startup code initializes global appdata even when `--profile` is explicit; its unavailable
+profile dialog is invisible headlessly. The browser fix supplies a fresh per-run appdata
+mount, without changing `HOME`, existing home contents or host permissions. Both runners
+verify that exact mount and remove it with their temporary profiles. A bounded anonymous
+home metadata layer also handles machines where the `.mozilla` mountpoint does not exist.
+Thirteen focused checks and real fixed startup probes (2.681 seconds, and 3.389 seconds
+with a pristine read-only home containing the staged repository) pass with clean exit and
+cleanup. This source pin leaves the 40-second deadline, sandbox, runtime, privacy defaults
+and private-session log boundary unchanged. A new combined guest proof is still pending;
+these local startup results are not a completed browser/model integration.
+
 Current dependency-ready candidate: a single incremental provider queue now owns source and
 derived graph work. Each durable package completion triggers a dependency scan; newly ready
 tasks join that same queue while unrelated original worker leases remain occupied. Workflow

@@ -1,12 +1,12 @@
 {
   "version": 1,
   "repository": "https://github.com/VOLPAROSSA/volparossa-browser",
-  "revision": "50e173d26dccdcc100b2d230b6ea11ef686a3493",
+  "revision": "4b1fdbe105c5cc23154778664c8d9fca9ef2454b",
   "files": {
-    "scripts/smoke_browser_startup.py": {"bytes": 11304, "sha256": "993438bc4e61b7c075ad97df86c08bbe55751f954ac4a0b727d5611af5b4c6e2"},
-    "scripts/smoke_compute_model.py": {"bytes": 29222, "sha256": "3686cf6e6261c0c54710e2f70a319ae2ace431a7b6646b497b3debae43444ddf"},
+    "scripts/smoke_browser_startup.py": {"bytes": 11504, "sha256": "5193fe4b95bd49416c5a2cb1e0a19db9ebef0d3cf63467ad11a31646a5a930e3"},
+    "scripts/smoke_compute_model.py": {"bytes": 29389, "sha256": "70b8a944ba6322d46690eafa74247526ac3fc13e92ae9870717e8ed7c63f5c1b"},
     "scripts/smoke_privacy.py": {"bytes": 15728, "sha256": "917d66faaeb6f80890c557ae3904bfee96b5fabc94e428776d83d1dc08fba283"},
-    "scripts/stage_firefox.py": {"bytes": 6888, "sha256": "7e14fe685ef0dcd3ffa0c412c0cea1088f1e779776d8be0841a1ab046c071a02"},
+    "scripts/stage_firefox.py": {"bytes": 9281, "sha256": "5d54e0e35662fae6b19d5f497d68469b0757fe754601c3e016f6fda773375203"},
     "integration/VolparossaCompute.sys.mjs": {"bytes": 10594, "sha256": "60c34936c0c0a3537e797dcd1c73be4f767c277aaad2c998fc39cbb5e958527b"},
     "integration/VolparossaComputePanel.sys.mjs": {"bytes": 4843, "sha256": "e3ca1653643e1d604bf21b0a78147b757f1482b855b174b1a351a35732c95ebf"},
     "defaults/privacy.json": {"bytes": 987, "sha256": "f6594ebca20585479635522e562f2da26a6422774b9628a0a906b320311076a7"}
