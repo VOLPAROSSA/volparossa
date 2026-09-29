@@ -7,6 +7,7 @@ mod inference_output;
 mod owner_control;
 mod peer;
 mod policy_assessment;
+mod private_serve;
 mod private_task;
 mod resources;
 mod sandbox;
@@ -43,6 +44,8 @@ pub(crate) enum Command {
     Run(Box<Options>),
     /// Answer one private local question without publishing inputs or using peer executors.
     PrivateTask(Box<private_task::Options>),
+    /// Serve bounded same-owner private questions locally; never exports them to peers.
+    PrivateServe(Box<private_serve::Options>),
     /// Fetch one explicitly selected signed public training source, train, and pack an adapter.
     TrainCycle(Box<train_cycle::Options>),
     /// Autonomously cycle through explicitly selected public sources using spare capacity.
@@ -141,6 +144,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Capacity => return spare_capacity::diagnostic(),
         Command::Run(options) => options,
         Command::PrivateTask(options) => return private_task::run(&options).await,
+        Command::PrivateServe(options) => return private_serve::run(*options).await,
         Command::TrainCycle(options) => return train_cycle::run(&options, socket).await,
         Command::TrainLoop(options) => return train_loop::run(&options, socket).await,
         Command::AggregateAdapters(options) => {

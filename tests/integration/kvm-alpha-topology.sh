@@ -12,6 +12,7 @@ umask 077
 
 mode=preview
 scenario=alpha
+private_storage_peer=no
 agent_jobs_loss=no
 agent_jobs_follow=no
 agent_jobs_peer_recovery=no
@@ -48,10 +49,20 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
 }
 
 print_plan() {
+    if [ "$private_storage_peer" = yes ]; then
+        printf '%s\n' \
+            'VOLPAROSSA private-storage-peer protected network smoke plan:' \
+            '  reuse only the disposable provider topology and exact host-state cleanup;' \
+            '  attach one distinct provider store, issue an explicit bounded owner grant, upload three chunks;' \
+            '  retry the committed archive, remove the source, reopen the same store and restore twice;' \
+            '  verify non-consuming reads, explicit renewal/deletion and full private fixture cleanup;' \
+            '  retain sanitized counters plus drained privacy metadata; no Signal/encryption/replication claim.'
+        return
+    fi
     if [ "$scenario" = content-repair ]; then
         printf '%s\n' \
             'VOLPAROSSA automatic public-replica repair smoke plan:' \
@@ -592,6 +603,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+            private_storage_peer=no
             download_sharing=no
             agent_jobs_loss=no
             agent_jobs_follow=no
@@ -615,6 +627,7 @@ while [ "$#" -gt 0 ]; do
             agent_train_loop=no
             agent_artifact_quarantine=no
             case $2 in
+                private-storage-peer) scenario=content-custody; private_storage_peer=yes; wifi_link=no; uplink_link=no ;;
                 agent-artifact-quarantine) scenario=agent-artifact; agent_train_loop=yes; agent_artifact_quarantine=yes; wifi_link=no; uplink_link=no ;;
                 agent-train-loop) scenario=agent-artifact; agent_train_loop=yes; wifi_link=no; uplink_link=no ;;
                 agent-train-cycle) scenario=agent-artifact; agent_train_cycle=yes; wifi_link=no; uplink_link=no ;;
@@ -810,6 +823,12 @@ if [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$
     done
     for custody_tool in head base64 openssl; do
         command -v "$custody_tool" >/dev/null 2>&1 || exit 69
+    done
+fi
+if [ "$private_storage_peer" = yes ]; then
+    for storage_fixture in private-storage-peer-smoke.sh private-storage-peer-smoke.py; do
+        [ -f "$source_directory/tests/integration/$storage_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
     done
 fi
 if [ "$agent_train_loop" = yes ]; then
@@ -1817,7 +1836,9 @@ cleanup() {
     if [ "$scenario" = content-mailbox ] && command -v content_mailbox_cleanup >/dev/null 2>&1; then
         content_mailbox_cleanup || original_status=1
     fi
-    if [ "$scenario" = content-custody ] && command -v content_custody_cleanup >/dev/null 2>&1; then
+    if [ "$private_storage_peer" = yes ] && command -v private_storage_peer_cleanup >/dev/null 2>&1; then
+        private_storage_peer_cleanup || original_status=1
+    elif [ "$scenario" = content-custody ] && command -v content_custody_cleanup >/dev/null 2>&1; then
         content_custody_cleanup || original_status=1
     fi
     if [ "$scenario" = agent-jobs ] && command -v agent_jobs_cleanup >/dev/null 2>&1; then
@@ -2087,6 +2108,8 @@ cleanup() {
         content_repair_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-mailbox ]; then
         content_mailbox_finalize_report "$original_status" || original_status=1
+    elif [ "$private_storage_peer" = yes ]; then
+        private_storage_peer_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-custody ]; then
         content_custody_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = agent-jobs ]; then
@@ -2229,6 +2252,10 @@ if [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$
     . "$source_directory/tests/integration/content-provider-smoke.sh"
     # shellcheck source=tests/integration/content-custody-smoke.sh
     . "$source_directory/tests/integration/content-custody-smoke.sh"
+fi
+if [ "$private_storage_peer" = yes ]; then
+    # shellcheck source=tests/integration/private-storage-peer-smoke.sh
+    . "$source_directory/tests/integration/private-storage-peer-smoke.sh"
 fi
 if [ "$scenario" = agent-jobs ]; then
     # shellcheck source=tests/integration/agent-jobs-smoke.sh
@@ -2405,6 +2432,10 @@ if [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$
     for custody_script in content-custody-smoke.py content-retain-smoke.py content-provider-smoke.py content-provider-https-smoke.py content-network-smoke.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$custody_script" "$WORK/bin/$custody_script"
     done
+fi
+if [ "$private_storage_peer" = yes ]; then
+    install -o root -g root -m 0555 "$source_directory/tests/integration/private-storage-peer-smoke.py" \
+        "$WORK/bin/private-storage-peer-smoke.py"
 fi
 if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
     for artifact_script in agent-artifact-smoke.py agent-training-smoke.py; do
@@ -5555,6 +5586,8 @@ start_privacy_observers() {
             [ "$scenario" = content-message ] || return 1 ;;
         content-mailbox-send-privacy|content-mailbox-receive-privacy)
             [ "$scenario" = content-mailbox ] || return 1 ;;
+        private-storage-peer-privacy)
+            [ "$private_storage_peer" = yes ] || return 1 ;;
         content-custody-deposit-privacy|content-custody-inspect-privacy|content-custody-fetch-privacy)
             [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ] || return 1 ;;
         content-custody-initial-privacy|content-custody-replacement-privacy)
@@ -6297,6 +6330,10 @@ if [ "$agent_train_loop" = yes ]; then
 fi
 if [ "$scenario" = agent-artifact ]; then
     agent_artifact_run
+    exit 0
+fi
+if [ "$private_storage_peer" = yes ]; then
+    private_storage_peer_run
     exit 0
 fi
 if [ "$scenario" = content-custody ]; then

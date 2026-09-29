@@ -58,7 +58,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
-    /// Explicit private ciphertext storage (local provider development commands).
+    /// Explicit private ciphertext storage, locally or through protected provider routes.
     Storage {
         #[command(subcommand)]
         command: storage::Command,
@@ -269,7 +269,7 @@ async fn main() -> Result<()> {
 
 async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
-        CliCommand::Storage { command } => storage::run(command),
+        CliCommand::Storage { command } => storage::run(command, &cli.control_socket).await,
         CliCommand::Init {
             identity,
             passphrase_file,
@@ -747,6 +747,9 @@ fn print_response(response: ControlResponse) -> Result<()> {
         }
         Payload::ContentPolicy(receipt) => {
             println!("{}", serde_json::to_string_pretty(&receipt)?);
+        }
+        Payload::PrivateStorageReady(_) | Payload::PrivateStorageGrant(_) => {
+            anyhow::bail!("private storage reply requires its scoped storage command")
         }
         Payload::Roles(roles) => {
             println!("client: {}", roles.client);

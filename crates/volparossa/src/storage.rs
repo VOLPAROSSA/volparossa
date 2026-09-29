@@ -1,4 +1,6 @@
-//! Explicit local ciphertext custody; not a network backup or reciprocal-credit service.
+//! Explicit local custody and protected peer transfers; not a reciprocal-credit service.
+
+mod peer;
 
 use std::{
     fs::OpenOptions,
@@ -21,6 +23,11 @@ pub(crate) enum Command {
     Local {
         #[command(subcommand)]
         command: LocalCommand,
+    },
+    /// Private provider grants and resumable transfers through the running agent only.
+    Peer {
+        #[command(subcommand)]
+        command: Box<peer::Command>,
     },
 }
 
@@ -84,8 +91,11 @@ pub(crate) enum LocalCommand {
     },
 }
 
-pub(crate) fn run(command: Command) -> Result<()> {
-    let Command::Local { command } = command;
+pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
+    let command = match command {
+        Command::Local { command } => command,
+        Command::Peer { command } => return peer::run(*command, socket).await,
+    };
     match command {
         LocalCommand::Init {
             store,

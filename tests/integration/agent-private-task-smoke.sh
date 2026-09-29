@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-only
-# Explicit disposable guest provisioning and one actual local-private inference.
+# Explicit guest provisioning; private Unix IPC, cancellation and one EOS inference.
 # shellcheck disable=SC2317
 set -eu
 export LC_ALL=C
@@ -16,10 +16,13 @@ plan() {
         '  explicitly provision the pinned CPU SmolLM2-360M profile within the existing 3GiB budget;' \
         '  create one mode-0600 synthetic private question/context and a mode-0700 work-parent;' \
         '  require public inference to reject that exact private input before acquiring the runtime;' \
-        '  execute one local private-task, with two threads and the original 600s deadline;' \
+        '  start same-owner private-serve on a new mode-0600 Unix socket, with fixed roots and limits;' \
+        '  observe real cancel/disconnect cleanup and global busy rejection before one EOS task;' \
+        '  execute that one private task via bounded Unix IPC, with two threads and the original 600s deadline;' \
         '  use a read-only root observer for exact input/model mounts and network-denied namespaces;' \
         '  require real owner ACKs and an EOS answer containing the generated synthetic identifier;' \
-        '  observe ephemeral input/report removal at first stdout and unchanged original input;' \
+        '  observe ephemeral input/report removal at the first result-frame byte and unchanged original input;' \
+        '  stop the exact service, require socket removal and no private prompts in its diagnostics;' \
         '  export only selected proof and the explicitly authorized synthetic answer, never raw private input/report;' \
         '  reap owned processes, remove only the two new guest fixture roots and compare routes/DNS/firewall.' \
         'No host installation/model, public cache, publication, training, peer execution or full-B04 claim.'
@@ -82,7 +85,7 @@ CARGO_TARGET_DIR=/home/vpci/target cargo build --locked -p volparossa --bin volp
         tail -c 131072 /home/vpci/cargo-build.log >&2
         exit 1
     }
-phase=private-task
+phase=private-service
 printf '%s\n' "$phase" >"$output/current-phase"
 python3 -B "$fixture" execute "$output" "$revision" \
     >"$output/runner.stdout" 2>"$output/runner.stderr"

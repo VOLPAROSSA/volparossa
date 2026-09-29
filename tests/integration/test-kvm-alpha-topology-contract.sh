@@ -37,6 +37,7 @@ for script in "$GUEST" "$HOST"; do
     "$script" --preview --scenario content-message | grep -Fi 'content-message' >/dev/null
     "$script" --preview --scenario content-https | grep -Fi 'content-https' >/dev/null
     "$script" --preview --scenario content-provider | grep -Fi 'content-provider' >/dev/null
+    "$script" --preview --scenario private-storage-peer | grep -Fi 'private-storage-peer' >/dev/null
     "$script" --preview --scenario content-replication | grep -Fi 'content-replication' >/dev/null
     "$script" --preview --scenario dns-cache | grep -Fi 'DNS-cache' >/dev/null
     "$script" --preview --scenario agent-artifact-quarantine | grep -Fi 'quarantine' >/dev/null
@@ -153,9 +154,11 @@ with tempfile.TemporaryDirectory(prefix='volparossa-private-export-') as directo
     published.mkdir(parents=True)
     safe = ('agent-private-task-smoke.json', 'agent-private-task-snapshot.json',
             'agent-private-task-answer.json', 'agent-private-task-owner_controls.json',
-            'agent-private-task-stdout_boundary.json', 'agent-private-task-provision.log')
+            'agent-private-task-stdout_boundary.json', 'agent-private-task-provision.log',
+            'agent-private-task-result_boundary.json', 'agent-private-task-private_service.json')
     unsafe = ('agent-private-task-input.json', 'agent-private-task-report.json',
-              'agent-private-task-arbitrary.json')
+              'agent-private-task-arbitrary.json', 'agent-private-task-private.stderr',
+              'agent-private-task-request.json')
     for name in safe + unsafe:
         (published / name).write_text('{}')
     archive = module['collect'](home, base / 'opt', 'a' * 40, 'agent-private-task', 1,
@@ -168,6 +171,9 @@ with tempfile.TemporaryDirectory(prefix='volparossa-private-export-') as directo
 PYTHON_PRIVATE_EXPORT
 
 [ -f "$WORKFLOW" ] && [ ! -L "$WORKFLOW" ]
+grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'private-storage-peer'" "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/private-storage-peer-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/test-private-storage-peer-smoke.py' "$WORKFLOW" >/dev/null
 grep -F 'agent-public-collection) scenario=agent-jobs; agent_public_collection=yes; wifi_link=no; uplink_link=no ;;' "$GUEST" >/dev/null
 grep -F '. "$source_directory/tests/integration/agent-public-collection-smoke.sh"' "$GUEST" >/dev/null
 grep -F 'agent-public-collection-smoke.py agent-public-document-smoke.py agent-document-synthesis.py' "$GUEST" >/dev/null
