@@ -24,6 +24,67 @@ ORIGINAL_RELAYS = {"relay0", "relay1", "relay2", "relay3"}
 ROLES = ("client", "relay0", "relay1", "relay2", "relay3", "relay4", "exit")
 CLOSING_STATES = ("FIN-WAIT-1", "FIN-WAIT-2", "CLOSE-WAIT", "CLOSING", "LAST-ACK")
 LIFETIME_FIELDS = ("cookie", "local", "remote", "local_id", "remote_id", "remote_token")
+MPTCP_DIAGNOSTIC_COUNTERS = (
+    "AddAddr", "AddAddrTx", "AddAddrTxDrop", "AddAddrDrop", "EchoAdd", "EchoAddTx", "EchoAddTxDrop",
+    "MPJoinSynTx", "MPJoinSynRx", "MPJoinSynAckRx", "MPJoinAckRx", "MPJoinNoTokenFound",
+    "MPJoinSynTxCreatSkErr", "MPJoinSynTxBindErr", "MPJoinSynTxConnectErr",
+    "MPJoinSynAckHMacFailure", "MPJoinAckHMacFailure", "RmAddr", "RmAddrTx", "RmSubflow",
+)
+
+
+def mptcp_counters(raw):
+    """Read only fixed MPTCP MIB fields, never arbitrary per-host statistics."""
+    require(type(raw) is str and len(raw) <= 65536, "MPTCP MIB exceeds bound")
+    rows = [line.split()[1:] for line in raw.splitlines() if line.startswith("MPTcpExt:")]
+    require(len(rows) == 2 and 1 <= len(rows[0]) <= 256 and len(rows[0]) == len(rows[1])
+            and len(set(rows[0])) == len(rows[0]), "invalid MPTCP MIB rows")
+    require(all(re.fullmatch(r"[0-9]{1,20}", value) and int(value) < 2**64 for value in rows[1]),
+            "invalid MPTCP MIB counter")
+    values = dict(zip(rows[0], map(int, rows[1])))
+    require(set(MPTCP_DIAGNOSTIC_COUNTERS) <= values.keys(), "missing MPTCP MIB counters")
+    return {name: values[name] for name in MPTCP_DIAGNOSTIC_COUNTERS}
+
+
+def warm_diagnostics(history, current, warm):
+    """Bounded transitions, not success evidence or a reason to bypass a proof gate."""
+    require(type(warm) is int and 1 <= warm <= 3, "invalid original warm ID")
+    projection = {}
+    for role in ("client", "exit"):
+        row = current[role]
+        kernel = row.get("kernel", {})
+        projection[role] = dict(
+            kernel_available="kernel" in row,
+            meta_cookie=kernel.get("cookie"),
+            established_path_ids=[p["path_id"] for p in kernel.get("subflows", [])],
+            endpoint_path_ids=[p["path_id"] for p in kernel.get("endpoints", [])],
+            diagnostics=row.get("diagnostics", dict(available=False, error="NOT_RETAINED")),
+        )
+    snapshot = dict(started_monotonic_ns=current["started_monotonic_ns"],
+                    observed_monotonic_ns=current["observed_monotonic_ns"], state=projection)
+    if history is None:
+        history = dict(schema_version=1, warm_path_id=warm, samples=0, omitted_transitions=0,
+                       transitions=[], first_endpoint_present=None, first_endpoint_withdrawn=None)
+    require(history["schema_version"] == 1 and history["warm_path_id"] == warm
+            and 0 <= history["samples"] < 450 and len(history["transitions"]) <= 32,
+            "invalid bounded warm diagnostic history")
+    if history["samples"]:
+        require(history["last"]["observed_monotonic_ns"] < snapshot["started_monotonic_ns"],
+                "overlapping warm diagnostics")
+    changed = not history["samples"] or history["last"]["state"] != projection
+    if changed:
+        if len(history["transitions"]) < 32:
+            history["transitions"].append(snapshot)
+        else:
+            history["omitted_transitions"] += 1
+    present = warm in projection["exit"]["endpoint_path_ids"]
+    if present and history["first_endpoint_present"] is None:
+        history["first_endpoint_present"] = snapshot
+    elif (not present and projection["exit"]["kernel_available"]
+          and history["first_endpoint_present"] is not None and history["first_endpoint_withdrawn"] is None):
+        history["first_endpoint_withdrawn"] = snapshot
+    history["last"] = snapshot
+    history["samples"] += 1
+    return history
 
 
 def exit_endpoints(raw, layout):
@@ -98,8 +159,17 @@ def sample(owners, layout, anchor=None, warm=None):
                    tcp=G.command([*prefix, "ss", "-HOntie", selector]))
         if role == "exit":
             raw["endpoints"] = G.command([*prefix, "ip", "-j", "mptcp", "endpoint", "show"])
+        try:
+            counters = mptcp_counters(G.command([*prefix, "cat", "/proc/net/netstat"]))
+            timeout = G.command([*prefix, "cat", "/proc/sys/net/mptcp/add_addr_timeout"]).strip()
+            require(re.fullmatch(r"[0-9]{1,10}", timeout) is not None, "invalid ADD_ADDR timeout")
+            diagnostics = dict(available=True, counters=counters, add_addr_timeout_seconds=int(timeout),
+                               owner_pid=pid, owner_start_ticks=owner["start_ticks"], owner_netns=owner["netns"])
+        except (ValueError, OSError, subprocess.SubprocessError):
+            # Optional diagnostics cannot change data-path acceptance. Do not retain raw errors.
+            diagnostics = dict(available=False, error="KERNEL_DIAGNOSTICS_UNAVAILABLE")
         same_owner()
-        result[role] = dict(raw=raw)
+        result[role] = dict(raw=raw, diagnostics=diagnostics)
         try:
             result[role]["kernel"] = kernel_sample(raw, layout, role,
                 anchor[role]["kernel"] if anchor else None, warm)
@@ -404,6 +474,9 @@ def main(args):
         result = sample(read(Path(args[1])), read(Path(args[2])))
     elif len(args) == 6 and args[0] == "sample":
         result = sample(read(Path(args[1])), read(Path(args[2])), read(Path(args[3])), int(args[4]))
+    elif len(args) == 4 and args[0] == "warm-diagnostics":
+        history = read(Path(args[3])) if Path(args[3]).exists() else None
+        result = warm_diagnostics(history, read(Path(args[1])), int(args[2]))
     elif len(args) == 5 and args[0] == "retirement-candidate":
         retirement_candidate(read(Path(args[1])), read(Path(args[2])), read(Path(args[3])), int(args[4])); return
     elif len(args) == 7 and args[0] == "retired":

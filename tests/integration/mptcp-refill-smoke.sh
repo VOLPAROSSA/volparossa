@@ -217,8 +217,21 @@ mptcp_refill_run() {
     mref_poll=0
     while [ "$mref_poll" -lt 450 ]; do
         kill -0 "$DOWNLOAD_CLIENT_PID" 2>/dev/null || fail MPTCP_REFILL_APPLICATION_ENDED
-        if mptcp_refill_sample initial warm \
-            && jq -e '(.client.kernel.subflows | length) == 3 and (.exit.kernel.subflows | length) == 3' "$WORK/mptcp-refill-warm.json" >/dev/null; then break; fi
+        mref_sample_ok=false
+        if mptcp_refill_sample initial warm; then mref_sample_ok=true; fi
+        # Keep the short announcement window, not only the final overwritten sample.
+        # These observations diagnose failures; they do not replace any acceptance check.
+        mptcp_refill_check warm-diagnostics "$WORK/mptcp-refill-warm.json" "$mref_warm" \
+            "$WORK/mptcp-refill-warm-diagnostics.json" 2>"$WORK/mptcp-refill-warm-diagnostics.err" || true
+        if [ "$mref_sample_ok" = true ]; then
+            if [ ! -e "$WORK/mptcp-refill-warm-endpoint-first.json" ] \
+                && jq -e --argjson warm "$mref_warm" '.exit.kernel.endpoints | any(.path_id == $warm)' \
+                    "$WORK/mptcp-refill-warm.json" >/dev/null; then
+                install -m 0600 "$WORK/mptcp-refill-warm.json" "$WORK/mptcp-refill-warm-endpoint-first.json" || true
+            fi
+            if jq -e '(.client.kernel.subflows | length) == 3 and (.exit.kernel.subflows | length) == 3' \
+                "$WORK/mptcp-refill-warm.json" >/dev/null; then break; fi
+        fi
         sleep 0.1; mref_poll=$((mref_poll + 1))
     done
     [ "$mref_poll" -lt 450 ] || fail MPTCP_REFILL_WARM_NEVER_APPEARED

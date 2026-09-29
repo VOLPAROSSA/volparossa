@@ -112,6 +112,17 @@ requirements remain intact. No passing live refill is claimed. Fixture cleanup/A
 but the separate Client `SHUTDOWN_CLEANUP_FAILED` diagnostic remains unresolved in this
 artifact. See [the scoped evidence notes](MPTCP_REFILL.md).
 
+The [run on `82fe0f39`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36601313163)
+remains **failed**, earlier at `MPTCP_REFILL_WARM_NEVER_APPEARED`. Both original paths
+continue carrying data. The Exit successfully adds warm endpoint 1 and retires it about
+eleven seconds later, but the Client never observes its third subflow; no fresh extension
+is attempted. The same primary-2/second-3/warm-1 ordering previously worked, so a simple
+path-ID ordering defect is not established. Original diagnostics do not retain ADD_ADDR/
+echo/JOIN counters or the short announcement window; loss of an announcement is only a
+hypothesis. The fixture now retains those bounded observations without changing loss,
+timers or acceptance gates. Cleanup completes with zero owned objects and unchanged host
+state. This run does not verify the fresh-evidence ordinal correction or prove live refill.
+
 The first [Firefox integration PR](https://github.com/VOLPAROSSA/volparossa-browser/pull/1)
 is merged (`bab677ba`): isolated ESR 140.16 privacy defaults and native Strict tracking
 protection passed a real browser smoke, including preservation of user choices after restart.

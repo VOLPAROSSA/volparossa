@@ -134,6 +134,39 @@ class RefillEvidence(unittest.TestCase):
     def test_valid_synthetic_schema_not_runtime_evidence(self):
         C["validate"](self.evidence)
 
+    def test_fixed_kernel_mib_projection_rejects_ambiguous_or_invalid_counters(self):
+        names = list(C["MPTCP_DIAGNOSTIC_COUNTERS"])
+        raw = "TcpExt: Ignored\nTcpExt: 9\nMPTcpExt: " + " ".join(names + ["UnrelatedField"]) + "\n"
+        raw += "MPTcpExt: " + " ".join(map(str, range(len(names) + 1))) + "\n"
+        expected = dict(zip(names, range(len(names))))
+        self.assertEqual(C["mptcp_counters"](raw), expected)
+        for invalid in (raw + raw, raw.replace(names[1], names[0]), raw.replace(names[0], "Missing"),
+                        raw.replace("MPTcpExt: 0 ", "MPTcpExt: -1 "),
+                        raw.replace("MPTcpExt: 0 ", f"MPTcpExt: {2**64} "), "x" * 65537):
+            with self.subTest(invalid=invalid[:50]), self.assertRaises(ValueError):
+                C["mptcp_counters"](invalid)
+
+    def test_warm_diagnostics_retain_short_announcement_and_bounded_transitions(self):
+        history = None
+        for i in range(40):
+            sample = copy.deepcopy(self.evidence["baseline"])
+            sample.update(started_monotonic_ns=i * 10 + 1, observed_monotonic_ns=i * 10 + 2)
+            for role in ("client", "exit"):
+                sample[role]["diagnostics"] = dict(available=True, counters={"AddAddrTx": i})
+            if i == 1:
+                sample["exit"]["kernel"]["endpoints"].append(dict(path_id=3))
+            history = C["warm_diagnostics"](history, sample, 3)
+        self.assertEqual(history["samples"], 40)
+        self.assertEqual(len(history["transitions"]), 32)
+        self.assertEqual(history["omitted_transitions"], 8)
+        self.assertEqual(history["first_endpoint_present"]["started_monotonic_ns"], 11)
+        self.assertEqual(history["first_endpoint_withdrawn"]["started_monotonic_ns"], 21)
+        self.assertEqual(history["last"]["started_monotonic_ns"], 391)
+        with self.assertRaisesRegex(ValueError, "overlapping"):
+            C["warm_diagnostics"](history, sample, 3)
+        with self.assertRaisesRegex(ValueError, "history"):
+            C["warm_diagnostics"](dict(history, samples=450), sample, 3)
+
     def test_exact_closing_warm_and_blackholed_client_residue_do_not_hide_fresh_r4_bytes(self):
         for state in C["CLOSING_STATES"]:
             with self.subTest(state=state):
