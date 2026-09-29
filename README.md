@@ -236,16 +236,19 @@ independent replacements. Without those replacements, it remains visibly **pendi
 
 The core has durable, resumable storage with provider-issued grants and owner-signed operations.
 A real **1 GiB local trial** passes restart/resume and two complete hash-verified restores.
-The next candidate adds `storage peer serve/grant/deposit/progress/restore/renew/delete`
-through the agent's protected-route interface: a private owner journal retains the exact
+`storage peer serve/grant/deposit/progress/restore/renew/delete` uses the agent's
+protected-route interface: a private owner journal retains the exact
 archive and lease across retries; restores are verified, non-consuming and never overwrite
 an existing output. These commands accept **already encrypted** archives; they do not encrypt
 plaintext or turn private backups into public-cache or training material.
 
-The peer wiring still needs a real multi-node overlay proof. Least-authority application
-enrollment, adaptive contribution accounting and safe drain, redundancy repair and native
-Signal backup restore remain open. The local and framed-stream results are steps toward
-decentralized cloud backup, not a completed cloud service.
+Real disposable overlay trials now pass for a single provider and **two-provider replica
+failover**: both copies are charged, a survivor restores the complete archive after the
+original file is removed, and repeated restores leave its copy intact. Owner-directed
+replacement is the next candidate: build and fully read back C before releasing A from an
+A/B replica set. Least-authority application enrollment, automatic placement/repair,
+adaptive contribution and safe capacity drain, independent-device availability and native
+Signal backup restore remain open. This is not yet a completed cloud-storage service.
 
 [Private storage scope and commands →](docs/PRIVATE_STORAGE.md)
 

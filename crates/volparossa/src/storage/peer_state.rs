@@ -24,7 +24,7 @@ use volparossa_content::private_storage::{
 const MAX_JOURNAL_BYTES: u64 = 16 * 1024;
 const JOURNAL: &str = "archive.json";
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Journal {
     version: u32,
