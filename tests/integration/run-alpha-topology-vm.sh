@@ -50,6 +50,13 @@ print_plan() {
         '  power off and discard the overlay, keys, seed and source archive.' \
         'No TAP, bridge, host route, firewall, DNS, sysctl or VPN state is changed.'
     printf 'Guest resources: 4 vCPUs, %s MiB RAM; model-worker limits are unchanged.\n' "$(guest_memory_for_scenario)"
+    case $scenario in dns-cache|reciprocity-private-dns)
+        printf '%s\n' \
+            'Private-DNS outer uplink: read runner IPv6 addresses and one fixed-root route without sending packets;' \
+            '  disable only QEMU outer usernet IPv6 if the kernel explicitly reports no route; unknown fails preflight;' \
+            '  retain sanitized decision evidence; product and internal overlay IPv6 remain unchanged.'
+        ;;
+    esac
     if [ "$scenario" = agent-reasoning ]; then
         printf '%s\n' \
             'Agent-reasoning: one explicit pinned 1.7B BF16 public worker, original 444-byte source/question;' \
@@ -529,6 +536,12 @@ cleanup() {
     if [ "$FINISHED" = no ] && [ -f "$RUN_DIRECTORY/console.log" ]; then
         install -m 0600 "$RUN_DIRECTORY/console.log" "$output_directory/vm-console.log" \
             2>/dev/null || true
+    fi
+    if [ -f "$RUN_DIRECTORY/qemu-outer-uplink.json" ]; then
+        # Keep runner-owned provenance even when guest retrieval fails or a
+        # guest archive happens to contain the same basename.
+        install -m 0600 "$RUN_DIRECTORY/qemu-outer-uplink.json" "$output_directory/qemu-outer-uplink.json" \
+            2>/dev/null || status=1
     fi
     rm -rf --one-file-system -- "$RUN_DIRECTORY"
     exit "$status"
@@ -1149,6 +1162,19 @@ if [ "$guest_memory_mib" -gt 4096 ]; then
         exit 69
     fi
 fi
+qemu_usernet=user,id=net0,hostfwd=tcp:127.0.0.1:22223-:22
+case $scenario in dns-cache|reciprocity-private-dns)
+    command -v python3 >/dev/null 2>&1 || { printf '%s\n' 'private DNS uplink preflight requires Python 3' >&2; exit 77; }
+    uplink_preflight_status=0
+    python3 -B "$HERE/qemu-outer-uplink.py" "$scenario" "$expected_commit" \
+        >"$RUN_DIRECTORY/qemu-outer-uplink.json" || uplink_preflight_status=$?
+    install -m 0600 "$RUN_DIRECTORY/qemu-outer-uplink.json" "$output_directory/qemu-outer-uplink.json"
+    [ "$uplink_preflight_status" -eq 0 ] || { printf '%s\n' 'private DNS runner IPv6 observation unknown; QEMU not started' >&2; exit 77; }
+    qemu_outer_ipv6=$(jq -r '.qemu_option' "$RUN_DIRECTORY/qemu-outer-uplink.json")
+    case $qemu_outer_ipv6 in ipv6=on|ipv6=off) ;; *) exit 77 ;; esac
+    qemu_usernet=$qemu_usernet,$qemu_outer_ipv6
+    ;;
+esac
 qemu-system-x86_64 \
     -name volparossa-alpha-topology \
     -no-user-config -nodefaults \
@@ -1158,7 +1184,7 @@ qemu-system-x86_64 \
     -drive "if=virtio,format=raw,readonly=on,file=$SEED" \
     -device virtio-rng-pci \
     -device virtio-net-pci,netdev=net0 \
-    -netdev user,id=net0,hostfwd=tcp:127.0.0.1:22223-:22 \
+    -netdev "$qemu_usernet" \
     -display none -monitor none -serial "file:$CONSOLE" "$@" \
     -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny \
     </dev/null >/dev/null 2>&1 &

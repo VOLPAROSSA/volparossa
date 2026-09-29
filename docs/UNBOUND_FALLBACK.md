@@ -241,6 +241,15 @@ own bounded child cleanup, and explicitly cannot count as acceptance or extend t
 five-second resolution budget. Six focused report/protocol checks pass; timing results are
 still pending.
 
+The next private-DNS VM fixture also checks the runner's IPv6 address/route information
+without sending packets. Only an explicit kernel `ENETUNREACH` for the fixed root selector
+disables IPv6 on QEMU's outer user network; unknown observations stop before VM launch.
+A present route keeps that option enabled but does not establish Internet reachability.
+The bounded, sanitized decision is retained as `qemu-outer-uplink.json`. Other scenarios,
+product IPv6, internal WireGuard paths and all acceptance gates remain unchanged. Five pure
+decision checks pass. This fixture candidate is not evidence of the original runner's
+IPv6 state or a demonstrated correction of the signed/bogus failures.
+
 The new `reciprocity-private-dns` scenario is an executable candidate, not a live PASS.
 It retains the same four all-role agents and concurrent native UDP flows from the reciprocal
 fixture, then requires an ordinary protected application lookup to use the actually selected

@@ -14,6 +14,9 @@ WORKFLOW=$HERE/../../.github/workflows/alpha-topology.yml
 RECIPROCITY=$HERE/reciprocity-smoke.sh
 RECIPROCITY_PY=$HERE/reciprocity-smoke.py
 
+# Pure decisions and preview wiring only: never run a runner network probe here.
+python3 -B "$HERE/test-qemu-outer-uplink.py"
+
 # This pressure fixture requires actual nonshared mounts; PrivateMounts alone
 # intentionally keeps systemd's inbound/slave propagation. Other fixtures do not.
 grep -F 'jobs_mount_flags=shared' "$HERE/agent-jobs-smoke.sh" >/dev/null
