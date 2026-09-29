@@ -336,17 +336,39 @@ restore failover and preservation of the surviving copy. This
 fixture is not an actual two-provider protected-overlay run, independent-device availability
 proof or Signal snapshot validation.
 
-The separate disposable **`private-storage-replicas`** scenario is now wired for the next
-live run; **its runtime result is pending**. It attaches two explicitly pinned stores, checks
-the full two-copy charge, removes the source and actually stops the first provider's content
-service before two survivor restores. It then reopens that same store, deletes only its copy,
-restores the survivor again and explicitly removes the final copy. Three phase-specific
-protected-path/privacy captures, exact-source report validation and private/host cleanup are
-required. The original passing single-provider scenario remains unchanged. Replica-only
-fixture bounds allow 420 seconds per failover restore and 900 seconds per private phase;
-each core exchange retains its original 120-second limit, without automatic operation retries.
-Three new report/cleanup tests and the KVM static contract pass; neither executes the live
-network scenario. Service withdrawal is not proof of separate physical failure domains.
+The disposable **`private-storage-replicas`** scenario now has a
+[passing real run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36602808623) on exact
+source `bff536e2e2fe781be89d573ec264afa2ddacc3f0`. Its original 110-file artifact passes the
+exact-source report checker. Independently rebuilding the evidence from all retained phase
+files produces exactly the exported aggregate and the report's storage evidence. The ZIP
+SHA-256 is `3bc47fb9d80e8406cb773e47e733b3d8f76d5aecba8887016c6bacce43d73d46`.
+
+Two actual stores in distinct disposable namespaces, with independently pinned identities,
+each commit 524,326 synthetic opaque bytes in three chunks. The owner accounts for
+**1,048,652 physical payload bytes**, not just the one-copy logical length. After removing
+the original input, the fixture stops the first provider's content service. Two separate
+restores fail over to the second provider, verify the full original length/SHA-256 and leave
+its copy intact; no-clobber and the unavailable copy's continued charge are checked too.
+Reopening the same first store retains the original identities. Explicitly deleting its copy
+leaves the second copy available for a third verified restore. Retried deletion is idempotent;
+deleting the final copy leaves both providers with zero leases and charged payload bytes.
+
+The upload, failover and final phases each retain their own drained, zero-drop physical and
+control-path captures, with respectively **18 / 4 / 6** completed Exit MPTCP/TLS operations
+on the same protected route. The unavailable provider sends zero response payload during
+failover; the survivor sends enough for both complete restores. The checker also verifies
+the two relay paths, absence of direct Client-to-Exit/provider bypasses and separation from
+the selected control relay. The Client cannot read either provider store locally. Private
+credentials, grants, journals and input/output files are removed; topology cleanup leaves
+zero owned objects, and the guest-parent network snapshots are byte-identical.
+
+This is **explicit two-store service failover**, not independent physical failure domains,
+whole-agent restart, interrupted network-upload resume, archive encryption or Signal snapshot
+validation. It does not prove automatic placement/repair, measured metadata overhead, safe
+contribution-driven drain or network-wide storage credit. The original single-provider proof
+is unchanged. Replica-only fixture bounds allow 420 seconds per failover restore and 900
+seconds per private phase; core exchanges retain their original 120-second limits without
+automatic operation retries.
 
 The [first run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36600197974) on `ba38a6a5`
 reaches the final evidence step after the actual two-copy upload, source removal, first-service
@@ -356,15 +378,18 @@ private and topology cleanup finish with unchanged host state. The overall resul
 **FAILED**: the builder attempts to read a two-element usage array using an object-only reader.
 The first exporter also omits the separate phase route/capture/completion files, so the original
 bundle cannot independently establish all protected-path/privacy gates. The original 85 files
-are retained unchanged; a corrected collector and fresh exact-source proof are still required.
+remain unchanged and failed; the later passing run above supplies fresh evidence rather than
+relabeling this earlier result.
 
 ## Next end-to-end proof
 
-Extend the passing single-provider topology to the explicit replica-set commands with two
-distinct providers: interrupted upload, provider restart/disappearance, source-offline restore
-failover and quota refusal, with privacy and complete cleanup evidence. Finish least-authority
-application enrollment rather than treating the administrative socket as that API. Keep provider statements distinct from measured custody
-and usable capacity when reconciling physical usage.
+Extend the passing two-provider proof to interrupted network upload, whole-agent restart,
+source-device-offline recovery and network quota refusal, with privacy and complete cleanup
+evidence. The current proof removes the original file and withdraws one provider service;
+it does not take independent hardware or the owner's device offline. Finish least-authority
+application enrollment rather than treating the administrative socket as that API. Keep
+provider statements distinct from measured custody and usable capacity when reconciling
+physical usage.
 Then add availability-aware redundant placement and repair, with the adaptive contribution
 and acknowledged drain/handoff controller above. Demonstrate both a growing target and a
 2 GB-to-1 GB target reduction without losing other participants' live data, including the
