@@ -42,6 +42,7 @@ STATUS_PHASES = frozenset((
     "browser-stop", "private-log-check", "report-write", "complete",
 ))
 STATUS_ERRORS = frozenset((
+    "FIREFOX_EXITED_EARLY", "MARIONETTE_CONNECT_TIMEOUT",
     "CHECK_FAILED", "OS_ERROR", "SUBPROCESS_FAILED", "RUNTIME_FAILED", "INTERRUPTED",
     "SCRIPT_FAILED", "UNCLASSIFIED", "BROKER_BUSY", "BROKER_INVALID_REQUEST",
     "BROKER_HANDSHAKE_REQUIRED", "BROKER_NO_SUCH_TASK", "BROKER_CANCELLED",
@@ -69,6 +70,29 @@ def check_browser_status(value):
     return value
 
 
+def check_browser_startup(value):
+    require(type(value) is dict and set(value) == {
+        "version", "outcome", "firefox_exit_code", "elapsed_ms", "connection_deadline_elapsed",
+        "log_readable", "log_truncated", "log_signals",
+    } and type(value["version"]) is int and value["version"] == 1
+        and value["outcome"] in ("not_started", "exited", "timeout", "connected", "connection_error")
+        and (value["firefox_exit_code"] is None or type(value["firefox_exit_code"]) is int
+             and -128 <= value["firefox_exit_code"] <= 255)
+        and type(value["elapsed_ms"]) is int and 0 <= value["elapsed_ms"] <= 710000
+        and all(type(value[name]) is bool for name in (
+            "connection_deadline_elapsed", "log_readable", "log_truncated"))
+        and type(value["log_signals"]) is dict and set(value["log_signals"]) == {
+            "library_load_message", "profile_message", "sandbox_message", "permission_message", "out_of_memory_message",
+        } and all(type(flag) is bool for flag in value["log_signals"].values()))
+    if value["outcome"] == "exited":
+        require(value["firefox_exit_code"] is not None)
+    if value["outcome"] in ("timeout", "not_started"):
+        require(value["firefox_exit_code"] is None)
+    if value["outcome"] == "timeout":
+        require(value["connection_deadline_elapsed"] is True)
+    return value
+
+
 def browser_diagnostic(report_root, process, deadline):
     code = process.poll() if process is not None else None
     result = dict(process_state="not_started" if process is None else "running" if code is None else "exited",
@@ -88,6 +112,20 @@ def browser_diagnostic(report_root, process, deadline):
     except (OSError, ValueError, KeyError, TypeError):
         # Never export malformed status fields, raw logs, exception messages or paths.
         result["status_state"] = "invalid"
+    startup_path = report_root / "browser-startup.json"
+    try:
+        info = startup_path.lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size <= 4096)
+        with startup_path.open("rb") as source:
+            data = source.read(4097)
+        require(len(data) <= 4096)
+        result["runtime_startup"] = check_browser_startup(json.loads(data))
+        result["runtime_startup_state"] = "valid"
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, KeyError, TypeError):
+        result["runtime_startup_state"] = "invalid"
     return result
 
 
@@ -383,6 +421,23 @@ def self_test():
             require(result["status_state"] == "invalid" and "status" not in result)
         status_path.write_bytes(b"x" * 4097)
         require(browser_diagnostic(root, None, time.monotonic() + 60)["status_state"] == "invalid")
+        startup = dict(version=1, outcome="exited", firefox_exit_code=-4, elapsed_ms=1234,
+            connection_deadline_elapsed=False, log_readable=True, log_truncated=False,
+            log_signals=dict(library_load_message=False, profile_message=False, sandbox_message=False,
+                permission_message=False, out_of_memory_message=False))
+        startup_path = root / "browser-startup.json"
+        startup_path.write_text(json.dumps(startup))
+        startup_path.chmod(0o600)
+        result = browser_diagnostic(root, Process(1), time.monotonic() + 60)
+        require(result["runtime_startup_state"] == "valid" and result["runtime_startup"] == startup)
+        for field, replacement in (("outcome", "private text"), ("firefox_exit_code", True),
+                                   ("elapsed_ms", -1), ("raw_log", "private question"),
+                                   ("log_signals", dict(library_load_message="private path"))):
+            wrong = dict(startup)
+            wrong[field] = replacement
+            startup_path.write_text(json.dumps(wrong))
+            result = browser_diagnostic(root, Process(1), time.monotonic() + 60)
+            require(result["runtime_startup_state"] == "invalid" and "runtime_startup" not in result)
     print("private-browser exact source/runtime, result boundary, 14 rejection controls and fixed private-free diagnostics PASS; no browser/model executed")
 
 

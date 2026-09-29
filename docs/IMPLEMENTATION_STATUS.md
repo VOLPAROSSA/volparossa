@@ -1184,6 +1184,23 @@ new diagnostics preserve all existing acceptance gates and time limits. Five foc
 smoke checks, core report/diagnostic checks and the static KVM contract pass; the original
 VM failure still needs a source-exact diagnostic run, not an inferred cause.
 
+The [diagnostic run on `354229a6`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36599723295)
+also **fails** before admission. Real Cancel/Disconnect again pass, while the retained
+browser phase is now `marionette-connect`, with `CHECK_FAILED` and an exited Python smoke
+process. This narrows the failure to browser startup/test-control connection; it does not
+distinguish Firefox exiting from the inner 40-second connection deadline. The outer 55-second
+deadline has not elapsed. The artifact does not retain Firefox's own return code or startup
+stderr. All 11 original files remain unchanged, ZIP SHA-256
+`c982c8e1217cf248bc06ec3281746b16cc427a1cf4aaf2d014cd1a5bac01ec5b`.
+Browser cleanup is ordinary; core cleanup again uses fallback signals, and host state is
+unchanged. No combined model execution or panel result follows from this diagnostic.
+The next source-bound candidate preserves the actual Firefox exit code, startup duration and
+fixed loader/profile/sandbox/permission/memory signal flags separately from the wrapper's
+status. Raw browser logs remain private and are removed. Six focused browser-model smoke
+checks and the core diagnostic checks pass; exact ESR launches also reached Marionette in
+isolated read-only namespaces both with ordinary and hidden system fonts. Those local launches
+do not reproduce or explain the guest failure, and no deadline or package change is inferred.
+
 Current dependency-ready candidate: a single incremental provider queue now owns source and
 derived graph work. Each durable package completion triggers a dependency scan; newly ready
 tasks join that same queue while unrelated original worker leases remain occupied. Workflow
