@@ -30,13 +30,17 @@ def fixture():
     for role in ("client", "exit"):
         e["owners_refilled"][role]["paths"].append(dict(path_id=4, interface=p[f"{role}_interface"], ifindex=5,
             relay_node="relay4", endpoint="49.165.5.1:41001"))
-    for i, stage in enumerate(("baseline", "initial_progress", "warm", "warm_progress", "retired", "refilled", "refilled_progress")):
-        ids = [1, 2] if i < 2 or stage == "retired" else [1, 2, 3] if i < 4 else [1, 2, 4]
+    for i, stage in enumerate(("baseline", "initial_progress", "warm", "warm_progress", "retiring", "retired", "refilled", "refilled_progress")):
+        ids = [1, 2] if i < 2 or stage in ("retiring", "retired") else [1, 2, 3] if i < 4 else [1, 2, 4]
         layout = dict(e["layout_refilled"], paths=[p for p in e["layout_refilled"]["paths"] if p["path_id"] in ids])
         e[stage] = dict(started_monotonic_ns=i * 20_000_000_000 + 1,
             observed_monotonic_ns=i * 20_000_000_000 + 2,
             **{role: OLD["raw_snapshot"](layout, role, len(ids), i * 100000, 20 if i > 1 else 0)
                for role in ("client", "exit")})
+        e[stage]["exit"]["raw"]["endpoints"] = json.dumps([
+            dict(address=p["exit_address"], id=p["path_id"] + 1, dev=p["exit_interface"], signal=True)
+            for p in layout["paths"] if p["path_id"] != 1])
+        reproject(e, stage)
     e["exposure"] = dict(relay_peer_id="peer4", capacity_before_mbps=1, capacity_after_mbps=32,
         started_monotonic_ns=e["retired"]["observed_monotonic_ns"] + 1, helper_pid_before=30, helper_pid_after=30,
         agent_pid_before=20, agent_pid_after=21)
@@ -71,16 +75,33 @@ def fixture():
     for role in ("client", "server"):
         e[role].update(case="mptcp-refill", response_bytes=C["BODY_BYTES"], response_sha256=digest.hexdigest(),
             request_bytes=len(request), request_sha256=hashlib.sha256(request).hexdigest())
-    e["client"].update(first_byte_monotonic_ns=3, completed_monotonic_ns=140_000_000_003,
-                       duration_ns=140_000_000_000)
+    e["client"].update(first_byte_monotonic_ns=3, completed_monotonic_ns=180_000_000_003,
+                       duration_ns=180_000_000_000)
     e["cleanup"] = dict(application_complete=True, route_disconnected=True, owned_qdiscs_removed=True)
     return e
+
+
+def reproject(e, stage):
+    layout = e["layout_refilled"] if stage.startswith("refilled") else e["layout_initial"]
+    for role in ("client", "exit"):
+        anchor = e["warm_progress"][role]["kernel"] if stage in ("retiring", "retired", "refilled", "refilled_progress") else None
+        e[stage][role]["kernel"] = C["kernel_sample"](e[stage][role]["raw"], layout, role, anchor, 3)
+
+
+def closing_residue(e, state="FIN-WAIT-1"):
+    for stage in ("retiring", "retired", "refilled", "refilled_progress"):
+        for role in ("client", "exit"):
+            line = next(line for line in e["warm_progress"][role]["raw"]["tcp"].splitlines() if "fd42:1:3:" in line)
+            if role == "exit":
+                line = line.replace("ESTAB", state, 1)
+            e[stage][role]["raw"]["tcp"] += line + "\n"
+        reproject(e, stage)
 
 
 def raw_files(e):
     prefix = C["PREFIX"]
     keys = ("selection", "layout_initial", "layout_refilled", "owners_initial", "owners_refilled", "baseline",
-            "initial_progress", "warm", "warm_progress", "retired", "refilled", "refilled_progress", "injection",
+            "initial_progress", "warm", "warm_progress", "retiring", "retired", "refilled", "refilled_progress", "injection",
             "exposure", "client", "server", "cleanup")
     files = {f"{prefix}-{key.replace('_', '-')}.json": e[key] for key in keys}
     files[f"{prefix}-selection.txt"] = "".join(
@@ -112,6 +133,50 @@ class RefillEvidence(unittest.TestCase):
 
     def test_valid_synthetic_schema_not_runtime_evidence(self):
         C["validate"](self.evidence)
+
+    def test_exact_closing_warm_and_blackholed_client_residue_do_not_hide_fresh_r4_bytes(self):
+        for state in C["CLOSING_STATES"]:
+            with self.subTest(state=state):
+                e = copy.deepcopy(self.evidence)
+                closing_residue(e, state)
+                C["validate"](e)
+                self.assertEqual(len(e["refilled"]["client"]["kernel"]["subflows"]), 4)
+                self.assertEqual(e["retired"]["exit"]["kernel"]["closing_subflows"][0]["state"], state)
+                # Historical growth still rejects non-ESTAB TCP rows; only refill
+                # receives independently proven endpoint withdrawal semantics.
+                with self.assertRaisesRegex(ValueError, "unexpected socket dump"):
+                    C["G"].kernel_sample(e["retired"]["exit"]["raw"], e["layout_initial"], "exit")
+
+    def test_closing_residue_requires_exact_old_lifetime_and_never_ignores_malformed_rows(self):
+        e = copy.deepcopy(self.evidence)
+        closing_residue(e)
+        raw = e["retired"]["exit"]["raw"]
+        for old, new in (("sk:b13", "sk:ffff"), ("FIN-WAIT-1", "SYN-SENT"),
+                         ("fd42:1:3::3", "fd42:1:99::3"), ("def456(id:4)", "def456(id:9)")):
+            changed = dict(raw, tcp=raw["tcp"].replace(old, new))
+            with self.assertRaises(ValueError):
+                C["kernel_sample"](changed, e["layout_initial"], "exit", e["warm_progress"]["exit"]["kernel"], 3)
+        with self.assertRaises(ValueError):
+            C["kernel_sample"](dict(raw, tcp=raw["tcp"] + "malformed\n"), e["layout_initial"], "exit",
+                                e["warm_progress"]["exit"]["kernel"], 3)
+
+    def test_endpoint_withdrawal_no_progress_and_healthy_flow_are_independent_requirements(self):
+        e = copy.deepcopy(self.evidence)
+        closing_residue(e)
+        changes = (
+            lambda x: x["retired"]["exit"]["raw"].update(endpoints=x["warm_progress"]["exit"]["raw"]["endpoints"]),
+            lambda x: x["retired"]["exit"]["raw"].update(endpoints="[]"),
+            lambda x: x["retired"]["exit"]["raw"].update(tcp=x["retired"]["exit"]["raw"]["tcp"].replace("FIN-WAIT-1", "ESTAB")),
+            lambda x: x["retired"]["client"]["raw"].update(tcp=x["retired"]["client"]["raw"]["tcp"].replace("bytes_received:300000", "bytes_received:300001")),
+            lambda x: x["retired"]["client"]["raw"].update(tcp=x["retired"]["client"]["raw"]["tcp"].replace("bytes_received:500000", "bytes_received:400000")),
+            lambda x: x["retired"].update(started_monotonic_ns=x["retiring"]["observed_monotonic_ns"] + 1),
+        )
+        for change in changes:
+            altered = copy.deepcopy(e)
+            change(altered)
+            with self.assertRaises(ValueError):
+                reproject(altered, "retired")
+                C["validate"](altered)
 
     def test_any_three_distinct_original_relays_including_r3_active_or_warm_are_accepted(self):
         addresses = {node: address for address, node in C["G"].RELAY_IPS.items()}
@@ -238,9 +303,9 @@ class RefillEvidence(unittest.TestCase):
         e = copy.deepcopy(self.evidence)
         for role in ("client", "exit"):
             sample = e["refilled_progress"][role]
-            sample["raw"]["tcp"] = "\n".join(line.replace("600000", "500000") if "fd42:1:4:" in line else line
+            sample["raw"]["tcp"] = "\n".join(line.replace("700000", "600000") if "fd42:1:4:" in line else line
                                              for line in sample["raw"]["tcp"].splitlines()) + "\n"
-            sample["kernel"] = C["G"].kernel_sample(sample["raw"], e["layout_refilled"], role)
+        reproject(e, "refilled_progress")
         with self.assertRaisesRegex(ValueError, "substantial fresh payload"):
             C["validate"](e)
 

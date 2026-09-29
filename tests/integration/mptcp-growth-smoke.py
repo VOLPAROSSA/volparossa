@@ -64,6 +64,33 @@ def socket_rows(value, states=("ESTAB",)):
     return rows
 
 
+def subflow_record(row, layout, role, token):
+    """Parse one already state-classified row without changing scenario acceptance."""
+    direction = "exit" if role == "exit" else "client"
+    other = "client" if role == "exit" else "exit"
+    match = re.search(r"tcp-ulp-mptcp\s+flags:(?P<flags>\S+)\s+"
+                      r"token:(?P<remote>[0-9a-f]+)\(id:(?P<remote_id>\d+)\)/"
+                      r"(?P<local>[0-9a-f]+)\(id:(?P<local_id>\d+)\)", row["line"])
+    require(match is not None and int(match["local"], 16) == int(token, 16)
+            and all(int(match[key]) <= 255 for key in ("local_id", "remote_id")),
+            "TCP row is not a subflow of the exact MPTCP meta socket")
+    path = next((path for path in layout["paths"] if
+                 row["local"][0] == path[f"{direction}_address"]
+                 and row["remote"][0] == path[f"{other}_address"]), None)
+    require(path is not None and (row["local"] if role == "exit" else row["remote"])[1] == 44443,
+            "subflow left exact selected overlay/Exit listener")
+    counters = {}
+    for name in ("bytes_acked", "bytes_received", "data_segs_out"):
+        found = re.search(rf"\b{name}:(\d+)\b", row["line"])
+        counters[name] = int(found[1]) if found else 0
+        require(counters[name] < 2**64, "kernel counter overflow")
+    retrans = re.search(r"\bretrans:(\d+)/(\d+)\b", row["line"])
+    counters["total_retrans"] = int(retrans[2]) if retrans else 0
+    return dict(path_id=path["path_id"], local=list(row["local"]), remote=list(row["remote"]),
+                cookie=row["cookie"], flags=match["flags"], remote_token=match["remote"],
+                remote_id=int(match["remote_id"]), local_id=int(match["local_id"]), **counters)
+
+
 def kernel_sample(raw, layout, role):
     # The ordinary application's request-side SHUT_WR is intentionally propagated. Its
     # MPTCP meta socket may be half closed while the download's TCP subflows stay ESTAB.
@@ -74,31 +101,7 @@ def kernel_sample(raw, layout, role):
     token = re.search(r"\btoken:([0-9a-f]+)(?:\s|$)", meta["line"])
     require(token is not None and int(token[1], 16) != 0
             and "fallback" not in meta["line"].lower(), "missing genuine MPTCP token or fallback")
-    direction = "exit" if role == "exit" else "client"
-    other = "client" if role == "exit" else "exit"
-    records = []
-    for row in socket_rows(raw["tcp"]):
-        match = re.search(r"tcp-ulp-mptcp\s+flags:(?P<flags>\S+)\s+"
-                          r"token:(?P<remote>[0-9a-f]+)\(id:(?P<remote_id>\d+)\)/"
-                          r"(?P<local>[0-9a-f]+)\(id:(?P<local_id>\d+)\)", row["line"])
-        require(match is not None and int(match["local"], 16) == int(token[1], 16)
-                and all(int(match[key]) <= 255 for key in ("local_id", "remote_id")),
-                "TCP row is not a subflow of the exact MPTCP meta socket")
-        path = next((path for path in layout["paths"] if
-                     row["local"][0] == path[f"{direction}_address"]
-                     and row["remote"][0] == path[f"{other}_address"]), None)
-        require(path is not None and (row["local"] if role == "exit" else row["remote"])[1] == 44443,
-                "subflow left exact selected overlay/Exit listener")
-        counters = {}
-        for name in ("bytes_acked", "bytes_received", "data_segs_out"):
-            found = re.search(rf"\b{name}:(\d+)\b", row["line"])
-            counters[name] = int(found[1]) if found else 0
-            require(counters[name] < 2**64, "kernel counter overflow")
-        retrans = re.search(r"\bretrans:(\d+)/(\d+)\b", row["line"])
-        counters["total_retrans"] = int(retrans[2]) if retrans else 0
-        records.append(dict(path_id=path["path_id"], local=list(row["local"]), remote=list(row["remote"]),
-                            cookie=row["cookie"], flags=match["flags"], remote_token=match["remote"],
-                            remote_id=int(match["remote_id"]), local_id=int(match["local_id"]), **counters))
+    records = [subflow_record(row, layout, role, token[1]) for row in socket_rows(raw["tcp"])]
     require(2 <= len(records) <= 3 and len({row["path_id"] for row in records}) == len(records)
             and len({row["cookie"] for row in records}) == len(records), "ambiguous/incomplete subflow set")
     return dict(token=token[1], cookie=meta["cookie"], local=list(meta["local"]), remote=list(meta["remote"]),

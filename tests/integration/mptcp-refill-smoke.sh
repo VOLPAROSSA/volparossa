@@ -84,6 +84,12 @@ mptcp_refill_cleanup() {
 }
 
 mptcp_refill_sample() {
+    case $2 in retiring|retired|refilled|refilled-progress)
+        mptcp_refill_check sample "$WORK/mptcp-refill-owners-$1.json" "$WORK/mptcp-refill-layout-$1.json" \
+            "$WORK/mptcp-refill-warm-progress.json" "$mref_warm" \
+            "$WORK/mptcp-refill-$2.json" 2>"$WORK/mptcp-refill-sample.err"
+        return $? ;;
+    esac
     mptcp_refill_check sample "$WORK/mptcp-refill-owners-$1.json" "$WORK/mptcp-refill-layout-$1.json" \
         "$WORK/mptcp-refill-$2.json" 2>"$WORK/mptcp-refill-sample.err"
 }
@@ -227,12 +233,24 @@ mptcp_refill_run() {
     mref_poll=0
     while [ "$mref_poll" -lt 450 ]; do
         kill -0 "$DOWNLOAD_CLIENT_PID" 2>/dev/null || fail MPTCP_REFILL_APPLICATION_ENDED
-        if mptcp_refill_sample initial retired \
-            && jq -e --argjson warm "$mref_warm" 'all(.client.kernel.subflows[],.exit.kernel.subflows[]; .path_id != $warm)' \
-                "$WORK/mptcp-refill-retired.json" >/dev/null; then break; fi
+        if mptcp_refill_sample initial retiring \
+            && mptcp_refill_check retirement-candidate "$WORK/mptcp-refill-warm-progress.json" \
+                "$WORK/mptcp-refill-retiring.json" "$WORK/mptcp-refill-layout-initial.json" "$mref_warm" \
+                2>"$WORK/mptcp-refill-retirement.err"; then break; fi
         sleep 0.1; mref_poll=$((mref_poll + 1))
     done
     [ "$mref_poll" -lt 450 ] || fail MPTCP_REFILL_WARM_NOT_RETIRED
+    mref_healthy=$(jq -er --argjson risky "$mref_risky" '.paths[] | select(.path_id != $risky) | .path_id' "$WORK/mptcp-refill-selection.json")
+    mref_poll=0
+    while [ "$mref_poll" -lt 300 ]; do
+        kill -0 "$DOWNLOAD_CLIENT_PID" 2>/dev/null || fail MPTCP_REFILL_APPLICATION_ENDED
+        if mptcp_refill_sample initial retired \
+            && mptcp_refill_check retired "$WORK/mptcp-refill-warm-progress.json" "$WORK/mptcp-refill-retiring.json" \
+                "$WORK/mptcp-refill-retired.json" "$WORK/mptcp-refill-layout-initial.json" "$mref_warm" "$mref_healthy" \
+                2>"$WORK/mptcp-refill-retirement.err"; then break; fi
+        sleep 0.1; mref_poll=$((mref_poll + 1))
+    done
+    [ "$mref_poll" -lt 300 ] || fail MPTCP_REFILL_WARM_RETIREMENT_UNPROVEN
     mref_started=$(python3 -c 'import time; print(time.monotonic_ns())')
     mref_agent_before=$(systemctl show --property=MainPID --value volparossa-alpha-agent@relay4.service)
     mref_helper_before=$(systemctl show --property=MainPID --value volparossa-alpha-helper@relay4.service)
@@ -299,11 +317,11 @@ mptcp_refill_finalize_report() {
     jq -cn --arg revision "$expected_commit" --arg run_id "$RUN_ID" --arg phase "$PHASE" --arg blocker "$OBSERVED_BLOCKER" \
         --argjson status "$1" --argjson evidence "$mref_evidence" --argjson complete "$CLEANUP_COMPLETE" \
         --argjson remaining "$REMAINING_OWNED_OBJECTS" --slurpfile host "$WORK/a15-evidence.json" '
-        {schema_version:1,acceptance_version:2,report_kind:"volparossa-mptcp-refill-runtime",source_revision:$revision,run_id:$run_id,phase:$phase,
+        {schema_version:1,acceptance_version:3,report_kind:"volparossa-mptcp-refill-runtime",source_revision:$revision,run_id:$run_id,phase:$phase,
          success:($status == 0 and $evidence.success == true and $complete and $remaining == 0 and $host[0].unchanged == true),
          transfer:$evidence,observed_blocker:(if $blocker == "" then null else $blocker end),
          cleanup:{complete:$complete,remaining_owned_objects:$remaining},host_state:($host[0] | del(.acceptance_id)),
-         scope:"v2: three distinct original relays from R0-R3; same application and MPTCP meta socket adds fresh R4 outside that set; kernel/WG observations, not exported signed capability inspection; no speed or full-alpha claim"}' \
+         scope:"v3: exact warm endpoint withdrawal and anchored TCP closing residue; three distinct original relays from R0-R3; same application and MPTCP meta socket adds fresh R4 outside that set; kernel/WG observations, not exported signed capability inspection; no speed or full-alpha claim"}' \
         >"$WORK/mptcp-refill-smoke.json" || return 1
     for mref_artifact in "$WORK"/mptcp-refill-*.json "$WORK"/mptcp-refill-*.txt "$WORK"/mptcp-refill-*.yaml \
         "$WORK"/mptcp-refill-*.out "$WORK"/mptcp-refill-*.err "$WORK"/mptcp-refill-*.log; do

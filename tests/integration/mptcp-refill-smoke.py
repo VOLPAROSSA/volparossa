@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 
 spec = importlib.util.spec_from_file_location("mptcp_growth_reader", Path(__file__).with_name("mptcp-growth-smoke.py"))
 G = importlib.util.module_from_spec(spec)
@@ -17,10 +18,135 @@ spec.loader.exec_module(G)
 G.RELAY_IPS = {**G.RELAY_IPS, "49.165.5.1": "relay4"}
 read, text, require = G.read, G.text, G.require
 PREFIX = "mptcp-refill"
-ACCEPTANCE_VERSION = 2
+ACCEPTANCE_VERSION = 3
 BODY_BYTES = 256 * 1024 * 1024
 ORIGINAL_RELAYS = {"relay0", "relay1", "relay2", "relay3"}
 ROLES = ("client", "relay0", "relay1", "relay2", "relay3", "relay4", "exit")
+CLOSING_STATES = ("FIN-WAIT-1", "FIN-WAIT-2", "CLOSE-WAIT", "CLOSING", "LAST-ACK")
+LIFETIME_FIELDS = ("cookie", "local", "remote", "local_id", "remote_id", "remote_token")
+
+
+def exit_endpoints(raw, layout):
+    """Bounded iproute2 generic-netlink dump, independently scoped to the Exit namespace."""
+    require(len(raw) <= 65536, "endpoint dump exceeds bound")
+    rows = json.loads(raw)
+    require(type(rows) is list and len(rows) <= 8, "invalid endpoint dump")
+    result = []
+    for row in rows:
+        require(type(row) is dict and {"address", "id", "signal", "dev"} <= set(row)
+                and set(row) <= {"address", "id", "signal", "dev", "port"}
+                and type(row["id"]) is int and 1 <= row["id"] <= 255
+                and row["signal"] is True and row.get("port", 0) in (0, 44443),
+                "unexpected Exit MPTCP endpoint fields or flags")
+        path = next((p for p in layout["paths"] if row["address"] == p["exit_address"]
+                     and row["dev"] == p["exit_interface"]), None)
+        require(path is not None, "endpoint escaped owned route layout")
+        result.append(dict(path_id=path["path_id"], **row))
+    require(len({r["path_id"] for r in result}) == len(result)
+            and len({r["id"] for r in result}) == len(result), "ambiguous Exit endpoint identities")
+    return sorted(result, key=lambda row: row["path_id"])
+
+
+def kernel_sample(raw, layout, role, anchor=None, warm=None):
+    """Keep closing residues typed; never silently discard malformed/foreign socket rows."""
+    states = ("ESTAB", "CLOSE-WAIT") if role == "exit" else ("ESTAB", "FIN-WAIT-1", "FIN-WAIT-2")
+    meta = G.socket_rows(raw["meta"], states)
+    require(len(meta) == 1, "one unchanged application MPTCP socket required")
+    meta = meta[0]
+    token = re.search(r"\btoken:([0-9a-f]+)(?:\s|$)", meta["line"])
+    require(token is not None and int(token[1], 16) != 0 and "fallback" not in meta["line"].lower(),
+            "missing genuine MPTCP token or fallback")
+    result = dict(token=token[1], cookie=meta["cookie"], local=list(meta["local"]), remote=list(meta["remote"]))
+    if anchor is not None:
+        require(all(result[k] == anchor[k] for k in ("token", "cookie", "local", "remote")),
+                "original warm anchor meta socket was replaced")
+    active, closing = [], []
+    for row in G.socket_rows(raw["tcp"], ("ESTAB", *CLOSING_STATES)):
+        record = dict(G.subflow_record(row, layout, role, token[1]), state=row["state"])
+        if row["state"] == "ESTAB":
+            active.append(record)
+        else:
+            prior = next((p for p in anchor["subflows"] if p["path_id"] == warm), None) if anchor else None
+            require(prior is not None and record["path_id"] == warm
+                    and all(prior[k] == record[k] for k in LIFETIME_FIELDS),
+                    "closing row is not the exact previously productive warm socket")
+            closing.append(record)
+    rows = active + closing
+    require(2 <= len(active) <= 4 and len(rows) <= 4 and len(closing) <= 1
+            and len({r["path_id"] for r in rows}) == len(rows)
+            and len({r["cookie"] for r in rows}) == len(rows), "ambiguous/incomplete refill subflow set")
+    result.update(subflows=sorted(active, key=lambda row: row["path_id"]),
+                  closing_subflows=sorted(closing, key=lambda row: row["path_id"]))
+    if role == "exit":
+        result["endpoints"] = exit_endpoints(raw["endpoints"], layout)
+    return result
+
+
+def sample(owners, layout, anchor=None, warm=None):
+    result = dict(started_monotonic_ns=time.monotonic_ns())
+    for role, owner in owners.items():
+        pid = owner["pid"]
+        def same_owner():
+            fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+            require(fields[19] == owner["start_ticks"]
+                    and str(Path(f"/proc/{pid}/ns/net").stat().st_ino) == owner["netns"],
+                    "helper namespace owner lifetime changed")
+        same_owner()
+        prefix = ["nsenter", "-t", str(pid), "-n"]
+        selector = "( sport = :44443 )" if role == "exit" else "( dport = :44443 )"
+        raw = dict(meta=G.command([*prefix, "ss", "-HOnMie", selector]),
+                   tcp=G.command([*prefix, "ss", "-HOntie", selector]))
+        if role == "exit":
+            raw["endpoints"] = G.command([*prefix, "ip", "-j", "mptcp", "endpoint", "show"])
+        same_owner()
+        result[role] = dict(raw=raw)
+        try:
+            result[role]["kernel"] = kernel_sample(raw, layout, role,
+                anchor[role]["kernel"] if anchor else None, warm)
+        except (ValueError, KeyError, TypeError) as error:
+            result[role]["error"] = str(error)
+    result["observed_monotonic_ns"] = time.monotonic_ns()
+    return result
+
+
+def warm_record(sample, role, warm):
+    kernel = sample[role]["kernel"]
+    return next((p for p in kernel["subflows"] + kernel["closing_subflows"] if p["path_id"] == warm), None)
+
+
+def retirement_candidate(anchor, current, layout, warm):
+    stable(anchor, current)
+    for role in ("client", "exit"):
+        require(anchor[role]["kernel"] == kernel_sample(anchor[role]["raw"], layout, role),
+                "warm anchor differs from original raw evidence")
+        require(current[role]["kernel"] == kernel_sample(current[role]["raw"], layout, role, anchor[role]["kernel"], warm),
+                "retirement projection differs from raw kernel evidence")
+        old, new = warm_record(anchor, role, warm), warm_record(current, role, warm)
+        require(old is not None and old["state"] == "ESTAB", "warm path was never established")
+        if new is not None:
+            require(all(old[k] == new[k] for k in LIFETIME_FIELDS), "warm residue changed socket identity")
+    prior = next((p for p in anchor["exit"]["kernel"]["endpoints"] if p["path_id"] == warm), None)
+    require(prior is not None and prior["id"] == warm_record(anchor, "exit", warm)["local_id"],
+            "warm endpoint was not independently observed before retirement")
+    endpoints = current["exit"]["kernel"]["endpoints"]
+    require(all(p["path_id"] != warm and p["id"] != prior["id"] for p in endpoints)
+            and all(p in endpoints for p in anchor["exit"]["kernel"]["endpoints"] if p["path_id"] != warm),
+            "warm Exit endpoint not withdrawn or another live endpoint removed")
+    require(all(p["path_id"] != warm for p in current["exit"]["kernel"]["subflows"]),
+            "warm Exit subflow is still established")
+
+
+def retired(anchor, before, after, layout, warm, healthy):
+    retirement_candidate(anchor, before, layout, warm)
+    retirement_candidate(anchor, after, layout, warm)
+    require(after["started_monotonic_ns"] - before["observed_monotonic_ns"] >= 10_000_000_000,
+            "warm withdrawal lacks sustained observation interval")
+    progress_path(before, after, healthy)
+    for role, counter in (("client", "bytes_received"), ("exit", "bytes_acked")):
+        old, new = warm_record(before, role, warm), warm_record(after, role, warm)
+        if new is not None:
+            require(old is not None and all(old[k] == new[k] for k in LIFETIME_FIELDS)
+                    and old[counter] == new[counter], "withdrawn warm path resumed useful progress or reappeared")
 
 
 def selected(value, peers):
@@ -116,17 +242,25 @@ def validate(e):
     for path in e["selection"]["paths"]:
         node = next(p["relay_node"] for p in e["owners_initial"]["exit"]["paths"] if p["path_id"] == path["path_id"])
         require(path["relay_peer_id"] == e["expected_peers"][node], "initial CLI identity differs from physical WG peer")
-    stages = ("baseline", "initial_progress", "warm", "warm_progress", "retired", "refilled", "refilled_progress")
+    stages = ("baseline", "initial_progress", "warm", "warm_progress", "retiring", "retired", "refilled", "refilled_progress")
     for index, name in enumerate(stages):
         sample = e[name]
         layout = e["layout_refilled"] if name.startswith("refilled") else e["layout_initial"]
         for role in ("client", "exit"):
-            require(sample[role]["kernel"] == G.kernel_sample(sample[role]["raw"], layout, role),
+            anchor = e["warm_progress"][role]["kernel"] if index >= 4 else None
+            require(sample[role]["kernel"] == kernel_sample(sample[role]["raw"], layout, role, anchor, warm),
                     "projected kernel evidence differs from original ss")
         client, exit_side = sample["client"]["kernel"], sample["exit"]["kernel"]
-        require({p["path_id"] for p in client["subflows"]} == {p["path_id"] for p in exit_side["subflows"]},
-                "both endpoints do not see the same subflows")
+        client_ids = {p["path_id"] for p in client["subflows"]}
+        exit_ids = {p["path_id"] for p in exit_side["subflows"]}
+        require(client_ids == exit_ids if index < 4 else
+                client_ids - {warm} == exit_ids and warm not in exit_ids,
+                "live subflow mismatch beyond the exact withdrawn warm residue")
+        if index >= 4:
+            retirement_candidate(e["warm_progress"], sample, layout, warm)
         for row in client["subflows"]:
+            if index >= 4 and row["path_id"] == warm:
+                continue  # Retained and independently anchored, never claimed live at Exit.
             mirror = next(p for p in exit_side["subflows"] if p["path_id"] == row["path_id"])
             require(row["local"] == mirror["remote"] and row["remote"] == mirror["local"]
                     and row["local_id"] == mirror["remote_id"] and row["remote_id"] == mirror["local_id"],
@@ -146,8 +280,7 @@ def validate(e):
             "initial socket differs from initial active subset")
     G.progress(e["baseline"], e["initial_progress"], 2)
     G.progress(e["warm"], e["warm_progress"], 3)
-    require(all(warm not in {p["path_id"] for p in e["retired"][role]["kernel"]["subflows"]}
-                for role in ("client", "exit")), "old warm subflow was not retired before refill")
+    retired(e["warm_progress"], e["retiring"], e["retired"], e["layout_initial"], warm, next(iter(initial - {risky})))
     require(e["retired"]["observed_monotonic_ns"] < e["exposure"]["started_monotonic_ns"]
             < e["refilled"]["started_monotonic_ns"], "R4 became eligible before warm exhaustion")
     require(e["retired"]["started_monotonic_ns"] - e["warm_progress"]["observed_monotonic_ns"] >= 10_000_000_000,
@@ -235,7 +368,7 @@ def validate(e):
 def build(work):
     work = Path(work)
     keys = ("selection", "layout_initial", "layout_refilled", "owners_initial", "owners_refilled", "baseline",
-            "initial_progress", "warm", "warm_progress", "retired", "refilled", "refilled_progress", "injection",
+            "initial_progress", "warm", "warm_progress", "retiring", "retired", "refilled", "refilled_progress", "injection",
             "exposure", "client", "server", "cleanup")
     e = {key: read(work / f"{PREFIX}-{key.replace('_', '-')}.json") for key in keys}
     e.update(success=True, acceptance_version=ACCEPTANCE_VERSION,
@@ -268,7 +401,13 @@ def main(args):
     elif len(args) == 3 and args[0] == "owners":
         result = G.owner_namespaces(read(Path(args[1])))
     elif len(args) == 4 and args[0] == "sample":
-        result = G.sample(read(Path(args[1])), read(Path(args[2])))
+        result = sample(read(Path(args[1])), read(Path(args[2])))
+    elif len(args) == 6 and args[0] == "sample":
+        result = sample(read(Path(args[1])), read(Path(args[2])), read(Path(args[3])), int(args[4]))
+    elif len(args) == 5 and args[0] == "retirement-candidate":
+        retirement_candidate(read(Path(args[1])), read(Path(args[2])), read(Path(args[3])), int(args[4])); return
+    elif len(args) == 7 and args[0] == "retired":
+        retired(read(Path(args[1])), read(Path(args[2])), read(Path(args[3])), read(Path(args[4])), int(args[5]), int(args[6])); return
     elif len(args) == 4 and args[0] == "progress":
         G.progress(read(Path(args[1])), read(Path(args[2])), int(args[3])); return
     elif len(args) == 4 and args[0] == "path-progress":
@@ -294,7 +433,7 @@ def main(args):
         require(report["transfer"] == e == read(path.parent / f"{PREFIX}-evidence.json")
                 and report["run_id"] == e["run_id"], "report differs from original evidence"); return
     else:
-        raise ValueError("usage: select PATHS PEERS OUT | original-relays OWNERS | owners LAYOUT OUT | sample OWNERS LAYOUT OUT | progress BEFORE AFTER COUNT | path-progress BEFORE AFTER PATH | evidence WORK OUT | report REPORT SHA")
+        raise ValueError("usage: select PATHS PEERS OUT | original-relays OWNERS | owners LAYOUT OUT | sample OWNERS LAYOUT [WARM_ANCHOR WARM_ID] OUT | retirement-candidate ANCHOR CURRENT LAYOUT WARM_ID | retired ANCHOR BEFORE AFTER LAYOUT WARM_ID HEALTHY_ID | progress BEFORE AFTER COUNT | path-progress BEFORE AFTER PATH | evidence WORK OUT | report REPORT SHA")
     Path(args[-1]).write_text(json.dumps(result, sort_keys=True) + "\n", encoding="ascii")
     if args[0] == "sample":
         require(all("kernel" in result[r] for r in ("client", "exit")), "incomplete raw kernel snapshot retained")

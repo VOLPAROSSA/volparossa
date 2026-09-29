@@ -5741,9 +5741,16 @@ impl DiscoveryRuntime {
                 log_outbound_event(state, outcome).await;
             }
             request_response::Event::OutboundFailure {
-                peer, request_id, ..
+                peer,
+                request_id,
+                error,
+                ..
             } => {
                 if self.fail_route_retire_upstream(request_id) {
+                    tracing::warn!(
+                        diagnostic_code = route_retire_outbound_failure_code(&error),
+                        "route retirement upstream transport failed"
+                    );
                     return;
                 }
                 if self.fail_downlink_budget(request_id) {
@@ -16838,6 +16845,29 @@ pub enum DiscoveryRuntimeError {
     ReservationService,
 }
 
+// Keep externally sourced error strings, peer identities and addresses out of diagnostics.
+// These fixed classes observe an existing failure; they never change retirement or retries.
+fn route_retire_outbound_failure_code(error: &request_response::OutboundFailure) -> &'static str {
+    match error {
+        request_response::OutboundFailure::DialFailure => "ROUTE_RETIRE_OUTBOUND_DIAL_FAILED",
+        request_response::OutboundFailure::Timeout => "ROUTE_RETIRE_OUTBOUND_TIMED_OUT",
+        request_response::OutboundFailure::ConnectionClosed => {
+            "ROUTE_RETIRE_OUTBOUND_CONNECTION_CLOSED"
+        }
+        request_response::OutboundFailure::UnsupportedProtocols => {
+            "ROUTE_RETIRE_OUTBOUND_PROTOCOL_UNSUPPORTED"
+        }
+        request_response::OutboundFailure::Io(error) => match error.kind() {
+            std::io::ErrorKind::UnexpectedEof => "ROUTE_RETIRE_OUTBOUND_IO_UNEXPECTED_EOF",
+            std::io::ErrorKind::InvalidData => "ROUTE_RETIRE_OUTBOUND_IO_INVALID_DATA",
+            std::io::ErrorKind::ConnectionReset => "ROUTE_RETIRE_OUTBOUND_IO_CONNECTION_RESET",
+            std::io::ErrorKind::BrokenPipe => "ROUTE_RETIRE_OUTBOUND_IO_BROKEN_PIPE",
+            std::io::ErrorKind::TimedOut => "ROUTE_RETIRE_OUTBOUND_IO_TIMED_OUT",
+            _ => "ROUTE_RETIRE_OUTBOUND_IO_OTHER",
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -16867,6 +16897,61 @@ mod tests {
     use super::*;
 
     static NEXT_MEMORY_ADDRESS: AtomicU64 = AtomicU64::new(90_000);
+
+    #[test]
+    fn route_retire_failure_diagnostics_are_fixed_classes_without_private_error_text() {
+        use request_response::OutboundFailure;
+
+        for (error, expected) in [
+            (
+                OutboundFailure::DialFailure,
+                "ROUTE_RETIRE_OUTBOUND_DIAL_FAILED",
+            ),
+            (OutboundFailure::Timeout, "ROUTE_RETIRE_OUTBOUND_TIMED_OUT"),
+            (
+                OutboundFailure::ConnectionClosed,
+                "ROUTE_RETIRE_OUTBOUND_CONNECTION_CLOSED",
+            ),
+            (
+                OutboundFailure::UnsupportedProtocols,
+                "ROUTE_RETIRE_OUTBOUND_PROTOCOL_UNSUPPORTED",
+            ),
+        ] {
+            assert_eq!(route_retire_outbound_failure_code(&error), expected);
+        }
+        for (kind, expected) in [
+            (
+                std::io::ErrorKind::UnexpectedEof,
+                "ROUTE_RETIRE_OUTBOUND_IO_UNEXPECTED_EOF",
+            ),
+            (
+                std::io::ErrorKind::InvalidData,
+                "ROUTE_RETIRE_OUTBOUND_IO_INVALID_DATA",
+            ),
+            (
+                std::io::ErrorKind::ConnectionReset,
+                "ROUTE_RETIRE_OUTBOUND_IO_CONNECTION_RESET",
+            ),
+            (
+                std::io::ErrorKind::BrokenPipe,
+                "ROUTE_RETIRE_OUTBOUND_IO_BROKEN_PIPE",
+            ),
+            (
+                std::io::ErrorKind::TimedOut,
+                "ROUTE_RETIRE_OUTBOUND_IO_TIMED_OUT",
+            ),
+            (
+                std::io::ErrorKind::PermissionDenied,
+                "ROUTE_RETIRE_OUTBOUND_IO_OTHER",
+            ),
+        ] {
+            let error = OutboundFailure::Io(std::io::Error::new(
+                kind,
+                "PRIVATE_DETAILS_MUST_NOT_BE_LOGGED",
+            ));
+            assert_eq!(route_retire_outbound_failure_code(&error), expected);
+        }
+    }
 
     const fn test_client_roles() -> RolesConfig {
         RolesConfig {

@@ -55,7 +55,26 @@ mandatory. Bounded per-draw diagnostics record the actual failed selection stage
 endpoint before disconnect, without WireGuard keys. Nine refill, nine historical growth and
 eleven generated privacy-observer checks pass. The fixture also fixes one formatting-sensitive
 source test and uses a freshly generated nonce in the helper test; no runtime check is removed.
-The new source still needs its own disposable live run. No refill or alpha completion is claimed.
+The [next run on `5e6560e2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36581328449)
+also remains **failed**, at `MPTCP_REFILL_WARM_NOT_RETIRED`. The Exit's original warm tuple
+and cookie `2002` were retained as `FIN-WAIT-1`; the old parser rejected this closing row,
+while the deliberately blackholed Client still saw its old warm socket as established.
+The helper/agent logged Exit endpoint retirement, but no fresh R4 proof was reached.
+Final fixture teardown completed with unchanged host state; this does not erase the
+route-disconnect failure separately recorded before teardown.
+The Client helper did complete its local route/ingress destruction; the outstanding
+R2-to-Exit retirement exchange did not complete. Its underlying transport failure was
+discarded, so a precise cause is not proved. Fixed, non-private transport-failure classes
+are now logged at that existing failure boundary; one focused mapping test passes.
+Retry, retirement and cleanup behavior are unchanged by that diagnostic addition.
+
+[Refill acceptance version 3](MPTCP_REFILL.md) now keeps exact anchored closing residues
+separate from established subflows and independently observes Exit endpoint withdrawal.
+It requires a sustained ten-second withdrawal interval, no useful progress on surviving
+old warm residues and fresh progress on the unchanged healthy original path before exposing
+R4. Unknown/malformed rows still fail, and all R4 byte/hash/privacy checks remain mandatory.
+Twelve refill and nine unchanged historical growth checker tests pass; no new live proof
+or alpha completion is claimed. The failed original evidence remains unchanged.
 
 The first [Firefox integration PR](https://github.com/VOLPAROSSA/volparossa-browser/pull/1)
 is merged (`bab677ba`): isolated ESR 140.16 privacy defaults and native Strict tracking
