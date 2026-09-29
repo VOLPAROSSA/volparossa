@@ -147,6 +147,32 @@ impl Fixture {
         assert_eq!(outcome.is_ok(), result.is_ok());
         result
     }
+
+    async fn bridged(
+        &self,
+        target: StorageTarget,
+        operation: StorageOperation,
+        payload: &[u8],
+    ) -> StorageTransfer {
+        let (mut remote, server, challenge) = self.session().await;
+        let (mut owner, mut agent) = tokio::io::duplex(4096);
+        let signed = self.request(&challenge, target, operation);
+        let (received, forwarded) = tokio::join!(
+            finish(&mut owner, &self.grant, &challenge, &signed, payload),
+            bridge(&mut agent, &mut remote, &self.grant, &challenge),
+        );
+        let received = received.unwrap();
+        let forwarded = forwarded.unwrap();
+        assert_eq!(forwarded.receipt.encode(), received.receipt.encode());
+        assert_eq!(forwarded.ciphertext_bytes, received.ciphertext.len() as u64);
+        drop(remote);
+        timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        received
+    }
 }
 
 fn hash(bytes: &[u8]) -> [u8; 32] {
@@ -179,6 +205,73 @@ async fn denied(server: Server) {
             .unwrap()
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn owner_signed_bridge_transfers_real_custody_and_unchanged_receipts() {
+    let fixture = Fixture::new();
+    let bytes = vec![0xb6; CHUNK_BYTES + 57];
+    let original = target(&bytes);
+    let reserved = fixture
+        .bridged(
+            original,
+            StorageOperation::Reserve {
+                expires_at: unix_now().unwrap() + 600,
+            },
+            &[],
+        )
+        .await;
+    let owned = StorageTarget {
+        lease_id: Some(reserved.receipt.result().lease_id),
+        ..original
+    };
+    for (ordinal, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
+        fixture
+            .bridged(owned, append((ordinal * CHUNK_BYTES) as u64, chunk), chunk)
+            .await;
+    }
+    fixture
+        .bridged(owned, StorageOperation::Finalize, &[])
+        .await;
+    for _ in 0..2 {
+        let restored = fixture
+            .bridged(
+                owned,
+                StorageOperation::ReadRange {
+                    offset: 0,
+                    length: bytes.len() as u64,
+                },
+                &[],
+            )
+            .await;
+        assert_eq!(restored.ciphertext, bytes);
+    }
+    assert_eq!(fixture.usage().committed_bytes, bytes.len() as u64);
+}
+
+#[tokio::test]
+async fn bridge_rejects_an_owner_request_from_another_connection_before_custody() {
+    let fixture = Fixture::new();
+    let (old_stream, old_server, old_challenge) = fixture.session().await;
+    let signed = fixture.request(
+        &old_challenge,
+        target(b"opaque"),
+        StorageOperation::Reserve {
+            expires_at: unix_now().unwrap() + 600,
+        },
+    );
+    drop(old_stream);
+    denied(old_server).await;
+    let (mut remote, server, challenge) = fixture.session().await;
+    let (mut owner, mut agent) = tokio::io::duplex(4096);
+    write_frame(&mut owner, &signed.encode()).await.unwrap();
+    assert!(matches!(
+        bridge(&mut agent, &mut remote, &fixture.grant, &challenge).await,
+        Err(WireError::Protocol(_))
+    ));
+    drop(remote);
+    denied(server).await;
+    assert_eq!(fixture.usage().leases, 0);
 }
 
 #[tokio::test]

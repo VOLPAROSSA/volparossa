@@ -54,6 +54,16 @@ different authorization and retention rules. Overlay content service does not co
 Exit capability or bypass route privacy. Owner-priority resource bounds apply to storage and
 replication as well as network contribution.
 
+## Shared core and application scope
+
+The [application lifecycle contract](APPLICATION_LIFECYCLE.md) specifies one independently
+managed core per device, shared by Firefox, Signal and other integrations. Closing a frontend
+does not stop accepted background participation or another application's work. Network use
+can be application-scoped or explicitly system-wide; cooperative-cache scope is configured
+separately and never makes private HTTPS content public. Per-app authority and aggregate
+resource accounting must be implemented rather than exposing the whole administrative socket
+to every frontend. Existing service files alone do not prove that integration is complete.
+
 ## Trust and process boundaries
 
 The requested [cooperative AI extension](DECENTRALIZED_AGENTS.md) adds isolated training/task

@@ -81,6 +81,14 @@ pub struct StorageTransfer {
     pub ciphertext: Vec<u8>,
 }
 
+/// Exact remote statement retained after the bounded local handoff; no payload copy remains.
+pub struct StorageBridgeReceipt {
+    /// Original signed provider receipt, verified against the owner's exact request.
+    pub receipt: SignedStorageReceipt,
+    /// Number of range bytes forwarded to the local owner, zero for other operations.
+    pub ciphertext_bytes: u64,
+}
+
 /// Explicit service owner. Synchronous database/hash work never runs on the async reactor.
 /// No listener, advertisement, grant issuance or automatic contribution is started here.
 pub struct StorageService {
@@ -260,6 +268,56 @@ where
         Ok(StorageTransfer {
             receipt,
             ciphertext,
+        })
+    })
+    .await
+    .map_err(|_| WireError::Timeout)?
+}
+
+/// Forward one owner-authorized operation on the two original, already protected streams.
+///
+/// The agent passes the provider challenge to its local caller before entering this bridge.
+/// The caller signs it without sending an owner key to the agent. Only canonical signed
+/// metadata and bounded ciphertext cross this handoff; no commands or local paths occur.
+/// A verified provider receipt is forwarded unchanged, not replaced with an agent statement.
+/// The surrounding agent must still finish its TLS/route checks before local terminal success.
+///
+/// # Errors
+/// Rejects changed grants/challenges, invalid owner signatures, oversized/corrupt payloads,
+/// unrelated provider receipts and incomplete transfers. Missing success requires reconciliation.
+pub async fn bridge<L, R>(
+    local: &mut L,
+    remote: &mut R,
+    grant: &VerifiedStorageGrant,
+    challenge: &StorageChallenge,
+) -> Result<StorageBridgeReceipt, WireError>
+where
+    L: AsyncRead + AsyncWrite + Unpin,
+    R: AsyncRead + AsyncWrite + Unpin,
+{
+    timeout(IO_TIMEOUT, async {
+        let request = SignedStorageRequest::decode_and_verify(
+            &read_frame(local, MAX_REQUEST_BYTES).await?,
+            grant,
+            challenge,
+            unix_now()?,
+        )?;
+        let payload = if matches!(request.operation(), StorageOperation::Append { .. }) {
+            read_frame(local, CHUNK_BYTES).await?
+        } else {
+            Vec::new()
+        };
+        validate_append(&request, &payload)?;
+        let transfer = finish(remote, grant, challenge, request.signed(), &payload).await?;
+        let ciphertext_bytes =
+            u64::try_from(transfer.ciphertext.len()).map_err(|_| WireError::Invalid)?;
+        write_frame(local, &transfer.receipt.encode()).await?;
+        if !transfer.ciphertext.is_empty() {
+            write_frame(local, &transfer.ciphertext).await?;
+        }
+        Ok(StorageBridgeReceipt {
+            receipt: transfer.receipt,
+            ciphertext_bytes,
         })
     })
     .await
