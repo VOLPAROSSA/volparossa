@@ -29,6 +29,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: Box<peer::Command>,
     },
+    /// Retain explicit independently pinned provider copies, with non-consuming restore failover.
+    Replicas {
+        #[command(subcommand)]
+        command: Box<peer::replicas::Command>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -95,6 +100,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
     let command = match command {
         Command::Local { command } => command,
         Command::Peer { command } => return peer::run(*command, socket).await,
+        Command::Replicas { command } => return peer::replicas::run(*command, socket).await,
     };
     match command {
         LocalCommand::Init {

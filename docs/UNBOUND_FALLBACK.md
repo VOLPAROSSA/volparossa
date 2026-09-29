@@ -379,6 +379,12 @@ have zero outgoing recursive queries, an exact local-cache counter increment and
 native worker. These source fixes do not retrospectively identify the rejected packets or
 the exact retirement owner in the failed `859c9e90` run.
 
+The new responsiveness test and four existing disconnect/cancellation/quarantine checks
+pass, as do strict agent Clippy, formatting, eleven reciprocal-fixture checks (the
+separate privileged mount probe is opt-in), four exact-TAP capture checks and nineteen
+shared-capture regressions. They establish the local correction, not a completed new
+four-role live acceptance run.
+
 Focused tests cover configuration rejection, bounded CNAME/TTL/provenance parsing, malformed and
 negative responses, rebinding rejection, and an actual framed TCP backend in a disposable test
 namespace. That backend uses controlled DNS responses, **not an executed Unbound daemon**.

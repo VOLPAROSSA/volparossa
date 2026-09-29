@@ -24,14 +24,14 @@ use volparossa_content::private_storage::{
 const MAX_JOURNAL_BYTES: u64 = 16 * 1024;
 const JOURNAL: &str = "archive.json";
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Journal {
     version: u32,
-    provider_key: [u8; 32],
-    owner_key: [u8; 32],
-    grant_hex: String,
-    archive_id: [u8; 32],
+    pub(super) provider_key: [u8; 32],
+    pub(super) owner_key: [u8; 32],
+    pub(super) grant_hex: String,
+    pub(super) archive_id: [u8; 32],
     pub(super) ciphertext_bytes: u64,
     pub(super) sha256: [u8; 32],
     pub(super) requested_expiry: u64,
@@ -173,7 +173,7 @@ impl LockedJournal {
     }
 }
 
-fn directory(path: &Path) -> Result<File> {
+pub(super) fn directory(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -190,7 +190,7 @@ fn directory(path: &Path) -> Result<File> {
     Ok(file)
 }
 
-fn anchored(directory: &File) -> PathBuf {
+pub(super) fn anchored(directory: &File) -> PathBuf {
     PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()))
 }
 
