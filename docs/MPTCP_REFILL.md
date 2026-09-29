@@ -59,3 +59,26 @@ The final fixture report records complete disposable teardown and unchanged host
 That is separate from the earlier route-disconnect failure still visible in its logs.
 Twelve refill checker tests and nine historical growth checker tests pass locally after
 this observer correction; these are synthetic checker regressions, not a new live run.
+
+[Run 36586125461 on `05cda509`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36586125461)
+also remains **failed**, now at `MPTCP_REFILL_FRESH_PATH_MISSING`. Its version-3 evidence
+does establish retirement: the exact warm Exit endpoint is withdrawn, its anchored TCP
+residue is closing, and the original healthy path progresses while the old warm bytes
+remain stalled. Rechecking that interval with the unchanged retirement checker succeeds.
+R4 becomes eligible afterwards, but no new R4 helper context, subflow payload or complete
+application hash is proved. The original evidence is retained without rewriting its result.
+
+The Client reports `PRESELECTION_SAMPLE_INVALID_SNAPSHOT` on the refill retry cadence.
+The corresponding production defect is that the established-route restriction filtered
+candidate vectors **after** their affine subject bindings had been constructed. Their sizes
+and pair indices then disagreed, so the existing shape check correctly rejected the attempt.
+An earlier random control-relay choice could also discard the route's required original
+control lineage. The correction selects that exact lineage from the complete, revalidated
+and ambiguity-checked group, projects its relays, and only then constructs the affine
+bindings. Unrestricted selection and all freshness, byte/hash, privacy and cleanup gates
+are unchanged. This source correction is not yet a successful live refill proof.
+
+The run's final disposable cleanup is complete and host state unchanged. Separately, the
+agent reports `SHUTDOWN_CLEANUP_FAILED`; two relays record `ROUTE_RETIRE_OUTBOUND_DIAL_FAILED`
+during their retirement exchanges. Those diagnostics identify a failed outbound dial, not
+its underlying cause, and are not erased by the fixture's eventual teardown.

@@ -40,11 +40,8 @@ pub(super) struct PreselectionRestriction {
 }
 
 impl PreselectionRestriction {
-    pub(super) fn apply(
-        self,
-        mut snapshot: super::RouteCandidateSnapshot,
-    ) -> Option<super::RouteCandidateSnapshot> {
-        if self.exit_node == [0; 32]
+    pub(super) fn is_valid(&self) -> bool {
+        !(self.exit_node == [0; 32]
             || self.control_node == [0; 32]
             || self.exit_node == self.control_node
             || self.exit_peer == self.control_peer
@@ -57,33 +54,33 @@ impl PreselectionRestriction {
                     || *peer == self.exit_peer
                     || *node == self.control_node
                     || *peer == self.control_peer
-            })
-        {
-            return None;
-        }
-        snapshot.forwarded_exits.retain(|candidate| {
+            }))
+    }
+
+    /// Select only from an already revalidated, ambiguity-checked Exit lineage group.
+    /// The caller constructs affine subjects after this projection, never before it.
+    pub(super) fn control_index(
+        &self,
+        candidates: &[super::ForwardedExitCandidateSnapshot],
+    ) -> Option<usize> {
+        candidates.iter().position(|candidate| {
             let cap = candidate.capability();
             cap.exit_node_id == self.exit_node
                 && cap.exit_peer_id == self.exit_peer
                 && cap.control_relay_node_id == self.control_node
                 && cap.control_relay_peer_id == self.control_peer
-        });
-        if snapshot.forwarded_exits.len() != 1 {
-            return None;
-        }
-        snapshot.direct_relays.retain(|candidate| {
+        })
+    }
+
+    pub(super) fn retain_direct_relays(
+        &self,
+        candidates: &mut Vec<super::DirectRelayCandidateSnapshot>,
+    ) {
+        candidates.retain(|candidate| {
             let cap = candidate.capability();
             (cap.node_id == self.control_node && cap.peer_id == self.control_peer)
                 || self.data_relays.contains(&(cap.node_id, cap.peer_id))
         });
-        if self.data_relays.iter().any(|(node, peer)| {
-            !snapshot.direct_relays.iter().any(|candidate| {
-                candidate.capability().node_id == *node && candidate.capability().peer_id == *peer
-            })
-        }) {
-            return None;
-        }
-        Some(snapshot)
     }
 }
 

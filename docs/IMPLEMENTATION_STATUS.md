@@ -76,6 +76,21 @@ R4. Unknown/malformed rows still fail, and all R4 byte/hash/privacy checks remai
 Twelve refill and nine unchanged historical growth checker tests pass; no new live proof
 or alpha completion is claimed. The failed original evidence remains unchanged.
 
+The [version-3 run on `05cda509`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36586125461)
+remains **failed**, at `MPTCP_REFILL_FRESH_PATH_MISSING`. Its original evidence passes the
+unchanged warm-retirement checker, but no R4 helper context, fresh R4 payload or complete
+application hash is established. Repeated `PRESELECTION_SAMPLE_INVALID_SNAPSHOT` events
+match a production ordering defect: the refill restriction filtered candidates after their
+affine subject bindings were built. It also ran after a random control choice that could
+discard the existing route's pinned control. The candidate fix selects only that exact
+lineage from the fully revalidated, ambiguity-checked projection and constructs its affine
+bindings afterwards; the sampler and authorization gates remain unchanged. Five focused signed
+snapshot/projection regressions and strict agent Clippy pass, but do not establish a working
+live refill. The separate Quality failure exposed missing extension message tags in the schema
+and its exact-enumeration test; both now track the implemented tags 33–35. Final fixture
+cleanup is complete with unchanged host state; the earlier agent shutdown failure remains,
+with two relay retirement exchanges now specifically reporting outbound dial failures.
+
 The first [Firefox integration PR](https://github.com/VOLPAROSSA/volparossa-browser/pull/1)
 is merged (`bab677ba`): isolated ESR 140.16 privacy defaults and native Strict tracking
 protection passed a real browser smoke, including preservation of user choices after restart.

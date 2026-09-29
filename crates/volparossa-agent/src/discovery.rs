@@ -2370,8 +2370,12 @@ impl DiscoveryRuntime {
         let captured_at_ms = unix_millis();
         self.purge_completed_at(captured_at_ms);
         let policy = state.read().await.policy_snapshot(captured_at_ms);
-        let snapshot =
-            self.build_route_candidate_snapshot(requested_candidates, captured_at_ms, &policy);
+        let snapshot = self.build_route_candidate_snapshot(
+            requested_candidates,
+            captured_at_ms,
+            &policy,
+            None,
+        );
         let _ = reply.send(snapshot);
     }
 
@@ -2431,6 +2435,7 @@ impl DiscoveryRuntime {
             requested_candidate_bound,
             captured_at_ms,
             &policy,
+            restriction.as_ref(),
         ) {
             Ok(snapshot) => snapshot,
             Err(RouteCandidateSnapshotError::InvalidLimit) => {
@@ -2465,15 +2470,6 @@ impl DiscoveryRuntime {
             minimum_other_relays,
             maximum_other_relays,
         );
-        let snapshot = if let Some(restriction) = restriction {
-            let Some(snapshot) = restriction.apply(snapshot) else {
-                let _ = reply.send(Err(ClientPreselectionError::Unavailable));
-                return;
-            };
-            snapshot
-        } else {
-            snapshot
-        };
         let snapshot = match narrow_route_candidate_snapshot(snapshot, scope) {
             Ok(snapshot) => snapshot,
             Err(failure) => {
@@ -13409,6 +13405,7 @@ impl DiscoveryRuntime {
         requested_candidates: usize,
         captured_at_ms: u64,
         active: &AgentPolicySnapshot,
+        restriction: Option<&route_extension::PreselectionRestriction>,
     ) -> Result<RouteCandidateSnapshot, RouteCandidateSnapshotError> {
         #[cfg(test)]
         self.route_snapshot_build_attempts
@@ -13416,6 +13413,7 @@ impl DiscoveryRuntime {
         if requested_candidates == 0
             || requested_candidates > MAXIMUM_SELECTION_CANDIDATES
             || captured_at_ms == 0
+            || restriction.is_some_and(|restriction| !restriction.is_valid())
         {
             return Err(RouteCandidateSnapshotError::InvalidLimit);
         }
@@ -13439,8 +13437,16 @@ impl DiscoveryRuntime {
             &mut direct_relays,
             &mut forwarded_exits,
             maximum_candidates,
-            Self::random_exit_control_index,
+            |group| match restriction {
+                Some(restriction) => restriction.control_index(group),
+                None => Self::random_exit_control_index(group.len()),
+            },
         );
+        if let Some(restriction) = restriction {
+            restriction.retain_direct_relays(&mut direct_relays);
+        }
+        // A restriction selects only freshly revalidated actor capabilities. Construct their
+        // affine bindings once, after the exact Exit/control choice and relay projection.
         let preselection_subjects = preselection_observation::PreselectionSubjectSet::from_snapshot(
             &revalidated,
             &direct_relays,
@@ -13738,7 +13744,7 @@ impl DiscoveryRuntime {
         direct_relays: &mut [DirectRelayCandidateSnapshot],
         forwarded_exits: &mut Vec<ForwardedExitCandidateSnapshot>,
         maximum_candidates: usize,
-        mut choose_control: impl FnMut(usize) -> Option<usize>,
+        mut choose_control: impl FnMut(&[ForwardedExitCandidateSnapshot]) -> Option<usize>,
     ) {
         direct_relays.sort_by(|left, right| {
             (left.capability.node_id, left.capability.peer_id.to_bytes()).cmp(&(
@@ -13783,7 +13789,7 @@ impl DiscoveryRuntime {
             {
                 continue;
             }
-            if let Some(index) = choose_control(group.len()).filter(|index| *index < group.len()) {
+            if let Some(index) = choose_control(group).filter(|index| *index < group.len()) {
                 selected.push(group[index].clone());
             }
         }
@@ -19675,7 +19681,7 @@ mod tests {
         let policy = fixture.state.read().await.policy_snapshot(now_ms);
         fixture
             .runtime
-            .build_route_candidate_snapshot(requested_candidates, now_ms, &policy)
+            .build_route_candidate_snapshot(requested_candidates, now_ms, &policy, None)
     }
 
     pub(super) struct PreselectionSnapshotFixture {
@@ -25618,8 +25624,8 @@ mod tests {
                 &mut direct,
                 &mut exits,
                 10,
-                |count| {
-                    assert_eq!(count, 3);
+                |group| {
+                    assert_eq!(group.len(), 3);
                     Some(choice)
                 },
             );
@@ -25689,6 +25695,193 @@ mod tests {
         );
     }
 
+    async fn larger_restricted_preselection_fixture() -> (Box<RuntimeFixture>, u64) {
+        let (mut fixture, now_ms) = signed_alternative_exit_controls_fixture().await;
+        for discriminator in 44..47 {
+            let identity = Identity::generate();
+            assert!(
+                ingest_direct_snapshot_advertisement_with_capabilities(
+                    &mut fixture,
+                    &identity,
+                    RolesConfig {
+                        client: false,
+                        relay: true,
+                        exit: false,
+                    },
+                    1,
+                    [discriminator; 32],
+                    now_ms,
+                    PreselectionTestCapabilities::all(),
+                )
+                .await
+                .is_some()
+            );
+        }
+        let control = fixture
+            .runtime
+            .direct_relays
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        assert!(
+            ingest_forwarded_snapshot_exit_with_capabilities(
+                &mut fixture,
+                &control,
+                &Identity::generate(),
+                RolesConfig {
+                    client: false,
+                    relay: false,
+                    exit: true,
+                },
+                1,
+                [47; 32],
+                now_ms,
+                PreselectionTestCapabilities::all(),
+            )
+            .await
+            .is_some()
+        );
+        (fixture, now_ms)
+    }
+
+    #[tokio::test]
+    async fn route_snapshot_restricted_preselection_binds_exact_control_after_projection() {
+        let (fixture, now_ms) = larger_restricted_preselection_fixture().await;
+        let active = fixture.state.read().await.policy_snapshot(now_ms);
+        let unrestricted = fixture
+            .runtime
+            .build_route_candidate_snapshot(10, now_ms, &active, None)
+            .unwrap();
+        assert_eq!(unrestricted.direct_relays.len(), 6);
+        assert_eq!(unrestricted.forwarded_exits.len(), 2);
+        assert_eq!(unrestricted.preselection_subjects.entries.len(), 8);
+        let policy = unrestricted.policy;
+        let revalidated = fixture
+            .runtime
+            .load_revalidated_route_candidates(10, now_ms, policy)
+            .unwrap();
+        let originals = fixture.runtime.project_forwarded_route_candidates(
+            &revalidated,
+            &unrestricted.direct_relays,
+            now_ms,
+            policy,
+        );
+        assert_eq!(
+            originals.len(),
+            4,
+            "three shared controls plus another Exit"
+        );
+        for original in &originals {
+            let capability = original.capability();
+            let restriction = route_extension::PreselectionRestriction {
+                exit_node: capability.exit_node_id,
+                exit_peer: capability.exit_peer_id,
+                control_node: capability.control_relay_node_id,
+                control_peer: capability.control_relay_peer_id,
+                data_relays: unrestricted
+                    .direct_relays
+                    .iter()
+                    .map(|relay| (relay.capability().node_id, relay.capability().peer_id))
+                    .filter(|(node, _)| *node != capability.control_relay_node_id)
+                    .take(2)
+                    .collect(),
+            };
+            let snapshot = fixture
+                .runtime
+                .build_route_candidate_snapshot(10, now_ms, &active, Some(&restriction))
+                .unwrap();
+            assert_eq!(snapshot.forwarded_exits, vec![original.clone()]);
+            assert_eq!(snapshot.direct_relays.len(), 3);
+            assert_eq!(snapshot.preselection_subjects.entries.len(), 4);
+            assert_eq!(snapshot.preselection_subjects.forwarded_pairs.len(), 1);
+            let narrowed = narrow_route_candidate_snapshot(
+                snapshot,
+                PreselectionSamplingScope::new(
+                    Transport::TcpMptcp,
+                    ObservationAddressFamily::Ipv4,
+                    Bandwidth {
+                        up_mbps: 10,
+                        down_mbps: 10,
+                    },
+                    2,
+                    2,
+                ),
+            )
+            .unwrap_or_else(|failure| panic!("restricted affine shape: {:?}", failure.error));
+            assert!(
+                PreselectionAttemptGate::new()
+                    .unwrap()
+                    .begin(
+                        narrowed,
+                        Transport::TcpMptcp,
+                        ObservationAddressFamily::Ipv4,
+                        Bandwidth {
+                            up_mbps: 10,
+                            down_mbps: 10
+                        },
+                        Bandwidth {
+                            up_mbps: 100,
+                            down_mbps: 100
+                        },
+                        Bandwidth {
+                            up_mbps: 80,
+                            down_mbps: 80
+                        },
+                    )
+                    .is_ok(),
+                "signed actor provenance must survive selection of every exact control"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn route_snapshot_restricted_preselection_rejects_missing_pinned_control() {
+        let (fixture, now_ms) = signed_alternative_exit_controls_fixture().await;
+        let active = fixture.state.read().await.policy_snapshot(now_ms);
+        let original = fixture
+            .runtime
+            .build_route_candidate_snapshot(10, now_ms, &active, None)
+            .unwrap();
+        let capability = original.forwarded_exits[0].capability();
+        let restriction = route_extension::PreselectionRestriction {
+            exit_node: capability.exit_node_id,
+            exit_peer: capability.exit_peer_id,
+            control_node: capability.control_relay_node_id,
+            control_peer: *Identity::generate().peer_id(),
+            data_relays: original
+                .direct_relays
+                .iter()
+                .map(|relay| (relay.capability().node_id, relay.capability().peer_id))
+                .filter(|(node, _)| *node != capability.control_relay_node_id)
+                .collect(),
+        };
+        let restricted = fixture
+            .runtime
+            .build_route_candidate_snapshot(10, now_ms, &active, Some(&restriction))
+            .unwrap();
+        assert!(
+            restricted.forwarded_exits.is_empty(),
+            "no random replacement control"
+        );
+        assert!(
+            narrow_route_candidate_snapshot(
+                restricted,
+                PreselectionSamplingScope::new(
+                    Transport::TcpMptcp,
+                    ObservationAddressFamily::Ipv4,
+                    Bandwidth {
+                        up_mbps: 10,
+                        down_mbps: 10
+                    },
+                    2,
+                    2,
+                ),
+            )
+            .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn route_snapshot_alternative_controls_reject_conflicts_duplicates_and_invalid_choice() {
         let (fixture, now_ms) = signed_alternative_exit_controls_fixture().await;
@@ -25730,9 +25923,9 @@ mod tests {
                 &mut direct,
                 &mut exits,
                 10,
-                |count| match mutation {
+                |group| match mutation {
                     7 => None,
-                    8 => Some(count),
+                    8 => Some(group.len()),
                     _ => Some(0),
                 },
             );

@@ -48,6 +48,58 @@ enum ControlMessageType {
   CONTROL_MESSAGE_TYPE_RETIREMENT_RECEIPT = 30;
   CONTROL_MESSAGE_TYPE_DNS_CACHE_QUERY = 31;
   CONTROL_MESSAGE_TYPE_DNS_CACHE_REPLY = 32;
+  CONTROL_MESSAGE_TYPE_ROUTE_EXTENSION_REQUEST = 33;
+  CONTROL_MESSAGE_TYPE_ROUTE_EXTENSION = 34;
+  CONTROL_MESSAGE_TYPE_ROUTE_EXTENSION_RELAY_COMMIT = 35;
+}
+
+// Zero is a proto3 default only and is rejected by the signed-payload validator.
+enum RouteExtensionPhase {
+  ROUTE_EXTENSION_PHASE_UNSPECIFIED = 0;
+  ROUTE_EXTENSION_PHASE_PROBE = 1;
+  ROUTE_EXTENSION_PHASE_AUTHORIZE = 2;
+  ROUTE_EXTENSION_PHASE_COMMIT = 3;
+  ROUTE_EXTENSION_PHASE_ABORT = 4;
+}
+
+// Immutable original route authority plus exactly one new Relay path.
+message RouteExtensionScope {
+  bytes extension_id = 1;
+  bytes signed_exit_reservation = 2;
+  bytes finalized_bundle_hash = 3;
+  uint32 path_id = 4;
+  bytes relay_node_id = 5;
+  bytes relay_peer_id = 6;
+  bytes probe_id = 7;
+  ProbeAddressFamily address_family = 8;
+}
+
+message RouteExtensionRequest {
+  RouteExtensionScope scope = 1;
+  RouteExtensionPhase phase = 2;
+  FinalizedRelayPath path = 3;
+  bytes signed_confirmation = 4;
+}
+
+message RouteExtension {
+  RouteExtensionScope scope = 1;
+  RouteExtensionPhase phase = 2;
+  bytes signed_probe_permit = 3;
+  bytes signed_relay_authorization = 4;
+  bytes signed_confirmation_receipt = 5;
+  repeated uint32 selected_path_ids = 6;
+  uint64 hard_expires_at_ms = 7;
+}
+
+message RouteExtensionRelayCommit {
+  bytes route_context_id = 1;
+  bytes reservation_id = 2;
+  bytes extension_id = 3;
+  uint32 path_id = 4;
+  bytes relay_node_id = 5;
+  bytes authorization_sha256 = 6;
+  bytes confirmation_sha256 = 7;
+  uint64 hard_expires_at_ms = 8;
 }
 
 // Cache-only IN/A or IN/AAAA; names never enter the capability DHT.

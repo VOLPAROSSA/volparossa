@@ -1707,6 +1707,9 @@ fn assert_preselection_message_type_tags(schema: &str, messages: &str) {
         "RETIREMENT_RECEIPT",
         "DNS_CACHE_QUERY",
         "DNS_CACHE_REPLY",
+        "ROUTE_EXTENSION_REQUEST",
+        "ROUTE_EXTENSION",
+        "ROUTE_EXTENSION_RELAY_COMMIT",
     ];
     let rust_names = [
         "Unspecified",
@@ -1742,6 +1745,9 @@ fn assert_preselection_message_type_tags(schema: &str, messages: &str) {
         "RetirementReceipt",
         "DnsCacheQuery",
         "DnsCacheReply",
+        "RouteExtensionRequest",
+        "RouteExtension",
+        "RouteExtensionRelayCommit",
     ];
     assert_eq!(schema_enum.matches(';').count(), names.len());
     assert_eq!(
