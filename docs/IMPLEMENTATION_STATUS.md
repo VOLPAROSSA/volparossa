@@ -1215,6 +1215,19 @@ Four new browser checks, six existing model-harness checks and core schema/expor
 The 40-second startup deadline, browser privacy settings and sandbox are unchanged. This is
 diagnostic coverage, not a demonstrated startup fix or completed browser/model integration.
 
+The [empty-startup run on `69ce99a0`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36607457567)
+fails before model provisioning: the exact Firefox process remains alive after 40,002 ms,
+loopback is up, but neither IPv4 nor IPv6 has the test-control listener. The input-free
+424-byte log reports missing `libGL.so.1` and a software-compositor warning. An isolated
+local probe hides that exact library using a child-only read-only mount: both warnings
+occur, yet the same runtime opens a real session in about 3.2 seconds. Missing GL alone
+is therefore not a demonstrated explanation or justification for a package/deadline change.
+All 11 original files remain unchanged, ZIP SHA-256
+`9d742e147d9a8f90dd8d25dae06c52255aca77a44026fad6c5a959bec4221174`.
+Owned-process/profile cleanup completes; guest-parent state is byte-identical. The next
+source pin enables Firefox startup trace only in the separate empty profile, still capped
+at 16 KiB. Combined private-session logging, privacy settings and sandbox stay unchanged.
+
 Current dependency-ready candidate: a single incremental provider queue now owns source and
 derived graph work. Each durable package completion triggers a dependency scan; newly ready
 tasks join that same queue while unrelated original worker leases remain occupied. Workflow
