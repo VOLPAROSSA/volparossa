@@ -239,7 +239,22 @@ returns `Unavailable`, it may run one separate 30-second native timing diagnosti
 case. These fixed-question guest-only observations retain no raw packet or log, have their
 own bounded child cleanup, and explicitly cannot count as acceptance or extend the normal
 five-second resolution budget. Six focused report/protocol checks pass; timing results are
-still pending.
+recorded below.
+
+The [diagnostic run on `84be45ac`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36602822670)
+still **fails overall**, but now proves the signed private-worker-to-local-cache linkage:
+the native lookup returns in 3,297 ms, the original answer validates independently against
+the built-in roots, and policy-bound local reuse does not extend its TTL. The unsigned answer
+returns in 3,611 ms, remains unshared, and timeout/cancel reaping passes again. The deliberately
+bogus name instead returns `Unavailable` at 4,502 ms. Its separate fresh native diagnostic
+also produces no complete reply within 30,032 ms and is killed/reaped; extending the caller's
+budget is therefore not a demonstrated fix. No actual native `Bogus` verdict is claimed.
+The separate protected C05 report passes again but uses its own upstream, not these native
+answers. Guest hosts, topology cleanup and byte-identical guest-parent network snapshots pass.
+The original 298-file artifact is unchanged, ZIP SHA-256
+`b568467b21f7644a17c1f713f1782316a6ccf744ff03a77dafa82cde416031ff`.
+Native-to-peer distribution and reciprocal deployment remain unproved; `system` remains the
+default pending those integration steps.
 
 The next private-DNS VM fixture also checks the runner's IPv6 address/route information
 without sending packets. Only an explicit kernel `ENETUNREACH` for the fixed root selector

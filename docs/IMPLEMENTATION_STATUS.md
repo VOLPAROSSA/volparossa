@@ -3404,6 +3404,15 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   deadline. No native signed proof-cache linkage or actual `Bogus` verdict is claimed.
   All 276 original artifact files remain unchanged; see the fallback document for their hash.
   No default switch or reciprocal deployment proof follows from these partial results.
+  The [diagnostic run on `84be45ac`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36602822670)
+  now proves a genuine native signed lookup, independent root validation and policy-bound
+  local-cache reuse in 3,297 ms. Unsigned recursion and timeout/cancel reaping pass too.
+  It still **fails overall**: the bogus lookup is `Unavailable` at 4,502 ms, and a separate
+  30-second native diagnostic also obtains no complete reply before confirmed kill/reap.
+  The protected C05 report passes independently, not with these native answers as its source.
+  No native `Bogus` verdict, native-to-peer proof or reciprocal deployment is claimed.
+  All 298 original files, including unchanged-host and cleanup evidence, remain retained;
+  the fallback document records their ZIP hash. Default selection remains unchanged.
   A separate `reciprocity-private-dns` fixture now preserves four all-role agent lifetimes
   and concurrent real UDP routes while checking normal protected DNS, private native worker
   ownership, independent local-cache reuse, drained captures and complete guest-only uplink
