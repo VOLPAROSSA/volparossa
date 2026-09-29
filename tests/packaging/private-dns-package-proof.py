@@ -23,7 +23,9 @@ PROBE_UNIT = "volparossa-private-dns-package-probe.service"
 DEVIATIONS = ["source-built resolver example replaces agent ExecStart", "Type=oneshot",
               "Restart=no", "no helper/native Wants", "synthetic hosts bind read-only",
               "fixed observer ACK on stdin; bounded synthetic result on stdout",
+              "bounded startup stderr classified before owned temporary cleanup",
               "no full agent DNS-query claim"]
+PROBE_OUTPUT_BOUND = 16384
 
 
 def require(value, code):
@@ -157,7 +159,7 @@ def probe_unit(source, directory, marker, parent):
             result += [f"Environment=VOLPAROSSA_PRIVATE_DNS_PARENT_MNTNS={parent}",
                        f"BindReadOnlyPaths={directory}/hosts:/etc/hosts",
                        f"StandardInput=file:{directory}/ack", f"StandardOutput=file:{directory}/result",
-                       "StandardError=null", ""]
+                       f"StandardError=file:{directory}/stderr", ""]
             break
         result.append(line)
     return "\n".join(result) + "\n"
@@ -171,13 +173,107 @@ def process_identity(pid):
         return None
 
 
-def sandbox_probe(probe):
+def unit_diagnostics(data):
+    """Keep fixed manager result categories and numeric status, never journal text."""
+    require(len(data) <= 4096, "SANDBOX_STATUS_BOUND")
+    fields = {}
+    for line in data.decode("ascii").splitlines():
+        key, separator, value = line.partition("=")
+        require(separator and key in ("Result", "ExecMainCode", "ExecMainStatus", "ActiveState")
+                and key not in fields, "SANDBOX_STATUS_SHAPE")
+        fields[key] = value
+    require(set(fields) == {"Result", "ExecMainCode", "ExecMainStatus", "ActiveState"}, "SANDBOX_STATUS_SHAPE")
+    for key in ("ExecMainCode", "ExecMainStatus"):
+        require(re.fullmatch(r"[0-9]{1,3}", fields[key]) is not None
+                and 0 <= int(fields[key]) <= 255, "SANDBOX_STATUS_SHAPE")
+    result = fields["Result"]
+    state = fields["ActiveState"]
+    return dict(available=True, exec_main_code=int(fields["ExecMainCode"]),
+                exec_main_status=int(fields["ExecMainStatus"]),
+                result=result if result in ("success", "exit-code", "signal", "core-dump", "timeout",
+                    "start-limit-hit", "resources", "protocol", "watchdog", "oom-kill", "exec-condition") else "other",
+                active_state=state if state in ("active", "inactive", "failed", "activating",
+                    "deactivating", "reloading", "maintenance", "refreshing") else "other")
+
+
+def stderr_diagnostics(data):
+    """The example uses fixed guard errors; unknown content is never copied into the report."""
+    if len(data) > PROBE_OUTPUT_BOUND:
+        return dict(present=True, category="OUTPUT_BOUND", bounded=False)
+    categories = (
+        (b"explicit disposable mount namespace required", "PARENT_NAMESPACE_MARKER_MISSING"),
+        (b"disposable guest or private resolver assets unavailable", "DISPOSABLE_OR_ASSETS_GUARD"),
+        (b"isolated OS-positive fallback sentinel missing", "OS_SENTINEL_GUARD"),
+        (b"observer did not confirm the live caller cleanup boundary", "OBSERVER_ACK_REJECTED"),
+        (b"failed to fill whole buffer", "OBSERVER_ACK_EOF"),
+        (b"Permission denied", "PERMISSION_DENIED"),
+        (b"Operation not permitted", "OPERATION_NOT_PERMITTED"),
+        (b"error while loading shared libraries", "DYNAMIC_LOADER"),
+        (b"No such file or directory", "FILE_NOT_FOUND"),
+    )
+    category = next((code for marker, code in categories if marker in data),
+                    "UNCLASSIFIED" if data else "EMPTY")
+    return dict(present=bool(data), bytes=len(data), bounded=True, category=category)
+
+
+def result_diagnostics(data):
+    if len(data) > PROBE_OUTPUT_BOUND:
+        return dict(present=True, category="OUTPUT_BOUND", bounded=False)
+    if not data:
+        return dict(present=False, category="EMPTY", bounded=True)
+    try:
+        result = json.loads(data)
+    except (ValueError, UnicodeError):
+        return dict(present=True, category="INVALID_JSON", bounded=True)
+    if not isinstance(result, dict) or result.get("case") != "signed":
+        return dict(present=True, category="INVALID_CASE", bounded=True)
+    kept = dict(present=True, category="SIGNED_RESULT", bounded=True)
+    for key in ("case_passed", "dnssec_secure", "os_sentinel", "shareable_proof", "local_cache_reuse",
+                "cache_ttl_not_extended", "proof_policy_bound"):
+        if type(result.get(key)) is bool:
+            kept[key] = result[key]
+    for key, maximum in (("elapsed_ms", 35000), ("ttl_seconds", 2**32 - 1), ("address_count", 256)):
+        if type(result.get(key)) is int and 0 <= result[key] <= maximum:
+            kept[key] = result[key]
+    for key, allowed in (
+        ("source", ("independently_validated", "private_unbound", "unexpected_source")),
+        ("verdict", ("positive", "unavailable", "bogus", "error")),
+        ("error", ("InvalidQuestion", "InvalidScope", "InvalidProof", "Unavailable", "NameNotFound",
+                   "NoData", "Bogus", "CleanupUnconfirmed")),
+    ):
+        if result.get(key) in allowed:
+            kept[key] = result[key]
+    return kept
+
+
+def retain_sandbox_diagnostics(directory, observed, started_at, diagnostics):
+    # Run before systemctl stop/reset and before TemporaryDirectory deletes the raw files.
+    diagnostics.update(worker_observed=observed is not None,
+                       elapsed_ms=min(120000, max(0, round((time.monotonic() - started_at) * 1000))))
+    try:
+        data = run("systemctl", "show", PROBE_UNIT,
+                   "--property=Result,ExecMainCode,ExecMainStatus,ActiveState").stdout
+        diagnostics["manager"] = unit_diagnostics(data)
+    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
+        diagnostics["manager"] = dict(available=False, category="STATUS_UNAVAILABLE")
+    for name, classify in (("result", result_diagnostics), ("stderr", stderr_diagnostics)):
+        try:
+            file = directory / name
+            require(not file.is_symlink() and file.is_file(), "OUTPUT_NOT_REGULAR")
+            with file.open("rb") as source:
+                diagnostics[name] = classify(source.read(PROBE_OUTPUT_BOUND + 1))
+        except (RuntimeError, OSError, ValueError):
+            diagnostics[name] = dict(present=False, category="OUTPUT_UNAVAILABLE")
+
+
+def sandbox_probe(probe, diagnostics):
     account = pwd.getpwnam("volparossa")
     target = Path("/run/systemd/system") / PROBE_UNIT
     require(not target.exists() and not target.is_symlink(), "EXISTING_PROBE_UNIT")
     marker = "volparossa-private-dns-" + os.urandom(16).hex()
     observed = None
     started = False
+    started_at = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="private-dns-package-", dir="/run/volparossa") as temporary:
         directory = Path(temporary)
         os.chown(directory, 0, account.pw_gid)
@@ -223,6 +319,7 @@ def sandbox_probe(probe):
                 if pending.poll() is None:
                     pending.kill()
                 pending.wait(timeout=5)
+                diagnostics["start_command_status"] = pending.returncode
             require(observed is not None, "SANDBOX_WORKER_NOT_OBSERVED_REAPED")
             remaining = process_identity(observed[0])
             require(remaining is None or remaining[:2] != observed[:2], "SANDBOX_WORKER_NOT_REAPED")
@@ -237,6 +334,7 @@ def sandbox_probe(probe):
                         independent_dnssec_proof=True, local_cache_reuse=True,
                         full_agent_dns_query=False, deviations=DEVIATIONS)
         finally:
+            retain_sandbox_diagnostics(directory, observed, started_at, diagnostics)
             if started:
                 require(property_value(PROBE_UNIT, "Description") == marker, "PROBE_UNIT_OWNER_CHANGED")
                 run("systemctl", "stop", PROBE_UNIT)
@@ -309,7 +407,8 @@ def execute(probe, package, output, revision):
                       companion_sha256=digest(companion), worker_sha256=digest(WORKER),
                       agent_unit_sha256=digest(UNIT), probe_sha256=digest(probe))
         report["startup"] = missing_assets_start()
-        report["sandbox"] = sandbox_probe(probe)
+        report["sandbox_diagnostics"] = {}
+        report["sandbox"] = sandbox_probe(probe, report["sandbox_diagnostics"])
         report["installed_units_unchanged"] = UNIT.read_bytes() == original_unit
         report["fixture_config_restored"] = CONFIG.read_bytes() == original
         report["success"] = True
@@ -318,6 +417,12 @@ def execute(probe, package, output, revision):
         report["success"] = False
         report["failure"] = str(error) if isinstance(error, RuntimeError) else type(error).__name__
     finally:
+        for field, path, before in (("installed_units_unchanged", UNIT, original_unit),
+                                    ("fixture_config_restored", CONFIG, original)):
+            try:
+                report[field] = path.read_bytes() == before
+            except OSError:
+                report[field] = False
         output.write_text(json.dumps(report, indent=2) + "\n")
     validate(report, revision)
 

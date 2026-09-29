@@ -3647,7 +3647,15 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   A separate packaged-default candidate now selects private Unbound even when caching is off,
   while disabling all proof retention and peer sharing in that mode. Inactive nodes need no
   worker; effective Exits reject missing assets. Four config, three resolver and three startup
-  checks plus strict three-crate Clippy pass. Real package/default acceptance remains pending.
+  checks plus strict three-crate Clippy pass. The source-exact reciprocal run
+  [`36621104333` on `c2e21c6c`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36621104333)
+  now passes: protected private recursion takes 1,053 ms, same-socket local reuse 5 ms,
+  with unchanged four-node agents/flows, post-DNS echoes, a reaped worker, no new cache-hit
+  query/worker, responsive natural retirement, clean captures and unchanged host state.
+  Its 170 originals are retained. The separate package/C05 run `36621100178` remains failed:
+  C05 and all five native cases pass, as do source binding and installed-agent startup guards,
+  but the shipped-sandbox probe fails and upgrade/removal acceptance is not established.
+  No missing probe diagnostics are invented. See [exact results and hashes](UNBOUND_FALLBACK.md).
 
 The positive DNSSEC cache is now composed into the normal agent: the same bounded RAM resolver
 serves protected DNS, TCP resolution, general UDP and browser-QUIC destination pinning. Its peer

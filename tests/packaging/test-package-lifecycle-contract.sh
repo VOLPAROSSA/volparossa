@@ -23,7 +23,8 @@ trap 'exit 143' TERM
 grep -F 'PREVIEW ONLY: no package, service, account, file or network state was changed.' \
     "$temporary/preview" >/dev/null
 grep -F 'agent_control_socket=/run/volparossa/control/agent.sock' "$lifecycle" >/dev/null
-[ "$(grep -Fc 'wait_agent_control_socket' "$lifecycle")" -eq 3 ]
+# Definition, fresh install, optional private-DNS probe restoration, and upgrade.
+[ "$(grep -Fc 'wait_agent_control_socket' "$lifecycle")" -eq 4 ]
 [ "$(grep -Fc -- "--control-socket \"\$agent_control_socket\" status" "$lifecycle")" -eq 1 ]
 grep -F '/usr/bin/timeout --signal=KILL 0.2s' "$lifecycle" >/dev/null
 grep -F 'volparossa-agent control socket did not become ready' "$lifecycle" >/dev/null

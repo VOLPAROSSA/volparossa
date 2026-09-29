@@ -1,8 +1,9 @@
 # Exit-side Unbound fallback
 
 The development default is now the bounded private Unbound worker. This default/package
-integration is a candidate pending its source-exact installation and reciprocal-role proof;
-the earlier native and cache results below retain their narrower scopes. No host DNS,
+integration remains a candidate pending complete package acceptance. The source-exact
+reciprocal-role route now passes; the installation-sandbox probe does not yet pass.
+The earlier native and cache results below retain their narrower scopes. No host DNS,
 routes, firewall, resolver service or trust anchors are changed automatically.
 
 ## Private packaged worker candidate
@@ -47,7 +48,9 @@ roles-off startup, missing-worker rejection by the installed agent, and the ordi
 install/upgrade/remove lifecycle. A separate resolver probe inherits the shipped agent
 sandbox and must perform real DNSSEC resolution; its explicit executable/one-shot fixture
 deviations do not prove a full agent DNS query or a release build. Both original package
-reports and the independent native resolver report are retained. Live results are pending.
+reports and the independent native resolver report are retained. The first package run
+passes source binding, inert startup and missing-worker rejection, but fails its sandbox
+probe before upgrade/removal proof. See the source-exact results below.
 
 Private lookups still use an unexpired, independently verified shared-proof RAM
 answer first. On a miss, [bounded sequential source selection](#private-worker-unbound_private)
@@ -380,7 +383,45 @@ emitted by the pinned Debian libslirp implementation, retaining the exact TAP, e
 hardware/protocol and MAC bindings. It does not relax IP/DNS capture rules. Six targeted
 capture checks and nineteen shared capture checks pass. The older frame's length was not
 retained, so identifying that historical failure as this specific padding case remains an
-inference; a new source-exact reciprocal run is still required.
+inference; the later source-exact reciprocal run below passes without rewriting that result.
+
+### Reciprocal private resolution and local reuse pass
+
+[Run `36621104333` on `c2e21c6c`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36621104333)
+passes the complete scoped reciprocal DNS gate. Four unchanged Client/Relay/Exit agents
+retain their original UDP flows. An actual protected application lookup starts one
+unprivileged private Unbound child at the selected Exit and returns an independently
+validated answer in 1,053 ms. The same application socket and route return the repeated
+answer from the local proof cache in 5 ms, with no new worker or outgoing recursive query.
+The worker is observed and reaped; both answers have exact source-counter increments.
+All four original flows complete a subsequent echo. These timings describe this trial,
+not a general latency guarantee or a proof that peer caching is always fastest.
+
+Natural DNS-route retirement occurs after the concurrent echo window: the 30-second idle
+bound is observed at 31,665 ms, within unchanged signed authorization. All 408 status reads
+complete without timeout and the owned context disappears. Eight drained captures contain
+2,155 frames with no malformed/forbidden packets, drops or truncation. The local phase's
+two incoming DNS responses remain explicitly unattributed residual traffic; it initiates
+zero recursive queries. Disposable cleanup leaves zero owned objects and host-state
+SHA-256 remains `bb473ef29464a9fca6dcedb2a9187be239956aa1ac8e1ac46ed5a8a1050b7853`.
+The source-exact checker passes again against all 170 retained original files, ZIP SHA-256
+`711039e5b1ac1cf4e007c16c47d3bab9acb2f8ea316af9988419da79e8ef4fd0`.
+
+The [separate package/C05 run on the same source](https://github.com/VOLPAROSSA/volparossa/actions/runs/36621100178)
+remains **failed**. Its protected synthetic-DNSSEC upstream/peer/offline-local cache sequence
+passes, as do the five actual native-Unbound signed/unsigned/bogus/timeout/cancellation cases.
+The package's source/binary binding, inert roles-off startup with the worker hidden, and
+effective-Exit rejection with `DNS_PRIVATE_WORKER_UNAVAILABLE` also pass. Its separate
+shipped-sandbox resolver probe reports `SANDBOX_PROBE_FAILED`; the package upgrade/removal
+sequence is not proven. That fixture discarded its probe result/stderr, so the report does
+not establish the specific failure cause. All 282 original files remain failed-run evidence,
+ZIP SHA-256 `6b0207484f77e44f308141ef7d00d081b8c00850a36c21215c85b25e34aaec18`.
+Successful route/native checks are not substituted for the missing package acceptance.
+The next fixture revision retains bounded manager exit/status fields and fixed probe-result
+and stderr categories before its owned temporary files are removed; it does not relax the
+shipped sandbox or export raw output. Nine focused package-proof checks pass. The separate
+quality-gate failure was a stale static readiness-call count after adding the optional
+probe; the corrected lifecycle contract now passes without changing production behavior.
 
 ### Bounded protected DNS connection reuse
 
@@ -425,8 +466,8 @@ the exact retirement owner in the failed `859c9e90` run.
 The new responsiveness test and four existing disconnect/cancellation/quarantine checks
 pass, as do strict agent Clippy, formatting, eleven reciprocal-fixture checks (the
 separate privileged mount probe is opt-in), four exact-TAP capture checks and nineteen
-shared-capture regressions. They establish the local correction, not a completed new
-four-role live acceptance run.
+shared-capture regressions. The later `c2e21c6c` run above additionally establishes the
+scoped four-role live route; it does not establish every DNS or packaging case.
 
 Focused tests cover configuration rejection, bounded CNAME/TTL/provenance parsing, malformed and
 negative responses, rebinding rejection, and an actual framed TCP backend in a disposable test
@@ -439,7 +480,7 @@ Those focused checks alone do not prove deployed Unbound validation, private lis
 ownership, reciprocal-role routing, fastest-source choice, or the complete fallback feature.
 
 The genuine-Unbound signed/unsigned/bogus and timeout/cancellation preflight plus protected
-C05 cache sequence now have the separate live evidence above. The combined four-role private
-Unbound route, remaining CNAME/NXDOMAIN/expiry cases and fastest-source selection still need
-their relevant evidence. The full fallback request remains incomplete; the default backend
-has not been switched on the strength of these partial results.
+C05 cache sequence and combined four-role private-Unbound route now have the scoped live
+evidence above. Complete package acceptance, remaining CNAME/NXDOMAIN/expiry cases and
+fastest-source selection still need their relevant evidence. The full fallback request
+remains incomplete; the development default has changed in this candidate, not yet in main.

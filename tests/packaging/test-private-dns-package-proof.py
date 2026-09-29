@@ -4,8 +4,10 @@
 
 import copy
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -106,8 +108,53 @@ class PackageProofContract(unittest.TestCase):
         self.assertIn("User=volparossa", unit)
         self.assertIn("CapabilityBoundingSet=\n", unit)
         self.assertIn("BindReadOnlyPaths=/run/volparossa/proof/hosts:/etc/hosts", unit)
+        self.assertIn("StandardError=file:/run/volparossa/proof/stderr", unit)
+        self.assertNotIn("StandardError=null", unit)
         self.assertNotIn("Wants=", unit)
         self.assertNotIn("WantedBy=", unit)
+
+    def test_sandbox_failure_keeps_fixed_status_and_guard_without_raw_private_text(self):
+        raw = b"Result=exit-code\nExecMainCode=1\nExecMainStatus=203\nActiveState=failed\n"
+        outcome = subprocess.CompletedProcess([], 0, raw)
+        diagnostics = {}
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "stderr").write_bytes(
+                b'Error: "disposable guest or private resolver assets unavailable"\n'
+                b"never export private.invalid/path?q=secret\n")
+            (directory / "result").write_bytes(b"")
+            with mock.patch.object(PROOF, "run", return_value=outcome), \
+                    mock.patch.object(PROOF.time, "monotonic", return_value=2.125):
+                PROOF.retain_sandbox_diagnostics(directory, None, 1, diagnostics)
+        self.assertEqual(diagnostics["manager"]["exec_main_status"], 203)
+        self.assertEqual(diagnostics["manager"]["result"], "exit-code")
+        self.assertEqual(diagnostics["stderr"]["category"], "DISPOSABLE_OR_ASSETS_GUARD")
+        self.assertEqual(diagnostics["result"]["category"], "EMPTY")
+        self.assertEqual(diagnostics["elapsed_ms"], 1125)
+        self.assertFalse(diagnostics["worker_observed"])
+        self.assertNotIn("private.invalid", json.dumps(diagnostics))
+        self.assertNotIn("secret", json.dumps(diagnostics))
+        for invalid in (raw + raw, b"x" * 4097, raw.replace(b"203", b"999"),
+                        raw.replace(b"ExecMainCode=1\n", b"")):
+            with self.subTest(invalid=invalid[:30]), self.assertRaises(RuntimeError):
+                PROOF.unit_diagnostics(invalid)
+
+    def test_probe_result_projection_is_bounded_closed_and_never_confuses_dns_with_startup(self):
+        raw = json.dumps(dict(case="signed", case_passed=False, verdict="unavailable",
+            error="Unavailable", elapsed_ms=5001, private_url="https://private.invalid/secret",
+            unknown_reply="must not export", ttl_seconds=-1)).encode()
+        kept = PROOF.result_diagnostics(raw)
+        self.assertEqual(kept["category"], "SIGNED_RESULT")
+        self.assertEqual(kept["error"], "Unavailable")
+        self.assertEqual(kept["elapsed_ms"], 5001)
+        self.assertFalse(kept["case_passed"])
+        self.assertNotIn("private", json.dumps(kept))
+        self.assertNotIn("ttl_seconds", kept)
+        self.assertEqual(PROOF.stderr_diagnostics(b"unclassified private.invalid")["category"], "UNCLASSIFIED")
+        for parser in (PROOF.stderr_diagnostics, PROOF.result_diagnostics):
+            self.assertEqual(parser(b"x" * 16385)["category"], "OUTPUT_BOUND")
+        self.assertEqual(PROOF.result_diagnostics(b"not JSON")["category"], "INVALID_JSON")
+        self.assertEqual(PROOF.result_diagnostics(b'{"case":"unknown"}')["category"], "INVALID_CASE")
 
     def test_exit_fixture_changes_only_explicit_configuration_prerequisites(self):
         original = (ROOT / "config/examples/default.yaml").read_bytes()
