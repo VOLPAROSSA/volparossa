@@ -427,6 +427,7 @@ impl ContentRuntime {
                         let registry = registry.lock().await;
                         if !registry.has_live_publications(now())
                             && !registry.has_mailbox()
+                            && !registry.has_private_storage()
                             && !registry.has_custody()
                             && !registry.has_compute()
                         {

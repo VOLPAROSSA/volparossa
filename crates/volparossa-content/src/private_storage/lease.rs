@@ -1,8 +1,8 @@
-use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, params};
 
 use super::{
-    LeaseId, MAX_ARCHIVE_BYTES, MAX_LEASES, PrivateStorageStore, StorageError, StorageUsage,
-    StoredArchive, disk::check_space, valid_expiry,
+    LeaseId, MAX_ARCHIVE_BYTES, MAX_LEASES, PrivateStorageStore, StorageError, StorageLimits,
+    StorageUsage, StoredArchive, disk::check_space, valid_expiry,
 };
 
 impl PrivateStorageStore {
@@ -19,39 +19,22 @@ impl PrivateStorageStore {
         expires_at_unix: u64,
         now: u64,
     ) -> Result<LeaseId, StorageError> {
-        valid_expiry(expires_at_unix, now)?;
-        if ciphertext_bytes > MAX_ARCHIVE_BYTES {
-            return Err(StorageError::InvalidInput);
-        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let usage = usage(&transaction, self.limits.capacity_bytes)?;
-        if usage.leases >= MAX_LEASES
-            || usage
-                .reserved_bytes
-                .checked_add(usage.committed_bytes)
-                .and_then(|bytes| bytes.checked_add(ciphertext_bytes))
-                .is_none_or(|bytes| bytes > self.limits.capacity_bytes)
-        {
-            return Err(StorageError::Quota);
-        }
-        check_space(
+        let id = reserve_in_transaction(
+            &transaction,
             &self.directory,
-            usage
-                .reserved_bytes
-                .saturating_add(ciphertext_bytes)
-                .saturating_add(64 * 1024),
-            self.limits.min_free_bytes,
-        )?;
-        let mut id = [0; 16];
-        getrandom::fill(&mut id).map_err(|_| StorageError::Entropy)?;
-        transaction.execute(
-            "INSERT INTO leases (lease_id, ciphertext_bytes, sha256, expires, committed) VALUES (?1, ?2, ?3, ?4, 0)",
-            params![id.as_slice(), ciphertext_bytes, expected_sha256.as_slice(), expires_at_unix],
+            self.limits,
+            Reservation {
+                ciphertext_bytes,
+                expected_sha256,
+                expires_at_unix,
+                now,
+            },
         )?;
         transaction.commit()?;
-        Ok(LeaseId(id))
+        Ok(id)
     }
 
     /// Return pending and complete ciphertext accounting, including expired undeleted leases.
@@ -114,6 +97,59 @@ impl PrivateStorageStore {
         transaction.commit()?;
         Ok(deleted != 0)
     }
+}
+
+/// Shared transaction-local insertion; the caller alone commits the lease and any owner
+/// binding together. This is not a public authorization bypass or a separate transaction.
+#[derive(Clone, Copy)]
+pub(super) struct Reservation {
+    pub ciphertext_bytes: u64,
+    pub expected_sha256: [u8; 32],
+    pub expires_at_unix: u64,
+    pub now: u64,
+}
+
+pub(super) fn reserve_in_transaction(
+    transaction: &Transaction<'_>,
+    directory: &std::fs::File,
+    limits: StorageLimits,
+    reservation: Reservation,
+) -> Result<LeaseId, StorageError> {
+    let Reservation {
+        ciphertext_bytes,
+        expected_sha256,
+        expires_at_unix,
+        now,
+    } = reservation;
+    valid_expiry(expires_at_unix, now)?;
+    if ciphertext_bytes > MAX_ARCHIVE_BYTES {
+        return Err(StorageError::InvalidInput);
+    }
+    let usage = usage(transaction, limits.capacity_bytes)?;
+    if usage.leases >= MAX_LEASES
+        || usage
+            .reserved_bytes
+            .checked_add(usage.committed_bytes)
+            .and_then(|bytes| bytes.checked_add(ciphertext_bytes))
+            .is_none_or(|bytes| bytes > limits.capacity_bytes)
+    {
+        return Err(StorageError::Quota);
+    }
+    check_space(
+        directory,
+        usage
+            .reserved_bytes
+            .saturating_add(ciphertext_bytes)
+            .saturating_add(64 * 1024),
+        limits.min_free_bytes,
+    )?;
+    let mut id = [0; 16];
+    getrandom::fill(&mut id).map_err(|_| StorageError::Entropy)?;
+    transaction.execute(
+        "INSERT INTO leases (lease_id, ciphertext_bytes, sha256, expires, committed) VALUES (?1, ?2, ?3, ?4, 0)",
+        params![id.as_slice(), ciphertext_bytes, expected_sha256.as_slice(), expires_at_unix],
+    )?;
+    Ok(LeaseId(id))
 }
 
 pub(super) fn load(connection: &Connection, id: LeaseId) -> Result<StoredArchive, StorageError> {

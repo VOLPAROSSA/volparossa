@@ -27,16 +27,39 @@ working modified client. Ordinary Signal compatibility, authenticated direct cip
 delivery, linked-device synchronization and native encrypted snapshot restore need actual
 implementation and proof. Existing core private messages are not Signal interoperability.
 
-The separate [private-storage candidate](PRIVATE_STORAGE.md) implements a local non-evicting
-ciphertext store, durable pre-upload reservations, bounded streamed chunks, verified restore,
-renewal and explicit deletion. `storage local` deliberately claims no network transport,
-replication or verified reciprocal credit. Message ACKs cannot consume these backup leases.
-Actual remote storage, including recovery copies and counted overhead, must eventually be
-matched by usable contributed capacity; a local payload quota alone does not establish it.
-Five focused library tests and four real CLI-process tests pass. An explicit 1 GiB
-disk-backed smoke also passes: bounded-chunk write, store close/reopen, full-length/full-hash
-restore and explicit deletion. The data is synthetic opaque bytes, not an encrypted Signal
-snapshot. This proves local persistence at that size, not cloud backup or alpha completion.
+The separate [private-storage candidate](PRIVATE_STORAGE.md) now combines the non-evicting
+local ciphertext store with resumable uploads, provider-issued bounded grants, owner-signed
+fresh-challenge operations and durable provider/owner/archive/lease bindings. Lease creation
+and ownership registration are atomic; deletion retains a durable tombstone so retries cannot
+revive a removed copy. Full payload capacity remains charged for pending, partial, committed
+and expired copies until explicit deletion. Reads do not consume or renew a backup, and
+message ACKs cannot consume its lease. The framed library accepts an already protected stream;
+it does not establish or demonstrate an actual protected peer route itself. Provider keys
+must be trusted independently, and signed receipts are not proof of future custody or credit.
+
+Current focused evidence passes: **13 library tests** (four authentication/protocol, five real
+SQLite provider and four framed-duplex tests) plus **eight resumable-storage tests**. These
+cover real signatures, durable ownership/quota checks, transactional rollback, restart/resume
+and framed transfer using in-process streams—not independent remote peers. The earlier five
+local lifecycle and four real CLI-process tests remain evidence for `storage local`, not a
+remote CLI. The manual **1 GiB resumable trial passed in 93.04 seconds on 2026-09-29**: half
+upload, close/reopen, idempotent retry, remaining upload, finalization, another reopen and two
+bounded-range restores with complete length/SHA-256 checks. The committed copy survives both
+restores. This synthetic opaque archive is not a Signal snapshot; the trial proves local
+disk-backed resumption at that size, not decentralized backup or alpha completion.
+
+The agreed contribution rule matches **actual remote physical usage**, including every replica
+and counted overhead, with usable local contribution; pending reservations stay separately
+visible. A measured drop from 2 GB to 1 GB lowers the target accordingly, but cannot evict
+other participants' live data. Existing custody needs verified independent replacements and acknowledged handoff before
+release. Unavailable replacement capacity must appear as **pending drain**, not freed space.
+Current payload quotas and receipts do not implement this adaptive distributed controller.
+
+- [ ] Actual protected peer storage path, versioned application/agent IPC and remote CLI.
+- [ ] Independent-node interrupted-upload resume, source-offline restore and measured custody.
+- [ ] Replica placement/repair and physical-usage contribution control, including safe
+  2 GB-to-1 GB handoff and pending drain.
+- [ ] Native Signal encrypted snapshot export/import, including its attachments and recovery keys.
 
 ## Earlier milestone evidence
 

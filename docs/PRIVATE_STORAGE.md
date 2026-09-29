@@ -34,6 +34,33 @@ that replicas exist, or that the same allowance has not been promised to several
 Receipt-backed distributed accounting and usable-capacity checks remain to be implemented.
 No payments, tokens or blockchain are introduced.
 
+### Adaptive contribution and safe handoff
+
+The intended controller follows **actual remote physical usage**, including every recovery
+copy and any charged overhead. If that usage falls from 2 GB to 1 GB, the local contribution
+target also falls from 2 GB to 1 GB. A reduction in logical backup size alone is not enough:
+remote copies, reservations and deletion acknowledgements must first be reconciled.
+
+The target is not the same as currently occupied or immediately releasable local space.
+Accounting must show the target, committed custody, charged pending reservations and
+pending release separately. Reducing a target must never delete another participant's
+live fragments. Occupied space can be released only after those fragments have been
+migrated to verified, independently placed replacement holders and their handoff has
+been acknowledged. Identity, integrity and usable replacement custody must be checked;
+a signed receipt or capacity pledge alone does not prove actual available storage or
+future availability.
+
+Placement and repair should account for availability and independent failure risks,
+maintain the required recoverability and repair missing copies. Temporary repair and
+migration copies consume real capacity too: count that overhead explicitly, use bounded
+headroom, and never present an in-progress transfer as freed space. If suitable replacement
+capacity is unavailable, retain existing custody and expose a **pending drain** instead of
+claiming the lower target has already been achieved.
+
+This availability-aware placement, repair, handoff and automatic contribution controller
+is a requirement for the next networked work, **not implemented by the current local store
+or authenticated stream library**. No replication factor or coding scheme is prescribed here.
+
 ## First executable slice: local provider storage
 
 `volparossa storage local` operates an explicit, owner-only store. It does not contact
@@ -68,21 +95,47 @@ multi-node availability, replication, recovery after loss of all credentials, or
 cloud backup. A provider's restore must eventually be guarded by an authenticated, private
 lease capability; a local lease identifier alone is not a remote authentication scheme.
 
+## Current authorized, resumable library slice
+
+The core now also has provider-issued bounded grants, owner-signed challenge-bound
+operations and durable provider/owner/archive/lease bindings around the real SQLite store.
+Reserve, chunk append, progress, finalize, range read, renewal and deletion are separate
+operations. Fresh connection challenges reject cross-connection replay; exact upload
+retries do not charge another copy, and durable deletion tombstones prevent resurrection.
+Every reserved copy remains fully charged while partial or expired and until deletion.
+
+The framed wire library operates on an **already protected stream supplied by its caller**.
+It neither discovers peers nor establishes the production protected transport itself.
+Provider identity must be trusted independently; signed receipts bind the exact request
+but remain provider statements, not proof of network-wide contribution or future custody.
+There is still no real-peer storage path, versioned core application IPC or Signal
+encryption/export/import integration demonstrated by this milestone.
+
+Current focused evidence: 13 authentication, durable-provider and framed-stream tests
+pass (four protocol, five real SQLite provider and four framed-stream tests), alongside
+eight ordinary resumable-storage tests. The stream tests exercise real signed metadata
+and SQLite custody over in-process framed streams; they are not a multi-node network test.
+The earlier five local lifecycle and four CLI-process tests cover the separate local commands.
+
+The manual 1 GiB resumable test passed on 2026-09-29 in **93.04 seconds**: it writes half
+the synthetic archive to the actual SQLite store, closes/reopens it, resumes the remaining
+chunks, finalizes, reopens again and restores twice in bounded ranges, checking the full
+length and SHA-256 both times. Restore leaves the committed copy intact. The large test
+is deliberately excluded from ordinary CI runs. Reproduce with
+`cargo test -p volparossa-content --test private_storage_resumable resumable_one_gib -- --ignored`,
+using a disposable, sufficiently sized disk-backed `TMPDIR`. This is neither a Signal
+archive nor evidence of remote replication or automatic contribution adjustment.
+
 ## Next end-to-end slice
 
-Current local evidence: five library lifecycle tests and four real CLI-process tests pass.
-An explicitly invoked 1 GiB synthetic-blob test writes the actual SQLite store on the
-workspace SSD, closes/reopens it, verifies the complete restored length/hash and deletes
-the lease. It passed on 2026-09-29; the large test is deliberately not part of every CI run.
-Reproduce with `cargo test -p volparossa-content --test private_storage private_storage_one_gib -- --ignored`,
-using a disposable, sufficiently sized disk-backed `TMPDIR`. This is not a Signal archive
-or a network replication test.
-
-Connect this separate store to authenticated protected provider transport and versioned
-application IPC. Bind private leases, owner authorization, finite renewal and original
-object identity; count physical copies using verified custody receipts. Demonstrate real
-remote deposit, provider restart, source-offline restore and quota refusal before adding
-repair across independently failing providers.
+Connect the authenticated store/stream library to actual protected peer transport and
+versioned application IPC. Demonstrate real remote deposit, interrupted-upload resume,
+provider restart, source-offline restore and quota refusal. Keep provider statements
+distinct from measured custody and usable capacity when reconciling physical usage.
+Then add availability-aware redundant placement and repair, with the adaptive contribution
+and acknowledged drain/handoff controller above. Demonstrate both a growing target and a
+2 GB-to-1 GB target reduction without losing other participants' live data, including the
+pending-drain case when replacement capacity is insufficient.
 
 The Signal bridge must export a completed upstream encrypted snapshot, including its
 referenced encrypted attachments and private metadata, then reconstruct and validate that

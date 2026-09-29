@@ -271,6 +271,7 @@ pub struct PublicationRegistry {
     object_policy: crate::object_policy::ObjectPolicyGate,
     name_lookup: bool,
     mailbox: Option<Arc<crate::mailbox::wire::MailboxService>>,
+    private_storage: Option<Arc<crate::private_storage::wire::StorageService>>,
     custody: Option<Arc<custody::CustodyService>>,
     compute: Option<Arc<compute::ComputeService>>,
 }
@@ -310,6 +311,20 @@ impl PublicationRegistry {
     /// Whether an explicitly attached mailbox still owns this service independently of public content.
     pub fn has_mailbox(&self) -> bool {
         self.mailbox.is_some()
+    }
+
+    /// Attach explicitly owned private archive custody, separate from public publications.
+    /// This grants no owner quota and does not enable mailbox or public-name operations.
+    pub fn set_private_storage(
+        &mut self,
+        service: Arc<crate::private_storage::wire::StorageService>,
+    ) {
+        self.private_storage = Some(service);
+    }
+
+    /// Whether an explicitly attached private archive store still owns this service.
+    pub fn has_private_storage(&self) -> bool {
+        self.private_storage.is_some()
     }
 
     /// Attach explicitly configured public custody; cloned snapshots share its service owner.
@@ -607,6 +622,19 @@ where
                 .serve(stream, session.remaining(limits)?)
                 .await
                 .map_err(|_| ProviderError::Protocol);
+        }
+        if selector.version == crate::private_storage::wire::SELECTOR_VERSION
+            && selector.operation == crate::private_storage::wire::SELECTOR_OPERATION
+            && selector.manifest_id.is_empty()
+        {
+            registry
+                .private_storage
+                .as_ref()
+                .ok_or(ProviderError::Missing)?
+                .serve(stream)
+                .await
+                .map_err(|_| ProviderError::Protocol)?;
+            return Ok(TransferProgress::default());
         }
         if selector.version == crate::mailbox::wire::SELECTOR_VERSION
             && selector.operation == crate::mailbox::wire::SELECTOR_OPERATION
