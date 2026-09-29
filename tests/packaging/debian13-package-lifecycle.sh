@@ -12,12 +12,14 @@ mode=preview
 approval=no
 package_path=
 output_directory=
+private_dns_probe=
 
 usage() {
     printf '%s\n' \
         'usage: tests/packaging/debian13-package-lifecycle.sh --preview' \
         '       tests/packaging/debian13-package-lifecycle.sh --execute --yes' \
-        '         --package ABSOLUTE_PATH --output ABSOLUTE_EMPTY_DIRECTORY'
+        '         --package ABSOLUTE_PATH --output ABSOLUTE_EMPTY_DIRECTORY' \
+        '         [--private-dns-probe ABSOLUTE_SOURCE_BUILT_PROBE]'
 }
 
 print_plan() {
@@ -49,6 +51,11 @@ while [ "$#" -gt 0 ]; do
             output_directory=$2
             shift
             ;;
+        --private-dns-probe)
+            [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+            private_dns_probe=$2
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -62,7 +69,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$mode" = preview ]; then
-    if [ "$approval" != no ] || [ -n "$package_path$output_directory" ]; then
+    if [ "$approval" != no ] || [ -n "$package_path$output_directory$private_dns_probe" ]; then
         usage >&2
         exit 64
     fi
@@ -287,6 +294,16 @@ wait_agent_control_socket() {
 services='volparossa-helper.service volparossa-mpquic.service volparossa-agent.service'
 for unit in $services; do wait_active "$unit"; done
 wait_agent_control_socket
+
+if [ -n "$private_dns_probe" ]; then
+    [ "$private_dns_probe" = /home/vpci/target/debug/examples/private-unbound-proof ] || exit 64
+    python3 -B "$(dirname -- "$0")/private-dns-package-proof.py" execute \
+        "$private_dns_probe" "$package_path" "$output_directory/private-unbound-package.json" \
+        "${VOLPAROSSA_PACKAGE_SOURCE_REVISION:-}"
+    # The additional proof restores the original roles-off agent and config;
+    # the ordinary upgrade/removal assertions below remain unchanged.
+    wait_agent_control_socket
+fi
 
 before_pids=
 for unit in $services; do

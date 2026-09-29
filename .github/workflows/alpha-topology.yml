@@ -204,6 +204,7 @@ jobs:
           sh -n tests/integration/reciprocity-private-dns.sh
           python3 -B tests/integration/test-reciprocity-private-dns.py
           python3 -B tests/integration/test-reciprocity-private-dns-capture.py
+          python3 -B tests/packaging/test-private-dns-package-proof.py
 
       - name: Install official Ubuntu VM tools
         run: |
@@ -1315,6 +1316,12 @@ jobs:
           python3 -B tests/integration/dns-cache-smoke.py report "$report" "$GITHUB_SHA"
           python3 -B tests/integration/private-unbound-proof.py report \
             "$VOLPAROSSA_ALPHA_OUTPUT/private-unbound-proof.json" "$GITHUB_SHA"
+          python3 -B tests/packaging/private-dns-package-proof.py report \
+            "$VOLPAROSSA_ALPHA_OUTPUT/private-unbound-package.json" "$GITHUB_SHA"
+          jq -e '.overall == "PASS" and .network_state_unchanged == true and
+            .fresh_install.services_enabled == false and .service_start.live_status == true and
+            .upgrade.active_processes_restarted == true and .uninstall.active_services_stopped == true' \
+            "$VOLPAROSSA_ALPHA_OUTPUT/private-unbound-package-lifecycle.json" >/dev/null
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.before_sha256' "$report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \

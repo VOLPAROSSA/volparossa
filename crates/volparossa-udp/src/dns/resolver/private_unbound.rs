@@ -72,7 +72,12 @@ impl PrivateUnbound {
         }))
     }
 
-    pub(super) async fn resolve(&self, question: &DnsQuestion, deadline: Instant) -> Answer {
+    pub(super) async fn resolve(
+        &self,
+        question: &DnsQuestion,
+        deadline: Instant,
+        collect_proof: bool,
+    ) -> Answer {
         if self.0.quarantined.load(Ordering::Acquire) {
             return Err(DnsResolverError::CleanupUnconfirmed);
         }
@@ -99,7 +104,16 @@ impl PrivateUnbound {
                 .kill_on_drop(true);
             let answer = match command.spawn() {
                 Ok(mut child) => {
-                    match supervise(&mut child, &question, nonce, deadline, &mut reply).await {
+                    match supervise(
+                        &mut child,
+                        &question,
+                        nonce,
+                        deadline,
+                        collect_proof,
+                        &mut reply,
+                    )
+                    .await
+                    {
                         Err(DnsResolverError::CleanupUnconfirmed) => {
                             state.quarantined.store(true, Ordering::Release);
                             let _ = reply.send(Err(DnsResolverError::CleanupUnconfirmed));
@@ -126,6 +140,7 @@ async fn supervise(
     question: &DnsQuestion,
     nonce: [u8; 16],
     deadline: Instant,
+    collect_proof: bool,
     reply: &mut oneshot::Sender<Answer>,
 ) -> Answer {
     let session = match Session::new(child, question.clone(), nonce) {
@@ -142,10 +157,11 @@ async fn supervise(
             let primary = session.request(question.query()?).await?;
             let answer = primary.answer.ok_or(DnsResolverError::InvalidProof)?;
             fallback = Some(answer.clone());
-            let proof = if answer.source()
-                == (DnsAnswerSource::PrivateUnbound {
-                    dnssec_secure: true,
-                }) {
+            let proof = if collect_proof
+                && answer.source()
+                    == (DnsAnswerSource::PrivateUnbound {
+                        dnssec_secure: true,
+                    }) {
                 if let Some(raw) = primary.raw {
                     let source: Arc<dyn proof::EvidenceSource> = session.clone();
                     let bound =

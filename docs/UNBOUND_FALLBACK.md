@@ -1,8 +1,9 @@
 # Exit-side Unbound fallback
 
-This slice adds a bounded resolver backend, not an installed resolver service or a completed
-reciprocal Client+Exit deployment. Existing configurations retain the system-resolver fallback.
-No host DNS, routes, firewall, services or trust anchors are changed automatically.
+The development default is now the bounded private Unbound worker. This default/package
+integration is a candidate pending its source-exact installation and reciprocal-role proof;
+the earlier native and cache results below retain their narrower scopes. No host DNS,
+routes, firewall, resolver service or trust anchors are changed automatically.
 
 ## Private packaged worker candidate
 
@@ -25,19 +26,28 @@ to an agent-owned public DNS socket because this backend has none. Missing
 binary/library/anchors, DNSSEC bogus, timeout and unavailable answers never fall
 through to the OS resolver. An unconfirmed child cleanup quarantines the backend.
 
-The separate opt-in `volparossa-private-dns-worker` companion package includes
-this executable and requires `libunbound8` >= 1.26.1 plus `dns-root-data`; it does
-**not** require the standalone Unbound daemon. The core package and its existing
-Ubuntu-hosted package-build job retain their previous dependencies. Build the
-companion only in a provisioned Debian 13 environment using
+The core package now requires its exact-version `volparossa-private-dns-worker` companion.
+That companion includes this executable and requires `libunbound8` >= 1.26.1 plus
+`dns-root-data`, without a dependency back to the core or the standalone Unbound daemon.
+Build the companion only in a provisioned Debian 13 environment using
 `sh packaging/build-private-dns-worker-deb.sh --build`; preview is non-writing.
 Building requires `libunbound-dev`, pkg-config, a C compiler and CMake.
-Explicit private configuration rejects absent/unsafe worker or root-anchor files
+An effective Exit using private Unbound rejects absent/unsafe worker or root-anchor files
 at agent startup as `DNS_PRIVATE_WORKER_UNAVAILABLE`; no configuration parsing
 performs filesystem access and no missing companion silently enables OS fallback.
+All-off and local-only nodes do not require or probe the worker during inert startup.
+Changing effective roles already requires restart, where the Exit asset check applies.
 The worker reads only the fixed Debian root hints and trust anchor; it does not
 load `resolv.conf`, `hosts`, arbitrary configuration, or private path arguments.
 Updating distribution trust anchors remains an operator/package responsibility.
+
+The new disposable package proof installs the source-built companion and stages the same
+guest development binaries through the normal Debian package layout. It checks actual
+roles-off startup, missing-worker rejection by the installed agent, and the ordinary
+install/upgrade/remove lifecycle. A separate resolver probe inherits the shipped agent
+sandbox and must perform real DNSSEC resolution; its explicit executable/one-shot fixture
+deviations do not prove a full agent DNS query or a release build. Both original package
+reports and the independent native resolver report are retained. Live results are pending.
 
 Private lookups still use an unexpired, independently verified shared-proof RAM
 answer first. On a miss, [bounded sequential source selection](#private-worker-unbound_private)
@@ -63,8 +73,20 @@ of forged signatures despite AD, and child cleanup after cancellation/timeout. T
 local checks do not prove the new native proof-cache path in a real deployment.
 All 19 focused DNS tests, strict UDP all-target/all-feature Clippy, formatting and
 four version-2 guest-report checks also pass.
-The default stays `system` until the disposable
-real-resolver/privacy/cleanup proof below passes.
+Those earlier local checks do not by themselves prove the new packaged default.
+
+### Cache selection and configuration migration
+
+`dns_cache.enabled: false` disables proof retention, local proof reuse, peer lookup,
+peer proof serving and publication. It does **not** disable the selected resolver or
+silently switch it to the OS. Private Unbound then performs only the primary validated
+lookup, with the same deadline and child cleanup, without collecting extra shared proof.
+
+An explicit `fallback: { mode: system }` remains an opt-out. Existing custom `upstream`
+configurations now require that explicit mode; an ambiguous custom upstream with the
+private default fails configuration validation with a migration hint. Operator-owned
+configuration files are not silently rewritten. Four configuration checks, three agent
+startup-selection checks and three cache-disabled resolver checks pass locally.
 
 ## Opt in only to an already-protected endpoint
 
@@ -323,7 +345,8 @@ privacy checks, zero owned leftovers and byte-identical host state all pass. The
 original artifact is retained, ZIP SHA-256
 `389b25478906eb89a058359b01a8fe09f9637c59797bd8022c396be28d710111`.
 The C05 peer proof and live native-worker preflight are separate checks, not one claim that
-every production reciprocal deployment is now ready. The default therefore remains unchanged.
+every production reciprocal deployment is now ready. That run did not switch the default;
+the current default/package candidate is described above.
 
 The [reciprocal run on the same source](https://github.com/VOLPAROSSA/volparossa/actions/runs/36613323557)
 still **fails**. Its real protected warm lookup takes 1,610 ms through the selected Exit's
@@ -338,6 +361,26 @@ pre-cleanup observations were not checkpointed in the failed report and are not 
 All four original echo applications report success; final fixture cleanup and host-state
 comparison pass, but the complete combined gate remains open. Original 169-file artifact
 ZIP SHA-256: `a27b2a97d4b04ff501b85852069bdad26c0340c4779f7fc74efb54b2e06b734b`.
+
+The [next reciprocal run on `383b8117`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36617479438)
+also remains **failed**, now at capture validation. Its checkpoints retain an 819-ms genuine
+private-Unbound answer and a 25-ms same-socket local-cache answer, one original worker/no new
+worker, unchanged four-node agent identities and UDP contexts, and a post-DNS echo on each
+original flow. Natural retirement is observed through 404 completed status reads, no status
+timeouts and eventual absence of the owned DNS context; final phase retirement fields were
+not serialized before validation failed and are not fabricated. Seven captures have no
+malformed/forbidden packets; the warm Exit capture rejects one ARP reply from the exact
+private gateway to its TAP with `tap_arp_shape`. Its length/raw bytes were not exported, so
+the precise length/padding cause cannot be read back from that artifact. Final cleanup and
+unchanged host state pass. All 169 originals are retained (ZIP SHA-256
+`8b57f4e81b79ff6b9b2de23a3ad8c31f2d09a92f04d00d36b92477e1a741891f`).
+
+The current capture candidate admits the exact 64-byte, zero-padded gateway ARP reply
+emitted by the pinned Debian libslirp implementation, retaining the exact TAP, endpoint,
+hardware/protocol and MAC bindings. It does not relax IP/DNS capture rules. Six targeted
+capture checks and nineteen shared capture checks pass. The older frame's length was not
+retained, so identifying that historical failure as this specific padding case remains an
+inference; a new source-exact reciprocal run is still required.
 
 ### Bounded protected DNS connection reuse
 

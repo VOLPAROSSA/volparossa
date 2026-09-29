@@ -80,6 +80,7 @@ struct ResolutionCounters {
 /// One shared in-memory resolver. Clones retain the same cache and replay deadlines.
 #[derive(Clone)]
 pub struct ExitResolver {
+    cache_enabled: bool,
     recursive: Option<SocketAddr>,
     unbound_fallback: Option<SocketAddr>,
     private_unbound: Option<private_unbound::PrivateUnbound>,
@@ -100,6 +101,7 @@ impl ExitResolver {
     /// No resolver settings, routes, or host files are changed by this constructor.
     pub fn new(recursive: Option<SocketAddr>, peers: Option<Arc<dyn DnsPeerBackend>>) -> Self {
         Self {
+            cache_enabled: true,
             recursive,
             unbound_fallback: None,
             private_unbound: None,
@@ -108,6 +110,19 @@ impl ExitResolver {
             pending: Arc::new(Semaphore::new(32)),
             counts: Arc::default(),
         }
+    }
+
+    /// Configure positive-proof retention and peer sharing independently of fallback choice.
+    /// Disabled resolvers neither fetch peer evidence nor retain, reuse or serve DNS proofs.
+    /// A disabled clone detaches from any existing cache without changing other clones.
+    /// This constructor performs no query and starts no native worker.
+    #[must_use]
+    pub fn with_cache_enabled(mut self, enabled: bool) -> Self {
+        self.cache_enabled = enabled;
+        if !enabled {
+            self.cache = Arc::default();
+        }
+        self
     }
 
     /// Replace OS fallback with one explicitly trusted local Unbound endpoint.
@@ -202,6 +217,12 @@ impl ExitResolver {
             .try_acquire()
             .map_err(|_| DnsResolverError::Unavailable)?;
         if let Some(backend) = &self.private_unbound {
+            if !self.cache_enabled {
+                return backend
+                    .resolve(question, deadline, false)
+                    .await
+                    .map(|answer| self.record(answer.fallback));
+            }
             return source_choice::resolve(
                 &self.cache,
                 scope.permits_peers() && self.peers.is_some(),
@@ -212,7 +233,7 @@ impl ExitResolver {
             .await
             .map(|answer| self.record(answer));
         }
-        if scope.permits_peers() {
+        if self.cache_enabled && scope.permits_peers() {
             if let Some(peers) = &self.peers {
                 if let Ok(Ok(Some(bundle))) = timeout_at(
                     deadline.min(Instant::now() + PEER_TIMEOUT),
@@ -234,7 +255,7 @@ impl ExitResolver {
                 }
             }
         }
-        if let Some(recursive) = self.recursive {
+        if let Some(recursive) = self.recursive.filter(|_| self.cache_enabled) {
             if let Ok(Ok(proof)) = timeout_at(
                 deadline.min(Instant::now() + COLLECT_TIMEOUT),
                 proof::collect(question, recursive),
@@ -283,7 +304,7 @@ impl ExitResolver {
         question: &DnsQuestion,
         scope: &DnsResolutionScope,
     ) -> Option<ValidatedDnsAnswer> {
-        if !scope.permits_peers() {
+        if !self.cache_enabled || !scope.permits_peers() {
             return None;
         }
         let bundle = self.peers.as_ref()?.fetch(question, scope).await.ok()??;
@@ -301,7 +322,7 @@ impl ExitResolver {
         scope: &DnsResolutionScope,
         deadline: Instant,
     ) -> Result<ValidatedDnsAnswer, DnsResolverError> {
-        let private = backend.resolve(question, deadline).await?;
+        let private = backend.resolve(question, deadline, true).await?;
         if let Some(proof) = private.proof {
             if let Some(answer) = self.retain(
                 proof,
@@ -317,6 +338,9 @@ impl ExitResolver {
     /// Whether this RAM cache can currently share a verified proof under exactly this policy.
     /// This reveals no question or answer, performs no resolution and never renews a deadline.
     pub fn has_shareable_proof(&self, policy_hash: &[u8; 32]) -> bool {
+        if !self.cache_enabled {
+            return false;
+        }
         let Ok(mut cache) = self.cache.lock() else {
             return false;
         };
@@ -333,6 +357,9 @@ impl ExitResolver {
         question: &DnsQuestion,
         policy_hash: &[u8; 32],
     ) -> Option<DnsProofBundle> {
+        if !self.cache_enabled {
+            return None;
+        }
         let mut cache = self.cache.lock().ok()?;
         Self::prune(&mut cache);
         let entry = cache.entries.get(&Self::key(question, policy_hash))?;
@@ -357,6 +384,9 @@ impl ExitResolver {
         question: &DnsQuestion,
         policy: &[u8; 32],
     ) -> Option<ValidatedDnsAnswer> {
+        if !self.cache_enabled {
+            return None;
+        }
         let mut cache = self.cache.lock().ok()?;
         Self::prune(&mut cache);
         let entry = cache.entries.get(&Self::key(question, policy))?;
@@ -373,6 +403,9 @@ impl ExitResolver {
         policy: &[u8; 32],
         source: DnsAnswerSource,
     ) -> Option<ValidatedDnsAnswer> {
+        if !self.cache_enabled {
+            return None;
+        }
         let now_ms = unix_millis().ok()?;
         let now = Instant::now();
         let mut cache = self.cache.lock().ok()?;

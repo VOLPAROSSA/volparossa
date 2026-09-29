@@ -5,11 +5,10 @@ use serde::{Deserialize, Serialize};
 use crate::{ConfigError, validation};
 
 /// Explicit Exit-side fallback; configuring it never installs or starts a resolver.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DnsFallbackConfig {
-    /// Preserve the existing OS resolver behavior for existing configurations.
-    #[default]
+    /// Explicit opt-out retaining the operating-system resolver backend.
     System,
     /// Use only an operator-provisioned trusted Exit-side Unbound service on a high loopback port.
     Unbound {
@@ -20,15 +19,23 @@ pub enum DnsFallbackConfig {
     UnboundPrivate {},
 }
 
+impl Default for DnsFallbackConfig {
+    fn default() -> Self {
+        Self::UnboundPrivate {}
+    }
+}
+
 /// Positive DNSSEC sharing uses RAM only and never changes the host's DNS configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DnsCacheConfig {
-    /// Permit independently validated positive answers and cache-only peer service.
+    /// Permit local positive-proof retention, peer lookup and cache-only peer service.
+    /// Disabling caching never changes the separately selected fallback resolver.
     /// No roles, network listeners or Internet egress are activated by this flag.
     pub enabled: bool,
     /// Explicit trusted recursive DNS endpoint for collecting authenticated proof material.
-    /// None selects no new upstream; ordinary system resolution remains the fallback.
+    /// Only permitted with explicit `system` fallback and caching enabled. None leaves
+    /// resolution to the selected fallback; the default is the private native worker.
     pub upstream: Option<SocketAddr>,
     /// Explicit fallback selection; Unbound failure never falls through to the OS resolver.
     pub fallback: DnsFallbackConfig,
@@ -39,26 +46,25 @@ impl Default for DnsCacheConfig {
         Self {
             enabled: true,
             upstream: None,
-            fallback: DnsFallbackConfig::System,
+            fallback: DnsFallbackConfig::default(),
         }
     }
 }
 
 impl DnsCacheConfig {
     pub(crate) fn validate(self) -> Result<(), ConfigError> {
-        if matches!(self.fallback, DnsFallbackConfig::UnboundPrivate {})
-            && (!self.enabled || self.upstream.is_some())
+        if matches!(self.fallback, DnsFallbackConfig::UnboundPrivate {}) && self.upstream.is_some()
         {
             return Err(validation(
                 "dns_cache.fallback",
-                "private Unbound requires enabled cache and no separate upstream",
+                "private Unbound forbids a separate upstream; select fallback.mode: system explicitly for a custom upstream",
             ));
         }
         if let DnsFallbackConfig::Unbound { endpoint } = self.fallback {
-            if !self.enabled || self.upstream.is_some() {
+            if self.upstream.is_some() {
                 return Err(validation(
                     "dns_cache.fallback",
-                    "Unbound requires enabled cache and no separate upstream",
+                    "Unbound forbids a separate upstream",
                 ));
             }
             if !endpoint.ip().is_loopback() || endpoint.port() <= 1024 {
@@ -100,7 +106,10 @@ mod tests {
         assert!(defaults.dns_cache.enabled);
         assert!(defaults.dns_cache.upstream.is_none());
         assert!(!defaults.roles.client && !defaults.roles.relay && !defaults.roles.exit);
-        let configured: DnsCacheConfig = serde_yaml::from_str("upstream: '127.0.0.53:53'").unwrap();
+        let implicit: DnsCacheConfig = serde_yaml::from_str("upstream: '127.0.0.53:53'").unwrap();
+        assert!(implicit.validate().is_err());
+        let configured: DnsCacheConfig =
+            serde_yaml::from_str("upstream: '127.0.0.53:53'\nfallback: { mode: system }").unwrap();
         assert!(configured.validate().is_ok());
         for value in [
             "0.0.0.0:53",
@@ -134,7 +143,7 @@ mod tests {
         assert!(configured.validate().is_ok());
         assert_eq!(
             DnsCacheConfig::default().fallback,
-            DnsFallbackConfig::System
+            DnsFallbackConfig::UnboundPrivate {}
         );
         for endpoint in [
             "127.0.0.1:53",
@@ -156,7 +165,7 @@ mod tests {
                 ..configured
             }
             .validate()
-            .is_err()
+            .is_ok()
         );
         assert!(
             DnsCacheConfig {
@@ -186,7 +195,7 @@ mod tests {
                 ..configured
             }
             .validate()
-            .is_err()
+            .is_ok()
         );
         assert!(
             DnsCacheConfig {
@@ -208,5 +217,31 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn private_default_and_cache_off_are_inert_and_system_requires_explicit_selection() {
+        for yaml in ["{}", "enabled: false"] {
+            let configured: DnsCacheConfig = serde_yaml::from_str(yaml).unwrap();
+            assert!(configured.validate().is_ok());
+            assert_eq!(configured.fallback, DnsFallbackConfig::UnboundPrivate {});
+        }
+        let configured: DnsCacheConfig =
+            serde_yaml::from_str("enabled: false\nfallback: { mode: system }").unwrap();
+        assert!(configured.validate().is_ok());
+        assert!(!configured.enabled);
+        assert_eq!(configured.fallback, DnsFallbackConfig::System);
+        assert_eq!(
+            DnsFallbackConfig::default(),
+            DnsFallbackConfig::UnboundPrivate {}
+        );
+        let defaults =
+            crate::Config::from_yaml(include_str!("../../../config/examples/default.yaml"))
+                .unwrap();
+        assert_eq!(
+            defaults.dns_cache.fallback,
+            DnsFallbackConfig::UnboundPrivate {}
+        );
+        assert!(!defaults.roles.client && !defaults.roles.relay && !defaults.roles.exit);
     }
 }

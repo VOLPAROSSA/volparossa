@@ -94,13 +94,14 @@ udp:
 
 # Positive DNSSEC proofs may be shared from bounded RAM while participating.
 # This does not change host DNS, enable roles, or trust unsigned peer answers.
-# Set upstream to an existing trusted recursive TCP/53 endpoint to collect proofs;
-# null preserves the existing OS fallback when no independently valid peer proof exists.
+# Cache misses use the packaged private Unbound worker, never a host DNS change.
+# Disabling caching does not change the fallback. Explicit mode: system opts out;
+# a custom TCP/53 upstream additionally requires that explicit system selection.
 dns_cache:
   enabled: true
   upstream: null
   fallback:
-    mode: system
+    mode: unbound_private
 
 # Explicit public-content storage/serving consent. An enabled relay with a policy-authorized
 # hostname may start empty and automatically retain verified native/cooperative-HTTPS downloads.

@@ -634,6 +634,7 @@ NODES = ("client", "bootstrap1", "bootstrap2", "relay0", "relay1", "relay2",
 SAFE_NAMES = {"runner.stdout", "runner.stderr", "guest-exit-status", "current-phase",
               "reciprocity-private-dns-smoke.json",
               "private-unbound-proof.json", "private-unbound-build.log",
+              "private-unbound-package.json", "private-unbound-package-lifecycle.json",
               "worker-network-diagnostics.txt", "host-state-before.json", "host-state-after.json",
               "report.json", "local-link-smoke.json", "wifi-link-smoke.json",
               "reciprocity-smoke.json", "mixed-link-smoke.json", "mpquic-growth-smoke.json", "mptcp-growth-smoke.json", "sharing-smoke.json", "download-sharing-smoke.json",
@@ -1096,10 +1097,11 @@ if [ "$scenario" = uplink-link ]; then
 fi
 mkdir /home/vpci/alpha-output
 private_dns_status=0
-if [ "$scenario" = dns-cache ] || [ "$scenario" = reciprocity-private-dns ]; then
+if [ "$scenario" = dns-cache ] || [ "$scenario" = reciprocity-private-dns ] || [ "$scenario" = alpha ]; then
     guest_phase private-unbound-preflight
     set --
     [ "$scenario" != reciprocity-private-dns ] || set -- --provision-only
+    [ "$scenario" != alpha ] || set -- --provision-only
     set +e
     sh tests/integration/private-unbound-vm-guest.sh --execute "$expected_commit" "$@" \
         >/home/vpci/private-unbound-build.log 2>&1
@@ -1151,7 +1153,8 @@ topology_status=$?
 set -e
 guest_phase archive
 if [ "$scenario" = dns-cache ] || [ "$scenario" = reciprocity-private-dns ]; then
-    for retained in private-unbound-proof.json private-unbound-build.log; do
+    for retained in private-unbound-proof.json private-unbound-build.log \
+        private-unbound-package.json private-unbound-package-lifecycle.json; do
         if [ -f "/home/vpci/$retained" ]; then
             sudo -n cp -- "/home/vpci/$retained" "/home/vpci/alpha-output/$retained"
         fi

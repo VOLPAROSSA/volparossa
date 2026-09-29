@@ -3510,7 +3510,16 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   contain unparsed TAP frames/an unrecognized mDNS source. Incoming DNS packets also cross
   the phase boundary without new outgoing queries. Four echo applications and final cleanup
   pass, not the full combined privacy/lifetime gate. Missing report checkpoints are not
-  reconstructed as a PASS. All 169 originals remain retained; the default stays unchanged.
+  reconstructed as a PASS. All 169 originals remain retained; that run did not change the default.
+  The next reciprocal run (`383b8117`, `36617479438`) preserves unchanged agent/context IDs,
+  warm 819-ms and local 25-ms answers, post-DNS echoes, and natural retirement with 404 status
+  reads/no timeouts. It still fails on one exact gateway-to-TAP ARP reply's capture shape;
+  seven other captures and final cleanup/host-state pass. No historical packet bytes or full
+  PASS are invented. See [the retained evidence](UNBOUND_FALLBACK.md).
+  A separate packaged-default candidate now selects private Unbound even when caching is off,
+  while disabling all proof retention and peer sharing in that mode. Inactive nodes need no
+  worker; effective Exits reject missing assets. Four config, three resolver and three startup
+  checks plus strict three-crate Clippy pass. Real package/default acceptance remains pending.
 
 The positive DNSSEC cache is now composed into the normal agent: the same bounded RAM resolver
 serves protected DNS, TCP resolution, general UDP and browser-QUIC destination pinning. Its peer

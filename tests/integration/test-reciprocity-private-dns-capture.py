@@ -24,7 +24,55 @@ def arp(source="10.242.93.100", destination="10.242.93.2", operation=1):
         + socket.inet_aton(source) + target + socket.inet_aton(destination)
 
 
+def slirp_reply():
+    # Exact arp_input output shape in the pinned Debian libslirp source, not
+    # reconstructed bytes from the historical capture (which did not retain them).
+    frame = bytearray(arp(CAPTURE.TAP_GATEWAY, CAPTURE.TAP_ADDRESS, 2))
+    frame[6:12] = frame[22:28] = b"\x52\x55" + socket.inet_aton(CAPTURE.TAP_GATEWAY)
+    return bytes(frame) + bytes(22)
+
+
 class PrivateDnsCaptureTests(unittest.TestCase):
+    def test_exact_libslirp_64_byte_reply_is_accepted_only_on_owned_tap(self):
+        frame = slirp_reply()
+        self.assertEqual(len(frame), 64)
+        self.assertIsNone(CAPTURE.decode_frame_on_interface(frame, "dnsup0"))
+        for interface in ("xd", "underlay", "dnsup1", None):
+            with self.subTest(interface=interface), self.assertRaises(ValueError):
+                CAPTURE.decode_frame_on_interface(frame, interface)
+        wrong_target = bytearray(frame)
+        wrong_target[0] ^= 2
+        broadcast_target = bytearray(frame)
+        broadcast_target[:6] = broadcast_target[32:38] = b"\xff" * 6
+        wrong_operation = bytearray(frame)
+        wrong_operation[21] = 1
+        for invalid in (frame[:-1], frame + b"\x00", frame[:-1] + b"\x01",
+                        bytes(wrong_target), bytes(broadcast_target), bytes(wrong_operation),
+                        arp(CAPTURE.TAP_GATEWAY, CAPTURE.TAP_ADDRESS, 2) + bytes(22),
+                        arp(CAPTURE.TAP_ADDRESS, CAPTURE.TAP_GATEWAY, 2) + bytes(22)):
+            with self.subTest(length=len(invalid)), self.assertRaises(ValueError):
+                CAPTURE.decode_frame_on_interface(invalid, "dnsup0")
+
+    def test_arp_shape_diagnostics_separate_lengths_padding_and_fixed_fields(self):
+        frame = slirp_reply()
+        for invalid, length_class, failure in (
+            (frame[:41], "shorter_than_42", "short_header"),
+            (frame[:63], "between_61_and_63", "unexpected_length"),
+            (frame + b"\x00", "longer_than_64", "unexpected_length"),
+            (frame[:-1] + b"\x01", "slirp_64", "nonzero_padding"),
+            (frame[:18] + b"\x08" + frame[19:], "slirp_64", "hardware_protocol_lengths"),
+            (frame[:21] + b"\x03" + frame[22:], "slirp_64", "operation"),
+        ):
+            with self.subTest(failure=failure):
+                sample = CAPTURE.fixture_header_sample(None, "dnsup0", invalid)
+                self.assertEqual(sample["reason"], "tap_arp_shape")
+                self.assertEqual(sample["arp_frame_length_class"], length_class)
+                self.assertEqual(sample["arp_shape_failure"], failure)
+                self.assertNotIn(CAPTURE.TAP_GATEWAY, json.dumps(sample))
+                self.assertNotIn(CAPTURE.TAP_ADDRESS, json.dumps(sample))
+                with self.assertRaises(ValueError):
+                    CAPTURE.decode_frame_on_interface(invalid, "dnsup0")
+
     def test_exact_tap_arp_requires_its_physical_interface_and_keeps_ip_parser_strict(self):
         for source, destination in ((CAPTURE.TAP_ADDRESS, CAPTURE.TAP_GATEWAY),
                                     (CAPTURE.TAP_GATEWAY, CAPTURE.TAP_ADDRESS)):
@@ -79,7 +127,7 @@ class PrivateDnsCaptureTests(unittest.TestCase):
         sample = CAPTURE.fixture_header_sample(None, "dnsup0", foreign)
         self.assertEqual(sample, dict(interface="dnsup0", parse="unavailable", ethernet_kind="arp",
             reason="tap_arp_endpoints", arp_operation="request", source="outside_fixed_fixture",
-            destination="private_dns.gateway"))
+            destination="private_dns.gateway", arp_frame_length_class="arp_42", arp_shape_failure="none"))
         self.assertNotIn("203.0.113.123", json.dumps(sample))
         sample = CAPTURE.fixture_header_sample(None, "xd", arp())
         self.assertEqual(sample["reason"], "arp_endpoints")

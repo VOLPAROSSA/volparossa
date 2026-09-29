@@ -3015,9 +3015,17 @@ write_config() {
         printf 'routing:\n  client_minimum_upload_mbps: 8\n'
         printf '  client_minimum_download_mbps: 8\n'
         if [ "$scenario" = dns-cache ]; then
+            # C05 deliberately uses its owned synthetic DNSSEC TCP/53 upstream. Keep
+            # that existing backend explicit; native/private DNS has separate proofs.
             printf 'dns_cache:\n  enabled: %s\n  upstream: %s\n' "$dc_enabled" "$dc_upstream"
+            printf '  fallback:\n    mode: system\n'
+        elif [ "$reciprocal_private_dns" = yes ]; then
+            reciprocity_private_dns_config
+        else
+            # Non-DNS fixtures retain their scoped hosts/OS backend. This override is
+            # never emitted for the reciprocal private-DNS or installed-default proof.
+            printf 'dns_cache:\n  fallback:\n    mode: system\n'
         fi
-        [ "$reciprocal_private_dns" != yes ] || reciprocity_private_dns_config
         printf 'policy:\n  fail_closed: true\n'
         printf '  manifest_path: "%s/development-policy.manifest"\n' "$WORK"
         printf '  minimum_signatures: 3\n  reject_ech: true\n'

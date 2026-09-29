@@ -11,6 +11,7 @@ use super::session::{
     HEADER_BYTES, MAGIC, MAX_REPLY_BYTES, decode_reply, encode_request, permitted_question,
 };
 use super::*;
+use crate::{DnsPeerBackend, DnsPeerFuture, DnsQueryType, DnsResolutionScope, ExitResolver};
 
 fn nonce() -> [u8; 16] {
     let mut value = [0; 16];
@@ -99,7 +100,7 @@ fn private_wire_binds_nonce_question_sequence_size_ttl_and_validator_verdict() {
 
 #[test]
 fn supplemental_queries_are_only_original_question_dnssec_ancestors() {
-    let original = DnsQuestion::new("www.fixture.test", super::super::DnsQueryType::A).unwrap();
+    let original = DnsQuestion::new("www.fixture.test", DnsQueryType::A).unwrap();
     for (name, kind, sequence, allowed) in [
         ("www.fixture.test.", RecordType::A, 0, true),
         ("www.fixture.test.", RecordType::DNSKEY, 1, true),
@@ -123,7 +124,7 @@ fn supplemental_queries_are_only_original_question_dnssec_ancestors() {
 // No DNS or native resolver is involved: this owned subprocess exercises actual
 // framed pipes, a supplemental reply, EOF and reaping. Cryptographic proof
 // validation and packet provenance are tested separately in proof/tests.rs.
-fn framed_fixture() -> Child {
+fn framed_fixture(secure: bool) -> Child {
     Command::new("/usr/bin/python3")
         .args([
             "-c",
@@ -137,10 +138,13 @@ while True:
     first = sys.stdin.buffer.read(1)
     if not first: break
     request = first + exact(31)
+    if sys.argv[1] == 'secure' and request[12:16] != bytes(4):
+        raise RuntimeError('cache-disabled fixture accepts only the primary request')
     kind, size = struct.unpack('!HH', request[8:12])
     name = exact(size)
     header = bytearray(44)
     header[:8] = request[:8]
+    header[9] = int(sys.argv[1] == 'secure')
     header[12:16] = struct.pack('!I', 60)
     header[16:32] = request[16:32]
     header[32:36] = request[12:16]
@@ -152,6 +156,7 @@ while True:
     sys.stdout.buffer.flush()
 ",
         ])
+        .arg(if secure { "secure" } else { "unsigned" })
         .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -163,9 +168,9 @@ while True:
 
 #[tokio::test]
 async fn one_real_pipe_session_keeps_primary_origin_and_closes_after_supplemental_reply() {
-    let mut child = framed_fixture();
+    let mut child = framed_fixture(false);
     let pid = child.id().unwrap();
-    let question = DnsQuestion::new("fixture.test", super::super::DnsQueryType::A).unwrap();
+    let question = DnsQuestion::new("fixture.test", DnsQueryType::A).unwrap();
     let session = Session::new(&mut child, question.clone(), nonce()).unwrap();
     let primary = session.request(question.query().unwrap()).await.unwrap();
     assert_eq!(primary.answer.unwrap().addresses().len(), 1);
@@ -184,19 +189,78 @@ async fn one_real_pipe_session_keeps_primary_origin_and_closes_after_supplementa
     );
     assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
 
-    let mut child = framed_fixture();
+    let mut child = framed_fixture(false);
     let (mut reply, _result) = oneshot::channel();
     let result = supervise(
         &mut child,
         &question,
         nonce(),
         Instant::now() + Duration::from_secs(2),
+        true,
         &mut reply,
     )
     .await
     .unwrap();
     assert!(result.proof.is_none());
     assert!(child.try_wait().unwrap().is_some());
+}
+
+#[tokio::test]
+async fn disabled_cache_returns_native_primary_only_after_owned_process_cleanup() {
+    let mut child = framed_fixture(true);
+    let question = DnsQuestion::new("fixture.test", DnsQueryType::A).unwrap();
+    let (mut reply, _result) = oneshot::channel();
+    let answer = supervise(
+        &mut child,
+        &question,
+        nonce(),
+        Instant::now() + Duration::from_secs(2),
+        false,
+        &mut reply,
+    )
+    .await
+    .unwrap();
+    assert!(answer.proof.is_none());
+    assert_eq!(
+        answer.fallback.source(),
+        DnsAnswerSource::PrivateUnbound {
+            dnssec_secure: true
+        }
+    );
+    assert!(child.try_wait().unwrap().is_some());
+}
+
+struct ForbiddenPeer;
+
+impl DnsPeerBackend for ForbiddenPeer {
+    fn fetch<'a>(&'a self, _: &'a DnsQuestion, _: &'a DnsResolutionScope) -> DnsPeerFuture<'a> {
+        panic!("cache-disabled resolution must not consult a peer")
+    }
+}
+
+#[tokio::test]
+async fn disabled_cache_keeps_private_fallback_and_never_consults_peers_or_system() {
+    let resolver = ExitResolver::new(None, Some(Arc::new(ForbiddenPeer)))
+        .with_private_unbound_fallback()
+        .unwrap()
+        .with_cache_enabled(false);
+    // An unavailable private backend must remain unavailable; no subprocess/network or
+    // OS fallback may occur. A peer call would fail the test before this fixed error.
+    resolver
+        .private_unbound
+        .as_ref()
+        .unwrap()
+        .0
+        .quarantined
+        .store(true, Ordering::Release);
+    let question = DnsQuestion::new("fixture.test", DnsQueryType::A).unwrap();
+    let scope = DnsResolutionScope::new([43; 32], vec![vec![1]]).unwrap();
+    assert_eq!(
+        resolver.resolve(&question, &scope).await.err(),
+        Some(DnsResolverError::CleanupUnconfirmed)
+    );
+    assert_eq!(resolver.counts().trusted_fallback, 0);
+    assert_eq!(resolver.counts().peer_validated, 0);
 }
 
 #[tokio::test]
@@ -217,8 +281,8 @@ async fn owned_timeout_and_cancel_reap_before_completion_without_network() {
         if cancel {
             drop(result);
         }
-        let question = DnsQuestion::new("fixture.test", super::super::DnsQueryType::A).unwrap();
-        let answer = supervise(&mut child, &question, nonce(), deadline, &mut reply).await;
+        let question = DnsQuestion::new("fixture.test", DnsQueryType::A).unwrap();
+        let answer = supervise(&mut child, &question, nonce(), deadline, true, &mut reply).await;
         assert_eq!(answer.err(), Some(DnsResolverError::Unavailable));
         assert!(Instant::now() < deadline);
         assert!(child.try_wait().unwrap().is_some());
@@ -241,12 +305,13 @@ async fn reaped_output_is_required_even_when_the_pipe_closes_without_data() {
         .unwrap();
     let pid = child.id().unwrap();
     let (mut reply, _result) = oneshot::channel();
-    let question = DnsQuestion::new("fixture.test", super::super::DnsQueryType::A).unwrap();
+    let question = DnsQuestion::new("fixture.test", DnsQueryType::A).unwrap();
     let result = supervise(
         &mut child,
         &question,
         nonce(),
         Instant::now() + Duration::from_secs(1),
+        true,
         &mut reply,
     )
     .await;

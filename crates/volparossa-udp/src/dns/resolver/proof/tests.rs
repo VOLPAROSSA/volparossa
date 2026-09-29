@@ -246,6 +246,40 @@ async fn received_rrsig_ttl_and_original_first_seen_deadline_never_renew() {
 }
 
 #[tokio::test]
+async fn disabled_cache_never_retains_reuses_or_shares_independently_validated_proof() {
+    let fixture = fixture(DnsQueryType::A);
+    let policy = [43; 32];
+    let question = fixture.bundle.question().clone();
+    let resolver = ExitResolver::default();
+    let proof = validate_with_anchors(fixture.bundle.clone(), Arc::clone(&fixture.anchors))
+        .await
+        .unwrap();
+    resolver
+        .retain(proof, &policy, DnsAnswerSource::PeerValidated)
+        .unwrap();
+    assert!(resolver.has_shareable_proof(&policy));
+
+    let disabled = resolver.clone().with_cache_enabled(false);
+    assert!(!disabled.has_shareable_proof(&policy));
+    assert!(disabled.cached_bundle(&question, &policy).is_none());
+    assert!(disabled.cached_answer(&question, &policy).is_none());
+    let proof = validate_with_anchors(fixture.bundle, fixture.anchors)
+        .await
+        .unwrap();
+    assert!(
+        disabled
+            .retain(proof, &policy, DnsAnswerSource::PeerValidated)
+            .is_none()
+    );
+    let cache = disabled.cache.lock().unwrap();
+    assert!(cache.entries.is_empty() && cache.first_seen.is_empty());
+    assert!(
+        resolver.has_shareable_proof(&policy),
+        "other configured clones are unchanged"
+    );
+}
+
+#[tokio::test]
 async fn shareable_availability_requires_current_policy_and_both_original_deadlines() {
     let fixture = fixture(DnsQueryType::A);
     let resolver = ExitResolver::default();

@@ -12,6 +12,7 @@ mod client_ingress;
 mod client_udp_turns;
 mod control;
 mod discovery;
+mod dns_fallback;
 mod downlink_sharing;
 mod endpoint_leases;
 #[path = "helper_v3.rs"]
@@ -46,13 +47,13 @@ use tokio::{
     sync::{RwLock, Semaphore, watch},
     task::{JoinHandle, JoinSet},
 };
-use volparossa_config::{Config, DnsFallbackConfig};
+use volparossa_config::Config;
 use volparossa_identity::IdentityStore;
 use volparossa_inspection::InspectionError;
 use volparossa_local_control::LogLevel;
 use volparossa_metrics::{LocalMetricsEndpoint, MetricsRegistry};
 use volparossa_peerstore::PeerStore;
-use volparossa_udp::{ExitResolver, MAX_DNS_MESSAGE_BYTES};
+use volparossa_udp::MAX_DNS_MESSAGE_BYTES;
 
 use client_ingress::{
     BrowserQuicIngressDecision, BrowserQuicIngressGate, ClientIngressRuntime,
@@ -158,27 +159,15 @@ impl Agent {
                 mpquic_socket: paths.mpquic_exit_socket(roles),
             },
         )?;
-        if config.dns_cache.enabled {
-            let mut resolver = ExitResolver::new(
-                config.dns_cache.upstream,
-                Some(discovery_control.dns_peer_backend()),
-            );
-            resolver = match config.dns_cache.fallback {
-                DnsFallbackConfig::System => resolver,
-                DnsFallbackConfig::Unbound { endpoint } => resolver
-                    .with_unbound_fallback(endpoint)
-                    .map_err(|_| AgentError::UnsafeConfig)?,
-                DnsFallbackConfig::UnboundPrivate {} => {
-                    if !ExitResolver::private_unbound_assets_installed() {
-                        return Err(AgentError::PrivateDnsWorkerUnavailable);
-                    }
-                    resolver
-                        .with_private_unbound_fallback()
-                        .map_err(|_| AgentError::UnsafeConfig)?
-                }
-            };
-            discovery.configure_dns_cache(Arc::new(resolver));
-        }
+        let resolver = dns_fallback::configure(
+            config.dns_cache,
+            roles.exit,
+            config
+                .dns_cache
+                .enabled
+                .then(|| discovery_control.dns_peer_backend()),
+        )?;
+        discovery.configure_dns_cache(Arc::new(resolver));
         state.log(LogLevel::Info, "AGENT_INITIALIZED", unix_millis());
         if policy_failed {
             state.log(LogLevel::Warn, "POLICY_LOAD_FAILED", unix_millis());
@@ -1790,7 +1779,7 @@ pub enum AgentError {
     /// Configuration file type, mode, or size was unsafe.
     #[error("agent configuration file is unsafe")]
     UnsafeConfig,
-    /// Explicit private DNS needs the optional fixed worker and distribution trust anchors.
+    /// An enabled Exit using private DNS needs the fixed worker and distribution trust anchors.
     #[error(
         "private DNS companion or root anchors unavailable; provision volparossa-private-dns-worker and dns-root-data"
     )]

@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-only
-# Optional Debian-13-only companion. Never install packages or start services.
+# Debian-13-only worker dependency. Never install packages or start services.
 set -eu
 usage() {
     printf '%s\n' \
@@ -14,6 +14,7 @@ mode=${1:---preview}
 [ "$#" -le 1 ] || { usage >&2; exit 64; }
 case $mode in --preview) usage; exit 0 ;; --build) usage ;; *) usage >&2; exit 64 ;; esac
 [ "$(id -u)" -ne 0 ] || { printf '%s\n' 'Refusing a root package build.' >&2; exit 77; }
+# shellcheck source=/dev/null
 [ "$(. /etc/os-release; printf '%s:%s' "$ID" "$VERSION_ID")" = debian:13 ] || exit 77
 [ "$(dpkg --print-architecture)" = amd64 ] || exit 77
 for tool in cmake cc pkg-config dpkg-deb sha256sum install mktemp find touch sed head; do
@@ -48,8 +49,8 @@ install -m 0644 "$root/THIRD_PARTY_LICENSES.md" "$root/docs/UNBOUND_FALLBACK.md"
 printf '%s\n' \
     'Package: volparossa-private-dns-worker' "Version: $version" 'Architecture: amd64' \
     'Section: net' 'Priority: optional' 'Maintainer: VOLPAROSSA contributors' \
-    "Depends: volparossa (= $version), libunbound8 (>= 1.26.1), dns-root-data" \
-    'Description: optional private libunbound worker for VOLPAROSSA' \
+    'Depends: libunbound8 (>= 1.26.1), dns-root-data' \
+    'Description: private libunbound worker for VOLPAROSSA' \
     ' Typed inherited-pipe resolver; no listening DNS service or automatic activation.' >"$staging/DEBIAN/control"
 find "$staging" -exec touch -h -d "@$epoch" {} +
 install -d "$root/dist"
