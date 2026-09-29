@@ -5,6 +5,7 @@
 
 mod private_unbound;
 mod proof;
+mod source_choice;
 mod types;
 mod unbound;
 
@@ -51,6 +52,8 @@ struct Cache {
     entries: BTreeMap<CacheKey, Entry>,
     // Do not evict live first-seen pins merely to admit a replay of the same proof.
     first_seen: BTreeMap<([u8; 32], [u8; 32]), (Instant, Instant)>,
+    // Private-mode source timings only; no additional question or peer history.
+    source_choice: source_choice::SourceChoice,
 }
 
 /// Process-local totals only: no question, address, peer or route label can be retained.
@@ -180,6 +183,8 @@ impl ExitResolver {
     ///
     /// Invalid, missing, unsigned, and unsupported peer proofs are ignored, then the
     /// configured recursive collector and selected trusted fallback are used independently.
+    /// Private Unbound mode selects sequentially from recent usable-source timings,
+    /// with bounded real-request comparisons rather than simultaneous duplicate work.
     /// Explicit Unbound mode never falls through to OS resolution, including negative/error replies.
     /// # Errors
     /// Returns a detail-free error if no permitted address is resolved within the bound.
@@ -196,6 +201,17 @@ impl ExitResolver {
             .pending
             .try_acquire()
             .map_err(|_| DnsResolverError::Unavailable)?;
+        if let Some(backend) = &self.private_unbound {
+            return source_choice::resolve(
+                &self.cache,
+                scope.permits_peers() && self.peers.is_some(),
+                deadline,
+                self.private_peer_answer(question, scope),
+                backend.resolve(question, deadline),
+            )
+            .await
+            .map(|answer| self.record(answer));
+        }
         if scope.permits_peers() {
             if let Some(peers) = &self.peers {
                 if let Ok(Ok(Some(bundle))) = timeout_at(
@@ -240,12 +256,6 @@ impl ExitResolver {
                 .map_err(|_| DnsResolverError::Unavailable)?
                 .map(|answer| self.record(answer));
         }
-        if let Some(backend) = &self.private_unbound {
-            return backend
-                .resolve(question, deadline)
-                .await
-                .map(|answer| self.record(answer));
-        }
         let name = format!("{}.", question.name());
         let resolved = timeout_at(deadline, lookup_host((name.as_str(), 0)))
             .await
@@ -264,6 +274,24 @@ impl ExitResolver {
             Instant::now() + Duration::from_secs(30),
             DnsAnswerSource::TrustedFallback,
         )))
+    }
+
+    /// One complete peer attempt; the private selector bounds this entire future,
+    /// including independent validation and retaining the original proof deadline.
+    async fn private_peer_answer(
+        &self,
+        question: &DnsQuestion,
+        scope: &DnsResolutionScope,
+    ) -> Option<ValidatedDnsAnswer> {
+        if !scope.permits_peers() {
+            return None;
+        }
+        let bundle = self.peers.as_ref()?.fetch(question, scope).await.ok()??;
+        if bundle.question() != question {
+            return None;
+        }
+        let proof = proof::validate(bundle).await.ok()?;
+        self.retain(proof, scope.policy_hash(), DnsAnswerSource::PeerValidated)
     }
 
     /// Whether this RAM cache can currently share a verified proof under exactly this policy.

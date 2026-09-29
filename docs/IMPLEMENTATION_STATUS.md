@@ -3259,13 +3259,19 @@ that two-line ordering is corrected without changing behavior. No full Quality p
 
 ## Latest DNS integration checkpoint
 
-- [ ] Protected deployed Unbound fallback and adaptive fastest-source selection: an explicit
+- [ ] Protected deployed Unbound fallback and measured source selection: an explicit
   Exit-side TCP backend/configuration is implemented, with targeted parser and isolated TCP
   evidence. The private inherited-pipe worker candidate now adds genuine libunbound calls,
   fixed packaged paths, at most two owned children, deadline/cancellation cleanup and a separate
   native secure verdict. Its ABI build against hash-verified Debian libunbound 1.26.1 passes;
   three pure protocol/real inert-process tests and strict configuration checks pass, not
   substituted for recursive DNS; affected-crate all-target Clippy also passes.
+  Private mode now uses RAM proofs first, then adaptive **sequential** peer/private-Unbound
+  choice with bounded aggregate in-memory timings, cooldown and real-request comparison
+  probes. Its focused sequencing test and strict UDP all-target/all-feature Clippy pass;
+  this is not a live recursive-DNS speed proof or a guarantee of the globally fastest source.
+  Explicit loopback mode retains its fixed order. Peer budgets in private mode cover fetch,
+  independent validation and retention; original TTL, privacy and worker-cleanup bounds remain.
   Both explicit modes preserve real fallback TTLs and never call the OS resolver after selection.
   Neither local AD nor a private-library verdict is independent shareable peer proof. Real
   recursion/validation and simultaneous Client+Exit privacy/cleanup execution are still required.

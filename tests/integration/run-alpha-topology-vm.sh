@@ -238,6 +238,8 @@ print_plan() {
     elif [ "$scenario" = dns-cache ]; then
         printf '%s\n' \
             'DNS-cache scenario: download only fresh bounded signed DNS wire data from literal dns.google HTTPS;' \
+            '  extra private-Unbound preflight builds a fixed worker from checked guest dependencies;' \
+            '  live signed/unsigned/bogus recursion and owned timeout/cancel cleanup, not a normal-route proof;' \
             '  validate built-in roots, then normal Client single-Relay protected DNS to two actual Exits;' \
             '  upstream A, peer B with no recursive upstream, local B after A shutdown, unsigned fallback;' \
             '  exact control-only Exit peer link, 35 drained physical captures and unchanged guest state.'
@@ -600,6 +602,7 @@ FILE_COUNT_LIMIT = 64
 NODES = ("client", "bootstrap1", "bootstrap2", "relay0", "relay1", "relay2",
          "relay3", "relay4", "relay5", "exit", "exit2")
 SAFE_NAMES = {"runner.stdout", "runner.stderr", "guest-exit-status", "current-phase",
+              "private-unbound-proof.json", "private-unbound-build.log",
               "worker-network-diagnostics.txt", "host-state-before.json", "host-state-after.json",
               "report.json", "local-link-smoke.json", "wifi-link-smoke.json",
               "reciprocity-smoke.json", "mixed-link-smoke.json", "mpquic-growth-smoke.json", "mptcp-growth-smoke.json", "sharing-smoke.json", "download-sharing-smoke.json",
@@ -1000,7 +1003,7 @@ CARGO_TARGET_DIR=/home/vpci/target cargo build --locked \
     }
 if [ "$scenario" = dns-cache ]; then
     CARGO_TARGET_DIR=/home/vpci/target cargo build --locked \
-        -p volparossa-udp --example dns-cache-proof >>/home/vpci/cargo-build.log 2>&1 || {
+        -p volparossa-udp --example dns-cache-proof --example private-unbound-proof >>/home/vpci/cargo-build.log 2>&1 || {
             tail -c 131072 /home/vpci/cargo-build.log >&2
             exit 1
         }
@@ -1034,6 +1037,18 @@ if [ "$scenario" = uplink-link ]; then
     tail -c 131072 /home/vpci/egress-netns-test.log
 fi
 mkdir /home/vpci/alpha-output
+private_dns_status=0
+if [ "$scenario" = dns-cache ]; then
+    guest_phase private-unbound-preflight
+    set +e
+    sh tests/integration/private-unbound-vm-guest.sh --execute "$expected_commit" \
+        >/home/vpci/private-unbound-build.log 2>&1
+    private_dns_status=$?
+    set -e
+    if [ "$private_dns_status" -ne 0 ]; then
+        tail -c 131072 /home/vpci/private-unbound-build.log >&2
+    fi
+fi
 
 # The package lifecycle requires a pristine VM, including an absent
 # /run/volparossa. Exercise it before the topology's transient units can create
@@ -1075,6 +1090,13 @@ sudo -n -- ./tests/integration/kvm-alpha-topology.sh \
 topology_status=$?
 set -e
 guest_phase archive
+if [ "$scenario" = dns-cache ]; then
+    for retained in private-unbound-proof.json private-unbound-build.log; do
+        if [ -f "/home/vpci/$retained" ]; then
+            sudo -n cp -- "/home/vpci/$retained" "/home/vpci/alpha-output/$retained"
+        fi
+    done
+fi
 printf '%s\n' "$topology_status" >/home/vpci/alpha-output/guest-exit-status
 sudo -n chown -R vpci:vpci /home/vpci/alpha-output
 find /home/vpci/alpha-output -type d -exec chmod 0700 {} +
@@ -1082,6 +1104,7 @@ find /home/vpci/alpha-output -type f -exec chmod 0600 {} +
 tar -C /home/vpci/alpha-output -czf /home/vpci/alpha-output.tar.gz .
 guest_phase driver-finished
 if [ "$package_status" -ne 0 ]; then exit "$package_status"; fi
+if [ "$private_dns_status" -ne 0 ]; then exit "$private_dns_status"; fi
 exit "$topology_status"
 GUEST_DRIVER_SCRIPT
 chmod 0700 "$GUEST_DRIVER"

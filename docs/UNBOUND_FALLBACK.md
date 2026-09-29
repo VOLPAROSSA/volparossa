@@ -39,15 +39,18 @@ The worker reads only the fixed Debian root hints and trust anchor; it does not
 load `resolv.conf`, `hosts`, arbitrary configuration, or private path arguments.
 Updating distribution trust anchors remains an operator/package responsibility.
 
-Private lookup order is independently verified RAM cache → bounded peer lookup →
-private recursion within the original five-second deadline. At most two native
+Private lookups still use an unexpired, independently verified shared-proof RAM
+answer first. On a miss, [bounded sequential source selection](#private-worker-unbound_private)
+uses recent source timings to choose a peer attempt or private recursion within
+the original five-second deadline. At most two native
 children may run; the last 500 ms is reserved for exact child termination/reaping.
 No successful or negative result is returned before that child's successful wait.
 The native `secure` verdict is recorded as `PrivateUnbound { dnssec_secure }`,
 not as a shareable proof or a wire AD assertion. Rebinding checks, exact address
 pinning and route expiry remain enforced. Each query has a fresh process: a
-persistent libunbound cache, adaptive fastest-source selection, and independent
-proof extraction through the private worker are **not** claimed by this slice.
+persistent libunbound cache, a guarantee of the fastest source for each question,
+and independent proof extraction through the private worker are **not** claimed
+by this slice.
 
 See [the native boundary and versioned pipe protocol](../native/volparossa-dns-worker/README.md)
 and [opt-in configuration](../config/examples/unbound-private-exit.yaml).
@@ -81,7 +84,9 @@ Cache-serving peers remain cache-only: a peer miss does not trigger their own re
 
 ## Lookup and provenance
 
-The existing bounded order is retained:
+### Explicit loopback endpoint (`unbound`)
+
+This existing mode retains its fixed bounded order:
 
 1. Unexpired, independently verified RAM answer under the current policy.
 2. Independently verified peer proof, with the existing 500 ms peer budget.
@@ -101,8 +106,36 @@ negative proof, SOA lifetime or AD flag is invented. Other egress consumers fail
 address exists. CNAME chains are bounded to eight aliases; a positive response uses the lowest
 actual CNAME/address TTL. Public-address filtering and exact destination pinning still apply.
 
-This slice does not yet race a slower peer against Unbound or learn which source is fastest.
-It retains existing deadlines, rather than claiming adaptive fastest-answer selection.
+### Private worker (`unbound_private`)
+
+The independently verified RAM proof cache remains first. On a miss, the private
+mode keeps just two aggregate moving-average durations and two scheduling
+deadlines in RAM: no additional names, addresses, policy or peer identifiers, and
+no persistent timing history. A recently faster validated peer is preferred;
+otherwise private Unbound starts immediately. The timings include complete peer
+fetch/independent validation/retention, or native worker execution and reaping.
+
+A cold peer attempt gets 50 ms. With a measured Unbound duration, the peer budget
+is that duration minus a small margin, bounded to 20–500 ms and the original
+resolution deadline. A miss, invalid proof or timeout triggers a 30-second peer
+cooldown and then private fallback. Occasional alternate-source comparisons use
+one actual authorized request, at most once per 30 seconds; they are not background
+queries or a race of simultaneous sources. A peer attempt is ended or dropped
+before the fallback worker is polled. This selects from recent observations, not
+knowledge of which source will be fastest for every individual question.
+
+Every peer attempt still requires complete route-peer exclusions and the current
+policy scope. DNSSEC validation, immutable proof/first-seen TTL bounds and address
+pinning are unchanged. Private-worker answers remain non-shareable; neither a
+fast answer nor the native secure verdict substitutes for a transferable proof.
+The original five-second deadline, 500 ms cleanup reserve, two-worker limit,
+quarantine and prohibition of OS fallback remain intact.
+
+The focused sequential-choice test and strict UDP all-target/all-feature Clippy
+pass. The controlled test covers peer timeout/drop before fallback, bypass during
+cooldown, a later successful peer probe without a worker, and exclusion-scope
+enforcement. It is not recursive DNS or a live-network speed comparison; the
+separate guest preflight below retains its own evidence boundary.
 
 ## Unbound operating requirements
 
@@ -133,6 +166,29 @@ No `resolv.conf` replacement, systemd-resolved change, or automatic package/serv
 part of this feature.
 
 ## Evidence boundary
+
+The existing `dns-cache` KVM scenario now also invokes a separate
+`private-unbound-proof` preflight. It source-builds the real worker inside the
+disposable Debian 13 guest against the exact SHA-checked Debian packages recorded
+in `THIRD_PARTY_LICENSES.md`. A public Rust `ExitResolver` example checks actual
+native verdicts for `iana.org`, `neverssl.com` (only passes if actually unsigned)
+and the deliberately broken `dnssec-failed.org` test described by
+[ICANN](https://www.icann.org/dns-resolvers-checking-current-trust-anchors).
+No alternative trust anchor, forged secure verdict or fixed positive reply is
+used. A private guest mount namespace supplies an OS-positive `/etc/hosts`
+sentinel: private bogus/timeout must fail despite that tempting fallback.
+An observer stops only the probe's own native child via pidfd and checks exact
+PID/start disappearance while the caller remains alive, for both timeout and
+caller cancellation. The extra report retains worker/anchor digests and the
+actual package version. Dependency or public-DNS availability failure fails the
+preflight; it is not a skipped PASS.
+
+`private-unbound-proof.json` is **additional**, not a replacement for existing
+C05 protected peer/cache evidence. It explicitly sets
+`normal_client_route_proven`, `reciprocal_client_exit_proven` and
+`shared_dns_proof_proven` to false. The integration source and three offline
+report-parser checks exist; a passing real guest artifact is still required.
+Only the disposable VM installs these dependencies or performs the live queries.
 
 Focused tests cover configuration rejection, bounded CNAME/TTL/provenance parsing, malformed and
 negative responses, rebinding rejection, and an actual framed TCP backend in a disposable test
