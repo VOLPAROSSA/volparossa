@@ -1,3 +1,5 @@
+![Project VOLPAROSSA — a golden compass, connected globe and wolf against a dark landscape](docs/assets/volparossa-banner.png)
+
 # Project VOLPAROSSA
 
 **DICN — Decentralized Intelligent Cooperative Network**

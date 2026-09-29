@@ -819,7 +819,12 @@ pub(crate) fn unlock_signer(
     passphrase_file: Option<&Path>,
 ) -> Result<SigningKey> {
     let identity_path = identity_path.map_or_else(super::default_identity_path, Path::to_path_buf);
-    let passphrase = super::secret::read_passphrase(passphrase_file, false)?;
+    // Keep secret-input failures out of the public metadata/report error channel. In particular,
+    // do not forward private passphrase-file paths or arbitrary underlying reader diagnostics.
+    // Only the successful secret value crosses this boundary, into the identity unlock below.
+    let Ok(passphrase) = super::secret::read_passphrase(passphrase_file, false) else {
+        bail!("cannot read content identity passphrase");
+    };
     let identity = IdentityStore::new(identity_path)
         .load(&passphrase)
         .context("cannot unlock existing node identity; content commands never create one")?;
@@ -920,6 +925,20 @@ fn ensure_new_output(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unlock_signer_redacts_passphrase_input_errors() {
+        let directory = tempfile::tempdir().expect("private test directory");
+        let passphrase_path = directory.path().join("private-passphrase-filename");
+        let Err(error) = unlock_signer(None, Some(&passphrase_path)) else {
+            panic!("missing passphrase file must fail closed");
+        };
+        assert_eq!(
+            format!("{error:#}"),
+            "cannot read content identity passphrase"
+        );
+        assert!(!format!("{error:?}").contains("private-passphrase-filename"));
+    }
+
     use super::*;
     use clap::Parser as _;
     use std::os::unix::fs::PermissionsExt as _;
