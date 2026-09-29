@@ -37,6 +37,13 @@ five agent checks plus strict CLI/local-control/agent Clippy pass. These establi
 wiring and local boundaries, not live Firefox payloads, two simultaneously carrying app
 routes, a browser-wide kill switch, or direct fallback. The disposable combined proof remains
 pending; other core security defaults are unchanged.
+The corresponding [browser adapter PR #4](https://github.com/VOLPAROSSA/volparossa-browser/pull/4)
+at `18a74235` passes a real ESR Unix-IPC/three-TLS-response smoke with a synthetic gateway,
+including no proxy credential at the origin and independent detach. The new pinned
+`browser-network` KVM fixture requires actual core MPTCP/WireGuard payloads, two separate
+32-MiB browser hashes, two carrying paths per response and A retirement while B stays active.
+Its disposable browser-UID egress guard is test containment, not a product kill switch.
+The combined live result remains pending; no full Firefox 157 source build is claimed.
 
 [Signal integration](https://github.com/VOLPAROSSA/volparossa-chat/pull/1) now has a pinned
 Desktop/libsignal source baseline and explicit device/session/backup contracts, not a

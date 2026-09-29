@@ -64,6 +64,23 @@ private capability-file creation, one-use/UID/expiry admission, strict CONNECT/b
 and independent controller shutdown. The controller test does not prove two simultaneously
 carrying MPTCP routes. The live disposable Firefox/HTTPS proof is a separate remaining step.
 
+The [Firefox adapter](https://github.com/VOLPAROSSA/volparossa-browser/pull/4) is pinned to
+`18a7423589ea95d5f04be53dfc6aaead373d4568` for the new `browser-network` VM scenario.
+Its existing isolated ESR 140.16 smoke proves real Gecko Unix IPC and three TLS 1.3
+responses against a **synthetic** gateway, including independent detach and absence of
+proxy credentials at the origin. That result is not a real overlay proof.
+
+The combined fixture instead uses the actual core, two explicit CLI grants and a temporary
+HTTPS origin CA. Each 32-MiB response must pass its browser-side hash and show two genuine
+carrying MPTCP subflows through distinct WireGuard relays. It completes A's response, opens
+B, then retires A's attachment while B remains active; this does not claim simultaneous
+payload transfer by both apps. Original kernel socket/worker identities, helper namespace
+ownership, captures, independent retirement and unchanged host state are checked separately.
+Only sanitized metadata is exported; grants, profiles and temporary test keys are removed.
+The fixture's browser-UID loopback guard contains background traffic in the disposable
+namespace; it is explicitly not the product's browser-wide kill switch. No compute model
+is downloaded or executed for this network-only scenario. The first combined run is pending.
+
 Ordinary browsing integration, opportunistic fallback with the user-requested default-off
 browser kill switch, HTTP/3, WebRTC, background traffic and crash-persistent browser-wide
 enforcement remain unfinished. Existing shared-core security defaults are unchanged. Shared
