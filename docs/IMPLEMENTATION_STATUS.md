@@ -1036,6 +1036,16 @@ relabeled as IPC evidence. B04, confidential offload and browser-UI integration 
 See [service usage](DECENTRALIZED_AGENTS.md#application-local-private-compute-ipc) and the
 [local wire contract](../crates/volparossa/src/compute/private_serve/WIRE.md).
 
+Combined browser proof candidate (2026-09-29): the explicit `agent-private-browser` VM scenario
+pins browser integration source `96de1ab2ed9da42f718209f47505dc7a170c9e4a` and Debian ESR
+140.16.0, then submits the final private question through the actual Gecko sidebar and this
+same private service/model. It retains real Cancel/Disconnect checks and uses a separate
+decoded-result-before-panel-render cleanup boundary; the original v2 first-frame-byte proof
+is unchanged. Source pins, pure report checks and the static KVM/export contract pass.
+**Combined live execution is pending.** This is not a Firefox 157 build, native provider-selector
+integration, general answer-quality evidence or completed B04. Raw answers, private inputs,
+browser profiles and logs are excluded from the exported browser proof.
+
 Current dependency-ready candidate: a single incremental provider queue now owns source and
 derived graph work. Each durable package completion triggers a dependency scan; newly ready
 tasks join that same queue while unrelated original worker leases remain occupied. Workflow

@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "repository": "https://github.com/VOLPAROSSA/volparossa-browser",
+  "revision": "96de1ab2ed9da42f718209f47505dc7a170c9e4a",
+  "files": {
+    "scripts/smoke_compute_model.py": {"bytes": 20762, "sha256": "409439a7ef4d7c6a7657cd545599062f7a77ca2bd328ba34bf056620fb4cf084"},
+    "scripts/smoke_privacy.py": {"bytes": 15728, "sha256": "917d66faaeb6f80890c557ae3904bfee96b5fabc94e428776d83d1dc08fba283"},
+    "scripts/stage_firefox.py": {"bytes": 6353, "sha256": "c27b365a4936774a0cc1098c4dc9a5fc81d12f0c23395a6ac6e92b7156a11a38"},
+    "integration/VolparossaCompute.sys.mjs": {"bytes": 10594, "sha256": "60c34936c0c0a3537e797dcd1c73be4f767c277aaad2c998fc39cbb5e958527b"},
+    "integration/VolparossaComputePanel.sys.mjs": {"bytes": 4843, "sha256": "e3ca1653643e1d604bf21b0a78147b757f1482b855b174b1a351a35732c95ebf"},
+    "defaults/privacy.json": {"bytes": 987, "sha256": "f6594ebca20585479635522e562f2da26a6422774b9628a0a906b320311076a7"}
+  },
+  "runtime": {
+    "version": "140.16.0",
+    "source_stamp": "d864999404b3032f682d74ccc60d1ce38c9ce609",
+    "url": "https://security.debian.org/debian-security/pool/updates/main/f/firefox-esr/firefox-esr_140.16.0esr-1~deb13u1_amd64.deb",
+    "bytes": 71994716,
+    "sha256": "e32aeabcab2e74fe112332fad10f7d9630e14cd6f4564a596a71073018d24508",
+    "files": {
+      "firefox-esr": "22bb2d84f2289622e65fbcde266a30952e6ac64d27a2a1af75cea7229f2e6b14",
+      "libxul.so": "62cc326204668a2dae453c9e89d9c200e513c9e3ad0772b164091bf1e5333fb4",
+      "omni.ja": "c0d453127f9c1310dad39cc3f6971acfe59cdf561fec6918b129ee0c780c6e70",
+      "browser/omni.ja": "757f1f47bfbde5603e08cdb7ddc83bd27e9b26695bf843d640df7984842fffd7"
+    }
+  }
+}
