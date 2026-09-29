@@ -419,8 +419,8 @@ The additive version-two manifest retains the handoff and all original provider 
 The existing eight-record limit includes deleted provider history; a full set cannot silently
 discard an old identity to make room. The command uses bounded RAM but requires temporary
 local disk room for one complete encrypted archive and removes its staging directory on normal
-completion/failure. This candidate does not resize a provider, change the contribution target,
-add owner-offline migration authority or claim a new passing protected-overlay handoff run.
+completion/failure. This handoff does not resize a provider, change the contribution target,
+or add owner-offline migration authority. Its protected-overlay result is recorded below.
 The targeted three-real-store framed-transport test passes, covering lost Reserve,
 replacement-read and Delete confirmations, reopen/retry and repeated non-consuming
 replacement restores. All four focused replica tests pass together in 11.27 seconds;
