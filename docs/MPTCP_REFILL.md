@@ -209,3 +209,25 @@ parser, private-namespace bootstrap predicate, two signed snapshot protocol chec
 the schema-tag parity check. Four-crate all-target/all-feature strict Clippy, formatting
 and fourteen unchanged refill-fixture checks also pass. These do not substitute for a
 new live userspace-PM/fresh-fourth-path run.
+
+### First userspace-PM live result and parser correction
+
+[Run `36614116209` on `01fcabe7`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36614116209)
+fails during the initial application, before fresh-refill proof. The first owned subflow
+update returns `MPTCP_ENDPOINT_UNAVAILABLE`; the Client then records
+`INGRESS_TCP_STREAM_FAILED` and the application receives a connection reset. The original
+116 files remain unchanged (ZIP SHA-256
+`448be2f2e846b6de073fca62d3c4059be5b65195125d685fa0dfb17053d155f1`).
+Disposable cleanup reports zero owned objects and byte-identical host state, SHA-256
+`ed70b3cc6a3c37636ecd78599e64950c520a2a24d84e8c7532aa4b3df8cee106`.
+
+Source review found a concrete incompatibility: Linux v6.12's
+[`mptcp_event_addr_announced`](https://github.com/torvalds/linux/blob/v6.12/net/mptcp/pm_netlink.c)
+emits an IPv6 `ANNOUNCED` event with TOKEN, REM_ID, DPORT and DADDR6, without FAMILY.
+Our parser wrongly rejected that form. The correction accepts missing FAMILY only for
+that remote announcement, never an established/local tuple or an explicitly contradictory
+family. Eight targeted kernel checks pass, including the exact emitted shape, malformed
+and forged variants, and the existing real two-subflow disposable-kernel test; strict
+MPTCP Clippy and formatting pass. The original artifact contains no raw event frame, so
+this source-level defect is a plausible explanation of its kernel rejection, not a captured
+event identity. A new live run is still required; failure-injection and byte gates are unchanged.

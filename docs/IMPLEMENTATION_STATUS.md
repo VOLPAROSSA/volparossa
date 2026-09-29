@@ -137,6 +137,13 @@ replacing kernel scheduling/retransmission; it has a 64-issued-flow/context-gene
 Disposable teardown and host-state checks pass for the original run; separate agent
 shutdown/retirement failures remain visible. See [the exact evidence and limitations](MPTCP_REFILL.md).
 
+The first userspace-PM run (`01fcabe7`, `36614116209`) fails earlier: its first owned
+subflow update is rejected and the application connection resets. Source review identifies
+a valid Linux IPv6 `ANNOUNCED` form without FAMILY that our parser rejected. The exact-shape
+correction and eight targeted kernel checks pass locally; the original artifact has no raw
+event frame, so its precise event cause remains inferred. Cleanup and unchanged host state
+pass, but there is no new fresh-refill completion claim.
+
 The first [Firefox integration PR](https://github.com/VOLPAROSSA/volparossa-browser/pull/1)
 is merged (`bab677ba`): isolated ESR 140.16 privacy defaults and native Strict tracking
 protection passed a real browser smoke, including preservation of user choices after restart.

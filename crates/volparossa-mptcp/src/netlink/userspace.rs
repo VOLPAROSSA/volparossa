@@ -343,7 +343,13 @@ fn parse_event(frame: &[u8], family: u16) -> Result<MptcpEvent, MptcpError> {
      -> Result<Option<SocketAddr>, MptcpError> {
         match (fields[address_index], fields[port_index]) {
             (Some(bytes), Some(port)) => {
-                if fields[2] != Some(&IPV6_FAMILY.to_ne_bytes()[..]) {
+                // Linux v6.12 mptcp_event_addr_announced() emits DADDR6/DPORT
+                // without FAMILY. That documented event is only an observation,
+                // never authority to create a subflow. Other tuple events still
+                // require FAMILY; an explicit contradictory family is rejected.
+                let announced_without_family =
+                    kind == MptcpEventKind::Announced && address_index == 8 && fields[2].is_none();
+                if !announced_without_family && fields[2] != Some(&IPV6_FAMILY.to_ne_bytes()[..]) {
                     return Err(invalid("event address family"));
                 }
                 let address = Ipv6Addr::from(
@@ -432,5 +438,54 @@ mod tests {
         assert!(parse_event(&forged, 35).is_err());
         push_attr(&mut payload, 1, &123_u32.to_ne_bytes()).unwrap();
         assert!(parse_event(&build_message(35, 0, 0, 10, 1, &payload).unwrap(), 35).is_err());
+    }
+
+    #[test]
+    fn kernel_announced_without_family_does_not_abort_subflow_event_drain() {
+        // Exact emitted fields from Linux v6.12 net/mptcp/pm_netlink.c,
+        // mptcp_event_addr_announced(): TOKEN, REM_ID, DPORT and DADDR6;
+        // unlike CREATED/ESTABLISHED, this notification omits FAMILY.
+        let address: Ipv6Addr = "fd76:6f6c:7061:1111:2222:3:4444:4".parse().unwrap();
+        let mut payload = Vec::new();
+        push_attr(&mut payload, 1, &123_u32.to_ne_bytes()).unwrap();
+        push_attr(&mut payload, 4, &[3]).unwrap();
+        push_attr(&mut payload, 10, &44443_u16.to_be_bytes()).unwrap();
+        push_attr(&mut payload, 8, &address.octets()).unwrap();
+        let frame = build_message(35, 0, 0, 6, 1, &payload).unwrap();
+        let event = parse_event(&frame, 35).unwrap();
+        assert_eq!(event.kind, MptcpEventKind::Announced);
+        assert_eq!(event.token, Some(123));
+        assert_eq!(event.remote_id, Some(3));
+        assert_eq!(event.local, None);
+        assert_eq!(event.remote, Some(SocketAddr::new(address.into(), 44443)));
+
+        // Missing FAMILY is not allowed for an established-subflow tuple.
+        assert!(parse_event(&build_message(35, 0, 0, 10, 1, &payload).unwrap(), 35).is_err());
+        let mut contradictory = payload.clone();
+        push_attr(&mut contradictory, 2, &2_u16.to_ne_bytes()).unwrap();
+        assert!(parse_event(&build_message(35, 0, 0, 6, 1, &contradictory).unwrap(), 35).is_err());
+        let mut duplicated = payload.clone();
+        push_attr(&mut duplicated, 8, &address.octets()).unwrap();
+        assert!(parse_event(&build_message(35, 0, 0, 6, 1, &duplicated).unwrap(), 35).is_err());
+        let mut local_without_family = payload.clone();
+        push_attr(&mut local_without_family, 6, &address.octets()).unwrap();
+        push_attr(&mut local_without_family, 9, &45123_u16.to_be_bytes()).unwrap();
+        assert!(
+            parse_event(
+                &build_message(35, 0, 0, 6, 1, &local_without_family).unwrap(),
+                35
+            )
+            .is_err()
+        );
+        let mut malformed = Vec::new();
+        push_attr(&mut malformed, 1, &123_u32.to_ne_bytes()).unwrap();
+        push_attr(&mut malformed, 4, &[3]).unwrap();
+        push_attr(&mut malformed, 10, &44443_u16.to_be_bytes()).unwrap();
+        push_attr(&mut malformed, 8, &address.octets()[..15]).unwrap();
+        assert!(parse_event(&build_message(35, 0, 0, 6, 1, &malformed).unwrap(), 35).is_err());
+        assert!(parse_event(&frame, 36).is_err());
+        let mut forged_sender = frame;
+        forged_sender[12] = 1;
+        assert!(parse_event(&forged_sender, 35).is_err());
     }
 }
