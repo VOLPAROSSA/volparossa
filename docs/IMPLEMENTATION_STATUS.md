@@ -180,6 +180,27 @@ new three-real-store framed-transport handoff with lost Reserve, readback and De
 retained charge, reopen and repeated restores. This is separate from the passing two-provider
 overlay evidence above; no new live handoff proof is claimed.
 
+A separate `private-storage-handoff` scenario is now executable: six protected phases
+cover A/B upload, stopped A with three copies still charged, same-intent retry after
+reopening A, repeated independent reads from B and C, and acknowledged deletion. It
+requires the real owner CLI, full replacement readback, exact store identities and
+per-phase route/privacy/completion evidence. Five handoff checks and three dispatch/export
+checks pass locally. It does not claim automatic
+contribution resizing, repair, independent hardware or Signal backup integration.
+
+The [source-exact run on `721b56f9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36616700648)
+now **passes** all six phases and the unchanged report checker against 139 original files
+(ZIP SHA-256 `6d6d274c2fd526930147c929cb27a96caad05b98726ed73e27ed1146e14ac131`).
+With the original input absent, the three independent provider stores each retain 524,326
+bytes while A's deletion is unconfirmed (1,572,978 charged payload bytes). Reopening the
+same A store and retrying the same intent verifies C again, then deletes only A, retaining
+B/C and 1,048,652 charged bytes. Two full non-consuming restores from B and then C succeed
+with the other service unavailable; final acknowledged deletion leaves zero leases/bytes.
+All six route/privacy/completion phases, exact store identities, private cleanup, zero
+remaining topology objects and byte-identical host state pass. This withdraws provider
+services, not independent machines or the whole owner device, and does not establish
+automatic contribution resizing or measured physical overhead.
+
 - [x] Source-exact disposable multi-node proof of the protected single-provider storage path
   and seven CLI commands (`434ed112`, run `36589770066`).
 - [x] Explicit replica-set commands: focused local two-store resume, accounting and failover checks.

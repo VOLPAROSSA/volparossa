@@ -478,12 +478,24 @@ The additive version-two manifest retains the handoff and all original provider 
 The existing eight-record limit includes deleted provider history; a full set cannot silently
 discard an old identity to make room. The command uses bounded RAM but requires temporary
 local disk room for one complete encrypted archive and removes its staging directory on normal
-completion/failure. This candidate does not resize a provider, change the contribution target,
-add owner-offline migration authority or claim a new passing protected-overlay handoff run.
+completion/failure. This handoff does not resize a provider, change the contribution target,
+or add owner-offline migration authority. Its protected-overlay result is recorded below.
 The targeted three-real-store framed-transport test passes, covering lost Reserve,
 replacement-read and Delete confirmations, reopen/retry and repeated non-consuming
 replacement restores. All four focused replica tests pass together in 11.27 seconds;
-this does not replace the pending real protected-overlay handoff proof.
+these local checks are separate from the protected-overlay proof below.
+
+The real [three-provider handoff run on `721b56f9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36616700648)
+passes its exact-source checker against all 139 original artifact files. Its original source
+file is absent before migration. Stopped A leaves three actual copies charged; after the
+same-store retry, C is fully verified before A's confirmed deletion reduces the charge to
+two copies. B and C each restore the full archive twice while the other service is unavailable.
+Six protected MPTCP/TLS route/privacy phases and full cleanup pass; guest host-state bytes
+are unchanged (SHA-256 `8e1d848f7788cb4092c5d7215ef7079cc2214346edf45f70d696d65cad0965e1`).
+The immutable artifact ZIP SHA-256 is
+`6d6d274c2fd526930147c929cb27a96caad05b98726ed73e27ed1146e14ac131`.
+This proves explicit owner-coordinated handoff, not automatic resizing/repair, independent
+hardware failure domains, archive encryption or Signal backup restore.
 
 Extend the passing two-provider proof to interrupted network upload, whole-agent restart,
 source-device-offline recovery and network quota refusal, with privacy and complete cleanup
