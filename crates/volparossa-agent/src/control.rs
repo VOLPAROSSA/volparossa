@@ -400,6 +400,17 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
                 Err(error) => content_response(request_id, Err(error)),
             }
         }
+        control_request::Operation::PrivateStorageAdmission(request) => {
+            match context.content.private_storage_admission(&request).await {
+                Ok(status) => response(
+                    request_id,
+                    ControlResult::Ok,
+                    "PRIVATE_STORAGE_ADMISSION",
+                    control_response::Payload::PrivateStorageAdmission(status),
+                ),
+                Err(error) => content_response(request_id, Err(error)),
+            }
+        }
         control_request::Operation::ContentFetch(request) => content_response(
             request_id,
             Box::pin(context.content.fetch(request, context)).await,

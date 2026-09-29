@@ -10,7 +10,8 @@ use rusqlite::{OpenFlags, params};
 use rustix::fs::{FlockOperation, Mode, OFlags};
 
 use super::{
-    APPLICATION_ID, PrivateStorageStore, StorageError, StorageLimits, VERSION, valid_limits,
+    APPLICATION_ID, PrivateStorageStore, StorageError, StorageLimits, VERSION, admission,
+    valid_limits,
 };
 
 const OWNER: &str = ".volparossa-private-storage-v1";
@@ -43,7 +44,9 @@ impl PrivateStorageStore {
                 singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
                 version INTEGER NOT NULL, store_id BLOB NOT NULL CHECK(length(store_id) = 32),
                 capacity_bytes INTEGER NOT NULL CHECK(capacity_bytes > 0),
-                min_free_bytes INTEGER NOT NULL CHECK(min_free_bytes >= 0)
+                min_free_bytes INTEGER NOT NULL CHECK(min_free_bytes >= 0),
+                admission_target_bytes INTEGER NOT NULL
+                    CHECK(admission_target_bytes >= 0 AND admission_target_bytes <= capacity_bytes)
              ) STRICT;
              CREATE TABLE leases (
                 lease_id BLOB PRIMARY KEY CHECK(length(lease_id) = 16),
@@ -63,7 +66,7 @@ impl PrivateStorageStore {
         connection.pragma_update(None, "application_id", APPLICATION_ID)?;
         connection.pragma_update(None, "user_version", VERSION)?;
         connection.execute(
-            "INSERT INTO storage_meta VALUES (1, ?1, ?2, ?3, ?4)",
+            "INSERT INTO storage_meta VALUES (1, ?1, ?2, ?3, ?4, ?3)",
             params![
                 VERSION,
                 id.as_slice(),
@@ -95,6 +98,7 @@ impl PrivateStorageStore {
 
     /// Reopen the exact owned store with its durable configured limits. No data is evicted.
     /// Committed chunks are verified when restored, not fully rehashed on every status query.
+    /// Version-one stores are upgraded atomically with their original capacity as the target.
     ///
     /// # Errors
     /// Rejects foreign/busy ownership, unsafe database files, corrupt metadata or `SQLite` errors.
@@ -119,7 +123,7 @@ impl PrivateStorageStore {
         let application: i64 =
             connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if application != APPLICATION_ID || version != VERSION {
+        if application != APPLICATION_ID || !matches!(version, 1 | VERSION) {
             return Err(StorageError::InvalidStore);
         }
         let (stored_version, stored_id, capacity_bytes, min_free_bytes): (i64, Vec<u8>, u64, u64) =
@@ -131,16 +135,20 @@ impl PrivateStorageStore {
             min_free_bytes,
         };
         valid_limits(limits).map_err(|_| StorageError::InvalidStore)?;
-        if stored_version != VERSION || stored_id != id {
+        if stored_version != version || stored_id != id {
             return Err(StorageError::InvalidStore);
         }
-        let store = Self {
+        let mut store = Self {
             connection,
             directory,
             _owner: owner,
             limits,
         };
         store.usage()?;
+        if version == 1 {
+            admission::upgrade(&mut store)?;
+        }
+        store.admission_status()?;
         Ok(store)
     }
 }
