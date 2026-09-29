@@ -982,6 +982,29 @@ network-state bytes remain identical. The original failed run remains failed and
 This verifies the bounded local private lane, not confidential distributed computation,
 private training, general answer accuracy or full B04.
 
+New application-local private-service candidate (2026-09-29): `compute private-serve`
+exposes a separate same-owner mode-0600 Unix socket below an owned mode-0700 directory.
+Its versioned, length-bounded private JSON interface accepts capabilities, question/context
+submission and same-connection cancellation—not paths, executables, model choices or public
+compute jobs. At most eight connections share one execution slot. It reuses the actual
+`private-task` staging, isolated executor, input/model report binding and cleanup path;
+disconnect/shutdown cancels the owned worker before releasing admission, while unconfirmed
+cleanup quarantines further jobs. Results stay on the originating connection, with no public
+cache, training, cloud fallback or retained-result lookup. Six focused local protocol/lifecycle
+tests pass, including real Unix framing and admission/cancellation controls. These tests do
+**not** execute a model or prove Firefox integration.
+
+The new `agent-private-task` fixture requires **proof version 2** and
+`private_service.version = 1`: observed Cancel and Disconnect worker lifetimes followed by one
+actual pinned 360M EOS answer over IPC, cleanup at the first result-frame byte, exact socket
+removal and unchanged host state. It reuses one explicit guest provision rather than adding a
+second complete inference run. Pure fixture, shell and static KVM/export-allowlist checks pass;
+**the new source-exact live model/IPC proof is pending**. The original `9d870440` direct-CLI
+proof above remains evidence only for that historical source and stdout boundary; it is not
+relabeled as IPC evidence. B04, confidential offload and browser-UI integration remain open.
+See [service usage](DECENTRALIZED_AGENTS.md#application-local-private-compute-ipc) and the
+[local wire contract](../crates/volparossa/src/compute/private_serve/WIRE.md).
+
 Current dependency-ready candidate: a single incremental provider queue now owns source and
 derived graph work. Each durable package completion triggers a dependency scan; newly ready
 tasks join that same queue while unrelated original worker leases remain occupied. Workflow

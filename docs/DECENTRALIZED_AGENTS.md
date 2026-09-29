@@ -1790,6 +1790,47 @@ decentralized inference engine. Any adoption needs a compatible decentralized tr
 explicit privacy accounting. Public task results may be shared only when the job permits it;
 private results remain recipient-protected and expire independently of public models.
 
+### Application-local private compute IPC
+
+`compute private-serve` is the development interface for an owner-authorized local application,
+including privileged browser integration. It is separate from the public compute broker:
+
+```sh
+volparossa compute private-serve \
+  --socket /absolute/private/control/compute.sock \
+  --work-parent /absolute/private/work \
+  --runtime-root /absolute/private/venv \
+  --model-root /absolute/private/model \
+  --model-profile smollm2-360m-v1 \
+  --execute
+```
+
+These directories must already be owned, canonical mode-0700 directories; the new socket is
+mode 0600 and accepts only the same effective UID. The pinned model/runtime must already be
+provisioned. Omit `--execute` for a scope preview. Model, roots, threads and deadline are fixed
+by the owner at launch, never chosen by requests. Question/context limits and the real private
+executor are the same as `private-task`; incomplete output remains explicitly incomplete.
+
+Applications negotiate capabilities, submit bounded question/context text and may cancel only
+their own connection's task. Eight connections share one execution slot, with no task queue or
+reconnect/history lookup. Disconnect and normal service shutdown cancel through the existing
+sandbox supervisor; the slot stays owned until execution returns through cleanup. Unconfirmed
+cleanup quarantines admission. Temporary input/report files follow the private-task contract:
+this is not RAM-only processing, secure erasure or confidential remote execution.
+
+The [v1 local wire contract](../crates/volparossa/src/compute/private_serve/WIRE.md) documents
+the strict length-prefixed JSON exception, response correlation and cancellation lifecycle.
+Private text belongs in bounded message bodies, never URLs, logs, public cache or training.
+Web pages must not receive the socket or a generic command bridge; model output is untrusted
+text. There is no automatic peer/cloud fallback.
+
+Six local protocol/lifecycle tests pass, including actual Unix framing—not real inference.
+The new version-2 `agent-private-task` KVM fixture is prepared to prove one actual EOS answer
+over this interface, Cancel/Disconnect cleanup and result delivery only after cleanup.
+**That source-exact live proof is pending.** The earlier `9d870440` proof remains a historical
+file-oriented CLI result, not evidence for this socket or a Firefox UI. No B04 completion is
+claimed.
+
 ## Fully automatic whitelist/blacklist decisions
 
 The existing [whitelist](WHITELIST.md) already enforces threshold-signed **destination/port**

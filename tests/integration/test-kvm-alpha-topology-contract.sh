@@ -152,9 +152,11 @@ with tempfile.TemporaryDirectory(prefix='volparossa-private-export-') as directo
     published.mkdir(parents=True)
     safe = ('agent-private-task-smoke.json', 'agent-private-task-snapshot.json',
             'agent-private-task-answer.json', 'agent-private-task-owner_controls.json',
-            'agent-private-task-stdout_boundary.json', 'agent-private-task-provision.log')
+            'agent-private-task-stdout_boundary.json', 'agent-private-task-provision.log',
+            'agent-private-task-result_boundary.json', 'agent-private-task-private_service.json')
     unsafe = ('agent-private-task-input.json', 'agent-private-task-report.json',
-              'agent-private-task-arbitrary.json')
+              'agent-private-task-arbitrary.json', 'agent-private-task-private.stderr',
+              'agent-private-task-request.json')
     for name in safe + unsafe:
         (published / name).write_text('{}')
     archive = module['collect'](home, base / 'opt', 'a' * 40, 'agent-private-task', 1,

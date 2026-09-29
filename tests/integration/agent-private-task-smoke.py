@@ -10,10 +10,11 @@ import os
 from pathlib import Path
 import re
 import runpy
-import select
 import shutil
 import signal
+import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -26,9 +27,9 @@ NAME = "agent-private-task"
 PROFILE = TRAIN["LARGE_MODEL_PROFILE"]
 MODEL = TRAIN["inference_profile"](PROFILE)
 CLI = "/home/vpci/target/debug/volparossa"
-SCOPE = ("one actual local-private synthetic Q/A with observed isolated readonly input/model mounts, "
-         "owner controls, EOS and owned temporary cleanup; not confidential remote execution, "
-         "a portable signed receipt, general answer quality or completed B04")
+SCOPE = ("v2 actual private-serve Unix IPC: one local-private synthetic EOS Q/A plus observed cancel/disconnect, "
+         "isolated readonly input/model mounts, owner controls and cleanup before the result frame; "
+         "not a Firefox UI proof, confidential remote execution, a portable signed receipt, general answer quality or completed B04")
 ACK = re.compile(rb"compute owner_ack phase=(paused|resumed) sequence=([1-9][0-9]*) step=([0-9]+) elapsed_ms=([0-9]+)")
 
 
@@ -108,31 +109,97 @@ def owner_controls(raw):
                 pressure_injected=False, all_owner_activity_claimed=False)
 
 
-def at_stdout(work_parent, original, expected, isolation):
-    require(not list(work_parent.iterdir()), "private temporary input/report still present at stdout")
+def at_result(work_parent, original, expected, isolation, point="first_result_frame_byte"):
+    require(not list(work_parent.iterdir()), "private temporary input/report still present at result")
     require(identity(original) == expected, "original private input changed")
     require(not any(TRAIN["alive"](p) for p in isolation["owned_processes"] if p != isolation["cli"]),
-            "actual private worker still alive at stdout")
-    return dict(observation_point="first_stdout_read", ephemeral_children=0,
+            "actual private worker still alive at result")
+    return dict(observation_point=point, ephemeral_children=0,
                 original=identity(original), observed_worker_lifetimes_ended=True)
 
 
-def answer(process, deadline, work_parent, original, expected, isolation):
-    raw, observed = bytearray(), None
-    while True:
-        remaining = deadline - time.monotonic()
-        require(remaining > 0, "private original fixture deadline elapsed")
-        require(select.select([process.stdout], [], [], remaining)[0], "private stdout deadline elapsed")
-        block = os.read(process.stdout.fileno(), 8192)
-        if not block:
-            break
-        if observed is None:
-            observed = at_stdout(work_parent, original, expected, isolation)
-        raw.extend(block)
-        require(len(raw) <= 65536, "private result exceeds fixture bound")
-    code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
-    require(observed is not None, "private CLI emitted no answer")
-    return json.loads(raw), observed, code
+def send_request(stream, operation):
+    request_id = os.urandom(16).hex()
+    raw = json.dumps(dict(version=1, id=request_id, operation=operation), separators=(",", ":")).encode()
+    require(0 < len(raw) <= 32768, "private fixture request exceeds protocol bound")
+    stream.sendall(struct.pack("!I", len(raw)) + raw)
+    return request_id
+
+
+def response(stream, request_id, event, deadline, first_byte=None):
+    def exact(length):
+        raw = bytearray()
+        while len(raw) < length:
+            remaining = deadline - time.monotonic()
+            require(remaining > 0, "private IPC deadline elapsed")
+            stream.settimeout(remaining)
+            block = stream.recv(length - len(raw))
+            require(bool(block), "private IPC disconnected before complete response")
+            raw.extend(block)
+        return bytes(raw)
+    header = exact(1)
+    observed = first_byte() if first_byte else None
+    length = struct.unpack("!I", header + exact(3))[0]
+    require(0 < length <= 65536, "private IPC response exceeds protocol bound")
+    value = json.loads(exact(length))
+    require(value["version"] == 1 and value["id"] == request_id and value["event"] == event,
+            "private IPC response correlation/event differs")
+    return value, observed
+
+
+def expected_capabilities():
+    return dict(visibility="private_local", local_only=True, model_profile=PROFILE,
+        max_question_bytes=512, max_context_bytes=4096, max_request_bytes=32768, max_response_bytes=65536,
+        execution_slots=1, max_connections=8, max_seconds=600, network_access=False, public_cache=False,
+        training=False, cloud_fallback=False, model_execution_proven=False, quarantined=False)
+
+
+def check_capabilities(value):
+    require(value == expected_capabilities(), "private service capability scope differs")
+
+
+def connect_service(path, process):
+    stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stream.settimeout(5)
+    stream.connect(str(path))
+    pid, uid, gid = struct.unpack("3i", stream.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+    require(pid == process.pid and uid == os.getuid() and gid == os.getgid(), "private service peer owner differs")
+    request_id = send_request(stream, dict(type="capabilities"))
+    value, _ = response(stream, request_id, "capabilities", time.monotonic() + 5)
+    check_capabilities(value["capabilities"])
+    return stream, value["capabilities"]
+
+
+def runtime_unlocked(lock):
+    with lock.open("rb") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def check_service(value, primary_isolation, original):
+    require(value["version"] == 1 and value["protocol"] == "private-local-json-v1"
+            and value["one_eos_job"] is True and value["global_busy_observed"] is True
+            and value["same_owner_peer_verified"] is True and value["socket_mode"] == 0o600
+            and value["socket_parent_mode"] == 0o700 and value["stdout_empty"] is True
+            and value["private_prompts_absent_from_diagnostics"] is True
+            and value["service_exit_code"] == 0 and value["socket_removed"] is True,
+            "private IPC lifecycle proof differs")
+    check_capabilities(value["capabilities"])
+    for name in ("cancel", "disconnect"):
+        proof = value[name]
+        TRAIN["check_isolation"](proof["isolation"])
+        check_snapshot(proof["snapshot"])
+        require(proof["isolation"]["cli"] == primary_isolation["cli"]
+                and proof["isolation"]["worker"] != primary_isolation["worker"]
+                and proof["snapshot"]["original"] == original
+                and proof["runtime_lock_released"] is True
+                and proof["cleanup"] == dict(observation_point="cancel_terminal_frame_byte" if name == "cancel" else "disconnect_cleanup",
+                    ephemeral_children=0, original=proof["snapshot"]["original"], observed_worker_lifetimes_ended=True),
+                "cancel/disconnect did not clean the exact observed worker before later admission")
+    require(value["cancel"]["terminal_code"] == "cancelled" and value["cancel"]["cancel_acknowledged"] is True
+            and value["disconnect"]["connection_closed_by_owner"] is True
+            and value["cancel"]["isolation"]["worker"] != value["disconnect"]["isolation"]["worker"],
+            "private service cancellation mechanism differs")
 
 
 def check_answer(value, canary):
@@ -166,6 +233,7 @@ def check_provision(value):
 
 def check_report(value, revision):
     require(value["report_kind"] == "volparossa-agent-private-task" and value["source_revision"] == revision
+            and value["proof_version"] == 2
             and value["scope"] == SCOPE and value["success"] is True
             and value["full_b04_claimed"] is False and value["confidential_remote_execution_claimed"] is False
             and value["exported_answer_is_authorized_synthetic_test_data"] is True
@@ -179,10 +247,11 @@ def check_report(value, revision):
             "actual pinned model changed")
     require(value["public_rejection"] == dict(error="compute_public_data_required", exit_nonzero=True,
             stdout_empty=True, output_absent=True, runtime_lease_absent=True), "private input reached public execution")
-    require(value["stdout_boundary"] == dict(observation_point="first_stdout_read", ephemeral_children=0,
+    require(value["result_boundary"] == dict(observation_point="first_result_frame_byte", ephemeral_children=0,
             original=value["snapshot"]["original"], observed_worker_lifetimes_ended=True)
             and value["original_after"] == value["snapshot"]["original"] and value["runtime_lock_released"] is True,
             "private snapshot lifetime or original input preservation differs")
+    check_service(value["private_service"], value["isolation"], value["snapshot"]["original"])
     controls = value["owner_controls"]
     reconstructed = b"\n".join(
         [f"compute owner_ack phase={a['phase']} sequence={a['sequence']} step={a['step']} elapsed_ms={a['elapsed_ms']}".encode()
@@ -198,7 +267,7 @@ def check_report(value, revision):
 def check_bundle(path, revision):
     value = read(path, 1048576)
     check_report(value, revision)
-    for field in ("provision", "isolation", "snapshot", "answer", "owner_controls", "stdout_boundary"):
+    for field in ("provision", "isolation", "snapshot", "answer", "owner_controls", "result_boundary", "private_service"):
         require(read(path.parent / f"{NAME}-{field}.json") == value[field], "original private fixture evidence differs")
     for when in ("before", "after"):
         require(TRAIN["file_hash"](path.parent / f"host-state-{when}.json", 1048576)["sha256"]
@@ -215,11 +284,11 @@ def execute(output, revision):
     work_parent.mkdir(mode=0o700)
     before = TRAIN["snapshot"]()
     write(output / "host-state-before.json", before)
-    result = dict(report_kind="volparossa-agent-private-task", source_revision=revision, scope=SCOPE, success=False,
+    result = dict(report_kind="volparossa-agent-private-task", proof_version=2, source_revision=revision, scope=SCOPE, success=False,
         full_b04_claimed=False, confidential_remote_execution_claimed=False,
         exported_answer_is_authorized_synthetic_test_data=True, raw_private_input_exported=False,
         raw_worker_report_exported=False, phase="provision")
-    process, observer, members, fallback = None, None, [], False
+    process, observer, members, fallback, clients = None, None, [], False, []
     try:
         with (output / f"{NAME}-provision.log").open("w") as log:
             subprocess.run([sys.executable, "-B", str(TRAIN["ML"] / "provision.py"), "--execute", "--yes",
@@ -231,9 +300,14 @@ def execute(output, revision):
         canary = "CANARY" + str(int.from_bytes(os.urandom(4)) % 100000000).zfill(8)
         result["test_canary"] = canary
         original = jobs / "private-input.json"
-        write(original, dict(version=1, visibility="private_local",
+        private_input = dict(version=1, visibility="private_local",
             question="What is the test identifier in the note? Answer with only the identifier.",
-            context=f"Synthetic private test note: The test identifier is {canary}. This note contains no real secrets."))
+            context=f"Synthetic private test note: The test identifier is {canary}. This note contains no real secrets.")
+        # Match serde_json's canonical map ordering used by the service; the root
+        # observer will compare the exact snapshot bytes/inode, not a loose semantic match.
+        with original.open("xb") as stream:
+            stream.write(json.dumps(private_input, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode())
+        original.chmod(0o600)
         initial = identity(original)
         model_file = provision / "model/model.safetensors"
         result["on_disk_model_before"] = TRAIN["file_hash"](model_file, MODEL["model"]["base_weights"]["bytes"])
@@ -249,35 +323,110 @@ def execute(output, revision):
                 and not rejected.exists() and not lock.exists(), "private input not rejected before public runtime admission")
         result["public_rejection"] = dict(error="compute_public_data_required", exit_nonzero=True,
             stdout_empty=True, output_absent=True, runtime_lease_absent=True)
-        result["phase"] = "private-infer-and-observe"
-        with (jobs / "private.stderr").open("wb") as diagnostics:
+        result["phase"] = "private-service-start"
+        socket_path = jobs / "private.sock"
+        with (jobs / "private.stderr").open("wb") as diagnostics, (jobs / "private.stdout").open("wb") as service_stdout:
+            process = subprocess.Popen([CLI, "compute", "private-serve", "--socket", str(socket_path),
+                "--work-parent", str(work_parent), *common], stdout=service_stdout, stderr=diagnostics)
+            for _ in range(100):
+                require(process.poll() is None, "private service exited before socket creation")
+                if socket_path.exists() and stat.S_IMODE(socket_path.lstat().st_mode) == 0o600:
+                    break
+                time.sleep(0.1)
+            info = socket_path.lstat()
+            require(stat.S_ISSOCK(info.st_mode) and info.st_uid == os.getuid()
+                    and stat.S_IMODE(info.st_mode) == 0o600, "private service socket is not owner-only")
+            service = dict(version=1, protocol="private-local-json-v1", socket_mode=0o600,
+                socket_parent_mode=stat.S_IMODE(jobs.stat().st_mode), same_owner_peer_verified=True)
+            result["private_service"] = service
+
+            def observed(directory):
+                nonlocal observer
+                with (jobs / "observer.stderr").open("wb") as observer_diagnostics:
+                    observer = subprocess.Popen(["sudo", "-n", sys.executable, "-B", str(Path(__file__).resolve()),
+                        "observe", str(process.pid), str(directory), str(provision), str(original), str(work_parent)],
+                        stdout=subprocess.DEVNULL, stderr=observer_diagnostics)
+                    require(observer.wait(timeout=70) == 0, "actual private worker isolation observation failed")
+                isolation = read(directory / f"{NAME}-isolation.json")
+                snapshot = read(directory / f"{NAME}-snapshot.json")
+                members.extend(isolation["owned_processes"])
+                return isolation, snapshot
+
+            # Two actual sandbox lifetimes are interrupted before the sole complete
+            # inference. Later admission and EOS prove these earlier slots were released.
+            for mechanism in ("cancel", "disconnect"):
+                result["phase"] = f"private-service-{mechanism}"
+                stream, caps = connect_service(socket_path, process)
+                clients.append(stream)
+                service["capabilities"] = caps
+                request_id = send_request(stream, dict(type="submit", question=private_input["question"], context=private_input["context"]))
+                response(stream, request_id, "admitted", time.monotonic() + 5)
+                if mechanism == "cancel":
+                    other, _ = connect_service(socket_path, process)
+                    clients.append(other)
+                    busy_id = send_request(other, dict(type="submit", question="Inert second request?", context="Must not be admitted."))
+                    busy, _ = response(other, busy_id, "error", time.monotonic() + 5)
+                    require(busy["code"] == "busy", "second connection bypassed global single-task admission")
+                    other.close()
+                    service["global_busy_observed"] = True
+                proof_directory = jobs / f"{mechanism}-observation"
+                proof_directory.mkdir(mode=0o700)
+                isolated, snap = observed(proof_directory)
+                proof = dict(isolation=isolated, snapshot=snap)
+                if mechanism == "cancel":
+                    cancel_id = send_request(stream, dict(type="cancel", task_id=request_id))
+                    acknowledgement, _ = response(stream, cancel_id, "cancel_requested", time.monotonic() + 5)
+                    require(acknowledgement["task_id"] == request_id, "cancel targeted another task")
+                    terminal, boundary = response(stream, request_id, "error", time.monotonic() + 10,
+                        lambda: at_result(work_parent, original, initial, isolated, "cancel_terminal_frame_byte"))
+                    require(terminal["code"] == "cancelled", "cancel did not end through verified cleanup")
+                    proof.update(cancel_acknowledged=True, terminal_code=terminal["code"], cleanup=boundary)
+                    stream.close()
+                else:
+                    stream.close()
+                    deadline = time.monotonic() + 10
+                    while list(work_parent.iterdir()) or any(TRAIN["alive"](p) for p in isolated["owned_processes"] if p != isolated["cli"]):
+                        require(time.monotonic() < deadline and process.poll() is None, "disconnect did not reap the owned worker")
+                        time.sleep(0.05)
+                    proof.update(connection_closed_by_owner=True,
+                        cleanup=at_result(work_parent, original, initial, isolated, "disconnect_cleanup"))
+                runtime_unlocked(lock)
+                proof["runtime_lock_released"] = True
+                service[mechanism] = proof
+
+            result["phase"] = "private-service-infer-and-observe"
+            diagnostics_offset = (jobs / "private.stderr").stat().st_size
+            stream, caps = connect_service(socket_path, process)
+            clients.append(stream)
+            require(caps == service["capabilities"], "capabilities changed after cancellation")
             deadline = time.monotonic() + 610
-            process = subprocess.Popen([CLI, "compute", "private-task", "--input", str(original),
-                "--work-parent", str(work_parent), *common], stdout=subprocess.PIPE, stderr=diagnostics)
-            with (jobs / "observer.stderr").open("wb") as observer_diagnostics:
-                observer = subprocess.Popen(["sudo", "-n", sys.executable, "-B", str(Path(__file__).resolve()),
-                    "observe", str(process.pid), str(output), str(provision), str(original), str(work_parent)],
-                    stdout=subprocess.DEVNULL, stderr=observer_diagnostics)
-                require(observer.wait(timeout=70) == 0, "actual private worker isolation observation failed")
-            result["isolation"] = read(output / f"{NAME}-isolation.json")
-            result["snapshot"] = read(output / f"{NAME}-snapshot.json")
-            # Cleanup tracking may append later observations; never mutate the
-            # original evidence retained separately in the isolation record.
-            members = list(result["isolation"]["owned_processes"])
-            result["answer"], result["stdout_boundary"], code = answer(
-                process, deadline, work_parent, original, initial, result["isolation"])
-            # Preserve an actual incomplete answer honestly for diagnosis, not as PASS.
+            request_id = send_request(stream, dict(type="submit", question=private_input["question"], context=private_input["context"]))
+            response(stream, request_id, "admitted", time.monotonic() + 5)
+            result["isolation"], result["snapshot"] = observed(output)
+            final, result["result_boundary"] = response(stream, request_id, "result", deadline,
+                lambda: at_result(work_parent, original, initial, result["isolation"]))
+            result["answer"] = final["result"]
+            stream.close()
+            # Preserve actual incomplete output honestly for diagnosis, never as PASS.
             write(output / f"{NAME}-answer.json", result["answer"])
-            write(output / f"{NAME}-stdout_boundary.json", result["stdout_boundary"])
-            require(code == 0, "actual private inference did not complete")
-        result["owner_controls"] = owner_controls((jobs / "private.stderr").read_bytes())
-        write(output / f"{NAME}-owner_controls.json", result["owner_controls"])
-        check_answer(result["answer"], canary)
+            write(output / f"{NAME}-result_boundary.json", result["result_boundary"])
+            check_answer(result["answer"], canary)
+            service["one_eos_job"] = True
+            result["owner_controls"] = owner_controls((jobs / "private.stderr").read_bytes()[diagnostics_offset:])
+            write(output / f"{NAME}-owner_controls.json", result["owner_controls"])
+            process.send_signal(signal.SIGINT)
+            service["service_exit_code"] = process.wait(timeout=10)
+        raw_diagnostics = (jobs / "private.stderr").read_bytes()
+        require(len(raw_diagnostics) <= 65536 and all(text.encode() not in raw_diagnostics for text in
+            (private_input["question"], private_input["context"], canary)), "private input leaked into service diagnostics")
+        service["private_prompts_absent_from_diagnostics"] = True
+        service["stdout_empty"] = (jobs / "private.stdout").stat().st_size == 0
+        service["socket_removed"] = not socket_path.exists()
+        check_service(service, result["isolation"], initial)
+        write(output / f"{NAME}-private_service.json", service)
         result["original_after"] = identity(original)
         require(result["original_after"] == initial, "private original changed after answer")
-        with lock.open("rb") as stream:
-            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            fcntl.flock(stream, fcntl.LOCK_UN)
+        runtime_unlocked(lock)
         result["runtime_lock_released"] = True
         result["on_disk_model_after"] = TRAIN["file_hash"](model_file, MODEL["model"]["base_weights"]["bytes"])
         result["phase"] = "cleanup"
@@ -285,6 +434,8 @@ def execute(output, revision):
         # No parser text, private context, report fragments or private filenames in evidence.
         result["observed_blocker"] = type(error).__name__
     finally:
+        for client in clients:
+            client.close()
         if process is not None and process.poll() is None:
             members += TRAIN["descendants"](process.pid)
         for child in (process, observer):
@@ -333,6 +484,17 @@ def execute(output, revision):
 
 
 def self_test():
+    check_capabilities(expected_capabilities())
+    for field, replacement in (("network_access", True), ("public_cache", True),
+                               ("quarantined", True), ("execution_slots", 2), ("version", 2)):
+        invalid = expected_capabilities()
+        invalid[field] = replacement
+        try:
+            check_capabilities(invalid)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("unsafe private service capability accepted")
     canary = "CANARY12345678"
     value = dict(version=1, operation="compute_private_task", model_profile=PROFILE,
         execution_complete=True, answer_complete=True, complete=True, answer_status="eos", local_only=True,
@@ -376,15 +538,32 @@ def self_test():
         work.mkdir(mode=0o700)
         expected = identity(original)
         isolated = {"owned_processes": [], "cli": {"pid": 0}}
-        at_stdout(work, original, expected, isolated)
+        at_result(work, original, expected, isolated)
         (work / "retained-input").mkdir(mode=0o700)
         try:
-            at_stdout(work, original, expected, isolated)
+            at_result(work, original, expected, isolated)
         except ValueError:
             pass
         else:
-            raise ValueError("retained private input accepted at stdout")
-    print("private-task pure snapshot/EOS/canary/cleanup controls PASS; no model executed")
+            raise ValueError("retained private input accepted at result frame")
+    # Pure framing controls only; no fake response is counted as actual model evidence.
+    request_id = "01" * 16
+    for kind in ("valid", "wrong-id", "oversize"):
+        left, right = socket.socketpair()
+        try:
+            payload = json.dumps(dict(version=1, id=request_id if kind != "wrong-id" else "02" * 16, event="admitted")).encode()
+            left.sendall(struct.pack("!I", 65537 if kind == "oversize" else len(payload)) + payload)
+            try:
+                value, observed = response(right, request_id, "admitted", time.monotonic() + 1, lambda: "checked-before-body")
+            except ValueError:
+                require(kind != "valid", "valid private frame rejected")
+            else:
+                require(kind == "valid" and observed == "checked-before-body" and value["id"] == request_id,
+                        "invalid private frame accepted")
+        finally:
+            left.close()
+            right.close()
+    print("private-task v2 pure IPC/snapshot/EOS/canary/cleanup controls PASS; no model executed")
 
 
 def main():
@@ -406,7 +585,7 @@ def main():
         return 0
     if len(sys.argv) == 5 and sys.argv[1] == "failure":
         write(Path(sys.argv[2]) / f"{NAME}-smoke.json", dict(report_kind="volparossa-agent-private-task",
-            source_revision=sys.argv[3], success=False, scope=SCOPE, phase=sys.argv[4],
+            proof_version=2, source_revision=sys.argv[3], success=False, scope=SCOPE, phase=sys.argv[4],
             observed_blocker="GUEST_PHASE_INCOMPLETE", full_b04_claimed=False,
             confidential_remote_execution_claimed=False))
         return 1

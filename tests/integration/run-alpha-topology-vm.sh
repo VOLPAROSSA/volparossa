@@ -57,8 +57,9 @@ print_plan() {
             '  separate pending semantic review; no EOS-to-quality or distributed-execution claim.'
     elif [ "$scenario" = agent-private-task ]; then
         printf '%s\n' \
-            'Private-task: actual owner-local inference over explicitly private fixture input;' \
+            'Private-task: v2 owner-local private-serve IPC over explicitly private fixture input;' \
             '  pinned 360M CPU worker with no peer/cache publication, unchanged device limits;' \
+            '  one EOS task plus real cancellation/disconnect cleanup before result delivery;' \
             '  retain selected proof and the authorized synthetic test answer; remove guest job/model roots.'
     elif [ "$scenario" = agent-owner-cancel ]; then
         printf '%s\n' \
@@ -821,7 +822,8 @@ def collect(home, opt, revision, scenario, guest_status,
                 "agent-private-task-smoke.json", "agent-private-task-provision.json",
                 "agent-private-task-isolation.json", "agent-private-task-snapshot.json",
                 "agent-private-task-answer.json", "agent-private-task-owner_controls.json",
-                "agent-private-task-stdout_boundary.json", "agent-private-task-provision.log"))
+                "agent-private-task-stdout_boundary.json", "agent-private-task-provision.log",
+                "agent-private-task-result_boundary.json", "agent-private-task-private_service.json"))
         candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("wifi-link-*"))[:64]
                           if re.fullmatch(r"wifi-link-[a-z0-9-]+\.(json|txt|log)", path.name))
         candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("download-sharing-*"))[:64]
