@@ -998,8 +998,18 @@ The new `agent-private-task` fixture requires **proof version 2** and
 `private_service.version = 1`: observed Cancel and Disconnect worker lifetimes followed by one
 actual pinned 360M EOS answer over IPC, cleanup at the first result-frame byte, exact socket
 removal and unchanged host state. It reuses one explicit guest provision rather than adding a
-second complete inference run. Pure fixture, shell and static KVM/export-allowlist checks pass;
-**the new source-exact live model/IPC proof is pending**. The original `9d870440` direct-CLI
+second complete inference run. Pure fixture, shell and static KVM/export-allowlist checks pass.
+The [first live IPC run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36580027127)
+on `331e9a1e` failed in `private-service-cancel`: owner-only socket modes, same-owner access,
+capabilities and global busy admission were observed, but the original report retained only
+`ValueError`, not a precise failure or worker-isolation proof. It exports no completed IPC
+answer. Cleanup removed all owned objects and preserved host-state bytes, but used fallback
+signals; this is not successful ordinary cancellation/cleanup. The ten original artifact
+files and their ZIP (`f75468aecfb22ce6e0e76b481c5523a839757e9bc1c47819cc1664e3f198fdef`)
+remain unchanged. The cause is not established. A diagnostic-only fixture update now records
+fixed phase/failure codes and sanitized observer status in the existing report without private
+inputs, raw errors or worker output; acceptance checks are unchanged. **The live model/IPC
+proof remains incomplete**, including cancellation and disconnection. The original `9d870440` direct-CLI
 proof above remains evidence only for that historical source and stdout boundary; it is not
 relabeled as IPC evidence. B04, confidential offload and browser-UI integration remain open.
 See [service usage](DECENTRALIZED_AGENTS.md#application-local-private-compute-ipc) and the

@@ -32,6 +32,97 @@ SCOPE = ("v2 actual private-serve Unix IPC: one local-private synthetic EOS Q/A 
          "not a Firefox UI proof, confidential remote execution, a portable signed receipt, general answer quality or completed B04")
 ACK = re.compile(rb"compute owner_ack phase=(paused|resumed) sequence=([1-9][0-9]*) step=([0-9]+) elapsed_ms=([0-9]+)")
 
+# Only fixed source-defined strings can leave the private job root. Never export
+# str(error), traceback, raw observer/service stderr, JSON snippets or worker reports.
+CHECK_CODES = {
+    "private observer owner mismatch": "OBSERVER_OWNER_MISMATCH",
+    "private CLI disappeared before observation": "SERVICE_DISAPPEARED",
+    "unexpected private work-parent contents": "SNAPSHOT_EXTRA_CHILDREN",
+    "wrong ephemeral private directory": "SNAPSHOT_DIRECTORY_INVALID",
+    "private input snapshot was not observed": "SNAPSHOT_NOT_OBSERVED",
+    "private input was not independently snapshotted with exact bytes and permissions": "SNAPSHOT_BINDING_FAILED",
+    "observed private input changed": "SNAPSHOT_CHANGED",
+    "input must be an owned private regular file": "INPUT_FILE_INVALID",
+    "invalid artifact file": "INPUT_BYTES_INVALID",
+    "observer output/CLI owner mismatch": "OBSERVER_OUTPUT_OWNER_MISMATCH",
+    "CLI disappeared before observing worker": "SERVICE_DISAPPEARED",
+    "actual isolated Python worker was not observed": "WORKER_NOT_OBSERVED",
+    "owned process thread observation limit": "OBSERVER_THREAD_BOUND",
+    "owned process child-list limit": "OBSERVER_CHILD_LIST_BOUND",
+    "owned descendant process limit": "OBSERVER_PROCESS_BOUND",
+    "worker namespace shared with guest": "WORKER_NAMESPACE_SHARED",
+    "worker has an external network device": "WORKER_NETWORK_DEVICE",
+    "worker has an IPv4 route": "WORKER_IPV4_ROUTE",
+    "worker input mount writable": "WORKER_INPUT_WRITABLE",
+    "worker output mount missing": "WORKER_OUTPUT_MISSING",
+    "worker mounts do not reference the actual supplied files": "WORKER_INPUT_INODE_MISMATCH",
+    "host-home/private canary visible": "WORKER_HOST_INPUT_VISIBLE",
+    "worker retained capabilities": "WORKER_CAPABILITIES_PRESENT",
+    "actual private worker isolation observation failed": "OBSERVER_FAILED",
+    "private IPC deadline elapsed": "IPC_DEADLINE",
+    "private IPC disconnected before complete response": "IPC_EARLY_DISCONNECT",
+    "private IPC response exceeds protocol bound": "IPC_FRAME_BOUND",
+    "private IPC response correlation/event differs": "IPC_RESPONSE_MISMATCH",
+    "cancel targeted another task": "CANCEL_TASK_MISMATCH",
+    "cancel did not end through verified cleanup": "CANCEL_TERMINAL_MISMATCH",
+    "private temporary input/report still present at result": "RESULT_STAGING_RETAINED",
+    "original private input changed": "ORIGINAL_INPUT_CHANGED",
+    "actual private worker still alive at result": "RESULT_WORKER_ALIVE",
+    "disconnect did not reap the owned worker": "DISCONNECT_CLEANUP_FAILED",
+}
+ERROR_CODES = frozenset(CHECK_CODES.values()) | {
+    "CHECK_FAILED", "JSON_INVALID", "UTF8_INVALID", "OS_ERROR", "TIMEOUT",
+    "REPORT_KEY_MISSING", "REPORT_TYPE_INVALID", "SUBPROCESS_FAILED", "UNCLASSIFIED",
+}
+OBSERVER_STAGES = frozenset(("guard", "owner", "snapshot-wait", "snapshot-binding", "worker-isolation", "snapshot-recheck", "complete"))
+PROTOCOL_EVENTS = frozenset(("capabilities", "admitted", "result", "error", "cancel_requested"))
+PROTOCOL_ERRORS = frozenset(("busy", "invalid_request", "handshake_required", "no_such_task",
+                             "cancelled", "execution_failed", "cleanup_unconfirmed"))
+
+
+def safe_failure(error):
+    """Classify fixed assertion messages, never copy an arbitrary exception's text."""
+    if type(error) is ValueError and str(error) in CHECK_CODES:
+        code = CHECK_CODES[str(error)]
+    elif isinstance(error, json.JSONDecodeError):
+        code = "JSON_INVALID"
+    elif isinstance(error, UnicodeError):
+        code = "UTF8_INVALID"
+    elif isinstance(error, (TimeoutError, subprocess.TimeoutExpired)):
+        code = "TIMEOUT"
+    elif isinstance(error, OSError):
+        code = "OS_ERROR"
+    elif isinstance(error, KeyError):
+        code = "REPORT_KEY_MISSING"
+    elif isinstance(error, TypeError):
+        code = "REPORT_TYPE_INVALID"
+    elif isinstance(error, subprocess.SubprocessError):
+        code = "SUBPROCESS_FAILED"
+    elif isinstance(error, ValueError):
+        code = "CHECK_FAILED"
+    else:
+        code = "UNCLASSIFIED"
+    return code
+
+
+def check_observer_diagnostic(value):
+    require(type(value) is dict and set(value) == {"version", "stage", "success", "failure_code"}
+            and value["version"] == 1 and type(value["success"]) is bool
+            and value["stage"] in OBSERVER_STAGES
+            and (value["failure_code"] in ERROR_CODES if not value["success"] else
+                 value["failure_code"] is None and value["stage"] == "complete"),
+            "invalid fixed observer diagnostic")
+
+
+def observer_status_path(work_parent, output):
+    """Keep the child-to-parent diagnostic outside the exported artifact directory."""
+    jobs = work_parent.parent
+    destinations = {jobs / "cancel-observation": "cancel",
+                    jobs / "disconnect-observation": "disconnect",
+                    jobs.parent / "alpha-output": "inference"}
+    require(output in destinations, "unexpected private observer proof directory")
+    return jobs / f"observer-{destinations[output]}.json"
+
 
 def identity(path):
     info = path.lstat()
@@ -52,13 +143,16 @@ def check_snapshot(value):
             "private input was not independently snapshotted with exact bytes and permissions")
 
 
-def observe(pid, output, provision, original, work_parent):
+def observe(pid, output, provision, original, work_parent, diagnostic):
+    diagnostic["stage"] = "guard"
     TRAIN["guest_guard"](root=True)
+    diagnostic["stage"] = "owner"
     owner = TRAIN["identity"](pid)
     initial = identity(original)
     require(Path(f"/proc/{pid}").stat().st_uid == initial["uid"] == output.stat().st_uid != 0,
             "private observer owner mismatch")
     snapshot = None
+    diagnostic["stage"] = "snapshot-wait"
     for _ in range(100):
         require(TRAIN["identity"](pid) == owner, "private CLI disappeared before observation")
         children = list(work_parent.iterdir())
@@ -73,19 +167,42 @@ def observe(pid, output, provision, original, work_parent):
                 break
         time.sleep(0.1)
     require(snapshot is not None, "private input snapshot was not observed")
+    diagnostic["stage"] = "snapshot-binding"
     evidence = dict(original=initial, snapshot=identity(snapshot),
                     work_parent_mode=stat.S_IMODE(work_parent.stat().st_mode),
                     ephemeral_mode=stat.S_IMODE(snapshot.parent.stat().st_mode))
     check_snapshot(evidence)
     # The existing observer compares actual /proc/worker/root/dataset.json with this
     # new snapshot inode, not merely with a copied hash or the owner's original file.
+    diagnostic["stage"] = "worker-isolation"
     TRAIN["observe"](pid, output / f"{NAME}-isolation.json", provision, snapshot, original)
+    diagnostic["stage"] = "snapshot-recheck"
     require(identity(original) == initial and identity(snapshot) == evidence["snapshot"],
             "observed private input changed")
     target = output / f"{NAME}-snapshot.json"
     write(target, evidence)
     info = original.stat()
     os.chown(target, info.st_uid, info.st_gid)
+
+
+def observe_diagnosed(pid, output, provision, original, work_parent):
+    diagnostic = dict(version=1, stage="guard", success=False, failure_code="UNCLASSIFIED")
+    try:
+        observe(pid, output, provision, original, work_parent, diagnostic)
+        diagnostic.update(stage="complete", success=True, failure_code=None)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        diagnostic["failure_code"] = safe_failure(error)
+    check_observer_diagnostic(diagnostic)
+    # This IPC side channel stays in the exact owned jobs directory, including the
+    # inference observer whose ordinary proof files go into alpha-output. Only its
+    # validated fixed fields are later included in the existing main smoke report.
+    target = observer_status_path(work_parent, output)
+    info = target.parent.lstat()
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid != 0 and stat.S_IMODE(info.st_mode) == 0o700,
+            "invalid observer output owner")
+    write(target, diagnostic)
+    os.chown(target, info.st_uid, info.st_gid)
+    return 0 if diagnostic["success"] else 1
 
 
 def owner_controls(raw):
@@ -126,7 +243,7 @@ def send_request(stream, operation):
     return request_id
 
 
-def response(stream, request_id, event, deadline, first_byte=None):
+def response(stream, request_id, event, deadline, first_byte=None, diagnostic=None):
     def exact(length):
         raw = bytearray()
         while len(raw) < length:
@@ -142,6 +259,16 @@ def response(stream, request_id, event, deadline, first_byte=None):
     length = struct.unpack("!I", header + exact(3))[0]
     require(0 < length <= 65536, "private IPC response exceeds protocol bound")
     value = json.loads(exact(length))
+    if diagnostic is not None and type(value) is dict:
+        # A worker may have failed while the external observer was waiting. Keep
+        # only enumerated protocol states, never an unexpected result body/string.
+        diagnostic.clear()
+        diagnostic.update(expected_event=event if event in PROTOCOL_EVENTS else "unrecognized",
+                          observed_event=value.get("event") if value.get("event") in PROTOCOL_EVENTS else "unrecognized",
+                          correlated=value.get("version") == 1 and value.get("id") == request_id)
+        code = value.get("code")
+        if value.get("event") == "error":
+            diagnostic["error_code"] = code if code in PROTOCOL_ERRORS else "unrecognized"
     require(value["version"] == 1 and value["id"] == request_id and value["event"] == event,
             "private IPC response correlation/event differs")
     return value, observed
@@ -340,13 +467,28 @@ def execute(output, revision):
                 socket_parent_mode=stat.S_IMODE(jobs.stat().st_mode), same_owner_peer_verified=True)
             result["private_service"] = service
 
-            def observed(directory):
+            def service_response(stream, request_id, event, deadline, first_byte=None):
+                return response(stream, request_id, event, deadline, first_byte,
+                                service.setdefault("last_response", {}))
+
+            def observed(directory, label):
                 nonlocal observer
+                result["phase"] = f"private-service-{label}-observer-start"
                 with (jobs / "observer.stderr").open("wb") as observer_diagnostics:
                     observer = subprocess.Popen(["sudo", "-n", sys.executable, "-B", str(Path(__file__).resolve()),
                         "observe", str(process.pid), str(directory), str(provision), str(original), str(work_parent)],
                         stdout=subprocess.DEVNULL, stderr=observer_diagnostics)
-                    require(observer.wait(timeout=70) == 0, "actual private worker isolation observation failed")
+                    result["phase"] = f"private-service-{label}-observer-wait"
+                    exit_code = observer.wait(timeout=70)
+                status_path = observer_status_path(work_parent, directory)
+                diagnostics = result.setdefault("observer_diagnostics", {})
+                diagnostics[label] = dict(exit_code=exit_code, status_present=status_path.is_file())
+                if status_path.is_file():
+                    status = read(status_path, 4096)
+                    check_observer_diagnostic(status)
+                    diagnostics[label]["status"] = status
+                require(exit_code == 0, "actual private worker isolation observation failed")
+                result["phase"] = f"private-service-{label}-observer-bind"
                 isolation = read(directory / f"{NAME}-isolation.json")
                 snapshot = read(directory / f"{NAME}-snapshot.json")
                 members.extend(isolation["owned_processes"])
@@ -355,34 +497,39 @@ def execute(output, revision):
             # Two actual sandbox lifetimes are interrupted before the sole complete
             # inference. Later admission and EOS prove these earlier slots were released.
             for mechanism in ("cancel", "disconnect"):
-                result["phase"] = f"private-service-{mechanism}"
+                result["phase"] = f"private-service-{mechanism}-connect"
                 stream, caps = connect_service(socket_path, process)
                 clients.append(stream)
                 service["capabilities"] = caps
+                result["phase"] = f"private-service-{mechanism}-admission"
                 request_id = send_request(stream, dict(type="submit", question=private_input["question"], context=private_input["context"]))
-                response(stream, request_id, "admitted", time.monotonic() + 5)
+                service_response(stream, request_id, "admitted", time.monotonic() + 5)
                 if mechanism == "cancel":
+                    result["phase"] = "private-service-cancel-global-busy"
                     other, _ = connect_service(socket_path, process)
                     clients.append(other)
                     busy_id = send_request(other, dict(type="submit", question="Inert second request?", context="Must not be admitted."))
-                    busy, _ = response(other, busy_id, "error", time.monotonic() + 5)
+                    busy, _ = service_response(other, busy_id, "error", time.monotonic() + 5)
                     require(busy["code"] == "busy", "second connection bypassed global single-task admission")
                     other.close()
                     service["global_busy_observed"] = True
                 proof_directory = jobs / f"{mechanism}-observation"
                 proof_directory.mkdir(mode=0o700)
-                isolated, snap = observed(proof_directory)
+                isolated, snap = observed(proof_directory, mechanism)
                 proof = dict(isolation=isolated, snapshot=snap)
                 if mechanism == "cancel":
+                    result["phase"] = "private-service-cancel-acknowledgement"
                     cancel_id = send_request(stream, dict(type="cancel", task_id=request_id))
-                    acknowledgement, _ = response(stream, cancel_id, "cancel_requested", time.monotonic() + 5)
+                    acknowledgement, _ = service_response(stream, cancel_id, "cancel_requested", time.monotonic() + 5)
                     require(acknowledgement["task_id"] == request_id, "cancel targeted another task")
-                    terminal, boundary = response(stream, request_id, "error", time.monotonic() + 10,
+                    result["phase"] = "private-service-cancel-terminal-cleanup"
+                    terminal, boundary = service_response(stream, request_id, "error", time.monotonic() + 10,
                         lambda: at_result(work_parent, original, initial, isolated, "cancel_terminal_frame_byte"))
                     require(terminal["code"] == "cancelled", "cancel did not end through verified cleanup")
                     proof.update(cancel_acknowledged=True, terminal_code=terminal["code"], cleanup=boundary)
                     stream.close()
                 else:
+                    result["phase"] = "private-service-disconnect-cleanup"
                     stream.close()
                     deadline = time.monotonic() + 10
                     while list(work_parent.iterdir()) or any(TRAIN["alive"](p) for p in isolated["owned_processes"] if p != isolated["cli"]):
@@ -390,6 +537,7 @@ def execute(output, revision):
                         time.sleep(0.05)
                     proof.update(connection_closed_by_owner=True,
                         cleanup=at_result(work_parent, original, initial, isolated, "disconnect_cleanup"))
+                result["phase"] = f"private-service-{mechanism}-runtime-unlock"
                 runtime_unlocked(lock)
                 proof["runtime_lock_released"] = True
                 service[mechanism] = proof
@@ -401,9 +549,10 @@ def execute(output, revision):
             require(caps == service["capabilities"], "capabilities changed after cancellation")
             deadline = time.monotonic() + 610
             request_id = send_request(stream, dict(type="submit", question=private_input["question"], context=private_input["context"]))
-            response(stream, request_id, "admitted", time.monotonic() + 5)
-            result["isolation"], result["snapshot"] = observed(output)
-            final, result["result_boundary"] = response(stream, request_id, "result", deadline,
+            service_response(stream, request_id, "admitted", time.monotonic() + 5)
+            result["isolation"], result["snapshot"] = observed(output, "inference")
+            result["phase"] = "private-service-inference-terminal-cleanup"
+            final, result["result_boundary"] = service_response(stream, request_id, "result", deadline,
                 lambda: at_result(work_parent, original, initial, result["isolation"]))
             result["answer"] = final["result"]
             stream.close()
@@ -432,7 +581,7 @@ def execute(output, revision):
         result["phase"] = "cleanup"
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         # No parser text, private context, report fragments or private filenames in evidence.
-        result["observed_blocker"] = type(error).__name__
+        result["observed_blocker"] = safe_failure(error)
     finally:
         for client in clients:
             client.close()
@@ -484,6 +633,26 @@ def execute(output, revision):
 
 
 def self_test():
+    secret = "PRIVATE-CANARY-not-for-diagnostics"
+    for error in (ValueError(secret), OSError(secret), KeyError(secret), TypeError(secret),
+                  json.JSONDecodeError(secret, secret, 0), RuntimeError(secret)):
+        code = safe_failure(error)
+        require(code in ERROR_CODES and secret not in code, "exception text escaped fixed classifier")
+    require(safe_failure(ValueError("worker mounts do not reference the actual supplied files"))
+            == "WORKER_INPUT_INODE_MISMATCH", "known observer failure lost its fixed code")
+    observer_failure = dict(version=1, stage="snapshot-binding", success=False, failure_code="SNAPSHOT_BINDING_FAILED")
+    check_observer_diagnostic(observer_failure)
+    check_observer_diagnostic(dict(version=1, stage="complete", success=True, failure_code=None))
+    for field, replacement in (("private_input", secret), ("stage", secret),
+                               ("failure_code", secret), ("success", True)):
+        invalid = dict(observer_failure)
+        invalid[field] = replacement
+        try:
+            check_observer_diagnostic(invalid)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("private/unbound observer diagnostic accepted")
     check_capabilities(expected_capabilities())
     for field, replacement in (("network_access", True), ("public_cache", True),
                                ("quarantined", True), ("execution_slots", 2), ("version", 2)):
@@ -518,6 +687,17 @@ def self_test():
                    b"compute phase=preparing\ncompute phase=baseline\ncompute phase=complete\n")
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
+        observer_work = root / "jobs/work"
+        for directory in (root / "jobs/cancel-observation", root / "jobs/disconnect-observation", root / "alpha-output"):
+            status = observer_status_path(observer_work, directory)
+            require(status.parent == observer_work.parent and not status.is_relative_to(root / "alpha-output"),
+                    "observer diagnostic escaped into exported artifact directory")
+        try:
+            observer_status_path(observer_work, root / "unrecognized-output")
+        except ValueError:
+            pass
+        else:
+            raise ValueError("unknown observer output scope accepted")
         original, snapshot = root / "original", root / "snapshot"
         write(original, {"inert": "synthetic"})
         write(snapshot, {"inert": "synthetic"})
@@ -548,22 +728,38 @@ def self_test():
             raise ValueError("retained private input accepted at result frame")
     # Pure framing controls only; no fake response is counted as actual model evidence.
     request_id = "01" * 16
-    for kind in ("valid", "wrong-id", "oversize"):
+    for kind in ("valid", "wrong-id", "oversize", "worker-error", "unknown-error", "unexpected-result"):
         left, right = socket.socketpair()
         try:
-            payload = json.dumps(dict(version=1, id=request_id if kind != "wrong-id" else "02" * 16, event="admitted")).encode()
+            frame = dict(version=1, id=request_id if kind != "wrong-id" else "02" * 16, event="admitted")
+            if kind in ("worker-error", "unknown-error"):
+                frame.update(event="error", code="execution_failed" if kind == "worker-error" else secret,
+                             private_input=secret)
+            elif kind == "unexpected-result":
+                frame.update(event="result", result={"output": {"text": secret}})
+            payload = json.dumps(frame).encode()
             left.sendall(struct.pack("!I", 65537 if kind == "oversize" else len(payload)) + payload)
+            diagnostic = {}
             try:
-                value, observed = response(right, request_id, "admitted", time.monotonic() + 1, lambda: "checked-before-body")
-            except ValueError:
+                value, observed = response(right, request_id, "admitted", time.monotonic() + 1,
+                                           lambda: "checked-before-body", diagnostic)
+            except ValueError as error:
                 require(kind != "valid", "valid private frame rejected")
+                require(safe_failure(error) in ("IPC_RESPONSE_MISMATCH", "IPC_FRAME_BOUND"),
+                        "private frame failure lost its fixed classification")
             else:
                 require(kind == "valid" and observed == "checked-before-body" and value["id"] == request_id,
                         "invalid private frame accepted")
+            require(secret not in json.dumps(diagnostic), "private protocol content escaped diagnostics")
+            if kind == "worker-error":
+                require(diagnostic == dict(expected_event="admitted", observed_event="error", correlated=True,
+                                           error_code="execution_failed"), "worker error code was not safely retained")
+            elif kind == "unknown-error":
+                require(diagnostic["error_code"] == "unrecognized", "unknown private error escaped allowlist")
         finally:
             left.close()
             right.close()
-    print("private-task v2 pure IPC/snapshot/EOS/canary/cleanup controls PASS; no model executed")
+    print("private-task v2 pure IPC/snapshot/EOS/canary/cleanup/static-diagnostic controls PASS; no model executed")
 
 
 def main():
@@ -577,8 +773,7 @@ def main():
         signal.signal(signal.SIGHUP, interrupted)
         return execute(Path(sys.argv[2]), sys.argv[3])
     if len(sys.argv) == 7 and sys.argv[1] == "observe":
-        observe(int(sys.argv[2]), *(Path(x) for x in sys.argv[3:]))
-        return 0
+        return observe_diagnosed(int(sys.argv[2]), *(Path(x) for x in sys.argv[3:]))
     if len(sys.argv) == 4 and sys.argv[1] == "report":
         check_bundle(Path(sys.argv[2]), sys.argv[3])
         print("actual local-private synthetic Q/A report PASS; no confidential remote claim")
