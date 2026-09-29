@@ -3,6 +3,7 @@
 """Synthetic report/parser controls only, not a live network proof."""
 
 import copy
+import json
 from pathlib import Path
 import runpy
 import tempfile
@@ -55,6 +56,52 @@ def fixture():
 
 
 class PrivateStorageReplicaEvidence(unittest.TestCase):
+    def test_build_reads_real_file_layout_including_two_usage_objects(self):
+        valid = fixture()
+        valid["network"] = {phase: {name: values[name] for name in
+            ("selected_route", "gates", "control_privacy", "privacy")}
+            for phase, values in valid["network"].items()}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            def write(name, value):
+                (root / name).write_text(json.dumps(value, indent=2) + "\n")
+            for name in CHECK["SUMMARY_NAMES"]:
+                if name not in ("smoke", "evidence"):
+                    write(f"private-storage-replicas-{name}.json", valid[name])
+            write("a01-expected-peers.json", valid["expected_peers"])
+            for phase, values in valid["network"].items():
+                write(f"private-storage-replicas-{phase}-live-selection.json", values["selected_route"])
+                write(f"private-storage-replicas-{phase}-gates.json", values["gates"])
+                write(f"content-provider-private-storage-replicas-{phase}-control.json", values["control_privacy"])
+                for role, values_by_role in values["privacy"].items():
+                    write(f"private-storage-replicas-{phase}-privacy-{role}.json", values_by_role)
+            self.assertEqual(CHECK["build_evidence"](root), valid)
+            self.assertEqual(set(CHECK["EXPORT_NAMES"]) - {"private-storage-replicas-smoke.json",
+                "private-storage-replicas-evidence.json"}, {path.name for path in root.iterdir()})
+            usage_file = root / "private-storage-replicas-deleted_usage.json"
+            for invalid in ({}, [], [valid["deleted_usage"][0]], valid["deleted_usage"] * 2,
+                            [dict(reserved_bytes=False, committed_bytes=0, leases=0)] * 2,
+                            [dict(reserved_bytes=0, committed_bytes=0, leases=0, private_key="never")] * 2):
+                write(usage_file.name, invalid)
+                with self.assertRaises(ValueError):
+                    CHECK["build_evidence"](root)
+            write(usage_file.name, valid["deleted_usage"])
+            (root / "private-storage-replicas-finish-privacy-exit.json").unlink()
+            with self.assertRaises(FileNotFoundError):
+                CHECK["build_evidence"](root)
+
+    def test_export_names_are_exact_and_match_bounded_diagnostic_collector(self):
+        names = CHECK["EXPORT_NAMES"]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(len(names), 36)
+        driver = (HERE / "run-alpha-topology-vm.sh").read_text()
+        start = driver.index('REPLICA_NAMES = ')
+        end = driver.index('\n\ndef read_tail', start)
+        namespace = {}
+        exec(driver[start:end], namespace)
+        self.assertEqual(set(names), namespace["REPLICA_NAMES"])
+        self.assertFalse(any(name.endswith((".log", ".err", ".bin", ".key")) for name in names))
+
     def test_two_copies_actual_unavailability_survivor_bytes_and_charge_are_required(self):
         valid = fixture()
         CHECK["validate_evidence"](valid)

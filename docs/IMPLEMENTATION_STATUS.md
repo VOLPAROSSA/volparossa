@@ -128,6 +128,17 @@ Separate upload/failover/final captures and unchanged host/private cleanup are m
 Its three pure report/cleanup tests and KVM static contract pass; they do not establish runtime
 success, independent hardware, automatic repair, reciprocity or Signal interoperability.
 
+The [first replica run on `ba38a6a5`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36600197974)
+**fails during final evidence assembly**, not during the CLI upload or restores. Its retained
+phase outputs record two committed copies (524,326 bytes each), source removal, two verified
+non-consuming restores with the first service stopped, same-store reopen, selected-copy
+deletion, a further survivor restore and zero final charge. Private/topology cleanup and
+unchanged host state pass. The evidence builder rejects the intended two-element deleted-usage
+array because it reused an object-only reader. Its exporter also omitted the phase capture,
+route and completion files, so those observations cannot be independently reconstructed from
+this artifact. This is not a completed replica acceptance PASS. All 85 original files remain
+unchanged (ZIP SHA-256 `d3d67e02e7f8b81fadb414cea87ef0de449404021f47d36d820de80d0afc2fcb`).
+
 - [x] Source-exact disposable multi-node proof of the protected single-provider storage path
   and seven CLI commands (`434ed112`, run `36589770066`).
 - [x] Explicit replica-set commands: focused local two-store resume, accounting and failover checks.

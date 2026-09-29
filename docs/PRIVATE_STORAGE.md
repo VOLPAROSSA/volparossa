@@ -348,6 +348,16 @@ each core exchange retains its original 120-second limit, without automatic oper
 Three new report/cleanup tests and the KVM static contract pass; neither executes the live
 network scenario. Service withdrawal is not proof of separate physical failure domains.
 
+The [first run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36600197974) on `ba38a6a5`
+reaches the final evidence step after the actual two-copy upload, source removal, first-service
+withdrawal, repeated survivor restores, same-store reopen and explicit deletion lifecycle.
+Its aggregate metadata reports 1,048,652 charged payload bytes initially and zero finally;
+private and topology cleanup finish with unchanged host state. The overall result is still
+**FAILED**: the builder attempts to read a two-element usage array using an object-only reader.
+The first exporter also omits the separate phase route/capture/completion files, so the original
+bundle cannot independently establish all protected-path/privacy gates. The original 85 files
+are retained unchanged; a corrected collector and fresh exact-source proof are still required.
+
 ## Next end-to-end proof
 
 Extend the passing single-provider topology to the explicit replica-set commands with two

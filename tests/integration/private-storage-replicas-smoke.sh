@@ -196,10 +196,15 @@ private_storage_replicas_finalize_report() {
        cleanup:{complete:$complete,remaining_owned_objects:$remaining},host_state:($host[0] | del(.acceptance_id)),
        scope:"two explicitly pinned stores over protected routes; actual first service unavailable, source removed, verified survivor restores and selected-copy deletion; synthetic opaque bytes, not independent hardware or reciprocal contribution"}' \
         >"$WORK/private-storage-replicas-smoke.json" || return 1
-    for storage_name in smoke evidence prepare upload failover finish withdrawal deleted_usage private_cleanup isolation layout; do
-        storage_artifact=$WORK/private-storage-replicas-$storage_name.json
-        [ ! -f "$storage_artifact" ] || [ -L "$storage_artifact" ] || \
-            install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$storage_artifact" "$output_directory/$(basename -- "$storage_artifact")"
+    storage_exports=$(python3 -B "$source_directory/tests/integration/private-storage-replicas-smoke.py" export-names) || return 1
+    # Exact 36-name list includes all three capture phases even if aggregation failed.
+    # No prefix globs, raw CLI logs, grants, owner data, or journals are exported.
+    for storage_name in $storage_exports; do
+        storage_artifact=$WORK/$storage_name
+        if [ -f "$storage_artifact" ] && [ ! -L "$storage_artifact" ]; then
+            [ "$(wc -c <"$storage_artifact")" -le 1048576 ] || return 1
+            install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$storage_artifact" "$output_directory/$storage_name"
+        fi
     done
     python3 -B "$source_directory/tests/integration/private-storage-replicas-smoke.py" report \
         "$WORK/private-storage-replicas-smoke.json" "$expected_commit"

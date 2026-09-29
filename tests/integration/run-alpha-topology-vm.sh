@@ -690,6 +690,17 @@ SAFE_NAMES.update(f"{kind}-{node}.{extension}" for node in NODES
                   for kind, extension in (("agent", "log"), ("helper", "log"),
                                            ("logs", "txt"), ("status", "txt"),
                                            ("peers", "txt"), ("roles", "txt")))
+REPLICA_NAMES = {"a01-expected-peers.json"} | {
+    f"private-storage-replicas-{name}.json" for name in (
+        "smoke", "evidence", "prepare", "upload", "failover", "finish", "withdrawal",
+        "deleted_usage", "private_cleanup", "isolation", "layout")
+} | {name for phase in ("upload", "failover", "finish") for name in (
+    f"private-storage-replicas-{phase}-live-selection.json",
+    f"private-storage-replicas-{phase}-gates.json",
+    f"content-provider-private-storage-replicas-{phase}-control.json",
+    *(f"private-storage-replicas-{phase}-privacy-{role}.json"
+      for role in ("client", "relay0", "relay1", "relay2", "exit")),
+)}
 
 
 def read_tail(path, limit=FILE_LIMIT):
@@ -762,6 +773,9 @@ def collect(home, opt, revision, scenario, guest_status,
     for root, label in roots:
         if root.is_symlink() or not root.is_dir():
             continue
+        if scenario == "private-storage-replicas":
+            # Prioritize only exact sanitized source files within the existing count/byte caps.
+            candidates.extend((root / name, f"{label}/{name}") for name in sorted(REPLICA_NAMES))
         for name in sorted(SAFE_NAMES):
             candidates.append((root / name, f"{label}/{name}"))
         if scenario == "content-custody":

@@ -24,6 +24,31 @@ FILES = {"identity.key", "passphrase", "grant-a.bin", "grant-b.bin", "input.bin"
          "restore-a.bin", "restore-b.bin", "restore-survivor.bin", "identities.sha256"}
 SCOPE_FALSE = ("signal_backup_proven", "archive_encryption_proven", "independent_failure_domains_proven",
                "automatic_repair", "network_contribution_credit", "full_alpha_acceptance_claimed")
+SUMMARY_NAMES = ("smoke", "evidence", "prepare", "upload", "failover", "finish", "withdrawal",
+                 "deleted_usage", "private_cleanup", "isolation", "layout")
+EXPORT_NAMES = ("a01-expected-peers.json",) + tuple(
+    f"private-storage-replicas-{name}.json" for name in SUMMARY_NAMES
+) + tuple(name for phase in ("upload", "failover", "finish") for name in (
+    f"private-storage-replicas-{phase}-live-selection.json",
+    f"private-storage-replicas-{phase}-gates.json",
+    f"content-provider-private-storage-replicas-{phase}-control.json",
+    *(f"private-storage-replicas-{phase}-privacy-{role}.json" for role in ROLES),
+))
+
+
+def read_deleted_usage(path):
+    """The CLI produces exactly two small usage objects, not one evidence object."""
+    require(not path.is_symlink(), "symlink usage evidence is not accepted")
+    with path.open(encoding="ascii") as source:
+        text = source.read(1025)
+    require(len(text) <= 1024, "usage evidence exceeds its bound")
+    value = json.loads(text)
+    require(isinstance(value, list) and len(value) == 2, "two provider usage objects required")
+    for usage in value:
+        require(isinstance(usage, dict) and set(usage) == {"reserved_bytes", "committed_bytes", "leases"}
+                and all(type(count) is int and 0 <= count <= 2**64 - 1 for count in usage.values()),
+                "invalid provider usage object")
+    return value
 
 
 def invoke(binary, socket, args, raw=False, expected=0, deadline=180):
@@ -305,7 +330,8 @@ def validate_evidence(value):
 
 def build_evidence(work):
     value = {name: read(work / f"private-storage-replicas-{name}.json") for name in
-             ("prepare", "upload", "failover", "finish", "withdrawal", "deleted_usage", "private_cleanup", "isolation", "layout")}
+             ("prepare", "upload", "failover", "finish", "withdrawal", "private_cleanup", "isolation", "layout")}
+    value["deleted_usage"] = read_deleted_usage(work / "private-storage-replicas-deleted_usage.json")
     value.update(success=True, expected_peers=read(work / "a01-expected-peers.json"), **dict.fromkeys(SCOPE_FALSE, False))
     value["network"] = {name: dict(selected_route=read(work / f"private-storage-replicas-{name}-live-selection.json"),
         privacy={role: read(work / f"private-storage-replicas-{name}-privacy-{role}.json") for role in ROLES},
@@ -327,6 +353,9 @@ def validate_report(report, revision):
 
 def main(arguments):
     command = arguments[0]
+    if command == "export-names" and len(arguments) == 1:
+        print("\n".join(EXPORT_NAMES))
+        return
     if command == "prepare" and len(arguments) == 8:
         result = prepare(private_root(arguments[1]), *arguments[2:])
     elif command in ("upload", "failover", "finish") and len(arguments) == 6:
