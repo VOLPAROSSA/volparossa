@@ -16,6 +16,7 @@ pub use compute_control::{
 };
 mod custody;
 mod mailbox;
+mod private_storage;
 pub use content::{
     ContentCacheLimits, ContentExportRequest, ContentFetchNameRequest, ContentFetchRequest,
     ContentImportRequest, ContentLocalFetchNameRequest, ContentPolicyApplyRequest,
@@ -28,6 +29,10 @@ pub use custody::{
     ContentCustodyReady, ContentCustodyRequest,
 };
 pub use mailbox::{MailboxReady, MailboxRemoteRequest, MailboxServeRequest};
+pub use private_storage::{
+    PrivateStorageGrant, PrivateStorageGrantRequest, PrivateStorageReady,
+    PrivateStorageRemoteRequest, PrivateStorageServeRequest,
+};
 
 use prost::Message;
 use thiserror::Error;
@@ -56,7 +61,7 @@ pub struct ControlRequest {
     /// One allowlisted operation.
     #[prost(
         oneof = "control_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40"
     )]
     pub operation: Option<control_request::Operation>,
 }
@@ -70,7 +75,9 @@ pub mod control_request {
         ContentCustodyDiscoverRequest, ContentCustodyRequest, ContentExportRequest,
         ContentFetchNameRequest, ContentFetchRequest, ContentImportRequest,
         ContentLocalFetchNameRequest, ContentPolicyApplyRequest, ContentServeRequest, Empty,
-        HttpsContentFetchRequest, LogQuery, MailboxRemoteRequest, MailboxServeRequest, RoleChange,
+        HttpsContentFetchRequest, LogQuery, MailboxRemoteRequest, MailboxServeRequest,
+        PrivateStorageGrantRequest, PrivateStorageRemoteRequest, PrivateStorageServeRequest,
+        RoleChange,
     };
 
     /// Exactly one supported CLI-to-agent operation.
@@ -160,6 +167,15 @@ pub mod control_request {
         /// Durably apply an exact-object decision verified under the current configured quorum.
         #[prost(message, tag = "35")]
         ContentPolicyApply(ContentPolicyApplyRequest),
+        /// Attach an explicit owner-only private store to the protected provider service.
+        #[prost(message, tag = "38")]
+        PrivateStorageServe(PrivateStorageServeRequest),
+        /// Issue one operator-authorized provider grant to a known application public key.
+        #[prost(message, tag = "39")]
+        PrivateStorageGrant(PrivateStorageGrantRequest),
+        /// Upgrade this same socket for one provider-granted owner-signed custody operation.
+        #[prost(message, tag = "40")]
+        PrivateStorageRemote(PrivateStorageRemoteRequest),
     }
 }
 
@@ -245,7 +261,7 @@ pub struct ControlResponse {
     /// Typed response body.
     #[prost(
         oneof = "control_response::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30"
     )]
     pub payload: Option<control_response::Payload>,
 }
@@ -258,7 +274,8 @@ pub mod control_response {
         ComputeDiscovered, ComputeReady, ComputeTranscript, ContentCustodyDiscovered,
         ContentCustodyReady, ContentPolicyReceipt, ContentReceipt, ContentTransferReady, Empty,
         HttpsContentTransferReady, LogList, MailboxReady, NamedContentTransferReady, PathList,
-        PeerList, PolicySnapshot, RoleSnapshot, SessionList, StatusSnapshot,
+        PeerList, PolicySnapshot, PrivateStorageGrant, PrivateStorageReady, RoleSnapshot,
+        SessionList, StatusSnapshot,
     };
 
     /// Exactly one response body.
@@ -321,6 +338,12 @@ pub mod control_response {
         /// Authenticated current hints, not reservations or retention promises.
         #[prost(message, tag = "28")]
         ContentCustodyDiscovered(ContentCustodyDiscovered),
+        /// Original connection-bound challenge, not a successful private storage operation.
+        #[prost(message, tag = "29")]
+        PrivateStorageReady(PrivateStorageReady),
+        /// Explicit node-signed custody capability, not measured available storage.
+        #[prost(message, tag = "30")]
+        PrivateStorageGrant(PrivateStorageGrant),
     }
 }
 
@@ -735,6 +758,9 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
         control_request::Operation::ContentLocalFetchName(request) => request.validate()?,
         control_request::Operation::MailboxServe(request) => request.validate()?,
         control_request::Operation::MailboxRemote(request) => request.validate()?,
+        control_request::Operation::PrivateStorageServe(request) => request.validate()?,
+        control_request::Operation::PrivateStorageGrant(request) => request.validate()?,
+        control_request::Operation::PrivateStorageRemote(request) => request.validate()?,
         control_request::Operation::ContentCustody(request) => request.validate()?,
         control_request::Operation::ContentCustodyDiscover(request) => request.validate()?,
         control_request::Operation::ContentImport(request) => request.validate()?,
@@ -835,6 +861,8 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
         control_response::Payload::HttpsContentTransferReady(ready) => ready.validate()?,
         control_response::Payload::NamedContentTransferReady(ready) => ready.validate()?,
         control_response::Payload::MailboxReady(ready) => ready.validate()?,
+        control_response::Payload::PrivateStorageReady(ready) => ready.validate()?,
+        control_response::Payload::PrivateStorageGrant(grant) => grant.validate()?,
         control_response::Payload::ContentCustodyReady(ready) => ready.validate()?,
         control_response::Payload::ContentCustodyDiscovered(discovered) => discovered.validate()?,
         control_response::Payload::ComputeReady(ready) => ready.validate()?,
