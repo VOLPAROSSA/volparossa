@@ -105,6 +105,37 @@ def raw_files(evidence):
 
 
 class MptcpGrowthEvidence(unittest.TestCase):
+    def test_device_bound_ss_endpoint_keeps_exact_path_binding(self):
+        # Exact endpoint retained from failed run 36616966078: the kernel JOIN
+        # succeeded, but the old fixture rejected the zone after the bracket.
+        retained = "[fd76:6f6c:7061:6ea5:e1f7:3:3068:1]%vpc37a42c7a2:55687"
+        self.assertEqual(CHECK["endpoint"](retained),
+                         ("fd76:6f6c:7061:6ea5:e1f7:3:3068:1", 55687, "vpc37a42c7a2"))
+        layout = fixture()["layout"]
+        for role in ("client", "exit"):
+            raw = raw_snapshot(layout, role, 2, 0)["raw"]
+            for path in layout["paths"][:2]:
+                address = path[f"{role}_address"]
+                interface = path[f"{role}_interface"]
+                raw["tcp"] = raw["tcp"].replace(f"[{address}]:", f"[{address}]%{interface}:")
+            self.assertEqual(len(CHECK["kernel_sample"](raw, layout, role)["subflows"]), 2)
+            first = layout["paths"][0]
+            interface = first[f"{role}_interface"]
+            for replacement in ("foreign", layout["paths"][1][f"{role}_interface"]):
+                altered = dict(raw, tcp=raw["tcp"].replace(f"%{interface}:", f"%{replacement}:"))
+                with self.assertRaisesRegex(ValueError, "zone differs from exact owned path"):
+                    CHECK["kernel_sample"](altered, layout, role)
+            inside = dict(raw, tcp=raw["tcp"].replace(
+                f"]%{interface}:", f"%{interface}]:"))
+            self.assertEqual(CHECK["kernel_sample"](inside, layout, role),
+                             CHECK["kernel_sample"](raw, layout, role))
+        for invalid in ("[fd42::1%vpc1]%vpc1:1234", "[fd42::1%vpc1]%vpc2:1234",
+                        "[fd42::1]%:1234", "[fd42::1]%../vpc1:1234", "[fd42::1]%..:1234",
+                        "[fd42::1]%abcdefghijklmnop:1234", "[fd42::1]%vpc1:1234junk",
+                        "[fd42::1]%vpc1:65536", "[fd42::1]%vpc1:0"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                CHECK["endpoint"](invalid)
+
     def test_eligible_control_relay_can_be_classified_without_accepting_it_as_data_path(self):
         path = dict(path_id=3, client_interface="vpc3", exit_interface="vpe3")
         self.assertEqual(CHECK["relay_endpoint"]("not-recorded-key 48.164.4.1:41001\n",

@@ -43,11 +43,17 @@ def selected(value, peers):
 
 
 def endpoint(value):
-    match = re.fullmatch(r"\[([0-9a-fA-F:]+)(?:%[A-Za-z0-9]+)?\]:(\d+)", value)
+    # ss prints a device-bound socket as [address]%ifname:port. Retain the
+    # older [address%ifname]:port spelling too, but never two simultaneous zones.
+    zone = r"[A-Za-z0-9_.-]{1,15}"
+    match = re.fullmatch(rf"\[([0-9a-fA-F:]+)(?:%({zone}))?\](?:%({zone}))?:([0-9]{{1,5}})", value)
     require(match is not None, "expected exact IPv6 overlay socket endpoint")
-    address, port = match.groups()
+    address, inside, outside, port = match.groups()
+    require(not (inside and outside), "duplicate socket interface zone")
+    interface = inside or outside
+    require(interface not in (".", ".."), "invalid socket interface zone")
     require(0 < int(port) <= 65535, "invalid TCP port")
-    return str(ipaddress.IPv6Address(address)), int(port)
+    return str(ipaddress.IPv6Address(address)), int(port), interface
 
 
 def socket_rows(value, states=("ESTAB",)):
@@ -59,7 +65,8 @@ def socket_rows(value, states=("ESTAB",)):
         local, remote = endpoint(fields[3]), endpoint(fields[4])
         cookie = re.search(r"\bsk:([0-9a-f]+)\b", line)
         require(cookie is not None and int(cookie[1], 16) != 0, "missing kernel socket lifetime cookie")
-        rows.append(dict(local=local, remote=remote, cookie=cookie[1], state=fields[0], line=line))
+        rows.append(dict(local=local[:2], remote=remote[:2], local_interface=local[2],
+                         remote_interface=remote[2], cookie=cookie[1], state=fields[0], line=line))
     require(len(rows) <= 8, "excessive current socket rows")
     return rows
 
@@ -79,6 +86,9 @@ def subflow_record(row, layout, role, token):
                  and row["remote"][0] == path[f"{other}_address"]), None)
     require(path is not None and (row["local"] if role == "exit" else row["remote"])[1] == 44443,
             "subflow left exact selected overlay/Exit listener")
+    require(all(row[key] in (None, path[f"{direction}_interface"])
+                for key in ("local_interface", "remote_interface")),
+            "socket interface zone differs from exact owned path")
     counters = {}
     for name in ("bytes_acked", "bytes_received", "data_segs_out"):
         found = re.search(rf"\b{name}:(\d+)\b", row["line"])

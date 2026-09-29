@@ -134,6 +134,23 @@ class RefillEvidence(unittest.TestCase):
     def test_valid_synthetic_schema_not_runtime_evidence(self):
         C["validate"](self.evidence)
 
+    def test_userspace_bound_subflows_keep_refill_lifetime_and_fourth_path_gates(self):
+        evidence = copy.deepcopy(self.evidence)
+        for stage in ("baseline", "initial_progress", "warm", "warm_progress", "retiring", "retired",
+                      "refilled", "refilled_progress"):
+            layout = evidence["layout_refilled"] if stage.startswith("refilled") else evidence["layout_initial"]
+            for role in ("client", "exit"):
+                raw = evidence[stage][role]["raw"]
+                for path in layout["paths"]:
+                    raw["tcp"] = raw["tcp"].replace(f"[{path[f'{role}_address']}]:",
+                        f"[{path[f'{role}_address']}]%{path[f'{role}_interface']}:")
+            reproject(evidence, stage)
+        C["validate"](evidence)
+        evidence["refilled_progress"]["client"]["raw"]["tcp"] = evidence["refilled_progress"]["client"]["raw"]["tcp"].replace(
+            "%vpc4:", "%vpc3:")
+        with self.assertRaisesRegex(ValueError, "zone differs from exact owned path"):
+            reproject(evidence, "refilled_progress")
+
     def test_fixed_kernel_mib_projection_rejects_ambiguous_or_invalid_counters(self):
         names = list(C["MPTCP_DIAGNOSTIC_COUNTERS"])
         raw = "TcpExt: Ignored\nTcpExt: 9\nMPTcpExt: " + " ".join(names + ["UnrelatedField"]) + "\n"

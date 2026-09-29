@@ -231,3 +231,35 @@ and forged variants, and the existing real two-subflow disposable-kernel test; s
 MPTCP Clippy and formatting pass. The original artifact contains no raw event frame, so
 this source-level defect is a plausible explanation of its kernel rejection, not a captured
 event identity. A new live run is still required; failure-injection and byte gates are unchanged.
+
+### Successful initial update, then fixture socket-format rejection
+
+[Run `36616966078` on `0b2e3c59`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36616966078)
+also remains **failed**, at `mptcp-refill-application` / `MPTCP_REFILL_APPLICATION_FAILED`.
+Unlike the previous run, its first owned subflow update returns `MPTCP_ENDPOINT_UPDATED`
+at 19:17:36.502 UTC. The retained Client kernel dump contains two established TCP subflows
+under the same MPTCP token, a successful MP_JOIN and an observed ADD_ADDR. It does not
+contain the raw netlink announcement frame, so it cannot establish the exact event that
+previously failed.
+
+The baseline observer rejects the actual device-bound socket spelling
+`[fd76:6f6c:7061:6ea5:e1f7:3:3068:1]%vpc37a42c7a2:55687`: its old parser accepted the
+interface zone only inside the brackets. Consequently no baseline is accepted and the
+fixture never opens its bulk-download release gate. Roughly 62 seconds after the helper
+update the application reports an incomplete download; the retained evidence does not
+identify the precise closer or timeout. The final Exit snapshot already contains a
+closing original socket and must not be reclassified as a valid live baseline.
+
+The fixture-only correction accepts the real `ss` zone position while binding any zone
+to the exact selected local interface. Duplicate/conflicting zones, invalid or overlong
+interface names, trailing text, wrong addresses and wrong ports remain rejected. Ten
+growth and fifteen refill parser/checker tests pass, including the actual retained
+endpoint spelling. No production lifetime, loss injection, release gate or byte threshold
+changes. Re-parsing retained Client rows can recover only partial kernel observations,
+not application transfer, warm retirement or fourth-path proof.
+
+The original 118 files remain unchanged (ZIP SHA-256
+`67c4f563fc7163cce4c4888cbd395b9761d1409fde313eb1a59b44607cdf87f1`).
+Disposable cleanup reports zero remaining owned objects; before/after host-state hashes
+match at `96425b125ebfe54dd4520dd41cc437387594b268b2ead134a323b798da45ab48`.
+A fresh live run is required to establish anything beyond the corrected observer.

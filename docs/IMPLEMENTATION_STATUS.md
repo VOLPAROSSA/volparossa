@@ -144,6 +144,15 @@ correction and eight targeted kernel checks pass locally; the original artifact 
 event frame, so its precise event cause remains inferred. Cleanup and unchanged host state
 pass, but there is no new fresh-refill completion claim.
 
+The next run (`0b2e3c59`, `36616966078`) reaches `MPTCP_ENDPOINT_UPDATED` and retains two
+established Client subflows, but still fails before payload release: the fixture rejects
+the real `ss` spelling `[IPv6]%interface:port`, which leaves its baseline/download gate
+closed. The later incomplete EOF is not attributed to a particular timeout without
+evidence. A fixture-only, exact-interface-bound parser correction passes ten growth and
+fifteen refill checks; no lifetime, loss or byte requirements change. Original cleanup
+and unchanged host state pass. Its 118-file artifact remains failed: partial Client
+snapshot reconstruction is not a passed transfer or fresh-fourth-path proof.
+
 The first [Firefox integration PR](https://github.com/VOLPAROSSA/volparossa-browser/pull/1)
 is merged (`bab677ba`): isolated ESR 140.16 privacy defaults and native Strict tracking
 protection passed a real browser smoke, including preservation of user choices after restart.
