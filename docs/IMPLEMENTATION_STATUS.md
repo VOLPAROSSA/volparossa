@@ -1037,7 +1037,7 @@ See [service usage](DECENTRALIZED_AGENTS.md#application-local-private-compute-ip
 [local wire contract](../crates/volparossa/src/compute/private_serve/WIRE.md).
 
 Combined browser proof candidate (2026-09-29): the explicit `agent-private-browser` VM scenario
-pins browser integration source `96de1ab2ed9da42f718209f47505dc7a170c9e4a` and Debian ESR
+pins browser integration source `d37b74eceb527465499bcd366c9a4930b63218b2` and Debian ESR
 140.16.0, then submits the final private question through the actual Gecko sidebar and this
 same private service/model. It retains real Cancel/Disconnect checks and uses a separate
 decoded-result-before-panel-render cleanup boundary; the original v2 first-frame-byte proof
@@ -1045,6 +1045,18 @@ is unchanged. Source pins, pure report checks and the static KVM/export contract
 **Combined live execution is pending.** This is not a Firefox 157 build, native provider-selector
 integration, general answer-quality evidence or completed B04. Raw answers, private inputs,
 browser profiles and logs are excluded from the exported browser proof.
+The [first combined run on `db5059e7`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36594499298)
+failed during browser runtime staging, before model provision or any combined inference.
+Its original eight-file artifact reports `SUBPROCESS_FAILED`, not the staging stderr;
+ordinary cleanup and unchanged host-state bytes pass. Original ZIP SHA-256:
+`837ce198645fe9f8a7b4902765f2d52f50066beaeed0d471c7cd5399659aa276`.
+Separately, workspace extraction of the exact pinned Debian package reproduced a missing
+`/etc/firefox-esr` error when staging followed `browser/defaults/syspref` in a readonly-host
+sandbox with empty private `/etc`. Browser `d37b74ec` excludes that host-specific preference
+link, retaining strict handling of other runtime dependencies. The same extraction now
+stages successfully with all four pinned runtime hashes unchanged; two new staging tests
+pass. This independently reproduced defect is consistent with the failed stage, not a
+recovery of its suppressed stderr. The first run stays failed; combined execution remains pending.
 
 Current dependency-ready candidate: a single incremental provider queue now owns source and
 derived graph work. Each durable package completion triggers a dependency scan; newly ready
