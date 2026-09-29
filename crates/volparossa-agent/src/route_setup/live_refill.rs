@@ -63,10 +63,12 @@ impl ClientRouteControl {
             || route.established.exit_bundle.path_count()
                 + route.established.attempted_extension_paths.len()
                 >= 8
-            || !transport.refill_needed(Instant::now())
         {
             return Ok(ClientPathMaintenance::Unchanged);
         }
+        let Some(buddy_path) = transport.refill_sample_path(Instant::now()) else {
+            return Ok(ClientPathMaintenance::Unchanged);
+        };
         if let Some(agent) = &self.agent_state {
             let agent = agent.read().await;
             if !agent.roles().client
@@ -88,11 +90,22 @@ impl ClientRouteControl {
             return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
         }
         let available = snapshot.direct_relays();
+        let Some(buddy_grant) = owned
+            .relay_grants
+            .iter()
+            .find(|grant| grant.path_id() == buddy_path)
+        else {
+            return Ok(ClientPathMaintenance::Unchanged);
+        };
+        // The same flow that demanded refill nominated this progressing sibling. Resolve it
+        // only through the route's original verified grant and authenticated Relay authority;
+        // its current advertisement alone must not nominate an impaired or retired path.
         let Some(buddy) = owned.relay_authorities.iter().find(|peer| {
-            available.iter().any(|candidate| {
-                candidate.capability().node_id == peer.node_id
-                    && candidate.capability().peer_id == peer.peer_id
-            })
+            peer.node_id == *buddy_grant.relay_node_id()
+                && available.iter().any(|candidate| {
+                    candidate.capability().node_id == peer.node_id
+                        && candidate.capability().peer_id == peer.peer_id
+                })
         }) else {
             return Ok(ClientPathMaintenance::Unchanged);
         };

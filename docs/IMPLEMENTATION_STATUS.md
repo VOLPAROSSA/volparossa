@@ -91,6 +91,17 @@ and its exact-enumeration test; both now track the implemented tags 33–35. Fin
 cleanup is complete with unchanged host state; the earlier agent shutdown failure remains,
 with two relay retirement exchanges now specifically reporting outbound dial failures.
 
+The [next run on `4107389b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36591890165)
+remains **failed** at `MPTCP_REFILL_FRESH_PATH_MISSING`. It progresses through two fresh
+native permits and real R4/companion helper Prepare, but never completes native Ready or
+proves fresh R4 payload. The companion was original path 1/R2, explicitly blackholed by
+the saved injection: nomination chose the first advertised original Relay instead of the
+healthy sibling observed on the same flow. The candidate correction carries that progressing,
+non-lossy sibling's exact path ID into original-grant/Relay resolution. It changes no native
+readiness, timing, injected loss, application hash or cleanup gate. Synthetic regressions
+cover the nomination; no passing live refill is claimed. The failed original report retains
+complete disposable cleanup and unchanged host state.
+
 The first [Firefox integration PR](https://github.com/VOLPAROSSA/volparossa-browser/pull/1)
 is merged (`bab677ba`): isolated ESR 140.16 privacy defaults and native Strict tracking
 protection passed a real browser smoke, including preservation of user choices after restart.

@@ -92,10 +92,13 @@ struct History {
 }
 
 impl History {
-    fn demand(&mut self, samples: &[MptcpSubflowInfo], scope: &Scope, now: Instant) -> bool {
+    /// Nominate a presently progressing, non-lossy sibling from this exact flow, not just
+    /// a boolean demand. An advertised but stalled original path cannot serve as the second
+    /// path of the fresh two-path native measurement.
+    fn demand(&mut self, samples: &[MptcpSubflowInfo], scope: &Scope, now: Instant) -> Option<u32> {
         let Some(bound) = scope.bind(samples) else {
             *self = Self::default();
-            return false;
+            return None;
         };
         let mut progressing = Vec::new();
         let mut lossy = Vec::new();
@@ -159,17 +162,18 @@ impl History {
                                 >= STALLED))
             })
         });
-        let ready = primed
-            && risky.is_some_and(|risky| {
-                // No refill on an idle connection: another selected path must be carrying bytes
-                // now. A stalled path alone is not claimed to prove packet loss or extra goodput.
-                progressing
-                    .iter()
-                    .any(|path| *path != risky && !lossy.contains(path))
-            });
-        if !ready {
+        // No refill on an idle connection: another selected path must be carrying bytes now.
+        // Retain that same path identity through nomination instead of later selecting an
+        // unrelated first entry in the reservation's original Relay ordering.
+        let buddy = risky.filter(|_| primed).and_then(|risky| {
+            progressing
+                .iter()
+                .copied()
+                .find(|path| *path != risky && !lossy.contains(path))
+        });
+        if buddy.is_none() {
             self.candidate = None;
-            return false;
+            return None;
         }
         let risky = risky.expect("checked risky path");
         let since = match self.candidate {
@@ -192,7 +196,11 @@ impl History {
                             >= WARM_GRACE
                 })
             });
-        warm_unhelpful && now.duration_since(since) >= SUSTAINED_DEGRADATION
+        if warm_unhelpful && now.duration_since(since) >= SUSTAINED_DEGRADATION {
+            buddy
+        } else {
+            None
+        }
     }
 }
 
@@ -277,21 +285,26 @@ impl ClientRefillObservations {
         Ok(())
     }
 
-    pub(crate) fn refill_needed(&self, now: Instant) -> bool {
-        let Ok(mut state) = self.0.lock() else {
-            return false;
-        };
+    pub(crate) fn refill_sample_path(&self, now: Instant) -> Option<u32> {
+        let mut state = self.0.lock().ok()?;
         let State { scope, flows, .. } = &mut *state;
-        let mut demand = false;
+        let mut buddy = None;
         flows.retain_mut(|flow| {
             match flow.observer.observe(scope.tuples.len().min(MAXIMUM_PATHS)) {
-                Ok(Some(samples)) => demand |= flow.history.demand(&samples, scope, now),
+                Ok(Some(samples)) => {
+                    let observed = flow.history.demand(&samples, scope, now);
+                    buddy = buddy.or(observed);
+                }
                 Ok(None) => return false,
                 Err(_) => flow.history = History::default(),
             }
             true
         });
-        state.admit_attempt(demand, now)
+        if state.admit_attempt(buddy.is_some(), now) {
+            buddy
+        } else {
+            None
+        }
     }
 }
 

@@ -182,10 +182,10 @@ impl ClientMptcpTransport {
         Ok(())
     }
 
-    pub(crate) fn refill_needed(&self, now: Instant) -> bool {
+    pub(crate) fn refill_sample_path(&self, now: Instant) -> Option<u32> {
         self.refill_observations
             .as_ref()
-            .is_some_and(|observations| observations.refill_needed(now))
+            .and_then(|observations| observations.refill_sample_path(now))
     }
 
     /// Acquire and adopt the exact connected MPTCP descriptor for a verified Exit signal.

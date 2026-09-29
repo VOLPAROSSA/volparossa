@@ -82,3 +82,22 @@ The run's final disposable cleanup is complete and host state unchanged. Separat
 agent reports `SHUTDOWN_CLEANUP_FAILED`; two relays record `ROUTE_RETIRE_OUTBOUND_DIAL_FAILED`
 during their retirement exchanges. Those diagnostics identify a failed outbound dial, not
 its underlying cause, and are not erased by the fixture's eventual teardown.
+
+[Run 36591890165 on `4107389b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36591890165)
+remains **failed**, also at `MPTCP_REFILL_FRESH_PATH_MISSING`. The corrected candidate
+projection now reaches two fresh Exit-issued native permits and real helper Prepare on
+R4 and its sampling companion, but neither completes native Ready. No R4 attachment,
+new-path payload or complete application hash is established. Final disposable cleanup
+is complete and host state unchanged; the immutable original result is not rewritten.
+
+The saved injection and owner mapping identify the companion as original path 1/R2,
+whose Exit-facing link is deliberately blackholed at 100% loss. The production caller
+selected the first still-advertised original Relay, rather than the progressing sibling
+that caused refill demand. Thus a fresh two-path measurement unnecessarily depended on
+the already impaired path. The bounded correction retains the currently progressing,
+non-lossy sibling's path ID from that same flow observation and resolves it through the
+existing verified grant and Relay authority. Fresh A1/native readiness still has to prove
+that both nominated paths work; telemetry does not replace that authority. All timing,
+loss injection, original socket identity, payload/hash and cleanup requirements remain
+unchanged. Focused synthetic nomination tests accompany this correction; a successful
+new live refill is still pending.
