@@ -153,6 +153,17 @@ route and completion files, so those observations cannot be independently recons
 this artifact. This is not a completed replica acceptance PASS. All 85 original files remain
 unchanged (ZIP SHA-256 `d3d67e02e7f8b81fadb414cea87ef0de449404021f47d36d820de80d0afc2fcb`).
 
+The next owner-coordinated candidate adds `storage replicas replace`: a durable,
+resumable A/B-to-B/C handoff through the same protected operations. It retrieves and hashes
+the surviving copy, retains the exact replacement identity across retries, and fully reads
+back C before signing Delete for A alone. Unconfirmed operations remain charged and pending;
+temporary third-copy storage is not presented as released capacity. This is explicit owner
+orchestration, not automatic provider discovery, contribution resize or permission to move
+another owner's data. The four focused replica tests pass (11.27 seconds), including the
+new three-real-store framed-transport handoff with lost Reserve, readback and Delete replies,
+retained charge, reopen and repeated restores. This is separate from the passing two-provider
+overlay evidence above; no new live handoff proof is claimed.
+
 - [x] Source-exact disposable multi-node proof of the protected single-provider storage path
   and seven CLI commands (`434ed112`, run `36589770066`).
 - [x] Explicit replica-set commands: focused local two-store resume, accounting and failover checks.

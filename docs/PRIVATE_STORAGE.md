@@ -383,6 +383,49 @@ relabeling this earlier result.
 
 ## Next end-to-end proof
 
+### Owner-coordinated replacement candidate
+
+`storage replicas replace` performs one explicit, resumable **A/B → B/C** handoff, using
+the existing owner-signed operations and protected agent transport. It is not provider
+discovery, unattended repair or permission to move somebody else's archive. The owner
+must be online with the original identity, privately retained set and independently trusted
+replacement grant. The new grant must permit Reserve, Append, Progress, Finalize and ReadRange,
+and its retention must cover at least the original A lease.
+
+```sh
+volparossa storage replicas replace --state /absolute/replica-set \
+  --from-provider-key PROVIDER_A_KEY_HEX --provider-key PROVIDER_C_KEY_HEX \
+  --grant /absolute/provider-c.grant --lifetime-seconds 604800 \
+  --identity /absolute/owner.identity
+```
+
+No original source file is required. The command fully restores and hashes a surviving
+copy other than A/C into owner-private temporary ciphertext storage. It uploads/resumes C
+under a durable replacement archive identity, then retrieves **all of C's bytes again**
+and checks the original length/SHA-256. A committed receipt alone is insufficient. The
+survivor's committed state is reconfirmed before the owner signs Delete for **only A**.
+Neither reads nor failed attempts consume B or delete A. This proves current retrievability
+when completed, not different physical failure domains or future availability.
+
+Repeat the same command after interruption. Every incomplete retry rechecks the replacement
+before source deletion, even if an earlier process reached the deletion phase. A missing
+replacement response, quota refusal, unavailable survivor or unconfirmed A deletion remains
+`pending_handoff` with `operation_complete: false`; uncertain copies stay fully charged.
+Temporary migration therefore counts up to three full payload copies. Only A's authenticated
+deletion confirmation lowers that bound back to B/C's two copies. Lost acknowledgements reuse
+the exact retained archive/lease and idempotent deletion tombstone, not another reservation.
+
+The additive version-two manifest retains the handoff and all original provider journals.
+The existing eight-record limit includes deleted provider history; a full set cannot silently
+discard an old identity to make room. The command uses bounded RAM but requires temporary
+local disk room for one complete encrypted archive and removes its staging directory on normal
+completion/failure. This candidate does not resize a provider, change the contribution target,
+add owner-offline migration authority or claim a new passing protected-overlay handoff run.
+The targeted three-real-store framed-transport test passes, covering lost Reserve,
+replacement-read and Delete confirmations, reopen/retry and repeated non-consuming
+replacement restores. All four focused replica tests pass together in 11.27 seconds;
+this does not replace the pending real protected-overlay handoff proof.
+
 Extend the passing two-provider proof to interrupted network upload, whole-agent restart,
 source-device-offline recovery and network quota refusal, with privacy and complete cleanup
 evidence. The current proof removes the original file and withdraws one provider service;

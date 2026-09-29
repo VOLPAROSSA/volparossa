@@ -1,5 +1,7 @@
 //! Explicit owner-selected copies, retaining the existing authenticated peer transfer path.
 
+#[path = "replicas_handoff.rs"]
+mod handoff;
 #[path = "replicas_transfer.rs"]
 mod operations;
 #[path = "replicas_state.rs"]
@@ -38,6 +40,8 @@ pub(crate) enum Command {
     Renew(Renew),
     /// Explicitly delete ONE provider copy; never roll back or delete other copies.
     Delete(Delete),
+    /// Replace ONE provider, verifying the complete new copy before deleting the old one.
+    Replace(Box<Replace>),
 }
 
 #[derive(Debug, Args)]
@@ -104,6 +108,22 @@ pub(crate) struct Delete {
     existing: Existing,
 }
 
+#[derive(Debug, Args)]
+pub(crate) struct Replace {
+    /// Existing provider to retire, only after a surviving copy and replacement are verified.
+    #[arg(long, value_parser = parse_publisher_key)]
+    from_provider_key: VerifyingKey,
+    /// New independently trusted provider; never adopted from discovery or a grant response.
+    #[arg(long, value_parser = parse_publisher_key)]
+    provider_key: VerifyingKey,
+    #[arg(long)]
+    grant: PathBuf,
+    #[arg(long, default_value_t = 604_800, value_parser = clap::value_parser!(u64).range(1..=MAX_LEASE_SECONDS))]
+    lifetime_seconds: u64,
+    #[command(flatten)]
+    existing: Existing,
+}
+
 pub(in crate::storage) async fn run(command: Command, socket: &Path) -> Result<()> {
     let report = match command {
         Command::Create(args) => create(&args)?,
@@ -143,6 +163,23 @@ pub(in crate::storage) async fn run(command: Command, socket: &Path) -> Result<(
             let signer = args.existing.unlock.signer()?;
             let mut set = LockedSet::open(&args.existing.state)?;
             operations::delete(&mut set, socket, &signer, args.provider_key).await?
+        }
+        Command::Replace(args) => {
+            let signer = args.existing.unlock.signer()?;
+            let mut set = LockedSet::open(&args.existing.state)?;
+            set.check_owner(&signer)?;
+            let encoded = state::read_private(&args.grant, MAX_GRANT_BYTES as u64)?;
+            let grant = SignedStorageGrant::decode(&encoded)?
+                .verify(&args.provider_key, crate::storage::now()?)?;
+            handoff::replace(
+                &mut set,
+                socket,
+                &signer,
+                args.from_provider_key,
+                &grant,
+                args.lifetime_seconds,
+            )
+            .await?
         }
     };
     let complete = report["operation_complete"].as_bool().unwrap_or(true);

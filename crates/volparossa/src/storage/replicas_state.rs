@@ -53,6 +53,26 @@ pub(super) struct Manifest {
     pub(super) ciphertext_bytes: u64,
     pub(super) sha256: [u8; 32],
     pub(super) copies: Vec<CopyRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) handoff: Option<Handoff>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum HandoffPhase {
+    Copying,
+    DeletePending,
+    Complete,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Handoff {
+    pub(super) from: usize,
+    pub(super) to: usize,
+    pub(super) phase: HandoffPhase,
+    /// Durable intent precedes creation of the per-copy journal and all remote operations.
+    initial_journal: Journal,
 }
 
 pub(super) struct LockedSet {
@@ -110,6 +130,7 @@ impl LockedSet {
                 ciphertext_bytes: length,
                 sha256,
                 copies: Vec::new(),
+                handoff: None,
             },
         };
         for (index, journal) in journals.into_iter().enumerate() {
@@ -145,7 +166,7 @@ impl LockedSet {
         )?;
         let data: Manifest = serde_json::from_slice(&bytes).context("invalid replica manifest")?;
         ensure!(
-            data.version == 1
+            matches!(data.version, 1 | 2)
                 && (2..=MAX_COPIES).contains(&data.copies.len())
                 && (1..=MAX_ARCHIVE_BYTES).contains(&data.ciphertext_bytes),
             "invalid replica manifest scope"
@@ -160,6 +181,7 @@ impl LockedSet {
             );
         }
         let retained = Self { directory, data };
+        retained.recover_handoff_copy()?;
         for index in 0..retained.data.copies.len() {
             retained.copy(index)?;
         }
@@ -189,6 +211,158 @@ impl LockedSet {
             "replica set belongs to a different owner"
         );
         Ok(())
+    }
+
+    /// Publish the replacement identity before its first possible remote reservation.
+    pub(super) fn prepare_handoff(
+        &mut self,
+        from: &VerifyingKey,
+        grant: &VerifiedStorageGrant,
+        lifetime: u64,
+    ) -> Result<(usize, usize)> {
+        grant.current(crate::storage::now()?)?;
+        ensure!(
+            grant.owner_key().as_bytes() == &self.data.owner_key,
+            "replacement has a different owner"
+        );
+        if let Some(pending) = &self.data.handoff {
+            let matches = self.data.copies[pending.from].provider_key == from.to_bytes()
+                && self.data.copies[pending.to].provider_key == grant.provider_key().to_bytes()
+                && pending.initial_journal.grant_hex == hex::encode(grant.signed().encode());
+            if matches {
+                self.recover_handoff_copy()?;
+                return Ok((pending.from, pending.to));
+            }
+            ensure!(
+                pending.phase == HandoffPhase::Complete,
+                "another handoff is still pending"
+            );
+        }
+        ensure!(
+            self.data.copies.len() < MAX_COPIES,
+            "retained replica history has no replacement slot"
+        );
+        let from_index = self
+            .data
+            .copies
+            .iter()
+            .position(|copy| copy.provider_key == from.to_bytes())
+            .context("source provider is not in this replica set")?;
+        ensure!(
+            self.data.copies[from_index].charge != Charge::Deleted,
+            "source copy was explicitly deleted"
+        );
+        ensure!(
+            grant.provider_key().as_bytes() != &self.data.owner_key
+                && !self
+                    .data
+                    .copies
+                    .iter()
+                    .any(|copy| copy.provider_key == grant.provider_key().to_bytes()),
+            "replacement must be a new independently pinned provider"
+        );
+        ensure!(
+            grant.limits().max_payload_bytes >= self.data.ciphertext_bytes,
+            "replacement grant cannot hold the complete archive"
+        );
+        let original = self.copy(from_index)?;
+        transfer::known_target(&original.journal)?;
+        let expires = transfer::requested_expiry(grant, lifetime)?;
+        ensure!(
+            expires
+                >= original
+                    .journal
+                    .last_expiry
+                    .max(original.journal.requested_expiry),
+            "replacement retention would shorten the source lease"
+        );
+        let journal = Journal::new(grant, self.data.ciphertext_bytes, self.data.sha256, expires)?;
+        let to_index = self.data.copies.len();
+        self.data.copies.push(CopyRecord {
+            provider_key: journal.provider_key,
+            archive_id: journal.archive_id,
+            grant_sha256: Sha256::digest(hex::decode(&journal.grant_hex)?).into(),
+            charge: Charge::Unattempted,
+        });
+        self.data.handoff = Some(Handoff {
+            from: from_index,
+            to: to_index,
+            phase: HandoffPhase::Copying,
+            initial_journal: journal,
+        });
+        self.data.version = 2;
+        self.save()?;
+        self.recover_handoff_copy()?;
+        Ok((from_index, to_index))
+    }
+
+    fn recover_handoff_copy(&self) -> Result<()> {
+        let Some(handoff) = &self.data.handoff else {
+            return Ok(());
+        };
+        ensure!(
+            self.data.version == 2
+                && handoff.from < handoff.to
+                && handoff.to < self.data.copies.len(),
+            "invalid handoff identity"
+        );
+        let record = &self.data.copies[handoff.to];
+        let initial = &handoff.initial_journal;
+        let grant_sha256: [u8; 32] = Sha256::digest(hex::decode(&initial.grant_hex)?).into();
+        ensure!(
+            initial.owner_key == self.data.owner_key
+                && initial.provider_key == record.provider_key
+                && initial.archive_id == record.archive_id
+                && grant_sha256 == record.grant_sha256
+                && initial.ciphertext_bytes == self.data.ciphertext_bytes
+                && initial.sha256 == self.data.sha256
+                && initial.lease.is_none()
+                && initial.last_state.is_none()
+                && initial.last_stored_bytes == 0
+                && initial.last_expiry == 0,
+            "handoff creation intent differs from replacement identity"
+        );
+        let path = self.copy_path(handoff.to);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => return Ok(()), // copy() checks the exact private journal below.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        ensure!(
+            record.charge == Charge::Unattempted && handoff.phase == HandoffPhase::Copying,
+            "attempted handoff lost its replacement journal"
+        );
+        let staging = tempfile::Builder::new()
+            .prefix(".handoff-journal-")
+            .tempdir_in(state::anchored(&self.directory))?;
+        let staged = staging.path().join("copy");
+        let retained = LockedJournal::create(&staged, initial.clone())?;
+        rustix::fs::renameat_with(
+            rustix::fs::CWD,
+            &staged,
+            rustix::fs::CWD,
+            &path,
+            rustix::fs::RenameFlags::NOREPLACE,
+        )?;
+        self.directory.sync_all()?;
+        drop(retained);
+        Ok(())
+    }
+
+    pub(super) fn handoff_phase(&mut self, phase: HandoffPhase) -> Result<()> {
+        self.data
+            .handoff
+            .as_mut()
+            .context("missing handoff intent")?
+            .phase = phase;
+        self.save()
+    }
+
+    /// One owner-private ciphertext staging copy; no plaintext or original pathname is retained.
+    pub(super) fn handoff_staging(&self) -> Result<tempfile::TempDir> {
+        Ok(tempfile::Builder::new()
+            .prefix(".handoff-transfer-")
+            .tempdir_in(state::anchored(&self.directory))?)
     }
 
     fn copy_path(&self, index: usize) -> PathBuf {
@@ -287,6 +461,13 @@ impl LockedSet {
             "distinct_provider_identities": copies.len(), "copies": copies,
             "read_consumes_archive": false, "independent_failure_domains_proven": false,
             "network_contribution_credit": false, "automatic_repair": false,
+            "handoff": self.data.handoff.as_ref().map(|handoff| serde_json::json!({
+                "from_provider_key": hex::encode(self.data.copies[handoff.from].provider_key),
+                "replacement_provider_key": hex::encode(self.data.copies[handoff.to].provider_key),
+                "phase": handoff.phase,
+                "replacement_readback_required_before_source_delete": true,
+                "automatic_contribution_resize": false,
+            })),
         }))
     }
 }
