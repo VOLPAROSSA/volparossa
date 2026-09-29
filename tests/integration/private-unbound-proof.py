@@ -101,8 +101,11 @@ def run_case(probe, case):
         process.stdin.write(b"\x01")
         process.stdin.flush()
         stdout, stderr = process.communicate(timeout=2)
-        require(process.returncode == 0, f"PROBE_{case.upper()}_FAILED")
         require(not stdout and len(stderr) <= 4096, "PROBE_OUTPUT_BOUND")
+        result["probe_exit_code"] = process.returncode
+        if process.returncode != 0:
+            result["case_passed"] = False
+            result["fixture_error"] = f"PROBE_{case.upper()}_FAILED"
         completed = True
         return result
     finally:
@@ -120,7 +123,7 @@ def run_case(probe, case):
 
 
 def validate(report, revision):
-    require(report.get("schema") == 1 and report.get("source_revision") == revision,
+    require(report.get("schema") == 2 and report.get("source_revision") == revision,
             "REPORT_REVISION")
     require(report.get("success") is True and report.get("failure") is None, "PROOF_FAILED")
     require(report.get("report_kind") == "private-unbound-public-adapter"
@@ -137,11 +140,20 @@ def validate(report, revision):
     for case in CASES:
         require(cases[case].get("os_sentinel") is True
                 and cases[case].get("case") == case, "OS_SENTINEL_MISSING")
+        require(cases[case].get("case_passed") is True
+                and cases[case].get("probe_exit_code") == 0, "ACTUAL_CASE_FAILED")
     for case, secure in (("signed", True), ("unsigned", False)):
         result = cases[case]
         require(result.get("verdict") == "positive" and result.get("dnssec_secure") is secure
                 and result.get("ttl_seconds", 0) > 0 and result.get("address_count", 0) > 0
-                and result.get("shareable_proof") is False, "NATIVE_VERDICT_MISSING")
+                and result.get("shareable_proof") is secure, "NATIVE_VERDICT_MISSING")
+    signed = cases["signed"]
+    require(signed.get("source") == "independently_validated"
+            and signed.get("local_cache_reuse") is True
+            and signed.get("cache_ttl_not_extended") is True
+            and signed.get("proof_policy_bound") is True
+            and report.get("native_cache_linkage_proven") is True, "NATIVE_CACHE_LINKAGE_MISSING")
+    require(cases["unsigned"].get("source") == "private_unbound", "UNSIGNED_SOURCE_CHANGED")
     require(cases["bogus"].get("verdict") == "bogus", "BOGUS_NOT_REJECTED")
     for case in ("timeout", "cancel"):
         require(cases[case].get("native_worker_stopped") is True
@@ -160,12 +172,13 @@ def execute(probe, output, revision):
     require(probe == Path("/home/vpci/target/debug/examples/private-unbound-proof")
             and probe.is_file() and len(revision) == 40
             and all(char in "0123456789abcdef" for char in revision), "FIXED_PROBE_REQUIRED")
-    report = {"schema": 1, "source_revision": revision, "success": False,
+    report = {"schema": 2, "source_revision": revision, "success": False,
               "report_kind": "private-unbound-public-adapter",
               "native_package_version": subprocess.check_output(
                   ["dpkg-query", "-W", "-f=${Version}", "libunbound8"]).decode().strip(),
               "normal_client_route_proven": False, "reciprocal_client_exit_proven": False,
-              "shared_dns_proof_proven": False, "cases": {}, "failure": None}
+              "shared_dns_proof_proven": False, "native_cache_linkage_proven": False,
+              "cases": {}, "failure": None}
     for label, path in (("worker", WORKER), ("root_key", Path("/usr/share/dns/root.key")),
                         ("root_hints", Path("/usr/share/dns/root.hints"))):
         report[label + "_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -180,7 +193,18 @@ def execute(probe, output, revision):
             subprocess.run(["mount", "--bind", str(sentinel), "/etc/hosts"], check=True)
             mounted = True
             for case in CASES:
-                report["cases"][case] = run_case(probe, case)
+                started = time.monotonic()
+                try:
+                    result = run_case(probe, case)
+                except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+                    result = {"case": case, "case_passed": False,
+                              "elapsed_ms": round((time.monotonic() - started) * 1000),
+                              "fixture_error": str(error) if isinstance(error, RuntimeError)
+                              else type(error).__name__}
+                report["cases"][case] = result
+                if result.get("case_passed") is not True and report["failure"] is None:
+                    report["failure"] = result.get("fixture_error", f"PROBE_{case.upper()}_UNEXPECTED_RESULT")
+            report["native_cache_linkage_proven"] = report["cases"]["signed"].get("case_passed") is True
     except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
         # Fixed fixture errors only; no worker stderr or question output is retained.
         report["failure"] = str(error) if isinstance(error, RuntimeError) else type(error).__name__
@@ -190,6 +214,12 @@ def execute(probe, output, revision):
         report["guest_hosts_unchanged"] = (
             original_hosts == hashlib.sha256(Path("/etc/hosts").read_bytes()).hexdigest())
         report["success"] = report["failure"] is None
+        try:
+            validate(report, revision)
+        except RuntimeError as error:
+            report["success"] = False
+            if report["failure"] is None:
+                report["failure"] = str(error)
         output.write_text(json.dumps(report, indent=2) + "\n")
     validate(report, revision)
 

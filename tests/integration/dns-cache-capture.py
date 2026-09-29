@@ -75,7 +75,9 @@ def role_node(layout, role):
     return role
 
 
-def classify(layout, role, protocol, src, sport, dst, dport, payload, iface):
+def classify(layout, role, protocol, src, sport, dst, dport, payload, iface, *, frame=None):
+    # Match the shared capture engine callback. DNS classification needs only its already
+    # decoded fields; frame remains available to the engine's unchanged bounded diagnostics.
     node = role_node(layout, role)
     pair = {src, dst}
     source = ipaddress.ip_address(src)

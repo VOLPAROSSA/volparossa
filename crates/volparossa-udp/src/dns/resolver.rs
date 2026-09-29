@@ -207,7 +207,7 @@ impl ExitResolver {
                 scope.permits_peers() && self.peers.is_some(),
                 deadline,
                 self.private_peer_answer(question, scope),
-                backend.resolve(question, deadline),
+                self.private_origin_answer(backend, question, scope, deadline),
             )
             .await
             .map(|answer| self.record(answer));
@@ -292,6 +292,26 @@ impl ExitResolver {
         }
         let proof = proof::validate(bundle).await.ok()?;
         self.retain(proof, scope.policy_hash(), DnsAnswerSource::PeerValidated)
+    }
+
+    async fn private_origin_answer(
+        &self,
+        backend: &private_unbound::PrivateUnbound,
+        question: &DnsQuestion,
+        scope: &DnsResolutionScope,
+        deadline: Instant,
+    ) -> Result<ValidatedDnsAnswer, DnsResolverError> {
+        let private = backend.resolve(question, deadline).await?;
+        if let Some(proof) = private.proof {
+            if let Some(answer) = self.retain(
+                proof,
+                scope.policy_hash(),
+                DnsAnswerSource::UpstreamValidated,
+            ) {
+                return Ok(answer);
+            }
+        }
+        Ok(private.fallback)
     }
 
     /// Whether this RAM cache can currently share a verified proof under exactly this policy.

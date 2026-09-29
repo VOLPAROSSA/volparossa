@@ -162,6 +162,32 @@ class DnsNetworkEvidenceTests(unittest.TestCase):
             self.assertEqual(classify("exit2", f"10.241.{segment}.2", CHECK.PUBLIC["exit2"], dport=53,
                                      iface=iface)["unexpected_dns_packets"], 1)
 
+    def test_shared_capture_engine_frame_keyword_preserves_dns_classification(self):
+        current = fixture()["phases"]["warm-a-a"]["layout"]
+        payload = struct.pack("<I", 4) + bytes(44)
+        cases = (
+            ("client", CHECK.PUBLIC["client"], CHECK.PUBLIC["relay1"], 23000, "cr1",
+             {"client_leg_wireguard_data_datagrams": 1, "client_leg_wireguard_data_bytes": 48,
+              "relay1_client_leg_wireguard_data_datagrams": 1}),
+            ("client", CHECK.PUBLIC["client"], CHECK.PUBLIC["exit"], 23000, "underlay",
+             {"forbidden_packets": 1, "direct_client_exit_packets": 1}),
+            ("exit", "47.163.4.1", "47.163.4.2", 53, "xd",
+             {"forbidden_packets": 1, "unexpected_dns_packets": 1}),
+        )
+        for role, source, destination, dport, interface, expected in cases:
+            transport = struct.pack("!HHHH", 22000, dport, len(payload) + 8, 0) + payload
+            header = bytearray(20)
+            header[0], header[9] = 0x45, socket.IPPROTO_UDP
+            header[2:4] = struct.pack("!H", len(header) + len(transport))
+            header[12:16], header[16:20] = socket.inet_aton(source), socket.inet_aton(destination)
+            frame = bytes(12) + b"\x08\x00" + header + transport
+            packet = CAPTURE.ENGINE.decode_frame(frame)
+            # Match capture.receive exactly, including its raw-frame keyword. Calling only
+            # the adapter positionally missed the runtime TypeError in all five observers.
+            self.assertIs(CAPTURE.ENGINE.classify, CAPTURE.classify)
+            self.assertEqual(CAPTURE.ENGINE.classify(
+                current, role, *packet[1:], interface, frame=frame), expected)
+
 
 if __name__ == "__main__":
     unittest.main()

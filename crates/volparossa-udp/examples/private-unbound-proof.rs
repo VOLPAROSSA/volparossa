@@ -14,6 +14,7 @@ use std::{
 use tokio::time::{Instant, sleep, timeout};
 use volparossa_udp::{
     DnsAnswerSource, DnsQueryType, DnsQuestion, DnsResolutionScope, DnsResolverError, ExitResolver,
+    ValidatedDnsAnswer,
 };
 
 fn require_disposable_guest() -> Result<(), Box<dyn Error>> {
@@ -40,6 +41,74 @@ fn await_observer() -> Result<(), Box<dyn Error>> {
         return Err("observer did not confirm the live caller cleanup boundary".into());
     }
     Ok(())
+}
+
+const fn error_code(error: DnsResolverError) -> &'static str {
+    match error {
+        DnsResolverError::InvalidQuestion => "InvalidQuestion",
+        DnsResolverError::InvalidScope => "InvalidScope",
+        DnsResolverError::InvalidProof => "InvalidProof",
+        DnsResolverError::Unavailable => "Unavailable",
+        DnsResolverError::NameNotFound => "NameNotFound",
+        DnsResolverError::NoData => "NoData",
+        DnsResolverError::Bogus => "Bogus",
+        DnsResolverError::CleanupUnconfirmed => "CleanupUnconfirmed",
+    }
+}
+
+async fn positive_result(
+    case: &str,
+    answer: &ValidatedDnsAnswer,
+    resolver: &ExitResolver,
+    question: &DnsQuestion,
+    scope: &DnsResolutionScope,
+    elapsed_ms: u128,
+) {
+    let (source, secure) = match answer.source() {
+        DnsAnswerSource::UpstreamValidated => ("independently_validated", true),
+        DnsAnswerSource::PrivateUnbound { dnssec_secure } => ("private_unbound", dnssec_secure),
+        _ => ("unexpected_source", false),
+    };
+    let shareable = resolver
+        .cached_bundle(question, scope.policy_hash())
+        .is_some();
+    let ttl = answer.ttl_seconds();
+    let mut local_reuse = false;
+    let mut ttl_preserved = false;
+    if shareable {
+        if let Ok(cached) = resolver.resolve(question, scope).await {
+            local_reuse = cached.source() == DnsAnswerSource::LocalValidated
+                && cached.addresses() == answer.addresses();
+            ttl_preserved = cached.ttl_seconds() > 0 && cached.ttl_seconds() <= ttl;
+        }
+    }
+    let mut unrelated_policy = *scope.policy_hash();
+    unrelated_policy[0] ^= 1;
+    let policy_bound = !resolver.has_shareable_proof(&unrelated_policy)
+        && resolver
+            .cached_bundle(question, &unrelated_policy)
+            .is_none();
+    let native_matches = match case {
+        "signed" => {
+            source == "independently_validated"
+                && secure
+                && shareable
+                && local_reuse
+                && ttl_preserved
+                && policy_bound
+        }
+        "unsigned" => source == "private_unbound" && !secure && !shareable,
+        _ => false,
+    };
+    let sentinel: IpAddr = "93.184.216.34".parse().expect("fixed fixture sentinel");
+    let passed = native_matches
+        && !answer.addresses().is_empty()
+        && !answer.addresses().contains(&sentinel)
+        && ttl > 0;
+    println!(
+        "{{\"case\":\"{case}\",\"case_passed\":{passed},\"verdict\":\"positive\",\"source\":\"{source}\",\"dnssec_secure\":{secure},\"ttl_seconds\":{ttl},\"address_count\":{},\"elapsed_ms\":{elapsed_ms},\"os_sentinel\":true,\"shareable_proof\":{shareable},\"local_cache_reuse\":{local_reuse},\"cache_ttl_not_extended\":{ttl_preserved},\"proof_policy_bound\":{policy_bound}}}",
+        answer.addresses().len(),
+    );
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -71,50 +140,45 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let started = Instant::now();
     if case == "cancel" {
         let mut pending = Box::pin(resolver.resolve(&question, &scope));
-        if timeout(Duration::from_millis(500), &mut pending)
-            .await
-            .is_ok()
-        {
-            return Err("native child was not held for cancellation".into());
+        if let Ok(result) = timeout(Duration::from_millis(500), &mut pending).await {
+            let error = result.err().map_or("Positive", error_code);
+            println!(
+                "{{\"case\":\"cancel\",\"case_passed\":false,\"verdict\":\"unexpected_completion\",\"error\":\"{error}\",\"elapsed_ms\":{},\"os_sentinel\":true}}",
+                started.elapsed().as_millis()
+            );
+            return await_observer();
         }
         drop(pending);
         // The observer separately verifies the exact owned child disappears;
         // keep the caller runtime alive so process-exit is not mistaken for cleanup.
         sleep(Duration::from_secs(1)).await;
-        println!("{{\"case\":\"cancel\",\"verdict\":\"cancelled\",\"os_sentinel\":true}}");
+        println!(
+            "{{\"case\":\"cancel\",\"case_passed\":true,\"verdict\":\"cancelled\",\"elapsed_ms\":{},\"os_sentinel\":true}}",
+            started.elapsed().as_millis()
+        );
         return await_observer();
     }
     let answer = resolver.resolve(&question, &scope).await;
     let elapsed_ms = started.elapsed().as_millis();
-    match (case.as_str(), answer) {
-        ("signed" | "unsigned", Ok(answer)) => {
-            let secure = case == "signed";
-            if answer.source()
-                != (DnsAnswerSource::PrivateUnbound {
-                    dnssec_secure: secure,
-                })
-                || answer.addresses().is_empty()
-                || answer.addresses().contains(&sentinel)
-                || answer.ttl_seconds() == 0
-                || resolver
-                    .cached_bundle(&question, scope.policy_hash())
-                    .is_some()
-            {
-                return Err("native verdict, address, TTL or proof provenance differs".into());
-            }
+    match answer {
+        Ok(answer) => {
+            positive_result(case, &answer, &resolver, &question, &scope, elapsed_ms).await;
+        }
+        Err(error) => {
+            let passed = (case == "bogus" && error == DnsResolverError::Bogus)
+                || (case == "timeout"
+                    && error == DnsResolverError::Unavailable
+                    && elapsed_ms <= 5_500);
+            let verdict = match error {
+                DnsResolverError::Bogus => "bogus",
+                DnsResolverError::Unavailable => "unavailable",
+                _ => "error",
+            };
+            let code = error_code(error);
             println!(
-                "{{\"case\":\"{case}\",\"verdict\":\"positive\",\"dnssec_secure\":{secure},\"ttl_seconds\":{},\"address_count\":{},\"elapsed_ms\":{elapsed_ms},\"os_sentinel\":true,\"shareable_proof\":false}}",
-                answer.ttl_seconds(),
-                answer.addresses().len(),
+                "{{\"case\":\"{case}\",\"case_passed\":{passed},\"verdict\":\"{verdict}\",\"error\":\"{code}\",\"os_sentinel\":true,\"elapsed_ms\":{elapsed_ms}}}"
             );
         }
-        ("bogus", Err(DnsResolverError::Bogus)) => println!(
-            "{{\"case\":\"bogus\",\"verdict\":\"bogus\",\"os_sentinel\":true,\"elapsed_ms\":{elapsed_ms}}}"
-        ),
-        ("timeout", Err(DnsResolverError::Unavailable)) if elapsed_ms <= 5_500 => println!(
-            "{{\"case\":\"timeout\",\"verdict\":\"unavailable\",\"os_sentinel\":true,\"elapsed_ms\":{elapsed_ms}}}"
-        ),
-        _ => return Err("actual private resolver result did not match this fixture case".into()),
     }
     await_observer()
 }

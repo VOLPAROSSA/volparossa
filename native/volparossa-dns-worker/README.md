@@ -18,35 +18,52 @@ unconfirmed reap quarantines the backend and retains the child/concurrency slot.
 The process uses the real `ub_resolve` validator/iterator, Debian's read-only
 `/usr/share/dns/root.key` and `root.hints`, checking enabled, QNAME minimisation,
 ordinary TTLs, and no query logs or disk cache. It never reads `resolv.conf`,
-`hosts`, or a daemon configuration. Each child handles one query; there is **no
-persistent libunbound cache** between queries. The existing independently
-verified peer/RAM proof cache remains unchanged. A native `secure` verdict is
-local provenance and does not make a response shareable proof material.
+`hosts`, or a daemon configuration. One child retains one native resolver context
+for the original address lookup and up to 31 related DNSSEC evidence lookups.
+There is **no persistent libunbound cache** between resolution operations. The
+original raw answer seeds the independent Rust verifier; it requests only
+DNSKEY/DS records for that name or its ancestors, including the root DNSKEY.
+Only a successfully verified chain can enter the existing policy-scoped shared
+proof cache. A native `secure` verdict alone remains local provenance.
 
-## Version-1 pipe protocol
+## Version-2 pipe protocol
 
 The only local canonical-encoding exception is this fixed-width private FFI
 protocol; it avoids adding a Protocol Buffers runtime to the small native shim.
 It is not a peer protocol and cannot grant policy, configuration or privilege.
-Every integer uses big-endian encoding, unknown versions and trailing bytes are
-rejected, and one request/reply is followed by EOF.
+Every integer uses big-endian encoding. Unknown versions, unrelated questions,
+incorrect sequence/nonce/name/type and trailing bytes are rejected. The first
+request is A or AAAA; later requests may only obtain the related evidence above.
+At most 32 sequential exchanges share one session nonce and the original deadline.
+Closing stdin ends the session; Rust requires stdout EOF and confirmed child reaping.
 
 | Byte range | Request | Reply |
 |---|---|---|
-| 0–7 | `VPDNS001` | `VPDNS001` |
-| 8–9 | IN RR type: 1 (A) or 28 (AAAA) | status byte, then native secure boolean |
+| 0–7 | `VPDNS002` | `VPDNS002` |
+| 8–9 | IN RR type: A/AAAA initially, then DS/DNSKEY | status byte, then native secure boolean |
 | 10–11 | canonical ASCII name length, 1–253 | address count, 0–16 |
-| 12–15 | zero reserved bytes | remaining TTL in seconds |
+| 12–15 | sequence, starting at zero | remaining TTL in seconds |
 | 16–31 | opaque 16-byte request nonce | exact request nonce |
-| 32 onward | name without trailing dot | address RDATA, 4 or 16 bytes each |
+| 32–35 | name begins at byte 32 | exact request sequence |
+| 36–39 | — | raw DNS packet length, at most 4,096 |
+| 40–41 | — | exact requested RR type |
+| 42–43 | — | exact question-name length |
+| 44 onward | — | echoed name, address RDATA, then raw packet |
 
 Status values are `0=positive`, `1=unavailable`, `2=NXDOMAIN`, `3=NODATA`,
-`4=DNSSEC bogus`. Every nonpositive response is exactly 32 bytes with secure,
-count and TTL zero. Maximum request/reply sizes are 285/288 bytes. No raw native
-error, name, path or remote parser text appears in an error response. Public
+`4=DNSSEC bogus`. Every nonpositive response is exactly 44 bytes plus the echoed
+question name, with secure/count/TTL/raw length zero. Maximum request/reply sizes
+are 285/4,649 bytes. The root name is encoded as `.`; other names have no trailing
+dot. No raw native error, filesystem path or remote parser text is emitted. Public
 unicast/address-family checks stay in Rust. Unbound's TTL already includes the
 minimum CNAME/address lifetime; Rust conservatively starts that lifetime before
-the query so pipe/cleanup time can never extend it.
+the query so pipe/cleanup time can never extend it. Evidence collection strips
+unneeded authority/additional sections and AD, retains all answer RRsets/signatures,
+and validates against the built-in root anchors. Unsupported CNAME, wildcard or
+unsigned evidence is not promoted to shared proof. Optional proof collection can
+leave a usable native fallback answer, but malformed pipe data, bogus responses
+or unconfirmed cleanup still fail closed. A proof-collection timeout can return
+that already obtained answer only after confirmed child reaping.
 
 ## Build without installing or starting a resolver
 

@@ -45,19 +45,25 @@ uses recent source timings to choose a peer attempt or private recursion within
 the original five-second deadline. At most two native
 children may run; the last 500 ms is reserved for exact child termination/reaping.
 No successful or negative result is returned before that child's successful wait.
-The native `secure` verdict is recorded as `PrivateUnbound { dnssec_secure }`,
-not as a shareable proof or a wire AD assertion. Rebinding checks, exact address
-pinning and route expiry remain enforced. Each query has a fresh process: a
-persistent libunbound cache, a guarantee of the fastest source for each question,
-and independent proof extraction through the private worker are **not** claimed
-by this slice.
+The native `secure` verdict alone is recorded as `PrivateUnbound { dnssec_secure }`,
+not as a shareable proof or a wire AD assertion. The version-2 worker also supplies
+its raw answer and related DNSKEY/DS packets to the existing independent built-in-root
+verifier. Successful verification yields `UpstreamValidated`, retained under the current
+policy for local reuse and existing peer proof serving. Rebinding checks, exact address
+pinning and route expiry remain enforced. Each resolution has a fresh process; its native
+context lives only across that lookup's bounded evidence exchanges. A persistent native
+cache or a guarantee of the fastest source for every question is not claimed.
 
 See [the native boundary and versioned pipe protocol](../native/volparossa-dns-worker/README.md)
 and [opt-in configuration](../config/examples/unbound-private-exit.yaml).
-Native compilation against the hash-checked Debian library passes. Three focused
-protocol/real inert-process lifecycle tests and the strict private configuration
-test pass, together with affected-crate all-target Clippy. They do not prove recursive DNS or a deployed
-reciprocal Client+Exit path. The default stays `system` until the disposable
+Native compilation against the hash-checked Debian library passes. Nine focused
+version-2 protocol, independent-proof, source-choice and owned inert-process checks
+pass. They include seeded proof collection without a repeated address lookup, rejection
+of forged signatures despite AD, and child cleanup after cancellation/timeout. These
+local checks do not prove the new native proof-cache path in a real deployment.
+All 19 focused DNS tests, strict UDP all-target/all-feature Clippy, formatting and
+four version-2 guest-report checks also pass.
+The default stays `system` until the disposable
 real-resolver/privacy/cleanup proof below passes.
 
 ## Opt in only to an already-protected endpoint
@@ -126,8 +132,13 @@ knowledge of which source will be fastest for every individual question.
 
 Every peer attempt still requires complete route-peer exclusions and the current
 policy scope. DNSSEC validation, immutable proof/first-seen TTL bounds and address
-pinning are unchanged. Private-worker answers remain non-shareable; neither a
-fast answer nor the native secure verdict substitutes for a transferable proof.
+pinning are unchanged. A private worker now seeds the independent proof collector
+with the original raw address answer and retains one native context for the related
+DNSKEY/DS requests. Raw messages are bounded to 4 KiB and 32 exchanges; no unrelated
+address query, extra worker, listener or deadline is introduced. Query-start timestamps
+conservatively bound TTLs. Only the independently verified result becomes shareable;
+unsigned or unsupported answers retain their non-shareable native provenance. Neither
+a fast answer nor the native secure verdict substitutes for a transferable proof.
 The original five-second deadline, 500 ms cleanup reserve, two-worker limit,
 quarantine and prohibition of OS fallback remain intact.
 
@@ -185,10 +196,26 @@ preflight; it is not a skipped PASS.
 
 `private-unbound-proof.json` is **additional**, not a replacement for existing
 C05 protected peer/cache evidence. It explicitly sets
-`normal_client_route_proven`, `reciprocal_client_exit_proven` and
-`shared_dns_proof_proven` to false. The integration source and three offline
-report-parser checks exist; a passing real guest artifact is still required.
+`normal_client_route_proven` and `reciprocal_client_exit_proven` to false. The version-2
+candidate additionally requires a genuine native signed lookup to produce independent
+shareable proof and a subsequent local-cache answer. This is still distinct from a
+live peer receiving that proof; a passing new guest artifact is required.
 Only the disposable VM installs these dependencies or performs the live queries.
+
+The [first live run on `9aa777fd`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36594857358)
+**failed**, with all 137 original exported files retained. Its native worker actually resolves
+the signed test name with `dnssec_secure=true` (3,601 ms, TTL 3,595 s) and the unsigned test
+name with `dnssec_secure=false` (3,624 ms, TTL 56 s), despite the OS-positive sentinel.
+The bogus case produces `PROBE_BOGUS_NO_RESULT`; its typed Rust failure was not retained, so
+timeout versus another failure is not established. Native timeout/cancel cases were not reached.
+The original C05 phase separately obtains one independently validated upstream answer, then
+fails `DNS_CACHE_CAPTURE_INCOMPLETE`; this is not completed peer/local-cache evidence.
+Its packet observers failed with a `frame` keyword mismatch at the shared capture adapter;
+the candidate fixes that interface and passes five focused DNS capture/report checks.
+The original failed artifact is unchanged, and that fix alone proves no live C05 result.
+Guest hosts and final host-state bytes remain unchanged, and topology cleanup completes.
+Original ZIP SHA-256: `10e197cc29b4598a90962e92026f2fbd24c075833e2b223b1238840a282921e7`.
+These partial observations are real resolver evidence, not a passing full fallback/deployment proof.
 
 Focused tests cover configuration rejection, bounded CNAME/TTL/provenance parsing, malformed and
 negative responses, rebinding rejection, and an actual framed TCP backend in a disposable test

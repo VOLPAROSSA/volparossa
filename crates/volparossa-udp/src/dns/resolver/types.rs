@@ -256,7 +256,7 @@ pub enum DnsAnswerSource {
     LocalValidated,
     /// Freshly and independently validated evidence from a peer.
     PeerValidated,
-    /// Freshly validated evidence collected from the configured recursive resolver.
+    /// Fresh independently validated evidence from configured recursion or the private worker.
     UpstreamValidated,
     /// Existing trusted OS resolver semantics, without a shared DNSSEC-proof claim.
     TrustedFallback,

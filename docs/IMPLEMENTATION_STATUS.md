@@ -3263,9 +3263,14 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   Exit-side TCP backend/configuration is implemented, with targeted parser and isolated TCP
   evidence. The private inherited-pipe worker candidate now adds genuine libunbound calls,
   fixed packaged paths, at most two owned children, deadline/cancellation cleanup and a separate
-  native secure verdict. Its ABI build against hash-verified Debian libunbound 1.26.1 passes;
-  three pure protocol/real inert-process tests and strict configuration checks pass, not
-  substituted for recursive DNS; affected-crate all-target Clippy also passes.
+  native secure verdict. Its ABI build against hash-verified Debian libunbound 1.26.1 passes.
+  The version-2 candidate keeps one native context across the original address query and bounded
+  related DNSKEY/DS queries. Its raw packets feed the existing independent root verifier; only
+  validated proof enters the policy-scoped local/peer cache. Nine focused private protocol,
+  proof, source-choice and real inert-process tests pass, not substituted for live recursion
+  or a completed private-worker-to-peer proof. Initial version-1 configuration and affected-crate
+  all-target Clippy checks remain historical evidence. Version-2's 19 focused DNS tests,
+  strict UDP all-target/all-feature Clippy, formatter and four guest-report checks now pass.
   Private mode now uses RAM proofs first, then adaptive **sequential** peer/private-Unbound
   choice with bounded aggregate in-memory timings, cooldown and real-request comparison
   probes. Its focused sequencing test and strict UDP all-target/all-feature Clippy pass;
@@ -3279,6 +3284,14 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   or default switch. A separate optional Debian 13 companion builder declares the private worker
   and dependencies; existing core package construction/dependencies remain unchanged.
   See [Unbound fallback scope and readiness](UNBOUND_FALLBACK.md).
+  The [first native guest run on `9aa777fd`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36594857358)
+  **fails overall**: real signed and unsigned recursion returns the correct native secure flags
+  despite the OS-positive sentinel, but the bogus case emits no result with a retained typed
+  cause; timeout/cancel cases are not reached. The separate protected C05 phase obtains a valid
+  upstream answer and then fails `DNS_CACHE_CAPTURE_INCOMPLETE`. Original artifacts are retained;
+  guest hosts and final host-state bytes are unchanged and topology cleanup completes.
+  The capture failure is a shared observer callback's unsupported `frame` keyword; the current
+  adapter fix passes five focused DNS capture/report tests but still needs a new live run.
 
 The positive DNSSEC cache is now composed into the normal agent: the same bounded RAM resolver
 serves protected DNS, TCP resolution, general UDP and browser-QUIC destination pinning. Its peer

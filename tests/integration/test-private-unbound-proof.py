@@ -15,17 +15,22 @@ REVISION = "a" * 40
 
 
 def synthetic_report():
-    report = {"schema": 1, "source_revision": REVISION, "success": True, "failure": None,
+    report = {"schema": 2, "source_revision": REVISION, "success": True, "failure": None,
               "report_kind": "private-unbound-public-adapter",
               "native_package_version": "1.26.1-0+deb13u1",
               "worker_sha256": "b" * 64, "root_key_sha256": "c" * 64,
               "root_hints_sha256": "d" * 64,
               "normal_client_route_proven": False, "reciprocal_client_exit_proven": False,
-              "shared_dns_proof_proven": False, "guest_hosts_unchanged": True,
-              "cases": {case: {"case": case, "os_sentinel": True} for case in PROOF.CASES}}
+              "shared_dns_proof_proven": False, "native_cache_linkage_proven": True,
+              "guest_hosts_unchanged": True,
+              "cases": {case: {"case": case, "case_passed": True, "probe_exit_code": 0,
+                               "os_sentinel": True} for case in PROOF.CASES}}
     for case, secure in (("signed", True), ("unsigned", False)):
         report["cases"][case].update(verdict="positive", dnssec_secure=secure,
-                                     ttl_seconds=30, address_count=1, shareable_proof=False)
+                                     ttl_seconds=30, address_count=1, shareable_proof=secure,
+                                     source="independently_validated" if secure else "private_unbound",
+                                     local_cache_reuse=secure, cache_ttl_not_extended=secure,
+                                     proof_policy_bound=True)
     report["cases"]["bogus"]["verdict"] = "bogus"
     for case in ("timeout", "cancel"):
         report["cases"][case].update(native_worker_stopped=True, native_worker_reaped=True)
@@ -56,11 +61,24 @@ class ReportContract(unittest.TestCase):
                                    ("cancel", "native_worker_stopped", False),
                                    ("bogus", "verdict", "positive"),
                                    ("signed", "os_sentinel", False),
-                                   ("signed", "ttl_seconds", 0)):
+                                   ("signed", "ttl_seconds", 0),
+                                   ("signed", "shareable_proof", False),
+                                   ("signed", "local_cache_reuse", False),
+                                   ("signed", "cache_ttl_not_extended", False),
+                                   ("signed", "proof_policy_bound", False)):
             changed = copy.deepcopy(original)
             changed["cases"][case][field] = value
             with self.assertRaises(RuntimeError):
                 PROOF.validate(changed, REVISION)
+
+    def test_fixed_error_is_retained_without_becoming_the_expected_verdict(self):
+        changed = synthetic_report()
+        changed["cases"]["bogus"].update(case_passed=False, verdict="unavailable",
+                                        error="Unavailable", elapsed_ms=4501)
+        with self.assertRaises(RuntimeError):
+            PROOF.validate(changed, REVISION)
+        self.assertEqual(changed["cases"]["bogus"]["error"], "Unavailable")
+        self.assertEqual(changed["cases"]["bogus"]["elapsed_ms"], 4501)
 
 
 if __name__ == "__main__":
