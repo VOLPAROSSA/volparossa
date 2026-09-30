@@ -40,8 +40,8 @@ mod path_extension;
 use path_extension::ExtensionRecord;
 #[path = "engine_v3/mptcp_subflow.rs"]
 mod mptcp_subflow;
-pub(crate) use mptcp_subflow::BackendMptcpSubflow;
-use mptcp_subflow::{IssuedMptcpFlow, MAX_MPTCP_FLOWS_PER_CONTEXT};
+pub(crate) use mptcp_subflow::{BackendMptcpFlowRetirement, BackendMptcpSubflow};
+use mptcp_subflow::{MAX_MPTCP_FLOWS_PER_CONTEXT, MptcpFlowLedger};
 
 #[path = "engine_v3/uplink_sharing.rs"]
 mod uplink_sharing;
@@ -394,6 +394,7 @@ pub(crate) enum BackendAction {
     Destroy,
     AcquireTransportSocket,
     UpdateMptcpSubflow,
+    RetireMptcpFlow,
     AddMptcpEndpoint,
     RemoveMptcpEndpoint,
 }
@@ -452,6 +453,7 @@ enum MptcpEndpointMutation {
     Add(AddMptcpEndpoint),
     Remove(RemoveMptcpEndpoint),
     Subflow(BackendMptcpSubflow),
+    RetireFlow(BackendMptcpFlowRetirement),
 }
 
 /// One non-cloneable backend input. Engine rollback authority remains in `OperationOwner`.
@@ -612,7 +614,7 @@ struct ContextRecord {
     activated_at_unix: Option<u64>,
     leases: BTreeMap<(u32, i32), LeaseRecord>,
     extensions: BTreeMap<[u8; 16], ExtensionRecord>,
-    mptcp_flows: BTreeMap<[u8; 32], IssuedMptcpFlow>,
+    mptcp_flows: MptcpFlowLedger,
 }
 
 #[derive(Clone)]
@@ -686,6 +688,13 @@ pub(crate) enum BackendError {
 /// unavailable backend. A complete production adapter still requires integration tests for all of
 /// these properties.
 pub(crate) trait AsyncLeaseBackend: Send + Sync {
+    fn retire_mptcp_flow(
+        self: Arc<Self>,
+        request: BackendRequest<BackendMptcpFlowRetirement>,
+    ) -> BackendFuture<BackendCompletion<()>> {
+        let (completion, _) = request.into_parts();
+        Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
+    }
     fn update_mptcp_subflow(
         self: Arc<Self>,
         request: BackendRequest<BackendMptcpSubflow>,
@@ -1312,7 +1321,10 @@ impl HelperEngine {
         if descriptor.is_some()
             != matches!(
                 request.operation.as_ref(),
-                Some(helper_request::Operation::UpdateMptcpSubflow(_))
+                Some(
+                    helper_request::Operation::UpdateMptcpSubflow(_)
+                        | helper_request::Operation::RetireMptcpFlow(_)
+                )
             )
         {
             return execution(invalid_response(&request), None);
@@ -1614,6 +1626,17 @@ impl HelperEngine {
         }
 
         let result = match request.operation.as_ref() {
+            Some(helper_request::Operation::RetireMptcpFlow(value)) => {
+                self.retire_mptcp_flow_async(
+                    request,
+                    request_id,
+                    digest,
+                    value,
+                    descriptor.expect("validated descriptor operation"),
+                    sender,
+                )
+                .await
+            }
             Some(helper_request::Operation::UpdateMptcpSubflow(value)) => {
                 self.update_mptcp_subflow_async(
                     request,
@@ -2905,7 +2928,7 @@ impl HelperEngine {
                 activated_at_unix: None,
                 leases: records,
                 extensions: BTreeMap::new(),
-                mptcp_flows: BTreeMap::new(),
+                mptcp_flows: MptcpFlowLedger::default(),
             },
         );
         state
@@ -4680,6 +4703,12 @@ impl HelperEngine {
             action,
             token.call_deadline(),
         );
+        let retired_flow = match &mutation {
+            MptcpEndpointMutation::RetireFlow(value) => {
+                fixed::<32>(&value.operation.mptcp_flow_handle)
+            }
+            _ => None,
+        };
         let call = match mutation {
             MptcpEndpointMutation::Add(value) => {
                 let request = BackendRequest::new(binding, value);
@@ -4699,6 +4728,13 @@ impl HelperEngine {
                 let request = BackendRequest::new(binding, value);
                 self.call_backend(binding.call_deadline, move || {
                     backend.update_mptcp_subflow(request)
+                })
+                .await
+            }
+            MptcpEndpointMutation::RetireFlow(value) => {
+                let request = BackendRequest::new(binding, value);
+                self.call_backend(binding.call_deadline, move || {
+                    backend.retire_mptcp_flow(request)
                 })
                 .await
             }
@@ -4760,6 +4796,7 @@ impl HelperEngine {
                     && context_backend_lineage(context_id, context) == token.lineage()
                     && matches_handle(&context.handle, context_handle)
                     && context_owns_mptcp_path(context, path_id)
+                    && retired_flow.is_none_or(|flow| context.mptcp_flows.contains_key(&flow))
                     && deadline_live(
                         expiry_now(self.inner.clock.as_ref()),
                         context.hard_expires_at_unix,
@@ -4785,6 +4822,14 @@ impl HelperEngine {
         state
             .cleanup_pending
             .remove(&(context_id, operation.generation));
+        if let Some(flow) = retired_flow {
+            state
+                .contexts
+                .get_mut(&context_id)
+                .expect("exact committed context")
+                .mptcp_flows
+                .remove(&flow);
+        }
         state.in_flight = None;
         drop(state);
         let _ = token.settle();
@@ -6139,6 +6184,7 @@ fn insert_cache(state: &mut EngineState, request_id: [u8; 16], value: CachedResp
 fn request_context_id(request: &HelperRequest) -> Option<[u8; 16]> {
     let value = match request.operation.as_ref()? {
         helper_request::Operation::UpdateMptcpSubflow(value) => &value.route_context_id,
+        helper_request::Operation::RetireMptcpFlow(value) => &value.route_context_id,
         helper_request::Operation::PreparePathExtension(value) => &value.route_context_id,
         helper_request::Operation::ActivatePathExtension(value) => &value.route_context_id,
         helper_request::Operation::CommitPathExtension(value) => &value.route_context_id,
