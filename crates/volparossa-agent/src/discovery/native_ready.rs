@@ -131,7 +131,7 @@ impl ExitNativeReadyPlan {
     }
 }
 
-fn same_attempt(left: &NativeProbePathScope, right: &NativeProbePathScope) -> bool {
+pub(super) fn same_attempt(left: &NativeProbePathScope, right: &NativeProbePathScope) -> bool {
     // Client signatures and Exit Permits have already authenticated each complete scope. The
     // client deliberately mints a fresh ephemeral signing identity per path, alongside its
     // probe/challenge. Those fields remain pinned to that path, not shared across the attempt.

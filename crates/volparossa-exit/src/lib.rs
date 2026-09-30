@@ -24,8 +24,8 @@ pub use native_preselection::{
     AcceptedNativeProbeRelayAuthorization,
 };
 pub use reservation_v4::{
-    AcceptedExitCapacityHold, AcceptedExitConfirmation, AcceptedRelayProbePermit, ProbeEvidence,
-    ProbeEvidenceError, ProbeEvidenceVerifier,
+    AcceptedExitCapacityHold, AcceptedExitConfirmation, AcceptedRelayProbePermit,
+    AcceptedRouteExtension, ProbeEvidence, ProbeEvidenceError, ProbeEvidenceVerifier,
 };
 
 use std::{
@@ -42,7 +42,7 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpSocket, TcpStream},
-    sync::Mutex,
+    sync::{Mutex, RwLock},
     time,
 };
 use volparossa_core::{
@@ -807,6 +807,11 @@ impl ExitService {
         Ok(ActiveTcpRoute {
             route,
             reservation_id: accepted.reservation_id,
+            signed_exit_reservation: accepted.encoded.clone(),
+            relay_grants: relay_reservations
+                .iter()
+                .map(|bytes| bytes.to_vec())
+                .collect(),
         })
     }
 
@@ -903,7 +908,13 @@ impl ExitService {
         self.policy.ensure_active_at(now_ms)?;
         let dns_scope = self.dns_resolution_scope(&route.reservation_id);
         Ok(ActiveTcpEgressRoute {
-            route: route.route,
+            authority: RwLock::new(ActiveTcpAuthority {
+                route: Arc::new(route.route),
+                signed_exit_reservation: route.signed_exit_reservation,
+                relay_grants: route.relay_grants,
+                extensions: Vec::new(),
+                signed_capability: None,
+            }),
             reservation_id: route.reservation_id,
             policy: self.policy.clone(),
             flow_replay: Mutex::new(ReplayCache::new(self.config.replay_capacity)?),
@@ -1226,6 +1237,36 @@ impl ExitService {
                 .rollback(&replay_entry.0, &replay_entry.1);
         }
         result
+    }
+
+    /// Confirm that the already-bound route was adopted by its real helper/native runtime.
+    ///
+    /// Callers must supply actual successful helper commit and native listener adoption; signed
+    /// control admission alone must never invoke this transition. Original hard expiry and
+    /// reserved bandwidth are unchanged.
+    ///
+    /// # Errors
+    /// Rejects an unbound, expired or missing allocation and establishment after its setup limit.
+    pub fn mark_route_established(
+        &mut self,
+        reservation_id: &[u8; ID_BYTES],
+        now_ms: u64,
+    ) -> Result<(), ExitError> {
+        self.require_enabled()?;
+        self.policy.ensure_active_at(now_ms)?;
+        self.ensure_active_reservation(reservation_id)?;
+        let key = text_id::<ReservationId>(reservation_id)?;
+        let state = self
+            .endpoint_states
+            .get(&key)
+            .ok_or(ExitError::LeaseInvariant)?;
+        if state.phase != ExitReservationPhase::Finalized || state.expires_at_ms <= now_ms {
+            return Err(ExitError::InvalidGrant("established route scope"));
+        }
+        self.ledger_mut()?
+            .mark_tunnel_established(&key, unix_seconds(now_ms))?;
+        self.sync_metrics();
+        Ok(())
     }
 
     /// Explicitly release one route allocation.
@@ -1657,6 +1698,8 @@ impl fmt::Debug for AcceptedExitReservation {
 pub struct ActiveTcpRoute {
     route: VerifiedMptcpRoute,
     reservation_id: [u8; ID_BYTES],
+    signed_exit_reservation: Vec<u8>,
+    relay_grants: Vec<Vec<u8>>,
 }
 
 impl ActiveTcpRoute {
@@ -1679,7 +1722,7 @@ impl ActiveTcpRoute {
 /// It never creates or accepts a transport itself: callers must supply a genuine protected MPTCP
 /// TLS stream. The original [`ActiveTcpRoute`] is consumed when this value is created.
 pub struct ActiveTcpEgressRoute {
-    route: VerifiedMptcpRoute,
+    authority: RwLock<ActiveTcpAuthority>,
     reservation_id: [u8; ID_BYTES],
     policy: VerifiedManifest,
     flow_replay: Mutex<ReplayCache>,
@@ -1689,7 +1732,92 @@ pub struct ActiveTcpEgressRoute {
     dns_scope: DnsResolutionScope,
 }
 
+struct ActiveTcpAuthority {
+    route: Arc<VerifiedMptcpRoute>,
+    signed_exit_reservation: Vec<u8>,
+    relay_grants: Vec<Vec<u8>>,
+    extensions: Vec<Vec<u8>>,
+    signed_capability: Option<Vec<u8>>,
+}
+
 impl ActiveTcpEgressRoute {
+    /// Install one independently signed committed path addition after its actual helper commit.
+    ///
+    /// Only the effective authorization view changes. Original TLS identity, flow replay,
+    /// policy, route/session IDs, signed parent and expiry stay owned by this same egress task.
+    ///
+    /// # Errors
+    /// Rejects changed original authority, expiry, reordered/extra paths, altered retries or
+    /// capacity overflow. No failed verification modifies the current view.
+    pub async fn install_extension(
+        &self,
+        signed_extension: &[u8],
+        signed_relay_grant: &[u8],
+        signed_capability: &[u8],
+        now_ms: u64,
+    ) -> Result<(), ExitError> {
+        self.policy.ensure_active_at(now_ms)?;
+        let mut current = self.authority.write().await;
+        current.route.ensure_active_at(now_ms)?;
+        if current
+            .signed_capability
+            .as_ref()
+            .is_some_and(|bytes| bytes != signed_capability)
+        {
+            return Err(ExitError::InvalidGrant("extension capability changed"));
+        }
+        if let Some(index) = current
+            .extensions
+            .iter()
+            .position(|bytes| bytes == signed_extension)
+        {
+            let original_count = current.relay_grants.len() - current.extensions.len();
+            return if current.relay_grants[original_count + index] == signed_relay_grant {
+                Ok(())
+            } else {
+                Err(ExitError::InvalidGrant("extension retry grant changed"))
+            };
+        }
+        if current.relay_grants.len() >= 8 {
+            return Err(ExitError::InvalidGrant("extension path limit"));
+        }
+        let mut grants = current
+            .relay_grants
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+        grants.push(signed_relay_grant);
+        let mut extensions = current
+            .extensions
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+        extensions.push(signed_extension);
+        let next = VerifiedMptcpRoute::verify_with_extensions(
+            &current.signed_exit_reservation,
+            &grants,
+            &extensions,
+            signed_capability,
+            now_ms,
+            TimePolicy::default(),
+            &mut ReplayCache::new(64)?,
+        )?;
+        if next.reservation_id() != current.route.reservation_id()
+            || next.route_context_id() != current.route.route_context_id()
+            || next.exit_node_id() != current.route.exit_node_id()
+            || next.client_ephemeral_id() != current.route.client_ephemeral_id()
+            || next.expires_at_ms() != current.route.expires_at_ms()
+            || next.path_count() != current.route.path_count() + 1
+        {
+            return Err(ExitError::InvalidGrant("extension effective route changed"));
+        }
+        current.relay_grants.push(signed_relay_grant.to_vec());
+        current.extensions.push(signed_extension.to_vec());
+        current.signed_capability = Some(signed_capability.to_vec());
+        current.route = Arc::new(next);
+        Ok(())
+    }
+
     /// Return the still-allocated reservation identifier for completion reporting.
     #[must_use]
     pub const fn reservation_id(&self) -> &[u8; ID_BYTES] {
@@ -1711,9 +1839,10 @@ impl ActiveTcpEgressRoute {
     where
         R: AsyncRead + Unpin,
     {
-        self.route.ensure_active_at(now_ms)?;
+        let route = self.authority.read().await.route.clone();
+        route.ensure_active_at(now_ms)?;
         self.policy.ensure_active_at(now_ms)?;
-        let scope = TcpAuthorizationScope::new(&self.route, &self.policy);
+        let scope = TcpAuthorizationScope::new(&route, &self.policy);
         let mut flow_replay = self.flow_replay.lock().await;
         let result = read_authorized_open_tcp(
             reader,
@@ -1831,6 +1960,8 @@ struct ExitProbePermitState {
 
 #[derive(Clone)]
 struct ExitReservationState {
+    signed_exit_reservation: Vec<u8>,
+    extensions: HashMap<[u8; ID_BYTES], reservation_v4::extension::ExtensionState>,
     phase: ExitReservationPhase,
     route_context_id: [u8; ID_BYTES],
     client_session_id: [u8; NODE_ID_BYTES],
@@ -2576,6 +2707,7 @@ pub enum ExitError {
 
 #[cfg(test)]
 mod tests {
+    mod route_extension;
     #[tokio::test]
     async fn independent_egress_tcp_never_falls_back_when_the_selected_interface_is_absent() {
         let egress = volparossa_linux_uapi::IndependentEgress::new("vpnosuchuplink")
@@ -2687,6 +2819,8 @@ mod tests {
         0xd2,
     ];
     struct AdmittedRoute {
+        exit_key: SigningKey,
+        bundle: volparossa_reservation::VerifiedFinalizedExitBundle,
         accepted: AcceptedExitReservation,
         signed_relays: Vec<Vec<u8>>,
         coordinator: ReservationCoordinator,
@@ -3489,6 +3623,8 @@ mod tests {
         (
             service,
             AdmittedRoute {
+                exit_key,
+                bundle: verified_exit,
                 accepted,
                 signed_relays,
                 coordinator,

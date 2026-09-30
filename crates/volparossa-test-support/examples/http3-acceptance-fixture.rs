@@ -112,8 +112,13 @@ async fn main() -> FixtureResult<()> {
     match arguments.next().as_deref() {
         Some("route-layout") => {
             let context = argument(&mut arguments, "route context")?;
+            let count = arguments
+                .next()
+                .map(|value| value.parse::<u8>())
+                .transpose()?
+                .unwrap_or(3);
             reject_extra(arguments)?;
-            println!("{}", route_layout(&context)?);
+            println!("{}", route_layout_count(&context, count)?);
             Ok(())
         }
         Some("server") => {
@@ -139,14 +144,25 @@ async fn main() -> FixtureResult<()> {
             reject_extra(arguments)?;
             run_client(case, bind, remote, &certificate, run_id, &output).await
         }
-        _ => Err("usage: http3-acceptance-fixture {server|client} ... | route-layout HEX32".into()),
+        _ => Err(
+            "usage: http3-acceptance-fixture {server|client} ... | route-layout HEX32 [PATH_COUNT]"
+                .into(),
+        ),
     }
 }
 
+#[cfg(test)]
 fn route_layout(context: &str) -> FixtureResult<Value> {
+    route_layout_count(context, 3)
+}
+
+fn route_layout_count(context: &str, count: u8) -> FixtureResult<Value> {
+    if !(2..=8).contains(&count) {
+        return Err("path count must be 2..=8".into());
+    }
     let context_id = parse_run_id(context)?;
-    let mut paths = Vec::with_capacity(3);
-    for path_id in 1..=3 {
+    let mut paths = Vec::with_capacity(usize::from(count));
+    for path_id in 1..=count {
         let addresses = overlay_addresses(context_id, path_id)?;
         paths.push(json!({
             "path_id": path_id,
@@ -716,6 +732,22 @@ mod tests {
         ] {
             assert!(route_layout(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn route_layout_fresh_refill_adds_only_the_fourth_product_path() {
+        let context = "0123456789abcdef0123456789abcdef";
+        let original = route_layout_count(context, 3).unwrap();
+        let extended = route_layout_count(context, 4).unwrap();
+        let paths = extended["paths"].as_array().unwrap();
+        assert_eq!(paths.len(), 4);
+        assert_eq!(&paths[..3], original["paths"].as_array().unwrap());
+        let addresses = overlay_addresses(parse_run_id(context).unwrap(), 4).unwrap();
+        assert_eq!(paths[3]["path_id"], 4);
+        assert_eq!(paths[3]["client_address"], addresses.client.to_string());
+        assert_eq!(paths[3]["exit_address"], addresses.exit.to_string());
+        assert!(route_layout_count(context, 1).is_err());
+        assert!(route_layout_count(context, 9).is_err());
     }
 
     #[test]

@@ -83,6 +83,41 @@ async fn exchange(
     .expect("bounded real two-hop retirement exchange")
 }
 
+#[test]
+fn retirement_dial_diagnostics_are_closed_classes_not_remote_error_text() {
+    use libp2p::{core::transport::TransportError, swarm::DialError};
+    let address = "/memory/19331".parse().unwrap();
+    assert_eq!(
+        retirement_dial_failure_code(&DialError::NoAddresses),
+        "ROUTE_RETIRE_DIAL_NO_ADDRESSES"
+    );
+    let mut failure = DialError::Transport(vec![(
+        address,
+        TransportError::Other(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+    )]);
+    assert_eq!(
+        retirement_dial_failure_code(&failure),
+        "ROUTE_RETIRE_DIAL_TIMEOUT"
+    );
+    if let DialError::Transport(errors) = &mut failure {
+        errors.push((
+            "/memory/19332".parse().unwrap(),
+            TransportError::Other(std::io::Error::other("private remote transport detail")),
+        ));
+    }
+    assert_eq!(
+        retirement_dial_failure_code(&failure),
+        "ROUTE_RETIRE_DIAL_TRANSPORT_MIXED"
+    );
+    assert_eq!(
+        retirement_dial_failure_code(&DialError::Transport(vec![(
+            "/memory/19332".parse().unwrap(),
+            TransportError::Other(std::io::Error::other("private remote transport detail")),
+        )])),
+        "ROUTE_RETIRE_DIAL_TRANSPORT_OTHER"
+    );
+}
+
 #[tokio::test]
 async fn scoped_retirement_crosses_real_relay_and_exit_and_rejects_wrong_scope() {
     let (mut client, state, _client_dir) = super::super::tests::retirement_runtime_fixture();
@@ -110,6 +145,7 @@ async fn scoped_retirement_crosses_real_relay_and_exit_and_rejects_wrong_scope()
         ExitScope {
             request: request.clone(),
             relays: BTreeSet::from([*relay.service.local_peer_id()]),
+            extensions: BTreeMap::new(),
             expires_at_ms: original.expires_at_ms,
             retiring: false,
             complete: false,
@@ -173,6 +209,175 @@ async fn scoped_retirement_crosses_real_relay_and_exit_and_rejects_wrong_scope()
         ))
         .await
         .is_err()
+    );
+}
+
+fn extension_retirement_fixture(
+    exit: &DiscoveryRuntime,
+    relay: &DiscoveryRuntime,
+    session: &Identity,
+) -> (RouteExtensionScope, RouteExtension) {
+    let route = volparossa_test_support::SignedRouteFixture::new_with_path_ids(
+        &[1, 2, 3],
+        4,
+        4,
+        &[volparossa_protocol::Transport::TcpMptcp],
+        unix_millis(),
+    )
+    .unwrap();
+    let request = retirement(session);
+    let mut parent = decoded_signed_payload::<ExitReservation>(route.exit_reservation()).unwrap();
+    parent.route_context_id = request.route_context_id;
+    parent.reservation_id = request.reservation_id;
+    parent.policy_hash = request.policy_hash;
+    parent.client_session_id = request.client_session_id;
+    parent.client_session_public_key = request.client_session_public_key;
+    parent.exit_node_id = exit.local_node_id.to_vec();
+    parent.exit_peer_id = exit.service.local_peer_id().to_bytes();
+    let signed_parent = sign_control_message_with(
+        &parent,
+        exit.local_public_key,
+        parent.created_at_ms,
+        parent.expires_at_ms,
+        parent.nonce.as_slice().try_into().unwrap(),
+        TimePolicy::default(),
+        |bytes| exit.identity.sign(bytes).ok(),
+    )
+    .unwrap();
+    let scope = RouteExtensionScope {
+        extension_id: generate_nonce()[..16].to_vec(),
+        signed_exit_reservation: signed_parent,
+        finalized_bundle_hash: route.finalized_bundle_hash().to_vec(),
+        path_id: 4,
+        relay_node_id: relay.local_node_id.to_vec(),
+        relay_peer_id: relay.service.local_peer_id().to_bytes(),
+        probe_id: generate_nonce()[..16].to_vec(),
+        address_family: volparossa_protocol::ProbeAddressFamily::Ipv4 as i32,
+    };
+    // Model the Exit service's accepted Authorize result. This test exercises retained
+    // destruction authority and actual relay transport, not native probe acceptance.
+    let accepted = RouteExtension {
+        scope: Some(scope.clone()),
+        phase: RouteExtensionPhase::Authorize as i32,
+        signed_probe_permit: vec![1],
+        signed_relay_authorization: vec![1],
+        signed_confirmation_receipt: Vec::new(),
+        selected_path_ids: vec![1, 2, 3],
+        hard_expires_at_ms: parent.expires_at_ms,
+    };
+    (scope, accepted)
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one real two-hop retirement transition retains scope failures, late membership and idempotent receipts"
+)]
+async fn extension_relay_retirement_requires_exact_retained_authority_and_survives_cleanup() {
+    let (mut client, state, _client_dir) = super::super::tests::retirement_runtime_fixture();
+    let (mut relay, _, _relay_dir) = super::super::tests::retirement_runtime_fixture();
+    let (mut exit, _, _exit_dir) = super::super::tests::retirement_runtime_fixture();
+    super::super::tests::connect_runtime_client_to_control(&mut client, &mut relay.service).await;
+    super::super::tests::connect_runtime_client_to_control(&mut relay, &mut exit.service).await;
+    let session = Identity::generate();
+    let request = retirement(&session);
+    let context = fixed_bytes(&request.route_context_id).unwrap();
+    let (extension, accepted) = extension_retirement_fixture(&exit, &relay, &session);
+    let parent = extension.parent().unwrap();
+    let original_relays =
+        BTreeSet::from([Libp2pPeerId::from_bytes(&parent.control_relay_peer_id).unwrap()]);
+    assert!(relay.insert_relay_retirement(
+        context,
+        RelayScope {
+            request: request.clone(),
+            client_peer: *client.service.local_peer_id(),
+            exit_peer: *exit.service.local_peer_id(),
+            exit_node: exit.local_node_id,
+            expires_at_ms: parent.expires_at_ms,
+            retiring: false,
+            complete: false,
+        }
+    ));
+    exit.route_retire.exit.insert(
+        context,
+        ExitScope {
+            request: request.clone(),
+            relays: original_relays.clone(),
+            extensions: BTreeMap::new(),
+            expires_at_ms: parent.expires_at_ms,
+            retiring: false,
+            complete: false,
+        },
+    );
+    assert!(
+        Box::pin(exchange(
+            &mut client,
+            &mut relay,
+            &mut exit,
+            &state,
+            signed_retirement(&session, &request)
+        ))
+        .await
+        .is_err(),
+        "unknown new Relay denied"
+    );
+    let scope = exit.route_retire.exit.get_mut(&context).unwrap();
+    let mut wrong = accepted.clone();
+    wrong.scope.as_mut().unwrap().path_id = 5;
+    assert!(scope.retain_extension(&extension, &wrong).is_none());
+    wrong = accepted.clone();
+    wrong.phase = RouteExtensionPhase::Probe as i32;
+    assert!(scope.retain_extension(&extension, &wrong).is_none());
+    wrong = accepted.clone();
+    wrong.hard_expires_at_ms -= 1;
+    assert!(scope.retain_extension(&extension, &wrong).is_none());
+    scope.request.policy_hash[0] ^= 1;
+    assert!(scope.retain_extension(&extension, &accepted).is_none());
+    scope.request = request.clone();
+    assert!(scope.extensions.is_empty());
+    scope
+        .retain_extension(&extension, &accepted)
+        .expect("accepted new Relay retained");
+    scope
+        .retain_extension(&extension, &accepted)
+        .expect("exact retry is idempotent");
+    assert_eq!(
+        scope.relays, original_relays,
+        "original Finalize membership stays immutable"
+    );
+    assert_eq!(scope.extensions.len(), 1);
+    let mut substituted = extension.clone();
+    substituted.probe_id[0] ^= 1;
+    wrong = accepted.clone();
+    wrong.scope = Some(substituted.clone());
+    assert!(scope.retain_extension(&substituted, &wrong).is_none());
+    Box::pin(exchange(
+        &mut client,
+        &mut relay,
+        &mut exit,
+        &state,
+        signed_retirement(&session, &request),
+    ))
+    .await
+    .expect("new Relay receives real nested receipts");
+    assert!(relay.route_retire.relay[&context].complete);
+    assert!(exit.route_retire.exit[&context].complete);
+    Box::pin(exchange(
+        &mut client,
+        &mut relay,
+        &mut exit,
+        &state,
+        signed_retirement(&session, &request),
+    ))
+    .await
+    .expect("retry after live owners disappeared");
+    let scope = exit.route_retire.exit.get_mut(&context).unwrap();
+    substituted.extension_id = generate_nonce()[..16].to_vec();
+    substituted.path_id = 5;
+    wrong.scope = Some(substituted.clone());
+    assert!(
+        scope.retain_extension(&substituted, &wrong).is_none(),
+        "no new admission after retirement"
     );
 }
 

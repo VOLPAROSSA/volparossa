@@ -62,6 +62,12 @@ pub enum DatapathRelayOperation {
     MpquicSessionStart = 8,
     /// Retire one exact retained reservation; never a new Prepare or Start authorization.
     RouteRetire = 9,
+    /// Consume fresh native evidence for an original-route-bound extension Permit.
+    ExtensionProbe = 10,
+    /// Commit only the newly reserved Relay path, without reopening the Exit listener.
+    ExtensionCommit = 11,
+    /// Destroy only the new Relay's extension owner, never forward retirement to the Exit.
+    ExtensionAbort = 12,
 }
 
 /// Canonical direct datapath-relay request.
@@ -122,6 +128,10 @@ impl DatapathRelayRequest {
     /// # Errors
     ///
     /// Returns an error for malformed, ambiguous, oversized, or wrong-type input.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "exhaustive validation of each typed relay operation and authority shape"
+    )]
     pub fn validate(&self) -> Result<(), DatapathRelayRpcError> {
         validate_version(self.rpc_version)?;
         validate_fixed_nonzero::<REQUEST_ID_LENGTH>(&self.request_id)?;
@@ -131,6 +141,37 @@ impl DatapathRelayRequest {
             return Err(DatapathRelayRpcError::InvalidFrame);
         }
         match self.validated_operation()? {
+            DatapathRelayOperation::ExtensionProbe => {
+                validate_signed_type(
+                    &self.client_signed_request,
+                    ControlMessageType::RouteExtensionRequest,
+                )?;
+                validate_signed_type(
+                    &self.exit_signed_authorization,
+                    ControlMessageType::RelayProbePermit,
+                )
+            }
+            DatapathRelayOperation::ExtensionCommit => {
+                validate_signed_type(
+                    &self.client_signed_request,
+                    ControlMessageType::ExitReservationConfirmation,
+                )?;
+                validate_signed_type(
+                    &self.exit_signed_authorization,
+                    ControlMessageType::RouteExtension,
+                )
+            }
+            DatapathRelayOperation::ExtensionAbort => {
+                crate::route_retire::validate_request(
+                    &self.client_signed_request,
+                    self.deadline_unix_ms,
+                )
+                .map_err(|_| DatapathRelayRpcError::InvalidFrame)?;
+                validate_signed_type(
+                    &self.exit_signed_authorization,
+                    ControlMessageType::RouteExtension,
+                )
+            }
             DatapathRelayOperation::ExecuteProbe => {
                 validate_signed_type(
                     &self.client_signed_request,
@@ -396,7 +437,21 @@ impl DatapathRelayResponse {
         match self.validated_status()? {
             ForwardStatus::Granted => {
                 let expected = match operation {
-                    DatapathRelayOperation::ExecuteProbe => ControlMessageType::RelayProbeResult,
+                    DatapathRelayOperation::ExecuteProbe
+                    | DatapathRelayOperation::ExtensionProbe => {
+                        ControlMessageType::RelayProbeResult
+                    }
+                    DatapathRelayOperation::ExtensionCommit => {
+                        ControlMessageType::RouteExtensionRelayCommit
+                    }
+                    DatapathRelayOperation::ExtensionAbort => {
+                        return crate::route_retire::validate_receipt(
+                            &self.signed_response,
+                            &self.relay_node_id,
+                            false,
+                        )
+                        .map_err(|_| DatapathRelayRpcError::InvalidFrame);
+                    }
                     DatapathRelayOperation::ReservePath => ControlMessageType::RelayReservation,
                     DatapathRelayOperation::NativeProbeReady => {
                         ControlMessageType::NativeProbeRelayReady

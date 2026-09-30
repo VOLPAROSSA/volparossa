@@ -105,6 +105,71 @@ def raw_files(evidence):
 
 
 class MptcpGrowthEvidence(unittest.TestCase):
+    def test_device_bound_ss_endpoint_keeps_exact_path_binding(self):
+        # Exact endpoint retained from failed run 36616966078: the kernel JOIN
+        # succeeded, but the old fixture rejected the zone after the bracket.
+        retained = "[fd76:6f6c:7061:6ea5:e1f7:3:3068:1]%vpc37a42c7a2:55687"
+        self.assertEqual(CHECK["endpoint"](retained),
+                         ("fd76:6f6c:7061:6ea5:e1f7:3:3068:1", 55687, "vpc37a42c7a2"))
+        layout = fixture()["layout"]
+        for role in ("client", "exit"):
+            raw = raw_snapshot(layout, role, 2, 0)["raw"]
+            for path in layout["paths"][:2]:
+                address = path[f"{role}_address"]
+                interface = path[f"{role}_interface"]
+                raw["tcp"] = raw["tcp"].replace(f"[{address}]:", f"[{address}]%{interface}:")
+            self.assertEqual(len(CHECK["kernel_sample"](raw, layout, role)["subflows"]), 2)
+            first = layout["paths"][0]
+            interface = first[f"{role}_interface"]
+            for replacement in ("foreign", layout["paths"][1][f"{role}_interface"]):
+                altered = dict(raw, tcp=raw["tcp"].replace(f"%{interface}:", f"%{replacement}:"))
+                with self.assertRaisesRegex(ValueError, "zone differs from exact owned path"):
+                    CHECK["kernel_sample"](altered, layout, role)
+            inside = dict(raw, tcp=raw["tcp"].replace(
+                f"]%{interface}:", f"%{interface}]:"))
+            self.assertEqual(CHECK["kernel_sample"](inside, layout, role),
+                             CHECK["kernel_sample"](raw, layout, role))
+        for invalid in ("[fd42::1%vpc1]%vpc1:1234", "[fd42::1%vpc1]%vpc2:1234",
+                        "[fd42::1]%:1234", "[fd42::1]%../vpc1:1234", "[fd42::1]%..:1234",
+                        "[fd42::1]%abcdefghijklmnop:1234", "[fd42::1]%vpc1:1234junk",
+                        "[fd42::1]%vpc1:65536", "[fd42::1]%vpc1:0"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                CHECK["endpoint"](invalid)
+
+    def test_eligible_control_relay_can_be_classified_without_accepting_it_as_data_path(self):
+        path = dict(path_id=3, client_interface="vpc3", exit_interface="vpe3")
+        self.assertEqual(CHECK["relay_endpoint"]("not-recorded-key 48.164.4.1:41001\n",
+                         role="client", pid=1234, namespace="5678", path=path),
+                         ("48.164.4.1:41001", "relay3"))
+        evidence = fixture()
+        evidence["owners"]["client"]["paths"][2].update(relay_node="relay3", endpoint="48.164.4.1:41001")
+        with self.assertRaisesRegex(ValueError, "three distinct owned relay paths missing"):
+            CHECK["validate"](evidence)
+
+    def test_unknown_wg_endpoint_keeps_owned_context_before_disconnect_but_not_peer_key(self):
+        path = dict(path_id=2, client_interface="vpc2", exit_interface="vpe2")
+        for endpoint in ("10.241.11.2:41001", "46.162.3.1:41001", "203.0.113.99:41001"):
+            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError) as raised:
+                CHECK["relay_endpoint"](f"never-export-this-wg-key {endpoint}\n",
+                    role="client", pid=1234, namespace="5678", path=path)
+            message = str(raised.exception)
+            self.assertTrue(message.startswith("MPTCP_OWNER_UNKNOWN_RELAY_ENDPOINT "))
+            self.assertNotIn("never-export-this-wg-key", message)
+            self.assertEqual(json.loads(message.split(" ", 1)[1]), dict(
+                role="client", pid=1234, netns="5678", path_id=2, interface="vpc2", endpoint=endpoint))
+
+    def test_wg_endpoint_port_and_peer_ambiguity_stay_fail_closed(self):
+        path = dict(path_id=1, client_interface="vpc1", exit_interface="vpe1")
+        for endpoint in ("42.158.0.1:0", "42.158.0.1:65536", "42.158.0.1:-1",
+                         "42.158.0.1:x", "x" * 200):
+            with self.subTest(endpoint=endpoint), self.assertRaisesRegex(ValueError, "INVALID_RELAY_ENDPOINT"):
+                CHECK["relay_endpoint"](f"secret-key {endpoint}\n",
+                    role="exit", pid=1234, namespace="5678", path=path)
+        with self.assertRaisesRegex(ValueError, "AMBIGUOUS_WG_PEER") as raised:
+            CHECK["relay_endpoint"]("secret-one 42.158.0.1:41001\nsecret-two 44.160.1.1:41001\n",
+                role="exit", pid=1234, namespace="5678", path=path)
+        self.assertNotIn("secret", str(raised.exception))
+
     @classmethod
     def setUpClass(cls):
         cls.evidence = fixture()

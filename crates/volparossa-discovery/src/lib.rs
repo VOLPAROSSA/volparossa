@@ -1518,6 +1518,9 @@ impl DiscoveryService {
         {
             return Err(DiscoveryError::ProtocolPeer);
         }
+        if canonical.validated_operation()? == ExitForwardOperation::RouteRetire {
+            self.restore_retirement_exit_addresses(*exit_peer);
+        }
         Ok(self
             .swarm
             .behaviour_mut()
@@ -1629,6 +1632,39 @@ impl DiscoveryService {
             .map_err(|_| {
                 DiscoveryError::Swarm("exit-forward-upstream response channel closed".into())
             })
+    }
+
+    /// Consume the original authenticated control connection while returning live MPTCP state.
+    ///
+    /// # Errors
+    /// Rejects disabled Exit role, another operation, non-local Exit identity or stale lineage.
+    pub fn send_mptcp_paths_response(
+        &mut self,
+        connection: BoundNativeProbeControlConnection,
+        authenticated_control_relay: PeerId,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+        response: UpstreamExitForwardResponse,
+    ) -> Result<(), DiscoveryError> {
+        if !self.protocol_roles.exit() {
+            return Err(DiscoveryError::ProtocolRole);
+        }
+        response.validate()?;
+        let canonical = response.as_forward_response();
+        if canonical.validated_operation()? != ExitForwardOperation::MptcpPaths
+            || peer_id_from_wire(canonical.exit_peer_id())? != *self.local_peer_id()
+            || !self
+                .swarm
+                .behaviour()
+                .connection_provenance
+                .consume_bound_native_probe_control(connection, authenticated_control_relay)
+        {
+            return Err(DiscoveryError::ProtocolPeer);
+        }
+        self.swarm
+            .behaviour_mut()
+            .exit_forward_upstream
+            .send_response(channel, response)
+            .map_err(|_| DiscoveryError::Swarm("MPTCP path-state response channel closed".into()))
     }
 
     /// Consume exact authenticated connection lineage while handing one native Permit response

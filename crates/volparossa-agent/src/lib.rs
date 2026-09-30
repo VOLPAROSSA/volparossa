@@ -352,6 +352,14 @@ impl Agent {
             dns_routes.clone(),
             shutdown_tx.subscribe(),
         ));
+        let mut relay_refill_task = tokio::spawn(run_relay_refill(
+            Arc::clone(&self.state),
+            Arc::clone(&self.config),
+            self.discovery_control.clone(),
+            routes.clone(),
+            dns_routes.clone(),
+            shutdown_tx.subscribe(),
+        ));
         let mut metrics_task = tokio::spawn(run_metrics_endpoint(
             self.config.privacy.metrics_enabled,
             self.config.privacy.metrics_port,
@@ -385,6 +393,7 @@ impl Agent {
             _ = &mut discovery_task => Err(AgentError::Task),
             _ = &mut maintenance_task => Err(AgentError::Task),
             _ = &mut path_health_task => Err(AgentError::Task),
+            _ = &mut relay_refill_task => Err(AgentError::Task),
             result = &mut contribution_task => match result {
                 Ok(Err(error)) => Err(error),
                 Ok(Ok(())) | Err(_) => Err(AgentError::Task),
@@ -406,6 +415,7 @@ impl Agent {
         stop_task(&mut control_task).await;
         stop_task(&mut maintenance_task).await;
         stop_task(&mut path_health_task).await;
+        stop_task(&mut relay_refill_task).await;
         stop_task(&mut contribution_task).await;
         stop_task(&mut metrics_task).await;
         stop_task(&mut ingress_task).await;
@@ -1585,6 +1595,48 @@ async fn run_path_maintenance(
         maintain_client_paths(&state, &routes, &dns_routes)
     })
     .await;
+}
+
+/// Refill discovery and its signed transaction must not run on the native health tick. This
+/// separate joined owner admits at most one transaction at a time, and existing sockets continue
+/// transferring independently. The transport's real telemetry owns attempt cooldowns.
+async fn run_relay_refill(
+    state: Arc<RwLock<AgentState>>,
+    config: Arc<Config>,
+    discovery: DiscoveryControlHandle,
+    routes: ClientRouteControl,
+    dns_routes: ClientRouteControl,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            () = wait_for_shutdown(&mut shutdown) => return,
+            _ = interval.tick() => {}
+        }
+        for owner in [&routes, &dns_routes] {
+            match Box::pin(owner.maintain_mptcp_capacity(&config, &discovery)).await {
+                Ok(ClientPathMaintenance::Unchanged) => {}
+                Ok(ClientPathMaintenance::Reconfigured) => {
+                    state.write().await.log(
+                        LogLevel::Info,
+                        "MPTCP_RELAY_REFILL_COMMITTED",
+                        unix_millis(),
+                    );
+                }
+                Err(_) => {
+                    owner.disconnect().await;
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "MPTCP_RELAY_REFILL_CLEANUP_PENDING",
+                        unix_millis(),
+                    );
+                }
+            }
+        }
+    }
 }
 
 async fn run_path_health_ticks<F: Future<Output = ()>>(

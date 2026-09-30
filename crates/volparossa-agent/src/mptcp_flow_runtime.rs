@@ -25,8 +25,11 @@ use crate::{
     unix_millis,
 };
 
+pub(crate) mod client_refill;
 mod observed;
+mod path_extension;
 pub(crate) mod path_growth;
+pub(crate) use path_extension::MptcpExitPathControl;
 
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(12);
 const OPEN_TCP_TIMEOUT: Duration = Duration::from_secs(12);
@@ -74,6 +77,7 @@ enum ExitRuntimeEvent<A, T> {
     Accepted(A),
     FlowCompleted(Result<T, tokio::task::JoinError>),
     MaintainPaths,
+    ExtendPath(path_extension::PathCommand),
 }
 
 async fn next_exit_runtime_event<A, T: 'static>(
@@ -109,9 +113,15 @@ pub(crate) struct ProductionMptcpExitRuntime {
     egress: ActiveTcpEgressRoute,
     limits: TcpEgressLimits,
     expires_at_ms: u64,
+    path_control: MptcpExitPathControl,
+    path_commands: tokio::sync::mpsc::Receiver<path_extension::PathCommand>,
 }
 
 impl ProductionMptcpExitRuntime {
+    pub(crate) fn path_control(&self) -> MptcpExitPathControl {
+        self.path_control.clone()
+    }
+
     pub(crate) fn retain_cleanup_authority(&self) -> crate::helper::RuntimeBoundContextCleanup {
         self.helper_owner.retain_cleanup_authority()
     }
@@ -162,6 +172,7 @@ impl ProductionMptcpExitRuntime {
         let Ok(limits) = production_tcp_limits() else {
             fail!(ProductionMptcpExitError::Egress);
         };
+        let (path_control, path_commands) = MptcpExitPathControl::new(&helper_owner, expires_at_ms);
         Ok(Self {
             helper,
             helper_owner,
@@ -170,6 +181,8 @@ impl ProductionMptcpExitRuntime {
             egress,
             limits,
             expires_at_ms,
+            path_control,
+            path_commands,
         })
     }
 
@@ -182,6 +195,10 @@ impl ProductionMptcpExitRuntime {
     /// `flow_completed` reports each independently settled flow while this reusable listener
     /// remains active. Route completion alone cannot represent flow completion because a valid
     /// route commonly outlives its first stream by several minutes.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one event loop retains the original route owner while flows and path extension progress"
+    )]
     pub(crate) async fn run_until_shutdown<F, Fut>(
         self,
         shutdown: watch::Receiver<bool>,
@@ -194,12 +211,14 @@ impl ProductionMptcpExitRuntime {
         let reservation_id = self.reservation_id();
         let Self {
             helper,
-            helper_owner,
+            mut helper_owner,
             mut transport,
             tls,
             egress,
             limits,
             expires_at_ms,
+            path_control: _,
+            mut path_commands,
         } = self;
         let egress = Arc::new(egress);
         let mut growth = path_growth::WarmGrowth::new(transport.growth_scope());
@@ -217,16 +236,18 @@ impl ProductionMptcpExitRuntime {
                 break;
             }
             let accepting = flows.len() < MAXIMUM_CONCURRENT_MPTCP_FLOWS;
-            let event = until_exit_shutdown(
-                shutdown.clone(),
-                next_exit_runtime_event(
-                    Duration::from_millis(remaining),
-                    accepting,
-                    transport.listener().accept(),
-                    &mut flows,
-                    &mut maintenance,
-                ),
-            )
+            let event = until_exit_shutdown(shutdown.clone(), async {
+                tokio::select! {
+                    event = next_exit_runtime_event(
+                        Duration::from_millis(remaining),
+                        accepting,
+                        transport.listener().accept(),
+                        &mut flows,
+                        &mut maintenance,
+                    ) => event,
+                    Some(command) = path_commands.recv() => ExitRuntimeEvent::ExtendPath(command),
+                }
+            })
             .await;
             let Some(event) = event else {
                 failed = true;
@@ -275,6 +296,23 @@ impl ProductionMptcpExitRuntime {
                     }
                 }
                 ExitRuntimeEvent::RouteExpired => break,
+                ExitRuntimeEvent::ExtendPath(command) => {
+                    // Existing flow tasks keep running. The affine helper owner stays in this
+                    // runtime through timeout/cancellation, so a partial new path cannot escape
+                    // original-context expiry/destruction or replace the established route.
+                    let _ = time::timeout_at(
+                        maintenance_deadline,
+                        command.execute(
+                            &helper,
+                            &mut helper_owner,
+                            expires_at_ms,
+                            &egress,
+                            &mut transport,
+                            &mut growth,
+                        ),
+                    )
+                    .await;
+                }
             }
         }
         while let Some(result) = flows.join_next().await {
@@ -416,7 +454,7 @@ async fn maintain_warm_path(
         }
         path_growth::Decision::RetireExtra(path) => {
             transport.retire_extra(helper, path).await?;
-            growth.retired();
+            growth.retired(path);
             tracing::info!(
                 event_code = "MPTCP_WARM_PROBE_RETIRED",
                 "Unhelpful extra MPTCP endpoint retired with initial paths retained"
@@ -517,11 +555,11 @@ pub(crate) enum ProductionMptcpExitError {
 /// Live TLS 1.3 stream after a client `OPEN_TCP` was written.
 #[must_use = "the active MPTCP client flow must be used or shut down"]
 pub(crate) struct ActiveProductionMptcpClientFlow {
-    stream: Tls13MptcpStream,
+    stream: observed::ObservedTls,
 }
 
 impl ActiveProductionMptcpClientFlow {
-    pub(crate) fn stream_mut(&mut self) -> &mut Tls13MptcpStream {
+    pub(crate) fn stream_mut(&mut self) -> &mut observed::ObservedTls {
         &mut self.stream
     }
 
@@ -561,7 +599,8 @@ pub(crate) async fn activate_production_mptcp_client_flow(
     signed_open_tcp: &[u8],
     now_ms: u64,
 ) -> Result<ActiveProductionMptcpClientFlow, ProductionMptcpClientFailure> {
-    let (mptcp, certificate_der, required_subflows) = transport.into_tls_parts();
+    let (mptcp, certificate_der, required_subflows, observations, paths) =
+        transport.into_tls_parts();
     if expected_certificate_sha256.len() != 32
         || Sha256::digest(&certificate_der).as_slice() != expected_certificate_sha256
     {
@@ -593,6 +632,11 @@ pub(crate) async fn activate_production_mptcp_client_flow(
             ProductionMptcpClientError::Tls,
         ));
     };
+    if paths.ensure_initial(&stream).await.is_err() {
+        return Err(ProductionMptcpClientFailure::new(
+            ProductionMptcpClientError::Stream,
+        ));
+    }
     if let Err(cause) = prime_open_tcp_and_wait_for_subflows(
         &mut stream,
         signed_open_tcp,
@@ -603,6 +647,9 @@ pub(crate) async fn activate_production_mptcp_client_flow(
     {
         return Err(ProductionMptcpClientFailure::new(cause));
     }
+    let stream = observations
+        .attach(stream, paths.flow_handle())
+        .map_err(|_| ProductionMptcpClientFailure::new(ProductionMptcpClientError::Stream))?;
     Ok(ActiveProductionMptcpClientFlow { stream })
 }
 

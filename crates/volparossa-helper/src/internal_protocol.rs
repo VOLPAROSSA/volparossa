@@ -10,6 +10,8 @@ use std::{
 };
 
 use prost::Message;
+pub(crate) mod mptcp_subflow;
+pub(crate) mod path_extension;
 use thiserror::Error;
 use zeroize::Zeroizing;
 
@@ -32,7 +34,7 @@ pub(crate) struct InternalWorkerRequest {
     pub(crate) request_id: Vec<u8>,
     #[prost(
         oneof = "internal_worker_request::Operation",
-        tags = "10, 11, 12, 13, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26"
+        tags = "10, 11, 12, 13, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28"
     )]
     pub(crate) operation: Option<internal_worker_request::Operation>,
 }
@@ -70,6 +72,10 @@ pub(crate) mod internal_worker_request {
 
     #[derive(Clone, PartialEq, Oneof)]
     pub(crate) enum Operation {
+        #[prost(message, tag = "28")]
+        UpdateMptcpSubflow(super::mptcp_subflow::UpdateMptcpSubflow),
+        #[prost(message, tag = "27")]
+        PathExtension(super::path_extension::PathExtension),
         #[prost(message, tag = "26")]
         ApplyDownlinkBudget(super::ApplyWorkerDownlinkBudget),
         #[prost(message, tag = "10")]
@@ -698,6 +704,7 @@ fn response_matches_operation(
     use internal_worker_response::Outcome;
 
     match (operation, outcome) {
+        (Operation::PathExtension(value), outcome) => path_extension::matches(value, outcome),
         (Operation::Initialise(request), Outcome::Initialised(response)) => {
             request.route_context_id == response.route_context_id
         }
@@ -730,6 +737,14 @@ fn response_matches_operation(
         }
         (Operation::RemoveMptcpEndpoint(request), Outcome::MptcpEndpointRemoved(response)) => {
             request.path_id == response.path_id
+        }
+        (Operation::UpdateMptcpSubflow(request), Outcome::MptcpEndpointAdded(response)) => {
+            request.action == mptcp_subflow::Action::Ensure as i32
+                && request.path_id == response.path_id
+        }
+        (Operation::UpdateMptcpSubflow(request), Outcome::MptcpEndpointRemoved(response)) => {
+            request.action == mptcp_subflow::Action::Retire as i32
+                && request.path_id == response.path_id
         }
         (Operation::DestroyContext(_), Outcome::Destroyed(_)) => true,
         (Operation::ApplyDownlinkBudget(request), Outcome::DownlinkBudgetApplied(response)) => {
@@ -1096,6 +1111,7 @@ fn validate_request(value: &InternalWorkerRequest) -> Result<(), InternalProtoco
         .as_ref()
         .ok_or(InternalProtocolError::Invalid)?
     {
+        Operation::PathExtension(operation) => path_extension::validate(operation),
         Operation::Initialise(operation) => {
             route_id(&operation.route_context_id)?;
             let role = InternalContextRole::try_from(operation.role)
@@ -1204,6 +1220,7 @@ fn validate_request(value: &InternalWorkerRequest) -> Result<(), InternalProtoco
             route_id(&operation.route_context_id)?;
             path(operation.path_id)
         }
+        Operation::UpdateMptcpSubflow(operation) => operation.validate(),
         Operation::AcquireTransportSocket(operation) => {
             route_id(&operation.route_context_id)?;
             path_role(operation.path_id, operation.role)?;

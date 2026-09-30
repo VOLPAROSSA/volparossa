@@ -404,6 +404,7 @@ pub(crate) struct StartupCustodyTarget {
     recovery_anchor: DurablePrepareAnchor,
     durable_binding: DurableCustodyDescriptorBinding,
     restart_plan: Option<StartupRestartPlan>,
+    extensions: [Option<super::path_extension::RestartExtension>; 7],
 }
 
 /// Secret-free, journal-derived identity of the worker bootstrap which preceded custody.
@@ -520,6 +521,27 @@ impl fmt::Debug for StartupRestartPlan {
 }
 
 impl StartupCustodyTarget {
+    /// Exact journal-projected parent resources, usable only during locked startup settlement.
+    pub(crate) fn extension_resources(
+        &self,
+    ) -> Result<Vec<DurableWireguardResource>, DurableOwnershipError> {
+        if self.extensions.iter().all(Option::is_none) {
+            return Ok(Vec::new());
+        }
+        let plan = self
+            .restart_plan
+            .ok_or(DurableOwnershipError::RecoveryNotConfirmed)?
+            .network;
+        self.extensions
+            .iter()
+            .flatten()
+            .map(|extension| {
+                extension
+                    .resource(plan.context_id, plan.context_role)
+                    .map_err(|_| DurableOwnershipError::RecoveryNotConfirmed)
+            })
+            .collect()
+    }
     pub(crate) const fn phase(&self) -> StartupCustodyPhase {
         self.phase
     }
@@ -541,6 +563,7 @@ impl StartupCustodyTarget {
             && self.recovery_anchor == other.recovery_anchor
             && self.durable_binding == other.durable_binding
             && self.restart_plan == other.restart_plan
+            && self.extensions == other.extensions
     }
 
     /// Compare one opaque complete worker anchor without exposing any of its numeric coordinates.
@@ -594,6 +617,7 @@ impl StartupCustodyTarget {
             recovery_anchor,
             durable_binding,
             restart_plan: None,
+            extensions: [None; 7],
         }
     }
 
@@ -1096,6 +1120,12 @@ impl Drop for AdmissionPermit {
 }
 
 enum Operation {
+    ExtendPath {
+        deadline: HardDeadline,
+        key: OwnershipCoordinates,
+        extension: super::DurablePathExtension,
+        reply: ReplySender<DurableWireguardResource>,
+    },
     Register {
         deadline: HardDeadline,
         intent: DurablePrepareIntent,
@@ -1181,6 +1211,7 @@ impl Operation {
     fn deadline(&self) -> HardDeadline {
         match self {
             Self::Register { deadline, .. }
+            | Self::ExtendPath { deadline, .. }
             | Self::MarkCustody { deadline, .. }
             | Self::ArmCustody { deadline, .. }
             | Self::RetireNeverDispatched { deadline, .. }
@@ -1197,6 +1228,7 @@ impl Operation {
 
     fn complete_unstarted_deadline(self) {
         match self {
+            Self::ExtendPath { reply, .. } => reply.complete_unstarted_deadline(),
             Self::Register { reply, .. } => {
                 reply.complete_unstarted_deadline();
             }
@@ -1526,6 +1558,23 @@ pub(crate) struct DurableOwnershipPrepareHandle {
 }
 
 impl DurableOwnershipPrepareHandle {
+    /// Durably add one independently identified cleanup resource before any kernel mutation.
+    /// A failed or lost actor reply does not grant dispatch authority.
+    pub(crate) fn extend_path_until(
+        &self,
+        original: &DurablePrepareSettlement,
+        extension: super::DurablePathExtension,
+        deadline: HardDeadline,
+    ) -> Result<DurableWireguardResource, DurableOwnershipError> {
+        self.client
+            .submit(deadline, |reply| Operation::ExtendPath {
+                deadline,
+                key: original.key.coordinates,
+                extension,
+                reply,
+            })
+            .and_then(PendingReply::wait)
+    }
     pub(crate) fn register_until(
         &self,
         registration: DurableIntentRegistration,
@@ -2497,6 +2546,19 @@ fn project_startup_custody_target(
     };
     Ok(Some(StartupCustodyTarget {
         phase,
+        extensions: {
+            let mut extensions = [None; 7];
+            for (target, extension) in extensions.iter_mut().zip(&record.extensions) {
+                let resource = record
+                    .extension_resource(*extension)
+                    .map_err(|_| DurableOwnershipError::RecoveryNotConfirmed)?;
+                *target = Some(
+                    super::path_extension::RestartExtension::from_resource(&resource)
+                        .map_err(|_| DurableOwnershipError::RecoveryNotConfirmed)?,
+                );
+            }
+            extensions
+        },
         custody_name_digest: custody_name_digest_for_coordinates(OwnershipCoordinates {
             journal_epoch_id: record.journal_epoch_id,
             context_id: record.context_id,
@@ -2889,6 +2951,52 @@ impl<Executor: CleanupExecutor + ManagerAbsenceExecutor> ActorCore<Executor> {
                 self.revision = marked.revision;
                 OperationOutcome::Complete(Ok(marked.resources))
             }
+            Err(error) => OperationOutcome::failure(self.classify_journal_error(error)),
+        }
+    }
+
+    fn extend_path(
+        &mut self,
+        key: OwnershipCoordinates,
+        extension: super::DurablePathExtension,
+        deadline: HardDeadline,
+    ) -> OperationOutcome<DurableWireguardResource> {
+        if let Err(error) = self.validate_key(key) {
+            return OperationOutcome::failure(error);
+        }
+        let result = (|| {
+            let mut next = self.journal.snapshot.clone();
+            let record = next
+                .records
+                .get_mut(&key.ownership_id)
+                .ok_or(JournalError::InvalidRecord)?;
+            if record.phase != OwnershipPhase::MayOwnPrepare {
+                return Err(JournalError::InvalidTransition);
+            }
+            if let Some(existing) = record
+                .extensions
+                .iter()
+                .find(|item| item.extension_id == extension.extension_id)
+            {
+                if *existing != extension {
+                    return Err(JournalError::InvalidRecord);
+                }
+                self.journal.ensure_durable_matches()?;
+                return record.extension_resource(extension);
+            }
+            record.extensions.push(extension);
+            record.validate()?;
+            let resource = record.extension_resource(extension)?;
+            self.revision = self.journal.compare_and_swap_observed_with_deadline(
+                self.revision,
+                next,
+                &mut super::NoFailPersistObserver,
+                Some(deadline),
+            )?;
+            Ok(resource)
+        })();
+        match result {
+            Ok(resource) => OperationOutcome::Complete(Ok(resource)),
             Err(error) => OperationOutcome::failure(self.classify_journal_error(error)),
         }
     }
@@ -3480,6 +3588,20 @@ fn process_operation<Executor: CleanupExecutor + ManagerAbsenceExecutor>(
     admission: &Arc<Admission>,
 ) -> bool {
     match operation {
+        Operation::ExtendPath {
+            deadline,
+            key,
+            extension,
+            mut reply,
+        } => {
+            reply.arm();
+            finish_operation(
+                reply,
+                core.extend_path(key, extension, deadline),
+                lifecycle,
+                admission,
+            )
+        }
         Operation::Register {
             deadline: _,
             intent,

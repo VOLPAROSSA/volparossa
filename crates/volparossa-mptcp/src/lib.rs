@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-pub use netlink::MptcpNetlinkClient;
+pub use netlink::{MptcpEvent, MptcpEventKind, MptcpEventSubscription, MptcpNetlinkClient};
 pub use socket::{MptcpListener, MptcpStream, connect, listen, probe_kernel_support};
 pub use volparossa_linux_uapi::{MptcpInfo, MptcpSubflowInfo, mptcp_info, mptcp_subflow_info};
 
@@ -231,6 +231,7 @@ pub struct KernelMptcpPathManager {
 /// ownership registry and rollback states are retained; only the execution mechanism differs.
 pub struct SynchronousKernelMptcpPathManager {
     backend: KernelMptcpPathManager,
+    limits: std::sync::Mutex<Option<(String, MptcpLimits)>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -383,6 +384,7 @@ impl SynchronousKernelMptcpPathManager {
     pub fn new() -> Result<Self, MptcpError> {
         Ok(Self {
             backend: KernelMptcpPathManager::new()?,
+            limits: std::sync::Mutex::new(None),
         })
     }
 
@@ -390,6 +392,7 @@ impl SynchronousKernelMptcpPathManager {
     fn with_kernel(kernel: Arc<dyn MptcpKernelBackend>) -> Self {
         Self {
             backend: KernelMptcpPathManager::with_kernel(kernel),
+            limits: std::sync::Mutex::new(None),
         }
     }
 
@@ -431,6 +434,11 @@ impl SynchronousKernelMptcpPathManager {
                     route_context_id.to_owned(),
                     ManagedContext::Active(HashMap::new()),
                 );
+                *self
+                    .limits
+                    .lock()
+                    .map_err(|_| MptcpError::Worker("MPTCP limits lock poisoned".into()))? =
+                    Some((route_context_id.to_owned(), limits));
                 Ok(())
             }
             Ok(()) => Err(MptcpError::CleanupIncomplete(
@@ -536,6 +544,47 @@ impl SynchronousKernelMptcpPathManager {
         Err(MptcpError::CleanupIncomplete(
             "endpoint state commit and exact rollback failed",
         ))
+    }
+
+    /// Raise the limits of this existing owned namespace without replacing any endpoint.
+    ///
+    /// # Errors
+    /// Rejects absent/busy contexts, decreases, bounds above eight and kernel failures.
+    pub fn update_context_limits(
+        &self,
+        route_context_id: &str,
+        limits: MptcpLimits,
+    ) -> Result<(), MptcpError> {
+        validate_context_id(route_context_id)?;
+        limits.validate()?;
+        let contexts = self.backend.contexts.blocking_lock();
+        if !matches!(
+            contexts.get(route_context_id),
+            Some(ManagedContext::Active(_))
+        ) {
+            return Err(MptcpError::Invalid(
+                "route context is absent or busy".into(),
+            ));
+        }
+        let mut retained = self
+            .limits
+            .lock()
+            .map_err(|_| MptcpError::Worker("MPTCP limits lock poisoned".into()))?;
+        let Some((owner, old)) = retained.as_mut() else {
+            return Err(MptcpError::Invalid("limits owner absent".into()));
+        };
+        if owner != route_context_id
+            || limits.accepted_addrs < old.accepted_addrs
+            || limits.subflows < old.subflows
+        {
+            return Err(MptcpError::Invalid(
+                "limits decrease or foreign owner".into(),
+            ));
+        }
+        // Consume before mutation; retries still perform the real idempotent kernel write.
+        *old = limits;
+        self.backend.kernel.set_limits(limits)?;
+        Ok(())
     }
 
     fn mark_add_cleanup_required(
@@ -1990,6 +2039,46 @@ mod tests {
             accepted_addrs: 2,
             subflows: 4,
         }
+    }
+
+    #[test]
+    fn synchronous_live_limit_increase_preserves_endpoints_and_rejects_decrease() {
+        let kernel = Arc::new(FakeKernel::default());
+        let manager = SynchronousKernelMptcpPathManager::with_kernel(kernel.clone());
+        manager
+            .prepare_context("extension-route", limits())
+            .unwrap();
+        let endpoint = selected_endpoint(1);
+        manager
+            .add_path("extension-route", endpoint.clone())
+            .unwrap();
+        let raised = MptcpLimits {
+            accepted_addrs: 8,
+            subflows: 8,
+        };
+        manager
+            .update_context_limits("extension-route", raised)
+            .unwrap();
+        assert_eq!(kernel.state.lock().unwrap().active.get(&1), Some(&endpoint));
+        assert!(manager.update_context_limits("other", raised).is_err());
+        assert!(
+            manager
+                .update_context_limits("extension-route", limits())
+                .is_err()
+        );
+        assert!(
+            manager
+                .update_context_limits(
+                    "extension-route",
+                    MptcpLimits {
+                        accepted_addrs: 9,
+                        subflows: 8
+                    }
+                )
+                .is_err()
+        );
+        manager.cleanup_context("extension-route").unwrap();
+        assert!(kernel.state.lock().unwrap().active.is_empty());
     }
 
     trait EndpointTestExt {

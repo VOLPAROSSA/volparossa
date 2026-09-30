@@ -30,6 +30,21 @@ pub(crate) struct RuntimeBoundDownlinkBudgetTarget {
     route_context_id: [u8; 16],
     context_handle: [u8; 32],
     lease_handle: [u8; 32],
+    path_id: u32,
+}
+
+impl RuntimeBoundDownlinkBudgetTarget {
+    pub(crate) fn matches_route_path(&self, context: &[u8; 16], path: u32) -> bool {
+        self.route_context_id == *context && self.path_id == path
+    }
+
+    pub(crate) fn same_owner(&self, other: &Self) -> bool {
+        self.helper_runtime_id == other.helper_runtime_id
+            && self.route_context_id == other.route_context_id
+            && self.path_id == other.path_id
+            && bool::from(self.context_handle.ct_eq(&other.context_handle))
+            && bool::from(self.lease_handle.ct_eq(&other.lease_handle))
+    }
 }
 
 impl RuntimeBoundPreparedLeaseBatch {
@@ -45,6 +60,24 @@ impl RuntimeBoundPreparedLeaseBatch {
         if leases.next().is_some() {
             return Err(HelperClientError::Correlation);
         }
+        self.budget_target_for_lease(lease)
+    }
+
+    pub(crate) fn extension_downlink_budget_target(
+        &self,
+        extension_id: [u8; 16],
+    ) -> Result<RuntimeBoundDownlinkBudgetTarget, HelperClientError> {
+        let lease = self
+            .activated_extension_lease(extension_id)
+            .filter(|lease| lease.role == WireguardRole::Exit as i32)
+            .ok_or(HelperClientError::Correlation)?;
+        self.budget_target_for_lease(lease)
+    }
+
+    fn budget_target_for_lease(
+        &self,
+        lease: &volparossa_routing::PreparedLease,
+    ) -> Result<RuntimeBoundDownlinkBudgetTarget, HelperClientError> {
         Ok(RuntimeBoundDownlinkBudgetTarget {
             helper_runtime_id: self.helper_runtime_id,
             route_context_id: self
@@ -64,6 +97,7 @@ impl RuntimeBoundPreparedLeaseBatch {
                 .as_slice()
                 .try_into()
                 .map_err(|_| HelperClientError::Correlation)?,
+            path_id: lease.path_id,
         })
     }
 }
