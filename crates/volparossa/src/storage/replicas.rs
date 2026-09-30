@@ -1,5 +1,7 @@
 //! Explicit owner-selected copies, retaining the existing authenticated peer transfer path.
 
+#[path = "fragments.rs"]
+pub(in crate::storage) mod fragments;
 #[path = "replicas_handoff.rs"]
 mod handoff;
 #[path = "replicas_transfer.rs"]

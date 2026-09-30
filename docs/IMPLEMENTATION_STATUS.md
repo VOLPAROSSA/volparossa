@@ -25,8 +25,20 @@ returns the synthetic identifier in a 12-token EOS answer; cancellation/disconne
 owner/isolation checks, post-result cleanup and unchanged guest host state pass.
 All 18 original evidence files are retained locally; their archive SHA256 is
 `3d47971aa397ed43b076863912a67251efe69875babf02f1d538b196bd2063eb`.
-This is
-not yet editor execution, Codex tool use, general coding ability or private peer offload.
+This is not yet editor execution, Codex tool use, general coding ability or private peer offload.
+
+### Mailbox import confirmation
+
+The [mailbox import-confirmation candidate](MAILBOX_IMPORT_CONFIRMATION.md) adds a
+reusable split handoff: `content mailbox fetch` retains provider custody while writing
+bounded private payload/token/owner-signed pending receipts; `confirm-import` validates
+the exact owner, original grant/message, token and imported-byte digest before authenticating
+ACKs to both providers. Original expiry is retained, partial ACK progress persists and exact
+retries are idempotent. Legacy `receive` is unchanged. One canonical receipt test and three
+actual CLI/local signed-service tests pass, including interrupted ACK and restart/retry.
+These are not live-overlay tests. This is **not** native Thunderbird/Signal import, Signal
+Protocol, autonomous retention renewal or proof of no message loss; consumer confirmation
+remains an explicit application attestation, not an independently proved database commit.
 
 Automatic authority rounds and the four-job assessment cycle are integrated by
 [PR #163](https://github.com/VOLPAROSSA/volparossa/pull/163), normal merge `f4e6aa79`,
@@ -371,6 +383,25 @@ array because it reused an object-only reader. Its exporter also omitted the pha
 route and completion files, so those observations cannot be independently reconstructed from
 this artifact. This is not a completed replica acceptance PASS. All 85 original files remain
 unchanged (ZIP SHA-256 `d3d67e02e7f8b81fadb414cea87ef0de449404021f47d36d820de80d0afc2fcb`).
+
+The **fragment placement candidate** adds
+`storage fragments create/deposit/status/progress/restore/renew/delete`: distinct encrypted
+archive ranges with two or more copies across three to eight explicitly trusted providers.
+An immutable owner-signed reconstruction root binds full length/hash, contiguous fragment
+ranges/hashes, provider/grant pairs and original copy identities; mutable lease journals
+must match that root. It reuses the existing authenticated protected-transfer entrypoints,
+stages one fragment at a time and publishes restored output only after the full signed
+archive identity verifies. Conservative charges include every reserved/committed/uncertain
+fragment copy, including expired or unavailable ones. [Bounds and operator workflow](PRIVATE_STORAGE.md#fragment-placement-candidate-redundant-pieces-not-whole-archives-per-provider)
+are explicit; this is not erasure coding or whole-archive replication at every provider.
+
+All **three focused fragment tests pass**, including real three-store SQLite/signed-frame
+transfers: interrupted Reserve acknowledgement and same-identity retry, subset-only custody,
+source removal, repeated restore with one provider down, fail-closed restoration when a
+fragment loses both holders, renewal and interrupted delete/retry to zero leases. Signed-root
+tampering and coordinated mutation of unsigned nested copy identities are rejected. A real
+protected-overlay fragment-placement run is still pending; these tests do not establish
+independent failure domains, automatic repair/handoff, measured overhead or reciprocal credit.
 
 The next owner-coordinated candidate adds `storage replicas replace`: a durable,
 resumable A/B-to-B/C handoff through the same protected operations. It retrieves and hashes
