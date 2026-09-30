@@ -22,6 +22,7 @@ agent_jobs_ready_queue=no
 agent_jobs_package_queue=no
 agent_public_task=no
 agent_public_document=no
+agent_cooperative_browser=no
 agent_public_collection=no
 agent_public_network_sources=no
 agent_task_graph=no
@@ -55,6 +56,17 @@ usage() {
 }
 
 print_plan() {
+    if [ "$agent_cooperative_browser" = yes ]; then
+        printf '%s\n' \
+            'VOLPAROSSA cooperative browser proof plan:' \
+            '  stage exact-pinned Gecko UI and ESR runtime in the disposable guest;' \
+            '  prefill a known public README excerpt without dispatch, then require explicit rights/consent;' \
+            '  use a separate owner-only public IPC service, two real peers and protected MPTCP routes;' \
+            '  observe actual fragment and hierarchical synthesis workers, then cancel a second live peer task;' \
+            '  export only structural receipts; stop all owned services and remove model/browser/private state;' \
+            '  no private offload, semantic answer-quality, full Firefox build or full-alpha claim.'
+        return
+    fi
     if [ "$private_storage_handoff" = yes ]; then
         printf '%s\n' \
             'VOLPAROSSA private-storage-handoff protected network smoke plan:' \
@@ -636,6 +648,7 @@ while [ "$#" -gt 0 ]; do
             agent_jobs_package_queue=no
             agent_public_task=no
             agent_public_document=no
+            agent_cooperative_browser=no
             agent_public_collection=no
             agent_public_network_sources=no
             agent_task_graph=no
@@ -651,6 +664,7 @@ while [ "$#" -gt 0 ]; do
             agent_train_loop=no
             agent_artifact_quarantine=no
             case $2 in
+                agent-cooperative-browser) scenario=agent-jobs; agent_cooperative_browser=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-peer) scenario=content-custody; private_storage_peer=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-replicas) scenario=content-custody; private_storage_replicas=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-handoff) scenario=content-custody; private_storage_handoff=yes; wifi_link=no; uplink_link=no ;;
@@ -924,9 +938,16 @@ if [ "$agent_jobs_ready_queue" = yes ]; then
         [ -f "$source_directory/tests/integration/$ready_fixture" ] && [ ! -L "$source_directory/tests/integration/$ready_fixture" ] || exit 69
     done
 fi
-if [ "$agent_public_document" = yes ] || [ "$agent_public_collection" = yes ]; then
+if [ "$agent_public_document" = yes ] || [ "$agent_public_collection" = yes ] || [ "$agent_cooperative_browser" = yes ]; then
     for document_fixture in agent-public-document-smoke.sh agent-public-document-smoke.py agent-document-synthesis.py; do
         [ -f "$source_directory/tests/integration/$document_fixture" ] && [ ! -L "$source_directory/tests/integration/$document_fixture" ] || exit 69
+    done
+fi
+if [ "$agent_cooperative_browser" = yes ]; then
+    for cooperative_fixture in agent-cooperative-browser.py agent-cooperative-browser.sh \
+        agent-cooperative-browser-pins.json agent-private-task-browser-pins.json; do
+        [ -f "$source_directory/tests/integration/$cooperative_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$cooperative_fixture" ] || exit 69
     done
 fi
 if [ "$agent_public_collection" = yes ]; then
@@ -2339,6 +2360,10 @@ fi
 if [ "$agent_public_document" = yes ]; then
     # shellcheck source=tests/integration/agent-public-document-smoke.sh
     . "$source_directory/tests/integration/agent-public-document-smoke.sh"
+fi
+if [ "$agent_cooperative_browser" = yes ]; then
+    # shellcheck source=tests/integration/agent-cooperative-browser.sh
+    . "$source_directory/tests/integration/agent-cooperative-browser.sh"
 fi
 if [ "$agent_public_collection" = yes ]; then
     # shellcheck source=tests/integration/agent-public-collection-smoke.sh

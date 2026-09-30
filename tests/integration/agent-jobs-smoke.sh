@@ -343,6 +343,10 @@ agent_jobs_setup() {
 
 agent_jobs_run() {
     agent_jobs_setup
+    if [ "${agent_cooperative_browser:-no}" = yes ]; then
+        agent_cooperative_browser_run
+        return
+    fi
     if [ "${agent_autonomous_aggregation:-no}" = yes ]; then
         agent_autonomous_aggregation_run
         return
@@ -466,6 +470,11 @@ agent_jobs_resume_failed() {
 
 agent_jobs_finalize_report() {
     jobs_status=$1
+    # This app integration publishes only its closed structural receipt set.
+    if [ "${agent_cooperative_browser:-no}" = yes ]; then
+        agent_cooperative_browser_finalize_report "$jobs_status"
+        return
+    fi
     for jobs_log in "$WORK"/agent-jobs-*.json "$WORK"/agent-jobs-*.err "$WORK"/agent-jobs-*.log \
         "$WORK"/content-custody-fetch-*.json "$WORK"/content-provider-custody-fetch-*.json \
         "$WORK"/content-custody-executor-discovery-*.json \
