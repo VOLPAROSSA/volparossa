@@ -116,12 +116,17 @@ class BrowserNetworkEvidence(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "private.log"
             path.write_text(event("connect_header", "accepted", capability="secret-canary")
+                + event("attachment_route", "preparing", partition="secret-canary")
+                + event("attachment_route", "timeout")
                 + event("route", "PreselectionUnavailable", hostname="private-host")
                 + event("route", "private-error-with-url")
                 + json.dumps(dict(target="different", fields=dict(message="private-canary"))) + "\n")
             result = CHECK["gateway_diagnostic"](path)
             self.assertEqual(result, dict(available=True, truncated=False, unknown_event=True, events=[
-                dict(stage="connect_header", code="accepted"), dict(stage="route", code="PreselectionUnavailable")]))
+                dict(stage="connect_header", code="accepted"),
+                dict(stage="attachment_route", code="preparing"),
+                dict(stage="attachment_route", code="timeout"),
+                dict(stage="route", code="PreselectionUnavailable")]))
             self.assertNotIn("private", json.dumps(result))
             self.assertNotIn("secret", json.dumps(result))
             path.write_text("x" * 65536 + "\n" + event("route", "ready") * 100)

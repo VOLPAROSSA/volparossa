@@ -306,6 +306,22 @@ impl Attachment {
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<(), GatewayError> {
         self.scope.policy(context).await?;
+        // Cold signed discovery/native probing may outlast a browser's CONNECT/TLS timer.
+        // Do not publish Ready (or a proxy listener) until this independently owned route
+        // is prepared. No origin TLS/payload is sent or certified by this control handshake.
+        connect::prepare(
+            bootstrap,
+            &mut shutdown,
+            self.scope
+                .deadline
+                .min(Instant::now() + connect::PREPARE_TIMEOUT),
+            Box::pin(
+                self.routes
+                    .connect_tcp(&context.config, &context.discovery, &context.helper),
+            ),
+        )
+        .await?;
+        self.scope.policy(context).await?;
         // Only a loopback listener is created. There is no destination TcpStream::connect here.
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await

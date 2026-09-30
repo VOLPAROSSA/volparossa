@@ -17,6 +17,16 @@ kernel MPTCP, protected relay paths and Exit policy checks. There is no direct d
 socket, ordinary-TCP transport substitute, or automatic Internet fallback in this adapter.
 The browser retains end-to-origin TLS certificate verification inside the tunnel.
 
+The attachment prepares its own route **before** publishing the listener and `Ready`.
+Cold signed discovery and native route admission therefore run in the authenticated
+control handshake, not inside the browser's already-started CONNECT/TLS wait. Preparation
+is bounded to 90 seconds or the original grant deadline, whichever comes first. EOF,
+unexpected bootstrap input, daemon shutdown or expiry cancels the waiter and enters the
+existing owner-retained route cleanup. Policy is checked again before `Ready`.
+`Ready` means route admission succeeded; it does not certify an origin TLS exchange or
+payload. The browser's companion bootstrap wait is at most 95 seconds, also capped by
+the original expiry; its five-second Unix-connect and native TLS timeouts are unchanged.
+
 Closing the application connection, reaching its expiry or losing policy authorization closes
 that attachment's streams and retires its route. Other attachments and the daemon's main/DNS
 route owners are separate. Unconfirmed retirement keeps the owner and its admission slot for
@@ -65,7 +75,7 @@ and independent controller shutdown. The controller test does not prove two simu
 carrying MPTCP routes. The live disposable Firefox/HTTPS proof is a separate remaining step.
 
 The [Firefox adapter](https://github.com/VOLPAROSSA/volparossa-browser/pull/4) is pinned to
-`ce2298024d5a77561c6719cb6ab2a318e4914885` in the latest completed `browser-network` VM scenario.
+`e722242a5576dac9031ad7daaf1f1189bcee0b1e` in the next `browser-network` VM candidate.
 Its existing isolated ESR 140.16 smoke proves real Gecko Unix IPC and three TLS 1.3
 responses against a **synthetic** gateway, including independent detach and absence of
 proxy credentials at the origin. That result is not a real overlay proof.
@@ -226,6 +236,34 @@ or flow stage/error records—no raw logs, addresses, URLs, headers, capabilitie
 Thirteen pure browser checks and fifteen core checks pass. These are diagnostic changes;
 the route failure is not yet identified or fixed, and real browser/MPTCP payload proof
 remains pending. Existing policy, isolation, lifetime and no-direct-fallback rules remain.
+
+The [tenth combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36766377022)
+on `3f89c5ab5a43bfa1df19cca55b81ec2bdc1ea839` again **fails at the first request**, now
+with closed native code `NS_ERROR_NET_TIMEOUT` (`0x804b000e`), CONNECT status 0 and no
+response body. The gateway records `connect_header/received` and `accepted`, but never
+route-ready, stream acquisition or forwarding. Both original attachments and namespace
+socket bindings pass. The run does not establish browser payload on either required path.
+All 18 originals are retained (ZIP SHA-256
+`9c9c48f175ee69e6682fe98ebfecf3f2e9f37938f0bed5c77e1a89f81667bee9`), with complete
+browser/profile/private/topology cleanup and unchanged host-state hash
+`ef974fc320c395a70e895e0b7f9332b1afb2fc843f4d4429931d3462a847a780`.
+
+Source inspection identifies a definite ordering bug: core published `Ready` before cold
+route admission, then performed that admission inside HTTP CONNECT. In the exact ESR
+release's [HTTP connection implementation](https://github.com/mozilla-firefox/firefox/blob/FIREFOX_140_16_0esr_RELEASE/netwerk/protocol/http/nsHttpConnection.cpp)
+and [TLS handshaker](https://github.com/mozilla-firefox/firefox/blob/FIREFOX_140_16_0esr_RELEASE/netwerk/protocol/http/TlsHandshaker.cpp),
+TLS setup precedes tunnel establishment and incomplete negotiation is subject to the native
+handshake timeout. The staged runtime's default is 30 seconds. This explains a possible
+timeout boundary; the historical closed events contain no elapsed times, so they do not
+prove that this exact timer caused the failed run or that no additional route failure exists.
+
+The candidate fixes the ordering as described above and retains only closed preparation
+stage/error enums in the existing diagnostic export. The fixture keeps two serial independent
+attachments; its first-request orchestration wait covers both preparations, without extending
+the 300-second grants or altering Firefox network/TLS preferences. Fifteen pure core fixture
+checks and shell syntax pass. Four focused Rust preparation checks are added for central
+execution; neither they nor the browser's simulated-transport checks are live overlay proof.
+The corrected real Firefox/MPTCP trial remains required.
 
 Ordinary browsing integration, opportunistic fallback with the user-requested default-off
 browser kill switch, HTTP/3, WebRTC, background traffic and crash-persistent browser-wide

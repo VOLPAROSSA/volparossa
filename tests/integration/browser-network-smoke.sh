@@ -9,7 +9,8 @@ browser_network_check() {
 
 browser_network_wait() {
     bn_wait=0
-    while [ "$bn_wait" -lt 900 ]; do
+    bn_wait_limit=${2:-900}
+    while [ "$bn_wait" -lt "$bn_wait_limit" ]; do
         [ ! -s "$1" ] || return 0
         kill -0 "$DOWNLOAD_CLIENT_PID" 2>/dev/null || return 1
         sleep 0.1
@@ -108,7 +109,11 @@ EOF
         "$WORK/browser-network-isolation.json" || fail BROWSER_NETWORK_APP_BOUNDARY_INVALID
     for bn_phase in first second; do
         PHASE=browser-network-$bn_phase
-        browser_network_wait "$bn_gates/$bn_phase.ready" || fail BROWSER_NETWORK_HTTPS_REQUEST_UNAVAILABLE
+        # Two serial, separately owned preparations (90s each) precede any HTTPS channel.
+        # This is the fixture's orchestration wait, not an origin TLS timeout or grant extension.
+        bn_ready_wait=900
+        [ "$bn_phase" != first ] || bn_ready_wait=2100
+        browser_network_wait "$bn_gates/$bn_phase.ready" "$bn_ready_wait" || fail BROWSER_NETWORK_HTTPS_REQUEST_UNAVAILABLE
         browser_network_sample "$bn_phase-baseline" || fail BROWSER_NETWORK_REAL_MPTCP_UNAVAILABLE
         if [ "$bn_phase" = second ]; then
             printf '%s\n' '{"version":1,"detach":true}' >"$bn_output/detach-a"

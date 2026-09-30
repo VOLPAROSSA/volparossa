@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-29
+Last updated: 2026-09-30
 
 ## Current integration and active work
 
@@ -101,6 +101,23 @@ pass. The fixture candidate read-only maps only the original client control dire
 to that unchanged path, requiring matching parent/socket inodes and ownership. Twelve
 pure browser checks, a real unprivileged namespace/socket check and thirteen core
 evidence checks pass; the corrected real browser/MPTCP payload proof remains pending.
+
+The latest [browser-network run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36766377022)
+on exact `3f89c5ab5a43bfa1df19cca55b81ec2bdc1ea839` passes both real attachments but
+fails its first request with `NS_ERROR_NET_TIMEOUT`, CONNECT status 0 and no body.
+Closed core events prove the CONNECT header was accepted, not that route setup completed.
+All 18 originals retain complete cleanup and unchanged host state. Source inspection finds
+core published `Ready` before cold signed discovery/native route preparation; the candidate
+now prepares the independently owned route first, bounded by 90 seconds and the original
+grant expiry. EOF/shutdown/expiry still joins through existing retained route ownership.
+The companion browser waits at most 95 seconds for bootstrap without changing native TLS
+timeouts; serial fixture orchestration accounts for both preparations. This corrects the
+source ordering, not a proven historical 30-second timing cause. Fifteen Python checks and
+shell syntax pass; all six focused Rust preparation checks now pass, including an expired
+capability never polling route admission and expiry/shutdown winning during the final
+ready poll. Actual browser payload
+on two protected MPTCP paths, ordinary browsing interception and a full browser kill switch
+remain unproven. See [the scoped evidence and boundaries](BROWSER_NETWORK.md).
 
 [Signal integration](https://github.com/VOLPAROSSA/volparossa-chat/pull/1) now has a pinned
 Desktop/libsignal source baseline and explicit device/session/backup contracts, not a

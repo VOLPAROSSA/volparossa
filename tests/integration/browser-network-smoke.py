@@ -53,6 +53,7 @@ ROUTE_ERRORS = frozenset(("Busy", "InvalidProfile", "PreselectionUnavailable", "
     "NativeTransportIdentityUnavailable", "RouteAdmissionUnavailable", "MptcpExitListenerSignalUnavailable",
     "TransportRuntimeUnavailable", "UdpExitSessionSignalUnavailable", "UdpIngressUnavailable"))
 GATEWAY_CODES = {
+    "attachment_route": ROUTE_ERRORS | {"preparing", "ready", "timeout", "revoked", "shutdown"},
     "connect_header": frozenset(("received", "timeout", "invalid", "accepted")),
     "policy_before_route": frozenset(("denied",)),
     "route": ROUTE_ERRORS | {"ready"},
