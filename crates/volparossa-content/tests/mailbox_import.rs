@@ -31,7 +31,7 @@ fn import_receipt_retains_original_authority_after_decode_and_rejects_substituti
             expires: NOW + 300,
         },
         MailboxQuota {
-            max_bytes: 1048576,
+            max_bytes: 1_048_576,
             max_messages: 8,
         },
     )
@@ -41,7 +41,7 @@ fn import_receipt_retains_original_authority_after_decode_and_rejects_substituti
     let mut cache = ChunkStore::create(
         &directory.path().join("ciphertext"),
         CacheLimits {
-            max_bytes: 1048576,
+            max_bytes: 1_048_576,
             max_entries: 16,
             min_free_bytes: 0,
         },

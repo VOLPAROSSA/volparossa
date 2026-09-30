@@ -94,12 +94,12 @@ impl SignedImportReceipt {
                 expires: checked.validity().expires.min(grant.validity().expires),
             },
         )?;
-        let signed = Self { envelope, payload };
-        if signed.encode().len() > MAX_IMPORT_RECEIPT_BYTES {
+        let receipt = Self { envelope, payload };
+        if receipt.encode().len() > MAX_IMPORT_RECEIPT_BYTES {
             return Err(MailboxError::Invalid);
         }
-        signed.verify(&signer.verifying_key(), now)?;
-        Ok(signed)
+        receipt.verify(&signer.verifying_key(), now)?;
+        Ok(receipt)
     }
 
     /// Canonical original mailbox-domain envelope; never public-cache publication.
