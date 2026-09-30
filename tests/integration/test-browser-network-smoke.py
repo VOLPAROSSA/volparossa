@@ -176,7 +176,7 @@ class BrowserNetworkEvidence(unittest.TestCase):
 
     def test_fixture_pin_and_closed_names_do_not_allow_secret_files(self):
         names = CHECK["EXPORT_NAMES"]
-        self.assertEqual(len(set(names)), 22)
+        self.assertEqual(len(set(names)), 23)
         self.assertTrue(all(name.startswith("browser-network-") and name.endswith(".json") for name in names))
         self.assertFalse(any(word in name for name in names for word in ("grant", "key", "profile", ".log")))
         with tempfile.TemporaryDirectory() as temporary:
@@ -186,6 +186,24 @@ class BrowserNetworkEvidence(unittest.TestCase):
             path.write_text(json.dumps(pins))
             with patch.dict(PROVISION["pins"].__globals__, {"PINS": path}), self.assertRaises(ValueError):
                 PROVISION["pins"]()
+
+    def test_driver_diagnostics_exclude_raw_stderr_and_unknown_status_fields(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            status, stderr = root / "status.json", root / "driver.err"
+            value = dict(version=1, kind="real-gecko-core-gateway-driver-status", phase="grant-validation",
+                error_code="OS_ERROR", errno=13, child_exit_code=1)
+            CHECK["write"](status, value)
+            stderr.write_text("Permission denied: /private/grant secret-canary-value\n")
+            result = CHECK["driver_diagnostic"](status, stderr)
+            self.assertEqual(result["status"], value)
+            self.assertTrue(result["stderr_signals"]["permission_denied"])
+            self.assertNotIn("secret-canary", json.dumps(result))
+            self.assertNotIn("/private", json.dumps(result))
+            value["capability"] = "secret-canary-value"
+            CHECK["write"](status, value)
+            with self.assertRaises(ValueError):
+                CHECK["driver_diagnostic"](status, stderr)
 
     def test_actual_incomplete_collector_excludes_unlisted_private_files(self):
         with tempfile.TemporaryDirectory() as temporary:

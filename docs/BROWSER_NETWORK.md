@@ -65,7 +65,7 @@ and independent controller shutdown. The controller test does not prove two simu
 carrying MPTCP routes. The live disposable Firefox/HTTPS proof is a separate remaining step.
 
 The [Firefox adapter](https://github.com/VOLPAROSSA/volparossa-browser/pull/4) is pinned to
-`18a7423589ea95d5f04be53dfc6aaead373d4568` for the new `browser-network` VM scenario.
+`ba03cc680f81a3bc78effd7c1ef74bb700a84951` for the `browser-network` VM scenario.
 Its existing isolated ESR 140.16 smoke proves real Gecko Unix IPC and three TLS 1.3
 responses against a **synthetic** gateway, including independent detach and absence of
 proxy credentials at the origin. That result is not a real overlay proof.
@@ -94,6 +94,21 @@ This corrects a deterministic checker mismatch; the old run did not retain enoug
 diagnostics to exclude an additional launch failure. Eight pure fixture checks pass,
 including rejection of weakened guards and closed failure-stage diagnostics; the corrected
 live combined proof remains pending. No firewall or product isolation was relaxed.
+
+The [second combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36714093009)
+on `fd2d7eb2ed11a6b17415faec747115904800d348` passes that actual application boundary,
+but fails at `BROWSER_NETWORK_HTTPS_REQUEST_UNAVAILABLE`. It retains 16 original artifacts
+(ZIP SHA-256 `cf7f30b8aaafd17e60792ec307849b4a32658feb0ffd789f57904393fea04c59`),
+complete cleanup and unchanged host-state hash
+`05a36403bd56c0a962b92113ff73661f4002c583e3803c7ce5face4b2ea8cf07`.
+No browser report or WireGuard payload was observed; pre-browser driver failures were not
+recorded sufficiently to identify their cause. A new closed driver-status export retains
+the last wrapper/namespace/Firefox/attachment stage, canonical error/errno and boolean
+stderr classifications. It exports no raw stderr, browser logs, grants or private paths.
+Nine pure fixture checks pass, including rejection of unexpected diagnostic fields.
+The diagnostic browser revision above changes only its driver/tests/documentation, not
+the network module or pinned ESR package. The next live run must establish the cause and
+real payloads before this milestone passes.
 
 Ordinary browsing integration, opportunistic fallback with the user-requested default-off
 browser kill switch, HTTP/3, WebRTC, background traffic and crash-persistent browser-wide

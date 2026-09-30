@@ -30,15 +30,60 @@ PHASES = ("first", "second")
 EXPORT_NAMES = (
     f"{PREFIX}-smoke.json", f"{PREFIX}-evidence.json", f"{PREFIX}-provision.json",
     f"{PREFIX}-browser.json", f"{PREFIX}-origin.json", f"{PREFIX}-isolation.json",
+    f"{PREFIX}-driver.json",
     f"{PREFIX}-detach.json", f"{PREFIX}-private-cleanup.json",
     *(f"{PREFIX}-{phase}-{part}.json" for phase in PHASES for part in ("baseline", "progress")),
     *(f"{PREFIX}-{phase}-privacy-{role}.json" for phase in PHASES for role in ROLES),
 )
+DRIVER_PHASES = frozenset((
+    "wrapper-start", "runtime-validation", "isolated-home", "wrapper-launch", "child-validation",
+    "grant-validation", "profile-init", "browser-start", "marionette-connect", "marionette-session",
+    "script-start", "import", "attach-a", "attach-b", "wrong-scope", "request-a", "request-b",
+    "detach-a", "finish-b", "result-validation", "browser-stop", "complete",
+))
+DRIVER_ERRORS = frozenset((
+    "OS_ERROR", "CHECK_FAILED", "SUBPROCESS_FAILED", "RUNTIME_FAILED", "SCRIPT_FAILED",
+    "invalid_contract", "invalid_scope", "scope_unavailable", "invalid_channel",
+    "unsupported_runtime", "unavailable", "request_failed", "detached",
+))
 
 
 def write(path, value):
     path.write_text(json.dumps(value, sort_keys=True, indent=2, allow_nan=False) + "\n", encoding="ascii")
     path.chmod(0o600)
+
+
+def driver_diagnostic(status, stderr):
+    """Export only fixed driver stages, errno and classified local stderr signals."""
+    result = dict(version=1, status_available=False, status=None, stderr_available=False,
+                  stderr_truncated=False, stderr_signals={})
+    if status.is_file() and not status.is_symlink():
+        require(status.stat().st_size <= 2048, "driver status exceeds bound")
+        value = read(status)
+        require(set(value) == {"version", "kind", "phase", "error_code", "errno", "child_exit_code"}
+            and value["version"] == 1 and value["kind"] == "real-gecko-core-gateway-driver-status"
+            and value["phase"] in DRIVER_PHASES
+            and (value["error_code"] is None or value["error_code"] in DRIVER_ERRORS)
+            and (value["errno"] is None or type(value["errno"]) is int and 0 < value["errno"] < 4096)
+            and (value["child_exit_code"] is None or type(value["child_exit_code"]) is int
+                 and -255 <= value["child_exit_code"] <= 255), "driver status is not closed metadata")
+        result.update(status_available=True, status=value)
+    if stderr.is_file() and not stderr.is_symlink():
+        with stderr.open("rb") as source:
+            info = os.fstat(source.fileno())
+            require(stat.S_ISREG(info.st_mode), "driver stderr is not a regular file")
+            source.seek(max(0, info.st_size - 16384))
+            raw = source.read(16384).lower()
+        result.update(stderr_available=True, stderr_truncated=info.st_size > 16384,
+            stderr_signals={name: any(pattern in raw for pattern in patterns) for name, patterns in {
+                "module_missing": (b"modulenotfounderror:",),
+                "permission_denied": (b"permission denied",),
+                "read_only_filesystem": (b"read-only file system",),
+                "namespace_setup": (b"creating new namespace", b"failed to make / slave", b"setting up uid map"),
+                "driver_failed": (b"core network browser driver failed",),
+                "traceback": (b"traceback (most recent call last):",),
+            }.items()})
+    return result
 
 
 def block(run_id):
@@ -426,6 +471,8 @@ def main():
         write(output, isolation(int(sys.argv[2]), sys.argv[3], sys.argv[4], *map(int, sys.argv[5:8]), output=output))
     elif action == "cleanup":
         cleanup(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]))
+    elif action == "driver-diagnostic":
+        write(Path(sys.argv[4]), driver_diagnostic(Path(sys.argv[2]), Path(sys.argv[3])))
     elif action == "evidence":
         write(Path(sys.argv[3]), evidence(Path(sys.argv[2])))
     elif action == "report":
