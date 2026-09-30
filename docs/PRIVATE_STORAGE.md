@@ -518,7 +518,7 @@ records is rejected. This is **local transfer/lifecycle evidence**, not a new pr
 or independent-device proof. Automatic repair, fragment handoff/drain, measured metadata
 overhead and network-wide reciprocal contribution credit remain unfinished.
 
-### Disposable protected-fragment proof candidate
+### Disposable protected-fragment proof
 
 The `private-storage-fragments` scenario is separate from the older whole-archive
 `private-storage-replicas` and replacement `private-storage-handoff` proofs. Preview it with:
@@ -547,8 +547,16 @@ pass. The genuine local three-store lifecycle passes the actual fixture's restor
 A closed failure record now distinguishes CLI, accounting, survivor-receipt, output,
 identity and cleanup stages, preserving only fixed incomplete-report categories/counters
 before rejecting a nonzero CLI exit, without exporting raw private diagnostics. See
-[implementation status](IMPLEMENTATION_STATUS.md) for the original evidence and remaining
-restore/accounting/deletion gates. **Protected-fragment acceptance remains incomplete.**
+[implementation status](IMPLEMENTATION_STATUS.md) for the original failure evidence.
+
+The subsequent exact [trial 36773683946](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773683946)
+at `64c4f18cadb839ad6024c21166d6154e6665733f` **passes the complete protected-fragment
+lifecycle**, including the unchanged 56/16/16 protected-flow thresholds, two complete
+survivor reconstructions, non-consuming accounting, reopening all original stores and
+idempotent all-copy deletion to zero leases/payload. Both WireGuard relay paths, all
+privacy captures, private artifact removal and unchanged disposable guest-host state
+pass. This is a three-provider namespace proof, not independent-device availability,
+automatic repair, contribution resizing or network-wide reciprocal credit.
 The public synthetic opaque fixture proves no archive encryption or native Signal integration.
 
 ## Next end-to-end proof

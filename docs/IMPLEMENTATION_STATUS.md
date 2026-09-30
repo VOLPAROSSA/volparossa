@@ -417,6 +417,24 @@ It produced no fragment runtime result. Its incomplete report does not verify cl
 or unchanged host state; that absence is not converted into a PASS. The build candidate
 limits Cargo to two jobs without changing runtime limits or acceptance checks.
 
+**The protected fragment lifecycle now passes:** exact
+[trial 36773683946](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773683946)
+at `64c4f18cadb839ad6024c21166d6154e6665733f` completes all three phases with the
+original 56/16/16 successful protected-flow thresholds. Four distinct fragments,
+eight copies and three separate provider namespaces account for 786,505 logical /
+1,573,010 retained physical payload bytes. After the source is removed and A stopped,
+two complete SHA-256-verified restores combine B/C fragments without consuming copies.
+All three original stores reopen before renewal/deletion; idempotent deletion reaches
+zero leases/reserved/committed payload on each. Exact route/privacy gates, private-file
+cleanup, zero leftover objects and unchanged guest-host state pass. The original
+42-file artifact is retained (ZIP SHA-256
+`74a8544f5461e434fc67f9eb723f95d9ae9e9a8a8625caa25e3a0683db727c8c`).
+The candidate includes confirmed MPTCP-flow retirement and the two-job guest build
+limit; this success does not retrospectively diagnose every earlier failure.
+The fixture uses synthetic opaque bytes, not actual encrypted app backups. It proves
+neither independent physical failure domains, automatic placement/repair/contribution
+resize, network reciprocal credit, erasure coding nor completed Immich/Signal integration.
+
 The next owner-coordinated candidate adds `storage replicas replace`: a durable,
 resumable A/B-to-B/C handoff through the same protected operations. It retrieves and hashes
 the surviving copy, retains the exact replacement identity across retries, and fully reads
