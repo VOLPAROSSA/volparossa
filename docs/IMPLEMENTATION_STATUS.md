@@ -6,6 +6,22 @@ Last updated: 2026-09-30
 
 ## Current integration and active work
 
+### Editor-to-core private execution candidate
+
+The separate [VOLPAROSSA Code source milestone](https://github.com/VOLPAROSSA/volparossa-code/pull/1)
+is integrated in that repository. Its explicitly selected-code command uses the actual
+same-owner private compute protocol; the independent Codex app-server client is not yet
+wired into a complete edit/test agent. No proprietary extension source is included.
+
+The new `agent-private-code` disposable scenario pins the unmodified Node client at
+`d5802a024d665a47b42abdbe809bea2b9ee86bd8` and Node 24.19.0, retains both licenses, and
+reuses one pinned 360M provision. A network-isolated client submits a synthetic function
+to the real private service and must receive its generated identifier with EOS and
+confirmed cleanup. Existing owner controls, cancel/disconnect tests, model/input
+isolation and complete guest cleanup still apply. Only bounded facts are exported, not
+the source or raw answer. Source checks pass; the actual VM trial is pending. This is
+not yet editor execution, Codex tool use, general coding ability or private peer offload.
+
 Automatic authority rounds and the four-job assessment cycle are integrated by
 [PR #163](https://github.com/VOLPAROSSA/volparossa/pull/163), normal merge `f4e6aa79`,
 after Quality and all CodeQL analyses passed on `c4060377`. This also prevents local
