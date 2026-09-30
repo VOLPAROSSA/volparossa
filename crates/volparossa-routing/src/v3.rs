@@ -14,7 +14,9 @@ mod downlink;
 mod mptcp_subflow;
 #[path = "v3/path_extension.rs"]
 mod path_extension;
-pub use mptcp_subflow::{MptcpSubflowAction, UpdateMptcpSubflow, request_descriptor_fd_binding};
+pub use mptcp_subflow::{
+    MptcpSubflowAction, RetireMptcpFlow, UpdateMptcpSubflow, request_descriptor_fd_binding,
+};
 mod wifi_mesh;
 pub use downlink::{
     AppliedDownlinkBudget, ApplyDownlinkBudget, DestroyReceiveAccounting,
@@ -83,7 +85,7 @@ pub struct HelperRequest {
     /// Strict operation allowlist.
     #[prost(
         oneof = "helper_request::Operation",
-        tags = "20, 21, 22, 23, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52"
+        tags = "20, 21, 22, 23, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53"
     )]
     pub operation: Option<helper_request::Operation>,
 }
@@ -104,6 +106,9 @@ pub mod helper_request {
     /// Exactly one typed operation.
     #[derive(Clone, PartialEq, Oneof)]
     pub enum Operation {
+        /// Shut down and release one descriptor-bound Client flow capability.
+        #[prost(message, tag = "53")]
+        RetireMptcpFlow(super::RetireMptcpFlow),
         /// Mutate one helper-derived subflow with a correlated live meta descriptor.
         #[prost(message, tag = "52")]
         UpdateMptcpSubflow(super::UpdateMptcpSubflow),
@@ -1515,6 +1520,7 @@ pub fn safe_preview(value: &HelperRequest) -> Result<String, HelperProtocolError
         .ok_or(HelperProtocolError::Invalid("missing operation"))?;
     let mut output = match operation {
         Operation::UpdateMptcpSubflow(_) => "update one owned live MPTCP subflow".to_owned(),
+        Operation::RetireMptcpFlow(_) => "retire one owned MPTCP flow".to_owned(),
         Operation::PreparePathExtension(_) => "prepare one additive route path".to_owned(),
         Operation::ActivatePathExtension(_) => "activate one additive route path".to_owned(),
         Operation::CommitPathExtension(_) => "prove and commit one additive route path".to_owned(),
@@ -1622,6 +1628,7 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
         .ok_or(HelperProtocolError::Invalid("missing operation"))?
     {
         Operation::UpdateMptcpSubflow(operation) => mptcp_subflow::validate(operation),
+        Operation::RetireMptcpFlow(operation) => mptcp_subflow::validate_retire(operation),
         Operation::PreparePathExtension(operation) => path_extension::validate_prepare(operation),
         Operation::ActivatePathExtension(operation) => path_extension::validate_activate(operation),
         Operation::CommitPathExtension(operation) => path_extension::validate_commit(operation),

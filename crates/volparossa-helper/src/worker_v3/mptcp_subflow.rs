@@ -14,7 +14,9 @@ use super::{
     MptcpEndpointAdded, MptcpEndpointRemoved, NamespaceKernel, RoutingContextRole, WorkerContext,
     WorkerNamespaceKernel, internal_worker_response,
 };
-use crate::internal_protocol::mptcp_subflow::{Action, UpdateMptcpSubflow};
+use crate::internal_protocol::mptcp_subflow::{
+    Action, MptcpFlowRetired, RetireMptcpFlow, UpdateMptcpSubflow,
+};
 
 const MAX_FLOWS: usize = 64;
 
@@ -35,6 +37,36 @@ struct OwnedFlow {
     primary: u32,
     remote_port: u16,
     paths: BTreeMap<u8, PathState>,
+}
+
+fn retire_owned_flow(
+    flows: &mut BTreeMap<[u8; 32], OwnedFlow>,
+    request: &RetireMptcpFlow,
+) -> Result<(), InternalWorkerResult> {
+    let handle: [u8; 32] = request
+        .flow_handle
+        .as_slice()
+        .try_into()
+        .map_err(|_| InternalWorkerResult::Invalid)?;
+    if let Some(flow) = flows.get(&handle) {
+        if (
+            flow.token,
+            flow.cookie,
+            flow.primary,
+            u32::from(flow.remote_port),
+        ) != (
+            request.token,
+            request.cookie,
+            request.primary_path_id,
+            request.remote_port,
+        ) {
+            return Err(InternalWorkerResult::Invalid);
+        }
+        flows.remove(&handle);
+    }
+    // Closed events may already have reaped this entry; a pre-TLS failure may never have
+    // registered a subflow. Only the authenticated parent can issue this post-shutdown command.
+    Ok(())
 }
 
 pub(super) struct ClientPathManager {
@@ -269,9 +301,89 @@ pub(super) fn execute(
     (result, outcome, false)
 }
 
+pub(super) fn retire(
+    context: Option<&WorkerContext<NamespaceKernel>>,
+    request: &RetireMptcpFlow,
+    bound: ContextId,
+    deadline: HardDeadline,
+) -> ChildOperationOutcome {
+    let Some(context) = context.filter(|context| {
+        context.route_context_id == bound
+            && request.route_context_id.as_slice() == bound
+            && context.role == RoutingContextRole::Client
+    }) else {
+        return (InternalWorkerResult::Invalid, None, false);
+    };
+    if deadline.ensure_remaining().is_err()
+        || context
+            .committed_mptcp_endpoint(request.primary_path_id)
+            .is_err()
+    {
+        return (InternalWorkerResult::Invalid, None, false);
+    }
+    let Some(manager) = context.mptcp_flows.as_ref() else {
+        return (InternalWorkerResult::Invalid, None, false);
+    };
+    let Ok(mut manager) = manager.lock() else {
+        return (InternalWorkerResult::Kernel, None, false);
+    };
+    match retire_owned_flow(&mut manager.flows, request) {
+        Ok(()) if deadline.ensure_remaining().is_ok() => (
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::MptcpFlowRetired(
+                MptcpFlowRetired {
+                    flow_handle: request.flow_handle.clone(),
+                },
+            )),
+            false,
+        ),
+        Ok(()) => (InternalWorkerResult::CleanupIncomplete, None, false),
+        Err(error) => (error, None, false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_flow_forget_binds_every_original_selector_and_preserves_other_flows() {
+        let request = RetireMptcpFlow {
+            route_context_id: vec![1; 16],
+            flow_handle: vec![2; 32],
+            token: 3,
+            cookie: 4,
+            primary_path_id: 1,
+            remote_port: 44443,
+        };
+        let owned = || OwnedFlow {
+            token: 3,
+            cookie: 4,
+            primary: 1,
+            remote_port: 44443,
+            paths: BTreeMap::new(),
+        };
+        let mut flows = BTreeMap::from([([2; 32], owned()), ([8; 32], owned())]);
+        for field in 0..4 {
+            let mut wrong = request.clone();
+            match field {
+                0 => wrong.cookie += 1,
+                1 => wrong.token += 1,
+                2 => wrong.primary_path_id += 1,
+                _ => wrong.remote_port += 1,
+            }
+            assert_eq!(
+                retire_owned_flow(&mut flows, &wrong),
+                Err(InternalWorkerResult::Invalid)
+            );
+            assert_eq!(flows.len(), 2);
+        }
+        retire_owned_flow(&mut flows, &request).unwrap();
+        assert!(!flows.contains_key(&[2; 32]));
+        assert!(flows.contains_key(&[8; 32]));
+        retire_owned_flow(&mut flows, &request).unwrap();
+        assert_eq!(flows.len(), 1);
+    }
 
     #[test]
     fn acknowledged_pending_create_is_not_duplicated_by_an_ensure_retry() {
