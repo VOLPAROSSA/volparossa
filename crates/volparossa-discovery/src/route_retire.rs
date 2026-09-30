@@ -97,6 +97,19 @@ mod tests {
             swarm::{ConnectionId, DialError, FromSwarm, NetworkBehaviour, behaviour::DialFailure},
         };
 
+        fn contains(service: &mut crate::DiscoveryService, address: &libp2p::Multiaddr) -> bool {
+            service
+                .swarm
+                .behaviour_mut()
+                .kademlia
+                .kbuckets()
+                .any(|bucket| {
+                    bucket
+                        .iter()
+                        .any(|entry| entry.node.value.iter().any(|value| value == address))
+                })
+        }
+
         let local = identity::Keypair::generate_ed25519();
         let peer = identity::Keypair::generate_ed25519().public().to_peer_id();
         let mut service = crate::DiscoveryService::new(local).unwrap();
@@ -139,18 +152,6 @@ mod tests {
                 error: &failure,
                 connection_id: ConnectionId::new_unchecked(1),
             }));
-        fn contains(service: &mut crate::DiscoveryService, address: &libp2p::Multiaddr) -> bool {
-            service
-                .swarm
-                .behaviour_mut()
-                .kademlia
-                .kbuckets()
-                .any(|bucket| {
-                    bucket
-                        .iter()
-                        .any(|entry| entry.node.value.iter().any(|value| value == address))
-                })
-        }
         assert!(!contains(&mut service, &known));
         assert!(!contains(&mut service, &identify));
         assert!(contains(&mut service, &residual));

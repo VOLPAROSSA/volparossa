@@ -1,10 +1,49 @@
 # Same-flow MPTCP relay refill
 
-The development candidate extends an existing Client/Exit context with a newly eligible
+The development implementation extends an existing Client/Exit context with a newly eligible
 relay. It must preserve the application connection, both original MPTCP meta sockets and
 the healthy existing path. A newly allocated WireGuard path is only a candidate: actual
 subflow payload progress, both physical WireGuard legs and the final application hash
 are required before claiming that the fresh path carried data.
+
+## Current result: complete same-flow refill proof
+
+[Run `36714634165`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36714634165)
+on exact source `c24fd086ef138f0fa415eca34f2b3bba079104f7` **passes** the unchanged
+version-3 report checker against all 171 original artifacts. The complete 256-MiB
+(268,435,456-byte) application response matches at both ends, SHA-256
+`98b45951638603039e30b1cf89b598ff6587740edb261f996cf4139c673908e3`.
+
+The original two paths carry application data, then the original warm third path joins
+and carries data. Under deliberate loss, that exact warm endpoint is withdrawn while the
+healthy original path keeps progressing; two withdrawn observations span 10.296 seconds.
+Only afterwards does R4 become eligible and supply newly allocated path 4. In its checked
+progress interval that new path carries 168,960 Client receive bytes and 170,280 Exit
+acknowledged bytes, both above the unchanged 65,536-byte gate. The healthy original path
+simultaneously gains 167,640 receive / 170,280 acknowledged bytes. The same application,
+route context and both original kernel MPTCP meta-socket cookies, tokens and tuples survive
+all eight raw-kernel observations. This is real new-path payload, not merely a helper
+allocation, ADD_ADDR acknowledgement or substituted ordinary TCP connection.
+
+Fourteen drained physical-interface captures verify the original and fresh paths' two
+WireGuard legs, with no capture drops or forbidden direct Client-to-Exit traffic, no
+destination exposure at the Client/Relays and no Client public address at the Exit.
+Normal product retirement now succeeds for the original Relays, control Relay and fresh
+R4, as well as the Exit. Final CLI status is disconnected with zero contexts/subflows and
+an empty path list. The application completes, owned loss/rate qdiscs are removed, and
+disposable teardown leaves zero owned objects. Both enumerated guest-parent host-state
+snapshots have SHA-256
+`596e0fc4ae16a11370d0c9662e3ce555a40d2a5532ea4b74492847885c68fd7b`.
+The unchanged original ZIP has SHA-256
+`558c1a90840d056dd52ec70cd19d27bc121ee5364b813bedfa0725d67a115830`.
+
+This proves one live same-flow replacement sequence in the disposable topology, not
+four simultaneously productive paths, measured speed improvement or complete alpha
+acceptance. The implementation still allows at most eight issued path identities per
+context lifetime, including aborted attempts, and 64 issued helper flow handles per
+context generation. Signed-capability/expiry correctness is not independently reconstructed
+from these exported kernel/WireGuard observations. Earlier failed runs below stay failed;
+their pending statements describe their own revisions, not this later passing result.
 
 ## Retirement is not simultaneous TCP disappearance
 
@@ -45,7 +84,7 @@ The endpoint decoder follows the bounded address/ID/signal/device fields emitted
 This diagnostic command is read-only and runs only inside the disposable owned namespace;
 production control continues to use its typed kernel backend.
 
-## Evidence status
+## Earlier evidence and corrections
 
 [Run 36581328449 on `5e6560e2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36581328449)
 remains **failed** with `MPTCP_REFILL_WARM_NOT_RETIRED`. Its saved Exit TCP row is

@@ -13,12 +13,28 @@ passphrase-reader errors from entering the public CLI report channel. It does no
 the earlier model-quality limitations or promote uncertain judgments to sound reasoning.
 The original README banner is integrated by [PR #164](https://github.com/VOLPAROSSA/volparossa/pull/164).
 
+**Live MPTCP relay refill now passes its complete functional proof:**
+[run `36714634165`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36714634165)
+on `c24fd086ef138f0fa415eca34f2b3bba079104f7` passes the unchanged version-3 checker
+against all 171 original artifacts. One full 256-MiB application retains its context and
+both original kernel MPTCP meta sockets across two-path progress, warm-path growth,
+exact warm retirement under loss and fresh R4 admission. New path 4 gains 168,960 Client
+receive / 170,280 Exit acknowledged bytes while the healthy original path progresses.
+Both application hashes agree; all fourteen physical captures, normal route retirement,
+zero-context final status, owned qdisc removal, zero leftover objects and unchanged host
+state pass. This closes the same-flow fourth-path/normal-cleanup boundary, not broader
+alpha acceptance, unlimited connections or a speed-improvement claim. The eight-issued-
+path-identity lifetime bound and 64-issued-flow-handle bound remain. See
+[the exact source, hashes and limitations](MPTCP_REFILL.md#current-result-complete-same-flow-refill-proof).
+Earlier failures and pending statements below retain their historical source scope.
+
 The live-relay-refill candidate adds signed +1 path extensions to an existing Client/Exit
 context. It retains the original reservation, Exit and hard expiry; newly owned WireGuard
 resources have their own Prepare/Activate/Commit/Abort lifecycle and durable cleanup markers.
 The Exit receives a real adjacent downlink budget before committing the new path. The
 discovery actor yields while that handshake completes, rather than preventing its own budget
-messages from being processed. New paths are warm candidates, not claimed active subflows.
+messages from being processed. New paths enter as warm candidates; the passing live proof
+above independently requires actual payload on the newly activated fourth path.
 
 Real same-flow kernel observations drive nomination: idle flows or still-useful warm paths do
 not authorize growth. Failed nominations rotate independently of allocated path IDs, and
@@ -30,8 +46,8 @@ this slice does not remove that implementation bound or implement unlimited conn
 Six targeted helper extension tests, four Exit extension tests, 34 agent MPTCP tests
 (including five client-refill observation tests) and 11 agent extension tests pass locally;
 the selectors overlap and are not an independent aggregate count. Strict all-target,
-all-feature Clippy passes for the nine affected crates. These are not a live datapath proof.
-A separate `mptcp-refill` disposable scenario is prepared to require exhaustion of the
+all-feature Clippy passes for the nine affected crates. These local checks alone are not a
+live datapath proof. The separate `mptcp-refill` disposable scenario requires exhaustion of the
 original warm path, a newly eligible fourth relay path,
 the same MPTCP socket/context, actual bytes on that new path, retained original paths, full
 payload verification, privacy captures and complete cleanup. Existing `mptcp-growth` evidence
