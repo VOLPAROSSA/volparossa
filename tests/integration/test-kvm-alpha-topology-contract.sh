@@ -176,6 +176,52 @@ with tempfile.TemporaryDirectory(prefix='volparossa-private-export-') as directo
     assert captured['success'] is False and captured['cleanup']['verified'] is False
 PYTHON_PRIVATE_EXPORT
 
+# The Code client reuses the same single model provision, but keeps its later
+# completion boundary and sanitized answer facts separate from first-byte proof.
+"$HOST" --preview --scenario agent-private-code | grep -F 'Private-code:' >/dev/null
+sh "$HERE/agent-private-task-smoke.sh" --preview --code | grep -F 'no second model download' >/dev/null
+if sh "$HERE/agent-private-task-smoke.sh" --preview --code --browser >/dev/null 2>&1; then exit 1; fi
+grep -F 'exec sh tests/integration/agent-private-task-smoke.sh --execute --yes --expected-commit "$expected_commit" --code' "$HOST" >/dev/null
+grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-private-code'" "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-private-task-smoke.py report-code "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
+python3 -B "$HERE/agent-private-task-code.py" self-test
+python3 -B - "$HOST" <<'PYTHON_CODE_EXPORT'
+from pathlib import Path
+import json
+import sys
+import tempfile
+
+text = Path(sys.argv[1]).read_text()
+driver = text.split("<<'GUEST_DRIVER_SCRIPT'\n", 1)[1].split('\nGUEST_DRIVER_SCRIPT', 1)[0]
+assert driver.index('if [ "$scenario" = agent-private-code ]; then') < driver.index('printf \'%s  volparossa-mpquic\\n\'')
+code = text.split("<<'GUEST_DIAGNOSTICS_PYTHON'\n", 1)[1].split('\nGUEST_DIAGNOSTICS_PYTHON', 1)[0]
+module = dict(__name__='code_fixture_contract')
+exec(compile(code, 'code_fixture_diagnostics', 'exec'), module)
+with tempfile.TemporaryDirectory(prefix='volparossa-code-export-') as directory:
+    base = Path(directory)
+    home = base / 'home'
+    published = home / 'alpha-output'
+    published.mkdir(parents=True)
+    safe = ('agent-private-code-smoke.json', 'agent-private-code-provision.json',
+            'agent-private-code-client.json', 'agent-private-code-answer.json',
+            'agent-private-task-provision.json', 'agent-private-task-provision.log',
+            'agent-private-task-isolation.json', 'agent-private-task-snapshot.json',
+            'agent-private-task-owner_controls.json', 'agent-private-task-result_boundary.json',
+            'agent-private-task-private_service.json')
+    unsafe = ('agent-private-code-input.json', 'agent-private-code-runner.log',
+              'agent-private-code-raw-answer.json', 'agent-private-task-answer.json',
+              'agent-private-task-input.json', 'agent-private-task-report.json')
+    for name in safe + unsafe:
+        (published / name).write_text('{}')
+    archive = module['collect'](home, base / 'opt', 'a' * 40, 'agent-private-code', 1,
+                                cgroups=base / 'cgroups', proc=base / 'proc')
+    captured = json.loads((archive.parent / 'vm-incomplete.json').read_text())
+    names = {entry['file'] for entry in captured['diagnostics']['files']}
+    assert {f'published/{name}' for name in safe} <= names
+    assert not {f'published/{name}' for name in unsafe} & names
+    assert captured['success'] is False and captured['cleanup']['verified'] is False
+PYTHON_CODE_EXPORT
+
 # The browser scenario is separate from the original first-byte v2 proof. It keeps
 # model/control/cleanup checks and exports only exact sanitized panel provenance.
 "$HOST" --preview --scenario agent-private-browser | grep -F 'Private-browser:' >/dev/null
