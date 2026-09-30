@@ -6,6 +6,29 @@ Last updated: 2026-09-30
 
 ## Current integration and active work
 
+### Editor-to-core private execution candidate
+
+The separate [VOLPAROSSA Code source milestone](https://github.com/VOLPAROSSA/volparossa-code/pull/1)
+is integrated in that repository. Its explicitly selected-code command uses the actual
+same-owner private compute protocol; the independent Codex app-server client is not yet
+wired into a complete edit/test agent. No proprietary extension source is included.
+
+The new `agent-private-code` disposable scenario pins the unmodified Node client at
+`d5802a024d665a47b42abdbe809bea2b9ee86bd8` and Node 24.19.0, retains both licenses, and
+reuses one pinned 360M provision. A network-isolated client submits a synthetic function
+to the real private service and must receive its generated identifier with EOS and
+confirmed cleanup. Existing owner controls, cancel/disconnect tests, model/input
+isolation and complete guest cleanup still apply. Only bounded facts are exported, not
+the source or raw answer. The [real VM trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/36738995292)
+**passes** on `7605c0ec6f56ea863333558b4c06fdec6a9cd630`: the actual 360M model
+returns the synthetic identifier in a 12-token EOS answer; cancellation/disconnect,
+owner/isolation checks, post-result cleanup and unchanged guest host state pass.
+All 18 original evidence files are retained locally; their archive SHA256 is
+`3d47971aa397ed43b076863912a67251efe69875babf02f1d538b196bd2063eb`.
+This is not yet editor execution, Codex tool use, general coding ability or private peer offload.
+
+### Storage layer and privacy boundaries
+
 **Private storage is now documented as a separate fourth layer**, with actual replicated-byte
 reciprocity, adaptive contribution targets and safe pending drain. The requested storage
 immune system must address prohibited-content admission and abuse without disclosing private
@@ -16,6 +39,8 @@ does not defeat malicious clients. The content-admission/review mechanism remain
 Different-chunk placement is implemented in the signed fragment CLI with local-service
 evidence below; its real overlay/provider-loss trial remains pending. The earlier
 replica/handoff proofs retain a complete encrypted archive at each selected provider.
+
+### Mailbox import confirmation
 
 The [mailbox import-confirmation candidate](MAILBOX_IMPORT_CONFIRMATION.md) adds a
 reusable split handoff: `content mailbox fetch` retains provider custody while writing
