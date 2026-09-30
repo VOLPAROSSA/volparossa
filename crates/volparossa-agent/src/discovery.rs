@@ -17805,6 +17805,7 @@ mod tests {
     pub(super) struct PreselectionTestCapabilities {
         transports: PreselectionTestTransports,
         families: PreselectionTestFamilies,
+        network_discriminator: Option<u8>,
     }
 
     impl PreselectionTestCapabilities {
@@ -17819,6 +17820,14 @@ mod tests {
                     ipv4: true,
                     ipv6: true,
                 },
+                network_discriminator: None,
+            }
+        }
+
+        const fn all_on_network(discriminator: u8) -> Self {
+            Self {
+                network_discriminator: Some(discriminator),
+                ..Self::all()
             }
         }
     }
@@ -17835,6 +17844,7 @@ mod tests {
                     ipv4: true,
                     ipv6: false,
                 },
+                network_discriminator: None,
             }
         }
     }
@@ -17866,21 +17876,22 @@ mod tests {
         nonce: [u8; 32],
         sequence_number: u64,
     ) {
+        let discriminator = advertised.network_discriminator.unwrap_or(nonce[0]);
         network.country_code = "NL".to_owned();
-        network.operator_id = format!("operator-{}-{sequence_number}", nonce[0]);
+        network.operator_id = format!("operator-{discriminator}-{sequence_number}");
         network.asn = 64_512_u32
-            .saturating_add(u32::from(nonce[0]).saturating_mul(16))
+            .saturating_add(u32::from(discriminator).saturating_mul(16))
             .saturating_add(u32::try_from(sequence_number % 16).expect("bounded sequence suffix"));
         network.ipv4_prefix_hint = advertised
             .families
             .ipv4
-            .then(|| format!("44.{}.{}.0/24", nonce[0], sequence_number % 255))
+            .then(|| format!("44.{discriminator}.{}.0/24", sequence_number % 255))
             .unwrap_or_default();
         network.ipv6_prefix_hint = advertised
             .families
             .ipv6
             .then(|| {
-                let prefix_segment = (u16::from(nonce[0]) << 8)
+                let prefix_segment = (u16::from(discriminator) << 8)
                     | u16::try_from(sequence_number % 255).expect("bounded sequence suffix");
                 format!("2606:4700:{prefix_segment:x}::/48")
             })
@@ -25606,9 +25617,8 @@ mod tests {
         let mut fixture = Box::new(fixture(test_client_roles()));
         let now_ms = unix_millis();
         let exit = Identity::generate();
-        let mut exit_nonce = generate_nonce();
-        // Test network diversity derives from this byte; the relays use 40..43.
-        exit_nonce[0] = 43;
+        // Public network hints are fixture inputs, independent of signing nonces.
+        let exit_nonce = generate_nonce();
         let exit_peer = *exit.peer_id();
         let deadline = now_ms.saturating_add(20_000);
         fixture
@@ -25626,7 +25636,7 @@ mod tests {
             exit_nonce,
             now_ms,
             &fixture.directory,
-            PreselectionTestCapabilities::all(),
+            PreselectionTestCapabilities::all_on_network(43),
         );
         for discriminator in 40..43 {
             let identity = Identity::generate();
@@ -25640,9 +25650,9 @@ mod tests {
                         exit: false
                     },
                     1,
-                    [discriminator; 32],
+                    generate_nonce(),
                     now_ms,
-                    PreselectionTestCapabilities::all(),
+                    PreselectionTestCapabilities::all_on_network(discriminator),
                 )
                 .await
                 .is_some()
@@ -25765,8 +25775,11 @@ mod tests {
 
     async fn larger_restricted_preselection_fixture() -> (Box<RuntimeFixture>, u64) {
         let (mut fixture, now_ms) = signed_alternative_exit_controls_fixture().await;
-        for _ in 0..3 {
+        // The base fixture uses networks 40..43. Keep added public hints diverse
+        // without overwriting any part of the independently generated nonce.
+        for discriminator in 44..47 {
             let identity = Identity::generate();
+            let nonce = generate_nonce();
             assert!(
                 ingest_direct_snapshot_advertisement_with_capabilities(
                     &mut fixture,
@@ -25777,9 +25790,9 @@ mod tests {
                         exit: false,
                     },
                     1,
-                    generate_nonce(),
+                    nonce,
                     now_ms,
-                    PreselectionTestCapabilities::all(),
+                    PreselectionTestCapabilities::all_on_network(discriminator),
                 )
                 .await
                 .is_some()
@@ -25792,6 +25805,7 @@ mod tests {
             .next()
             .unwrap()
             .clone();
+        let exit_nonce = generate_nonce();
         assert!(
             ingest_forwarded_snapshot_exit_with_capabilities(
                 &mut fixture,
@@ -25803,9 +25817,9 @@ mod tests {
                     exit: true,
                 },
                 1,
-                generate_nonce(),
+                exit_nonce,
                 now_ms,
-                PreselectionTestCapabilities::all(),
+                PreselectionTestCapabilities::all_on_network(47),
             )
             .await
             .is_some()
