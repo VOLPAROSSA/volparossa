@@ -83,6 +83,41 @@ async fn exchange(
     .expect("bounded real two-hop retirement exchange")
 }
 
+#[test]
+fn retirement_dial_diagnostics_are_closed_classes_not_remote_error_text() {
+    use libp2p::{core::transport::TransportError, swarm::DialError};
+    let address = "/memory/19331".parse().unwrap();
+    assert_eq!(
+        retirement_dial_failure_code(&DialError::NoAddresses),
+        "ROUTE_RETIRE_DIAL_NO_ADDRESSES"
+    );
+    let mut failure = DialError::Transport(vec![(
+        address,
+        TransportError::Other(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+    )]);
+    assert_eq!(
+        retirement_dial_failure_code(&failure),
+        "ROUTE_RETIRE_DIAL_TIMEOUT"
+    );
+    if let DialError::Transport(errors) = &mut failure {
+        errors.push((
+            "/memory/19332".parse().unwrap(),
+            TransportError::Other(std::io::Error::other("private remote transport detail")),
+        ));
+    }
+    assert_eq!(
+        retirement_dial_failure_code(&failure),
+        "ROUTE_RETIRE_DIAL_TRANSPORT_MIXED"
+    );
+    assert_eq!(
+        retirement_dial_failure_code(&DialError::Transport(vec![(
+            "/memory/19332".parse().unwrap(),
+            TransportError::Other(std::io::Error::other("private remote transport detail")),
+        )])),
+        "ROUTE_RETIRE_DIAL_TRANSPORT_OTHER"
+    );
+}
+
 #[tokio::test]
 async fn scoped_retirement_crosses_real_relay_and_exit_and_rejects_wrong_scope() {
     let (mut client, state, _client_dir) = super::super::tests::retirement_runtime_fixture();

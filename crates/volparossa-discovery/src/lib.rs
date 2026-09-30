@@ -1518,6 +1518,9 @@ impl DiscoveryService {
         {
             return Err(DiscoveryError::ProtocolPeer);
         }
+        if canonical.validated_operation()? == ExitForwardOperation::RouteRetire {
+            self.restore_retirement_exit_addresses(*exit_peer);
+        }
         Ok(self
             .swarm
             .behaviour_mut()

@@ -6,26 +6,28 @@ use volparossa_protocol::{MptcpPathsRequest, MptcpPathsState, mptcp_paths_reques
 fn request() -> MptcpPathsRequest {
     let mut parent = exit_reservation_for_identity();
     parent.allowed_transports = vec![Transport::TcpMptcp as i32];
+    let nonce = generate_nonce();
+    parent.nonce = nonce.to_vec();
     MptcpPathsRequest {
         signed_exit_reservation: sign_control_message(
             &parent,
             &key(30),
             NOW,
             EXPIRY,
-            [4; 32],
+            nonce,
             TimePolicy::default(),
         )
         .unwrap(),
     }
 }
 
-fn signed<T: ControlPayload>(payload: &T, signer: &SigningKey, nonce: u8) -> Vec<u8> {
+fn signed<T: ControlPayload>(payload: &T, signer: &SigningKey) -> Vec<u8> {
     sign_control_message(
         payload,
         signer,
         NOW,
         NOW + 5_000,
-        [nonce; 32],
+        generate_nonce(),
         TimePolicy::default(),
     )
     .unwrap()
@@ -35,7 +37,7 @@ fn signed<T: ControlPayload>(payload: &T, signer: &SigningKey, nonce: u8) -> Vec
 fn mptcp_paths_request_binds_original_session_nonce_expiry_and_transport() {
     let payload = request();
     payload.parent().unwrap();
-    let bytes = signed(&payload, &key(31), 21);
+    let bytes = signed(&payload, &key(31));
     let mut replay = ReplayCache::new(4).unwrap();
     assert_eq!(
         verify_control_message::<MptcpPathsRequest>(
@@ -59,7 +61,7 @@ fn mptcp_paths_request_binds_original_session_nonce_expiry_and_transport() {
     );
     assert_ne!(
         mptcp_paths_request_hash(&bytes),
-        mptcp_paths_request_hash(&signed(&payload, &key(31), 22))
+        mptcp_paths_request_hash(&signed(&payload, &key(31)))
     );
     for (signer, expiry) in [(key(30), NOW + 5_000), (key(31), NOW + 5_001)] {
         assert!(
@@ -68,7 +70,7 @@ fn mptcp_paths_request_binds_original_session_nonce_expiry_and_transport() {
                 &signer,
                 NOW,
                 expiry,
-                [21; 32],
+                generate_nonce(),
                 TimePolicy::default()
             )
             .is_err()
@@ -85,13 +87,15 @@ fn mptcp_paths_request_binds_original_session_nonce_expiry_and_transport() {
     );
     let mut parent = payload.parent().unwrap();
     parent.allowed_transports = vec![Transport::UdpSinglePath as i32];
+    let nonce = generate_nonce();
+    parent.nonce = nonce.to_vec();
     let wrong = MptcpPathsRequest {
         signed_exit_reservation: sign_control_message(
             &parent,
             &key(30),
             NOW,
             EXPIRY,
-            [4; 32],
+            nonce,
             TimePolicy::default(),
         )
         .unwrap(),
@@ -111,7 +115,7 @@ fn mptcp_paths_request_binds_original_session_nonce_expiry_and_transport() {
 
 fn state() -> MptcpPathsState {
     MptcpPathsState {
-        request_sha256: mptcp_paths_request_hash(&signed(&request(), &key(31), 21)).to_vec(),
+        request_sha256: mptcp_paths_request_hash(&signed(&request(), &key(31))).to_vec(),
         route_context_id: vec![2; 16],
         reservation_id: vec![1; 16],
         exit_node_id: node_id(&key(30)),
@@ -125,7 +129,7 @@ fn state() -> MptcpPathsState {
 #[test]
 fn mptcp_paths_state_rejects_wrong_signer_replay_and_malformed_path_sets() {
     let payload = state();
-    let encoded = signed(&payload, &key(30), 23);
+    let encoded = signed(&payload, &key(30));
     let mut replay = ReplayCache::new(2).unwrap();
     assert_eq!(
         verify_control_message::<MptcpPathsState>(
@@ -153,7 +157,7 @@ fn mptcp_paths_state_rejects_wrong_signer_replay_and_malformed_path_sets() {
             &key(31),
             NOW,
             NOW + 5_000,
-            [23; 32],
+            generate_nonce(),
             TimePolicy::default()
         )
         .is_err()
@@ -181,7 +185,7 @@ fn mptcp_paths_state_rejects_wrong_signer_replay_and_malformed_path_sets() {
             &key(30),
             NOW,
             NOW + 5_000,
-            [23; 32],
+            generate_nonce(),
             TimePolicy::default()
         )
         .is_err()

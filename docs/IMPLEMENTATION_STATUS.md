@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-29
+Last updated: 2026-09-30
 
 ## Current integration and active work
 
@@ -164,6 +164,20 @@ exact-accepted-extension retirement-authority correction and real two-hop regres
 implemented; the targeted two-hop regression, formatting and strict agent Clippy pass.
 The fresh live transfer/retirement proof remains pending. The original 167-file run remains failed;
 successful disposable teardown and unchanged host state do not replace product cleanup.
+
+Run `36624751596` on `c47e56fd` repeats the complete 256-MiB application with matching
+hashes, unchanged meta sockets, exact warm retirement and fresh fourth-path progress
+(166,320 Client received / Exit acknowledged bytes). R4 now receives its cleanup receipt,
+confirming the accepted-extension retirement correction. The full report still **fails**:
+original warm Relay R1 repeatedly cannot dial the Exit after impairment removal. Source
+inspection finds that transient Kademlia transport failure can remove a known address
+without clearing our admission registry; a destruction-only retry now restores bounded,
+previously Known addresses for the exact Exit. A real Kademlia-event regression passes.
+The original artifact did not retain failed dial endpoints, so this is a reproduced source
+defect and candidate explanation, not proof of that exact remote failure. Scoped fixed-class
+dial diagnostics are added; a new live cleanup proof remains required. The original 169
+files retain failed normal cleanup, successful disposable teardown and unchanged host state;
+see [the exact evidence and remaining limitation](MPTCP_REFILL.md).
 
 The first [Firefox integration PR](https://github.com/VOLPAROSSA/volparossa-browser/pull/1)
 is merged (`bab677ba`): isolated ESR 140.16 privacy defaults and native Strict tracking

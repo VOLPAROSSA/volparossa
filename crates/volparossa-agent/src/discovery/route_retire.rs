@@ -177,6 +177,38 @@ fn peer_node(peer: Libp2pPeerId) -> Option<[u8; 32]> {
     ))
 }
 
+fn retirement_dial_failure_code(error: &libp2p::swarm::DialError) -> &'static str {
+    use libp2p::{core::transport::TransportError, swarm::DialError};
+    match error {
+        DialError::NoAddresses => "ROUTE_RETIRE_DIAL_NO_ADDRESSES",
+        DialError::LocalPeerId { .. } => "ROUTE_RETIRE_DIAL_SELF",
+        DialError::WrongPeerId { .. } => "ROUTE_RETIRE_DIAL_PEER_MISMATCH",
+        DialError::DialPeerConditionFalse(_) => "ROUTE_RETIRE_DIAL_ALREADY_CONNECTED_OR_PENDING",
+        DialError::Aborted => "ROUTE_RETIRE_DIAL_ABORTED",
+        DialError::Denied { .. } => "ROUTE_RETIRE_DIAL_DENIED",
+        DialError::Transport(errors) => {
+            let mut classes = errors.iter().map(|(_, error)| match error {
+                TransportError::MultiaddrNotSupported(_) => "ROUTE_RETIRE_DIAL_UNSUPPORTED",
+                TransportError::Other(error) => match error.kind() {
+                    std::io::ErrorKind::TimedOut => "ROUTE_RETIRE_DIAL_TIMEOUT",
+                    std::io::ErrorKind::ConnectionRefused => "ROUTE_RETIRE_DIAL_REFUSED",
+                    std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::HostUnreachable => "ROUTE_RETIRE_DIAL_UNREACHABLE",
+                    _ => "ROUTE_RETIRE_DIAL_TRANSPORT_OTHER",
+                },
+            });
+            let first = classes
+                .next()
+                .unwrap_or("ROUTE_RETIRE_DIAL_TRANSPORT_EMPTY");
+            if classes.all(|class| class == first) {
+                first
+            } else {
+                "ROUTE_RETIRE_DIAL_TRANSPORT_MIXED"
+            }
+        }
+    }
+}
+
 fn exit_request(grant: &ExitReservation) -> RouteRetire {
     RouteRetire {
         route_context_id: grant.route_context_id.clone(),
@@ -234,6 +266,27 @@ fn capability_request(grant: &ClientSessionCapability) -> RouteRetire {
 }
 
 impl DiscoveryRuntime {
+    pub(super) fn trace_retirement_dial_failure(
+        &self,
+        peer: Option<Libp2pPeerId>,
+        error: &libp2p::swarm::DialError,
+    ) {
+        if !peer.is_some_and(|peer| {
+            self.route_retire
+                .upstream
+                .values()
+                .any(|pending| pending.exit == peer)
+        }) {
+            return;
+        }
+        // Do not log the error display/debug text: it embeds remote addresses and identifiers.
+        // A dial to the same pending Exit is a scoped diagnostic, not RPC correlation proof.
+        tracing::warn!(
+            diagnostic_code = retirement_dial_failure_code(error),
+            "route retirement adjacent Exit dial failed"
+        );
+    }
+
     /// Close only this newly added Relay's admission after a verified extension abort.
     /// The original Exit and other Relays are deliberately not sent a retirement request.
     pub(super) fn begin_extension_relay_retirement(

@@ -5119,8 +5119,15 @@ impl DiscoveryRuntime {
             SwarmEvent::Behaviour(BehaviourEvent::DatapathRelay(event)) => {
                 Box::pin(self.handle_datapath_event(event, state)).await;
             }
-            SwarmEvent::OutgoingConnectionError { .. }
-            | SwarmEvent::IncomingConnectionError { .. } => {
+            SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                self.trace_retirement_dial_failure(peer_id, &error);
+                state.write().await.log(
+                    LogLevel::Debug,
+                    "DISCOVERY_CONNECTION_FAILED",
+                    unix_millis(),
+                );
+            }
+            SwarmEvent::IncomingConnectionError { .. } => {
                 state.write().await.log(
                     LogLevel::Debug,
                     "DISCOVERY_CONNECTION_FAILED",
@@ -25758,7 +25765,7 @@ mod tests {
 
     async fn larger_restricted_preselection_fixture() -> (Box<RuntimeFixture>, u64) {
         let (mut fixture, now_ms) = signed_alternative_exit_controls_fixture().await;
-        for discriminator in 44..47 {
+        for _ in 0..3 {
             let identity = Identity::generate();
             assert!(
                 ingest_direct_snapshot_advertisement_with_capabilities(
@@ -25770,7 +25777,7 @@ mod tests {
                         exit: false,
                     },
                     1,
-                    [discriminator; 32],
+                    generate_nonce(),
                     now_ms,
                     PreselectionTestCapabilities::all(),
                 )
@@ -25796,7 +25803,7 @@ mod tests {
                     exit: true,
                 },
                 1,
-                [47; 32],
+                generate_nonce(),
                 now_ms,
                 PreselectionTestCapabilities::all(),
             )

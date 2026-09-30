@@ -304,3 +304,42 @@ All 167 original files remain unchanged, ZIP SHA-256
 Disposable teardown reports zero remaining owned objects and unchanged host SHA-256
 `440fffc060d0624a44e1e5d24072598a1c837b9f4c9e3d89dbe3f05836eb61d8`;
 the product's failed normal disconnect/shutdown is not concealed by that later cleanup.
+
+### Fresh Relay cleanup succeeds; an original warm Relay cannot reconnect
+
+[Run `36624751596` on `c47e56fd`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36624751596)
+again completes 268,435,456 bytes at both application ends, SHA-256
+`0151d9c46ca3bcef1d9b4e4f4ac3c42c32a810a8c269272564e55b25e009cc54`.
+The unchanged original snapshots pass two-path progress, warm three-path progress,
+warm retirement, all eight raw projections and unchanged socket lifetimes. Fresh path 4
+carries 166,320 received bytes at the Client and 166,320 acknowledged bytes at the Exit
+in its checked interval; the healthy original path progresses too. All fourteen captures
+pass drain and basic privacy checks. These are partial observations, not a passed report.
+
+The accepted-extension retirement fix now has live effect: R4 obtains its upstream receipt
+and logs `ROUTE_RETIRE_RELAY_COMPLETE` at 20:26:47 UTC. The remaining failure is original
+warm Relay R1, whose repeated Exit retirement attempts report
+`ROUTE_RETIRE_OUTBOUND_DIAL_FAILED`. Both injected loss qdiscs had already been removed
+before normal disconnect. Exact failed dial addresses and causes were not retained, so
+the artifact does not establish which transport/address failed. The report remains
+**failed** at `MPTCP_REFILL_DISCONNECT_FAILED`; the Client's shutdown failure remains visible.
+
+Source inspection identifies a reconnect defect in the retained-address path: pinned
+libp2p-kad removes individual addresses on transport failure, whereas our bounded admission
+registry keeps their provenance and does not reinsert duplicate admissions. Peer-ID-only
+retirement can therefore keep trying an unusable surviving address after a temporary loss.
+The candidate restores only previously `Known`, still-canonical and local-scope-eligible
+addresses for the exact Exit when sending a retirement request. It imports no new address,
+does not resurrect Identify/mDNS-only or purged client addresses, does not choose a new Exit,
+and grants no forwarding authority. A focused regression delivers a real Kademlia
+`FromSwarm::DialFailure` event and verifies known-listener recovery without reviving other
+removed addresses. It passes locally; this reproduces the source defect, not the uncaptured
+endpoint identity of the failed run. Closed-category diagnostics now retain dial causes only
+for an Exit with pending retirement, without logging address/peer/error text. A new live
+run must still establish full normal cleanup; loss, timing, payload and acceptance gates
+are unchanged.
+
+All 169 original files remain unchanged, ZIP SHA-256
+`3a05e0f5aa1aeed53b38ffdc0a8ea32384efe81bec7fefd081078b278eba81bc`.
+Final disposable cleanup reports zero owned objects and equal host-state SHA-256
+`438531a184d131f9c3811715741fc01e731948a22d1f0e0a3dbffe952de08aa8`.
