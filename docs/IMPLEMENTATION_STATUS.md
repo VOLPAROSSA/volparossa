@@ -13,6 +13,9 @@ backups. This is a requirement clarification, not new runtime enforcement: signe
 quotas and ciphertext hashes do not classify encrypted files, and uploader self-attestation
 does not defeat malicious clients. The content-admission/review mechanism remains open; see
 [storage privacy and abuse boundaries](PRIVATE_STORAGE.md#storage-immune-system-and-private-content-limits).
+Different-chunk placement across providers also remains open: the current chunked transfers
+and replica/handoff proofs retain a complete encrypted archive at every selected provider,
+not a subset of archive fragments per holder.
 
 Automatic authority rounds and the four-job assessment cycle are integrated by
 [PR #163](https://github.com/VOLPAROSSA/volparossa/pull/163), normal merge `f4e6aa79`,

@@ -237,6 +237,9 @@ or permission to redistribute everything a user receives.
 
 The developing cloud-storage service is designed for **application-encrypted backups**, not public
 content or training data. Storage peers hold opaque chunks; recovery keys stay with the owner.
+The intended placement spreads different encrypted chunks across participants, with recovery
+copies per chunk; no single holder needs to store the whole archive. That placement step is
+not yet implemented by the current full-archive replica sets described below.
 Unlike an opportunistic cache, this layer has explicit retention, renewal and deletion:
 restoring a backup must not consume it. Message delivery has its own lifecycle, separate
 from both backup storage and the public cache.
@@ -301,7 +304,9 @@ plaintext or turn private backups into public-cache or training material.
 
 Real disposable overlay trials now pass for a single provider and **two-provider replica
 failover**: both copies are charged, a survivor restores the complete archive after the
-original file is removed, and repeated restores leave its copy intact. A separate scoped
+original file is removed, and repeated restores leave its copy intact. Although transfers
+are chunked, each current provider retains the complete encrypted archive; this is not yet
+different-chunk placement across peers. A separate scoped
 proof also passes for **owner-directed A/B → B/C replacement**: build and fully read back C
 before releasing A. That is explicit handoff, not unattended repair or automatic downsizing.
 Least-authority application enrollment, automatic placement/repair,

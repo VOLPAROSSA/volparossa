@@ -17,6 +17,20 @@ not a readable conversation database. A hash detects corruption; it is not encry
 proof of ownership or permission to publish private data. Backup consent never authorizes
 public-cache publication or compute training.
 
+### Fragment placement versus transfer chunks
+
+The required end state distributes different encrypted chunks across storage participants,
+with redundant copies of each chunk and a private authenticated reconstruction manifest.
+The owner restores by gathering and verifying the required chunks; no single provider
+needs a complete archive. Contribution accounting counts every actual retained chunk copy
+and charged overhead, regardless of how many holders share them.
+
+The current transport streams bounded chunks, but `storage replicas` deposits the **same
+complete encrypted archive at each selected provider**. Chunked transfer and full-archive
+replica failover do not prove distributed fragment placement. Per-chunk placement,
+independent replica repair and recovery of the private reconstruction metadata remain
+unfinished; the existing complete-copy proofs must not be presented as that end state.
+
 ## Reciprocal contribution
 
 The user-selected rule is:
