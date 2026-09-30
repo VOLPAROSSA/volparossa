@@ -65,7 +65,7 @@ and independent controller shutdown. The controller test does not prove two simu
 carrying MPTCP routes. The live disposable Firefox/HTTPS proof is a separate remaining step.
 
 The [Firefox adapter](https://github.com/VOLPAROSSA/volparossa-browser/pull/4) is pinned to
-`a82e6c6313a4dc56cebaac4fcdff5cd3d12895d4` for the `browser-network` VM scenario.
+`2ed43df06d110685edb830ccc48fc38cdb4b0e9b` for the `browser-network` VM scenario.
 Its existing isolated ESR 140.16 smoke proves real Gecko Unix IPC and three TLS 1.3
 responses against a **synthetic** gateway, including independent detach and absence of
 proxy credentials at the origin. That result is not a real overlay proof.
@@ -155,6 +155,23 @@ The next diagnostic classifies only exact fixture-owned destinations and fixed b
 setup directories, retaining an unknown category rather than exporting paths. Eleven
 focused checks pass. No sandbox permission, browser pin or product datapath changed;
 actual browser-to-overlay payload transfer remains unproven.
+
+The [sixth combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36726326554)
+on `4808fe06113915709d61b070c022288cb1e53331` **fails** before child validation or HTTPS.
+Its closed diagnostic identifies `browser_work` as the sole directory-creation target,
+with permission denied. All 17 original artifacts are retained (ZIP SHA-256
+`68f134e5df9061ab7ce2146a72c3fbac7a00890c2be270b969d1d5801f8e2e20`).
+Private cleanup passes, and both host snapshots hash to
+`d8101820722bbbbdddb5afe8866ff8ec5e6aab0e3729d68818576a8a4a3da438`.
+A bounded local bubblewrap-only probe, using UID 985 with zero effective capabilities
+and no-new-privileges, reproduces destination-parent creation denial with an unmapped,
+search-only parent. An anonymous child-only parent shell removes that dependency.
+The candidate driver therefore rebinds only the pinned runtime read-only beneath that
+shell, remounts the shell read-only, and retains the original private writable work bind.
+Other provisioning-home entries are hidden, not copied or made readable. Existing parent,
+runtime and grant permissions, application UID, network namespace and capability checks
+are unchanged. Nine focused browser tests pass. This is a sandbox-launch candidate;
+the next actual combined run must still prove Gecko HTTPS and protected MPTCP payloads.
 
 Ordinary browsing integration, opportunistic fallback with the user-requested default-off
 browser kill switch, HTTP/3, WebRTC, background traffic and crash-persistent browser-wide

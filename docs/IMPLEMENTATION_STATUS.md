@@ -75,6 +75,14 @@ on `ff98dc8c` narrows the launch failure to bwrap directory creation. Its 17 ret
 original artifacts still prove no browser payload; private cleanup and unchanged host
 state pass. Exact closed destination categories are now recorded without raw paths;
 eleven focused checks pass. This remains diagnosis, not a verified permission fix.
+The [sixth run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36726326554)
+on `4808fe06` identifies the exact failing destination category as the browser work
+directory; it still fails before child validation or HTTPS. Cleanup and unchanged host
+state pass. A bounded bubblewrap-only reproduction distinguishes an unmapped, search-only
+parent from an owned parent. The candidate browser driver now places only the verified
+runtime beneath an anonymous, read-only provisioning-parent shell inside its mount
+namespace. It does not change parent permissions, grants, UID, capabilities or network
+access. Nine browser driver checks pass; the corrected combined live proof remains pending.
 
 [Signal integration](https://github.com/VOLPAROSSA/volparossa-chat/pull/1) now has a pinned
 Desktop/libsignal source baseline and explicit device/session/backup contracts, not a
