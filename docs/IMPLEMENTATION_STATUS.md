@@ -376,8 +376,22 @@ must show subset-only custody. After removing the owner source and stopping prov
 the fixture requires two full B/C reconstructions, unchanged physical charges, original
 store reopen and explicit deletion of all eight copies. Each transfer phase requires the
 same two-path protected MPTCP route, drained privacy captures and original host cleanup.
-Eight focused Python receipt/export/wiring checks pass. **The privileged overlay run has
-not been executed yet**; this is not a fragment network acceptance PASS or Signal backup proof.
+The first exact protected-overlay trial **36741590268** at
+`3d8d24bc9ac19006af7798a727c2e67377576f6d` failed after successful upload, same-identity
+retry and renewal of all eight copies: its bounded completion counter observed 43 rather
+than the required 56 protected exchanges. The source was removed, but the trial stopped
+before provider withdrawal, survivor restores and store-accounting snapshots. Private
+cleanup and unchanged guest-host state passed; the original 19-file evidence bundle remains
+unchanged (ZIP SHA-256 `bf83447621179be27faff66eb315e3749d5fc209ee83711ab9e1d56ffc7caebe`).
+The fixture had read only the latest 400 event records, not the complete existing 1000-record
+agent ring, without checking whether that tail covered the phase baseline. The candidate
+now reads the full bounded Exit window and explicitly rejects truncated/clock-regressed
+evidence, retaining the original **56/16/16** completion thresholds and every data/privacy
+gate. Exported metadata includes window coverage and separate failed-flow counts, not raw
+logs. The original artifact lacks that window metadata, so it does not retrospectively
+prove all missing events were cropped. Nine focused Python receipt/export/wiring checks
+pass; **the corrected protected-overlay trial remains pending**. This is not a fragment
+network acceptance PASS or Signal backup proof.
 
 The next owner-coordinated candidate adds `storage replicas replace`: a durable,
 resumable A/B-to-B/C handoff through the same protected operations. It retrieves and hashes

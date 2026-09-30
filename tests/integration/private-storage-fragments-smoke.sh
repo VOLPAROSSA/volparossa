@@ -37,15 +37,24 @@ private_storage_fragments_phase_finish() {
     content_provider_stop_control_observer || fail FRAGMENTS_CONTROL_CAPTURE_INCOMPLETE
     storage_poll=0
     while [ "$storage_poll" -lt 50 ]; do
-        capture_product_logs
-        storage_flows=$(content_provider_event_count exit MPTCP_EXIT_FLOW_COMPLETED)
+        # The shared diagnostic snapshot requests only the newest 400 records.
+        # This phase performs 56 exchanges plus their other lifecycle events:
+        # count the complete existing 1000-record ring, never a cropped tail.
+        "$binary_directory/volparossa" --control-socket "$WORK/runtime-exit/control/agent.sock" \
+            logs --limit 1000 >"$WORK/private-storage-fragments-exit-log-window.txt" \
+            || fail FRAGMENTS_EXIT_LOG_UNAVAILABLE
+        python3 -B "$WORK/bin/private-storage-fragments-smoke.py" flow-gates \
+            "$WORK/private-storage-fragments-exit-log-window.txt" "$provider_baseline_ms" \
+            >"$WORK/private-storage-fragments-$storage_phase-gates.json" || fail FRAGMENTS_EXIT_LOG_INVALID
+        jq -e '.exit_log_window_covers_baseline == true' \
+            "$WORK/private-storage-fragments-$storage_phase-gates.json" >/dev/null \
+            || fail FRAGMENTS_EXIT_LOG_WINDOW_TRUNCATED
+        storage_flows=$(jq -er '.exit_mptcp_tls_completed' \
+            "$WORK/private-storage-fragments-$storage_phase-gates.json") || fail FRAGMENTS_EXIT_LOG_INVALID
         [ "$storage_flows" -lt "$storage_expected_flows" ] || break
         sleep 0.1
         storage_poll=$((storage_poll + 1))
     done
-    jq -n --argjson baseline "$provider_baseline_ms" --argjson count "$storage_flows" \
-        '{event_baseline_unix_ms:$baseline,exit_mptcp_tls_completed:$count}' \
-        >"$WORK/private-storage-fragments-$storage_phase-gates.json"
     [ "$storage_flows" -ge "$storage_expected_flows" ] || fail FRAGMENTS_PROTECTED_FLOW_INCOMPLETE
 }
 

@@ -39,6 +39,30 @@ FILES = {"identity.key", "passphrase", "grant-a.bin", "grant-b.bin", "grant-c.bi
          "input.bin", "restore-1.bin", "restore-2.bin", "identities.sha256"}
 
 
+def flow_gates(path, baseline):
+    # Only code-only counters/timestamps leave the VM; this private snapshot is
+    # not an export. Never infer cumulative totals from a truncated log window.
+    require(type(baseline) is int and baseline > 0, "invalid event baseline")
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_size <= 262144, "invalid bounded Exit log")
+    records = []
+    for line in path.read_text().splitlines():
+        match = re.fullmatch(r"([0-9]+)\tlevel=([0-9]+)\tevent=([A-Z0-9_]+)\tsession=[0-9a-f]*\tpath=(?:-|[0-9]+)", line)
+        require(match is not None, "unexpected Exit log record")
+        timestamp = int(match[1])
+        require(timestamp > 0 and (not records or timestamp >= records[-1][0]),
+                "Exit log clock regressed")
+        records.append((timestamp, match[3]))
+    require(0 < len(records) <= 1000, "invalid Exit log window length")
+    return dict(event_baseline_unix_ms=baseline, exit_log_limit=1000, exit_log_records=len(records),
+        exit_log_oldest_unix_ms=records[0][0], exit_log_newest_unix_ms=records[-1][0],
+        exit_log_window_covers_baseline=records[0][0] <= baseline,
+        exit_mptcp_tls_completed=sum(timestamp > baseline and event == "MPTCP_EXIT_FLOW_COMPLETED"
+                                     for timestamp, event in records),
+        exit_mptcp_tls_failed=sum(timestamp > baseline and event == "MPTCP_EXIT_FLOW_FAILED"
+                                 for timestamp, event in records))
+
+
 def existing(root):
     return ["--state", root / "fragment-set", *unlock(root)]
 
@@ -301,8 +325,11 @@ def validate_network(phase, peers, layout, name):
     # Provider control may reuse cached authenticated discovery; an empty but
     # fully drained dedicated capture is valid, never unexpected control traffic.
     NET["validate_drained"](control, allow_empty=True)
-    require(phase["gates"]["event_baseline_unix_ms"] > 0
-            and phase["gates"]["exit_mptcp_tls_completed"] >= PHASES[name], "protected completion count incomplete")
+    gates = phase["gates"]
+    require(gates["event_baseline_unix_ms"] > 0 and gates["exit_log_limit"] == 1000
+            and 0 < gates["exit_log_records"] <= 1000 and gates["exit_log_window_covers_baseline"] is True
+            and 0 < gates["exit_log_oldest_unix_ms"] <= gates["event_baseline_unix_ms"] < gates["exit_log_newest_unix_ms"]
+            and gates["exit_mptcp_tls_completed"] >= PHASES[name], "protected completion count incomplete")
 
 
 def validate_evidence(value):
@@ -373,7 +400,9 @@ def main(arguments):
     command = arguments[0]
     if command == "export-names" and len(arguments) == 1:
         print("\n".join(EXPORT_NAMES)); return
-    if command == "prepare" and len(arguments) == 10:
+    if command == "flow-gates" and len(arguments) == 3:
+        result = flow_gates(Path(arguments[1]), int(arguments[2]))
+    elif command == "prepare" and len(arguments) == 10:
         result = prepare(private_root(arguments[1]), *arguments[2:])
     elif command in PHASES and len(arguments) == 7:
         result = {"upload": upload, "restore": restore, "finish": finish}[command](

@@ -23,6 +23,10 @@ def fixture():
     for name, count in CHECK["PHASES"].items():
         phase = copy.deepcopy(old["network"]["complete"])
         phase["gates"]["exit_mptcp_tls_completed"] = count
+        baseline = phase["gates"]["event_baseline_unix_ms"]
+        phase["gates"].update(exit_log_limit=1000, exit_log_records=count + 1,
+            exit_log_oldest_unix_ms=baseline, exit_log_newest_unix_ms=baseline + count,
+            exit_log_window_covers_baseline=True, exit_mptcp_tls_failed=0)
         for role, capture in phase["privacy"].items():
             for node in CHECK["NODES"]:
                 active = role == "exit" and (name != "restore" or node != "relay4")
@@ -147,6 +151,9 @@ class FragmentEvidence(unittest.TestCase):
             lambda v: v["network"]["upload"]["privacy"]["client"].update(direct_client_exit_packets=1),
             lambda v: v["network"]["finish"]["privacy"]["exit"].update(packet_socket_drops=1),
             lambda v: v["network"]["upload"]["gates"].update(exit_mptcp_tls_completed=55),
+            lambda v: v["network"]["upload"]["gates"].update(exit_log_window_covers_baseline=False),
+            lambda v: v["network"]["upload"]["gates"].update(exit_log_oldest_unix_ms=2**63),
+            lambda v: v["network"]["upload"]["gates"].update(exit_log_limit=400),
             lambda v: v["network"]["restore"]["control_privacy"].update(unexpected_provider_application_packets=1),
             lambda v: v["private_cleanup"].update(fragment_staging_removed=False),
             lambda v: v.update(automatic_repair=True),
@@ -157,6 +164,41 @@ class FragmentEvidence(unittest.TestCase):
                 CHECK["validate_evidence"](bad)
         with self.assertRaises((ValueError, KeyError)):
             CHECK["validate_evidence"](OLD["fixture"]())
+
+    def test_full_log_window_keeps_all_completions_and_refuses_cropped_or_regressed_evidence(self):
+        def record(timestamp, event):
+            return f"{timestamp}\tlevel=1\tevent={event}\tsession=\tpath=-\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "private-exit-window.txt"
+            baseline = 1000
+            lines = [record(baseline, "MPTCP_EXIT_FLOW_COMPLETED")]
+            for number in range(56):
+                lines.extend(record(baseline + 1 + number, "MPTCP_LIFECYCLE") for _ in range(8))
+                lines.append(record(baseline + 1 + number, "MPTCP_EXIT_FLOW_COMPLETED"))
+            lines.append(record(baseline + 57, "MPTCP_EXIT_FLOW_FAILED"))
+            path.write_text("".join(lines))
+            full = CHECK["flow_gates"](path, baseline)
+            self.assertEqual(full["exit_mptcp_tls_completed"], 56)
+            self.assertEqual(full["exit_mptcp_tls_failed"], 1)
+            self.assertTrue(full["exit_log_window_covers_baseline"])
+            path.write_text("".join(lines[-400:]))
+            cropped = CHECK["flow_gates"](path, baseline)
+            self.assertLess(cropped["exit_mptcp_tls_completed"], 56)
+            self.assertFalse(cropped["exit_log_window_covers_baseline"])
+            phase = fixture()
+            phase["network"]["upload"]["gates"] = cropped
+            with self.assertRaises(ValueError):
+                CHECK["validate_evidence"](phase)
+            for invalid in ("", "unexpected raw diagnostics\n", "".join(lines * 3),
+                            record(1001, "MPTCP_LIFECYCLE") + record(1000, "MPTCP_EXIT_FLOW_COMPLETED")):
+                path.write_text(invalid)
+                with self.assertRaises(ValueError):
+                    CHECK["flow_gates"](path, baseline)
+            self.assertNotIn(path.name, CHECK["EXPORT_NAMES"])
+        shell = (HERE / "private-storage-fragments-smoke.sh").read_text()
+        self.assertIn('logs --limit 1000 >"$WORK/private-storage-fragments-exit-log-window.txt"', shell)
+        self.assertIn("FRAGMENTS_EXIT_LOG_WINDOW_TRUNCATED", shell)
+        self.assertEqual(CHECK["PHASES"], dict(upload=56, restore=16, finish=16))
 
     def test_cli_signed_ranges_per_copy_finite_lease_and_conservative_charge(self):
         for phase in ("created", "committed", "restore", "deleted"):
