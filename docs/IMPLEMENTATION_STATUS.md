@@ -361,6 +361,25 @@ route and completion files, so those observations cannot be independently recons
 this artifact. This is not a completed replica acceptance PASS. All 85 original files remain
 unchanged (ZIP SHA-256 `d3d67e02e7f8b81fadb414cea87ef0de449404021f47d36d820de80d0afc2fcb`).
 
+The **fragment placement candidate** adds
+`storage fragments create/deposit/status/progress/restore/renew/delete`: distinct encrypted
+archive ranges with two or more copies across three to eight explicitly trusted providers.
+An immutable owner-signed reconstruction root binds full length/hash, contiguous fragment
+ranges/hashes, provider/grant pairs and original copy identities; mutable lease journals
+must match that root. It reuses the existing authenticated protected-transfer entrypoints,
+stages one fragment at a time and publishes restored output only after the full signed
+archive identity verifies. Conservative charges include every reserved/committed/uncertain
+fragment copy, including expired or unavailable ones. [Bounds and operator workflow](PRIVATE_STORAGE.md#fragment-placement-candidate-redundant-pieces-not-whole-archives-per-provider)
+are explicit; this is not erasure coding or whole-archive replication at every provider.
+
+All **three focused fragment tests pass**, including real three-store SQLite/signed-frame
+transfers: interrupted Reserve acknowledgement and same-identity retry, subset-only custody,
+source removal, repeated restore with one provider down, fail-closed restoration when a
+fragment loses both holders, renewal and interrupted delete/retry to zero leases. Signed-root
+tampering and coordinated mutation of unsigned nested copy identities are rejected. A real
+protected-overlay fragment-placement run is still pending; these tests do not establish
+independent failure domains, automatic repair/handoff, measured overhead or reciprocal credit.
+
 The next owner-coordinated candidate adds `storage replicas replace`: a durable,
 resumable A/B-to-B/C handoff through the same protected operations. It retrieves and hashes
 the surviving copy, retains the exact replacement identity across retries, and fully reads

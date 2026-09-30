@@ -34,6 +34,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: Box<peer::replicas::Command>,
     },
+    /// Split already encrypted archives across explicit providers with per-fragment copies.
+    Fragments {
+        #[command(subcommand)]
+        command: Box<peer::replicas::fragments::Command>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -109,6 +114,9 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Local { command } => command,
         Command::Peer { command } => return peer::run(*command, socket).await,
         Command::Replicas { command } => return peer::replicas::run(*command, socket).await,
+        Command::Fragments { command } => {
+            return peer::replicas::fragments::run(*command, socket).await;
+        }
     };
     match command {
         LocalCommand::Init {
