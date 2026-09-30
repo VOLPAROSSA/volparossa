@@ -1781,6 +1781,12 @@ def generation_metadata(tokens, eos_token_id, profile_name=DEFAULT_MODEL_PROFILE
 def generate(model, samples, tokenizer, torch, session, transformers, profile_name=DEFAULT_MODEL_PROFILE):
     profile = model_profile(profile_name)
     require(1 <= len(samples) <= profile["max_rows"], "INVALID_DATASET_SIZE")
+    # The exact pinned Qwen README recommends this nonthinking sampling profile.
+    # Keep the existing seed 7; no retry/seed search or forced tool selection.
+    # https://huggingface.co/Qwen/Qwen3-0.6B/blob/c1899de289a04d12100db370d81485cdf75e47ca/README.md
+    generation_options = ({"do_sample": True, "temperature": 0.7, "top_p": 0.8,
+                           "top_k": 20, "min_p": 0.0}
+                          if profile_name == QWEN_MODEL_PROFILE else {"do_sample": False})
     class OwnerCheckpoint(transformers.StoppingCriteria):
         def __call__(self, _input_ids, _scores, **_kwargs):
             # Service the original owner's controls on this execution thread after
@@ -1795,7 +1801,7 @@ def generate(model, samples, tokenizer, torch, session, transformers, profile_na
         for index, input_ids in enumerate(samples):
             session.check()
             output = model.generate(input_ids=input_ids, attention_mask=torch.ones_like(input_ids),
-                                    max_new_tokens=profile["new_tokens"], do_sample=False, use_cache=True,
+                                    max_new_tokens=profile["new_tokens"], use_cache=True, **generation_options,
                                     stopping_criteria=transformers.StoppingCriteriaList([OwnerCheckpoint()]),
                                     pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
             session.check()

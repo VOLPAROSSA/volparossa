@@ -32,11 +32,29 @@ execution/capture/refresh/lifetime/reap/storage/task diagnostics before the exis
 cleanup error masks that cause. Only fixed operation/error categories, errno classes
 and bounded startup exit/signal metadata may be exported; its private local log is
 removed with the fixture. Quarantine, cleanup conditions and all deadlines remain
-unchanged. A fresh real trial is still required to diagnose the failed operation;
-these diagnostics are **not a demonstrated fix**. Focused checks passed: 23 existing
+unchanged; these diagnostics are **not a demonstrated cleanup fix**. Focused checks passed: 23 existing
 and new supervisor tests, the additional actual tracing-formatter-to-fixture-parser
 bridge, and 12 offline Python fixture checks; none executes model inference.
-Actual native tool use,
+
+The subsequent exact [trial 36774164207](https://github.com/VOLPAROSSA/volparossa/actions/runs/36774164207)
+on `c5781c476c3779b91dcea68427de75506e1ec6b8` completed its actual first model turn
+and confirmed worker/input cleanup (279 prompt tokens, 19 generated tokens), but
+returned an `assistant` response rather than the required `read_file` proposal.
+The client consequently failed `tool-check`; the second model turn never started.
+The closed service diagnostic recorded `execution/result_observed`, not a cleanup
+error. No OOM occurred and all fixture cleanup/unchanged-host checks passed. This
+does not explain or resolve the earlier intermittent cleanup failure, nor does it
+prove tool execution or a correct answer; raw response text was not exported.
+
+A bounded follow-up candidate corrects Qwen's generation options to the exact
+[pinned upstream nonthinking recommendation](https://huggingface.co/Qwen/Qwen3-0.6B/blob/c1899de289a04d12100db370d81485cdf75e47ca/README.md):
+sampling with temperature 0.7, top-p 0.8, top-k 20 and min-p 0. The existing seed 7,
+single attempt, original prompt, strict native tool parser, owner checkpoints,
+token/memory/deadline limits and cleanup requirements remain unchanged. Legacy
+Smol profiles retain greedy generation. This is a generation-profile correction,
+**not a proved cause or fix for the missing tool proposal**; a fresh real trial is
+required. Eight focused offline generation/bridge checks pass with explicit backend
+doubles, not new inference evidence. Actual native tool use,
 a hard-4GiB-bounded long-context run and an end-to-end editing loop remain
 **unproved/incomplete**. See the [exact wire contract](../crates/volparossa/src/compute/private_conversation/WIRE.md).
 

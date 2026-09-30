@@ -64,6 +64,12 @@ class QwenConversationTests(unittest.TestCase):
             model.generate.assert_called_once()
             self.assertEqual(model.generate.call_args.kwargs["max_new_tokens"], 1024)
             self.assertEqual(model.generate.call_args.kwargs["eos_token_id"], 151645)
+            generation = model.generate.call_args.kwargs
+            self.assertEqual({key: generation[key] for key in
+                ("do_sample", "temperature", "top_p", "top_k", "min_p")},
+                {"do_sample": True, "temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0})
+            self.assertTrue(generation["use_cache"])
+            self.assertEqual(len(generation["stopping_criteria"]), 1)
             tokenizer.decode.assert_called_once_with([21], skip_special_tokens=False)
 
     def test_exact_pins_preserve_runtime_and_private_only_admission(self):
