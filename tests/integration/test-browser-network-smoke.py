@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import re
 import runpy
 import subprocess
 import tarfile
@@ -91,6 +92,50 @@ def fixture(root):
 
 
 class BrowserNetworkEvidence(unittest.TestCase):
+    def test_request_codes_are_closed_and_preserved(self):
+        detail = dict(stage="stream-stop", nsresult=0x804B000D, proxy_status=502,
+                      http_status=None, received_body=False)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            value = dict(version=1, kind="real-gecko-core-gateway-driver-status", phase="request-a",
+                error_code="SCRIPT_FAILED", errno=None, child_exit_code=1, attachment=None, request=detail)
+            CHECK["write"](root / "status", value)
+            self.assertEqual(CHECK["driver_diagnostic"](root / "status", root / "absent")["status"], value)
+            for changes in (dict(stage="private-host"), dict(nsresult=True), dict(nsresult=1 << 32),
+                            dict(http_status=99), dict(proxy_status=600), dict(received_body=1),
+                            dict(headers="private-cookie")):
+                value["request"] = detail | changes
+                CHECK["write"](root / "status", value)
+                with self.assertRaises(ValueError):
+                    CHECK["driver_diagnostic"](root / "status", root / "absent")
+
+    def test_gateway_export_retains_only_exact_stage_and_closed_enum(self):
+        def event(stage, code, **extra):
+            return json.dumps(dict(target="volparossa_agent::browser_gateway::connect", fields=dict(
+                message="browser_gateway_observation", stage=stage, code=code, **extra))) + "\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "private.log"
+            path.write_text(event("connect_header", "accepted", capability="secret-canary")
+                + event("route", "PreselectionUnavailable", hostname="private-host")
+                + event("route", "private-error-with-url")
+                + json.dumps(dict(target="different", fields=dict(message="private-canary"))) + "\n")
+            result = CHECK["gateway_diagnostic"](path)
+            self.assertEqual(result, dict(available=True, truncated=False, unknown_event=True, events=[
+                dict(stage="connect_header", code="accepted"), dict(stage="route", code="PreselectionUnavailable")]))
+            self.assertNotIn("private", json.dumps(result))
+            self.assertNotIn("secret", json.dumps(result))
+            path.write_text("x" * 65536 + "\n" + event("route", "ready") * 100)
+            result = CHECK["gateway_diagnostic"](path)
+            self.assertTrue(result["truncated"])
+            self.assertEqual(len(result["events"]), 64)
+            self.assertTrue(all(row == dict(stage="route", code="ready") for row in result["events"]))
+            alias = path.parent / "alias"
+            alias.symlink_to(path)
+            self.assertFalse(CHECK["gateway_diagnostic"](alias)["available"])
+        route_source = (HERE.parents[1] / "crates/volparossa-agent/src/route_setup.rs").read_text()
+        body = route_source.split("pub(crate) enum ClientRouteConnectError {", 1)[1].split("}", 1)[0]
+        self.assertEqual(set(re.findall(r"^\s*([A-Za-z]+),", body, re.M)), CHECK["ROUTE_ERRORS"])
+
     def test_attachment_substage_and_nsresult_are_closed_original_facts(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

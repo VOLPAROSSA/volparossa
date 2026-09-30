@@ -1,15 +1,15 @@
 {
   "version": 1,
   "repository": "https://github.com/VOLPAROSSA/volparossa-browser",
-  "revision": "ce2298024d5a77561c6719cb6ab2a318e4914885",
+  "revision": "a87af336f034acc81d465307f3b352eee716e3ac",
   "files": {
     "scripts/smoke_network_core.py": {
-      "bytes": 24115,
-      "sha256": "b387cf2cb913ec5138d8f148898e39f93c28ab497199d6b217270d7b1caec645"
+      "bytes": 26764,
+      "sha256": "7de6cd49cafaee077e60d18b24830d4f564cc0c6eab2d1eb81eb060b23c5055b"
     },
     "scripts/smoke_network.py": {
-      "bytes": 21265,
-      "sha256": "3e8d94ba2fc3478611918fe09b31cfbe1b42ad037ce9fe7765a7c6a3b0d433d0"
+      "bytes": 22032,
+      "sha256": "787bee251ccf73ff0572d149986c5c3b27ad2ca35e75601c084d7779d9d5b0e3"
     },
     "scripts/smoke_browser_startup.py": {
       "bytes": 11504,

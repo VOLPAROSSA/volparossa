@@ -65,7 +65,7 @@ and independent controller shutdown. The controller test does not prove two simu
 carrying MPTCP routes. The live disposable Firefox/HTTPS proof is a separate remaining step.
 
 The [Firefox adapter](https://github.com/VOLPAROSSA/volparossa-browser/pull/4) is pinned to
-`2ed43df06d110685edb830ccc48fc38cdb4b0e9b` for the `browser-network` VM scenario.
+`ce2298024d5a77561c6719cb6ab2a318e4914885` in the latest completed `browser-network` VM scenario.
 Its existing isolated ESR 140.16 smoke proves real Gecko Unix IPC and three TLS 1.3
 responses against a **synthetic** gateway, including independent detach and absence of
 proxy credentials at the origin. That result is not a real overlay proof.
@@ -205,6 +205,27 @@ ownership equality, read-only access and the original grant are mandatory proof 
 Production Rust, peer UID checks, application credentials and egress restrictions are
 unchanged. Twelve pure browser checks, one actual unprivileged namespace/socket check
 and thirteen core evidence checks pass; actual browser/MPTCP transfer is still pending.
+
+The [ninth combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36743469202)
+on `4d60478acbe50873c4b1f167c05b2bc0106314f0` passes the original-inode mount mapping,
+socket access, both real grant attachments and the wrong-scope denial. Actual Gecko then
+**fails at `request-a / SCRIPT_FAILED`**, before observed WireGuard payload. All 18
+original artifacts remain failed (ZIP SHA-256
+`d10f84b04860eafbb0a1bd973007b4683983bfef772ce52a6ebba7ffd4dd115a`). Browser/profile and
+private-file cleanup pass; topology cleanup leaves zero objects and both host snapshots
+hash to `0777714e9b0d08e611e73ecefb892cf591a2245a6a8112b73d696e54bc862873`.
+
+A local replay against the synthetic gateway now also passes at the fixture's destination
+port 18443: three real TLS responses, exact CONNECT authority/header shape and native
+Gecko proxy-response status 200, with complete cleanup. This rules out that port alone;
+it is not evidence of a working overlay route. The next combined candidate preserves
+fixed request stages, numeric native/CONNECT/HTTP statuses and a body-present flag.
+Only the disposable client's gateway tracing target is enabled at debug level. Export
+reads at most the final 64 KiB and retains at most 64 allowlisted CONNECT, policy, route
+or flow stage/error records—no raw logs, addresses, URLs, headers, capabilities or payloads.
+Thirteen pure browser checks and fifteen core checks pass. These are diagnostic changes;
+the route failure is not yet identified or fixed, and real browser/MPTCP payload proof
+remains pending. Existing policy, isolation, lifetime and no-direct-fallback rules remain.
 
 Ordinary browsing integration, opportunistic fallback with the user-requested default-off
 browser kill switch, HTTP/3, WebRTC, background traffic and crash-persistent browser-wide

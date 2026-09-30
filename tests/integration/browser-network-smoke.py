@@ -44,6 +44,71 @@ DRIVER_PHASES = frozenset((
 ATTACH_STAGES = frozenset(("process-gate", "unix-transport", "constructor", "transport-timeout", "input-stream",
     "output-stream", "input-pump", "input-listen", "proxy-filter", "bootstrap-write", "bootstrap-wait",
     "bootstrap-reply", "bootstrap-read", "ready-validate", "ready-proxy", "bootstrap-eof", "bootstrap-timeout"))
+REQUEST_STAGES = frozenset(("channel-create", "hash-init", "channel-open", "stream-start",
+    "stream-data", "stream-stop", "body-integrity"))
+ROUTE_ERRORS = frozenset(("Busy", "InvalidProfile", "PreselectionUnavailable", "NativePermitUnavailable",
+    "NativeRelayUnavailable", "NativeHelperPrepareUnavailable", "NativeAuthorizationUnavailable",
+    "NativeHelperActivateUnavailable", "NativeStartUnavailable", "NativeHelperCommitUnavailable",
+    "NativeProofUnavailable", "NativeSamplerRetirementUnavailable", "NativeRemoteRetirementUnavailable",
+    "NativeTransportIdentityUnavailable", "RouteAdmissionUnavailable", "MptcpExitListenerSignalUnavailable",
+    "TransportRuntimeUnavailable", "UdpExitSessionSignalUnavailable", "UdpIngressUnavailable"))
+GATEWAY_CODES = {
+    "connect_header": frozenset(("received", "timeout", "invalid", "accepted")),
+    "policy_before_route": frozenset(("denied",)),
+    "route": ROUTE_ERRORS | {"ready"},
+    "policy_before_flow": frozenset(("denied",)),
+    "flow": ROUTE_ERRORS,
+    "policy_after_flow": frozenset(("denied",)),
+    "acknowledgement": frozenset(("write_failed", "forwarding_started")),
+}
+
+
+def validate_request(value):
+    require(value is None or type(value) is dict and set(value) == {
+        "stage", "nsresult", "proxy_status", "http_status", "received_body"}
+        and value["stage"] in REQUEST_STAGES and type(value["received_body"]) is bool
+        and (value["nsresult"] is None or type(value["nsresult"]) is int and 0 <= value["nsresult"] <= 0xffffffff)
+        and all(value[key] is None or type(value[key]) is int and (value[key] == 0 or 100 <= value[key] <= 599)
+                for key in ("proxy_status", "http_status")), "request diagnostic is not closed metadata")
+
+
+def gateway_diagnostic(path):
+    """Only fixed codes from the fixture-enabled target; never export a raw log line."""
+    result = dict(available=False, truncated=False, events=[], unknown_event=False)
+    if path is None or not path.is_file() or path.is_symlink():
+        return result
+    with path.open("rb") as source:
+        info = os.fstat(source.fileno())
+        require(stat.S_ISREG(info.st_mode), "gateway diagnostic input is not a regular file")
+        offset = max(0, info.st_size - 65536)
+        source.seek(offset)
+        raw = source.read(65536)
+    result.update(available=True, truncated=bool(offset))
+    lines = raw.splitlines()
+    if offset and lines:
+        lines = lines[1:]  # The bounded window may begin in the middle of a JSON record.
+    for line in lines:
+        if len(line) > 8192:
+            result["truncated"] = True
+            continue
+        try:
+            value = json.loads(line)
+        except (ValueError, UnicodeError):
+            continue
+        if type(value) is not dict or value.get("target") != "volparossa_agent::browser_gateway::connect":
+            continue
+        fields = value.get("fields")
+        if type(fields) is not dict or fields.get("message") != "browser_gateway_observation":
+            continue
+        stage, code = fields.get("stage"), fields.get("code")
+        if type(stage) is not str or type(code) is not str or code not in GATEWAY_CODES.get(stage, ()):
+            result["unknown_event"] = True
+            continue
+        result["events"].append(dict(stage=stage, code=code))
+        if len(result["events"]) > 64:
+            result["events"].pop(0)
+            result["truncated"] = True
+    return result
 
 
 def validate_attachment(value):
@@ -97,15 +162,15 @@ def directory_creation_targets(lines, home=None, work=None):
     return result
 
 
-def driver_diagnostic(status, stderr, home=None, work=None):
+def driver_diagnostic(status, stderr, home=None, work=None, gateway_log=None):
     """Export only fixed driver stages, errno and classified local stderr signals."""
     result = dict(version=1, status_available=False, status=None, stderr_available=False,
-                  stderr_truncated=False, stderr_signals={})
+                  stderr_truncated=False, stderr_signals={}, gateway=gateway_diagnostic(gateway_log))
     if status.is_file() and not status.is_symlink():
         require(status.stat().st_size <= 2048, "driver status exceeds bound")
         value = read(status)
         legacy = {"version", "kind", "phase", "error_code", "errno", "child_exit_code"}
-        require(set(value) in (legacy, legacy | {"attachment"})
+        require(set(value) in (legacy, legacy | {"attachment"}, legacy | {"attachment", "request"})
             and value["version"] == 1 and value["kind"] == "real-gecko-core-gateway-driver-status"
             and value["phase"] in DRIVER_PHASES
             and (value["error_code"] is None or value["error_code"] in DRIVER_ERRORS)
@@ -113,6 +178,7 @@ def driver_diagnostic(status, stderr, home=None, work=None):
             and (value["child_exit_code"] is None or type(value["child_exit_code"]) is int
                  and -255 <= value["child_exit_code"] <= 255), "driver status is not closed metadata")
         validate_attachment(value.get("attachment"))
+        validate_request(value.get("request"))
         result.update(status_available=True, status=value)
     if stderr.is_file() and not stderr.is_symlink():
         with stderr.open("rb") as source:
@@ -556,8 +622,8 @@ def main():
     elif action == "cleanup":
         cleanup(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]))
     elif action == "driver-diagnostic":
-        require(len(sys.argv) in (5, 7), "driver diagnostic arguments differ")
-        locations = [] if len(sys.argv) == 5 else [Path(sys.argv[5]), Path(sys.argv[6])]
+        require(len(sys.argv) in (5, 7, 8), "driver diagnostic arguments differ")
+        locations = list(map(Path, sys.argv[5:]))
         write(Path(sys.argv[4]), driver_diagnostic(Path(sys.argv[2]), Path(sys.argv[3]), *locations))
     elif action == "evidence":
         write(Path(sys.argv[3]), evidence(Path(sys.argv[2])))

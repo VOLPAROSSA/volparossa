@@ -11,10 +11,24 @@ use tokio::{
 };
 
 use super::{GatewayError, Scope};
-use crate::{control::ControlContext, route_setup::ClientRouteControl, unix_millis};
+use crate::{
+    control::ControlContext,
+    route_setup::{ClientRouteConnectError, ClientRouteControl},
+    unix_millis,
+};
 
 const MAX_HEADER: usize = 8192;
 const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
+
+// Opt-in closed diagnostics: no authority, capability, partition, route, address
+// or application bytes. Only this target is enabled by the disposable fixture.
+fn observe(stage: &'static str, code: &'static str) {
+    tracing::debug!(stage, code, "browser_gateway_observation");
+}
+
+fn observe_route_error(stage: &'static str, code: ClientRouteConnectError) {
+    tracing::debug!(stage, code = ?code, "browser_gateway_observation");
+}
 
 pub(super) async fn proxy(
     mut application: TcpStream,
@@ -23,14 +37,21 @@ pub(super) async fn proxy(
     context: &ControlContext,
     secret: &[u8; 32],
 ) {
-    if !matches!(
-        timeout(
-            HEADER_TIMEOUT,
-            read_connect(&mut application, scope, secret)
-        )
-        .await,
-        Ok(Ok(()))
-    ) {
+    observe("connect_header", "received");
+    let header = timeout(
+        HEADER_TIMEOUT,
+        read_connect(&mut application, scope, secret),
+    )
+    .await;
+    if !matches!(&header, Ok(Ok(()))) {
+        observe(
+            "connect_header",
+            if header.is_err() {
+                "timeout"
+            } else {
+                "invalid"
+            },
+        );
         reject(
             &mut application,
             b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
@@ -38,13 +59,15 @@ pub(super) async fn proxy(
         .await;
         return;
     }
+    observe("connect_header", "accepted");
     if scope.policy(context).await.is_err() {
+        observe("policy_before_route", "denied");
         return;
     }
-    if Box::pin(routes.connect_tcp(&context.config, &context.discovery, &context.helper))
-        .await
-        .is_err()
+    if let Err(error) =
+        Box::pin(routes.connect_tcp(&context.config, &context.discovery, &context.helper)).await
     {
+        observe_route_error("route", error);
         reject(
             &mut application,
             b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
@@ -52,22 +75,33 @@ pub(super) async fn proxy(
         .await;
         return;
     }
+    observe("route", "ready");
     let Ok(policy) = scope.policy(context).await else {
+        observe("policy_before_flow", "denied");
         return;
     };
-    let Ok(flow) =
-        Box::pin(routes.open_content_stream(&policy, &scope.hostname, scope.port, unix_millis()))
-            .await
-    else {
-        reject(
-            &mut application,
-            b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
-        )
-        .await;
-        return;
+    let flow = match Box::pin(routes.open_content_stream(
+        &policy,
+        &scope.hostname,
+        scope.port,
+        unix_millis(),
+    ))
+    .await
+    {
+        Ok(flow) => flow,
+        Err(error) => {
+            observe_route_error("flow", error);
+            reject(
+                &mut application,
+                b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            )
+            .await;
+            return;
+        }
     };
     // Recheck after asynchronous setup, before forwarding any browser payload.
     if scope.policy(context).await.is_err() {
+        observe("policy_after_flow", "denied");
         flow.shutdown();
         return;
     }
@@ -79,9 +113,11 @@ pub(super) async fn proxy(
         .await,
         Ok(Ok(()))
     ) {
+        observe("acknowledgement", "write_failed");
         flow.shutdown();
         return;
     }
+    observe("acknowledgement", "forwarding_started");
     let _ = flow.proxy_application(application).await;
 }
 

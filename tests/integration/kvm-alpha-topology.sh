@@ -3432,6 +3432,9 @@ launch_agent() {
     [ "$(unit_load_state "$agent_unit")" = not-found ] || fail AGENT_UNIT_COLLISION
     AGENT_UNITS="$AGENT_UNITS $agent_unit"
     agent_rust_log=volparossa_agent=info
+    if [ "$scenario" = browser-network ] && [ "$node" = client ]; then
+        agent_rust_log=$agent_rust_log,volparossa_agent::browser_gateway::connect=debug
+    fi
     if [ "$scenario" = mpquic-growth ] && [ "$node" = client ]; then
         # Exact owned-path counters/decisions only, no destination or payload logging.
         agent_rust_log=$agent_rust_log,volparossa_agent::path_health=debug
