@@ -198,8 +198,16 @@ class BrowserNetworkEvidence(unittest.TestCase):
             result = CHECK["driver_diagnostic"](status, stderr)
             self.assertEqual(result["status"], value)
             self.assertTrue(result["stderr_signals"]["permission_denied"])
+            self.assertFalse(result["stderr_signals"]["working_directory"])
+            self.assertFalse(result["stderr_signals"]["mount_setup"])
             self.assertNotIn("secret-canary", json.dumps(result))
             self.assertNotIn("/private", json.dumps(result))
+            for message, signal in (("bwrap: Can't chdir to /private/check-out: Permission denied", "working_directory"),
+                                    ("bwrap: Can't bind mount /private/secret: Permission denied", "mount_setup")):
+                stderr.write_text(message)
+                classified = CHECK["driver_diagnostic"](status, stderr)
+                self.assertTrue(classified["stderr_signals"][signal])
+                self.assertNotIn("/private", json.dumps(classified))
             value["capability"] = "secret-canary-value"
             CHECK["write"](status, value)
             with self.assertRaises(ValueError):

@@ -65,7 +65,7 @@ and independent controller shutdown. The controller test does not prove two simu
 carrying MPTCP routes. The live disposable Firefox/HTTPS proof is a separate remaining step.
 
 The [Firefox adapter](https://github.com/VOLPAROSSA/volparossa-browser/pull/4) is pinned to
-`ba03cc680f81a3bc78effd7c1ef74bb700a84951` for the `browser-network` VM scenario.
+`a82e6c6313a4dc56cebaac4fcdff5cd3d12895d4` for the `browser-network` VM scenario.
 Its existing isolated ESR 140.16 smoke proves real Gecko Unix IPC and three TLS 1.3
 responses against a **synthetic** gateway, including independent detach and absence of
 proxy credentials at the origin. That result is not a real overlay proof.
@@ -106,9 +106,25 @@ recorded sufficiently to identify their cause. A new closed driver-status export
 the last wrapper/namespace/Firefox/attachment stage, canonical error/errno and boolean
 stderr classifications. It exports no raw stderr, browser logs, grants or private paths.
 Nine pure fixture checks pass, including rejection of unexpected diagnostic fields.
-The diagnostic browser revision above changes only its driver/tests/documentation, not
-the network module or pinned ESR package. The next live run must establish the cause and
-real payloads before this milestone passes.
+The diagnostic revision changes its driver/tests/documentation, not the network module
+or pinned ESR package.
+
+The [third combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36716815095)
+on `e53034f64ae3faf6c8a09999ead19bbe27767822` still **fails** before HTTPS. Its new
+closed diagnostic identifies `wrapper-launch` / `SUBPROCESS_FAILED`, child exit 1 and a
+permission-denied signal; the child never records runtime validation. All 17 original
+artifacts are retained (ZIP SHA-256
+`3178ac704a14d72ac51f3fa4e91d7a79d640d63aaf88494dcb5f37521efe210e`), with complete
+cleanup and matching host-state hash
+`8b201fe6a22c03c9c59b6d94f9de21719c81b4402c8b8daea33229180ae37445`.
+The fixture inherited the provisioning user's private source-checkout working directory
+after dropping to the application UID. The candidate driver now explicitly enters its
+own fresh `0700` work directory both before and inside bubblewrap. This removes that
+inaccessible-directory dependency without widening source permissions or network access;
+it is not yet a demonstrated live fix. Closed stderr classification now distinguishes
+working-directory from bind/mount failures without exporting private paths. Eight browser
+driver checks and nine core fixture checks pass. Actual browser payloads remain unproven
+until the next combined run passes.
 
 Ordinary browsing integration, opportunistic fallback with the user-requested default-off
 browser kill switch, HTTP/3, WebRTC, background traffic and crash-persistent browser-wide

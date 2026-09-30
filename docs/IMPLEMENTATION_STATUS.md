@@ -56,6 +56,13 @@ fails before the first HTTPS request without a browser report or WireGuard paylo
 Cleanup again preserves host state. Closed driver-stage/error diagnostics now cover the
 previous pre-browser reporting gap; nine pure fixture checks pass, but the live cause and
 combined payload proof remain pending. No core gateway behavior is changed speculatively.
+The [third run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36716815095)
+on `e53034f6` now locates the failure at bubblewrap launch with permission denied,
+before child runtime validation; isolation, cleanup and unchanged host state still pass.
+The candidate driver explicitly uses its owned work directory before/inside bubblewrap,
+avoiding the inherited private provisioning checkout. Eight browser driver and nine core
+fixture checks pass, but the corrected live proof remains pending. No browser overlay
+success, permissions relaxation or full-browser kill-switch claim is implied.
 
 [Signal integration](https://github.com/VOLPAROSSA/volparossa-chat/pull/1) now has a pinned
 Desktop/libsignal source baseline and explicit device/session/backup contracts, not a

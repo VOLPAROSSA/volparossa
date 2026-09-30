@@ -80,6 +80,8 @@ def driver_diagnostic(status, stderr):
                 "permission_denied": (b"permission denied",),
                 "read_only_filesystem": (b"read-only file system",),
                 "namespace_setup": (b"creating new namespace", b"failed to make / slave", b"setting up uid map"),
+                "working_directory": (b"can't chdir", b"chdir base_path", b"chdir /", b"fchdir to oldroot"),
+                "mount_setup": (b"can't bind mount", b"can't mount", b"mounting proc", b"creating mount point"),
                 "driver_failed": (b"core network browser driver failed",),
                 "traceback": (b"traceback (most recent call last):",),
             }.items()})
