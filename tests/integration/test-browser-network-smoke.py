@@ -252,6 +252,35 @@ class BrowserNetworkEvidence(unittest.TestCase):
             self.assertNotIn("/private", json.dumps(result))
             self.assertNotIn("secret-canary", json.dumps(result))
 
+    def test_bwrap_directory_target_is_exact_closed_and_never_exports_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stderr = root / "driver.err"
+            home, work = Path("/owned/private-home"), Path("/owned/private-work")
+            cases = {
+                "browser_home": str(home), "browser_appdata": str(home / ".mozilla"),
+                "browser_work": str(work), "temporary_directory": "/tmp",
+                "proc_directory": "/proc", "device_directory": "/dev", "filesystem_root": "/",
+                "unknown": "/unrecognized/secret-canary",
+            }
+            for name, destination in cases.items():
+                for prefix in ("", "newroot", "/newroot"):
+                    with self.subTest(target=name, newroot=prefix):
+                        stderr.write_text(f"bwrap: Can't mkdir parents for {prefix}{destination}: Permission denied\n")
+                        result = CHECK["driver_diagnostic"](root / "absent", stderr, home, work)
+                        self.assertEqual({key for key, value in result["bwrap_directory_targets"].items() if value}, {name})
+                        self.assertTrue(result["bwrap_operations"]["directory_creation"])
+                        self.assertNotIn("/owned", json.dumps(result))
+                        self.assertNotIn("secret-canary", json.dumps(result))
+            for name in ("newroot", "oldroot", "proc"):
+                stderr.write_text(f"bwrap: Creating {name} failed: Permission denied\n")
+                result = CHECK["driver_diagnostic"](root / "absent", stderr, home, work)
+                self.assertEqual({key for key, value in result["bwrap_directory_targets"].items() if value}, {"sandbox_" + name})
+            for destination in (str(home) + "-other", str(work) + "/unrecognized", str(home) + "/../other"):
+                stderr.write_text(f"bwrap: Can't mkdir parents for {destination}: Permission denied\n")
+                result = CHECK["driver_diagnostic"](root / "absent", stderr, home, work)
+                self.assertEqual({key for key, value in result["bwrap_directory_targets"].items() if value}, {"unknown"})
+
     def test_actual_incomplete_collector_excludes_unlisted_private_files(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

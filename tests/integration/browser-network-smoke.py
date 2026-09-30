@@ -53,7 +53,41 @@ def write(path, value):
     path.chmod(0o600)
 
 
-def driver_diagnostic(status, stderr):
+def directory_creation_targets(lines, home=None, work=None):
+    """Match exact fixture destinations; export no path fragments or raw errno text."""
+    targets = {"browser_home": home, "browser_appdata": None if home is None else home / ".mozilla",
+               "browser_work": work, "temporary_directory": Path("/tmp"),
+               "proc_directory": Path("/proc"), "device_directory": Path("/dev"),
+               "filesystem_root": Path("/")}
+    result = dict.fromkeys((*targets, "sandbox_newroot", "sandbox_oldroot", "sandbox_proc", "unknown"), False)
+    for line in lines:
+        for prefix, name in ((b"creating newroot failed", "sandbox_newroot"),
+                             (b"creating oldroot failed", "sandbox_oldroot"),
+                             (b"creating proc failed", "sandbox_proc")):
+            if line.startswith(prefix):
+                result[name] = True
+        prefix = b"can't mkdir parents for "
+        if not line.startswith(prefix):
+            continue
+        # bwrap's fixed diagnostic is "Can't mkdir parents for %s: %s".
+        # Accept only an exact destination, optionally prefixed by its newroot;
+        # unusual/error-containing paths remain unknown rather than being echoed.
+        destination, separator, _ = line[len(prefix):].rpartition(b": ")
+        matched = False
+        if separator:
+            for name, path in targets.items():
+                if path is None:
+                    continue
+                exact = os.fsencode(path).lower()
+                if destination in (exact, b"newroot" + exact, b"/newroot" + exact):
+                    result[name] = True
+                    matched = True
+        if not matched:
+            result["unknown"] = True
+    return result
+
+
+def driver_diagnostic(status, stderr, home=None, work=None):
     """Export only fixed driver stages, errno and classified local stderr signals."""
     result = dict(version=1, status_available=False, status=None, stderr_available=False,
                   stderr_truncated=False, stderr_signals={})
@@ -100,6 +134,7 @@ def driver_diagnostic(status, stderr):
             "permission_change": (b"can't chmod ",),
         }
         result.update(stderr_available=True, stderr_truncated=info.st_size > 16384,
+            bwrap_directory_targets=directory_creation_targets(bwrap_lines, home, work),
             bwrap_operations={name: any(line.startswith(prefix) for line in bwrap_lines for prefix in prefixes)
                               for name, prefixes in bwrap_operations.items()},
             bwrap_operation_unknown=any(not any(line.startswith(prefix)
@@ -503,7 +538,9 @@ def main():
     elif action == "cleanup":
         cleanup(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]))
     elif action == "driver-diagnostic":
-        write(Path(sys.argv[4]), driver_diagnostic(Path(sys.argv[2]), Path(sys.argv[3])))
+        require(len(sys.argv) in (5, 7), "driver diagnostic arguments differ")
+        locations = [] if len(sys.argv) == 5 else [Path(sys.argv[5]), Path(sys.argv[6])]
+        write(Path(sys.argv[4]), driver_diagnostic(Path(sys.argv[2]), Path(sys.argv[3]), *locations))
     elif action == "evidence":
         write(Path(sys.argv[3]), evidence(Path(sys.argv[2])))
     elif action == "report":

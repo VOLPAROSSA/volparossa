@@ -142,6 +142,20 @@ The next diagnostic retains only fixed bwrap operation flags, never their path/a
 the sandbox, application permissions, pinned browser and core datapath are unchanged.
 This is diagnostic coverage, not a claimed launch or browser-payload fix.
 
+The [fifth combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36722045933)
+on `ff98dc8c26a0e94840bfe20eb46a7f1682f634a4` **fails** at the same wrapper boundary.
+It now identifies bwrap directory creation as the failing operation; source lookup,
+readonly remount, identity mapping and exec classifications are false. The original
+diagnostic did not retain the destination, so a permission change is not justified by
+this result. All 17 originals remain retained (ZIP SHA-256
+`373524974dd2bb20c04553179c6240965f98c2af16d06d87f1caa2b31436b5b1`).
+Private cleanup passes; both host snapshots hash to
+`58a90792fd99dbcca21bc6cf50e9aacd6db110f708f678abfee56f1b237b5ca3`.
+The next diagnostic classifies only exact fixture-owned destinations and fixed bwrap
+setup directories, retaining an unknown category rather than exporting paths. Eleven
+focused checks pass. No sandbox permission, browser pin or product datapath changed;
+actual browser-to-overlay payload transfer remains unproven.
+
 Ordinary browsing integration, opportunistic fallback with the user-requested default-off
 browser kill switch, HTTP/3, WebRTC, background traffic and crash-persistent browser-wide
 enforcement remain unfinished. Existing shared-core security defaults are unchanged. Shared

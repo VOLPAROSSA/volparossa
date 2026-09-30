@@ -164,7 +164,9 @@ browser_network_cleanup() {
     bn_report=/home/vpci/browser-network-runtime/build/proofs/session/report.json
     browser_network_check driver-diagnostic \
         /home/vpci/browser-network-runtime/build/proofs/session/driver-status.json \
-        "$WORK/browser-network-driver.err" "$WORK/browser-network-driver.json" || bn_cleanup_status=1
+        "$WORK/browser-network-driver.err" "$WORK/browser-network-driver.json" \
+        "$WORK/client-fixtures/browser-network/home" \
+        /home/vpci/browser-network-runtime/build/proofs/session || bn_cleanup_status=1
     if [ -f "$bn_report" ] && [ ! -L "$bn_report" ] && [ "$(stat -Lc '%s' "$bn_report")" -le 16384 ]; then
         install -o root -g root -m 0600 "$bn_report" "$WORK/browser-network-browser.json" || bn_cleanup_status=1
     fi
