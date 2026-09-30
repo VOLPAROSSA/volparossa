@@ -189,7 +189,7 @@ agent_jobs_cgroup_empty() {
 
 agent_jobs_stop_unit() {
     jobs_stop_unit=$1
-    case $jobs_stop_unit in volparossa-alpha-compute@relay[345].service|volparossa-alpha-policy-authority@relay[345].service|volparossa-alpha-aggregation.service) ;; *) return 1 ;; esac
+    case $jobs_stop_unit in volparossa-alpha-compute@relay[345].service|volparossa-alpha-policy-authority@relay[345].service|volparossa-alpha-aggregation.service|volparossa-alpha-public-browser.service|volparossa-alpha-cooperative-browser.service) ;; *) return 1 ;; esac
     jobs_load_state=$(systemctl show --property=LoadState --value "$jobs_stop_unit") || return 1
     case $jobs_load_state in
         loaded)
@@ -266,6 +266,9 @@ agent_jobs_stop() {
 
 agent_jobs_cleanup() {
     agent_jobs_stop || return 1
+    if [ "${agent_cooperative_browser:-no}" = yes ]; then
+        python3 -B "$source_directory/tests/integration/agent-cooperative-browser.py" account-home-cleanup "$WORK" || return 1
+    fi
     if [ "${agent_policy_assessment:-no}" = yes ]; then
         python3 -B "$source_directory/tests/integration/agent-policy-assessment-smoke.py" round_cleanup "$WORK" || return 1
     fi

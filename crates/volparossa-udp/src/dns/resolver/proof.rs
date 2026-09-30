@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    future::Future,
     net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{
@@ -34,6 +35,22 @@ pub(super) struct ValidatedProof {
     pub addresses: Vec<IpAddr>,
     pub digest: [u8; 32],
     pub signature_expiry_ms: u64,
+}
+
+/// Raw worker evidence, with a conservative TTL origin taken before its native query.
+/// Neither the worker's AD bit nor its validation verdict is independent DNSSEC proof.
+pub(super) struct RawEvidence {
+    pub packet: Vec<u8>,
+    pub started_at_ms: u64,
+}
+
+/// One already owned private resolver session. The caller owns its absolute deadline and
+/// confirmed teardown; this collector never starts a worker or opens a fallback socket.
+pub(super) trait EvidenceSource: Send + Sync {
+    fn query<'a>(
+        &'a self,
+        request: DnsRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<RawEvidence, DnsResolverError>> + Send + 'a>>;
 }
 
 pub(super) fn unix_millis() -> Result<u64, DnsResolverError> {
@@ -113,6 +130,46 @@ fn check_query(query: &Query) -> Result<(), DnsResolverError> {
     Ok(())
 }
 
+fn normalize_private(
+    raw: &RawEvidence,
+    expected: &Query,
+) -> Result<RecordedMessage, DnsResolverError> {
+    check_query(expected)?;
+    if !(12..=MAX_MESSAGE_BYTES).contains(&raw.packet.len())
+        || raw.started_at_ms == 0
+        || raw.started_at_ms > unix_millis()?
+    {
+        return Err(DnsResolverError::InvalidProof);
+    }
+    let mut message = Message::from_vec(&raw.packet).map_err(|_| DnsResolverError::InvalidProof)?;
+    if message.id() != 0
+        || message.message_type() != MessageType::Response
+        || message.op_code() != OpCode::Query
+        || message.response_code() != ResponseCode::NoError
+        || message.truncated()
+        || message.queries() != std::slice::from_ref(expected)
+        || !message.signature().is_empty()
+        || message.answers().len() + message.name_servers().len() + message.additionals().len()
+            > 256
+    {
+        return Err(DnsResolverError::InvalidProof);
+    }
+    // A real recursive answer may carry authority, glue and EDNS. Only those sections are
+    // removed. Keep every answer RRset/RRSIG: CNAMEs, wildcard expansion or unsupported
+    // mixed answers must fail the same strict parser, not turn into a fabricated positive.
+    message.set_authentic_data(false);
+    message.name_servers_mut().clear();
+    message.additionals_mut().clear();
+    *message.extensions_mut() = None;
+    let packet = message
+        .to_vec()
+        .map_err(|_| DnsResolverError::InvalidProof)?;
+    Ok(RecordedMessage {
+        message: parse_message(&packet)?,
+        received_at_ms: raw.started_at_ms,
+    })
+}
+
 type QueryKey = (String, u16);
 type ProofStream = Pin<Box<dyn Stream<Item = Result<DnsResponse, ProtoError>> + Send>>;
 
@@ -126,6 +183,7 @@ struct RecordedMessage {
 struct EvidenceHandle {
     records: Arc<Mutex<BTreeMap<QueryKey, RecordedMessage>>>,
     recursive: Option<SocketAddr>,
+    private: Option<Arc<dyn EvidenceSource>>,
     calls: Arc<AtomicUsize>,
 }
 
@@ -134,6 +192,7 @@ impl EvidenceHandle {
         Self {
             records: Arc::default(),
             recursive,
+            private: None,
             calls: Arc::default(),
         }
     }
@@ -163,9 +222,16 @@ impl EvidenceHandle {
         let mut message = if let Some(existing) = existing {
             existing.message
         } else {
-            let remote = self.recursive.ok_or(DnsResolverError::InvalidProof)?;
-            let message = query_recursive(request.clone(), remote).await?;
-            let received_at_ms = unix_millis()?;
+            let recorded = if let Some(source) = &self.private {
+                normalize_private(&source.query(request.clone()).await?, query)?
+            } else {
+                let remote = self.recursive.ok_or(DnsResolverError::InvalidProof)?;
+                RecordedMessage {
+                    message: query_recursive(request.clone(), remote).await?,
+                    received_at_ms: unix_millis()?,
+                }
+            };
+            let message = &recorded.message;
             let mut records = self
                 .records
                 .lock()
@@ -182,13 +248,8 @@ impl EvidenceHandle {
             {
                 return Err(DnsResolverError::InvalidProof);
             }
-            records.insert(
-                key,
-                RecordedMessage {
-                    message: message.clone(),
-                    received_at_ms,
-                },
-            );
+            let message = message.clone();
+            records.insert(key, recorded);
             message
         };
         message.set_id(request.id());
@@ -329,6 +390,42 @@ async fn collect_with_anchors(
     anchors: Arc<TrustAnchors>,
 ) -> Result<ValidatedProof, DnsResolverError> {
     let handle = EvidenceHandle::empty(Some(recursive));
+    collect_from_handle(question, handle, anchors).await
+}
+
+/// Build shareable evidence from an existing private worker answer without repeating A/AAAA.
+/// Only independent Rust chain validation can promote this answer into a proof bundle.
+pub(super) async fn collect_private(
+    question: &DnsQuestion,
+    source: Arc<dyn EvidenceSource>,
+    primary: RawEvidence,
+) -> Result<ValidatedProof, DnsResolverError> {
+    collect_private_with_anchors(question, source, primary, Arc::new(TrustAnchors::default())).await
+}
+
+async fn collect_private_with_anchors(
+    question: &DnsQuestion,
+    source: Arc<dyn EvidenceSource>,
+    primary: RawEvidence,
+    anchors: Arc<TrustAnchors>,
+) -> Result<ValidatedProof, DnsResolverError> {
+    let query = question.query()?;
+    let primary = normalize_private(&primary, &query)?;
+    let mut handle = EvidenceHandle::empty(None);
+    handle.private = Some(source);
+    handle
+        .records
+        .lock()
+        .map_err(|_| DnsResolverError::Unavailable)?
+        .insert(EvidenceHandle::key(&query), primary);
+    collect_from_handle(question, handle, anchors).await
+}
+
+async fn collect_from_handle(
+    question: &DnsQuestion,
+    handle: EvidenceHandle,
+    anchors: Arc<TrustAnchors>,
+) -> Result<ValidatedProof, DnsResolverError> {
     let response = verified_response(handle.clone(), question, anchors).await?;
     let mut expires_at_ms = u64::MAX;
     let mut messages = Vec::new();

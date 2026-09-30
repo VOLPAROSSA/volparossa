@@ -3,7 +3,7 @@
 mod wifi_mesh;
 pub use wifi_mesh::WifiMeshConfig;
 mod dns_cache;
-pub use dns_cache::DnsCacheConfig;
+pub use dns_cache::{DnsCacheConfig, DnsFallbackConfig};
 mod content_contribution;
 pub use content_contribution::ContentContributionConfig;
 

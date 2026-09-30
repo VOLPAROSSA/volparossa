@@ -228,6 +228,7 @@ reciprocity_run() {
             >"$WORK/reciprocity-sessions-$reciprocity_node.txt"
     done
     reciprocity_agent_snapshot after
+    [ "${reciprocal_private_dns:-no}" != yes ] || reciprocity_private_dns_run
     printf 'stop\n' >"$WORK/reciprocity-app/stop"
     for reciprocity_pid in $reciprocity_client_pids; do
         wait "$reciprocity_pid" || fail RECIPROCITY_APPLICATION_FAILED

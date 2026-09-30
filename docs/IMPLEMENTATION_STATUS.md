@@ -3783,6 +3783,151 @@ that two-line ordering is corrected without changing behavior. No full Quality p
 
 ## Latest DNS integration checkpoint
 
+- [x] Source-bound development-package and DNS integration on `138787d1`:
+  [KVM run `36719475479`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36719475479)
+  passes the protected A/AAAA upstream/peer/local-cache sequence, unsigned fallback,
+  five real native Unbound cases, installed resolver sandbox and complete package
+  install/upgrade/remove lifecycle. Missing effective-Exit assets are rejected; inert
+  startup and restoration of the fixture-started native service/helper lifetime pass.
+  All 277 original artifacts are retained (ZIP SHA-256
+  `c3e7180d9ccfebe08f35a35fd969e45003bdfc66f99b0184a1d4e9ede21c68c9`).
+  Cleanup leaves zero owned objects and unchanged host state. This is not a release-build,
+  full installed-agent DNS-query or full-alpha proof. The combined revision with the newly
+  merged MPTCP-refill milestone still needs its integration check; historical failures below
+  are not relabelled. See [scope and receipts](UNBOUND_FALLBACK.md#complete-development-package-and-cache-pass).
+
+- [ ] Protected deployed Unbound fallback and measured source selection: an explicit
+  Exit-side TCP backend/configuration is implemented, with targeted parser and isolated TCP
+  evidence. The private inherited-pipe worker candidate now adds genuine libunbound calls,
+  fixed packaged paths, at most two owned children, deadline/cancellation cleanup and a separate
+  native secure verdict. Its ABI build against hash-verified Debian libunbound 1.26.1 passes.
+  The version-2 candidate keeps one native context across the original address query and bounded
+  related DNSKEY/DS queries. Its raw packets feed the existing independent root verifier; only
+  validated proof enters the policy-scoped local/peer cache. Nine focused private protocol,
+  proof, source-choice and real inert-process tests pass, not substituted for live recursion
+  or a completed private-worker-to-peer proof. Initial version-1 configuration and affected-crate
+  all-target Clippy checks remain historical evidence. Version-2's 19 focused DNS tests,
+  strict UDP all-target/all-feature Clippy, formatter and four guest-report checks now pass.
+  Private mode now uses RAM proofs first, then adaptive **sequential** peer/private-Unbound
+  choice with bounded aggregate in-memory timings, cooldown and real-request comparison
+  probes. Its focused sequencing test and strict UDP all-target/all-feature Clippy pass;
+  this is not a live recursive-DNS speed proof or a guarantee of the globally fastest source.
+  Explicit loopback mode retains its fixed order. Peer budgets in private mode cover fetch,
+  independent validation and retention; original TTL, privacy and worker-cleanup bounds remain.
+  Both explicit modes preserve real fallback TTLs and never call the OS resolver after selection.
+  Neither local AD nor a private-library verdict is independent shareable peer proof. Real
+  recursion/validation now passes below; simultaneous Client+Exit privacy/cleanup remains open.
+  There is no persistent libunbound cache, adaptive racing, host package installation/DNS change
+  or default switch. A separate optional Debian 13 companion builder declares the private worker
+  and dependencies; existing core package construction/dependencies remain unchanged.
+  See [Unbound fallback scope and readiness](UNBOUND_FALLBACK.md).
+  The [first native guest run on `9aa777fd`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36594857358)
+  **fails overall**: real signed and unsigned recursion returns the correct native secure flags
+  despite the OS-positive sentinel, but the bogus case emits no result with a retained typed
+  cause; timeout/cancel cases are not reached. The separate protected C05 phase obtains a valid
+  upstream answer and then fails `DNS_CACHE_CAPTURE_INCOMPLETE`. Original artifacts are retained;
+  guest hosts and final host-state bytes are unchanged and topology cleanup completes.
+  The capture failure is a shared observer callback's unsupported `frame` keyword; the current
+  adapter fix passes five focused DNS capture/report tests. The
+  [version-2 run on `6aaa5c95`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36598970370)
+  now passes the separate protected A/AAAA upstream/peer/local-cache and unsigned-fallback
+  report, including a rebuild from its original raw evidence, drained captures and host cleanup.
+  That fixture does not use private Unbound as its upstream. The native preflight still fails:
+  unsigned recursion passes (2,192 ms), and exact child reaping passes on timeout and caller
+  cancellation, but signed and bogus questions return `Unavailable` at the 4.5-second work
+  deadline. No native signed proof-cache linkage or actual `Bogus` verdict is claimed.
+  All 276 original artifact files remain unchanged; see the fallback document for their hash.
+  No default switch or reciprocal deployment proof follows from these partial results.
+  The [diagnostic run on `84be45ac`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36602822670)
+  now proves a genuine native signed lookup, independent root validation and policy-bound
+  local-cache reuse in 3,297 ms. Unsigned recursion and timeout/cancel reaping pass too.
+  It still **fails overall**: the bogus lookup is `Unavailable` at 4,502 ms, and a separate
+  30-second native diagnostic also obtains no complete reply before confirmed kill/reap.
+  The protected C05 report passes independently, not with these native answers as its source.
+  No native `Bogus` verdict, native-to-peer proof or reciprocal deployment is claimed.
+  All 298 original files, including unchanged-host and cleanup evidence, remain retained;
+  the fallback document records their ZIP hash. Default selection remains unchanged.
+  The [IPv6-observed run on `4930f8e9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36605711028)
+  **passes all five native cases** with unchanged worker bytes: signed independent cache
+  linkage (1,436 ms), unsigned recursion (440 ms), actual `Bogus` rejection (937 ms), timeout
+  and caller-cancel reaping. The runner proves no route for outer IPv6; the fixture disables
+  only that QEMU option. The exact-source native checker passes. The overall run still fails
+  in the separate C05 warm-A/AAAA phase with `DNS_CACHE_NORMAL_ROUTE_UNAVAILABLE`; combined
+  protected deployment remains incomplete. Its original 167 files and cleanup evidence remain.
+  A separate `reciprocity-private-dns` fixture now preserves four all-role agent lifetimes
+  and concurrent real UDP routes while checking normal protected DNS, private native worker
+  ownership, independent local-cache reuse, drained captures and complete guest-only uplink
+  cleanup. Its five inert tests and static wrapper contract pass; live execution is pending.
+  The [first reciprocal live run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36605721961)
+  then fails before DNS at `PRIVATE_DNS_UPLINK_ENDED`: the guest-only slirp sandbox cannot
+  pivot into `/tmp`. Uplink/topology cleanup and unchanged guest-parent state pass. This
+  establishes neither reciprocal DNS success nor a reason to disable the sandbox.
+  The new protected UDP-DNS reuse candidate retains the exact application/resolver/name,
+  policy and original selected route for at most 16 sequential questions, 30 idle seconds
+  and the original signed expiry. One outstanding question requires exact response-ID and
+  question correlation; changed bindings get a new ordinary route, and TCP stays one-shot.
+  Three focused Rust tests pass. C05 now observes A/AAAA on one actual application socket
+  and route with separate captures, then explicitly retires before Exit/offline phases.
+  Eight focused fixture checks pass. The [run on `859c9e90`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36613320245)
+  now passes the full C05 workflow: all five live native-Unbound cases and the separate
+  protected A/AAAA upstream/peer/offline-local/unsigned phases pass both exact-source checkers.
+  Same-socket byte progression, captures, explicit retirement, zero leftovers and unchanged
+  host state are verified in 275 retained original files. See the fallback document for hashes.
+  Its [separate reciprocal run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36613323557)
+  still fails: warm private recursion takes 1,610 ms and same-association local reuse 3 ms
+  without a new child, but status polling blocks during retirement and the Exit captures
+  contain unparsed TAP frames/an unrecognized mDNS source. Incoming DNS packets also cross
+  the phase boundary without new outgoing queries. Four echo applications and final cleanup
+  pass, not the full combined privacy/lifetime gate. Missing report checkpoints are not
+  reconstructed as a PASS. All 169 originals remain retained; that run did not change the default.
+  The next reciprocal run (`383b8117`, `36617479438`) preserves unchanged agent/context IDs,
+  warm 819-ms and local 25-ms answers, post-DNS echoes, and natural retirement with 404 status
+  reads/no timeouts. It still fails on one exact gateway-to-TAP ARP reply's capture shape;
+  seven other captures and final cleanup/host-state pass. No historical packet bytes or full
+  PASS are invented. See [the retained evidence](UNBOUND_FALLBACK.md).
+  A separate packaged-default candidate now selects private Unbound even when caching is off,
+  while disabling all proof retention and peer sharing in that mode. Inactive nodes need no
+  worker; effective Exits reject missing assets. Four config, three resolver and three startup
+  checks plus strict three-crate Clippy pass. The source-exact reciprocal run
+  [`36621104333` on `c2e21c6c`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36621104333)
+  now passes: protected private recursion takes 1,053 ms, same-socket local reuse 5 ms,
+  with unchanged four-node agents/flows, post-DNS echoes, a reaped worker, no new cache-hit
+  query/worker, responsive natural retirement, clean captures and unchanged host state.
+  Its 170 originals are retained. The separate package/C05 run `36621100178` remains failed:
+  C05 and all five native cases pass, as do source binding and installed-agent startup guards,
+  but the shipped-sandbox probe fails and upgrade/removal acceptance is not established.
+  No missing probe diagnostics are invented. See [exact results and hashes](UNBOUND_FALLBACK.md).
+  The diagnostic repeat `36624654504` on `d4791119` again passes C05/native/startup checks,
+  but records systemd `203/EXEC` before the probe or worker runs; no underlying exec errno
+  or historical mount flags were retained. The fixture now stages the source-exact probe
+  under a private root-owned `/usr/libexec` directory, keeps its runtime files under `/run`,
+  and checks mount flags plus actual agent-user access without relaxing the shipped sandbox.
+  Ten focused package-proof checks pass; the complete live package lifecycle remains pending.
+  The next run [`36713955757` on `3e5c8051`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36713955757)
+  passes the installed DNS startup/sandbox probe and all five independent native cases.
+  Actual sandbox resolution takes 504 ms, with independent DNSSEC proof, observed/reaped
+  same-UID worker and local reuse; source binding and configuration/unit restoration pass.
+  The full run remains failed: the package lifecycle incorrectly requires a persistent
+  MPQUIC process in roles-off mode, and the separate C05 public-wire collector rejects
+  insufficient original TTL before application queries. Lifecycle report v2 now checks
+  active helper/agent upgrade lifetimes and explicitly successful inert native state; the
+  collector boundedly re-fetches only expiring fixed questions without changing its 60-second
+  validity gate or renewing old bytes. Seven recording, ten package-DNS, six native-proof
+  checks and the nonmutating lifecycle contract pass. A new live run is still required;
+  all 83 originals, failure boundaries and unchanged host-state evidence remain retained.
+  The next run [`36716641748` on `c34af147`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36716641748)
+  passes the refreshed protected C05 sequence, all five native cases and the installed
+  startup/sandbox probe (1,112-ms signed lookup) under their exact-source checkers. It still
+  fails full package acceptance: the startup fixture enabled Exit temporarily and started
+  the native worker through the agent's `Wants=` dependency, but restored only the agent.
+  The unchanged lifecycle gate correctly rejects that still-running Exit worker before
+  upgrade/removal. Fixture cleanup now stops agent plus native, restores the original
+  config/drop-in, restarts the agent and requires inert successful native state/no sockets
+  plus the unchanged helper lifetime. Success and failure paths have stateful regression
+  coverage; all twelve pure package-proof checks pass. New live package acceptance is
+  pending. The 270 originals, complete topology cleanup and equal host hashes are retained
+  in [the exact evidence history](UNBOUND_FALLBACK.md).
+
 The positive DNSSEC cache is now composed into the normal agent: the same bounded RAM resolver
 serves protected DNS, TCP resolution, general UDP and browser-QUIC destination pinning. Its peer
 backend uses signed, bounded cache-only RPC and a generic provider capability, not DNS names in

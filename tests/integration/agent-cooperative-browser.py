@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import runpy
 import stat
@@ -55,6 +56,72 @@ def digest(path):
 
 def paths(work):
     return (work / "agent-jobs-user/browser", work / "state-client/compute-source/public-browser")
+
+
+def prepare_account_home(path, uid, gid):
+    """Create only an absent account home; never chmod or adopt an existing path."""
+    require(path.is_absolute() and path.parent.resolve() == path.parent and uid > 0 and gid > 0,
+            "invalid fixture account home")
+    created = False
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        path.mkdir(mode=0o700)
+        info = path.lstat()
+        try:
+            if (info.st_uid, info.st_gid) != (uid, gid):
+                os.chown(path, uid, gid, follow_symlinks=False)
+        except OSError:
+            if (path.lstat().st_dev, path.lstat().st_ino) == (info.st_dev, info.st_ino):
+                path.rmdir()
+            raise
+        created = True
+        info = path.lstat()
+    require(stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700
+            and (info.st_uid, info.st_gid) == (uid, gid), "account home ownership/mode differs")
+    return dict(version=1, created=created, device=info.st_dev, inode=info.st_ino, uid=uid, gid=gid)
+
+
+def cleanup_account_home(path, marker):
+    require(set(marker) == {"version", "created", "device", "inode", "uid", "gid"}
+            and marker["version"] == 1 and type(marker["created"]) is bool
+            and all(type(marker[key]) is int and marker[key] >= 0 for key in ("device", "inode", "uid", "gid")),
+            "invalid fixture home ownership marker")
+    if not marker["created"]:
+        return
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    require(stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700
+            and (info.st_dev, info.st_ino, info.st_uid, info.st_gid)
+                == tuple(marker[key] for key in ("device", "inode", "uid", "gid")),
+            "fixture-created account home changed")
+    path.rmdir()  # Empty only: never recursively remove browser or pre-existing data.
+
+
+def account_home(work, cleanup=False):
+    require(work.parent == Path("/opt") and work.name.startswith("va.") and work.resolve() == work,
+            "invalid disposable fixture root")
+    marker = work / f"{NAME}-home.json"
+    if cleanup and not marker.exists() and not marker.is_symlink():
+        return
+    require(os.geteuid() == 0 and JOBS["TRAIN"]["socket"].gethostname() == "volparossa-alpha"
+            and subprocess.check_output(["systemd-detect-virt"], text=True, timeout=5).strip() == "kvm",
+            "account home fixture is disposable-guest-only")
+    account = pwd.getpwnam("volparossa")
+    home = Path("/var/lib/volparossa")
+    require(account.pw_dir == str(home), "unexpected service account home")
+    if cleanup:
+        cleanup_account_home(home, read(marker))
+    else:
+        require(not marker.exists() and not marker.is_symlink(), "home ownership marker already exists")
+        ownership = prepare_account_home(home, account.pw_uid, account.pw_gid)
+        try:
+            write(marker, ownership)
+        except OSError:
+            cleanup_account_home(home, ownership)
+            raise
 
 
 def pins():
@@ -417,6 +484,9 @@ def check_report(value, revision):
 
 
 def main(args):
+    if len(args) == 2 and args[0] in ("account-home-prepare", "account-home-cleanup"):
+        account_home(Path(args[1]), cleanup=args[0] == "account-home-cleanup")
+        return
     if args == ["export-names"]:
         print("\n".join(EXPORT_NAMES))
     elif len(args) == 2 and args[0] == "provision":

@@ -5,11 +5,16 @@ set -eu
 umask 022
 
 mode=preview
+staged_binary_directory=
+staged_native_binary=
 usage() {
     printf '%s\n' \
         'usage: packaging/build-deb.sh [--preview|--build]' \
+        '       packaging/build-deb.sh --stage-built ABSOLUTE_BINARY_DIRECTORY ABSOLUTE_NATIVE_BINARY' \
         '' \
-        'Preview is the non-writing default. --build performs the explicit non-root build.'
+        'Preview is the non-writing default. --build performs the explicit non-root build.' \
+        '--stage-built packages existing exact-source development binaries; it is not a release build.' \
+        'That mode requires VOLPAROSSA_PACKAGE_SOURCE_REVISION (40 lowercase hex characters).'
 }
 
 case "$#" in
@@ -21,6 +26,13 @@ case "$#" in
             -h|--help) usage; exit 0 ;;
             *) usage >&2; exit 64 ;;
         esac
+        ;;
+    3)
+        [ "$1" = --stage-built ] || { usage >&2; exit 64; }
+        mode=stage-built
+        staged_binary_directory=$2
+        staged_native_binary=$3
+        case $staged_binary_directory:$staged_native_binary in /*:/*) ;; *) exit 64 ;; esac
         ;;
     *) usage >&2; exit 64 ;;
 esac
@@ -64,11 +76,10 @@ export SOURCE_DATE_EPOCH="$source_date_epoch"
 printf '%s\n' \
     "VOLPAROSSA Debian package plan for version $version on $architecture." \
     "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
-    '  cargo build --locked --release --workspace --all-features' \
-    '  native/volparossa-mpquic/scripts/build-upstream.sh' \
+    "  build mode: $mode (stage-built performs no Rust/native compilation)" \
     '  stage fixed binaries, configuration, units, notices, and resolved Cargo licenses' \
     "  dpkg-deb -> dist/volparossa_${version}_${architecture}.deb" \
-    'Writes, when --build is explicit: the Cargo target directory, native build output, dist/, and one validated temporary directory.' \
+    'Writes only in explicit build/staging mode: dist/ and one validated temporary directory; --build also compiles Rust/native outputs.' \
     'Never installs a package or service and never changes networking.'
 if [ -x "$native_launcher" ]; then
     printf '%s\n' 'Native launcher prerequisite: READY.'
@@ -98,25 +109,38 @@ if [ "$(id -u)" -eq 0 ]; then
 fi
 
 cd "$repository_directory"
-cargo_target_directory=$(cargo metadata --locked --offline --no-deps --format-version 1 | \
-    jq -er '.target_directory | select(type == "string" and startswith("/"))')
-if [ -z "$cargo_target_directory" ]; then
-    printf '%s\n' 'Cargo did not report one absolute target directory.' >&2
-    exit 1
+if [ "$mode" = stage-built ]; then
+    source_revision=${VOLPAROSSA_PACKAGE_SOURCE_REVISION:-}
+    case $source_revision in ''|*[!0-9a-f]*) exit 65 ;; esac
+    [ "${#source_revision}" -eq 40 ] || exit 65
+    [ -d "$staged_binary_directory" ] && [ ! -L "$staged_binary_directory" ] || exit 65
+    release_directory=$staged_binary_directory
+else
+    cargo_target_directory=$(cargo metadata --locked --offline --no-deps --format-version 1 | \
+        jq -er '.target_directory | select(type == "string" and startswith("/"))')
+    if [ -z "$cargo_target_directory" ]; then
+        printf '%s\n' 'Cargo did not report one absolute target directory.' >&2
+        exit 1
+    fi
+    release_directory=$cargo_target_directory/release
+    cargo build --locked --release --workspace --all-features
 fi
-release_directory=$cargo_target_directory/release
-cargo build --locked --release --workspace --all-features
 
 for binary_name in volparossa volparossa-agent volparossa-helper; do
-    if [ ! -x "$release_directory/$binary_name" ]; then
+    if [ ! -f "$release_directory/$binary_name" ] || [ -L "$release_directory/$binary_name" ] \
+        || [ ! -x "$release_directory/$binary_name" ]; then
         printf 'Required release binary is missing: %s/%s\n' \
             "$release_directory" "$binary_name" >&2
         exit 1
     fi
 done
-"$repository_directory/native/volparossa-mpquic/scripts/build-upstream.sh"
-native_binary=$repository_directory/native/volparossa-mpquic/build/volparossa-mpquic
-if [ ! -x "$native_binary" ]; then
+if [ "$mode" = stage-built ]; then
+    native_binary=$staged_native_binary
+else
+    "$repository_directory/native/volparossa-mpquic/scripts/build-upstream.sh"
+    native_binary=$repository_directory/native/volparossa-mpquic/build/volparossa-mpquic
+fi
+if [ ! -f "$native_binary" ] || [ -L "$native_binary" ] || [ ! -x "$native_binary" ]; then
     printf 'Required native executable is missing: %s\n' "$native_binary" >&2
     exit 1
 fi
@@ -169,6 +193,16 @@ install -m 0644 docs/OPERATIONS.md "$package_root/usr/share/doc/volparossa/OPERA
 install -m 0644 docs/PRIVACY.md "$package_root/usr/share/doc/volparossa/PRIVACY.md"
 install -m 0644 "$script_directory/debian/copyright" \
     "$package_root/usr/share/doc/volparossa/copyright"
+if [ "$mode" = stage-built ]; then
+    jq -n --arg revision "$source_revision" \
+        --arg cli "$(sha256sum "$release_directory/volparossa" | awk '{print $1}')" \
+        --arg agent "$(sha256sum "$release_directory/volparossa-agent" | awk '{print $1}')" \
+        --arg helper "$(sha256sum "$release_directory/volparossa-helper" | awk '{print $1}')" \
+        --arg native "$(sha256sum "$native_binary" | awk '{print $1}')" \
+        '{schema:1,build_profile:"development-staged",source_revision:$revision,
+          release_build_proven:false,binaries:{cli:$cli,agent:$agent,helper:$helper,native:$native}}' \
+        >"$package_root/usr/share/doc/volparossa/development-build.json"
+fi
 
 for native_notice in "$repository_directory"/third_party/licenses/*.txt; do
     if [ ! -f "$native_notice" ]; then

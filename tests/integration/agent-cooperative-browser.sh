@@ -63,8 +63,10 @@ agent_cooperative_browser_run() {
     [ "$(stat -Lc '%a:%u' "$cooperative_socket")" = "600:$AGENT_UID" ] || fail COOPERATIVE_BROWSER_SOCKET_AUTHORITY
     PHASE=agent-cooperative-browser-panel
     content_custody_phase_start fetch
-    # A normal service-user transition initializes its existing account home.
-    # Bare setpriv would retain the root runner's inaccessible home environment.
+    # sysusers records the account home but does not create it in this non-package
+    # guest. Create only the exact missing home; cleanup removes it only if still empty.
+    python3 -B "$cooperative_script" account-home-prepare "$WORK" || fail COOPERATIVE_BROWSER_HOME_FAILED
+    # The normal service-user transition chooses the account home without a HOME override.
     cooperative_driver_unit=volparossa-alpha-cooperative-browser.service
     [ "$(unit_load_state "$cooperative_driver_unit")" = not-found ] || fail COOPERATIVE_BROWSER_DRIVER_COLLISION
     jobs_units="$jobs_units $cooperative_driver_unit"

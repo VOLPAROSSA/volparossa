@@ -1,0 +1,9 @@
+# Optional configuration fragment, not an installer or a ready reciprocal deployment.
+# The operator must provision/protect this Exit-side validator first; see
+# docs/UNBOUND_FALLBACK.md. All omitted role settings remain off by default.
+dns_cache:
+  enabled: true
+  upstream: null
+  fallback:
+    mode: unbound
+    endpoint: "127.0.0.1:5335"

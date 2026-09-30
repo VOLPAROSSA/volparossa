@@ -3,6 +3,7 @@
 """Pure synthetic proof-boundary controls; no browser, peer or model execution."""
 import copy
 import json
+import os
 from pathlib import Path
 import runpy
 import subprocess
@@ -56,6 +57,37 @@ def fixture():
 
 
 class CooperativeBrowserProof(unittest.TestCase):
+    def test_guest_account_home_is_created_only_when_absent_and_removed_only_when_owned_and_empty(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = root / "account-home"
+            marker = CHECK["prepare_account_home"](home, os.geteuid(), os.getegid())
+            self.assertTrue(marker["created"])
+            self.assertEqual(home.stat().st_mode & 0o777, 0o700)
+            existing = CHECK["prepare_account_home"](home, os.geteuid(), os.getegid())
+            self.assertFalse(existing["created"])
+            CHECK["cleanup_account_home"](home, existing)
+            self.assertTrue(home.is_dir())
+            keep = home / "do-not-remove"
+            keep.write_text("unrelated data")
+            with self.assertRaises(OSError):
+                CHECK["cleanup_account_home"](home, marker)
+            self.assertEqual(keep.read_text(), "unrelated data")
+            keep.unlink()
+            CHECK["cleanup_account_home"](home, marker)
+            CHECK["cleanup_account_home"](home, marker)
+            self.assertFalse(home.exists())
+            home.symlink_to(root, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                CHECK["prepare_account_home"](home, os.geteuid(), os.getegid())
+            with self.assertRaises(ValueError):
+                CHECK["cleanup_account_home"](home, marker)
+            self.assertTrue(home.is_symlink())
+        shell = (HERE / "agent-cooperative-browser.sh").read_text()
+        self.assertLess(shell.index('account-home-prepare "$WORK"'), shell.index("--property=SetLoginEnvironment=yes"))
+        cleanup = (HERE / "agent-jobs-smoke.sh").read_text().split("agent_jobs_cleanup() {", 1)[1]
+        self.assertLess(cleanup.index("agent_jobs_stop"), cleanup.index("account-home-cleanup"))
+
     def test_failure_metadata_is_closed_and_account_transition_is_explicit(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "browser-status.json"
@@ -72,6 +104,28 @@ class CooperativeBrowserProof(unittest.TestCase):
         self.assertIn("--property=User=volparossa --property=Group=volparossa", shell)
         self.assertIn("--property=CapabilityBoundingSet= --property=AmbientCapabilities=", shell)
         self.assertIn('diagnostic "$WORK" "$cooperative_browser_status"', shell)
+        jobs = (HERE / "agent-jobs-smoke.sh").read_text()
+        stop = "agent_jobs_stop_unit() {" + jobs.split("agent_jobs_stop_unit() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+        # Exercise the real allowlist without invoking host systemd or touching cgroups.
+        doubles = '''
+systemctl() {
+    case "$*" in
+        "show --property=LoadState --value "*) printf 'not-found\\n' ;;
+        "show --property=ActiveState --value "*) printf 'inactive\\n' ;;
+        "show --property=MainPID --value "*) printf '0\\n' ;;
+        "reset-failed "*) return 0 ;;
+        *) return 99 ;;
+    esac
+}
+agent_jobs_cgroup_empty() { return 0; }
+'''
+        for unit, expected in (("volparossa-alpha-public-browser.service", 0),
+                               ("volparossa-alpha-cooperative-browser.service", 0),
+                               ("volparossa-agent.service", 1),
+                               ("volparossa-alpha-public-browser-other.service", 1)):
+            result = subprocess.run(["sh", "-c", doubles + stop + 'agent_jobs_stop_unit "$1"', "test", unit],
+                                    capture_output=True, text=True, timeout=3, check=False)
+            self.assertEqual(result.returncode, expected)
 
     def test_receipts_consent_and_two_real_peer_levels_cannot_be_substituted(self):
         value = fixture()

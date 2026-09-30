@@ -204,7 +204,9 @@ the diagram does not imply that every source must be contacted.*
 - **Offline messages:** known-contact mailboxes retain recipient-encrypted messages. Cache holders
   receive ciphertext, not the recipient's decryption key.
 - **Shared DNS:** reuse independently validated positive DNSSEC evidence, preserving original
-  authority and expiry rather than trusting an arbitrary peer's answer.
+  authority and expiry rather than trusting an arbitrary peer's answer. A bounded private
+  [Unbound fallback](docs/UNBOUND_FALLBACK.md) handles misses at the Exit; packaged-default
+  integration is still undergoing its separate functional proof.
 - **Existing HTTPS:** supported cooperative-origin, origin-digest or
   [checksum-file](docs/OPERATIONS.md#https-checksum-file-downloads) modes authenticate the origin
   before using peer content. No interception CA, TLS bypass or automatic sharing of private
