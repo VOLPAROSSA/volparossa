@@ -128,6 +128,15 @@ impl ExecutionSlot {
     }
 
     fn finish(&mut self, result: &Result<Value>) {
+        if result
+            .as_ref()
+            .is_err_and(|error| error.to_string() == "compute_private_storage_cleanup_failed")
+        {
+            super::supervise::diagnostic::event(
+                "storage",
+                "compute_private_storage_cleanup_failed",
+            );
+        }
         self.cleanup_confirmed = !result.as_ref().is_err_and(|error| {
             error
                 .downcast_ref::<private_task::CleanupUnconfirmed>()
@@ -365,6 +374,10 @@ async fn connection(
                 let mut task = active.take().expect("completed active task");
                 // The handle was already awaited by select!; do not poll it again.
                 task.execution.take();
+                if let Err(error) = &result {
+                    super::supervise::diagnostic::event("task",
+                        if error.is_panic() { "panic" } else { "join_cancelled" });
+                }
                 let response = match result {
                     Ok(Ok(answer)) if !task.cancelled => {
                         let mut response = wire::response(&task.id, "result");

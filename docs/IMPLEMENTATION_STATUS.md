@@ -21,8 +21,23 @@ that all histories/tools fit. BF16/SDPA are required without silent fallback.
 Only conversation submission gets a 524,288-byte request frame; old operations
 retain their original bounds. Twenty focused Rust private protocol/lifecycle tests
 pass; offline worker tests use explicit backend doubles, **not model evidence**.
-Real weights have not been fetched or executed for this candidate. Actual native
-tool use, a hard-4GiB-bounded long-context run and an end-to-end editing loop remain
+The exact disposable [trial 36771139938](https://github.com/VOLPAROSSA/volparossa/actions/runs/36771139938)
+on `866db5b8e036c8ebfd093564f7adb651ef8f708e` provisioned the pinned runtime/model and
+observed the actual isolated Python worker, but failed at `turn-1-result` with
+`cleanup_unconfirmed` before any model-selected tool result was proved. The 5-GiB,
+no-swap service reported no OOM events; all fixture process/service cleanup and
+unchanged-host checks passed. These facts do not identify the original execution
+or lifetime-observation error. A follow-up source candidate adds opt-in, closed
+execution/capture/refresh/lifetime/reap/storage/task diagnostics before the existing
+cleanup error masks that cause. Only fixed operation/error categories, errno classes
+and bounded startup exit/signal metadata may be exported; its private local log is
+removed with the fixture. Quarantine, cleanup conditions and all deadlines remain
+unchanged. A fresh real trial is still required to diagnose the failed operation;
+these diagnostics are **not a demonstrated fix**. Focused checks passed: 23 existing
+and new supervisor tests, the additional actual tracing-formatter-to-fixture-parser
+bridge, and 12 offline Python fixture checks; none executes model inference.
+Actual native tool use,
+a hard-4GiB-bounded long-context run and an end-to-end editing loop remain
 **unproved/incomplete**. See the [exact wire contract](../crates/volparossa/src/compute/private_conversation/WIRE.md).
 
 Private conversation source candidate (2026-09-30): additive

@@ -44,6 +44,29 @@ CLIENT_CODES = {'busy', 'invalid_request', 'handshake_required', 'cancelled', 'e
                 'incompatible_capabilities', 'invalid_response', 'invalid_conversation', 'request_bound',
                 'response_bound', 'socket_error', 'disconnected', 'frame_timeout', 'handshake_timeout',
                 'not_connected', 'probe_failed'}
+SERVICE_PHASES = {'execution', 'capture', 'refresh', 'lifetime', 'reap', 'storage', 'task'}
+SERVICE_CODES = {
+    'unclassified', 'worker_other', 'startup_missing_result', 'result_observed', 'panic', 'join_cancelled',
+    'compute_deadline', 'compute_owner_busy', 'compute_memory_budget', 'compute_storage_budget',
+    'compute_process_bound', 'compute_thread_bound', 'compute_process_observation', 'compute_observation_size',
+    'compute_private_process_observation', 'compute_private_process_missing', 'compute_private_process_bound',
+    'compute_private_process_stat', 'compute_private_process_stat_open', 'compute_private_process_stat_read',
+    'compute_private_process_stat_bound', 'compute_private_process_children', 'compute_private_process_cleanup_deadline',
+    'compute_private_storage_cleanup_failed', 'compute_reap_deadline', 'compute_reap',
+    'compute_request_write_deadline', 'compute_request_write', 'compute_control_write_deadline', 'compute_control_write',
+    'compute_memory_pressure', 'compute_device_reserve', 'compute_owner_pressure', 'compute_pressure_observation',
+    'compute_worker_json', 'compute_worker_correlation', 'compute_worker_phase', 'compute_worker_status',
+    'compute_worker_kind', 'compute_worker_line_size', 'compute_worker_unterminated_line', 'compute_stdout_size',
+    'compute_stderr_size', 'compute_stderr_read', 'compute_wait', 'compute_worker_exit',
+    'JOB_INPUT_NOT_FOUND', 'JOB_PATH_PERMISSION_DENIED', 'JOB_MEMORY_EXHAUSTED', 'BACKEND_IMPORT_FAILED',
+    'BACKEND_EXECUTION_FAILED', 'BACKEND_NOT_INSTALLED', 'BACKEND_VERSION_MISMATCH', 'CPU_BACKEND_REQUIRED',
+    'MODEL_PARAMETER_DTYPE_MISMATCH', 'MODEL_WEIGHTS_CHANGED_ON_DISK', 'CONVERSATION_TOKENIZER_SHAPE',
+    'CONVERSATION_TOKEN_LIMIT', 'RESULT_TOO_LARGE', 'CANCELLED', 'DEADLINE_EXCEEDED',
+}
+SERVICE_IO_KINDS = {'none', 'not_found', 'permission_denied', 'unexpected_eof', 'broken_pipe',
+                    'interrupted', 'invalid_data', 'other'}
+SERVICE_STDERR_CLASSES = {None, 'none', 'bubblewrap', 'user_namespace', 'proc_mount', 'exec_denied',
+                          'python_startup', 'other'}
 EXPORT_NAMES = {'agent-private-conversation-smoke.json', 'host-state-before.json', 'host-state-after.json',
                 'current-phase', 'guest-exit-status', 'runner.stdout', 'runner.stderr'}
 
@@ -257,6 +280,45 @@ def closed_log(path):
         ('missing_library', b'error while loading shared libraries'))})
 
 
+def service_diagnostic(path):
+    """Local observations only; fixed vocabulary, no raw log, prompt, path or request ID."""
+    if not path.exists():
+        return None
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
+                and stat.S_IMODE(info.st_mode) == 0o600, 'private service log owner')
+        raw = stream.read(65537)
+    truncated = len(raw) > 65536
+    lines = raw[:65536].splitlines()
+    if truncated:
+        lines = lines[:-1]  # Never accept a partial final record.
+    events, unknown = [], False
+    marker = b'private_execution_diagnostic '
+    for line in lines:
+        if marker not in line:
+            continue
+        try:
+            event = json.loads(line.split(marker, 1)[1])
+            require(isinstance(event, dict) and set(event) == {'version', 'phase', 'detail'}
+                    and type(event['version']) is int and event['version'] == 1
+                    and event['phase'] in SERVICE_PHASES, 'service diagnostic phase')
+            detail = event['detail']
+            require(isinstance(detail, dict) and set(detail) == {'code', 'io_kind', 'exit_code', 'signal', 'stderr_class'}
+                    and detail['code'] in SERVICE_CODES and detail['io_kind'] in SERVICE_IO_KINDS
+                    and detail['stderr_class'] in SERVICE_STDERR_CLASSES, 'service diagnostic vocabulary')
+            for key, low, high in (('exit_code', -1, 255), ('signal', 0, 64)):
+                require(detail[key] is None or (type(detail[key]) is int and low <= detail[key] <= high),
+                        'service diagnostic exit bound')
+            if len(events) < 16:
+                events.append(event)
+            else:
+                truncated = True
+        except (ValueError, KeyError, TypeError):
+            unknown = True
+    return dict(version=1, events=events, truncated=truncated, unrecognized_record=unknown)
+
+
 def check_report(value, revision):
     require(value['report_kind'] == 'volparossa-agent-private-conversation' and value['proof_version'] == 1
             and value['source_revision'] == revision and re.fullmatch('[0-9a-f]{40}', revision)
@@ -379,6 +441,10 @@ def execute(output, revision):
         (ROOT / 'fixture.js').chmod(0o600)
         original_hash = digest(ROOT / 'fixture.js')
         result['phase'] = 'service-start'
+        # Only this opt-in target reaches the private log; no diagnostic journal or raw-log artifact.
+        diagnostic_log = ROOT / 'service.log'
+        with os.fdopen(os.open(diagnostic_log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb'):
+            pass
         command = [str(CLI), 'compute', 'private-serve', '--socket', str(ROOT / 'private.sock'),
             '--work-parent', str(ROOT / 'work'), '--runtime-root', str(ROOT / 'ml/venv'),
             '--model-root', str(ROOT / 'ml/model'), '--model-profile', PROFILE,
@@ -390,6 +456,9 @@ def execute(output, revision):
             '--property=User=vpci', '--property=Group=vpci', '--property=WorkingDirectory=/home/vpci/source',
             f'--property=MemoryMax={MEMORY_MAX}', '--property=MemorySwapMax=0', '--property=TasksMax=128',
             '--property=KillMode=control-group', '--property=RuntimeMaxSec=1400', '--property=TimeoutStopSec=10',
+            '--setenv=RUST_LOG=off,volparossa::compute::private_diagnostic=debug',
+            '--setenv=NO_COLOR=1',
+            f'--property=StandardOutput=append:{diagnostic_log}', f'--property=StandardError=append:{diagnostic_log}',
             '--property=NoNewPrivileges=yes', '--property=PrivateNetwork=yes', *command], check=True,
             capture_output=True, timeout=15)
         for _ in range(100):
@@ -478,6 +547,10 @@ def execute(output, revision):
             status = properties()
             service_stopped = status['LoadState'] == 'not-found' or status.get('ActiveState') in ('inactive', 'failed')
             unit('reset-failed', check=False)
+        try:
+            result['service_diagnostic'] = service_diagnostic(ROOT / 'service.log')
+        except (OSError, ValueError, KeyError, TypeError):
+            result['diagnostic_invalid'] = True
         alive = any(TRAIN['alive'](member) for member in members)
         removed = client_joined and provision_joined and observer_joined and service_stopped and not alive
         if removed:

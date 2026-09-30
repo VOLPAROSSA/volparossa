@@ -4,7 +4,9 @@
 import copy
 import hashlib
 import io
+import json
 from pathlib import Path
+import re
 import runpy
 import subprocess
 import tarfile
@@ -59,6 +61,65 @@ def example_receipt():
 
 
 class FixtureTests(unittest.TestCase):
+    def test_service_diagnostic_preserves_fixed_stages_without_private_fields(self):
+        event = dict(version=1, phase='refresh', detail=dict(code='compute_private_process_children',
+            io_kind='permission_denied', exit_code=None, signal=None, stderr_class=None))
+        records = [event]
+        for change in ({'phase': 'PRIVATE_CANARY'}, {'request_id': 'PRIVATE_CANARY'},
+                       {'detail': dict(event['detail'], code='PRIVATE_CANARY')},
+                       {'detail': dict(event['detail'], io_kind='PRIVATE_CANARY')},
+                       {'detail': dict(event['detail'], stderr_class='/private/PRIVATE_CANARY')},
+                       {'detail': dict(event['detail'], signal=True)}):
+            records.append(dict(event, **change))
+        with tempfile.TemporaryDirectory(prefix='qwen-fixture-test-', dir=HERE) as directory:
+            path = Path(directory) / 'private.log'
+            path.write_text('private raw prompt PRIVATE_CANARY\n' + ''.join(
+                'DEBUG private_execution_diagnostic ' + json.dumps(record) + '\n' for record in records))
+            path.chmod(0o600)
+            result = FIX['service_diagnostic'](path)
+            self.assertEqual(result['events'], [event])
+            self.assertTrue(result['unrecognized_record'])
+            self.assertFalse(result['truncated'])
+            self.assertNotIn('PRIVATE_CANARY', json.dumps(result))
+
+    def test_service_diagnostic_is_bounded_and_requires_owner_only_regular_file(self):
+        event = dict(version=1, phase='execution', detail=dict(code='startup_missing_result',
+            io_kind='none', exit_code=-1, signal=5, stderr_class='other'))
+        line = 'DEBUG private_execution_diagnostic ' + json.dumps(event) + '\n'
+        with tempfile.TemporaryDirectory(prefix='qwen-fixture-test-', dir=HERE) as directory:
+            path = Path(directory) / 'private.log'
+            path.write_text(line * 17)
+            path.chmod(0o600)
+            result = FIX['service_diagnostic'](path)
+            self.assertEqual(len(result['events']), 16)
+            self.assertTrue(result['truncated'])
+            path.write_text(line + 'PRIVATE_CANARY' * 8192)
+            result = FIX['service_diagnostic'](path)
+            self.assertEqual(result['events'], [event])
+            self.assertTrue(result['truncated'])
+            self.assertNotIn('PRIVATE_CANARY', json.dumps(result))
+            path.chmod(0o644)
+            with self.assertRaises(ValueError):
+                FIX['service_diagnostic'](path)
+            link = Path(directory) / 'link'
+            link.symlink_to(path)
+            with self.assertRaises(OSError):
+                FIX['service_diagnostic'](link)
+
+    def test_service_diagnostic_vocabulary_matches_source_and_log_is_not_exported(self):
+        source = (HERE.parents[1] / 'crates/volparossa/src/compute/supervise/diagnostic.rs').read_text()
+        expected = {'unclassified', 'worker_other', 'startup_missing_result', 'result_observed', 'panic', 'join_cancelled'}
+        for name in ('FIXED_CODES', 'WORKER_CODES'):
+            array = source.split(f'const {name}: &[&str] = &[', 1)[1].split('];', 1)[0]
+            expected.update(re.findall(r'"([A-Za-z_]+)"', array))
+        self.assertEqual(FIX['SERVICE_CODES'], expected)
+        self.assertNotIn('service.log', FIX['EXPORT_NAMES'])
+        fixture = (HERE / 'agent-private-conversation.py').read_text()
+        self.assertIn('--setenv=RUST_LOG=off,volparossa::compute::private_diagnostic=debug', fixture)
+        self.assertIn('--setenv=NO_COLOR=1', fixture)
+        self.assertIn('--property=StandardOutput=append:{diagnostic_log}', fixture)
+        self.assertIn('--property=StandardError=append:{diagnostic_log}', fixture)
+
     def test_current_pins_and_offline_receipt_contract(self):
         self.assertEqual(FIX['pins']()['revision'], 'fd8513aff6e9322a488570618396ed8a81fcfb12')
         FIX['check_report'](example_receipt(), REVISION)

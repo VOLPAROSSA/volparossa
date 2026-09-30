@@ -1,5 +1,6 @@
 //! Owner-controlled lifecycle and bounded observations, outside the model worker.
 
+pub(super) mod diagnostic;
 mod lifetime;
 
 use std::{
@@ -137,6 +138,9 @@ pub(super) async fn run(
         .mode
         .is_private()
         .then(|| lifetime::OwnedLifetimes::capture(pid));
+    if let Some(Err(error)) = &private_lifetimes {
+        diagnostic::failure("capture", error);
+    }
     let mut stdin = child.stdin.take().context("compute_child_stdin")?;
     let stdout = child.stdout.take().context("compute_child_stdout")?;
     let stderr = child.stderr.take().context("compute_child_stderr")?;
@@ -263,6 +267,12 @@ async fn confirm_cleanup(
     result: Result<Value>,
     mut private_lifetimes: Option<Result<lifetime::OwnedLifetimes>>,
 ) -> Result<Value> {
+    if mode.is_private() {
+        match &result {
+            Ok(_) => diagnostic::event("execution", "result_observed"),
+            Err(error) => diagnostic::failure("execution", error),
+        }
+    }
     // Retain exact sandbox descendant lifetimes before killing its launcher. Waiting only
     // for the launcher does not prove that dying/reparented namespace children have gone.
     let cleanup_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
@@ -274,8 +284,17 @@ async fn confirm_cleanup(
     }
     if let Some(lifetimes) = private_lifetimes {
         let confirmed = match lifetimes {
-            Ok(lifetimes) => lifetimes.wait_closed(cleanup_deadline).await.is_ok(),
-            Err(_) => false,
+            Ok(lifetimes) => match lifetimes.wait_closed(cleanup_deadline).await {
+                Ok(()) => true,
+                Err(error) => {
+                    diagnostic::failure("lifetime", &error);
+                    false
+                }
+            },
+            Err(error) => {
+                diagnostic::failure("capture", &error);
+                false
+            }
         };
         if !confirmed {
             return Err(super::private_task::CleanupUnconfirmed.into());
@@ -299,6 +318,7 @@ async fn reap_failed_child(
         .context("compute_reap_deadline")
         .and_then(|result| result.context("compute_reap"));
     if mode.is_private() && reaped.is_err() {
+        diagnostic::failure("reap", reaped.as_ref().unwrap_err());
         return Err(super::private_task::CleanupUnconfirmed.into());
     }
     reaped?;
