@@ -102,6 +102,27 @@ class SignalBackupEvidence(unittest.TestCase):
         self.assertFalse(any(name.endswith((".log", ".err", ".signal", ".key", ".bin")) for name in names))
         self.assertFalse(any("recovery" in name or "profile" in name for name in names))
 
+    def test_singleton_socket_uses_short_child_only_alias_of_owned_temp_tree(self):
+        # Actual disposable topology shape, not a long-path test-only configuration.
+        root = Path("/opt/va." + "a" * 32 + ".ABCDEF/client-fixtures/signal-backup-user")
+        command = CHECK["isolated_command"](root, Path("/candidate"), Path("/node"), Path("/reporter"))
+        alias = str(CHECK["NATIVE_TMP"])
+        binding = ["--bind", str(root / "tmp"), alias]
+        start = next(i for i in range(len(command)) if command[i:i + 3] == binding)
+        self.assertGreater(start, command.index("--tmpfs"))
+        self.assertEqual(command[start + 3:start + 6], ["--setenv", "TMPDIR", alias])
+        self.assertTrue(any(command[i:i + 3] == ["--bind", str(root), str(root)]
+                            for i in range(len(command))))
+        # Even this conservative short Chromium directory suffix exceeds the old
+        # limit. The alias leaves headroom for the actual scoped-directory name.
+        suffix = "/scoped_dirABCDEF/SingletonSocket"
+        self.assertGreaterEqual(len(os.fsencode(str(root / "tmp") + suffix)), 108)
+        self.assertLess(len(os.fsencode(alias + suffix)), 108)
+        self.assertIn("temporary-directory", CHECK["SANDBOX_PHASES"])
+        self.assertNotIn("--no-sandbox", command)
+        for name in ("HOME", "CODEX_HOME"):
+            self.assertFalse(any(command[i:i + 2] == ["--setenv", name] for i in range(len(command))))
+
     def test_private_cleanup_is_idempotent_and_does_not_follow_profile_links(self):
         with tempfile.TemporaryDirectory() as temporary:
             parent = Path(temporary) / "client-fixtures"; parent.mkdir(mode=0o700)

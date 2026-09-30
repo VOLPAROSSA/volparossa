@@ -24,11 +24,13 @@ CHAT = "c897667d76bea8140f0bc5f373404e43cbd54552"
 SIGNAL = "ef3872cb0249ec939d8aff857568a0e87a6b5075"
 CAPACITY = 67108864
 RUNTIME = Path("/home/vpci/signal-backup-runtime")
+NATIVE_TMP = Path("/tmp/signal")
 TITLE = "backups exports and imports a VOLPAROSSA replicated encrypted backup"
 STAGE = "dispatch"
 NATIVE_EXIT = None
 NATIVE_DIAGNOSTIC = None
-SANDBOX_PHASES = frozenset(("entry", "identity", "capabilities", "control-group", "control-socket", "xvfb-exec"))
+SANDBOX_PHASES = frozenset(("entry", "identity", "capabilities", "control-group", "control-socket",
+                            "temporary-directory", "xvfb-exec"))
 REPORTER_PHASES = frozenset(("reporter-initialized", "run-start", "hook-start", "hook-end", "test-start",
                             "test-end", "test-pass", "test-fail", "hook-fail", "unknown-fail", "pending", "run-end"))
 NATIVE_ERROR_CODES = frozenset(("EACCES", "EPERM", "ENOENT", "EROFS", "ENOSPC", "ENOMEM", "ECONNREFUSED",
@@ -270,9 +272,14 @@ def native_command(candidate, node, reporter):
 
 def isolated_command(root, candidate, node, reporter):
     # No host HOME override; Electron user data and all writable state are separately scoped.
+    # Chromium's SingletonSocket must fit Linux sockaddr_un.sun_path (108 bytes).
+    # Alias the SAME owned temp tree inside the existing private /tmp mount;
+    # only the sandbox child sees this shorter TMPDIR, never the host/outer runner.
     return ["bwrap", "--die-with-parent", "--unshare-user", "--unshare-pid", "--unshare-ipc",
         "--cap-drop", "ALL", "--ro-bind", "/", "/", "--bind", str(root), str(root),
-        "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--chdir", str(candidate),
+        "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+        "--bind", str(root / "tmp"), str(NATIVE_TMP), "--setenv", "TMPDIR", str(NATIVE_TMP),
+        "--chdir", str(candidate),
         "/usr/bin/python3", "-B", str(Path(__file__)), "sandbox", str(root), str(candidate), str(node),
         str(reporter), os.readlink("/proc/self/ns/net")]
 
@@ -298,6 +305,12 @@ def sandbox_exec(root, candidate, node, reporter, client_namespace):
             control.settimeout(2); control.connect(control_path)
         create(root / "sandbox.json", json.dumps(dict(client_namespace_retained=True,
             capless_nonroot=True, control_socket_access_verified=True)).encode())
+        phase = "temporary-directory"; sandbox_status(root, phase)
+        temporary = NATIVE_TMP.lstat()
+        require(os.environ.get("TMPDIR") == str(NATIVE_TMP)
+                and stat.S_ISDIR(temporary.st_mode) and stat.S_IMODE(temporary.st_mode) == 0o700
+                and temporary.st_uid == os.geteuid() and NATIVE_TMP.samefile(root / "tmp"),
+                "sandbox temporary alias does not preserve private owner storage")
         phase = "xvfb-exec"; sandbox_status(root, phase)
         os.execvpe("xvfb-run", native_command(candidate, node, reporter), os.environ)
     except (OSError, ValueError, KeyError, TypeError) as error:

@@ -459,6 +459,23 @@ four Chromium/V8 fatal source locations and closed categories, never CHECK expre
 values, arbitrary filenames or error text. It changes no sandbox or launch flags. Nine
 focused tests and three VM-wiring checks pass; a new exact-source runtime trial is pending.
 
+The fourth native trial on `b9a579a5`,
+[run `36738793723`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36738793723),
+still fails before any test, but now identifies the exact Chromium fatal site:
+`process_singleton_posix.cc:335`. In Electron 44.1.0's pinned Chromium 152.0.7977.65,
+the two Electron singleton patches move `SetupSocket`'s socket-path-too-long fatal from
+upstream line 313 to line 335. The fixture's long `TMPDIR` plus the generated singleton
+directory/socket exceeds Linux's 108-byte Unix socket address. This is a fixture path
+failure, not evidence that Signal needs relaxed sandbox permissions. The candidate binds
+the same owned `tmp` directory at `/tmp/signal` inside its existing private `/tmp` mount,
+sets `TMPDIR` only for that sandbox child, and checks that the alias retains the original
+directory identity, owner and mode 0700. The existing cleanup still removes the underlying
+private profile/temp tree. No Signal source, launch security flags or host paths change.
+The 17 original artifacts remain retained (ZIP SHA-256
+`205ca2c6b3e14959428e1fe7766b716c159017c36e34b79326c23b560e5ef2ce`);
+process joining, private cleanup and unchanged host-state checks passed. Native backup
+export/import remains **unproved** until a fresh exact-source trial passes.
+
 ## Earlier milestone evidence
 
 The completed development milestone is integrated into `main` by
