@@ -12,6 +12,7 @@ umask 077
 
 mode=preview
 scenario=alpha
+reciprocal_private_dns=no
 private_storage_peer=no
 private_storage_replicas=no
 private_storage_handoff=no
@@ -51,7 +52,7 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|private-storage-handoff|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|private-storage-handoff|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
 }
 
 print_plan() {
@@ -572,6 +573,14 @@ print_plan() {
         return
     fi
     if [ "$scenario" = reciprocity ]; then
+        if [ "$reciprocal_private_dns" = yes ]; then
+            printf '%s\n' \
+                'Reciprocity-private-dns: retain the four same-daemon reciprocal routes below;' \
+                '  use the packaged private Unbound worker on all four active nodes;' \
+                '  add four owned guest-only TAP uplinks, with no public DNS listener;' \
+                '  prove policy-bound DNS, independent DNSSEC/local cache reuse and no app DNS escape;' \
+                '  emit separate reciprocity-private-dns-smoke.json; keep original reciprocal gates.'
+        fi
         printf '%s\n' \
             'VOLPAROSSA reciprocal-node runtime smoke plan:' \
             '  require the same disposable Debian 13 KVM guest and exact source/native build;' \
@@ -625,6 +634,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+            reciprocal_private_dns=no
             private_storage_peer=no
             private_storage_replicas=no
             private_storage_handoff=no
@@ -651,6 +661,7 @@ while [ "$#" -gt 0 ]; do
             agent_train_loop=no
             agent_artifact_quarantine=no
             case $2 in
+                reciprocity-private-dns) scenario=reciprocity; reciprocal_private_dns=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-peer) scenario=content-custody; private_storage_peer=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-replicas) scenario=content-custody; private_storage_replicas=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-handoff) scenario=content-custody; private_storage_handoff=yes; wifi_link=no; uplink_link=no ;;
@@ -776,6 +787,7 @@ for benchmark_fixture in benchmark-selection.sh benchmark-paths.py; do
 done
 if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario" = sharing ]; then
     scenario_fixtures='reciprocity-smoke.sh reciprocity-smoke.py'
+    [ "$reciprocal_private_dns" != yes ] || scenario_fixtures="$scenario_fixtures reciprocity-private-dns.sh reciprocity-private-dns.py reciprocity-private-dns-capture.py reciprocity-private-dns-uplink.py dns-cache-smoke.py dns-cache-fixture.py dns-cache-capture.py content-replication-capture.py"
     [ "$scenario" != local-link ] || scenario_fixtures="$scenario_fixtures local-link-smoke.sh local-link-smoke.py"
     [ "$scenario" != sharing ] || scenario_fixtures="$scenario_fixtures sharing-smoke.sh sharing-smoke.py"
     [ "$download_sharing" != yes ] || scenario_fixtures="$scenario_fixtures download-sharing-smoke.sh download-sharing-smoke.py download-sharing-snapshot.py"
@@ -1798,6 +1810,9 @@ cleanup() {
         dns_cache_stop_server || original_status=1
     fi
     if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario" = sharing ]; then
+        if [ "$reciprocal_private_dns" = yes ] && command -v reciprocity_private_dns_stop >/dev/null 2>&1; then
+            reciprocity_private_dns_stop || original_status=1
+        fi
         if [ "$download_sharing" = yes ]; then download_sharing_resume || original_status=1; fi
         reciprocity_stop_processes
     fi
@@ -2188,6 +2203,9 @@ cleanup() {
         fi
     elif [ "$scenario" = reciprocity ]; then
         reciprocity_finalize_report "$original_status" || original_status=1
+        if [ "$reciprocal_private_dns" = yes ]; then
+            reciprocity_private_dns_finalize_report "$original_status" || original_status=1
+        fi
     else
         write_report "$original_status"
         if [ "$original_status" -eq 0 ]; then
@@ -2216,6 +2234,10 @@ fail() {
 if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario" = sharing ]; then
     # shellcheck source=tests/integration/reciprocity-smoke.sh
     . "$source_directory/tests/integration/reciprocity-smoke.sh"
+fi
+if [ "$reciprocal_private_dns" = yes ]; then
+    # shellcheck source=tests/integration/reciprocity-private-dns.sh
+    . "$source_directory/tests/integration/reciprocity-private-dns.sh"
 fi
 if [ "$scenario" = local-link ]; then
     # shellcheck source=tests/integration/local-link-smoke.sh
@@ -2802,6 +2824,7 @@ elif [ "$scenario" = local-link ]; then
     [ "$wifi_link" != yes ] || wifi_link_prepare
 elif [ "$scenario" = reciprocity ]; then
     reciprocity_extend_network
+    [ "$reciprocal_private_dns" != yes ] || reciprocity_private_dns_start
 fi
 TOPOLOGY_READY=true
 
@@ -2865,7 +2888,7 @@ jq -S -c -n \
     >"$WORK/a01-expected-peers.json"
 
 set --
-if [ "$scenario" = dns-cache ]; then
+if [ "$scenario" = dns-cache ] || [ "$reciprocal_private_dns" = yes ]; then
     set -- --dns-cache
 elif [ "$scenario" = content-provider ] || [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$scenario" = content-message ] \
     || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
@@ -3050,13 +3073,27 @@ write_config() {
         printf 'routing:\n  client_minimum_upload_mbps: 8\n'
         printf '  client_minimum_download_mbps: 8\n'
         if [ "$scenario" = dns-cache ]; then
+            # C05 deliberately uses its owned synthetic DNSSEC TCP/53 upstream. Keep
+            # that existing backend explicit; native/private DNS has separate proofs.
             printf 'dns_cache:\n  enabled: %s\n  upstream: %s\n' "$dc_enabled" "$dc_upstream"
+            printf '  fallback:\n    mode: system\n'
+        elif [ "$reciprocal_private_dns" = yes ]; then
+            reciprocity_private_dns_config
+        else
+            # Non-DNS fixtures retain their scoped hosts/OS backend. This override is
+            # never emitted for the reciprocal private-DNS or installed-default proof.
+            printf 'dns_cache:\n  fallback:\n    mode: system\n'
         fi
         printf 'policy:\n  fail_closed: true\n'
         printf '  manifest_path: "%s/development-policy.manifest"\n' "$WORK"
         printf '  minimum_signatures: 3\n  reject_ech: true\n'
         printf '  reject_unverifiable_sni: true\nprivacy:\n'
-        if [ "$scenario" = dns-cache ]; then printf '  metrics_enabled: %s\n' "$dc_metrics"
+        if [ "$reciprocal_private_dns" = yes ]; then
+            case $node in
+                client|relay0|relay2|exit) printf '  metrics_enabled: true\n' ;;
+                *) printf '  metrics_enabled: false\n' ;;
+            esac
+        elif [ "$scenario" = dns-cache ]; then printf '  metrics_enabled: %s\n' "$dc_metrics"
         else printf '  metrics_enabled: false\n'; fi
         printf '  persist_domain_logs: false\n  persist_destination_ips: false\n'
     } >"$WORK/config-$node.yaml"

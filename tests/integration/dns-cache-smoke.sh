@@ -171,7 +171,7 @@ dns_cache_start_capture() {
     done
 }
 
-dns_cache_stop_server() {
+dns_cache_stop_upstream() {
     [ -n "$DNS_CACHE_SERVER_PID" ] || return 0
     kill -TERM "$DNS_CACHE_SERVER_PID" 2>/dev/null || true
     dc_stop_attempt=0
@@ -188,12 +188,98 @@ dns_cache_stop_server() {
     return "$dc_server_status"
 }
 
+dns_cache_stop_application() {
+    [ -n "${DNS_CACHE_APPLICATION_PID:-}" ] || return 0
+    kill -TERM "$DNS_CACHE_APPLICATION_PID" 2>/dev/null || true
+    dc_app_stop=0
+    while kill -0 "$DNS_CACHE_APPLICATION_PID" 2>/dev/null && [ "$dc_app_stop" -lt 50 ]; do
+        dc_app_stop=$((dc_app_stop + 1)); sleep 0.1
+    done
+    if kill -0 "$DNS_CACHE_APPLICATION_PID" 2>/dev/null; then
+        kill -KILL "$DNS_CACHE_APPLICATION_PID" 2>/dev/null || true
+    fi
+    wait "$DNS_CACHE_APPLICATION_PID" 2>/dev/null || true
+    DNS_CACHE_APPLICATION_PID=
+    DNS_CACHE_PAIR_DIRECTORY=
+}
+
+dns_cache_stop_server() {
+    # The outer fixture's existing cleanup hook owns both child processes even when a
+    # phase fails between the first and second query. Upstream-only stops leave the
+    # genuinely open application socket alive between the two separate captures.
+    dns_cache_stop_application
+    dns_cache_stop_upstream
+}
+
+dns_cache_start_pair() {
+    [ -z "${DNS_CACHE_APPLICATION_PID:-}" ] || return 1
+    DNS_CACHE_PAIR_DIRECTORY=$WORK/client-fixtures/dns-cache-$1
+    install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$DNS_CACHE_PAIR_DIRECTORY"
+    ip netns exec "$CLIENT" env VOLPAROSSA_DNS_FIXTURE_PARENT_NETNS="$DNS_CACHE_PARENT_NETNS" \
+        setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --clear-groups \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- \
+        python3 -B "$WORK/bin/dns-cache-smoke.py" query-pair iana.org "$DNS_CACHE_PAIR_DIRECTORY" \
+        >"$WORK/dns-cache-$1-application-pair.out" 2>"$WORK/dns-cache-$1-application-pair.err" &
+    DNS_CACHE_APPLICATION_PID=$!
+    wait_observer "$DNS_CACHE_APPLICATION_PID" "$DNS_CACHE_PAIR_DIRECTORY/ready.json"
+}
+
+dns_cache_pair_query() {
+    [ -n "${DNS_CACHE_APPLICATION_PID:-}" ] || return 1
+    [ ! -e "$DNS_CACHE_PAIR_DIRECTORY/$1.go" ] || return 1
+    : >"$DNS_CACHE_PAIR_DIRECTORY/$1.go"
+    # The application itself still has the original 30-second receive timeout. This
+    # supervisor allowance only observes its bounded completion, never retries a query.
+    dc_app_deadline=$(($(date +%s) + 35))
+    while [ ! -f "$DNS_CACHE_PAIR_DIRECTORY/$1.json" ]; do
+        kill -0 "$DNS_CACHE_APPLICATION_PID" 2>/dev/null || return 1
+        [ "$(date +%s)" -lt "$dc_app_deadline" ] || return 1
+        sleep 0.02
+    done
+    install -m 0600 "$DNS_CACHE_PAIR_DIRECTORY/$1.json" "$2"
+}
+
+dns_cache_disconnect_group() {
+    dc_group=$1; dc_last=$2
+    if [ -n "${DNS_CACHE_APPLICATION_PID:-}" ]; then
+        dc_app_done=0
+        while kill -0 "$DNS_CACHE_APPLICATION_PID" 2>/dev/null && [ "$dc_app_done" -lt 50 ]; do
+            dc_app_done=$((dc_app_done + 1)); sleep 0.1
+        done
+        kill -0 "$DNS_CACHE_APPLICATION_PID" 2>/dev/null && return 1
+        wait "$DNS_CACHE_APPLICATION_PID" || return 1
+        DNS_CACHE_APPLICATION_PID=
+        DNS_CACHE_PAIR_DIRECTORY=
+    fi
+    benchmark_disconnect_route "dns-cache-$dc_group-finished" || return 1
+    dns_cache_cli paths >"$WORK/dns-cache-$dc_group-retired-paths.txt" || return 1
+    [ ! -s "$WORK/dns-cache-$dc_group-retired-paths.txt" ] || return 1
+    jq -cn --slurpfile route "$WORK/dns-cache-$dc_last-selection.json" \
+        '{route_context_id:$route[0].route_context_id,disconnected:true,remaining_path_rows:0}' \
+        >"$WORK/dns-cache-$dc_group-retirement.json"
+}
+
 dns_cache_phase() {
     dc_phase=$1; dc_wanted=$2; dc_family=$3; dc_mode=$4
     dc_prefix=dns-cache-$dc_phase
     PHASE=$dc_prefix
-    [ "$dc_phase" = warm-a-a ] || dns_cache_select "$dc_prefix" "$dc_wanted" \
-        || fail DNS_CACHE_NORMAL_ROUTE_UNAVAILABLE
+    case $dc_family in
+        AAAA)
+            # Inspect the live original association; do not draw a new route or invent
+            # zero-byte prewarm status after the actual A response has arrived.
+            dc_previous=dns-cache-${dc_phase%aaaa}a
+            dns_cache_cli paths >"$WORK/$dc_prefix-paths.txt" || fail DNS_CACHE_REUSE_PATHS_UNAVAILABLE
+            python3 -B "$source_directory/tests/integration/dns-cache-smoke.py" reuse \
+                "$WORK/$dc_prefix-paths.txt" "$WORK/a01-expected-peers.json" "$dc_wanted" \
+                "$WORK/$dc_previous-selection.json" "$WORK/$dc_previous-application.json" \
+                "$WORK/$dc_prefix-selection.json" || fail DNS_CACHE_ASSOCIATION_CHANGED ;;
+        A)
+            [ "$dc_phase" = warm-a-a ] || dns_cache_select "$dc_prefix" "$dc_wanted" \
+                || fail DNS_CACHE_NORMAL_ROUTE_UNAVAILABLE
+            [ "$dc_phase" = unsigned-b ] || dns_cache_start_pair "${dc_phase%-a}" \
+                || fail DNS_CACHE_APPLICATION_PAIR_UNAVAILABLE ;;
+        *) fail DNS_CACHE_QUERY_FAMILY_INVALID ;;
+    esac
     # A fresh bounded listener per phase uses the SAME original signed recording and
     # decreases original TTLs. This does not recollect/refresh evidence or retry queries.
     ip netns exec "$DEST" env VOLPAROSSA_DNS_FIXTURE_PARENT_NETNS="$DNS_CACHE_PARENT_NETNS" \
@@ -207,15 +293,22 @@ dns_cache_phase() {
     dns_cache_metrics "$WORK/$dc_prefix-metrics-before.json" || fail DNS_CACHE_METRICS_UNAVAILABLE
     dc_query_name=iana.org
     [ "$dc_phase" != unsigned-b ] || dc_query_name=destination.volparossa.test
-    ip netns exec "$CLIENT" env VOLPAROSSA_DNS_FIXTURE_PARENT_NETNS="$DNS_CACHE_PARENT_NETNS" \
-        setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --clear-groups \
-        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- \
-        python3 -B "$WORK/bin/dns-cache-smoke.py" query "$dc_query_name" "$dc_family" \
-        >"$WORK/$dc_prefix-application.json" 2>"$WORK/$dc_prefix-application.err" \
-        || fail DNS_CACHE_PROTECTED_APPLICATION_FAILED
-    # Normal DNS ingress retires its exact route after each response; no reused context
-    # can let an old Exit answer the next explicitly inspected route.
-    wait_disconnected || fail DNS_CACHE_ROUTE_NOT_RETIRED
+    if [ "$dc_phase" = unsigned-b ]; then
+        ip netns exec "$CLIENT" env VOLPAROSSA_DNS_FIXTURE_PARENT_NETNS="$DNS_CACHE_PARENT_NETNS" \
+            setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- \
+            python3 -B "$WORK/bin/dns-cache-smoke.py" query "$dc_query_name" "$dc_family" \
+            >"$WORK/$dc_prefix-application.json" 2>"$WORK/$dc_prefix-application.err" \
+            || fail DNS_CACHE_PROTECTED_APPLICATION_FAILED
+    else
+        dns_cache_pair_query "$dc_family" "$WORK/$dc_prefix-application.json" \
+            || fail DNS_CACHE_PROTECTED_APPLICATION_FAILED
+    fi
+    dns_cache_cli paths >"$WORK/$dc_prefix-paths-after.txt" || fail DNS_CACHE_REUSE_PATHS_UNAVAILABLE
+    python3 -B "$source_directory/tests/integration/dns-cache-smoke.py" reuse \
+        "$WORK/$dc_prefix-paths-after.txt" "$WORK/a01-expected-peers.json" "$dc_wanted" \
+        "$WORK/$dc_prefix-selection.json" "$WORK/$dc_prefix-application.json" \
+        "$WORK/$dc_prefix-selection-after.json" || fail DNS_CACHE_RECEIVED_BYTES_UNCONFIRMED
     dc_metric_attempt=0; dc_metric_ready=no
     while [ "$dc_metric_attempt" -lt 100 ]; do
         dns_cache_metrics "$WORK/$dc_prefix-metrics-after.json" || fail DNS_CACHE_METRICS_UNAVAILABLE
@@ -230,7 +323,7 @@ dns_cache_phase() {
     [ "$dc_metric_ready" = yes ] || fail DNS_CACHE_EXPECTED_SOURCE_NOT_OBSERVED
     kill -0 "$DNS_CACHE_SERVER_PID" 2>/dev/null || fail DNS_CACHE_UPSTREAM_ENDED_EARLY
     stop_privacy_observers || fail DNS_CACHE_CAPTURE_INCOMPLETE
-    dns_cache_stop_server || fail DNS_CACHE_UPSTREAM_CLEANUP_FAILED
+    dns_cache_stop_upstream || fail DNS_CACHE_UPSTREAM_CLEANUP_FAILED
 }
 
 dns_cache_run() {
@@ -255,6 +348,7 @@ dns_cache_run() {
       other_nodes_cache_disabled:true,production_root_anchors_unchanged:true}' >"$WORK/dns-cache-config.json"
     dns_cache_phase warm-a-a exit A upstream_validated
     dns_cache_phase warm-a-aaaa exit AAAA upstream_validated
+    dns_cache_disconnect_group warm-a warm-a-aaaa || fail DNS_CACHE_ROUTE_NOT_RETIRED
     # Both caches begin cold and must not advertise an empty service. Wait for the actual
     # successful availability publication after A's genuine validation, without refreshing TTLs.
     dc_available=no; dc_availability_deadline=$(($(date +%s) + 30))
@@ -270,7 +364,9 @@ dns_cache_run() {
     [ "$dc_available" = yes ] || fail DNS_CACHE_PROVIDER_PUBLICATION_UNAVAILABLE
     dns_cache_phase peer-b-a exit2 A peer_validated
     dns_cache_phase peer-b-aaaa exit2 AAAA peer_validated
+    dns_cache_disconnect_group peer-b peer-b-aaaa || fail DNS_CACHE_ROUTE_NOT_RETIRED
     dns_cache_phase unsigned-b exit2 A trusted_fallback
+    dns_cache_disconnect_group unsigned-b unsigned-b || fail DNS_CACHE_ROUTE_NOT_RETIRED
     PHASE=dns-cache-peer-offline
     systemctl stop volparossa-alpha-agent@exit.service || fail DNS_CACHE_PEER_STOP_FAILED
     dc_peer_active=$(systemctl show --property=ActiveState --value volparossa-alpha-agent@exit.service)
@@ -280,6 +376,7 @@ dns_cache_run() {
     jq -cn '{node:"exit",agent_active:false,main_pid:0}' >"$WORK/dns-cache-peer-stopped.json"
     dns_cache_phase local-b-a exit2 A local_validated
     dns_cache_phase local-b-aaaa exit2 AAAA local_validated
+    dns_cache_disconnect_group local-b local-b-aaaa || fail DNS_CACHE_ROUTE_NOT_RETIRED
     python3 -B "$source_directory/tests/integration/dns-cache-smoke.py" evidence \
         "$WORK" "$WORK/dns-cache-evidence.json" || fail DNS_CACHE_EVIDENCE_INVALID
     PHASE=dns-cache-complete

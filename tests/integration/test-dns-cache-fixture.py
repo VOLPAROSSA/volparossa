@@ -20,7 +20,7 @@ FIXTURE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(FIXTURE)
 
 
-def synthetic_response(question, now_ms, *, signed=True, owner=None):
+def synthetic_response(question, now_ms, *, signed=True, owner=None, ttl=300):
     """Only wire shape is plausible; these placeholder signature bytes cannot verify."""
     name, kind = question
     owner = name if owner is None else owner
@@ -34,7 +34,7 @@ def synthetic_response(question, now_ms, *, signed=True, owner=None):
         data = struct.pack("!HBB", 20326, 8, 2) + bytes(32)
 
     def record(kind, data):
-        return FIXTURE.name_wire(owner) + struct.pack("!HHIH", kind, 1, 300, len(data)) + data
+        return FIXTURE.name_wire(owner) + struct.pack("!HHIH", kind, 1, ttl, len(data)) + data
 
     records = record(kind, data)
     if signed:
@@ -72,6 +72,52 @@ class FixtureTests(unittest.TestCase):
             self.assertEqual(FIXTURE.failure_summary(error),
                              "DNS fixture failed: " + type(error).__name__)
         self.assertFalse((self.parent / "failed").exists())
+
+    def test_collection_refreshes_expiring_public_records_without_renewing_old_bytes(self):
+        now = [self.now / 1000]
+        calls = []
+        question = FIXTURE.QUESTIONS[0]
+        def fetch(current, remaining):
+            self.assertGreater(remaining, 0)
+            calls.append(current)
+            return synthetic_response(current, int(now[0] * 1000), ttl=5 if len(calls) == 1 else 300)
+        def advance(seconds):
+            self.assertGreaterEqual(seconds, 0)
+            self.assertLessEqual(seconds, 1)
+            now[0] += seconds
+        root = self.parent / "fresh"
+        with mock.patch.object(FIXTURE.time, "time", side_effect=lambda: now[0]), \
+                mock.patch.object(FIXTURE.time, "monotonic", side_effect=lambda: now[0]), \
+                mock.patch.object(FIXTURE.time, "sleep", side_effect=advance), \
+                mock.patch.object(FIXTURE, "fetch_wire", side_effect=fetch), \
+                contextlib.redirect_stdout(io.StringIO()):
+            FIXTURE.collect(root)
+        self.assertEqual(calls, list(FIXTURE.QUESTIONS) + [question])
+        self.assertGreaterEqual(now[0] * 1000, self.now + 5000)
+        recording = FIXTURE.read_json(root / "recording.json")
+        fresh = recording["records"][0]
+        self.assertGreaterEqual(fresh["received_at_unix_ms"], self.now + 5000)
+        for prior in recording["records"][1:]:
+            self.assertEqual(prior["received_at_unix_ms"], self.now)
+            self.assertEqual(prior["minimum_ttl_seconds"], 300)
+        self.assertEqual(recording["expires_at_unix_ms"], self.now + 300_000)
+        FIXTURE.load_recording(root, int(now[0] * 1000))
+
+    def test_collection_refresh_has_fixed_round_budget_and_never_accepts_short_ttl(self):
+        now = [self.now / 1000]
+        def advance(seconds):
+            now[0] += seconds
+        root = self.parent / "short"
+        with mock.patch.object(FIXTURE.time, "time", side_effect=lambda: now[0]), \
+                mock.patch.object(FIXTURE.time, "monotonic", side_effect=lambda: now[0]), \
+                mock.patch.object(FIXTURE.time, "sleep", side_effect=advance), \
+                mock.patch.object(FIXTURE, "fetch_wire", side_effect=lambda q, _: \
+                    synthetic_response(q, int(now[0] * 1000), ttl=50)) as fetch:
+            with self.assertRaisesRegex(FIXTURE.FixtureError, "insufficient original TTL for fixture"):
+                FIXTURE.collect(root)
+        self.assertEqual(fetch.call_count, len(FIXTURE.QUESTIONS) * FIXTURE.MAX_COLLECTION_ROUNDS)
+        self.assertLess(now[0] - self.now / 1000, FIXTURE.MAX_COLLECTION_SECONDS)
+        self.assertFalse(root.exists())
 
     def test_shape_ad_alone_substitution_and_real_time_are_not_proof(self):
         for question in FIXTURE.QUESTIONS:

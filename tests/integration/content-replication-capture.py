@@ -470,6 +470,11 @@ def decode_frame(frame):
     return version, protocol, source, sport, destination, dport, payload
 
 
+def decode_frame_on_interface(frame, _iface):
+    """Fixture adapters may require a stricter, exact interface-bound L2 profile."""
+    return decode_frame(frame)
+
+
 def udp_diagnostic_label(source, sport, destination, dport, payload):
     """One fixed explanatory class; never a packet admission or an authority decision."""
     src, dst = ipaddress.ip_address(source), ipaddress.ip_address(destination)
@@ -675,7 +680,7 @@ def capture(layout, output, ready, role, interfaces, max_seconds=MAX_SECONDS):
             return
         packet = None
         try:
-            packet = decode_frame(frame)
+            packet = decode_frame_on_interface(frame, sockets[observer])
             if packet is None:
                 updates = {"neighbor_packets": 1}
             else:

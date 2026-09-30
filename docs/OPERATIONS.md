@@ -270,8 +270,10 @@ volparossa paths
 ```
 
 This selects a real Client--Relay--Exit route; `Reachable` with zero bytes/RTT is readiness,
-not a successful DNS response. Each DNS association is retired after its response. A subsequent
-query may select a new route. `disconnect`, shutdown and policy/client disablement retire both
+not a successful DNS response. UDP questions from the same application socket for the same
+canonical name may reuse one association sequentially within its original signed lifetime;
+TCP DNS remains one-shot. Different owners/names select a separate association. Idle expiry,
+`disconnect`, shutdown and policy/client disablement retire both
 client-route owners; retiring one DNS context does not remove the main route's path projection.
 
 The agent can reuse independently validated positive DNSSEC A/AAAA answers at the Exit. It keeps
@@ -284,14 +286,29 @@ The default configuration is:
 dns_cache:
   enabled: true
   upstream: null
+  fallback:
+    mode: unbound_private
 ```
 
-This enables no network role and selects no public DNS provider. To collect shareable proofs,
-set `upstream` to an existing recursive resolver that you already trust and that accepts DNS over
-TCP on port 53. For example, `127.0.0.53:53` is appropriate only if such a listener actually exists
-in the agent's network namespace; VOLPAROSSA does not install or reconfigure it. Restart the agent
-after an explicit configuration change. A null endpoint retains peer-proof reuse and the existing
-OS-resolution fallback; `enabled: false` retains the old resolver path without cache exchange.
+This enables no network role and selects no public DNS provider. On an eligible cache miss,
+the Exit uses the packaged private libunbound worker for bounded recursion and validation.
+Independently validated evidence may be retained and shared; a native validation flag alone
+is not peer-proof authority. `enabled: false` disables retention and exchange, not this fallback.
+An enabled Exit needs the exact-version worker companion and distribution root-anchor files;
+an all-off installation starts no worker. See [private Unbound](UNBOUND_FALLBACK.md) for build,
+package and source-exact proof status. No host resolver configuration changes are made.
+
+The OS resolver is an explicit opt-out: `fallback: { mode: system }`. Only in that mode may
+`upstream` name an existing trusted recursive TCP/53 endpoint for proof collection; a custom
+upstream without that explicit mode is rejected with a migration hint. VOLPAROSSA does not
+install or reconfigure such a listener. Restart the agent after explicit configuration changes.
+
+An explicit [Exit-side Unbound fallback](UNBOUND_FALLBACK.md) can instead be selected with
+`fallback: { mode: unbound, endpoint: '127.0.0.1:5335' }` and `upstream: null`. In that mode
+resolver errors never fall through to OS resolution. The endpoint must already be provisioned
+and protected: loopback alone is not sufficient isolation, and a normal Unbound service account
+does not automatically work with simultaneous Client+Exit ingress. This optional endpoint mode
+does not install a resolver service; see the linked readiness limits before opting in.
 
 Peer signatures authenticate the transport peer, not the DNS answer. Every usable peer proof must
 validate against the built-in DNSSEC root anchors. Unsigned, missing or unsupported evidence falls
@@ -300,7 +317,8 @@ upstream lookup on another peer's cache miss. Names are not published in the DHT
 the authenticated cache peer serving a question necessarily sees that question. Involved route
 relays are excluded from those requests. CNAME and negative-answer sharing remain outside this
 initial positive-answer implementation. See the source-bound
-[implementation status](IMPLEMENTATION_STATUS.md); the complete two-Exit network proof is pending.
+[implementation status](IMPLEMENTATION_STATUS.md) for the passed two-Exit cache proof and the
+separate remaining packaged-default/reciprocal-node acceptance.
 
 ## Offline content commands
 
