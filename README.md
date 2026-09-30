@@ -247,8 +247,10 @@ failover**: both copies are charged, a survivor restores the complete archive af
 original file is removed, and repeated restores leave its copy intact. Owner-directed
 replacement is the next candidate: build and fully read back C before releasing A from an
 A/B replica set. Least-authority application enrollment, automatic placement/repair,
-adaptive contribution and safe capacity drain, independent-device availability and native
-Signal backup restore remain open. This is not yet a completed cloud-storage service.
+adaptive contribution and safe capacity drain, and independent-device availability remain
+open. A separate **native Signal backup trial now passes**: encrypted export, removal of the
+original archive, real-core retrieval and native import with message/attachment checks.
+Restoring leaves the retained copies intact. This is not yet a completed cloud-storage service.
 
 [Private storage scope and commands →](docs/PRIVATE_STORAGE.md)
 

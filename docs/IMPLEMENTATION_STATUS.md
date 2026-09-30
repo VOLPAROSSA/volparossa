@@ -411,8 +411,8 @@ sandbox claim is made. Only bounded structural receipts and drained packet count
 leave the guest; private profiles, recovery keys, plaintext snapshots and logs are removed.
 The upstream local mock server still provides registration/relink facilities. This is
 neither server-free Signal messaging nor independent-hardware/contribution-accounting proof.
-**The runtime milestone remains unchecked until its exact-source KVM run passes**; pure
-receipt tests and successful preparatory compilation alone do not prove native restore.
+The exact-source native round trip now **passes**, as recorded below. This proves the
+bounded encrypted-backup integration, not completed messaging, calling or cloud storage.
 
 The first native trial on `6dd21b18`,
 [run `36722947365`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36722947365),
@@ -473,8 +473,27 @@ directory identity, owner and mode 0700. The existing cleanup still removes the 
 private profile/temp tree. No Signal source, launch security flags or host paths change.
 The 17 original artifacts remain retained (ZIP SHA-256
 `205ca2c6b3e14959428e1fe7766b716c159017c36e34b79326c23b560e5ef2ce`);
-process joining, private cleanup and unchanged host-state checks passed. Native backup
-export/import remains **unproved** until a fresh exact-source trial passes.
+process joining, private cleanup and unchanged host-state checks passed. That failed run
+does not prove native backup export/import.
+
+The corrected native trial on `90dbea789b57efcbc6cab941e54dfb6a5240511e`,
+[run `36742201942`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36742201942),
+**passes** the exact upstream encrypted-export/import test: one test, one pass, zero failed
+or pending tests. Signal creates the encrypted archive, the original ciphertext is removed,
+and a real protected-core restore reaches Signal's native importer. Upstream assertions
+verify messages, attachment plaintext hashes and screenshots. The archive is 198,352 bytes;
+both retained copies are charged (396,704 payload bytes) and survive import until explicit
+owner deletion, after which both stores report zero leases, reservations and committed bytes.
+Twelve Exit MPTCP/TLS exchanges complete. Both selected WireGuard relay paths carry data;
+the drained captures report no dropped packets, direct Client-to-Exit traffic or unexpected
+outer traffic. The app's non-loopback guard blocks 208 packets. Private profiles, recovery
+keys and grants are removed, the native process group joins, and no owned topology objects
+remain. Original guest-host snapshots are byte-identical (SHA-256
+`1c00c8ef8efc642f6f60728d3542700188ca7d8579e17d05364592eee4c1e7e5`). All 23 original artifacts
+remain retained, ZIP SHA-256 `8eb0cfa37d26f9864e28ca13c570c7c251736d9e196c97e0c1e000ecfc9df4f2`.
+The source-exact report checker also passes locally. Registration/relink still uses the
+upstream local mock server; this is not server-free Signal messaging, calling, independent
+hardware availability, automatic storage repair, reciprocal accounting or a full-alpha PASS.
 
 ## Earlier milestone evidence
 
