@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "repository": "https://github.com/VOLPAROSSA/volparossa-code",
+  "revision": "d5802a024d665a47b42abdbe809bea2b9ee86bd8",
+  "files": {
+    "src/private-compute.cjs": {"bytes": 15290, "sha256": "75261e5842bba0003a55efc7ce262816cc4171fdb589611ce989428bf5682672"},
+    "LICENSE": {"bytes": 35149, "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"}
+  },
+  "runtime": {
+    "version": "24.19.0",
+    "url": "https://nodejs.org/dist/v24.19.0/node-v24.19.0-linux-x64.tar.xz",
+    "bytes": 31633904,
+    "sha256": "14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647",
+    "files": {
+      "bin/node": {"bytes": 125989464, "sha256": "bc17c508ffeed0ec622934f9b7fa72f8e78da65350e63c3eceb56fa688aa5e12"},
+      "LICENSE": {"bytes": 157606, "sha256": "148eacf7863ef4329224a29398623077200a27194aa075569faf4a0a85566ca5"}
+    }
+  }
+}
