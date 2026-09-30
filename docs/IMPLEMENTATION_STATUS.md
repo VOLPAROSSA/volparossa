@@ -369,6 +369,16 @@ tampering and coordinated mutation of unsigned nested copy identities are reject
 protected-overlay fragment-placement run is still pending; these tests do not establish
 independent failure domains, automatic repair/handoff, measured overhead or reciprocal credit.
 
+The separate **`private-storage-fragments` protected-overlay smoke candidate** now wires
+the real fragment CLI into the disposable three-provider topology. Its four distinct
+fragments have two copies each; exact provider grants and stopped-service usage snapshots
+must show subset-only custody. After removing the owner source and stopping provider A,
+the fixture requires two full B/C reconstructions, unchanged physical charges, original
+store reopen and explicit deletion of all eight copies. Each transfer phase requires the
+same two-path protected MPTCP route, drained privacy captures and original host cleanup.
+Eight focused Python receipt/export/wiring checks pass. **The privileged overlay run has
+not been executed yet**; this is not a fragment network acceptance PASS or Signal backup proof.
+
 The next owner-coordinated candidate adds `storage replicas replace`: a durable,
 resumable A/B-to-B/C handoff through the same protected operations. It retrieves and hashes
 the surviving copy, retains the exact replacement identity across retries, and fully reads

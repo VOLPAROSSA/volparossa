@@ -44,6 +44,7 @@ for script in "$GUEST" "$HOST"; do
     "$script" --preview --scenario private-storage-peer | grep -Fi 'private-storage-peer' >/dev/null
     "$script" --preview --scenario private-storage-replicas | grep -Fi 'private-storage-replicas' >/dev/null
     "$script" --preview --scenario private-storage-handoff | grep -Fi 'private-storage-handoff' >/dev/null
+    "$script" --preview --scenario private-storage-fragments | grep -Fi 'private-storage-fragments' >/dev/null
     "$script" --preview --scenario content-replication | grep -Fi 'content-replication' >/dev/null
     "$script" --preview --scenario dns-cache | grep -Fi 'DNS-cache' >/dev/null
     "$script" --preview --scenario agent-artifact-quarantine | grep -Fi 'quarantine' >/dev/null
@@ -231,6 +232,8 @@ grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'private-storage-hando
 grep -F 'python3 -B tests/integration/private-storage-handoff-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/test-private-storage-handoff-smoke.py' "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/test-private-storage-handoff-wiring.py' "$WORKFLOW" >/dev/null
+grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'private-storage-fragments'" "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/private-storage-fragments-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
 grep -F 'agent-public-collection) scenario=agent-jobs; agent_public_collection=yes; wifi_link=no; uplink_link=no ;;' "$GUEST" >/dev/null
 grep -F '. "$source_directory/tests/integration/agent-public-collection-smoke.sh"' "$GUEST" >/dev/null
 grep -F 'agent-public-collection-smoke.py agent-public-document-smoke.py agent-document-synthesis.py' "$GUEST" >/dev/null

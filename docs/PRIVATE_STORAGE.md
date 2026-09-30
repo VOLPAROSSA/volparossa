@@ -502,6 +502,31 @@ records is rejected. This is **local transfer/lifecycle evidence**, not a new pr
 or independent-device proof. Automatic repair, fragment handoff/drain, measured metadata
 overhead and network-wide reciprocal contribution credit remain unfinished.
 
+### Disposable protected-fragment proof candidate
+
+The `private-storage-fragments` scenario is separate from the older whole-archive
+`private-storage-replicas` and replacement `private-storage-handoff` proofs. Preview it with:
+
+```sh
+sh tests/integration/run-alpha-topology-vm.sh --preview --scenario private-storage-fragments
+```
+
+The executable fixture places four distinct ranges (three 256-KiB fragments and 73 bytes)
+with two copies each on three explicitly pinned providers. Exact per-provider grants and
+usage snapshots require 524,361 / 524,361 / 524,288 retained bytes and 3 / 3 / 2 leases,
+respectively, not a whole archive on each provider. With the original source removed and
+the first provider stopped, two complete restores must combine fragments from the other
+two stores. Unavailable copies remain charged; repeated reads must leave all three stores'
+usage unchanged. Reopening the same stores precedes deletion of all eight copies and
+confirmation of zero retained leases/payload. All store inspection happens after stopping
+the corresponding service, never by bypassing its live lock.
+
+The fixture retains two-path MPTCP, exactly one relay on each path, TLS, control/data-plane
+privacy captures and disposable-host cleanup gates. Only a closed list of sanitized reports
+is exported, never private owner keys, grants, journals or raw ciphertext. Its eight focused
+receipt/export/wiring tests pass; **a real protected-overlay execution is still pending**.
+The public synthetic opaque fixture proves no archive encryption or native Signal integration.
+
 ## Next end-to-end proof
 
 ### Owner-coordinated replacement candidate
