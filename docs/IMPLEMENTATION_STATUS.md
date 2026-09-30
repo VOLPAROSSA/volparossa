@@ -6,6 +6,17 @@ Last updated: 2026-09-30
 
 ## Current integration and active work
 
+**Private storage is now documented as a separate fourth layer**, with actual replicated-byte
+reciprocity, adaptive contribution targets and safe pending drain. The requested storage
+immune system must address prohibited-content admission and abuse without disclosing private
+backups. This is a requirement clarification, not new runtime enforcement: signed grants,
+quotas and ciphertext hashes do not classify encrypted files, and uploader self-attestation
+does not defeat malicious clients. The content-admission/review mechanism remains open; see
+[storage privacy and abuse boundaries](PRIVATE_STORAGE.md#storage-immune-system-and-private-content-limits).
+Different-chunk placement is implemented in the signed fragment CLI with local-service
+evidence below; its real overlay/provider-loss trial remains pending. The earlier
+replica/handoff proofs retain a complete encrypted archive at each selected provider.
+
 The [mailbox import-confirmation candidate](MAILBOX_IMPORT_CONFIRMATION.md) adds a
 reusable split handoff: `content mailbox fetch` retains provider custody while writing
 bounded private payload/token/owner-signed pending receipts; `confirm-import` validates
