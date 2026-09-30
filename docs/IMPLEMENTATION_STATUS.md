@@ -6,6 +6,14 @@ Last updated: 2026-09-30
 
 ## Current integration and active work
 
+**Private storage is now documented as a separate fourth layer**, with actual replicated-byte
+reciprocity, adaptive contribution targets and safe pending drain. The requested storage
+immune system must address prohibited-content admission and abuse without disclosing private
+backups. This is a requirement clarification, not new runtime enforcement: signed grants,
+quotas and ciphertext hashes do not classify encrypted files, and uploader self-attestation
+does not defeat malicious clients. The content-admission/review mechanism remains open; see
+[storage privacy and abuse boundaries](PRIVATE_STORAGE.md#storage-immune-system-and-private-content-limits).
+
 Automatic authority rounds and the four-job assessment cycle are integrated by
 [PR #163](https://github.com/VOLPAROSSA/volparossa/pull/163), normal merge `f4e6aa79`,
 after Quality and all CodeQL analyses passed on `c4060377`. This also prevents local

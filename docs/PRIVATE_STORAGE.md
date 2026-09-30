@@ -24,7 +24,10 @@ The user-selected rule is:
 `required usable local contribution >= actual remote storage used, counting every copy`
 
 One GB retained at one remote provider requires at least one GB contributed locally.
-Two full copies of that GB require about two GB plus counted overhead. Replica repairs
+Two full copies of that GB require about two GB plus counted overhead: the first one-GB
+copy and one additional one-GB recovery copy, not three GB. The matching local contribution
+is usable space for other participants, not the owner's own retained original archive.
+Keeping that original consumes separate local disk space. Replica repairs
 and in-flight reservations must be accounted for without charging a retry twice or
 pretending that a promised copy already exists. Logical archive length, reserved bytes,
 retained ciphertext bytes, replication and any charged metadata must remain distinct.
@@ -33,6 +36,52 @@ A configured disk allowance is not proof that a participant provides reachable s
 that replicas exist, or that the same allowance has not been promised to several peers.
 Receipt-backed distributed accounting and usable-capacity checks remain to be implemented.
 No payments, tokens or blockchain are introduced.
+
+## Storage immune system and private-content limits
+
+The storage layer is subject to the same principle-led content policy as the network,
+cache and compute layers. Privacy is not permission to store prohibited material,
+including child sexual abuse material (CSAM). Preventing that use and protecting providers
+from abuse are requirements; **the current storage commands do not implement a private
+content-classification or distributed abuse-review mechanism**.
+
+The intended design separates three responsibilities:
+
+1. **Source-side admission:** an authorized application can check eligible input before it
+   encrypts it, without sharing private files with compute peers. The core currently accepts
+   already-encrypted archives and cannot perform that inspection. A hostile uploader can
+   modify or bypass local checks. An application assertion, signature or `--already-encrypted`
+   flag must never be described as proof that the content was checked or is permitted.
+2. **Custody and resource admission:** authenticate owners and operations, enforce grants,
+   byte/lease limits and retention, and reconcile real usage and usable contribution.
+   Existing signed grants and local quotas address bounded custody; they are not a content
+   verdict or completed distributed anti-abuse/accounting system.
+3. **Scoped abuse response:** privacy-minimizing reports, evidence provenance, mutual review,
+   conflicting-evidence handling, and reviewable restrictions, quarantine or removal.
+   Decisions must identify an authorized subject and scope, bind to the correct object/lease
+   and revision, and resist replay and fabricated reports. An accusation alone must not
+   delete a backup. Unknown ciphertext is not by itself evidence of prohibited content, and
+   the public-cache policy gate is not authority to classify or delete private backups.
+   A quarantined object must not be automatically redistributed by repair.
+   Reversals must be supported where possible; actual deletion is not reversible and must
+   not be presented as such. None of this establishes erasure by a malicious remote holder.
+
+Review must not publish plaintext, private filenames, plaintext content fingerprints,
+recovery keys or browsing associations. It must not redistribute suspected illegal files
+as peer evidence or training data. Use synthetic, lawful fixtures for development. Content
+integrity, origin authentication and proof of retained bytes are distinct from a judgment
+about what the bytes mean. Ciphertext hashes cannot classify the plaintext; ordinary remote
+AI inference would disclose that plaintext to its worker and is not an acceptable shortcut.
+
+The unresolved requirement is an admission and response design that meaningfully resists
+malicious uploaders while preserving the agreed privacy boundary. Opaque ciphertext plus
+client self-attestation cannot establish the absence of illegal content. Do not claim that
+the immune system is complete, all stored content is lawful, or encrypted custody removes
+legal risk. No decryption escrow, blanket client-file scanning, or specific confidential-
+hardware scheme is selected or authorized by this design note.
+
+See [principle-led governance](DECENTRALIZED_AGENTS.md#principles-guide-rules-not-the-other-way-around)
+and the [four-layer overview](../README.md#storage-layer-private-cloud-storage).
 
 ### Adaptive contribution and safe handoff
 
