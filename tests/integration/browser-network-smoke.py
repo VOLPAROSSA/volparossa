@@ -37,10 +37,20 @@ EXPORT_NAMES = (
 )
 DRIVER_PHASES = frozenset((
     "wrapper-start", "runtime-validation", "isolated-home", "wrapper-launch", "child-validation",
-    "grant-validation", "profile-init", "browser-start", "marionette-connect", "marionette-session",
+    "grant-validation", "socket-path", "socket-owner", "socket-access", "profile-init", "browser-start", "marionette-connect", "marionette-session",
     "script-start", "import", "attach-a", "attach-b", "wrong-scope", "request-a", "request-b",
     "detach-a", "finish-b", "result-validation", "browser-stop", "complete",
 ))
+ATTACH_STAGES = frozenset(("process-gate", "unix-transport", "constructor", "transport-timeout", "input-stream",
+    "output-stream", "input-pump", "input-listen", "proxy-filter", "bootstrap-write", "bootstrap-wait",
+    "bootstrap-reply", "bootstrap-read", "ready-validate", "ready-proxy", "bootstrap-eof", "bootstrap-timeout"))
+
+
+def validate_attachment(value):
+    require(value is None or type(value) is dict and set(value) == {"stage", "nsresult"}
+        and value["stage"] in ATTACH_STAGES and (value["nsresult"] is None
+            or type(value["nsresult"]) is int and 0 <= value["nsresult"] <= 0xffffffff),
+        "attachment diagnostic is not closed metadata")
 DRIVER_ERRORS = frozenset((
     "OS_ERROR", "CHECK_FAILED", "SUBPROCESS_FAILED", "RUNTIME_FAILED", "SCRIPT_FAILED",
     "invalid_contract", "invalid_scope", "scope_unavailable", "invalid_channel",
@@ -94,13 +104,15 @@ def driver_diagnostic(status, stderr, home=None, work=None):
     if status.is_file() and not status.is_symlink():
         require(status.stat().st_size <= 2048, "driver status exceeds bound")
         value = read(status)
-        require(set(value) == {"version", "kind", "phase", "error_code", "errno", "child_exit_code"}
+        legacy = {"version", "kind", "phase", "error_code", "errno", "child_exit_code"}
+        require(set(value) in (legacy, legacy | {"attachment"})
             and value["version"] == 1 and value["kind"] == "real-gecko-core-gateway-driver-status"
             and value["phase"] in DRIVER_PHASES
             and (value["error_code"] is None or value["error_code"] in DRIVER_ERRORS)
             and (value["errno"] is None or type(value["errno"]) is int and 0 < value["errno"] < 4096)
             and (value["child_exit_code"] is None or type(value["child_exit_code"]) is int
                  and -255 <= value["child_exit_code"] <= 255), "driver status is not closed metadata")
+        validate_attachment(value.get("attachment"))
         result.update(status_available=True, status=value)
     if stderr.is_file() and not stderr.is_symlink():
         with stderr.open("rb") as source:
@@ -409,6 +421,9 @@ def validate_browser(evidence):
         and browser["expected_sha256"] == body_hash(evidence["origin"]["run_id"])
         and browser["full_browser_killswitch"] is False and browser["firefox157_build_proven"] is False
         and browser["cleanup"] == dict(browser_exited=True, profile_removed=True), "actual pinned browser proof missing")
+    require(browser["socket_access"] == dict(path_type_verified=True, socket_parent_owner_group_match=True,
+        peer_uid_matches_socket=True, unix_connect_verified=True, capability_sent=False),
+        "in-sandbox non-consuming application socket proof missing")
     result = browser["result"]
     require(set(result) == {"independent_attachments", "wrong_scope_blocked", "a", "b", "a_detached", "b_survives_a_detach"}
         and all(result[key] is True for key in ("independent_attachments", "wrong_scope_blocked", "a_detached", "b_survives_a_detach"))

@@ -173,6 +173,23 @@ runtime and grant permissions, application UID, network namespace and capability
 are unchanged. Nine focused browser tests pass. This is a sandbox-launch candidate;
 the next actual combined run must still prove Gecko HTTPS and protected MPTCP payloads.
 
+The [seventh combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36732926403)
+on `cd3e630d243739e1d3188074907af0e8d5e03f81` gets past sandbox setup and launches actual
+ESR 140.16, but **fails at `attach-a` / `unavailable` before Ready**. It observes no
+WireGuard/provider payload. All 18 originals remain retained (ZIP SHA-256
+`b468959bab11bdedb2020696fa6f1ffb6a74beec21b609045339d13d18d0b2d0`). Browser/profile and
+private-file cleanup pass, topology cleanup leaves zero objects, and both host snapshots
+hash to `f4e38c146026adcbb328fd871ef32615655af76a690b1460888f549b3927b4f5`.
+
+The next diagnostic distinguishes fixed socket/stream/bootstrap stages, peer EOF and
+timeout with an optional numeric `nsresult`; it exports no exception text or credentials.
+A non-consuming in-sandbox preflight verifies the actual Unix socket/parent ownership,
+mode, access and peer UID without sending any bytes or claiming a capability. Eleven
+browser checks, twelve core evidence checks and a fresh real-ESR/synthetic-gateway smoke
+pass, including all three TLS responses and cleanup. The exact core bootstrap cause
+and actual browser-to-MPTCP payload remain unproven; no production routing or permission
+change is inferred from the previous generic error.
+
 Ordinary browsing integration, opportunistic fallback with the user-requested default-off
 browser kill switch, HTTP/3, WebRTC, background traffic and crash-persistent browser-wide
 enforcement remain unfinished. Existing shared-core security defaults are unchanged. Shared

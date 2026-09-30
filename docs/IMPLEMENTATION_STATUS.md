@@ -84,6 +84,16 @@ runtime beneath an anonymous, read-only provisioning-parent shell inside its mou
 namespace. It does not change parent permissions, grants, UID, capabilities or network
 access. Nine browser driver checks pass; the corrected combined live proof remains pending.
 
+The [seventh run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36732926403)
+on exact `cd3e630d243739e1d3188074907af0e8d5e03f81` launches actual Gecko and reaches
+`attach-a`, then fails with `unavailable` before Ready or overlay payload. All 18 originals
+are retained; browser/profile/private/topology cleanup and unchanged host state pass.
+Closed attachment substages and numeric `nsresult` now distinguish stream setup/write,
+EOF and timeout, with a same-sandbox Unix socket access probe that sends no capability.
+Eleven browser tests, twelve fixture tests and a real-ESR/synthetic-gateway smoke pass.
+This is improved diagnosis and preserved local functionality, not a successful real-core
+browser route; no speculative permission relaxation or core routing change is included.
+
 [Signal integration](https://github.com/VOLPAROSSA/volparossa-chat/pull/1) now has a pinned
 Desktop/libsignal source baseline and explicit device/session/backup contracts, not a
 working modified client. Ordinary Signal compatibility, authenticated direct ciphertext

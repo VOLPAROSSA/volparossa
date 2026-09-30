@@ -64,6 +64,8 @@ def fixture(root):
         script_sha256=provision["files"]["scripts/smoke_network_core.py"]["sha256"], expected_bytes=size,
         expected_sha256=digest, overlay_kernel_proof_external=True, full_browser_killswitch=False,
         firefox157_build_proven=False, namespace="net:[99]", cleanup=dict(browser_exited=True, profile_removed=True),
+        socket_access=dict(path_type_verified=True, socket_parent_owner_group_match=True,
+            peer_uid_matches_socket=True, unix_connect_verified=True, capability_sent=False),
         result=dict(independent_attachments=True, wrong_scope_blocked=True, a=dict(bytes=size, sha256_verified=True),
             b=dict(bytes=size, sha256_verified=True), a_detached=True, b_survives_a_detach=True))
     origin = dict(version=1, run_id=run_id, complete=True, requests=[dict(phase=phase, bytes=size, sha256=digest,
@@ -87,6 +89,24 @@ def fixture(root):
 
 
 class BrowserNetworkEvidence(unittest.TestCase):
+    def test_attachment_substage_and_nsresult_are_closed_original_facts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            status = root / "status.json"
+            value = dict(version=1, kind="real-gecko-core-gateway-driver-status", phase="attach-a",
+                error_code="unavailable", errno=None, child_exit_code=1,
+                attachment=dict(stage="bootstrap-eof", nsresult=0x804B000D))
+            CHECK["write"](status, value)
+            self.assertEqual(CHECK["driver_diagnostic"](status, root / "absent")["status"], value)
+            for detail in (dict(stage="secret path", nsresult=None),
+                           dict(stage="bootstrap-timeout", nsresult=True),
+                           dict(stage="bootstrap-write", nsresult=1 << 32),
+                           dict(stage="bootstrap-write", nsresult=1, capability="secret")):
+                value["attachment"] = detail
+                CHECK["write"](status, value)
+                with self.assertRaises(ValueError):
+                    CHECK["driver_diagnostic"](status, root / "absent")
+
     def test_numeric_nft_guard_keeps_exact_uid_protocol_and_drop_scope(self):
         guard = numeric_uid_guard()
         CHECK["validate_uid_guard"](guard, 985)
