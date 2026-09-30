@@ -37,6 +37,105 @@ EXPORT_NAMES = ("a01-expected-peers.json", *(f"private-storage-fragments-{name}.
         *(f"private-storage-fragments-{phase}-privacy-{role}.json" for role in ROLES))))
 FILES = {"identity.key", "passphrase", "grant-a.bin", "grant-b.bin", "grant-c.bin",
          "input.bin", "restore-1.bin", "restore-2.bin", "identities.sha256"}
+RESTORE_STAGE = "not_started"
+RESTORE_NUMBER = 0
+RESTORE_CLI = None
+RESTORE_COPY_OUTCOMES = frozenset(("explicitly_deleted", "unavailable_or_grant_invalid",
+    "unknown_reservation", "restored_and_retained", "unavailable_or_restore_unverified"))
+RESTORE_FAILURES = {
+    "private replica CLI operation failed": "cli_exit",
+    "replica diagnostics exceeded fixture bound": "cli_output_bound",
+    "fragment result has wrong identity/scope": "report_identity_scope",
+    "wrong fragment/provider counts": "report_counts",
+    "fragment range differs": "fragment_range",
+    "fragment copy placement or charge differs": "copy_placement_or_charge",
+    "copy lost its committed bytes or finite lease": "copy_receipt",
+    "confirmed copy count differs": "confirmed_copy_count",
+    "physical accounting differs": "physical_accounting",
+    "per-state charge differs": "state_accounting",
+    "provider physical charge differs": "provider_accounting",
+    "full reconstruction not verified": "reconstruction_receipt",
+    "fragment was not obtained from its actual surviving provider": "survivor_receipt",
+    "fixture file must be unlinked, owned and 0600": "output_metadata",
+    "full reconstructed archive differs from removed source": "output_length_or_hash",
+    "signed root or retained owner/provider/grant/archive/lease changed": "retained_identity",
+    "existing output overwritten": "existing_output_changed",
+    "temporary ciphertext staging remains": "staging_remains",
+}
+
+
+def restore_failure(error):
+    # A closed structural record replaces an empty failed-phase artifact. Never
+    # export arbitrary exception text, commands, paths, receipts or private stderr.
+    code = RESTORE_FAILURES.get(str(error), "unclassified")
+    if isinstance(error, subprocess.TimeoutExpired):
+        code = "cli_timeout"
+    elif isinstance(error, KeyError):
+        code = "report_field_missing"
+    elif isinstance(error, OSError):
+        code = "local_io"
+    return dict(version=1, kind="private-storage-fragments-restore-failure", success=False,
+        restore_number=RESTORE_NUMBER, stage=RESTORE_STAGE, code=code, cli=RESTORE_CLI)
+
+
+def restore_cli_receipt(stdout):
+    # The CLI emits an honest incomplete report before returning exit status 1.
+    # Retain only bounded structural facts, not its provider keys or full report.
+    try:
+        require(len(stdout) <= 16384, "bounded restore receipt")
+        value = json.loads(stdout)
+        require(type(value) is dict and value.get("operation") == "private_storage_fragments_restore",
+                "restore receipt operation")
+        fields = ("operation_complete", "restored", "whole_archive_sha256_verified")
+        require(all(value.get(key) is None or type(value[key]) is bool for key in fields), "restore receipt flags")
+        unavailable = value.get("unavailable_fragment")
+        require(unavailable is None or type(unavailable) is int and 0 <= unavailable < 4,
+                "restore receipt fragment")
+        outcomes = value.get("fragment_outcomes")
+        require(type(outcomes) is list and len(outcomes) <= 4, "restore receipt outcomes")
+        sanitized = []
+        for index, outcome in enumerate(outcomes):
+            require(type(outcome) is dict and type(outcome.get("index")) is int and outcome["index"] == index
+                and type(outcome.get("restored")) is bool and type(outcome.get("copy_outcomes")) is list
+                and len(outcome["copy_outcomes"]) <= 2
+                and all(type(code) is str and code in RESTORE_COPY_OUTCOMES for code in outcome["copy_outcomes"]),
+                "restore receipt outcome")
+            sanitized.append(dict(index=index, restored=outcome["restored"], copy_outcomes=outcome["copy_outcomes"]))
+        return dict(report="structural", **{key: value.get(key) for key in fields},
+            unavailable_fragment=unavailable, completed_fragments=sum(item["restored"] for item in sanitized),
+            fragment_outcomes=sanitized)
+    except (TypeError, ValueError, KeyError, UnicodeError):
+        return dict(report="unavailable_or_invalid")
+
+
+def restore_invoke(binary, socket, args, expected=0, deadline=700):
+    global RESTORE_CLI
+    RESTORE_CLI = dict(exit_code=None, timed_out=False, stdout_bytes=None, stderr_bytes=None,
+                       receipt=None)
+    process = subprocess.Popen([binary, "--control-socket", socket, *map(str, args)],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        stdout, stderr = process.communicate(timeout=deadline)
+        RESTORE_CLI.update(stdout_bytes=len(stdout), stderr_bytes=len(stderr),
+                           receipt=restore_cli_receipt(stdout))
+        require(process.returncode == expected, "private replica CLI operation failed")
+        require(len(stdout) <= 16384 and len(stderr) <= 16384, "replica diagnostics exceeded fixture bound")
+        if expected:
+            require(not stdout, "failed no-clobber operation emitted a success response")
+            return None
+        return json.loads(stdout)
+    except subprocess.TimeoutExpired:
+        RESTORE_CLI["timed_out"] = True
+        raise
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        RESTORE_CLI["exit_code"] = process.returncode
 
 
 def flow_gates(path, baseline):
@@ -181,25 +280,42 @@ def upload(root, binary, client, keys):
         source_removed_before_restore=True, staging_removed=True)
 
 
+def validate_restore_result(value, keys):
+    global RESTORE_STAGE
+    RESTORE_STAGE = "validate_accounting"
+    validate_cli(value, "restore", keys, "restore")
+    RESTORE_STAGE = "validate_survivor_receipts"
+    selected = (1, 1, 2, 1)
+    require(value["restored"] is True and value["whole_archive_sha256_verified"] is True
+        and len(value["fragment_outcomes"]) == 4, "full reconstruction not verified")
+    for index, outcome in enumerate(value["fragment_outcomes"]):
+        expected = (["unavailable_or_restore_unverified", "restored_and_retained"]
+                    if index in (0, 3) else ["restored_and_retained"])
+        require(outcome == dict(index=index, restored=True, provider_key=keys[selected[index]], copy_outcomes=expected),
+                "fragment was not obtained from its actual surviving provider")
+
+
 def restore(root, binary, client, keys):
+    global RESTORE_STAGE, RESTORE_NUMBER
+    RESTORE_STAGE = "source_absent"
     require(not (root / "input.bin").exists(), "original source remains")
     selected = (1, 1, 2, 1)
     for number in (1, 2):
+        RESTORE_NUMBER = number
         path = root / f"restore-{number}.bin"
-        value = invoke(binary, client, ["storage", "fragments", "restore", *existing(root), "--output", path], deadline=700)
-        validate_cli(value, "restore", keys, "restore")
-        require(value["restored"] is True and value["whole_archive_sha256_verified"] is True
-            and len(value["fragment_outcomes"]) == 4, "full reconstruction not verified")
-        for index, outcome in enumerate(value["fragment_outcomes"]):
-            expected = (["unavailable_or_restore_unverified", "restored_and_retained"]
-                        if index in (0, 3) else ["restored_and_retained"])
-            require(outcome == dict(index=index, restored=True, provider_key=keys[selected[index]], copy_outcomes=expected),
-                    "fragment was not obtained from its actual surviving provider")
+        RESTORE_STAGE = "cli_restore"
+        value = restore_invoke(binary, client, ["storage", "fragments", "restore", *existing(root), "--output", path])
+        validate_restore_result(value, keys)
+        RESTORE_STAGE = "validate_output"
         require(private_file(path).st_size == BYTES and hashlib.sha256(path.read_bytes()).hexdigest() == SHA,
                 "full reconstructed archive differs from removed source")
+        RESTORE_STAGE = "validate_retained_identity"
         check_identity(root)
-    invoke(binary, client, ["storage", "fragments", "restore", *existing(root), "--output", root / "restore-1.bin"], expected=1)
+    RESTORE_STAGE = "cli_existing_output"
+    restore_invoke(binary, client, ["storage", "fragments", "restore", *existing(root), "--output", root / "restore-1.bin"], expected=1, deadline=180)
+    RESTORE_STAGE = "validate_existing_output"
     require(hashlib.sha256((root / "restore-1.bin").read_bytes()).hexdigest() == SHA, "existing output overwritten")
+    RESTORE_STAGE = "validate_staging_removed"
     staged_files_absent(root)
     return dict(restores=2, source_absent=True, fragment_provider_indexes=list(selected),
         failed_first_provider_attempts=4, whole_archive_sha256_verified=True, reads_nonconsuming=True,
@@ -427,6 +543,8 @@ if __name__ == "__main__":
         signal.signal(signum, interrupted)
     try:
         main(sys.argv[1:])
-    except (KeyError, TypeError, ValueError, OSError, StopIteration, subprocess.SubprocessError):
+    except (KeyError, TypeError, ValueError, OSError, StopIteration, subprocess.SubprocessError) as error:
+        if len(sys.argv) > 1 and sys.argv[1] == "restore":
+            print(json.dumps(restore_failure(error), sort_keys=True))
         print("private fragments fixture failed; private diagnostics not exported", file=sys.stderr)
         sys.exit(1)

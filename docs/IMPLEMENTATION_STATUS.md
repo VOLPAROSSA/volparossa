@@ -389,9 +389,26 @@ now reads the full bounded Exit window and explicitly rejects truncated/clock-re
 evidence, retaining the original **56/16/16** completion thresholds and every data/privacy
 gate. Exported metadata includes window coverage and separate failed-flow counts, not raw
 logs. The original artifact lacks that window metadata, so it does not retrospectively
-prove all missing events were cropped. Nine focused Python receipt/export/wiring checks
-pass; **the corrected protected-overlay trial remains pending**. This is not a fragment
-network acceptance PASS or Signal backup proof.
+prove all missing events were cropped.
+
+The next exact trial **36744395110** at
+`04b20481c575b269d7ea2ff5bfc7d82b063b41d7` confirms all **56/56** upload flows with zero
+failed flows and a 631-record window covering the original phase baseline. The real three
+store snapshots account for all eight copies (1,573,010 payload bytes); the source was
+removed before provider A was stopped. The trial then failed at survivor restore. Captures
+show 536,146 / 266,175 response bytes from B / C and zero from A, but the original empty
+restore report does **not** establish a complete reconstruction or identify the failing
+CLI/checker step. Two restores, non-consuming post-restore accounting and deletion remain
+unproven. Private cleanup and unchanged guest-host state pass; the original 27-file bundle
+is preserved (ZIP SHA-256 `191d0f2f95472a81c57c476d08abdea829b00d2dc47db9d177f506b9165aa37f`).
+The candidate retains closed restore-phase/number/error codes, CLI exit/timeout state and
+bounded incomplete-report counters/outcome categories on failure, without provider keys,
+private reports or stderr. An incomplete CLI report is inspected before its nonzero exit
+remains a failure. The genuine signed local three-store lifecycle also checks its actual
+restore reports with the same Python validator and passes (26.60 seconds); this finds no
+deterministic report-shape mismatch and is not evidence about the failed overlay run.
+Twelve focused Python receipt/export/wiring checks pass. The next protected-overlay result
+remains pending. This is not a fragment network acceptance PASS or Signal backup proof.
 
 The next owner-coordinated candidate adds `storage replicas replace`: a durable,
 resumable A/B-to-B/C handoff through the same protected operations. It retrieves and hashes

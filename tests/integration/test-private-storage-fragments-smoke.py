@@ -7,9 +7,11 @@ import json
 import os
 from pathlib import Path
 import runpy
+import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).parent
 CHECK = runpy.run_path(str(HERE / "private-storage-fragments-smoke.py"))
@@ -219,6 +221,84 @@ class FragmentEvidence(unittest.TestCase):
             mutate(bad)
             with self.assertRaises(ValueError):
                 CHECK["validate_cli"](bad, operation, keys, "restore")
+
+    def test_restore_validator_checks_each_survivor_and_exports_only_closed_failure_codes(self):
+        value, _operation, keys = cli_fixture("restore")
+        value.update(restored=True, whole_archive_sha256_verified=True,
+            fragment_outcomes=[dict(index=index, restored=True, provider_key=keys[provider],
+                copy_outcomes=(["unavailable_or_restore_unverified", "restored_and_retained"]
+                    if index in (0, 3) else ["restored_and_retained"]))
+                for index, provider in enumerate((1, 1, 2, 1))])
+        CHECK["validate_restore_result"](value, keys)
+        for mutate in (lambda v: v.update(whole_archive_sha256_verified=False),
+                       lambda v: v["fragment_outcomes"][0].update(provider_key=keys[0]),
+                       lambda v: v["fragment_outcomes"][3].update(copy_outcomes=["restored_and_retained"])):
+            invalid = copy.deepcopy(value)
+            mutate(invalid)
+            with self.assertRaises(ValueError):
+                CHECK["validate_restore_result"](invalid, keys)
+        for error, code in ((ValueError("fragment copy placement or charge differs"), "copy_placement_or_charge"),
+                            (ValueError("PRIVATE_SENTINEL command/token/output"), "unclassified"),
+                            (KeyError("PRIVATE_SENTINEL"), "report_field_missing"),
+                            (OSError("PRIVATE_SENTINEL"), "local_io"),
+                            (subprocess.TimeoutExpired("PRIVATE_SENTINEL", 700), "cli_timeout")):
+            diagnostic = CHECK["restore_failure"](error)
+            self.assertFalse(diagnostic["success"])
+            self.assertEqual(diagnostic["code"], code)
+            self.assertNotIn("PRIVATE_SENTINEL", json.dumps(diagnostic))
+            self.assertEqual(set(diagnostic), {"version", "kind", "success", "restore_number", "stage", "code", "cli"})
+
+    def test_incomplete_cli_receipt_is_sanitized_before_nonzero_status_rejection(self):
+        report = dict(operation="private_storage_fragments_restore", operation_complete=False,
+            restored=False, unavailable_fragment=1, provider_key="PRIVATE_SENTINEL",
+            fragment_outcomes=[dict(index=0, restored=True, provider_key="PRIVATE_SENTINEL",
+                copy_outcomes=["unavailable_or_restore_unverified", "restored_and_retained"]),
+                dict(index=1, restored=False, provider_key="PRIVATE_SENTINEL",
+                copy_outcomes=["unavailable_or_restore_unverified", "unavailable_or_grant_invalid"])])
+        raw = json.dumps(report).encode()
+        process = mock.Mock(returncode=1)
+        process.communicate.return_value = (raw, b"PRIVATE_SENTINEL credential/path/error")
+        process.poll.return_value = 1
+        with mock.patch.object(subprocess, "Popen", return_value=process):
+            with self.assertRaisesRegex(ValueError, "private replica CLI operation failed") as failure:
+                CHECK["restore_invoke"]("unused-cli", "unused-socket", [])
+        diagnostic = CHECK["restore_failure"](failure.exception)
+        self.assertEqual(diagnostic["code"], "cli_exit")
+        self.assertEqual(diagnostic["cli"]["exit_code"], 1)
+        self.assertEqual(diagnostic["cli"]["stdout_bytes"], len(raw))
+        receipt = diagnostic["cli"]["receipt"]
+        self.assertEqual(receipt["report"], "structural")
+        self.assertEqual(receipt["completed_fragments"], 1)
+        self.assertEqual(receipt["unavailable_fragment"], 1)
+        self.assertEqual(receipt["fragment_outcomes"][1]["copy_outcomes"],
+                         ["unavailable_or_restore_unverified", "unavailable_or_grant_invalid"])
+        self.assertNotIn("PRIVATE_SENTINEL", json.dumps(diagnostic))
+        for mutate in (lambda value: value.update(unavailable_fragment=4),
+                       lambda value: value.update(operation_complete="PRIVATE_SENTINEL"),
+                       lambda value: value["fragment_outcomes"][0].update(index=True),
+                       lambda value: value["fragment_outcomes"][0].update(copy_outcomes=["PRIVATE_SENTINEL"]),
+                       lambda value: value.update(fragment_outcomes=value["fragment_outcomes"] * 3)):
+            invalid = copy.deepcopy(report)
+            mutate(invalid)
+            self.assertEqual(CHECK["restore_cli_receipt"](json.dumps(invalid).encode()),
+                             dict(report="unavailable_or_invalid"))
+        for raw in (b"PRIVATE_SENTINEL", b"x" * 16385, b"\xff"):
+            self.assertEqual(CHECK["restore_cli_receipt"](raw), dict(report="unavailable_or_invalid"))
+
+    def test_restore_timeout_remains_failure_and_joins_the_same_child(self):
+        process = mock.Mock(returncode=-15)
+        process.communicate.side_effect = subprocess.TimeoutExpired("PRIVATE_SENTINEL", 700)
+        process.poll.return_value = None
+        with mock.patch.object(subprocess, "Popen", return_value=process):
+            with self.assertRaises(subprocess.TimeoutExpired) as failure:
+                CHECK["restore_invoke"]("unused-cli", "unused-socket", [])
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=5)
+        diagnostic = CHECK["restore_failure"](failure.exception)
+        self.assertTrue(diagnostic["cli"]["timed_out"])
+        self.assertEqual(diagnostic["cli"]["exit_code"], -15)
+        self.assertEqual(diagnostic["code"], "cli_timeout")
+        self.assertNotIn("PRIVATE_SENTINEL", json.dumps(diagnostic))
 
     def test_report_requires_exact_source_and_cleanup(self):
         report = dict(schema_version=1, report_kind="volparossa-private-storage-fragments", source_revision="a" * 40,

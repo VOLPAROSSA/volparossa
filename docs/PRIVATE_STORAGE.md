@@ -523,8 +523,16 @@ the corresponding service, never by bypassing its live lock.
 
 The fixture retains two-path MPTCP, exactly one relay on each path, TLS, control/data-plane
 privacy captures and disposable-host cleanup gates. Only a closed list of sanitized reports
-is exported, never private owner keys, grants, journals or raw ciphertext. Its eight focused
-receipt/export/wiring tests pass; **a real protected-overlay execution is still pending**.
+is exported, never private owner keys, grants, journals or raw ciphertext. Twelve focused
+receipt/export/wiring tests pass. Exact trial `36744395110` verifies the full upload phase
+and subset accounting, then fails during survivor restore; returned B/C traffic
+alone is not proof of complete reconstruction. Its private cleanup and host-state checks
+pass. The genuine local three-store lifecycle passes the actual fixture's restore validator.
+A closed failure record now distinguishes CLI, accounting, survivor-receipt, output,
+identity and cleanup stages, preserving only fixed incomplete-report categories/counters
+before rejecting a nonzero CLI exit, without exporting raw private diagnostics. See
+[implementation status](IMPLEMENTATION_STATUS.md) for the original evidence and remaining
+restore/accounting/deletion gates. **Protected-fragment acceptance remains incomplete.**
 The public synthetic opaque fixture proves no archive encryption or native Signal integration.
 
 ## Next end-to-end proof
