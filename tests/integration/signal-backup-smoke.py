@@ -27,6 +27,13 @@ RUNTIME = Path("/home/vpci/signal-backup-runtime")
 TITLE = "backups exports and imports a VOLPAROSSA replicated encrypted backup"
 STAGE = "dispatch"
 NATIVE_EXIT = None
+NATIVE_DIAGNOSTIC = None
+SANDBOX_PHASES = frozenset(("entry", "identity", "capabilities", "control-group", "control-socket", "xvfb-exec"))
+REPORTER_PHASES = frozenset(("reporter-initialized", "run-start", "hook-start", "hook-end", "test-start",
+                            "test-end", "test-pass", "test-fail", "hook-fail", "unknown-fail", "pending", "run-end"))
+NATIVE_ERROR_CODES = frozenset(("EACCES", "EPERM", "ENOENT", "EROFS", "ENOSPC", "ENOMEM", "ECONNREFUSED",
+    "ETIMEDOUT", "ERR_MODULE_NOT_FOUND", "MODULE_NOT_FOUND", "ERR_DLOPEN_FAILED", "ERR_REQUIRE_ESM",
+    "ERR_UNKNOWN_FILE_EXTENSION", "ERR_ASSERTION", "ERR_MOCHA_TIMEOUT", "OTHER"))
 FALSE_SCOPE = ("server_free_messaging_proven", "independent_failure_domains_proven",
                "network_contribution_credit", "electron_sandbox_claimed", "full_alpha_acceptance_claimed")
 EXPORT_NAMES = ("a01-expected-peers.json",) + tuple(f"signal-backup-{name}.json" for name in
@@ -95,6 +102,97 @@ def digest(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
+def closed_error(error):
+    kind = next((name for name, cls in (("os_error", OSError), ("timeout", subprocess.TimeoutExpired),
+        ("subprocess_error", subprocess.SubprocessError), ("check_failed", ValueError),
+        ("invalid_shape", (KeyError, TypeError, StopIteration))) if isinstance(error, cls)), "other")
+    number = getattr(error, "errno", None)
+    return dict(kind=kind, errno=number if type(number) is int and 0 < number < 4096 else None)
+
+
+def sandbox_status(root, phase, error=None):
+    require(phase in SANDBOX_PHASES, "invalid sandbox diagnostic phase")
+    temporary, target = root / "sandbox-status.json.tmp", root / "sandbox-status.json"
+    create(temporary, json.dumps(dict(version=1, phase=phase,
+        error=None if error is None else closed_error(error))).encode())
+    if target.exists() or target.is_symlink():
+        private_file(target)
+    temporary.replace(target)
+
+
+def closed_status(path, reporter=False):
+    result = dict(available=False, valid=False, value=None)
+    try:
+        private_file(path)
+        require(path.stat().st_size <= 4096, "native diagnostic bound")
+        result["available"] = True
+        value = read(path)
+        if reporter:
+            require(set(value) == {"version", "phase", "tests", "passes", "failures", "pending", "exact_test", "last_failure"}
+                and value["version"] == 1 and value["phase"] in REPORTER_PHASES
+                and type(value["exact_test"]) is bool
+                and all(type(value[key]) is int and 0 <= value[key] <= 10000 for key in ("tests", "passes", "failures", "pending")),
+                "native reporter diagnostic shape")
+            failure = value["last_failure"]
+            require(failure is None or isinstance(failure, dict) and set(failure) == {"kind", "code", "errno"}
+                and failure["kind"] in ("test", "hook", "unknown") and failure["code"] in NATIVE_ERROR_CODES
+                and (failure["errno"] is None or type(failure["errno"]) is int and 0 < abs(failure["errno"]) < 4096),
+                "native reporter failure shape")
+        else:
+            require(set(value) == {"version", "phase", "error"} and value["version"] == 1
+                and value["phase"] in SANDBOX_PHASES, "native sandbox diagnostic shape")
+            error = value["error"]
+            require(error is None or isinstance(error, dict) and set(error) == {"kind", "errno"}
+                and error["kind"] in ("os_error", "timeout", "subprocess_error", "check_failed", "invalid_shape", "other")
+                and (error["errno"] is None or type(error["errno"]) is int and 0 < error["errno"] < 4096),
+                "native sandbox failure shape")
+        result.update(valid=True, value=value)
+    except (ValueError, OSError, KeyError, TypeError):
+        pass
+    return result
+
+
+def log_classification(path):
+    result = dict(available=False, truncated=False, signals={})
+    try:
+        private_file(path)
+        with path.open("rb") as source:
+            size = os.fstat(source.fileno()).st_size
+            source.seek(max(0, size - 16384))
+            raw = source.read(16384).lower()
+        patterns = {
+            "permission_denied": (b"permission denied", b"eacces", b"eperm"),
+            "missing_path": (b"enoent", b"no such file or directory"),
+            "readonly_filesystem": (b"read-only file system", b"erofs"),
+            "bwrap_failure": (b"bwrap: ",),
+            "xvfb_failure": (b"xvfb-run: error:", b"fatal server error:"),
+            "display_unavailable": (b"cannot open display", b"missing x server", b"unable to open x display"),
+            "module_missing": (b"err_module_not_found", b"module_not_found", b"cannot find module"),
+            "typescript_loader": (b"err_unknown_file_extension", b"err_require_esm", b"transformerror"),
+            "native_module_load": (b"err_dlopen_failed", b"no native build was found", b"invalid elf"),
+            "shared_library_missing": (b"error while loading shared libraries",),
+            "electron_launch": (b"electron.launch", b"failed to launch", b"app failed to start after"),
+            "signal_bootstrap_retry": (b"failed to start the app, attempt",),
+            "signal_fatal_test": (b"app had fatal test errors",),
+            "assertion": (b"assertionerror", b"err_assertion"),
+            "timeout": (b"timeouterror", b"timeout of", b"timed out", b"err_mocha_timeout"),
+            "test_selection": (b"no test files found", b"no tests found", b"pending test forbidden"),
+            "resource_failure": (b"out of memory", b"cannot allocate memory", b"no space left", b"file size limit exceeded"),
+        }
+        result.update(available=True, truncated=size > 16384,
+            signals={name: any(pattern in raw for pattern in options) for name, options in patterns.items()})
+    except (ValueError, OSError):
+        pass
+    return result
+
+
+def native_diagnostic(root, joined):
+    return dict(version=1, process_group_joined=joined, sandbox=closed_status(root / "sandbox-status.json"),
+        reporter=closed_status(root / "native-status.json", reporter=True),
+        stdout=log_classification(root / "native.stdout"), stderr=log_classification(root / "native.stderr"),
+        private_logs_exported=False)
+
+
 def native_command(candidate, node, reporter):
     return ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1280x1024x24 -nolisten tcp",
         str(node), "node_modules/mocha/bin/mocha.js", "--require", "ts/test-mock/setup-ci.node.ts",
@@ -113,19 +211,33 @@ def isolated_command(root, candidate, node, reporter):
 
 def sandbox_exec(root, candidate, node, reporter, client_namespace):
     """Positive socket proof after user/mount/PID isolation, without weakening its permissions."""
-    require(os.geteuid() != 0 and os.readlink("/proc/self/ns/net") == client_namespace,
-            "sandbox lost the unprivileged Client namespace")
-    status = dict(line.split(":", 1) for line in Path("/proc/self/status").read_text().splitlines())
-    require(all(int(status[field], 16) == 0 for field in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"))
-            and int(status["NoNewPrivs"]) == 1, "sandbox acquired capabilities")
-    control_path = read(root / "config.json")["controlSocket"]
-    # User namespace GID rendering may be overflowgid, but actual Unix access must survive.
-    require(Path(control_path).stat().st_gid in os.getgroups(), "sandbox control group unavailable")
-    with socket.socket(socket.AF_UNIX) as control:
-        control.settimeout(2); control.connect(control_path)
-    create(root / "sandbox.json", json.dumps(dict(client_namespace_retained=True,
-        capless_nonroot=True, control_socket_access_verified=True)).encode())
-    os.execvpe("xvfb-run", native_command(candidate, node, reporter), os.environ)
+    phase = "entry"
+    try:
+        sandbox_status(root, phase)
+        phase = "identity"; sandbox_status(root, phase)
+        require(os.geteuid() != 0 and os.readlink("/proc/self/ns/net") == client_namespace,
+                "sandbox lost the unprivileged Client namespace")
+        phase = "capabilities"; sandbox_status(root, phase)
+        status = dict(line.split(":", 1) for line in Path("/proc/self/status").read_text().splitlines())
+        require(all(int(status[field], 16) == 0 for field in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"))
+                and int(status["NoNewPrivs"]) == 1, "sandbox acquired capabilities")
+        phase = "control-group"; sandbox_status(root, phase)
+        control_path = read(root / "config.json")["controlSocket"]
+        # User namespace GID rendering may be overflowgid, but actual Unix access must survive.
+        require(Path(control_path).stat().st_gid in os.getgroups(), "sandbox control group unavailable")
+        phase = "control-socket"; sandbox_status(root, phase)
+        with socket.socket(socket.AF_UNIX) as control:
+            control.settimeout(2); control.connect(control_path)
+        create(root / "sandbox.json", json.dumps(dict(client_namespace_retained=True,
+            capless_nonroot=True, control_socket_access_verified=True)).encode())
+        phase = "xvfb-exec"; sandbox_status(root, phase)
+        os.execvpe("xvfb-run", native_command(candidate, node, reporter), os.environ)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        try:
+            sandbox_status(root, phase, error)
+        except (OSError, ValueError):
+            pass
+        raise
 
 
 def join_group(process):
@@ -153,7 +265,7 @@ def join_group(process):
 
 
 def run_native(root):
-    global STAGE, NATIVE_EXIT
+    global STAGE, NATIVE_EXIT, NATIVE_DIAGNOSTIC
     STAGE = "runtime-validation"
     provision = read(Path(__file__).with_name("signal-backup-runtime.json"))
     validate_provision(provision)
@@ -192,20 +304,27 @@ def run_native(root):
         XDG_DATA_HOME=str(root / "data"), XDG_RUNTIME_DIR=str(root / "runtime"),
         VOLPAROSSA_BACKUP_CONFIG=str(root / "config.json"), VOLPAROSSA_BACKUP_WORK=str(root / "backup"),
         VOLPAROSSA_BACKUP_RESULT=str(root / "result.json"), PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD="1",
+        VOLPAROSSA_BACKUP_STATUS=str(root / "native-status.json"),
         PATH=f"{node.parent}:{candidate / 'node_modules/.bin'}:/usr/bin:/bin")
     command = isolated_command(root, candidate, node, Path(__file__).with_name("signal-backup-reporter.cjs"))
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     resource.setrlimit(resource.RLIMIT_FSIZE, (128 * 1024 * 1024, 128 * 1024 * 1024))
     STAGE = "sandbox-launch"
-    with (root / "native.log").open("xb") as logs:
-        process = subprocess.Popen(command, cwd=root, env=environment, stdout=logs, stderr=logs,
+    with (root / "native.stdout").open("xb") as stdout, (root / "native.stderr").open("xb") as stderr:
+        os.chmod(root / "native.stdout", 0o600); os.chmod(root / "native.stderr", 0o600)
+        process = subprocess.Popen(command, cwd=root, env=environment, stdout=stdout, stderr=stderr,
                                    start_new_session=True)
         try:
             STAGE = "native-regression"
             NATIVE_EXIT = process.wait(timeout=2700)
             require(NATIVE_EXIT == 0, "native test failed; private diagnostics withheld")
         finally:
-            join_group(process)
+            joined = False
+            try:
+                join_group(process)
+                joined = True
+            finally:
+                NATIVE_DIAGNOSTIC = native_diagnostic(root, joined)
     STAGE = "native-receipt"
     require(read(root / "sandbox.json") == dict(client_namespace_retained=True,
         capless_nonroot=True, control_socket_access_verified=True), "inside sandbox positive proof missing")
@@ -352,7 +471,8 @@ if __name__ == "__main__":
         signal.signal(signum, interrupted)
     try:
         main(sys.argv[1:])
-    except (KeyError, TypeError, ValueError, OSError, StopIteration, subprocess.SubprocessError):
-        print(json.dumps(dict(success=False, failure_stage=STAGE, native_exit_status=NATIVE_EXIT)))
+    except (KeyError, TypeError, ValueError, OSError, StopIteration, subprocess.SubprocessError) as error:
+        print(json.dumps(dict(success=False, failure_stage=STAGE, native_exit_status=NATIVE_EXIT,
+            error=closed_error(error), native_diagnostic=NATIVE_DIAGNOSTIC)))
         print("native Signal fixture failed; private diagnostics withheld", file=sys.stderr)
         sys.exit(1)

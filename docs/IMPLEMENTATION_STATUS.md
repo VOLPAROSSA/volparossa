@@ -414,6 +414,18 @@ neither server-free Signal messaging nor independent-hardware/contribution-accou
 **The runtime milestone remains unchecked until its exact-source KVM run passes**; pure
 receipt tests and successful preparatory compilation alone do not prove native restore.
 
+The first native trial on `6dd21b18`,
+[run `36722947365`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36722947365),
+failed with native exit status 1. All ten source/runtime/dependency/native-build
+provisioning stages passed, but the original bounded receipt cannot distinguish
+sandbox startup, Xvfb, module loading, global setup or the selected test as the cause.
+It does not prove native backup export/import. All 17 original artifact files are
+retained; private cleanup and unchanged host snapshots passed. The next candidate
+adds closed sandbox-stage/errno diagnostics, bounded log classifications and incremental
+Mocha status, without exporting private logs or weakening isolation. Seven focused
+receipt/reporter checks and three VM-wiring checks pass locally; a fresh native trial
+is still required, and the original failure is not relabelled.
+
 ## Earlier milestone evidence
 
 The completed development milestone is integrated into `main` by

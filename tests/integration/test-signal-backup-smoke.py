@@ -2,8 +2,12 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Pure receipt/fixture controls, never a substitute for the live Signal regression."""
 import copy
+import json
+import os
 from pathlib import Path
 import runpy
+import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -110,6 +114,64 @@ class SignalBackupEvidence(unittest.TestCase):
             self.assertEqual(external.read_text(), "keep")
             with self.assertRaises(ValueError):
                 CHECK["cleanup"](str(parent))
+
+    def test_native_failure_metadata_is_closed_bounded_and_preserves_failed_status(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            CHECK["sandbox_status"](root, "control-socket", PermissionError(13, "private-canary"))
+            CHECK["create"](root / "native.stdout", b"secret-archive-canary\n")
+            CHECK["create"](root / "native.stderr", b"bwrap: Can't mkdir parents for /private-canary: Permission denied\n"
+                b"Error [ERR_MODULE_NOT_FOUND]: private-key-canary\n")
+            result = CHECK["native_diagnostic"](root, False)
+            self.assertFalse(result["process_group_joined"])
+            self.assertEqual(result["sandbox"]["value"], dict(version=1, phase="control-socket",
+                error=dict(kind="os_error", errno=13)))
+            self.assertTrue(result["stderr"]["signals"]["bwrap_failure"])
+            self.assertTrue(result["stderr"]["signals"]["module_missing"])
+            self.assertTrue(result["stderr"]["signals"]["permission_denied"])
+            self.assertFalse(result["reporter"]["available"])
+            self.assertNotIn("canary", json.dumps(result))
+            self.assertNotIn("/private", json.dumps(result))
+            self.assertFalse(result["private_logs_exported"])
+            CHECK["create"](root / "native-status.json", json.dumps(dict(version=1, phase="reporter-initialized",
+                tests=0, passes=0, failures=0, pending=0, exact_test=True, last_failure=None,
+                unexpected="secret-canary")).encode())
+            self.assertFalse(CHECK["closed_status"](root / "native-status.json", reporter=True)["valid"])
+            (root / "native.stdout").write_bytes(b"secret-canary" * 2048)
+            self.assertTrue(CHECK["log_classification"](root / "native.stdout")["truncated"])
+
+    def test_reporter_retains_closed_pretest_and_hook_failure_status(self):
+        node = os.environ.get("VOLPAROSSA_TEST_NODE") or shutil.which("node")
+        if node is None:
+            self.skipTest("explicit staged Node or system Node required for pure reporter test")
+        script = r"""
+const fs = require('node:fs');
+const { EventEmitter } = require('node:events');
+const Reporter = require(process.argv[1]);
+const runner = new EventEmitter();
+new Reporter(runner);
+const first = JSON.parse(fs.readFileSync(process.env.VOLPAROSSA_BACKUP_STATUS));
+if (first.phase !== 'reporter-initialized' || first.tests !== 0) throw new Error('missing initial status');
+runner.emit('start');
+runner.emit('hook');
+runner.emit('fail', { type: 'hook', fullTitle: () => 'private-canary' },
+  { message: 'secret-key-canary', stack: 'archive-canary', code: 'ENOENT', errno: -2 });
+runner.emit('end');
+"""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = dict(os.environ, VOLPAROSSA_BACKUP_STATUS=str(root / "native-status.json"),
+                VOLPAROSSA_BACKUP_RESULT=str(root / "result.json"))
+            subprocess.run([node, "-e", script, str((HERE / "signal-backup-reporter.cjs").resolve())],
+                cwd=root, env=environment, check=True, timeout=5, capture_output=True)
+            result = CHECK["closed_status"](root / "native-status.json", reporter=True)
+            self.assertTrue(result["valid"])
+            self.assertEqual(result["value"]["phase"], "run-end")
+            self.assertEqual(result["value"]["last_failure"], dict(kind="hook", code="ENOENT", errno=-2))
+            self.assertEqual(result["value"]["failures"], 1)
+            self.assertNotIn("canary", json.dumps(result))
+            with self.assertRaises(ValueError):
+                CHECK["validate_mocha"](json.loads((root / "result.json").read_text()))
 
 
 if __name__ == "__main__":
