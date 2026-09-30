@@ -57,6 +57,38 @@ def fixture():
 
 
 class CooperativeBrowserProof(unittest.TestCase):
+    def test_coordinator_diagnostic_retains_only_closed_stage_and_cleanup_facts(self):
+        value = dict(version=1, phase='tokenization', execution_ok=False,
+            error_class='io_permission', rpc=None, local_cleanup_confirmed=False,
+            receipts=dict(phase='complete', handles=0, receipts=0, terminal=0, error='none', confirmed=True),
+            cleanup_confirmed=False)
+        CHECK['check_execution_diagnostic'](value)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / 'execution-diagnostic.json'
+            self.assertEqual(CHECK['closed_execution'](path), dict(state='absent'))
+            path.write_text(json.dumps(value))
+            path.chmod(0o600)
+            self.assertEqual(CHECK['closed_execution'](path), dict(state='valid', status=value))
+            for mutation in (
+                lambda v: v.update(question='PRIVATE_PROMPT'),
+                lambda v: v.update(phase='PRIVATE_PROMPT'),
+                lambda v: v.update(error_class='PRIVATE_PROMPT'),
+                lambda v: v.update(cleanup_confirmed=True),
+                lambda v: v['receipts'].update(handles=16385),
+                lambda v: v['receipts'].update(path='/private/secret'),
+                lambda v: v.update(rpc=dict(category='exchange_unconfirmed', phase='poll', raw='PRIVATE_PROMPT')),
+            ):
+                bad = copy.deepcopy(value)
+                mutation(bad)
+                path.write_text(json.dumps(bad))
+                captured = CHECK['closed_execution'](path)
+                self.assertEqual(captured, dict(state='invalid'))
+                self.assertNotIn('PRIVATE_PROMPT', json.dumps(captured))
+        peer = dict(value, phase='peer_execution', error_class='peer_rpc',
+                    rpc=dict(category='broker_rejected', phase='submit', code='busy'))
+        CHECK['check_execution_diagnostic'](peer)
+
     def test_guest_account_home_is_created_only_when_absent_and_removed_only_when_owned_and_empty(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

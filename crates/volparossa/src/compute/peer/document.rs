@@ -33,6 +33,27 @@ const MAX_SAVED_BYTES: usize = 16 * 1024 * 1024;
 // including per-answer provenance. Metadata retains its smaller bound.
 const MAX_RESULT_BYTES: usize = 128 * 1024 * 1024;
 
+/// Closed progress labels for the public-service diagnostic; never input or error text.
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Phase {
+    Input,
+    Validation,
+    Directory,
+    SourceSelection,
+    ProviderSelection,
+    SourceRetention,
+    Tokenization,
+    Publication,
+    EnrollmentSave,
+    PeerExecution,
+    Synthesis,
+    CollectionJoin,
+    ResultSave,
+    Complete,
+    Compaction,
+}
+
 #[derive(Clone, Debug, Args)]
 #[allow(
     clippy::struct_excessive_bools,
@@ -217,6 +238,16 @@ async fn report_with_activity(
     socket: &Path,
     cancelled: &watch::Receiver<bool>,
 ) -> Result<Value> {
+    report_with_phase(args, socket, cancelled, &mut Phase::Validation).await
+}
+
+async fn report_with_phase(
+    args: &Options,
+    socket: &Path,
+    cancelled: &watch::Receiver<bool>,
+    phase: &mut Phase,
+) -> Result<Value> {
+    *phase = Phase::Validation;
     ensure!(
         args.execute && args.task_plan.is_none() && !args.plan_tasks && !args.plan_task_graph,
         "compute_document_report_mode"
@@ -229,9 +260,10 @@ async fn report_with_activity(
         args.resume || args.public_content,
         "compute_document_public_permission_required"
     );
+    *phase = Phase::Directory;
     let _lock = task::open_directory(&args.directory, args.resume)?;
     if !args.resume {
-        prepare(args, socket, cancelled).await?;
+        prepare(args, socket, cancelled, phase).await?;
     }
     if args.enroll_only {
         let (enrollment, _, _) = storage::load(&args.directory)?;
@@ -242,9 +274,11 @@ async fn report_with_activity(
             "package_count":enrollment.packages.len(), "private_data_supported":false}),
         );
     }
+    *phase = Phase::PeerExecution;
     let mut result = advance(args, socket, cancelled).await?;
     if result["synthesis_requested"] == true {
         if result["complete"] == true {
+            *phase = Phase::Synthesis;
             synthesis::advance(args, socket, cancelled, &mut result).await?;
         } else {
             result["joining"] = if result["execution_complete"] == true {
@@ -255,7 +289,9 @@ async fn report_with_activity(
             .into();
         }
     }
+    *phase = Phase::CollectionJoin;
     attach_collection(&args.directory, &mut result)?;
+    *phase = Phase::ResultSave;
     if !output::preserve_legacy_result(
         &args.directory.join("result.json"),
         MAX_RESULT_BYTES as u64,
@@ -266,6 +302,7 @@ async fn report_with_activity(
     )? {
         save(&args.directory, "result.json", &result, true)?;
     }
+    *phase = Phase::Complete;
     Ok(result)
 }
 
@@ -273,7 +310,12 @@ async fn report_with_activity(
     clippy::too_many_lines,
     reason = "One enrollment boundary binds acquired sources, tokenizer results and original signed validity before dispatch"
 )]
-async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool>) -> Result<()> {
+async fn prepare(
+    args: &Options,
+    socket: &Path,
+    cancelled: &watch::Receiver<bool>,
+    phase: &mut Phase,
+) -> Result<()> {
     ensure!(
         args.model_profile.is_default() || !args.batch_barrier,
         "compute_profile_requires_ready_rows"
@@ -282,6 +324,7 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
         args.public_content,
         "compute_document_public_permission_required"
     );
+    *phase = Phase::SourceSelection;
     let (document, collection, network) = selected_input(args, socket, cancelled).await?;
     let input = Input {
         version: 1,
@@ -297,6 +340,7 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
             .context("compute_document_question")?,
     };
     input.validate()?;
+    *phase = Phase::ProviderSelection;
     let selected = if args.discovery.discover_peers {
         ensure!(
             args.provider_key.is_empty(),
@@ -335,13 +379,16 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
         !*cancelled.borrow(),
         "compute_document_cancelled_before_planning"
     );
+    *phase = Phase::SourceRetention;
     retain_selected_sources(
         &args.directory,
         &input,
         collection.as_ref(),
         network.as_ref(),
     )?;
+    *phase = Phase::Tokenization;
     let plan = tokenize(args, &args.directory, &input, cancelled).await?;
+    *phase = Phase::Publication;
     ensure!(
         !*cancelled.borrow(),
         "compute_document_cancelled_before_publication"
@@ -387,6 +434,7 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
         .map(collection::network::Proofs::sha256)
         .transpose()?;
     drop(signer); // No identity/private key is retained during any peer exchange.
+    *phase = Phase::EnrollmentSave;
     save(&args.directory, "document.json", &enrollment, false)
 }
 

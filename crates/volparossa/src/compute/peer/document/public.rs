@@ -1,5 +1,7 @@
 //! Fixed operator configuration for the real public-document browser backend.
 
+mod diagnostic;
+
 use anyhow::{Context as _, Result, ensure};
 use clap::Args;
 use ed25519_dalek::VerifyingKey;
@@ -12,8 +14,9 @@ use std::{
 };
 use tokio::sync::watch;
 
-use super::{Options, parse_key, private_directory, rpc, task};
+use super::{Options, Phase, parse_key, private_directory, rpc, task};
 use crate::compute::ModelProfile;
+use diagnostic::{ReceiptObservation, ReceiptPhase};
 
 #[derive(Clone, Debug, Args)]
 pub(in crate::compute) struct Config {
@@ -131,6 +134,7 @@ pub(in crate::compute) async fn execute(
     cancelled: &watch::Receiver<bool>,
 ) -> Execution {
     let options = config.options(root, question, license);
+    let mut phase = Phase::Input;
     let result = async {
         private_directory(root)?;
         ensure!(
@@ -138,12 +142,17 @@ pub(in crate::compute) async fn execute(
             "compute_document_cancelled_before_planning"
         );
         task::write_bytes(&root.join("input.txt"), context.as_bytes(), false)?;
-        super::report_with_activity(&options, socket, cancelled).await
+        super::report_with_phase(&options, socket, cancelled, &mut phase).await
     }
     .await;
     // Failed/ambiguous execution must never free the admission slot just because the
     // coordinator future returned. Recheck every original handle, not only latest rows.
-    let remote_cleanup = terminal_receipts(root).unwrap_or(false);
+    let mut receipts = ReceiptObservation::default();
+    let remote_cleanup = terminal_receipts(root, &mut receipts).unwrap_or_else(|error| {
+        receipts.error = diagnostic::classify(&error);
+        false
+    });
+    receipts.confirmed = remote_cleanup;
     let local_cleanup = result.is_ok()
         || result.as_ref().is_err_and(|error| {
             matches!(
@@ -157,7 +166,21 @@ pub(in crate::compute) async fn execute(
                 .is_some()
         });
     let cleanup_confirmed = local_cleanup && remote_cleanup;
-    let result = result.and_then(|report| compact(&report, config, cleanup_confirmed));
+    let result = result.and_then(|report| {
+        phase = Phase::Compaction;
+        let compact = compact(&report, config, cleanup_confirmed)?;
+        phase = Phase::Complete;
+        Ok(compact)
+    });
+    let observation =
+        diagnostic::report(phase, &result, local_cleanup, &receipts, cleanup_confirmed);
+    // Diagnostic write failure does not change execution/cleanup truth or reopen a gate.
+    // The fixture reports this file as absent/invalid, never exports raw coordinator state.
+    let _ = task::write_bytes(
+        &root.join("execution-diagnostic.json"),
+        observation.to_string().as_bytes(),
+        false,
+    );
     Execution {
         result,
         cleanup_confirmed,
@@ -226,7 +249,7 @@ struct Receipt {
 
 /// Recheck coordinator-retained, exact authenticated RPC observations. This does not
 /// upgrade them into independently portable execution attestations or remote erasure.
-fn terminal_receipts(root: &Path) -> Result<bool> {
+fn retained_paths(root: &Path) -> Result<Vec<PathBuf>> {
     let mut directories = vec![(root.to_path_buf(), 0)];
     let mut paths = Vec::new();
     let mut entries = 0;
@@ -249,20 +272,29 @@ fn terminal_receipts(root: &Path) -> Result<bool> {
             }
         }
     }
+    Ok(paths)
+}
+
+fn terminal_receipts(root: &Path, observed: &mut ReceiptObservation) -> Result<bool> {
+    let paths = retained_paths(root)?;
     let mut handles = BTreeMap::new();
     for path in &paths {
         if matches!(
             path.file_name().and_then(|name| name.to_str()),
             Some("job-0.json" | "job-1.json" | "job-2.json" | "job-3.json")
         ) {
-            let handle: super::super::JobHandle =
-                serde_json::from_slice(&super::read_file(path, 65_536)?)?;
+            observed.phase = ReceiptPhase::ReadHandle;
+            let bytes = super::read_file(path, 65_536)?;
+            observed.phase = ReceiptPhase::DecodeHandle;
+            let handle: super::super::JobHandle = serde_json::from_slice(&bytes)?;
+            observed.phase = ReceiptPhase::DuplicateHandle;
             ensure!(
                 handles
                     .insert(handle.binding.job_id.clone(), handle)
                     .is_none(),
                 "compute_public_duplicate_handle"
             );
+            observed.handles = handles.len();
         }
     }
     let mut terminal = BTreeSet::new();
@@ -275,12 +307,17 @@ fn terminal_receipts(root: &Path) -> Result<bool> {
         {
             continue;
         }
-        let receipt: Receipt =
-            serde_json::from_slice(&super::read_file(path, rpc::MAX_RESPONSE_BYTES + 32768)?)?;
+        observed.phase = ReceiptPhase::ReadReceipt;
+        let bytes = super::read_file(path, rpc::MAX_RESPONSE_BYTES + 32768)?;
+        observed.phase = ReceiptPhase::DecodeReceipt;
+        let receipt: Receipt = serde_json::from_slice(&bytes)?;
+        observed.receipts += 1;
         let id = &receipt.handle.binding.job_id;
+        observed.phase = ReceiptPhase::HandleLookup;
         let handle = handles
             .get(id)
             .context("compute_public_receipt_without_handle")?;
+        observed.phase = ReceiptPhase::Binding;
         ensure!(
             receipt.version == 1
                 && name == format!("receipt-{id}.json")
@@ -288,15 +325,23 @@ fn terminal_receipts(root: &Path) -> Result<bool> {
                 && serde_json::to_vec(handle)? == serde_json::to_vec(&receipt.handle)?,
             "compute_public_retained_receipt_binding"
         );
+        observed.phase = ReceiptPhase::StatusValidation;
         let status = super::super::job(rpc::Outcome::Job(receipt.status), handle)?;
         if matches!(
             status.state,
             rpc::JobState::Complete | rpc::JobState::Failed | rpc::JobState::Cancelled
         ) {
             terminal.insert(id.clone());
+            observed.terminal = terminal.len();
         }
     }
-    Ok(handles.keys().all(|id| terminal.contains(id)))
+    let confirmed = handles.keys().all(|id| terminal.contains(id));
+    observed.phase = if confirmed {
+        ReceiptPhase::Complete
+    } else {
+        ReceiptPhase::MissingTerminal
+    };
+    Ok(confirmed)
 }
 
 #[cfg(test)]
@@ -308,8 +353,25 @@ mod tests {
     fn absent_jobs_are_quiescent_but_unknown_retained_objects_fail_closed() {
         let root = tempfile::tempdir().unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(terminal_receipts(root.path()).unwrap());
+        let mut observed = ReceiptObservation::default();
+        assert!(terminal_receipts(root.path(), &mut observed).unwrap());
+        assert_eq!(observed.phase, ReceiptPhase::Complete);
         std::os::unix::fs::symlink("/unused", root.path().join("untrusted")).unwrap();
-        assert!(terminal_receipts(root.path()).is_err());
+        assert!(terminal_receipts(root.path(), &mut ReceiptObservation::default()).is_err());
+    }
+
+    #[test]
+    fn malformed_handle_preserves_decode_stage_without_private_json() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        task::write_bytes(&root.path().join("job-0.json"), b"{\"PRIVATE_PROMPT", false).unwrap();
+        let mut observed = ReceiptObservation::default();
+        let error = terminal_receipts(root.path(), &mut observed).unwrap_err();
+        assert_eq!(observed.phase, ReceiptPhase::DecodeHandle);
+        assert_eq!(
+            diagnostic::classify(&error),
+            diagnostic::ErrorClass::JsonEof
+        );
+        assert_eq!(observed.handles, 0);
     }
 }

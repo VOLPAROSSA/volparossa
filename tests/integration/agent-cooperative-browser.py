@@ -43,6 +43,16 @@ STATUS_ERRORS = frozenset(("CHECK_FAILED", "OS_ERROR", "SUBPROCESS_FAILED", "INT
     "busy", "invalid_request", "handshake_required", "no_such_task", "execution_failed",
     "cleanup_unconfirmed", "unavailable", "not_configured", "invalid_response", "invalid_question",
     "invalid_context", "public_consent_required", "invalid_license", "deadline_exceeded", "storage_bound"))
+EXECUTION_PHASES = frozenset(('input', 'validation', 'directory', 'source_selection', 'provider_selection',
+    'source_retention', 'tokenization', 'publication', 'enrollment_save', 'peer_execution', 'synthesis',
+    'collection_join', 'result_save', 'complete', 'compaction'))
+EXECUTION_ERRORS = frozenset(('none', 'io_not_found', 'io_permission', 'io_other', 'json_syntax',
+    'json_data', 'json_eof', 'json_io', 'reaped_worker', 'peer_rpc', 'invariant_or_unknown'))
+RECEIPT_PHASES = frozenset(('scan_tree', 'read_handle', 'decode_handle', 'duplicate_handle',
+    'read_receipt', 'decode_receipt', 'handle_lookup', 'binding', 'status_validation', 'missing_terminal', 'complete'))
+RPC_PHASES = frozenset(('capabilities', 'eligibility', 'submit', 'poll', 'cancel'))
+RPC_ERRORS = frozenset(('invalid', 'busy', 'missing', 'expired', 'model_mismatch', 'worker_failed',
+                       'result_mismatch', 'unavailable'))
 
 
 def sha(raw):
@@ -204,12 +214,65 @@ def closed_status(path):
         return dict(state="invalid")
 
 
+def check_execution_diagnostic(value):
+    require(type(value) is dict and set(value) == {'version', 'phase', 'execution_ok', 'error_class',
+        'rpc', 'local_cleanup_confirmed', 'receipts', 'cleanup_confirmed'}
+        and type(value['version']) is int and value['version'] == 1
+        and value['phase'] in EXECUTION_PHASES and value['error_class'] in EXECUTION_ERRORS
+        and all(type(value[name]) is bool for name in ('execution_ok', 'local_cleanup_confirmed', 'cleanup_confirmed')),
+        'invalid closed coordinator diagnostic')
+    receipt = value['receipts']
+    require(type(receipt) is dict and set(receipt) == {'phase', 'handles', 'receipts', 'terminal', 'error', 'confirmed'}
+        and receipt['phase'] in RECEIPT_PHASES and receipt['error'] in EXECUTION_ERRORS
+        and type(receipt['confirmed']) is bool
+        and all(type(receipt[name]) is int and 0 <= receipt[name] <= 16384 for name in ('handles', 'receipts', 'terminal'))
+        and receipt['terminal'] <= receipt['handles']
+        and value['cleanup_confirmed'] == (value['local_cleanup_confirmed'] and receipt['confirmed']),
+        'invalid closed receipt diagnostic')
+    rpc = value['rpc']
+    if rpc is not None:
+        require(type(rpc) is dict and rpc.get('category') in
+            ('exchange_unconfirmed', 'broker_rejected', 'receipt_validation')
+            and rpc.get('phase') in RPC_PHASES, 'invalid closed RPC diagnostic')
+        expected = {'category', 'phase'}
+        if rpc['category'] == 'broker_rejected':
+            expected.add('code')
+            require(rpc.get('code') in RPC_ERRORS, 'invalid closed broker code')
+        require(set(rpc) == expected and value['error_class'] == 'peer_rpc', 'invalid closed RPC fields')
+    return value
+
+
+def closed_execution(path):
+    try:
+        info = path.lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= 8192
+                and stat.S_IMODE(info.st_mode) == 0o600 and info.st_uid == path.parent.stat().st_uid,
+                'invalid coordinator diagnostic file')
+        return dict(state='valid', status=check_execution_diagnostic(read(path, 8192)))
+    except FileNotFoundError:
+        return dict(state='absent')
+    except (OSError, ValueError, KeyError, TypeError):
+        return dict(state='invalid')
+
+
+def coordinator_diagnostic(state):
+    try:
+        tasks = task_roots(state)
+        return dict(state='valid', tasks=[dict(ordinal=index + 1,
+            **closed_execution(task / 'execution-diagnostic.json')) for index, task in enumerate(tasks)])
+    except FileNotFoundError:
+        return dict(state='absent')
+    except (OSError, ValueError, KeyError, TypeError):
+        return dict(state='invalid')
+
+
 def diagnostic(work, browser_code, observer_code):
     JOBS["guest_work"](work)
     require(0 <= browser_code <= 255 and 0 <= observer_code <= 255, "invalid process exit status")
-    root, _ = paths(work)
+    root, state = paths(work)
     write(work / f"{NAME}-diagnostic.json", dict(version=1, browser_exit_status=browser_code,
-        observer_exit_status=observer_code, browser=closed_status(root / "build/cooperative-proof/browser-status.json")))
+        observer_exit_status=observer_code, browser=closed_status(root / "build/cooperative-proof/browser-status.json"),
+        coordinator=coordinator_diagnostic(state)))
 
 
 def authorize(path, event):

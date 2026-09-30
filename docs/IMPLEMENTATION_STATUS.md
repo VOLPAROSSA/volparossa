@@ -25,6 +25,17 @@ pin fixes creation of a previously absent consent marker and preserves the origi
 failure phase across cleanup; five focused browser checks pass. A corrected source-bound
 live proof remains pending, not retroactively passed.
 
+The next [run `36732938863`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36732938863)
+on core `c8e5b0a2` reaches the first explicitly authorized browser task, then receives
+`cleanup_unconfirmed`. Both selected providers exchange application traffic, but the
+retained evidence does not establish a completed result or distinguish coordinator failure
+from uncertain terminal receipts. All 18 original artifacts remain failed (ZIP SHA-256
+`28b02fb7802d6c28f1752d59ebfb5ffe058fb830123538ec17442e7498bb0adc`); teardown leaves
+zero owned objects and identical host snapshots. A closed diagnostic now retains the
+document stage, typed error/RPC category, local cleanup and receipt-validation stage/counts.
+It exports no prompts, keys, paths or raw errors and does not weaken admission quarantine.
+Three scoped Rust and six fixture tests pass; the next source-exact trial remains pending.
+
 Automatic authority rounds and the four-job assessment cycle are integrated by
 [PR #163](https://github.com/VOLPAROSSA/volparossa/pull/163), normal merge `f4e6aa79`,
 after Quality and all CodeQL analyses passed on `c4060377`. This also prevents local
