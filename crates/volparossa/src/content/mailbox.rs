@@ -1,5 +1,7 @@
 //! Explicit private inbox discovery and delivery; no public name lookup or sender plaintext relay.
 
+mod import;
+
 use std::{
     collections::BTreeMap,
     fs,
@@ -47,6 +49,10 @@ pub(crate) enum Command {
     Send(Send),
     /// Discover the private inbox and decrypt messages into a NEW private directory, then acknowledge.
     Receive(Receive),
+    /// Fetch into a NEW private handoff directory; never acknowledge provider custody yet.
+    Fetch(Receive),
+    /// Explicitly attest durable consumer import, then acknowledge the exact message at both providers.
+    ConfirmImport(import::Confirm),
     /// Explicitly start the agent's durable mailbox service; content stop stops it again.
     Serve(Serve),
 }
@@ -151,6 +157,8 @@ pub(super) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Enroll(args) => enroll(&args, socket).await?,
         Command::Send(args) => send(&args, socket).await?,
         Command::Receive(args) => receive(&args, socket).await?,
+        Command::Fetch(args) => import::fetch(&args, socket).await?,
+        Command::ConfirmImport(args) => import::confirm(&args, socket).await?,
         Command::Serve(args) => {
             let request = MailboxServeRequest {
                 bind_address: args.bind.to_string(),
@@ -509,6 +517,30 @@ async fn receive_one(
     id: [u8; 32],
     publication: &SignedManifest,
 ) -> Result<Vec<String>> {
+    let plaintext =
+        fetch_plaintext(args, socket, grant, signer, recipient, id, publication).await?;
+    private_file(&args.output_dir.join(hex::encode(id)), &plaintext)?;
+    drop(plaintext);
+    both(
+        socket,
+        grant,
+        &simple(MailboxOperation::Acknowledge, Some(id)),
+        signer,
+        &[],
+    )
+    .await
+    .map(|confirmed| confirmed.encoded)
+}
+
+async fn fetch_plaintext(
+    args: &Receive,
+    socket: &Path,
+    grant: &VerifiedMailboxGrant,
+    signer: &SigningKey,
+    recipient: &RecipientKeyPair,
+    id: [u8; 32],
+    publication: &SignedManifest,
+) -> Result<Zeroizing<Vec<u8>>> {
     let command = simple(MailboxOperation::Get, Some(id));
     let reply = match remote(
         socket,
@@ -557,19 +589,9 @@ async fn receive_one(
     }
     ensure!(remaining.is_empty(), "unexpected mailbox ciphertext tail");
     let plaintext = open_private_message(&checked, &mut [&mut cache], now_seconds()?, recipient)?;
-    private_file(&args.output_dir.join(hex::encode(id)), &plaintext)?;
-    drop(plaintext);
     drop(cache);
     temporary.close()?;
-    both(
-        socket,
-        grant,
-        &simple(MailboxOperation::Acknowledge, Some(id)),
-        signer,
-        &[],
-    )
-    .await
-    .map(|confirmed| confirmed.encoded)
+    Ok(plaintext)
 }
 
 fn private_file(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -640,6 +662,22 @@ mod tests {
                 "new-output",
             ],
             vec![
+                "fetch",
+                "--invitation",
+                "invite",
+                "--output-dir",
+                "new-output",
+            ],
+            vec![
+                "confirm-import",
+                "--pending",
+                "handoff/pending.pb",
+                "--import-token-file",
+                "handoff/import-token",
+                "--imported-sha256",
+                &key,
+            ],
+            vec![
                 "serve",
                 "--bind",
                 "127.0.0.1:18080",
@@ -671,6 +709,19 @@ mod tests {
                 "cache",
                 "--manifest",
                 "manifest"
+            ])
+            .is_err()
+        );
+        assert!(
+            crate::Cli::try_parse_from([
+                "volparossa",
+                "content",
+                "mailbox",
+                "confirm-import",
+                "--pending",
+                "handoff/pending.pb",
+                "--import-token-file",
+                "handoff/import-token",
             ])
             .is_err()
         );
