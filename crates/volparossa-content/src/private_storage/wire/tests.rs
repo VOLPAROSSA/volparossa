@@ -179,6 +179,36 @@ fn hash(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
+#[tokio::test]
+async fn provider_local_admission_shares_disk_slot_and_persists_on_reopen() {
+    let mut fixture = Fixture::new();
+    let service = fixture.service.as_ref().unwrap();
+    let original = service.admission(None).await.unwrap();
+    assert_eq!(original.target_bytes, original.capacity_bytes);
+    let permit = Arc::clone(&service.disk_slot).try_acquire_owned().unwrap();
+    assert!(matches!(
+        service.admission(Some(0)).await,
+        Err(WireError::Busy)
+    ));
+    assert!(matches!(
+        service.admission(None).await,
+        Err(WireError::Busy)
+    ));
+    drop(permit);
+    assert_eq!(service.admission(None).await.unwrap(), original);
+    assert_eq!(service.admission(Some(0)).await.unwrap().target_bytes, 0);
+    assert!(matches!(
+        service.admission(Some(original.capacity_bytes + 1)).await,
+        Err(WireError::Store)
+    ));
+    fixture.reopen();
+    let service = fixture.service.as_ref().unwrap();
+    let reopened = service.admission(None).await.unwrap();
+    assert_eq!(reopened.target_bytes, 0);
+    assert_eq!(reopened.capacity_bytes, original.capacity_bytes);
+    assert_eq!(reopened.available_for_new_reservations_bytes, 0);
+}
+
 fn target(bytes: &[u8]) -> StorageTarget {
     StorageTarget {
         archive_id: [31; 32],

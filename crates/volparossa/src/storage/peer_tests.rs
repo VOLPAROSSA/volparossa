@@ -56,6 +56,8 @@ fn peer_storage_commands_accept_explicit_scoped_operations() {
     let key = hex::encode(SigningKey::from_bytes(&[11; 32]).verifying_key().as_bytes());
     let common = ["volparossa", "storage", "peer"];
     for command in [
+        vec!["admission", "--provider-key", &key],
+        vec!["admission", "--provider-key", &key, "--target-bytes", "0"],
         vec![
             "serve",
             "--bind",
@@ -133,6 +135,14 @@ fn peer_storage_commands_require_explicit_trust_encryption_and_no_reuse_override
     let key = hex::encode(SigningKey::from_bytes(&[11; 32]).verifying_key().as_bytes());
     let common = ["volparossa", "storage", "peer"];
     for command in [
+        vec!["admission", "--target-bytes", "1"],
+        vec![
+            "admission",
+            "--provider-key",
+            &key,
+            "--target-bytes",
+            "1099511627777",
+        ],
         vec![
             "serve",
             "--bind",
@@ -218,6 +228,99 @@ fn private_archive_journal_is_durable_locked_private_and_bound_before_reservatio
     drop(reopened);
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(LockedJournal::open(&path).is_err());
+}
+
+#[tokio::test]
+async fn local_provider_admission_cli_uses_real_framed_status_and_preserves_custody() {
+    use volparossa_local_control::{
+        CONTROL_PROTOCOL_VERSION, ControlResponse, ControlResult, PrivateStorageAdmission,
+        control_request::Operation, control_response::Payload, read_request, write_response,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("store");
+    let socket = directory.path().join("agent.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let mut secret = [0; 32];
+    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut secret);
+    let signer = SigningKey::from_bytes(&secret);
+    let provider_key = signer.verifying_key();
+    let now = super::super::now().unwrap();
+    let bytes = vec![0x43; 2048];
+    let mut store = PrivateStorageStore::create(
+        &root,
+        StorageLimits {
+            capacity_bytes: 4096,
+            min_free_bytes: 0,
+        },
+    )
+    .unwrap();
+    let lease = store
+        .reserve(2048, Sha256::digest(&bytes).into(), now + 300, now)
+        .unwrap();
+    store
+        .write_reserved(lease, &mut std::io::Cursor::new(&bytes), now)
+        .unwrap();
+    let backend = PrivateStorageProvider::new(store, provider_key).unwrap();
+    let service = Arc::new(StorageService::new(Arc::new(signer), backend));
+    let serving = Arc::clone(&service);
+    // This is a local agent framing fixture around the actual disk-slot/backend, not an
+    // overlay or remote storage proof. Both operations use the production CLI client.
+    let server = tokio::spawn(async move {
+        for expected_target in [Some(1024), None] {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let incoming = read_request(&mut stream).await.unwrap();
+            let Some(Operation::PrivateStorageAdmission(change)) = incoming.operation else {
+                panic!("scoped local provider admission operation");
+            };
+            assert_eq!(change.provider_key, provider_key.as_bytes());
+            assert_eq!(change.target_bytes, expected_target);
+            let status = serving.admission(change.target_bytes).await.unwrap();
+            let reply = ControlResponse {
+                protocol_version: CONTROL_PROTOCOL_VERSION,
+                request_id: incoming.request_id,
+                result: ControlResult::Ok as i32,
+                diagnostic_code: "PRIVATE_STORAGE_ADMISSION".into(),
+                payload: Some(Payload::PrivateStorageAdmission(PrivateStorageAdmission {
+                    provider_key: provider_key.to_bytes().to_vec(),
+                    capacity_bytes: status.capacity_bytes,
+                    target_bytes: status.target_bytes,
+                    reserved_bytes: status.reserved_bytes,
+                    committed_bytes: status.committed_bytes,
+                    leases: status.leases,
+                    retained_payload_bytes: status.retained_payload_bytes,
+                    pending_drain_bytes: status.pending_drain_bytes,
+                    available_for_new_reservations_bytes: status
+                        .available_for_new_reservations_bytes,
+                })),
+            };
+            write_response(&mut stream, &reply).await.unwrap();
+        }
+    });
+    for target_bytes in [Some(1024), None] {
+        let report = super::admission(
+            &super::Admission {
+                provider_key,
+                target_bytes,
+            },
+            &socket,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report["target_bytes"], 1024);
+        assert_eq!(report["retained_payload_bytes"], 2048);
+        assert_eq!(report["pending_drain_bytes"], 1024);
+        assert_eq!(report["automatic_migration"], false);
+        assert_eq!(report["network_contribution_verified"], false);
+    }
+    server.await.unwrap();
+    drop(service);
+    let mut reopened = PrivateStorageStore::open_existing(&root).unwrap();
+    assert_eq!(reopened.admission_status().unwrap().target_bytes, 1024);
+    assert!(reopened.reserve(1, [1; 32], now + 300, now).is_err());
+    let mut restored = Vec::new();
+    reopened.restore(lease, &mut restored, now).unwrap();
+    assert_eq!(restored, bytes);
+    assert_eq!(reopened.usage().unwrap().committed_bytes, 2048);
 }
 
 #[test]

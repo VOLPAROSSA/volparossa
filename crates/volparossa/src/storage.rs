@@ -54,6 +54,14 @@ pub(crate) enum LocalCommand {
         #[arg(long)]
         store: PathBuf,
     },
+    /// Set new-reservation admission only; occupied bytes remain protected and pending drain.
+    Target {
+        #[arg(long)]
+        store: PathBuf,
+        /// Zero closes new admission. Cannot exceed the store's original payload capacity.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(0..=MAX_CAPACITY_BYTES))]
+        target_bytes: u64,
+    },
     /// Stream an already-encrypted archive into one local lease, verifying its full hash.
     Deposit {
         #[arg(long)]
@@ -122,6 +130,14 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
             status(&store)
         }
         LocalCommand::Status { store } => status(&open(&store)?),
+        LocalCommand::Target {
+            store,
+            target_bytes,
+        } => {
+            let mut store = open(&store)?;
+            store.set_admission_target(target_bytes)?;
+            status(&store)
+        }
         LocalCommand::Deposit {
             store,
             input,
@@ -162,14 +178,23 @@ fn open(path: &Path) -> Result<PrivateStorageStore> {
 }
 
 fn status(store: &PrivateStorageStore) -> Result<()> {
-    let usage = store.usage()?;
+    let usage = store.admission_status()?;
     print(&json!({
         "schema": 1,
         "scope": "local-provider-only",
         "reserved_bytes": usage.reserved_bytes,
         "committed_bytes": usage.committed_bytes,
         "leases": usage.leases,
+        "capacity_bytes": usage.capacity_bytes,
+        "target_bytes": usage.target_bytes,
+        "retained_payload_bytes": usage.retained_payload_bytes,
+        "pending_drain_bytes": usage.pending_drain_bytes,
+        "pending_drain": usage.pending_drain_bytes > 0,
+        "available_for_new_reservations_bytes": usage.available_for_new_reservations_bytes,
         "accounting_unit": "ciphertext-payload-bytes-per-copy",
+        "metadata_overhead_measured": false,
+        "automatic_migration": false,
+        "automatic_contribution_resize": false,
         "remote_replication": false,
         "network_contribution_verified": false,
     }))

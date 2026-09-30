@@ -92,6 +92,19 @@ other participants' live data. Existing custody needs verified independent repla
 release. Unavailable replacement capacity must appear as **pending drain**, not freed space.
 Current payload quotas and receipts do not implement this adaptive distributed controller.
 
+New local admission-target slice: `storage local target/status` operates an offline owned
+store; `storage peer admission --provider-key LOCAL_KEY [--target-bytes N]` controls the
+already attached local provider through typed administrative IPC, not a remote peer.
+The durable target may fall below retained payload: new reservations are rejected when
+they do not fit, while existing leases/uploads/restores remain intact and excess custody
+is shown as `pending_drain_bytes`. Zero closes admission; the original hard quota and
+free-space floor remain unchanged. Schema 2 atomically migrates owned version-1 stores
+with their original quota as the initial target; older binaries reject schema 2. No target
+change deletes another owner's archive or claims freed disk, measured overhead, automatic
+migration or completed 1:1 reciprocity. Five new backend checks, two actual CLI/IPC checks,
+two protocol checks and strict four-crate Clippy pass; no network resize proof is claimed.
+See [commands and scope](PRIVATE_STORAGE.md#local-admission-target-and-pending-drain).
+
 The [live peer-storage run on `434ed112`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36589770066)
 **passes**. The exact-source report checker accepts the original 93-file artifact bundle
 (ZIP SHA-256 `80d1353d3844b82d75e5b554f4ab89ca538fc70248b9c6ab71d20f9d1f175370`).
@@ -166,6 +179,27 @@ another owner's data. The four focused replica tests pass (11.27 seconds), inclu
 new three-real-store framed-transport handoff with lost Reserve, readback and Delete replies,
 retained charge, reopen and repeated restores. This is separate from the passing two-provider
 overlay evidence above; no new live handoff proof is claimed.
+
+A separate `private-storage-handoff` scenario is now executable: six protected phases
+cover A/B upload, stopped A with three copies still charged, same-intent retry after
+reopening A, repeated independent reads from B and C, and acknowledged deletion. It
+requires the real owner CLI, full replacement readback, exact store identities and
+per-phase route/privacy/completion evidence. Five handoff checks and three dispatch/export
+checks pass locally. It does not claim automatic
+contribution resizing, repair, independent hardware or Signal backup integration.
+
+The [source-exact run on `721b56f9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36616700648)
+now **passes** all six phases and the unchanged report checker against 139 original files
+(ZIP SHA-256 `6d6d274c2fd526930147c929cb27a96caad05b98726ed73e27ed1146e14ac131`).
+With the original input absent, the three independent provider stores each retain 524,326
+bytes while A's deletion is unconfirmed (1,572,978 charged payload bytes). Reopening the
+same A store and retrying the same intent verifies C again, then deletes only A, retaining
+B/C and 1,048,652 charged bytes. Two full non-consuming restores from B and then C succeed
+with the other service unavailable; final acknowledged deletion leaves zero leases/bytes.
+All six route/privacy/completion phases, exact store identities, private cleanup, zero
+remaining topology objects and byte-identical host state pass. This withdraws provider
+services, not independent machines or the whole owner device, and does not establish
+automatic contribution resizing or measured physical overhead.
 
 - [x] Source-exact disposable multi-node proof of the protected single-provider storage path
   and seven CLI commands (`434ed112`, run `36589770066`).
