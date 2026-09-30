@@ -11,13 +11,19 @@ Firefox panel to the real `compute public-serve` service and existing signed doc
 peer-synthesis coordinator. Prefill does not submit; rights confirmation and explicit
 public consent are required. The private local compute service is unchanged.
 The `agent-cooperative-browser` disposable scenario pins browser source
-`3c7894168ce6c1f28e96ce5b95bc99928e6c4304` and ESR 140.16.0. Its independent observer
+`326ce0f2de2b72ce2769e95ddb8b009d6266f2ae` and ESR 140.16.0. Its independent observer
 requires both real peer workers over the protected route, complete source partitioning,
 multiple synthesis levels, exact retained receipts joined to the displayed answer,
 and cancellation after a second task has a live worker. Only bounded structural evidence
 and hashes are exported. Targeted fixture checks pass; **the combined live KVM proof
 has not yet passed**. This is not private peer inference, correctness of the answer,
 a full Firefox build or complete alpha acceptance. See [the proof contract](COOPERATIVE_BROWSER.md).
+The original [run 36728657126](https://github.com/VOLPAROSSA/volparossa/actions/runs/36728657126)
+on core `7c82fc76` / browser `3c789416` failed in the browser driver before peer payload.
+Cleanup completed and original host-state files were byte-identical. The updated browser
+pin fixes creation of a previously absent consent marker and preserves the original
+failure phase across cleanup; five focused browser checks pass. A corrected source-bound
+live proof remains pending, not retroactively passed.
 
 Automatic authority rounds and the four-job assessment cycle are integrated by
 [PR #163](https://github.com/VOLPAROSSA/volparossa/pull/163), normal merge `f4e6aa79`,

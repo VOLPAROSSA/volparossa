@@ -1,7 +1,8 @@
 # Cooperative browser: real public peer execution
 
-Status: implemented candidate; combined live KVM proof pending. Local pure fixture
-checks are not a browser, model or network execution claim.
+Status: implemented candidate; the first combined live KVM attempt failed in the
+browser proof driver. A corrected attempt remains pending. Local pure fixture checks
+are not a browser, model or network execution claim.
 
 The public browser integration has a separate socket and panel from private local
 compute. `ask(question, context)` prefills the panel only. Sending requires a supported
@@ -12,7 +13,7 @@ owner removes it; peer cancellation is not a global-erasure guarantee.
 The disposable `agent-cooperative-browser` scenario joins three actual components:
 
 1. Exact-pinned Gecko ESR 140.16.0 and browser source
-   `3c7894168ce6c1f28e96ce5b95bc99928e6c4304` drive the real public panel.
+   `326ce0f2de2b72ce2769e95ddb8b009d6266f2ae` drive the real public panel.
 2. `compute public-serve` owns the signing identity and model/runtime configuration;
    the browser submits no paths, model code or signing keys.
 3. Two real compatible peer workers execute signed public fragments and hierarchical
@@ -46,3 +47,31 @@ The GitHub alpha-topology workflow runs the real disposable scenario at its exac
 revision. Acceptance invokes `agent-cooperative-browser.py report REPORT SOURCE_SHA`;
 missing consent, workers, native receipts, hierarchy, transport evidence or cleanup fail
 the gate rather than silently substituting a fake service or local-only inference.
+
+## First live attempt and bounded driver correction
+
+[Run 36728657126](https://github.com/VOLPAROSSA/volparossa/actions/runs/36728657126)
+on core `7c82fc76ab9a2b4256dfd95f428199a0884bd705` and browser
+`3c7894168ce6c1f28e96ce5b95bc99928e6c4304` **fails**.
+The original 18-file artifact ZIP has SHA-256
+`9820ccb3e63490d8675d2a12bbf8c516e2a34b6f0dd99fa2127e78b616bfbdae`.
+Gecko reaches the panel driver, but its closed diagnostic records only
+`panel-cleanup / SCRIPT_FAILED`: a `finally` status update hid the preceding failure
+phase. No WireGuard data or provider application payload was observed in this phase;
+there is no combined answer, peer execution or cancellation proof.
+
+Source inspection identifies a deterministic fresh-marker defect. The driver calls
+`nsIFile.isSymlink()` before creating `pre-consent.json`, whereas the pinned
+[Gecko implementation](https://hg.mozilla.org/releases/mozilla-esr140/file/d864999404b3032f682d74ccc60d1ce38c9ce609/xpcom/io/nsLocalFileUnix.cpp)
+returns an error when `lstat` finds no such file. The correction in browser `326ce0f2`
+creates new markers atomically with `PR_CREATE_FILE | PR_EXCL`, still rejecting existing
+files and dangling symlinks; only the existing private status file may be replaced. It records failure
+before `finally` so cleanup cannot overwrite the original phase. Focused pure helper
+checks cover these semantics; they do not convert the failed run into a pass.
+
+That original attempt nevertheless reports complete cleanup with zero owned objects
+remaining and all four private-job cleanup checks true. The original before/after
+host-state files are byte-identical, SHA-256
+`2ab5456d7d3aea708e6564b060e41d7476b66fb1a4908c0f1e6d83516edfb474`.
+Acceptance still requires a new source-bound run with the real peer result, original
+receipts, cancellation and cleanup checks intact.
