@@ -66,6 +66,8 @@ def fixture(root):
         firefox157_build_proven=False, namespace="net:[99]", cleanup=dict(browser_exited=True, profile_removed=True),
         socket_access=dict(path_type_verified=True, socket_parent_owner_group_match=True,
             peer_uid_matches_socket=True, unix_connect_verified=True, capability_sent=False),
+        control_namespace=dict(scope="client-control-directory", original_socket_inode_preserved=True,
+            original_parent_inode_preserved=True, read_only=True, grant_unmodified=True),
         result=dict(independent_attachments=True, wrong_scope_blocked=True, a=dict(bytes=size, sha256_verified=True),
             b=dict(bytes=size, sha256_verified=True), a_detached=True, b_survives_a_detach=True))
     origin = dict(version=1, run_id=run_id, complete=True, requests=[dict(phase=phase, bytes=size, sha256=digest,
@@ -148,6 +150,16 @@ class BrowserNetworkEvidence(unittest.TestCase):
             self.assertEqual(CHECK["validate_report"](root / "browser-network-smoke.json", REVISION), report)
             with self.assertRaises(ValueError):
                 CHECK["validate_report"](root / "browser-network-smoke.json", "d" * 40)
+
+    def test_original_namespace_mapping_proof_is_required(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = fixture(root)
+            for field in ("original_socket_inode_preserved", "original_parent_inode_preserved", "read_only", "grant_unmodified"):
+                invalid = copy.deepcopy(report)
+                invalid["network"]["browser"]["control_namespace"][field] = False
+                with self.assertRaises(ValueError):
+                    CHECK["validate_browser"](invalid["network"])
 
     def test_one_noncarrying_path_or_foreign_flow_token_fails(self):
         with tempfile.TemporaryDirectory() as temporary:

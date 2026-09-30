@@ -190,6 +190,22 @@ pass, including all three TLS responses and cleanup. The exact core bootstrap ca
 and actual browser-to-MPTCP payload remain unproven; no production routing or permission
 change is inferred from the previous generic error.
 
+The [eighth combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36738800599)
+on `be2c6cd6baf70da6ec8c8550e88072f2117b4109` **fails** at the new socket preflight:
+`socket-path / OS_ERROR / ENOENT`. All 17 originals are retained (ZIP SHA-256
+`23394cdd6ed6b19abb070c49459941073932e5b2950496cfbfd6ac7aceecfdfb`). Private cleanup
+passes, topology cleanup leaves zero objects, and both host snapshots hash to
+`dd39e154bd1e2ea640e8cdb8ba7b41a609865394950276d57c670cd75f9c0e6b`.
+Source inspection confirms a fixture mount-publication mismatch: the agent binds its
+runtime at `/run/volparossa` and correctly advertises that app socket, while the browser
+sees the external fixture path. The candidate maps only the exact client control directory
+read-only at the unchanged advertised path inside the browser's private `/run`; neither
+the rest of the runtime nor agent state is published there. Parent/socket inode, mode and
+ownership equality, read-only access and the original grant are mandatory proof fields.
+Production Rust, peer UID checks, application credentials and egress restrictions are
+unchanged. Twelve pure browser checks, one actual unprivileged namespace/socket check
+and thirteen core evidence checks pass; actual browser/MPTCP transfer is still pending.
+
 Ordinary browsing integration, opportunistic fallback with the user-requested default-off
 browser kill switch, HTTP/3, WebRTC, background traffic and crash-persistent browser-wide
 enforcement remain unfinished. Existing shared-core security defaults are unchanged. Shared

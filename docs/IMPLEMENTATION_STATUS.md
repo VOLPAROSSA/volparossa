@@ -94,6 +94,14 @@ Eleven browser tests, twelve fixture tests and a real-ESR/synthetic-gateway smok
 This is improved diagnosis and preserved local functionality, not a successful real-core
 browser route; no speculative permission relaxation or core routing change is included.
 
+The [eighth run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36738800599)
+on `be2c6cd6` isolates `socket-path / ENOENT`: the grant's agent-namespace path was not
+published in the browser namespace. Private/topology cleanup and unchanged host state
+pass. The fixture candidate read-only maps only the original client control directory
+to that unchanged path, requiring matching parent/socket inodes and ownership. Twelve
+pure browser checks, a real unprivileged namespace/socket check and thirteen core
+evidence checks pass; the corrected real browser/MPTCP payload proof remains pending.
+
 [Signal integration](https://github.com/VOLPAROSSA/volparossa-chat/pull/1) now has a pinned
 Desktop/libsignal source baseline and explicit device/session/backup contracts, not a
 working modified client. Ordinary Signal compatibility, authenticated direct ciphertext

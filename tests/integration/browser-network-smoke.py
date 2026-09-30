@@ -37,7 +37,7 @@ EXPORT_NAMES = (
 )
 DRIVER_PHASES = frozenset((
     "wrapper-start", "runtime-validation", "isolated-home", "wrapper-launch", "child-validation",
-    "grant-validation", "socket-path", "socket-owner", "socket-access", "profile-init", "browser-start", "marionette-connect", "marionette-session",
+    "grant-validation", "control-namespace", "socket-path", "socket-owner", "socket-access", "profile-init", "browser-start", "marionette-connect", "marionette-session",
     "script-start", "import", "attach-a", "attach-b", "wrong-scope", "request-a", "request-b",
     "detach-a", "finish-b", "result-validation", "browser-stop", "complete",
 ))
@@ -424,6 +424,9 @@ def validate_browser(evidence):
     require(browser["socket_access"] == dict(path_type_verified=True, socket_parent_owner_group_match=True,
         peer_uid_matches_socket=True, unix_connect_verified=True, capability_sent=False),
         "in-sandbox non-consuming application socket proof missing")
+    require(browser["control_namespace"] == dict(scope="client-control-directory", original_socket_inode_preserved=True,
+        original_parent_inode_preserved=True, read_only=True, grant_unmodified=True),
+        "original control namespace mapping proof missing")
     result = browser["result"]
     require(set(result) == {"independent_attachments", "wrong_scope_blocked", "a", "b", "a_detached", "b_survives_a_detach"}
         and all(result[key] is True for key in ("independent_attachments", "wrong_scope_blocked", "a_detached", "b_survives_a_detach"))

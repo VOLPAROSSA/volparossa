@@ -96,6 +96,7 @@ EOF
         --groups="$bn_control_gid" --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- \
         env HOME="$bn_user/home" python3 -B "$bn_runtime/scripts/smoke_network_core.py" --stage "$bn_runtime/build/firefox-esr" \
         --grant-a "$bn_user/grant-a.json" --grant-b "$bn_user/grant-b.json" --test-ca "$bn_user/test-ca.pem" \
+        --control-directory "$WORK/runtime-client/control" \
         --expected-sha256 "$bn_hash" --expected-bytes 33554432 --core-revision "$expected_commit" \
         --parent-netns "$bn_parent_netns" --output "$bn_output" \
         --url-a https://destination.volparossa.test:18443/first.bin \
