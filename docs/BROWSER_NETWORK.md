@@ -1,7 +1,33 @@
 # Scoped browser TCP gateway
 
-Status: executable development candidate; a live Firefox-to-overlay proof is still pending.
+Status: the scoped Firefox-to-overlay TCP component has passed its live proof.
 This is not the complete browser network integration or a browser-wide kill switch.
+
+## Verified component milestone
+
+The exact [run 36776940049](https://github.com/VOLPAROSSA/volparossa/actions/runs/36776940049)
+on core `b8a1dd6e52978c40ced4c92c006f8301a587c659`, with browser adapter
+`198e288183b06d8a4ff584210ade449f124bc737`, passes. The 30 original artifacts were
+downloaded and revalidated against that source, including the original kernel samples
+and capture reports (artifact ZIP SHA-256
+`86174637ad5bdc62cbd2b785effed63325e5b4e4a10041212cd46806000b8a19`).
+
+Actual ESR 140.16 Gecko receives two separate 32-MiB HTTPS responses with complete
+length/hash verification and end-to-origin TLS 1.3. Each transfer has two carrying
+kernel MPTCP subflows bound to distinct WireGuard relays; each Client subflow receives
+more than 5 MiB between its original samples. The origin observes only the Exit and
+no proxy credentials. Closing attachment A retires its independent Client/Exit route
+while B remains active. Wrong-scope requests, packet-capture privacy boundaries,
+private-file cleanup and zero remaining owned topology objects are checked. The
+before/after guest-root host-state SHA-256 is unchanged:
+`b30f6805035ff4ce776c836dbe80a14d95a4883a25fa427f606b0f227821d396`.
+
+This proves two explicit scoped Gecko channels, not ordinary tab navigation over the
+overlay, simultaneous A/B payload transfer, live direct fallback, HTTP/3, a complete
+browser kill switch or a Firefox 157 source build. The disposable profile disables
+ECH-GREASE to match the existing Exit inspection boundary; product-scoped native ECH
+compatibility remains separate work. Earlier failed trials below remain historical
+failures; their pending-proof descriptions are superseded only for this component.
 
 ## One daemon, independent application connections
 
