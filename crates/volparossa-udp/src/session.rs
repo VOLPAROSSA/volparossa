@@ -855,6 +855,7 @@ mod tests {
                 port: u32::from(local.port()),
             }),
             remote: None,
+            mptcp_flow_handle: Vec::new(),
         };
         let result = CommittedQuicUdpTransport::from_helper_handoff(
             OwnedFd::from(socket),

@@ -116,6 +116,9 @@ mod downlink_sender;
 mod forwarding_bootstrap;
 mod functional_backend;
 mod ipv6_forwarding;
+mod mptcp_bootstrap;
+mod mptcp_subflow;
+mod path_extension;
 mod relay_fence;
 mod restart_reaper;
 pub(crate) use dead_worker_reaper::{
@@ -1380,9 +1383,15 @@ fn production_worker_network_bootstrap(
     deadline: HardDeadline,
 ) -> Result<WorkerNetworkBootstrap, WorkerV3Error> {
     match role {
-        RoutingContextRole::Client | RoutingContextRole::Exit => {
+        RoutingContextRole::Client => {
+            mptcp_bootstrap::enable(
+                parent_network_namespace,
+                crate::worker_sandbox::current_network_namespace_identity()?,
+                deadline,
+            )?;
             Ok(WorkerNetworkBootstrap::NonRelay)
         }
+        RoutingContextRole::Exit => Ok(WorkerNetworkBootstrap::NonRelay),
         RoutingContextRole::Relay => {
             let worker_network_namespace =
                 crate::worker_sandbox::current_network_namespace_identity()?;
@@ -1922,6 +1931,8 @@ fn relay_activation_specification(
 }
 
 struct WorkerContext<Kernel> {
+    mptcp_flows: Option<Mutex<mptcp_subflow::ClientPathManager>>,
+    extensions: BTreeMap<ContextId, path_extension::WorkerExtension>,
     route_context_id: ContextId,
     role: RoutingContextRole,
     bound_path_id: Option<u8>,
@@ -2321,6 +2332,8 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
     #[cfg(test)]
     const fn new(route_context_id: ContextId, role: RoutingContextRole, kernel: Kernel) -> Self {
         Self {
+            mptcp_flows: None,
+            extensions: BTreeMap::new(),
             route_context_id,
             role,
             bound_path_id: None,
@@ -2360,7 +2373,9 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             _ => return None,
         };
         Some(Self {
+            mptcp_flows: None,
             route_context_id,
+            extensions: BTreeMap::new(),
             role,
             bound_path_id: matches!(role, RoutingContextRole::Relay).then_some(path_id),
             relay_fence: Some(relay_fence),
@@ -2876,6 +2891,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         let ownership = ownerships
             .iter()
             .find(|ownership| ownership.resource.key() == (path_id, expected_role as i32))
+            .or_else(|| self.extension_committed_lease(path_id, expected_role as i32))
             .ok_or(InternalWorkerResult::Invalid)?;
         let proof = ownership.proof.ok_or(InternalWorkerResult::Invalid)?;
         let live = current_unix_seconds()
@@ -3041,6 +3057,12 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
     }
 
     fn destroy(&mut self, deadline: HardDeadline) -> WorkerDestroyOutcome {
+        let extensions = self.extensions.keys().copied().collect::<Vec<_>>();
+        for id in extensions {
+            if self.abort_extension(id, deadline) != InternalWorkerResult::Ok {
+                return WorkerDestroyOutcome::CleanupIncomplete;
+            }
+        }
         if let Some(manager) = self.mptcp.as_ref() {
             if manager.cleanup().is_err() || deadline.ensure_remaining().is_err() {
                 return WorkerDestroyOutcome::CleanupIncomplete;
@@ -3662,7 +3684,7 @@ fn initialise_child_context(
             let bootstrap = network_bootstrap
                 .take()
                 .ok_or(WorkerV3Error::Authentication)?;
-            let worker_context = WorkerContext::new_bound(
+            let mut worker_context = WorkerContext::new_bound(
                 route_context_id,
                 role,
                 bound_path_id,
@@ -3672,6 +3694,12 @@ fn initialise_child_context(
                 mptcp,
             )
             .ok_or(WorkerV3Error::Authentication)?;
+            if role == RoutingContextRole::Client {
+                worker_context.mptcp_flows = Some(Mutex::new(
+                    mptcp_subflow::ClientPathManager::connect()
+                        .map_err(|()| WorkerV3Error::Authentication)?,
+                ));
+            }
             *context = Some(worker_context);
             Ok((
                 InternalWorkerResult::Ok,
@@ -4078,6 +4106,13 @@ fn child_loop(
         let (request, deadline) = receive_deadline_bound_worker_request(channel, expected_parent)?;
         let operation = request.operation.as_ref().ok_or(WorkerV3Error::Invalid)?;
         let (result, outcome, exit, descriptor) = match operation {
+            internal_worker_request::Operation::PathExtension(value) => {
+                let (result, outcome, exit) = match context.as_mut() {
+                    Some(context) => context.extension_operation(value, &mut keys, deadline)?,
+                    None => (InternalWorkerResult::NotFound, None, false),
+                };
+                (result, outcome, exit, None)
+            }
             internal_worker_request::Operation::Initialise(initialise) => {
                 let (result, outcome, exit) = initialise_child_context(
                     &mut context,
@@ -4139,6 +4174,11 @@ fn child_loop(
             internal_worker_request::Operation::AddMptcpEndpoint(operation) => {
                 let (result, outcome, exit) =
                     add_mptcp_child_context(context.as_ref(), operation, bound_context, deadline)?;
+                (result, outcome, exit, None)
+            }
+            internal_worker_request::Operation::UpdateMptcpSubflow(operation) => {
+                let (result, outcome, exit) =
+                    mptcp_subflow::execute(context.as_ref(), operation, bound_context, deadline);
                 (result, outcome, exit, None)
             }
             internal_worker_request::Operation::RemoveMptcpEndpoint(operation) => {
@@ -4284,12 +4324,16 @@ fn request_context(request: &InternalWorkerRequest) -> Result<ContextId, WorkerV
     use internal_worker_request::Operation;
 
     let bytes = match request.operation.as_ref().ok_or(WorkerV3Error::Invalid)? {
+        Operation::PathExtension(value) => {
+            value.context_id().map_err(|_| WorkerV3Error::Invalid)?
+        }
         Operation::Initialise(value) => &value.route_context_id,
         Operation::PrepareLeases(value) => &value.route_context_id,
         Operation::ActivateLeases(value) => &value.route_context_id,
         Operation::ProbeCommitLeases(value) => &value.route_context_id,
         Operation::AddMptcpEndpoint(value) => &value.route_context_id,
         Operation::RemoveMptcpEndpoint(value) => &value.route_context_id,
+        Operation::UpdateMptcpSubflow(value) => &value.route_context_id,
         Operation::AcquireTransportSocket(value) => &value.route_context_id,
         Operation::InitialiseClientIngress(value) => &value.client_runtime_id,
         Operation::PrepareClientIngress(value) => &value.client_runtime_id,
@@ -7939,7 +7983,8 @@ fn transition(
             StablePhase::Prepared,
             Some(Operation::ActivateClientIngress(_) | Operation::ActivateLeases(_)),
         ) => Ok((StablePhase::Activated, false)),
-        (StablePhase::Activated, Some(Operation::ProbeCommitLeases(_))) => {
+        (StablePhase::Committed, Some(Operation::PathExtension(_)))
+        | (StablePhase::Activated, Some(Operation::ProbeCommitLeases(_))) => {
             Ok((StablePhase::Committed, false))
         }
         (
@@ -7957,7 +8002,11 @@ fn transition(
         }
         (
             StablePhase::Committed,
-            Some(Operation::AddMptcpEndpoint(_) | Operation::RemoveMptcpEndpoint(_)),
+            Some(
+                Operation::AddMptcpEndpoint(_)
+                | Operation::RemoveMptcpEndpoint(_)
+                | Operation::UpdateMptcpSubflow(_),
+            ),
         ) => Ok((StablePhase::Committed, false)),
         (StablePhase::Committed, Some(Operation::AcquireTransportSocket(value)))
             if InternalTransportSocketKind::try_from(value.descriptor_kind)
@@ -12605,6 +12654,7 @@ impl WorkerCoordinator {
 #[cfg(test)]
 mod tests {
     mod live_relay_cleanup;
+    mod path_extension;
     use std::{
         env, fs,
         io::Read,

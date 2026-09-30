@@ -70,6 +70,10 @@ pub enum ExitForwardOperation {
     AdjacentReceiveBudget = 13,
     /// Retained data Relay forwards a session-signed retirement; never a client-control hop.
     RouteRetire = 14,
+    /// Original control Relay forwards one session-signed finalized-route path extension.
+    ExtendRoute = 15,
+    /// Original control Relay carries a session query for established MPTCP path state.
+    MptcpPaths = 16,
 }
 
 /// Endpoint-bearing data-Relay request for the selected Exit's private readiness phase.
@@ -301,6 +305,8 @@ impl ExitForwardRequest {
             | ExitForwardOperation::ProbePermit
             | ExitForwardOperation::FinalizeReservation
             | ExitForwardOperation::ConfirmRelay
+            | ExitForwardOperation::ExtendRoute
+            | ExitForwardOperation::MptcpPaths
             | ExitForwardOperation::NativeProbePermit => {
                 validate_fixed_nonzero::<NODE_ID_LENGTH>(&self.exit_node_id)?;
                 if self.exit_node_id == self.control_relay_node_id {
@@ -1054,6 +1060,12 @@ fn validate_granted_responses(
         ExitForwardOperation::ConfirmRelay => {
             validate_exact_types(responses, &[ControlMessageType::ExitConfirmationReceipt])
         }
+        ExitForwardOperation::ExtendRoute => {
+            validate_exact_types(responses, &[ControlMessageType::RouteExtension])
+        }
+        ExitForwardOperation::MptcpPaths => {
+            validate_exact_types(responses, &[ControlMessageType::MptcpPathsState])
+        }
         ExitForwardOperation::NativeProbePermit => {
             validate_exact_types(responses, &[ControlMessageType::NativeProbePermit])
         }
@@ -1181,6 +1193,8 @@ fn request_type(operation: ExitForwardOperation) -> Result<ControlMessageType, F
             Ok(ControlMessageType::ExitReservationFinalizeRequest)
         }
         ExitForwardOperation::ConfirmRelay => Ok(ControlMessageType::ExitReservationConfirmation),
+        ExitForwardOperation::ExtendRoute => Ok(ControlMessageType::RouteExtensionRequest),
+        ExitForwardOperation::MptcpPaths => Ok(ControlMessageType::MptcpPathsRequest),
         ExitForwardOperation::NativeProbePermit => Ok(ControlMessageType::NativeProbePermitRequest),
         ExitForwardOperation::AdjacentReceiveBudget => {
             Ok(ControlMessageType::AdjacentReceiveBudget)

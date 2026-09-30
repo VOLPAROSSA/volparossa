@@ -31,6 +31,19 @@ pub enum Tls13MptcpStream {
 }
 
 impl Tls13MptcpStream {
+    /// Temporarily pin this exact live socket for an owner-bound privileged path command.
+    ///
+    /// # Errors
+    /// Returns an OS descriptor duplication error. The caller must drop the returned descriptor
+    /// immediately after its bounded command; observation never retains one.
+    pub fn try_clone_owned_fd(&self) -> std::io::Result<std::os::fd::OwnedFd> {
+        use std::os::fd::AsFd as _;
+        let stream = match self {
+            Self::Client(stream) => stream.get_ref().0,
+            Self::Server(stream) => stream.get_ref().0,
+        };
+        stream.as_fd().try_clone_to_owned()
+    }
     /// Read current kernel MPTCP negotiation and subflow evidence without unwrapping TLS.
     ///
     /// # Errors

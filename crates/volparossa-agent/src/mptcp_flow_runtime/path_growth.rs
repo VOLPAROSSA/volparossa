@@ -1,4 +1,4 @@
-//! One route-owned, additional failover probe using per-flow kernel TCP observations.
+//! Route-owned, bounded failover probes using per-flow kernel TCP observations.
 //!
 //! Initial endpoints are never retired here: they are shared by other accepted flows. Kernel
 //! scheduling/reinjection remains authoritative. ACK octets are transport evidence, not goodput.
@@ -20,6 +20,7 @@ const PROBE_GRACE: Duration = Duration::from_secs(10);
 const STALLED: Duration = Duration::from_secs(3);
 
 pub(crate) struct PathScope {
+    context: [u8; 16],
     tuples: BTreeMap<u32, (Ipv6Addr, Ipv6Addr)>,
     initial: Vec<u32>,
     port: u16,
@@ -37,6 +38,7 @@ impl PathScope {
             })
             .collect();
         Self {
+            context,
             tuples,
             initial: initial.to_vec(),
             port,
@@ -64,13 +66,19 @@ impl PathScope {
 struct Previous {
     sample: MptcpSubflowInfo,
     last_progress: Instant,
+    ever_progressed: bool,
 }
 
 #[derive(Clone, Copy, Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent sample facts distinguish missing endpoints from productive or stalled traffic"
+)]
 struct Window {
     progressed: bool,
     lossy: bool,
     stalled: bool,
+    established: bool,
 }
 
 #[derive(Default)]
@@ -108,6 +116,7 @@ impl FlowHistory {
             let last_progress = old
                 .filter(|_| !progressed)
                 .map_or(now, |old| old.last_progress);
+            let ever_progressed = progressed || old.is_some_and(|old| old.ever_progressed);
             let lossy = old.is_some_and(|old| {
                 let sent = sample.data_segments_sent - old.sample.data_segments_sent;
                 let retransmitted = sample.total_retransmissions - old.sample.total_retransmissions;
@@ -120,7 +129,9 @@ impl FlowHistory {
                 Window {
                     progressed,
                     lossy,
-                    stalled: now.duration_since(last_progress) >= STALLED,
+                    stalled: ever_progressed
+                        && (sample.tcp_state != 1 || now.duration_since(last_progress) >= STALLED),
+                    established: sample.tcp_state == 1,
                 },
             );
             next.insert(
@@ -128,8 +139,25 @@ impl FlowHistory {
                 Previous {
                     sample,
                     last_progress,
+                    ever_progressed,
                 },
             );
+        }
+        // A previously productive subflow can disappear after a real link failure. Preserve
+        // its bounded history, but never pretend that the missing endpoint is still live.
+        // A different, currently progressing path on this same flow is still required below.
+        for (path, previous) in &self.previous {
+            if let std::collections::btree_map::Entry::Vacant(entry) = next.entry(*path) {
+                entry.insert(*previous);
+                windows.insert(
+                    *path,
+                    Window {
+                        stalled: previous.ever_progressed
+                            && now.duration_since(previous.last_progress) >= STALLED,
+                        ..Window::default()
+                    },
+                );
+            }
         }
         self.previous = next;
         windows
@@ -141,15 +169,20 @@ impl FlowHistory {
         initial: &[u32],
         now: Instant,
     ) -> Option<u32> {
-        let risky = initial
-            .iter()
-            .copied()
-            .find(|path| windows.get(path).is_some_and(|window| window.lossy));
+        let risky = initial.iter().copied().find(|path| {
+            windows
+                .get(path)
+                .is_some_and(|window| window.lossy || window.stalled)
+        });
         let ready = initial.len() >= 2
             && risky.is_some()
             && initial.iter().all(|path| {
                 windows.get(path).is_some_and(|window| {
-                    window.progressed && (Some(*path) == risky || !window.lossy)
+                    if Some(*path) == risky {
+                        (window.progressed && window.lossy) || window.stalled
+                    } else {
+                        window.progressed && !window.lossy
+                    }
                 })
             });
         if !ready {
@@ -190,15 +223,45 @@ pub(super) enum Decision {
 pub(super) struct WarmGrowth {
     scope: PathScope,
     flows: Vec<Flow>,
-    probe: Option<Probe>,
+    // At most one entry per signed selected path (at most eight). A failed trial may need
+    // to stay installed for another live flow while a fresh authorized trial is attempted.
+    probes: BTreeMap<u32, Probe>,
 }
 
 impl WarmGrowth {
+    pub(super) fn can_extend_scope(&self, replacement: &PathScope) -> bool {
+        if self.scope.context != replacement.context
+            || self.scope.port != replacement.port
+            || self.scope.initial != replacement.initial
+            || !(self.scope.tuples.len()..=self.scope.tuples.len() + 1)
+                .contains(&replacement.tuples.len())
+            || replacement.tuples.len() > 8
+            || !self
+                .scope
+                .tuples
+                .iter()
+                .all(|(id, tuple)| replacement.tuples.get(id) == Some(tuple))
+        {
+            return false;
+        }
+        true
+    }
+
+    pub(super) fn extend_scope(&mut self, replacement: PathScope) -> bool {
+        if !self.can_extend_scope(&replacement) {
+            return false;
+        }
+        // Keep existing progress windows and active-probe ownership; a new path is not evidence
+        // that an old path recovered, nor a reason to replace an existing MPTCP metaconnection.
+        self.scope = replacement;
+        true
+    }
+
     pub(super) fn new(scope: PathScope) -> Self {
         Self {
             scope,
             flows: Vec::new(),
-            probe: None,
+            probes: BTreeMap::new(),
         }
     }
 
@@ -217,7 +280,7 @@ impl WarmGrowth {
 
     pub(super) fn observe(&mut self, warm: Option<u32>, now: Instant) -> Decision {
         let mut candidate = None;
-        let mut useful = false;
+        let mut useful = Vec::new();
         let mut safe_to_retire = true;
         self.flows.retain_mut(|flow| {
             let samples = match flow.observer.observe(self.scope.tuples.len()) {
@@ -232,57 +295,75 @@ impl WarmGrowth {
                 }
             };
             let windows = flow.history.observe(&samples, &self.scope, now);
-            safe_to_retire &= self.scope.initial.iter().all(|path| {
-                flow.history
-                    .previous
-                    .get(path)
-                    .is_some_and(|old| old.sample.tcp_state == 1)
-            });
-            if let Some(probe) = &self.probe {
-                useful |= probe_useful(probe, &windows, &self.scope.initial);
-            } else {
-                candidate = candidate
-                    .or_else(|| flow.history.candidate(&windows, &self.scope.initial, now));
+            safe_to_retire &= self
+                .scope
+                .initial
+                .iter()
+                .all(|path| windows.get(path).is_some_and(|window| window.established));
+            for probe in self.probes.values() {
+                if probe_useful(probe, &windows, &self.scope.initial)
+                    && !useful.contains(&probe.added)
+                {
+                    useful.push(probe.added);
+                }
             }
+            candidate =
+                candidate.or_else(|| flow.history.candidate(&windows, &self.scope.initial, now));
             true
         });
-        self.decide(warm, candidate, useful, safe_to_retire, now)
+        self.decide(warm, candidate, &useful, safe_to_retire, now)
     }
 
     fn decide(
         &mut self,
         warm: Option<u32>,
         candidate: Option<u32>,
-        useful: bool,
+        useful: &[u32],
         safe_to_retire: bool,
         now: Instant,
     ) -> Decision {
-        if let Some(probe) = &mut self.probe {
-            if useful {
+        for probe in self.probes.values_mut() {
+            if useful.contains(&probe.added) {
                 probe.last_useful = now;
             }
-            if safe_to_retire && now.duration_since(probe.last_useful) >= PROBE_GRACE {
+        }
+        if safe_to_retire {
+            if let Some(probe) = self
+                .probes
+                .values()
+                .find(|probe| now.duration_since(probe.last_useful) >= PROBE_GRACE)
+            {
                 return Decision::RetireExtra(probe.added);
             }
-        } else if let (Some(risky), Some(warm)) = (candidate, warm) {
-            return Decision::Activate { warm, risky };
+        }
+        if let (Some(risky), Some(warm)) = (candidate, warm) {
+            if self
+                .probes
+                .values()
+                .all(|probe| now.duration_since(probe.last_useful) >= PROBE_GRACE)
+            {
+                return Decision::Activate { warm, risky };
+            }
         }
         Decision::Hold
     }
 
     pub(super) fn activated(&mut self, added: u32, risky: u32, now: Instant) {
-        self.probe = Some(Probe {
+        self.probes.insert(
             added,
-            risky,
-            last_useful: now,
-        });
+            Probe {
+                added,
+                risky,
+                last_useful: now,
+            },
+        );
         for flow in &mut self.flows {
             flow.history.candidate = None;
         }
     }
 
-    pub(super) fn retired(&mut self) {
-        self.probe = None;
+    pub(super) fn retired(&mut self, path: u32) {
+        self.probes.remove(&path);
         for flow in &mut self.flows {
             flow.history.candidate = None;
         }

@@ -13,7 +13,8 @@ use thiserror::Error;
 use volparossa_protocol::{UnderlayScope, WireguardEndpoint};
 use volparossa_routing::{
     ContextRole, HELPER_PROTOCOL_VERSION, HelperRequest, PrepareLeaseBatch, PreparedLease,
-    PreparedLeaseBatch, UnderlayEvidence, WireguardRole, encode_request, helper_request,
+    PreparedLeaseBatch, PreparedPathExtension, UnderlayEvidence, WireguardRole, encode_request,
+    helper_request,
 };
 use volparossa_wireguard::{
     ClientEndpointLease, EndpointRole, ExitEndpointLease, HelperContextHandle, HelperLeaseHandle,
@@ -208,6 +209,70 @@ pub(crate) fn bind_prepared_exit_endpoint_leases(
         })
         .collect::<Result<Vec<_>, EndpointLeaseBindingError>>()?;
     Ok(LocalExitEndpointLeaseBatch { exit_leases })
+}
+
+/// Bind a new helper endpoint without pretending it belonged to the original closed batch.
+pub(crate) fn bind_prepared_exit_path_extension(
+    context: [u8; 16],
+    extension: [u8; 16],
+    path: u32,
+    response: PreparedPathExtension,
+) -> Result<ExitEndpointLease, EndpointLeaseBindingError> {
+    let (handle, parsed) =
+        parse_path_extension(context, extension, path, WireguardRole::Exit, response)?;
+    ExitEndpointLease::new(
+        context,
+        handle,
+        parsed.handle,
+        path,
+        EndpointRole::Exit,
+        parsed.endpoint,
+    )
+    .map_err(Into::into)
+}
+
+pub(crate) fn bind_prepared_client_path_extension(
+    context: [u8; 16],
+    extension: [u8; 16],
+    path: u32,
+    response: PreparedPathExtension,
+) -> Result<ClientEndpointLease, EndpointLeaseBindingError> {
+    let (handle, parsed) =
+        parse_path_extension(context, extension, path, WireguardRole::Client, response)?;
+    ClientEndpointLease::new(
+        context,
+        handle,
+        parsed.handle,
+        path,
+        EndpointRole::Client,
+        parsed.endpoint,
+    )
+    .map_err(Into::into)
+}
+
+fn parse_path_extension(
+    context: [u8; 16],
+    extension: [u8; 16],
+    path: u32,
+    role: WireguardRole,
+    response: PreparedPathExtension,
+) -> Result<(HelperContextHandle, ParsedLease), EndpointLeaseBindingError> {
+    if context == [0; 16]
+        || extension == [0; 16]
+        || response.extension_id != extension
+        || !(1..=u32::from(MAX_PATHS)).contains(&path)
+    {
+        return Err(EndpointLeaseBindingError::IdentityMismatch);
+    }
+    let handle = HelperContextHandle::try_from(response.context_handle.as_slice())?;
+    let lease = response
+        .lease
+        .ok_or(EndpointLeaseBindingError::InvalidPreparedOutcome)?;
+    let mut parsed = parse_response(vec![lease], &BTreeSet::from([(path, role)]), handle)?;
+    let lease = parsed
+        .remove(&(path, role))
+        .ok_or(EndpointLeaseBindingError::IdentityMismatch)?;
+    Ok((handle, lease))
 }
 
 /// Bind one exact helper-prepared Exit endpoint to its opaque local capability.
