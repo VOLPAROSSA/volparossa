@@ -11,7 +11,8 @@ use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use sha2::{Digest as _, Sha256};
 
 use super::{
-    LeaseId, PrivateStorageStore, StorageError, StorageUsage, StoredArchive, UploadProgress,
+    LeaseId, PrivateStorageStore, StorageAdmissionStatus, StorageError, StorageUsage,
+    StoredArchive, UploadProgress,
     lease::{self, Reservation},
     protocol::{
         ProtocolError, ReceiptResult, ReceiptState, StorageOperation, StorageTarget,
@@ -121,6 +122,26 @@ impl PrivateStorageProvider {
     /// Rejects invalid durable accounting or journal failures.
     pub fn usage(&self) -> Result<StorageUsage, StorageError> {
         self.store.usage()
+    }
+
+    /// Local target and retained obligations, not a remote availability/contribution proof.
+    ///
+    /// # Errors
+    /// Rejects invalid persistent accounting or journal failures.
+    pub fn admission_status(&self) -> Result<StorageAdmissionStatus, StorageError> {
+        self.store.admission_status()
+    }
+
+    /// Change only the local owner's admission target; all existing lease rights remain.
+    /// This method is not exposed by the signed remote owner-operation protocol.
+    ///
+    /// # Errors
+    /// Rejects targets above original capacity, invalid accounting or journal failures.
+    pub fn set_admission_target(
+        &mut self,
+        target_bytes: u64,
+    ) -> Result<StorageAdmissionStatus, StorageError> {
+        self.store.set_admission_target(target_bytes)
     }
 
     /// Execute one verified exact operation. The transport must first consume its original

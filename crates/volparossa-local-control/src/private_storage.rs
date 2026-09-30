@@ -91,6 +91,90 @@ pub struct PrivateStorageGrant {
     pub grant: Vec<u8>,
 }
 
+/// Local operator control of the currently attached provider; never forwarded to a peer.
+#[derive(Clone, PartialEq, Message)]
+pub struct PrivateStorageAdmissionRequest {
+    /// Independently pinned local provider key, not a caller-selected directory.
+    #[prost(bytes = "vec", tag = "1")]
+    pub provider_key: Vec<u8>,
+    /// Absent reads status; present sets the durable payload admission target, including zero.
+    #[prost(uint64, optional, tag = "2")]
+    pub target_bytes: Option<u64>,
+}
+
+/// Local payload admission and retained custody. This is not physical overhead or remote credit.
+#[derive(Clone, PartialEq, Message)]
+pub struct PrivateStorageAdmission {
+    /// Exact attached provider identity.
+    #[prost(bytes = "vec", tag = "1")]
+    pub provider_key: Vec<u8>,
+    /// Original maximum payload quota; existing custody remains valid up to this limit.
+    #[prost(uint64, tag = "2")]
+    pub capacity_bytes: u64,
+    /// Durable target used only for new reservations.
+    #[prost(uint64, tag = "3")]
+    pub target_bytes: u64,
+    /// Full payload reservations, including partial and expired undeleted leases.
+    #[prost(uint64, tag = "4")]
+    pub reserved_bytes: u64,
+    /// Verified committed payload, including expired undeleted copies.
+    #[prost(uint64, tag = "5")]
+    pub committed_bytes: u64,
+    /// Exact current pending plus committed lease count.
+    #[prost(uint64, tag = "6")]
+    pub leases: u64,
+    /// Reserved plus committed payload. No target change deletes these bytes.
+    #[prost(uint64, tag = "7")]
+    pub retained_payload_bytes: u64,
+    /// Retained payload above target, not permission to evict it.
+    #[prost(uint64, tag = "8")]
+    pub pending_drain_bytes: u64,
+    /// Target minus retained payload, saturating at zero; not a free-disk guarantee.
+    #[prost(uint64, tag = "9")]
+    pub available_for_new_reservations_bytes: u64,
+}
+
+impl PrivateStorageAdmissionRequest {
+    pub(crate) fn validate(&self) -> Result<(), ControlProtocolError> {
+        key(&self.provider_key)?;
+        if self
+            .target_bytes
+            .is_some_and(|target| target > MAX_CAPACITY)
+        {
+            return Err(ControlProtocolError::Invalid(
+                "private storage admission target",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl PrivateStorageAdmission {
+    pub(crate) fn validate(&self) -> Result<(), ControlProtocolError> {
+        key(&self.provider_key)?;
+        if !(1..=MAX_CAPACITY).contains(&self.capacity_bytes)
+            || self.target_bytes > self.capacity_bytes
+            || self.leases > 256
+            || self.reserved_bytes.checked_add(self.committed_bytes)
+                != Some(self.retained_payload_bytes)
+            || self.retained_payload_bytes > self.capacity_bytes
+            || self.pending_drain_bytes
+                != self
+                    .retained_payload_bytes
+                    .saturating_sub(self.target_bytes)
+            || self.available_for_new_reservations_bytes
+                != self
+                    .target_bytes
+                    .saturating_sub(self.retained_payload_bytes)
+        {
+            return Err(ControlProtocolError::Invalid(
+                "private storage admission accounting",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl PrivateStorageServeRequest {
     pub(crate) fn validate(&self) -> Result<(), ControlProtocolError> {
         let bind: std::net::SocketAddr = self
@@ -219,6 +303,10 @@ mod tests {
                 provider_key: public_key(),
                 grant: vec![1; 2048],
             }),
+            Operation::PrivateStorageAdmission(PrivateStorageAdmissionRequest {
+                provider_key: public_key(),
+                target_bytes: Some(0),
+            }),
         ];
         for operation in operations {
             let request = ControlRequest {
@@ -239,6 +327,17 @@ mod tests {
             Payload::PrivateStorageGrant(PrivateStorageGrant {
                 provider_key: public_key(),
                 grant: vec![1; 2048],
+            }),
+            Payload::PrivateStorageAdmission(PrivateStorageAdmission {
+                provider_key: public_key(),
+                capacity_bytes: 2048,
+                target_bytes: 1024,
+                reserved_bytes: 256,
+                committed_bytes: 1792,
+                leases: 2,
+                retained_payload_bytes: 2048,
+                pending_drain_bytes: 1024,
+                available_for_new_reservations_bytes: 0,
             }),
         ] {
             let response = ControlResponse {

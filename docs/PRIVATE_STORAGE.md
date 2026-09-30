@@ -57,11 +57,12 @@ headroom, and never present an in-progress transfer as freed space. If suitable 
 capacity is unavailable, retain existing custody and expose a **pending drain** instead of
 claiming the lower target has already been achieved.
 
-This availability-aware placement, repair, handoff and automatic contribution controller
-is a requirement for the next networked work, **not implemented by the current local store,
-authenticated stream library or peer-command candidate**. Reopening a provider with
-`--reuse-store` preserves its original capacity and free-space floor; it is not a resize
-operation. No replication factor or coding scheme is prescribed here.
+Availability-aware placement, repair and the automatic contribution controller remain
+requirements, **not completed by the current storage primitives**. Explicit owner-coordinated
+handoff and the local admission-target control below are building blocks, not automatic
+migration or verified network-wide reciprocity. Reopening a provider with `--reuse-store`
+preserves its original capacity/free-space floor and its current admission target; it does
+not choose a new target. No replication factor or coding scheme is prescribed here.
 
 ## First executable slice: local provider storage
 
@@ -78,6 +79,8 @@ peers, advertise capacity, enforce network-wide reciprocity or export Signal bac
 - `status --store ...` distinguishes pending reservations and committed ciphertext.
   These are local payload bytes per stored copy; SQLite/filesystem overhead is not
   represented as verified remote usage and is protected separately by free-space checks.
+- `target --store ... --target-bytes N` changes only the durable admission target described
+  below. It never removes a lease or changes the store's original hard payload quota.
 - `restore --store ... --lease HEX --output /absolute/new-file` verifies reconstruction
   and publishes a new mode-0600 output only after success. Existing output is not replaced;
   restoring twice does not consume the lease.
@@ -96,6 +99,62 @@ The local trial uses synthetic opaque bytes and does not demonstrate Signal-form
 multi-node availability, replication, recovery after loss of all credentials, or working
 cloud backup. A provider's restore must eventually be guarded by an authenticated, private
 lease capability; a local lease identifier alone is not a remote authentication scheme.
+
+## Local admission target and pending drain
+
+The explicit owner can now lower the target **below retained custody** without invalidating
+existing leases. This is local payload admission control, not an automatic computation of
+the contribution owed for remote physical storage. Five new real-store/provider checks,
+the real-process local CLI check, the framed Unix-IPC/service check and two local protocol
+checks pass. Strict all-target/all-feature Clippy for content, local control, agent and CLI
+also passes. No new live-network contribution-resize proof is claimed here.
+
+For an offline owned store:
+
+```sh
+volparossa storage local target --store /absolute/private-store --target-bytes 1073741824
+volparossa storage local status --store /absolute/private-store
+```
+
+The store must not already be held open by the provider service; its exclusive ownership
+lock is not bypassed. For a running provider, use its existing administrative control socket
+and independently pin the **local** provider key:
+
+```sh
+volparossa --control-socket /absolute/control/agent.sock storage peer admission \
+  --provider-key LOCAL_PROVIDER_KEY_HEX --target-bytes 1073741824
+volparossa --control-socket /absolute/control/agent.sock storage peer admission \
+  --provider-key LOCAL_PROVIDER_KEY_HEX
+```
+
+Despite the `peer` command group, these two operations affect only the already attached
+local provider. They open no remote route, accept no caller-selected store path, and reject
+a different provider key. Omitting `--target-bytes` reads status. The active store's existing
+bounded disk worker performs the mutation; no listener or participation role is enabled.
+
+Status separates `capacity_bytes` (original hard quota), `target_bytes`, pending reservations,
+committed payload, `retained_payload_bytes`, `pending_drain_bytes` and
+`available_for_new_reservations_bytes`. For example, 2 GiB retained with a 1 GiB target reports
+1 GiB pending drain and zero new-admission allowance. The existing 2 GiB is still retained,
+not claimed as released. New reservations that do not fit are rejected, not queued; existing
+reserved uploads, exact idempotent retries, valid restores and renewals keep their authority.
+Partial and expired undeleted copies remain fully counted. Reads do not consume custody.
+
+Zero closes new admission; increasing the target cannot exceed the original hard quota.
+Neither change alters lease identities, ownership, retention, ciphertext or the filesystem
+free-space floor. Lowering the target never deletes another owner's archive. Only a separate
+authorized deletion, including the existing owner-coordinated verified handoff, can reduce
+retained obligations; without that, pending drain remains pending.
+
+Store schema version 2 persists the target. Opening an exclusively owned version-1 store
+atomically migrates its schema/version, initializing the target to its original hard quota.
+Older executables reject version 2 rather than silently ignoring a lowered target. Reopening
+with current code preserves the target, and a target below usage is not store corruption.
+
+These counters exclude measured SQLite/filesystem/migration overhead. Admission allowance
+is **not free disk space**, available replacement custody, automatic migration or verified
+1:1 contribution. Status explicitly reports these limitations; the automatic remote-usage
+reconciler and safe distributed drain orchestration remain unfinished.
 
 ## Current authorized, resumable library slice
 
@@ -273,14 +332,178 @@ and two local-control protocol checks also passed. This is not a multi-node over
 or a full application process/Signal integration proof; no independent-replica claim
 follows from it.
 
+## Replica-set candidate: explicit copies and restore failover
+
+`volparossa storage replicas` adds **create, deposit, status, progress, restore, renew and
+delete** around the same authenticated peer transfers. It does not invent another transport,
+discover provider trust or manage placement automatically. Select two to eight distinct,
+independently trusted provider identities and obtain an owner-bound grant from each. This
+is a bounded capacity of the current command, not a network-wide replication limit. Different
+keys do not prove different operators, devices or failure domains.
+
+Prepare a **new** owner-local set; pair each repeated provider key with its corresponding
+grant in the same order. The regular input must already be encrypted and match the full hash.
+Creation performs no remote reservation. The existing provider setup, policy-authorized
+agent routes and owner-unlock requirements above still apply.
+
+```sh
+volparossa storage replicas create --state /absolute/replica-set \
+  --input /absolute/encrypted-archive --sha256 ARCHIVE_SHA256_HEX --already-encrypted \
+  --provider-key PROVIDER_A_KEY_HEX --grant /absolute/provider-a.grant \
+  --provider-key PROVIDER_B_KEY_HEX --grant /absolute/provider-b.grant \
+  --lifetime-seconds 604800 --identity /absolute/owner.identity
+
+volparossa storage replicas deposit --state /absolute/replica-set \
+  --input /absolute/encrypted-archive --already-encrypted --identity /absolute/owner.identity
+
+volparossa storage replicas status --state /absolute/replica-set
+volparossa storage replicas progress --state /absolute/replica-set --identity /absolute/owner.identity
+volparossa storage replicas restore --state /absolute/replica-set \
+  --output /absolute/new-restored-ciphertext --identity /absolute/owner.identity
+volparossa storage replicas renew --state /absolute/replica-set \
+  --lifetime-seconds 1209600 --identity /absolute/owner.identity
+volparossa storage replicas delete --state /absolute/replica-set \
+  --provider-key PROVIDER_A_KEY_HEX --identity /absolute/owner.identity
+```
+
+The locked `0700` set retains a bounded, atomically saved `0600` manifest and the original
+per-provider journals. Each copy stays bound to its provider, grant, owner, archive ID and
+complete ciphertext identity. Repeat **the same `replicas deposit` command** after interruption:
+it resumes the retained copies without a `--resume` flag or allocating replacement identities.
+A failed copy never rolls back another copy or deletes the source. Partial operations print
+`operation_complete: false` and exit nonzero; successful copies remain available.
+
+Restore tries the retained providers sequentially. Only a full length/hash-verified result
+is published to a new `0600` output; failed or incomplete data is not exposed. Restore never
+consumes a lease. Explicit delete targets **only the named provider**, and a confirmed deleted
+copy is not silently uploaded again. This operator-selected deletion is not automatic repair
+or a safe distributed capacity-drain controller.
+
+Local status needs no identity unlock. It distinguishes logical ciphertext length from
+reserved, committed and uncertain **full-copy payload charges**, including expired copies.
+Before each exchange, durable uncertainty prevents a lost confirmation from making a copy
+disappear from accounting. An unknown initial reservation requires `replicas deposit` with
+the retained input to reconcile the same archive before lease-only progress/delete can work.
+Lost deletion confirmation remains charged until a successful explicit retry. Renewal alone
+does not prove commitment, so it is followed by authenticated Progress. Reported charges are
+conservative local accounting of provider statements, not measured metadata overhead, proven
+future custody or usable reciprocal contribution.
+
+All **three focused replica tests pass** (7.36 seconds), including a local Unix/framed-stream
+lifecycle with two real SQLite providers, lost confirmations, provider/owner-state reopen,
+restore failover and preservation of the surviving copy. This
+fixture is not an actual two-provider protected-overlay run, independent-device availability
+proof or Signal snapshot validation.
+
+The disposable **`private-storage-replicas`** scenario now has a
+[passing real run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36602808623) on exact
+source `bff536e2e2fe781be89d573ec264afa2ddacc3f0`. Its original 110-file artifact passes the
+exact-source report checker. Independently rebuilding the evidence from all retained phase
+files produces exactly the exported aggregate and the report's storage evidence. The ZIP
+SHA-256 is `3bc47fb9d80e8406cb773e47e733b3d8f76d5aecba8887016c6bacce43d73d46`.
+
+Two actual stores in distinct disposable namespaces, with independently pinned identities,
+each commit 524,326 synthetic opaque bytes in three chunks. The owner accounts for
+**1,048,652 physical payload bytes**, not just the one-copy logical length. After removing
+the original input, the fixture stops the first provider's content service. Two separate
+restores fail over to the second provider, verify the full original length/SHA-256 and leave
+its copy intact; no-clobber and the unavailable copy's continued charge are checked too.
+Reopening the same first store retains the original identities. Explicitly deleting its copy
+leaves the second copy available for a third verified restore. Retried deletion is idempotent;
+deleting the final copy leaves both providers with zero leases and charged payload bytes.
+
+The upload, failover and final phases each retain their own drained, zero-drop physical and
+control-path captures, with respectively **18 / 4 / 6** completed Exit MPTCP/TLS operations
+on the same protected route. The unavailable provider sends zero response payload during
+failover; the survivor sends enough for both complete restores. The checker also verifies
+the two relay paths, absence of direct Client-to-Exit/provider bypasses and separation from
+the selected control relay. The Client cannot read either provider store locally. Private
+credentials, grants, journals and input/output files are removed; topology cleanup leaves
+zero owned objects, and the guest-parent network snapshots are byte-identical.
+
+This is **explicit two-store service failover**, not independent physical failure domains,
+whole-agent restart, interrupted network-upload resume, archive encryption or Signal snapshot
+validation. It does not prove automatic placement/repair, measured metadata overhead, safe
+contribution-driven drain or network-wide storage credit. The original single-provider proof
+is unchanged. Replica-only fixture bounds allow 420 seconds per failover restore and 900
+seconds per private phase; core exchanges retain their original 120-second limits without
+automatic operation retries.
+
+The [first run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36600197974) on `ba38a6a5`
+reaches the final evidence step after the actual two-copy upload, source removal, first-service
+withdrawal, repeated survivor restores, same-store reopen and explicit deletion lifecycle.
+Its aggregate metadata reports 1,048,652 charged payload bytes initially and zero finally;
+private and topology cleanup finish with unchanged host state. The overall result is still
+**FAILED**: the builder attempts to read a two-element usage array using an object-only reader.
+The first exporter also omits the separate phase route/capture/completion files, so the original
+bundle cannot independently establish all protected-path/privacy gates. The original 85 files
+remain unchanged and failed; the later passing run above supplies fresh evidence rather than
+relabeling this earlier result.
+
 ## Next end-to-end proof
 
-Exercise the candidate's real protected peer attachment and versioned agent IPC in a
-disposable multi-node topology. Demonstrate remote deposit, interrupted-upload resume,
-provider restart, source-offline restore and quota refusal, with privacy and complete
-cleanup evidence. Finish least-authority application enrollment rather than treating the
-administrative socket as that API. Keep provider statements distinct from measured custody
-and usable capacity when reconciling physical usage.
+### Owner-coordinated replacement candidate
+
+`storage replicas replace` performs one explicit, resumable **A/B → B/C** handoff, using
+the existing owner-signed operations and protected agent transport. It is not provider
+discovery, unattended repair or permission to move somebody else's archive. The owner
+must be online with the original identity, privately retained set and independently trusted
+replacement grant. The new grant must permit Reserve, Append, Progress, Finalize and ReadRange,
+and its retention must cover at least the original A lease.
+
+```sh
+volparossa storage replicas replace --state /absolute/replica-set \
+  --from-provider-key PROVIDER_A_KEY_HEX --provider-key PROVIDER_C_KEY_HEX \
+  --grant /absolute/provider-c.grant --lifetime-seconds 604800 \
+  --identity /absolute/owner.identity
+```
+
+No original source file is required. The command fully restores and hashes a surviving
+copy other than A/C into owner-private temporary ciphertext storage. It uploads/resumes C
+under a durable replacement archive identity, then retrieves **all of C's bytes again**
+and checks the original length/SHA-256. A committed receipt alone is insufficient. The
+survivor's committed state is reconfirmed before the owner signs Delete for **only A**.
+Neither reads nor failed attempts consume B or delete A. This proves current retrievability
+when completed, not different physical failure domains or future availability.
+
+Repeat the same command after interruption. Every incomplete retry rechecks the replacement
+before source deletion, even if an earlier process reached the deletion phase. A missing
+replacement response, quota refusal, unavailable survivor or unconfirmed A deletion remains
+`pending_handoff` with `operation_complete: false`; uncertain copies stay fully charged.
+Temporary migration therefore counts up to three full payload copies. Only A's authenticated
+deletion confirmation lowers that bound back to B/C's two copies. Lost acknowledgements reuse
+the exact retained archive/lease and idempotent deletion tombstone, not another reservation.
+
+The additive version-two manifest retains the handoff and all original provider journals.
+The existing eight-record limit includes deleted provider history; a full set cannot silently
+discard an old identity to make room. The command uses bounded RAM but requires temporary
+local disk room for one complete encrypted archive and removes its staging directory on normal
+completion/failure. This handoff does not resize a provider, change the contribution target,
+or add owner-offline migration authority. Its protected-overlay result is recorded below.
+The targeted three-real-store framed-transport test passes, covering lost Reserve,
+replacement-read and Delete confirmations, reopen/retry and repeated non-consuming
+replacement restores. All four focused replica tests pass together in 11.27 seconds;
+these local checks are separate from the protected-overlay proof below.
+
+The real [three-provider handoff run on `721b56f9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36616700648)
+passes its exact-source checker against all 139 original artifact files. Its original source
+file is absent before migration. Stopped A leaves three actual copies charged; after the
+same-store retry, C is fully verified before A's confirmed deletion reduces the charge to
+two copies. B and C each restore the full archive twice while the other service is unavailable.
+Six protected MPTCP/TLS route/privacy phases and full cleanup pass; guest host-state bytes
+are unchanged (SHA-256 `8e1d848f7788cb4092c5d7215ef7079cc2214346edf45f70d696d65cad0965e1`).
+The immutable artifact ZIP SHA-256 is
+`6d6d274c2fd526930147c929cb27a96caad05b98726ed73e27ed1146e14ac131`.
+This proves explicit owner-coordinated handoff, not automatic resizing/repair, independent
+hardware failure domains, archive encryption or Signal backup restore.
+
+Extend the passing two-provider proof to interrupted network upload, whole-agent restart,
+source-device-offline recovery and network quota refusal, with privacy and complete cleanup
+evidence. The current proof removes the original file and withdraws one provider service;
+it does not take independent hardware or the owner's device offline. Finish least-authority
+application enrollment rather than treating the administrative socket as that API. Keep
+provider statements distinct from measured custody and usable capacity when reconciling
+physical usage.
 Then add availability-aware redundant placement and repair, with the adaptive contribution
 and acknowledged drain/handoff controller above. Demonstrate both a growing target and a
 2 GB-to-1 GB target reduction without losing other participants' live data, including the

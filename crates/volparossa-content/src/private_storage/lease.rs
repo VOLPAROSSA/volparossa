@@ -2,7 +2,7 @@ use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehav
 
 use super::{
     LeaseId, MAX_ARCHIVE_BYTES, MAX_LEASES, PrivateStorageStore, StorageError, StorageLimits,
-    StorageUsage, StoredArchive, disk::check_space, valid_expiry,
+    StorageUsage, StoredArchive, admission, disk::check_space, valid_expiry,
 };
 
 impl PrivateStorageStore {
@@ -126,12 +126,15 @@ pub(super) fn reserve_in_transaction(
         return Err(StorageError::InvalidInput);
     }
     let usage = usage(transaction, limits.capacity_bytes)?;
+    let target_bytes = admission::target(transaction, limits.capacity_bytes)?;
     if usage.leases >= MAX_LEASES
+        || target_bytes == 0
+        || usage.reserved_bytes + usage.committed_bytes >= target_bytes
         || usage
             .reserved_bytes
             .checked_add(usage.committed_bytes)
             .and_then(|bytes| bytes.checked_add(ciphertext_bytes))
-            .is_none_or(|bytes| bytes > limits.capacity_bytes)
+            .is_none_or(|bytes| bytes > target_bytes)
     {
         return Err(StorageError::Quota);
     }
@@ -175,7 +178,7 @@ pub(super) fn load(connection: &Connection, id: LeaseId) -> Result<StoredArchive
     })
 }
 
-fn usage(connection: &Connection, capacity: u64) -> Result<StorageUsage, StorageError> {
+pub(super) fn usage(connection: &Connection, capacity: u64) -> Result<StorageUsage, StorageError> {
     let usage = connection.query_row(
         "SELECT coalesce(sum(CASE WHEN committed = 0 THEN ciphertext_bytes ELSE 0 END), 0),
                 coalesce(sum(CASE WHEN committed = 1 THEN ciphertext_bytes ELSE 0 END), 0),

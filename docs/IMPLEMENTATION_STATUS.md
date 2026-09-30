@@ -187,12 +187,12 @@ The default-extension bundle is integrated by
 uBlock Origin, Decentraleyes and Adaptive Tab Bar Color install signed and active in the
 isolated ESR 140.16.0 runtime, and disabling/removing them survives restart. Twelve offline
 checks and unchanged privacy-default checks pass; this is not a Firefox 157 source-build proof.
-Daemon attachment, browser-scoped kill switch (requested off by default), cache integration
-and complete native-sidebar/model integration remain unfinished. The private-compute
-transport/panel candidate is in [browser PR #2](https://github.com/VOLPAROSSA/volparossa-browser/pull/2),
-with a matching private-service candidate in [core PR #167](https://github.com/VOLPAROSSA/volparossa/pull/167).
-Protocol and isolated Gecko tests are not a full Firefox build or combined inference proof.
-Core defaults for other consumers are not weakened by the requested browser availability fallback.
+The [combined browser/core run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36614266330)
+now passes: the real ESR sidebar renders one synthetic EOS answer from the actual private
+360M worker after observed cleanup. This is not the Firefox 157 source build or native provider
+selector. Daemon network attachment, browser-scoped kill switch (requested off by default)
+and cache integration remain unfinished. Core defaults for other consumers are not weakened
+by the requested browser availability fallback.
 
 [Signal integration](https://github.com/VOLPAROSSA/volparossa-chat/pull/1) now has a pinned
 Desktop/libsignal source baseline and explicit device/session/backup contracts, not a
@@ -257,6 +257,19 @@ other participants' live data. Existing custody needs verified independent repla
 release. Unavailable replacement capacity must appear as **pending drain**, not freed space.
 Current payload quotas and receipts do not implement this adaptive distributed controller.
 
+New local admission-target slice: `storage local target/status` operates an offline owned
+store; `storage peer admission --provider-key LOCAL_KEY [--target-bytes N]` controls the
+already attached local provider through typed administrative IPC, not a remote peer.
+The durable target may fall below retained payload: new reservations are rejected when
+they do not fit, while existing leases/uploads/restores remain intact and excess custody
+is shown as `pending_drain_bytes`. Zero closes admission; the original hard quota and
+free-space floor remain unchanged. Schema 2 atomically migrates owned version-1 stores
+with their original quota as the initial target; older binaries reject schema 2. No target
+change deletes another owner's archive or claims freed disk, measured overhead, automatic
+migration or completed 1:1 reciprocity. Five new backend checks, two actual CLI/IPC checks,
+two protocol checks and strict four-crate Clippy pass; no network resize proof is claimed.
+See [commands and scope](PRIVATE_STORAGE.md#local-admission-target-and-pending-drain).
+
 The [live peer-storage run on `434ed112`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36589770066)
 **passes**. The exact-source report checker accepts the original 93-file artifact bundle
 (ZIP SHA-256 `80d1353d3844b82d75e5b554f4ab89ca538fc70248b9c6ab71d20f9d1f175370`).
@@ -270,10 +283,96 @@ traffic or packet drops; scoped private cleanup, full topology cleanup and byte-
 host state pass. This proves neither archive encryption nor independent replicas, whole-agent
 restart, interrupted network upload, distributed contribution accounting or Signal integration.
 
+The **replica-set candidate** adds
+`storage replicas create/deposit/status/progress/restore/renew/delete`, reusing the existing
+authenticated peer transfer path with two to eight explicitly pinned provider/grant pairs.
+Its bounded private manifest retains immutable per-provider journals, persists uncertainty
+before exchanges and resumes the same archive identities. Restore tries another retained
+copy when a provider fails and publishes only a fully length/hash-verified new file; reads
+never consume copies. Delete names exactly one provider and does not roll back other copies.
+Accounting separates logical length from reserved, committed and uncertain full-copy payload
+charges; expired or unconfirmed-deleted copies remain charged. It does not measure metadata
+overhead or prove reciprocity, independent failure domains, automatic repair or safe handoff.
+
+All **three targeted replica tests pass** (7.36 seconds), including two real SQLite providers
+over local Unix/framed streams with lost confirmations, durable reopen, resume, failover
+and surviving-copy retention. [Operator usage and reconciliation](PRIVATE_STORAGE.md#replica-set-candidate-explicit-copies-and-restore-failover)
+describe the explicit workflow; placement, adaptive contribution and acknowledged drain remain
+separate unfinished work.
+
+The [live two-provider replica run on `bff536e2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36602808623)
+**passes** at exact source `bff536e2e2fe781be89d573ec264afa2ddacc3f0`. The original
+110-file bundle passes the report checker; rebuilding evidence from the separately retained
+phase files exactly reproduces both the aggregate evidence and report contents. ZIP SHA-256:
+`3bc47fb9d80e8406cb773e47e733b3d8f76d5aecba8887016c6bacce43d73d46`.
+Two actual stores with distinct pinned identities in separate disposable namespaces each
+retain 524,326 synthetic opaque bytes / three chunks: 1,048,652 charged payload bytes in total.
+After source removal and the first provider's real service withdrawal, the second supplies
+two full length/hash-verified, non-consuming restores. The unavailable copy stays charged.
+Reopening the same first store preserves its identities; deleting only that copy leaves the
+survivor restorable once more. Idempotent deletion of the final copy leaves both stores with
+zero leases and charged bytes.
+
+Upload, failover and finalization have independent drained, zero-drop captures and respectively
+18, 4 and 6 completed Exit MPTCP/TLS operations on the unchanged protected route. The stopped
+provider supplies zero response payload during failover; only the survivor supplies restored
+bytes. Captures reject direct Client-to-Exit/provider bypasses, and isolation checks prevent
+the Client from reading either provider store locally. Private fixture cleanup and topology
+cleanup pass with zero owned objects left; guest-parent network snapshots are byte-identical.
+This proves explicit two-store service failover, not independent hardware/failure domains,
+whole-agent restart, interrupted overlay upload, archive encryption, Signal restore,
+automatic placement/repair, measured metadata overhead or reciprocal contribution control.
+
+The [first replica run on `ba38a6a5`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36600197974)
+**fails during final evidence assembly**, not during the CLI upload or restores. Its retained
+phase outputs record two committed copies (524,326 bytes each), source removal, two verified
+non-consuming restores with the first service stopped, same-store reopen, selected-copy
+deletion, a further survivor restore and zero final charge. Private/topology cleanup and
+unchanged host state pass. The evidence builder rejects the intended two-element deleted-usage
+array because it reused an object-only reader. Its exporter also omitted the phase capture,
+route and completion files, so those observations cannot be independently reconstructed from
+this artifact. This is not a completed replica acceptance PASS. All 85 original files remain
+unchanged (ZIP SHA-256 `d3d67e02e7f8b81fadb414cea87ef0de449404021f47d36d820de80d0afc2fcb`).
+
+The next owner-coordinated candidate adds `storage replicas replace`: a durable,
+resumable A/B-to-B/C handoff through the same protected operations. It retrieves and hashes
+the surviving copy, retains the exact replacement identity across retries, and fully reads
+back C before signing Delete for A alone. Unconfirmed operations remain charged and pending;
+temporary third-copy storage is not presented as released capacity. This is explicit owner
+orchestration, not automatic provider discovery, contribution resize or permission to move
+another owner's data. The four focused replica tests pass (11.27 seconds), including the
+new three-real-store framed-transport handoff with lost Reserve, readback and Delete replies,
+retained charge, reopen and repeated restores. This is separate from the passing two-provider
+overlay evidence above; no new live handoff proof is claimed.
+
+A separate `private-storage-handoff` scenario is now executable: six protected phases
+cover A/B upload, stopped A with three copies still charged, same-intent retry after
+reopening A, repeated independent reads from B and C, and acknowledged deletion. It
+requires the real owner CLI, full replacement readback, exact store identities and
+per-phase route/privacy/completion evidence. Five handoff checks and three dispatch/export
+checks pass locally. It does not claim automatic
+contribution resizing, repair, independent hardware or Signal backup integration.
+
+The [source-exact run on `721b56f9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36616700648)
+now **passes** all six phases and the unchanged report checker against 139 original files
+(ZIP SHA-256 `6d6d274c2fd526930147c929cb27a96caad05b98726ed73e27ed1146e14ac131`).
+With the original input absent, the three independent provider stores each retain 524,326
+bytes while A's deletion is unconfirmed (1,572,978 charged payload bytes). Reopening the
+same A store and retrying the same intent verifies C again, then deletes only A, retaining
+B/C and 1,048,652 charged bytes. Two full non-consuming restores from B and then C succeed
+with the other service unavailable; final acknowledged deletion leaves zero leases/bytes.
+All six route/privacy/completion phases, exact store identities, private cleanup, zero
+remaining topology objects and byte-identical host state pass. This withdraws provider
+services, not independent machines or the whole owner device, and does not establish
+automatic contribution resizing or measured physical overhead.
+
 - [x] Source-exact disposable multi-node proof of the protected single-provider storage path
   and seven CLI commands (`434ed112`, run `36589770066`).
+- [x] Explicit replica-set commands: focused local two-store resume, accounting and failover checks.
+- [x] Protected two-provider replica-set restore-failover acceptance proof
+  (`bff536e2`, run `36602808623`), including all three capture phases and cleanup.
 - [ ] Least-authority application enrollment beyond the versioned administrative agent IPC.
-- [ ] Independent-node interrupted-upload resume, source-offline restore and measured custody.
+- [ ] Independent-node interrupted-upload resume, source-device-offline restore and measured custody.
 - [ ] Replica placement/repair and physical-usage contribution control, including safe
   2 GB-to-1 GB handoff and pending drain.
 - [ ] Native Signal encrypted snapshot export/import, including its attachments and recovery keys.
@@ -1311,6 +1410,131 @@ proof above remains evidence only for that historical source and stdout boundary
 relabeled as IPC evidence. B04, confidential offload and browser-UI integration remain open.
 See [service usage](DECENTRALIZED_AGENTS.md#application-local-private-compute-ipc) and the
 [local wire contract](../crates/volparossa/src/compute/private_serve/WIRE.md).
+
+Original combined browser proof candidate (2026-09-29): the explicit `agent-private-browser` VM scenario
+pins browser integration source `68bec6de8d39321f810419ad254dd2e7e2ad66a1` and Debian ESR
+140.16.0, then submits the final private question through the actual Gecko sidebar and this
+same private service/model. It retains real Cancel/Disconnect checks and uses a separate
+decoded-result-before-panel-render cleanup boundary; the original v2 first-frame-byte proof
+is unchanged. Source pins, pure report checks and the static KVM/export contract pass.
+Combined live execution was initially pending; the later source-exact pass is recorded below.
+This is not a Firefox 157 build, native provider-selector
+integration, general answer-quality evidence or completed B04. Raw answers, private inputs,
+browser profiles and logs are excluded from the exported browser proof.
+The [first combined run on `db5059e7`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36594499298)
+failed during browser runtime staging, before model provision or any combined inference.
+Its original eight-file artifact reports `SUBPROCESS_FAILED`, not the staging stderr;
+ordinary cleanup and unchanged host-state bytes pass. Original ZIP SHA-256:
+`837ce198645fe9f8a7b4902765f2d52f50066beaeed0d471c7cd5399659aa276`.
+Separately, workspace extraction of the exact pinned Debian package reproduced a missing
+`/etc/firefox-esr` error when staging followed `browser/defaults/syspref` in a readonly-host
+sandbox with empty private `/etc`. Browser `d37b74ec` excludes that host-specific preference
+link, retaining strict handling of other runtime dependencies. The same extraction now
+stages successfully with all four pinned runtime hashes unchanged; two new staging tests
+pass. This independently reproduced defect is consistent with the failed stage, not a
+recovery of its suppressed stderr. The first run stays failed; it does not establish combined execution.
+
+The [next run on `3c4ec9ff`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36596525068)
+passes pinned runtime/model provision and the actual private-service Cancel/Disconnect
+checks, but **fails** at `private-browser-admission` before the browser admission marker.
+Its generic `CHECK_FAILED` does not distinguish sidebar startup, socket connection or another
+browser-side failure; suppressed browser logs are not reconstructed from that code. The 11
+original files are retained, ZIP SHA-256
+`a836f1128f10fc234b491f1fbd0170acca97ba155c8e0c2b863fda7e6763c378`.
+Browser cleanup completes without fallback signals; final core cleanup uses fallback signals,
+so this is not an ordinary-cleanup pass. Final host-state bytes are unchanged. No combined
+model answer, panel-render or completed browser integration is proved by this failed run.
+The follow-up retains fixed browser phase/error codes and process/deadline state inside the
+existing bounded report, never raw prompts, answers or logs. Local probes of the exact ESR
+sidebar, actual panel and module reach admission through an isolated read-only Unix-socket
+bind; their deliberately failing synthetic protocol peer is not a real-model proof. The
+new diagnostics preserve all existing acceptance gates and time limits. Five focused model-
+smoke checks, core report/diagnostic checks and the static KVM contract pass; the original
+VM failure still needs a source-exact diagnostic run, not an inferred cause.
+
+The [diagnostic run on `354229a6`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36599723295)
+also **fails** before admission. Real Cancel/Disconnect again pass, while the retained
+browser phase is now `marionette-connect`, with `CHECK_FAILED` and an exited Python smoke
+process. This narrows the failure to browser startup/test-control connection; it does not
+distinguish Firefox exiting from the inner 40-second connection deadline. The outer 55-second
+deadline has not elapsed. The artifact does not retain Firefox's own return code or startup
+stderr. All 11 original files remain unchanged, ZIP SHA-256
+`c982c8e1217cf248bc06ec3281746b16cc427a1cf4aaf2d014cd1a5bac01ec5b`.
+Browser cleanup is ordinary; core cleanup again uses fallback signals, and host state is
+unchanged. No combined model execution or panel result follows from this diagnostic.
+The next source-bound candidate preserves the actual Firefox exit code, startup duration and
+fixed loader/profile/sandbox/permission/memory signal flags separately from the wrapper's
+status. Raw browser logs remain private and are removed. Six focused browser-model smoke
+checks and the core diagnostic checks pass; exact ESR launches also reached Marionette in
+isolated read-only namespaces both with ordinary and hidden system fonts. Those local launches
+do not reproduce or explain the guest failure, and no deadline or package change is inferred.
+
+The [run on `3ade064c`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36602792924)
+now distinguishes the failure: Firefox is still alive after 40,059 ms, but Marionette never
+connects. The later wrapper exit 1 is not a Firefox crash. All five retained startup-log
+categories are false; no module import, sidebar or browser Submit is reached. Real core
+Cancel/Disconnect and final cleanup pass, with fallback signals needed for core shutdown
+and unchanged host state. The original 11 files remain unchanged, ZIP SHA-256
+`a382c3ce5442ff456cc15ee3f3300d6d8b9289383ecb41c1063b4df9a51169df`.
+The next candidate runs an isolated, empty-profile `about:blank` startup **before** model
+provisioning. Only that separate input-free run may retain a bounded 16 KiB startup log,
+fixed process facts and loopback/listener state; combined private-session logs remain excluded.
+Four new browser checks, six existing model-harness checks and core schema/export checks pass.
+The 40-second startup deadline, browser privacy settings and sandbox are unchanged. This is
+diagnostic coverage, not a demonstrated startup fix or completed browser/model integration.
+
+The [empty-startup run on `69ce99a0`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36607457567)
+fails before model provisioning: the exact Firefox process remains alive after 40,002 ms,
+loopback is up, but neither IPv4 nor IPv6 has the test-control listener. The input-free
+424-byte log reports missing `libGL.so.1` and a software-compositor warning. An isolated
+local probe hides that exact library using a child-only read-only mount: both warnings
+occur, yet the same runtime opens a real session in about 3.2 seconds. Missing GL alone
+is therefore not a demonstrated explanation or justification for a package/deadline change.
+All 11 original files remain unchanged, ZIP SHA-256
+`9d742e147d9a8f90dd8d25dae06c52255aca77a44026fad6c5a959bec4221174`.
+Owned-process/profile cleanup completes; guest-parent state is byte-identical. The next
+source pin enables Firefox startup trace only in the separate empty profile, still capped
+at 16 KiB. Combined private-session logging, privacy settings and sandbox stay unchanged.
+
+The [trace-enabled run on `543e4c2d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36610233935)
+also fails during the empty startup: 40,002 ms, Firefox alive, loopback up, no test-control
+listener and no startup trace beyond the same graphics warnings. It reaches no model or
+private IPC. All eleven original files are retained, ZIP SHA-256
+`3a46fc615bdebb0c025a28759f1e8115b2aea4f5394c08bd721d28aad61462f8`;
+the temporary process/profile are removed and guest-parent snapshots are byte-identical.
+
+A local controlled reproduction now identifies an early profile-root prerequisite: with
+only a read-only empty `.mozilla` root substituted, the exact runtime hangs for 40 seconds
+before Marionette initialization. Merely supplying empty `firefox` and `firefox-esr`
+directories in that isolated root permits a real session in 2.574 seconds. The pinned
+startup code initializes global appdata even when `--profile` is explicit; its unavailable
+profile dialog is invisible headlessly. The browser fix supplies a fresh per-run appdata
+mount, without changing `HOME`, existing home contents or host permissions. Both runners
+verify that exact mount and remove it with their temporary profiles. A bounded anonymous
+home metadata layer also handles machines where the `.mozilla` mountpoint does not exist.
+Thirteen focused checks and real fixed startup probes (2.681 seconds, and 3.389 seconds
+with a pristine read-only home containing the staged repository) pass with clean exit and
+cleanup. This source pin leaves the 40-second deadline, sandbox, runtime, privacy defaults
+and private-session log boundary unchanged. Those local startup results alone do not establish
+the combined browser/model integration.
+
+**Combined browser/core PASS (2026-09-29):** [run 36614266330](https://github.com/VOLPAROSSA/volparossa/actions/runs/36614266330)
+on core `5beb8d2d79e44d2b4d2e4e3bb20aa4e67701e03b`, with browser source
+`4b1fdbe105c5cc23154778664c8d9fca9ef2454b` and the exact Debian ESR 140.16.0 runtime,
+passes the complete `agent-private-browser` checker. Empty-profile startup takes 1,961 ms.
+After actual private-service Cancel/Disconnect checks, the real Gecko sidebar submits to
+the pinned local SmolLM2-360M worker and renders the synthetic canary as text, with EOS and
+12 generated tokens. At `decoded_result_before_panel_render`, the observer records zero
+ephemeral children and ended worker lifetimes; this is not the earlier first-frame-byte
+IPC observation point. Input/model isolation, ordinary cleanup without fallback signals,
+removal of browser/profile/appdata and model/job roots, and unchanged host state pass.
+No private prompt or raw model answer is exported. The 19 original artifacts remain immutable;
+ZIP SHA-256: `8da26ef025ff2a539124693ecd098c2e3d8a9d47a34102b8b1351278d8842925`.
+Both host-state snapshots have SHA-256
+`7293aa05b9868c420b2634dcecec728da9a9b8b276cd8e090e8b91d2bd441766`.
+Earlier failures above remain failed, not relabeled. This proves the bounded ESR panel → real
+core → local model path, **not** a Firefox 157 build, its patched native provider selector,
+general answer quality, confidential peer execution or completed B04.
 
 Current dependency-ready candidate: a single incremental provider queue now owns source and
 derived graph work. Each durable package completion triggers a dependency scan; newly ready
