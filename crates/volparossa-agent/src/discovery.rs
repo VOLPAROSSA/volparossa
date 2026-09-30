@@ -25765,8 +25765,12 @@ mod tests {
 
     async fn larger_restricted_preselection_fixture() -> (Box<RuntimeFixture>, u64) {
         let (mut fixture, now_ms) = signed_alternative_exit_controls_fixture().await;
-        for _ in 0..3 {
+        // Network hints derive from nonce[0]. The base fixture uses 40..43;
+        // keep every added Relay and Exit diverse regardless of random peer order.
+        for discriminator in 44..47 {
             let identity = Identity::generate();
+            let mut nonce = generate_nonce();
+            nonce[0] = discriminator;
             assert!(
                 ingest_direct_snapshot_advertisement_with_capabilities(
                     &mut fixture,
@@ -25777,7 +25781,7 @@ mod tests {
                         exit: false,
                     },
                     1,
-                    generate_nonce(),
+                    nonce,
                     now_ms,
                     PreselectionTestCapabilities::all(),
                 )
@@ -25792,6 +25796,8 @@ mod tests {
             .next()
             .unwrap()
             .clone();
+        let mut exit_nonce = generate_nonce();
+        exit_nonce[0] = 47;
         assert!(
             ingest_forwarded_snapshot_exit_with_capabilities(
                 &mut fixture,
@@ -25803,7 +25809,7 @@ mod tests {
                     exit: true,
                 },
                 1,
-                generate_nonce(),
+                exit_nonce,
                 now_ms,
                 PreselectionTestCapabilities::all(),
             )
