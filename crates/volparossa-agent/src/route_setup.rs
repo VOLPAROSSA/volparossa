@@ -13,17 +13,23 @@
 
 mod bootstrap;
 mod browser_failure;
+mod dns_reuse;
+mod extension;
+mod live_refill;
+mod mptcp_paths;
 mod path_growth;
 mod path_telemetry;
 mod retirement;
 mod selection_bridge;
 
+pub(crate) use extension::CommittedMptcpExtension;
 pub(crate) use selection_bridge::{
     PreProbeContinuation, PreparedPreselectionEvidence, prepare_preselection_evidence,
 };
 
 use bootstrap::BootstrapOwner;
 use browser_failure::BrowserFailureStage;
+use dns_reuse::ReusableDns;
 use path_growth::{GrowthDecision, WarmPathGrowth};
 use path_telemetry::PathTelemetry;
 
@@ -186,7 +192,12 @@ pub(crate) enum ClientRouteDisconnectError {
     CleanupPending,
 }
 
+#[derive(Clone)]
 struct ClientRouteRetirement {
+    owner: Arc<Mutex<ClientRouteRetirementOwner>>,
+}
+
+struct ClientRouteRetirementOwner {
     task: tokio::task::JoinHandle<Result<(), ClientRouteDisconnectError>>,
     completed: Option<Result<(), ClientRouteDisconnectError>>,
 }
@@ -194,23 +205,29 @@ struct ClientRouteRetirement {
 impl ClientRouteRetirement {
     fn new(task: tokio::task::JoinHandle<Result<(), ClientRouteDisconnectError>>) -> Self {
         Self {
-            task,
-            completed: None,
+            owner: Arc::new(Mutex::new(ClientRouteRetirementOwner {
+                task,
+                completed: None,
+            })),
         }
     }
 
-    async fn confirm(&mut self, wait: Duration) -> Result<(), ClientRouteDisconnectError> {
-        if let Some(result) = self.completed {
-            return result;
-        }
-        let result = timeout(wait, &mut self.task)
-            .await
-            .map_err(|_| ClientRouteDisconnectError::CleanupPending)?
-            .unwrap_or(Err(ClientRouteDisconnectError::CleanupPending));
-        // Do not poll a consumed JoinHandle again. A failed owner remains fail-closed rather
-        // than being replaced by Idle or by an unscoped helper cleanup request.
-        self.completed = Some(result);
-        result
+    async fn confirm(&self, wait: Duration) -> Result<(), ClientRouteDisconnectError> {
+        timeout(wait, async {
+            let mut owner = self.owner.lock().await;
+            if let Some(result) = owner.completed {
+                return result;
+            }
+            let result = (&mut owner.task)
+                .await
+                .unwrap_or(Err(ClientRouteDisconnectError::CleanupPending));
+            // Do not poll a consumed JoinHandle again. A failed owner remains fail-closed
+            // and cancellation drops only this waiter, never the retained cleanup task.
+            owner.completed = Some(result);
+            result
+        })
+        .await
+        .map_err(|_| ClientRouteDisconnectError::CleanupPending)?
     }
 }
 
@@ -322,6 +339,8 @@ impl EstablishedClientRoute {
                 ClientTransportState::NativeUdp(active)
                     if active.flow_expired(wall_now_ms, monotonic_now)
             )
+            || matches!(&self.transport, ClientTransportState::UdpActive(active)
+                if active.reusable_dns.as_ref().is_some_and(|dns| dns.expired(wall_now_ms, monotonic_now)))
     }
 
     const fn progress(&self) -> ClientRouteProgress {
@@ -421,7 +440,7 @@ impl EstablishedClientRoute {
                 let _ = Box::pin(route.disconnect()).await;
             }
             ClientTransportState::UdpActive(route) => {
-                let _ = route.shutdown().await;
+                let _ = Box::pin(route.shutdown()).await;
             }
             ClientTransportState::NativeUdp(active) => {
                 if retry_native {
@@ -1195,10 +1214,15 @@ impl ClientRouteControl {
             };
             *state = self.start_retirement(established);
         }
-        if let ClientRouteControlState::CleanupPending(retirement) = &mut *state {
-            if retirement.confirm(MAXIMUM_CALL_DURATION).await.is_ok() {
-                *state = ClientRouteControlState::Idle;
-            }
+        let retirement = match &*state {
+            ClientRouteControlState::CleanupPending(retirement) => Some(retirement.clone()),
+            _ => None,
+        };
+        drop(state);
+        if let Some(retirement) = retirement {
+            let _ = self
+                .confirm_retirement(&retirement, MAXIMUM_CALL_DURATION)
+                .await;
         }
     }
 
@@ -2060,7 +2084,7 @@ impl ClientRouteControl {
                     remote: authorized.destination(),
                 });
                 if active.client.send_payload(authorized.payload()).is_err() {
-                    let _ = active.shutdown().await;
+                    let _ = Box::pin(active.shutdown()).await;
                     orchestrator.shutdown_detached();
                     let mut state = self.state.lock().await;
                     *state = ClientRouteControlState::Idle;
@@ -2094,6 +2118,28 @@ impl ClientRouteControl {
         policy: &VerifiedManifest,
         now_ms: u64,
     ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        Box::pin(self.activate_dns_ingress_mode(ingress, policy, now_ms, false)).await
+    }
+
+    pub(crate) async fn activate_reusable_dns_ingress(
+        &self,
+        ingress: PolicyAuthorizedDnsIngress,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        Box::pin(self.activate_dns_ingress_mode(ingress, policy, now_ms, true)).await
+    }
+
+    #[allow(clippy::too_many_lines)] // Keep consuming activation and cleanup ownership together.
+    async fn activate_dns_ingress_mode(
+        &self,
+        ingress: PolicyAuthorizedDnsIngress,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+        reusable: bool,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        let reusable_input =
+            reusable.then(|| (ingress.reuse_identity(), ingress.dns_payload().to_vec()));
         self.retire_expired_route(now_ms, Instant::now()).await;
         let previous = {
             let mut state = self.state.lock().await;
@@ -2129,12 +2175,14 @@ impl ClientRouteControl {
         };
         let context_id = *ready.prepared.path.route_context_id();
         if route.is_some() {
-            self.retire_failed_dns(context_id, orchestrator, async move {
-                let _ = Box::pin(ready.disconnect()).await;
-                if let Some(route) = route {
-                    let _ = route.disconnect().await;
-                }
-            })
+            Box::pin(
+                self.retire_failed_dns(context_id, orchestrator, async move {
+                    let _ = Box::pin(ready.disconnect()).await;
+                    if let Some(route) = route {
+                        let _ = route.disconnect().await;
+                    }
+                }),
+            )
             .await;
             return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
         }
@@ -2151,11 +2199,21 @@ impl ClientRouteControl {
             return Err(ClientRouteConnectError::UdpIngressUnavailable);
         };
         let (flow, signed_authorization) = authorized.activation();
+        let reusable_dns = reusable_input.map(|(identity, request)| {
+            Box::new(ReusableDns::new(
+                identity,
+                request,
+                flow.expires_at_ms(),
+                now_ms,
+                Instant::now(),
+            ))
+        });
         match ready
             .activate(flow, signed_authorization, MAXIMUM_CALL_DURATION, now_ms)
             .await
         {
             Ok(mut active) => {
+                active.reusable_dns = reusable_dns;
                 active.return_path = Some(ClientUdpReturnPath {
                     application: authorized.source(),
                     remote: authorized.destination(),
@@ -2163,7 +2221,7 @@ impl ClientRouteControl {
                 if active.client.send_payload(authorized.payload()).is_err() {
                     Box::pin(
                         self.retire_failed_dns(context_id, orchestrator, async move {
-                            let _ = active.shutdown().await;
+                            let _ = Box::pin(active.shutdown()).await;
                         }),
                     )
                     .await;
@@ -2342,6 +2400,9 @@ impl ClientRouteControl {
             .await
             .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
             .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        if let Some(dns) = &mut active.reusable_dns {
+            dns.accept_response(&payload, crate::unix_millis(), Instant::now())?;
+        }
         active.observation.record_received(payload.len())?;
         self.replace_agent_path_projection(ClientPathProjection::Dns(active.observation.project()))
             .await?;
@@ -2670,11 +2731,28 @@ impl ClientRouteControl {
                 *state = self.start_retirement(established);
             }
         }
-        let ClientRouteControlState::CleanupPending(retirement) = &mut *state else {
+        let ClientRouteControlState::CleanupPending(retirement) = &*state else {
             unreachable!("exact retirement owner retained")
         };
+        let retirement = retirement.clone();
+        drop(state);
+        self.confirm_retirement(&retirement, wait).await
+    }
+
+    /// Cleanup may await remote peers and the helper. Status queries must not wait behind
+    /// those operations; new route admission still sees `CleanupPending` until exact success.
+    async fn confirm_retirement(
+        &self,
+        retirement: &ClientRouteRetirement,
+        wait: Duration,
+    ) -> Result<(), ClientRouteDisconnectError> {
         retirement.confirm(wait).await?;
-        *state = ClientRouteControlState::Idle;
+        let mut state = self.state.lock().await;
+        if matches!(&*state, ClientRouteControlState::CleanupPending(current)
+            if Arc::ptr_eq(&current.owner, &retirement.owner))
+        {
+            *state = ClientRouteControlState::Idle;
+        }
         Ok(())
     }
 }
@@ -2772,9 +2850,16 @@ fn client_open_tcp_material(
         .collect::<Vec<_>>();
     let mut replay = ReplayCache::new(MAXIMUM_REPLAY_CAPACITY)
         .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
-    let verified_route = VerifiedMptcpRoute::verify(
+    let extensions = established
+        .signed_extensions
+        .iter()
+        .map(Vec::as_slice)
+        .collect::<Vec<_>>();
+    let verified_route = VerifiedMptcpRoute::verify_with_extensions(
         &established.signed_exit_reservation,
         &relay_reservations,
+        &extensions,
+        established.exit_bundle.signed_capability(),
         now_ms,
         TimePolicy::default(),
         &mut replay,
@@ -3934,7 +4019,14 @@ impl RouteSetupRequest {
     }
 
     fn probe_permit_limit(&self) -> Result<u32, RouteSetupError> {
-        u32::try_from(self.paths.len()).map_err(|_| RouteSetupError::Invalid("probe permit limit"))
+        let paths = if self.parameters.allowed_transports == [Transport::TcpMptcp] {
+            self.paths
+                .len()
+                .max(self.parameters.post_probe_policy.relay_policy.maximum_paths)
+        } else {
+            self.paths.len()
+        };
+        u32::try_from(paths).map_err(|_| RouteSetupError::Invalid("probe permit limit"))
     }
 
     fn exit_intent(
@@ -3971,7 +4063,14 @@ impl RouteSetupRequest {
             allowed_transports: self.parameters.allowed_transports.clone(),
             reserved_up_mbps: self.parameters.reserved_up_mbps,
             reserved_down_mbps: self.parameters.reserved_down_mbps,
-            maximum_paths: self.final_path_upper()?,
+            // The capability reserves explicit configured refill room. The immutable finalized
+            // grant still describes only the paths actually measured and confirmed at setup.
+            maximum_paths: if self.parameters.allowed_transports == [Transport::TcpMptcp] {
+                u32::try_from(self.parameters.post_probe_policy.relay_policy.maximum_paths)
+                    .map_err(|_| RouteSetupError::Invalid("MPTCP refill capacity"))?
+            } else {
+                self.final_path_upper()?
+            },
             probe_permit_limit: self.probe_permit_limit()?,
             policy_hash: self.parameters.policy_hash,
             created_at_ms: self.parameters.created_at_ms,
@@ -5600,6 +5699,7 @@ pub(crate) struct ActiveProductionUdpRoute {
     route: ProductionRoute,
     observation: DnsPathObservation,
     return_path: Option<ClientUdpReturnPath>,
+    reusable_dns: Option<Box<ReusableDns>>,
 }
 
 struct DnsPathObservation {
@@ -6192,6 +6292,7 @@ impl CertificateBoundProductionUdpRoute {
                     received_bytes: 0,
                 },
                 return_path: None,
+                reusable_dns: None,
             }),
             Err(_error) => Err(ProductionUdpActivationFailure {
                 route,
@@ -6212,6 +6313,7 @@ impl ActiveProductionUdpRoute {
             client,
             observation: _,
             return_path: _,
+            reusable_dns: _,
         } = self;
         client.shutdown().await;
         route
@@ -7350,7 +7452,7 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
         cancellation: &mut watch::Receiver<bool>,
         deadline: Instant,
         measurement: VerifiedRouteMeasurement<P>,
-    ) -> Result<ExecutionProof<P::RelayGrant, P::NativeAuthorization>, RouteSetupError>
+    ) -> Result<ExecutionProof<P::RelayGrant, P::NativeAuthorization, P::ExitBundle>, RouteSetupError>
     where
         L: LocalRouteBackend,
         R: ReservationTransport,
@@ -7700,6 +7802,7 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
             commit: committed,
             signed_exit_reservation,
             native_authorization,
+            exit_bundle: finalized,
         })
     }
 
@@ -7799,13 +7902,18 @@ impl<P: ClientReservationProtocol> MeasuredRouteSetup<P> {
                 commit_proof: proof.commit,
                 signed_exit_reservation: proof.signed_exit_reservation,
                 native_authorization: Some(proof.native_authorization),
+                exit_bundle: proof.exit_bundle,
+                signed_extensions: Vec::new(),
+                attempted_extension_paths: BTreeSet::new(),
+                refill_nomination_cursor: 0,
+                pending_extension: None,
             }),
             Err(cause) => Err(transaction.rollback(cause).await),
         }
     }
 }
 
-struct ExecutionProof<G, A> {
+struct ExecutionProof<G, A, B> {
     grants: Vec<G>,
     relay_authorities: Vec<DirectRelayCapability>,
     confirmations: Vec<RelayConfirmationProof>,
@@ -7814,6 +7922,7 @@ struct ExecutionProof<G, A> {
     commit: CommittedLeaseBatch,
     signed_exit_reservation: Vec<u8>,
     native_authorization: A,
+    exit_bundle: B,
 }
 
 struct RelayConfirmationProof {
@@ -7832,6 +7941,14 @@ struct EstablishedRoute<P: ClientReservationProtocol> {
     commit_proof: CommittedLeaseBatch,
     signed_exit_reservation: Vec<u8>,
     native_authorization: Option<P::NativeAuthorization>,
+    // Retain the original bundle unchanged; every later +1 path is separately signed.
+    exit_bundle: P::ExitBundle,
+    signed_extensions: Vec<Vec<u8>>,
+    // A cancelled future retains its precise additive cleanup scope with the parent owner.
+    attempted_extension_paths: BTreeSet<u32>,
+    // Nomination attempts can fail before a helper path ID exists; rotate those independently.
+    refill_nomination_cursor: usize,
+    pending_extension: Option<extension::PendingExtension>,
 }
 
 impl<P: ClientReservationProtocol> EstablishedRoute<P> {
@@ -10074,6 +10191,8 @@ mod tests {
                 | ExitForwardOperation::MpquicSessionStart
                 | ExitForwardOperation::AdjacentReceiveBudget
                 | ExitForwardOperation::RouteRetire
+                | ExitForwardOperation::ExtendRoute
+                | ExitForwardOperation::MptcpPaths
                 | ExitForwardOperation::Unspecified => {
                     return Err(FakeTransportError::Definitive);
                 }
@@ -10191,6 +10310,9 @@ mod tests {
                 | DatapathRelayOperation::MptcpSessionStart
                 | DatapathRelayOperation::MpquicSessionStart
                 | DatapathRelayOperation::RouteRetire
+                | DatapathRelayOperation::ExtensionProbe
+                | DatapathRelayOperation::ExtensionCommit
+                | DatapathRelayOperation::ExtensionAbort
                 | DatapathRelayOperation::Unspecified => {
                     return Err(FakeTransportError::Definitive);
                 }
@@ -10447,6 +10569,8 @@ mod tests {
                 | ExitForwardOperation::MpquicSessionStart
                 | ExitForwardOperation::AdjacentReceiveBudget
                 | ExitForwardOperation::RouteRetire
+                | ExitForwardOperation::ExtendRoute
+                | ExitForwardOperation::MptcpPaths
                 | ExitForwardOperation::Unspecified => return Err(RealTransportError),
             };
             ExitForwardResponse::granted(
@@ -10547,6 +10671,9 @@ mod tests {
                 | DatapathRelayOperation::MptcpSessionStart
                 | DatapathRelayOperation::MpquicSessionStart
                 | DatapathRelayOperation::RouteRetire
+                | DatapathRelayOperation::ExtensionProbe
+                | DatapathRelayOperation::ExtensionCommit
+                | DatapathRelayOperation::ExtensionAbort
                 | DatapathRelayOperation::Unspecified => return Err(RealTransportError),
             };
             DatapathRelayResponse::granted(
@@ -10978,6 +11105,51 @@ mod tests {
         assert!(matches!(
             *control.state.lock().await,
             ClientRouteControlState::Idle
+        ));
+    }
+
+    #[tokio::test]
+    async fn client_retirement_wait_keeps_paths_responsive_without_early_idle() {
+        let control = ClientRouteControl::default();
+        let (complete, completion) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            completion
+                .await
+                .map_err(|_| ClientRouteDisconnectError::CleanupPending)
+        });
+        let original = ClientRouteRetirement::new(task);
+        *control.state.lock().await = ClientRouteControlState::CleanupPending(original.clone());
+        let mut cleanup = Box::pin(control.disconnect_with_wait(TEST_TIMEOUT));
+        tokio::select! {
+            result = &mut cleanup => panic!("unconfirmed cleanup returned {result:?}"),
+            () = tokio::task::yield_now() => {}
+        }
+        timeout(
+            Duration::from_millis(100),
+            control.refresh_mpquic_path_summaries(),
+        )
+        .await
+        .expect("Paths must not wait for the retained remote/helper cleanup")
+        .expect("no live MPQUIC owner to refresh");
+        assert!(matches!(&*control.state.lock().await,
+            ClientRouteControlState::CleanupPending(current)
+            if Arc::ptr_eq(&current.owner, &original.owner)));
+        complete.send(()).expect("exact cleanup task remains owned");
+        cleanup.await.expect("exact completion can enter Idle");
+        assert!(matches!(
+            *control.state.lock().await,
+            ClientRouteControlState::Idle
+        ));
+
+        // A delayed second waiter for this completed owner must not overwrite a newer state.
+        *control.state.lock().await = ClientRouteControlState::Connecting;
+        control
+            .confirm_retirement(&original, TEST_TIMEOUT)
+            .await
+            .unwrap();
+        assert!(matches!(
+            *control.state.lock().await,
+            ClientRouteControlState::Connecting
         ));
     }
 

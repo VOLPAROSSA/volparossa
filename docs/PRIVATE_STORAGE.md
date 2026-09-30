@@ -17,6 +17,20 @@ not a readable conversation database. A hash detects corruption; it is not encry
 proof of ownership or permission to publish private data. Backup consent never authorizes
 public-cache publication or compute training.
 
+### Fragment placement versus transfer chunks
+
+The required end state distributes different encrypted chunks across storage participants,
+with redundant copies of each chunk and a private authenticated reconstruction manifest.
+The owner restores by gathering and verifying the required chunks; no single provider
+needs a complete archive. Contribution accounting counts every actual retained chunk copy
+and charged overhead, regardless of how many holders share them.
+
+The current transport streams bounded chunks, but `storage replicas` deposits the **same
+complete encrypted archive at each selected provider**. Chunked transfer and full-archive
+replica failover do not prove distributed fragment placement. Per-chunk placement,
+independent replica repair and recovery of the private reconstruction metadata remain
+unfinished; the existing complete-copy proofs must not be presented as that end state.
+
 ## Reciprocal contribution
 
 The user-selected rule is:
@@ -24,7 +38,10 @@ The user-selected rule is:
 `required usable local contribution >= actual remote storage used, counting every copy`
 
 One GB retained at one remote provider requires at least one GB contributed locally.
-Two full copies of that GB require about two GB plus counted overhead. Replica repairs
+Two full copies of that GB require about two GB plus counted overhead: the first one-GB
+copy and one additional one-GB recovery copy, not three GB. The matching local contribution
+is usable space for other participants, not the owner's own retained original archive.
+Keeping that original consumes separate local disk space. Replica repairs
 and in-flight reservations must be accounted for without charging a retry twice or
 pretending that a promised copy already exists. Logical archive length, reserved bytes,
 retained ciphertext bytes, replication and any charged metadata must remain distinct.
@@ -33,6 +50,52 @@ A configured disk allowance is not proof that a participant provides reachable s
 that replicas exist, or that the same allowance has not been promised to several peers.
 Receipt-backed distributed accounting and usable-capacity checks remain to be implemented.
 No payments, tokens or blockchain are introduced.
+
+## Storage immune system and private-content limits
+
+The storage layer is subject to the same principle-led content policy as the network,
+cache and compute layers. Privacy is not permission to store prohibited material,
+including child sexual abuse material (CSAM). Preventing that use and protecting providers
+from abuse are requirements; **the current storage commands do not implement a private
+content-classification or distributed abuse-review mechanism**.
+
+The intended design separates three responsibilities:
+
+1. **Source-side admission:** an authorized application can check eligible input before it
+   encrypts it, without sharing private files with compute peers. The core currently accepts
+   already-encrypted archives and cannot perform that inspection. A hostile uploader can
+   modify or bypass local checks. An application assertion, signature or `--already-encrypted`
+   flag must never be described as proof that the content was checked or is permitted.
+2. **Custody and resource admission:** authenticate owners and operations, enforce grants,
+   byte/lease limits and retention, and reconcile real usage and usable contribution.
+   Existing signed grants and local quotas address bounded custody; they are not a content
+   verdict or completed distributed anti-abuse/accounting system.
+3. **Scoped abuse response:** privacy-minimizing reports, evidence provenance, mutual review,
+   conflicting-evidence handling, and reviewable restrictions, quarantine or removal.
+   Decisions must identify an authorized subject and scope, bind to the correct object/lease
+   and revision, and resist replay and fabricated reports. An accusation alone must not
+   delete a backup. Unknown ciphertext is not by itself evidence of prohibited content, and
+   the public-cache policy gate is not authority to classify or delete private backups.
+   A quarantined object must not be automatically redistributed by repair.
+   Reversals must be supported where possible; actual deletion is not reversible and must
+   not be presented as such. None of this establishes erasure by a malicious remote holder.
+
+Review must not publish plaintext, private filenames, plaintext content fingerprints,
+recovery keys or browsing associations. It must not redistribute suspected illegal files
+as peer evidence or training data. Use synthetic, lawful fixtures for development. Content
+integrity, origin authentication and proof of retained bytes are distinct from a judgment
+about what the bytes mean. Ciphertext hashes cannot classify the plaintext; ordinary remote
+AI inference would disclose that plaintext to its worker and is not an acceptable shortcut.
+
+The unresolved requirement is an admission and response design that meaningfully resists
+malicious uploaders while preserving the agreed privacy boundary. Opaque ciphertext plus
+client self-attestation cannot establish the absence of illegal content. Do not claim that
+the immune system is complete, all stored content is lawful, or encrypted custody removes
+legal risk. No decryption escrow, blanket client-file scanning, or specific confidential-
+hardware scheme is selected or authorized by this design note.
+
+See [principle-led governance](DECENTRALIZED_AGENTS.md#principles-guide-rules-not-the-other-way-around)
+and the [four-layer overview](../README.md#storage-layer-private-cloud-storage).
 
 ### Adaptive contribution and safe handoff
 
@@ -439,6 +502,68 @@ The first exporter also omits the separate phase route/capture/completion files,
 bundle cannot independently establish all protected-path/privacy gates. The original 85 files
 remain unchanged and failed; the later passing run above supplies fresh evidence rather than
 relabeling this earlier result.
+
+## Fragment placement candidate: redundant pieces, not whole archives per provider
+
+`storage fragments create/deposit/status/progress/restore/renew/delete` composes the
+existing authenticated replica lifecycle over **distinct ranges of an already-encrypted
+archive**. Select three to eight independently trusted provider/grant pairs and two to
+`providers - 1` copies per fragment. Deterministic rotating placement gives every fragment
+its requested copies while each provider retains only a subset of the archive. It adds no
+new transport, erasure coding, encryption scheme or automatically inferred provider trust.
+
+```sh
+volparossa storage fragments create --state /absolute/fragment-set \
+  --input /absolute/encrypted-archive --sha256 ARCHIVE_SHA256_HEX --already-encrypted \
+  --provider-key PROVIDER_A_KEY_HEX --grant /absolute/provider-a.grant \
+  --provider-key PROVIDER_B_KEY_HEX --grant /absolute/provider-b.grant \
+  --provider-key PROVIDER_C_KEY_HEX --grant /absolute/provider-c.grant \
+  --copies 2 --fragment-bytes 16777216 --lifetime-seconds 604800 \
+  --identity /absolute/owner.identity
+volparossa storage fragments deposit --state /absolute/fragment-set \
+  --input /absolute/encrypted-archive --already-encrypted --identity /absolute/owner.identity
+volparossa storage fragments status --state /absolute/fragment-set
+volparossa storage fragments progress --state /absolute/fragment-set --identity /absolute/owner.identity
+volparossa storage fragments restore --state /absolute/fragment-set \
+  --output /absolute/new-restored-ciphertext --identity /absolute/owner.identity
+volparossa storage fragments renew --state /absolute/fragment-set \
+  --lifetime-seconds 1209600 --identity /absolute/owner.identity
+volparossa storage fragments delete --state /absolute/fragment-set --identity /absolute/owner.identity
+```
+
+Creation is local only. The owner signs an immutable reconstruction manifest binding the
+original ciphertext length/hash, every contiguous fragment range/hash, exact provider keys,
+grant digests and original per-copy archive IDs. Existing private journals retain each
+subsequently issued lease and receipt; opening them verifies their immutable fields against
+the signed root. Keep the complete owner-only state directory independently with recovery
+material: neither peers nor the public cache receive this reconstruction manifest or keys.
+Fragmentation does not itself encrypt a plaintext input; `--already-encrypted` is an explicit
+caller contract, not cryptographic detection.
+
+There are at most 256 fragments, each at most 1 GiB. The default 16 MiB upper fragment size
+supports archives up to 4 GiB; larger archives need an explicitly larger fragment size,
+within the existing 64 GiB archive bound. Small archives split further to ensure at least
+one fragment per selected provider and must contain at least that many bytes. Aggregate
+planned bytes and lease counts must fit every original grant before any state or network
+allocation. Temporary staging contains at most one fragment alongside a restoring output.
+
+Repeat the same deposit command to resume the original reservations after interruption.
+Reserved, committed, uncertain and expired copies remain conservatively charged at their
+**actual fragment lengths**, including every retained replica. Missing confirmations do not
+release those charges. Unknown initial reservations require deposit retry with the original
+input before lease-only reconciliation. Restore independently tries each fragment's surviving
+copies and publishes a new `0600` file only after both fragment and complete-archive checks;
+repeated reads consume nothing. Delete targets **all** owned fragment copies, unlike the
+single-provider replica delete command. Failed deletion remains charged and retryable.
+
+All three focused tests pass, including three real SQLite providers over local signed framed
+streams: lost Reserve acknowledgement, durable same-identity resume, subset-only custody,
+source removal, two non-consuming restores with one provider unavailable, refusal when both
+holders of a fragment are unavailable, renewal and interrupted deletion/retry to zero leases.
+Tampering with the signed root or consistently rewriting both unsigned nested archive-ID
+records is rejected. This is **local transfer/lifecycle evidence**, not a new protected-overlay
+or independent-device proof. Automatic repair, fragment handoff/drain, measured metadata
+overhead and network-wide reciprocal contribution credit remain unfinished.
 
 ## Next end-to-end proof
 

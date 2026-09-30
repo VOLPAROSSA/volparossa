@@ -12,6 +12,7 @@ umask 077
 
 mode=preview
 scenario=alpha
+reciprocal_private_dns=no
 private_storage_peer=no
 private_storage_replicas=no
 private_storage_handoff=no
@@ -52,7 +53,7 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|private-storage-handoff|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|private-storage-handoff|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
 }
 
 print_plan() {
@@ -370,6 +371,15 @@ print_plan() {
             '  drain metadata-only captures, erase grants/profile/test keys and verify unchanged guest host state.'
         return
     fi
+    if [ "$scenario" = mptcp-refill ]; then
+        printf '%s\n' 'VOLPAROSSA same-flow fresh Relay refill (acceptance v2):' \
+            '  any three distinct original Relays from R0-R3: two active plus one warm; authority allows four paths;' \
+            '  impair one initial path and the already observed warm path only on disposable links;' \
+            '  expose R4 capacity 1 to 32 Mbps after warm retirement; require real new A1/native admission;' \
+            '  preserve original MPTCP socket and verify fresh R4 payload plus full 256 MiB hash;' \
+            '  remove exact owned qdiscs and all topology state; no speed or full-alpha claim.'
+        return
+    fi
     if [ "$scenario" = mptcp-growth ]; then
         printf '%s\n' \
             'VOLPAROSSA live MPTCP path-growth smoke plan:' \
@@ -575,6 +585,14 @@ print_plan() {
         return
     fi
     if [ "$scenario" = reciprocity ]; then
+        if [ "$reciprocal_private_dns" = yes ]; then
+            printf '%s\n' \
+                'Reciprocity-private-dns: retain the four same-daemon reciprocal routes below;' \
+                '  use the packaged private Unbound worker on all four active nodes;' \
+                '  add four owned guest-only TAP uplinks, with no public DNS listener;' \
+                '  prove policy-bound DNS, independent DNSSEC/local cache reuse and no app DNS escape;' \
+                '  emit separate reciprocity-private-dns-smoke.json; keep original reciprocal gates.'
+        fi
         printf '%s\n' \
             'VOLPAROSSA reciprocal-node runtime smoke plan:' \
             '  require the same disposable Debian 13 KVM guest and exact source/native build;' \
@@ -628,6 +646,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+            reciprocal_private_dns=no
             private_storage_peer=no
             private_storage_replicas=no
             private_storage_handoff=no
@@ -654,6 +673,7 @@ while [ "$#" -gt 0 ]; do
             agent_train_loop=no
             agent_artifact_quarantine=no
             case $2 in
+                reciprocity-private-dns) scenario=reciprocity; reciprocal_private_dns=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-peer) scenario=content-custody; private_storage_peer=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-replicas) scenario=content-custody; private_storage_replicas=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-handoff) scenario=content-custody; private_storage_handoff=yes; wifi_link=no; uplink_link=no ;;
@@ -681,7 +701,7 @@ while [ "$#" -gt 0 ]; do
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
                 uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
-                alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|browser-network|sharing|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-jobs|dns-cache) scenario=$2; wifi_link=no; uplink_link=no ;;
+                alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|browser-network|mptcp-refill|sharing|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-jobs|dns-cache) scenario=$2; wifi_link=no; uplink_link=no ;;
                 *) usage >&2; exit 64 ;;
             esac
             shift
@@ -779,6 +799,7 @@ for benchmark_fixture in benchmark-selection.sh benchmark-paths.py; do
 done
 if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario" = sharing ]; then
     scenario_fixtures='reciprocity-smoke.sh reciprocity-smoke.py'
+    [ "$reciprocal_private_dns" != yes ] || scenario_fixtures="$scenario_fixtures reciprocity-private-dns.sh reciprocity-private-dns.py reciprocity-private-dns-capture.py reciprocity-private-dns-uplink.py dns-cache-smoke.py dns-cache-fixture.py dns-cache-capture.py content-replication-capture.py"
     [ "$scenario" != local-link ] || scenario_fixtures="$scenario_fixtures local-link-smoke.sh local-link-smoke.py"
     [ "$scenario" != sharing ] || scenario_fixtures="$scenario_fixtures sharing-smoke.sh sharing-smoke.py"
     [ "$download_sharing" != yes ] || scenario_fixtures="$scenario_fixtures download-sharing-smoke.sh download-sharing-smoke.py download-sharing-snapshot.py"
@@ -790,8 +811,8 @@ if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario
             || { printf 'reciprocity fixture unavailable: %s\n' "$reciprocity_fixture" >&2; exit 69; }
     done
 fi
-if [ "$scenario" = mpquic-growth ] || [ "$scenario" = mptcp-growth ]; then
-    for growth_fixture in "$scenario-smoke.sh" "$scenario-smoke.py" mpquic-growth-smoke.py content-network-smoke.py; do
+if [ "$scenario" = mpquic-growth ] || [ "$scenario" = mptcp-growth ] || [ "$scenario" = mptcp-refill ]; then
+    for growth_fixture in "$scenario-smoke.sh" "$scenario-smoke.py" mptcp-growth-smoke.py mpquic-growth-smoke.py content-network-smoke.py; do
         if [ ! -f "$source_directory/tests/integration/$growth_fixture" ] \
             || [ -L "$source_directory/tests/integration/$growth_fixture" ]; then
             printf '%s\n' 'Multipath growth fixture unavailable' >&2
@@ -1818,6 +1839,9 @@ cleanup() {
         dns_cache_stop_server || original_status=1
     fi
     if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario" = sharing ]; then
+        if [ "$reciprocal_private_dns" = yes ] && command -v reciprocity_private_dns_stop >/dev/null 2>&1; then
+            reciprocity_private_dns_stop || original_status=1
+        fi
         if [ "$download_sharing" = yes ]; then download_sharing_resume || original_status=1; fi
         reciprocity_stop_processes
     fi
@@ -1935,6 +1959,9 @@ cleanup() {
     fi
     if [ "$scenario" = browser-network ] && command -v browser_network_cleanup >/dev/null 2>&1; then
         browser_network_cleanup || original_status=1
+    fi
+    if [ "$scenario" = mptcp-refill ] && command -v mptcp_refill_cleanup >/dev/null 2>&1; then
+        mptcp_refill_cleanup || original_status=1
     fi
     capture_worker_network_diagnostics
 
@@ -2163,6 +2190,8 @@ cleanup() {
         mptcp_growth_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = browser-network ]; then
         browser_network_finalize_report "$original_status" || original_status=1
+    elif [ "$scenario" = mptcp-refill ]; then
+        mptcp_refill_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = dns-cache ]; then
         dns_cache_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-replication ]; then
@@ -2208,6 +2237,9 @@ cleanup() {
         fi
     elif [ "$scenario" = reciprocity ]; then
         reciprocity_finalize_report "$original_status" || original_status=1
+        if [ "$reciprocal_private_dns" = yes ]; then
+            reciprocity_private_dns_finalize_report "$original_status" || original_status=1
+        fi
     else
         write_report "$original_status"
         if [ "$original_status" -eq 0 ]; then
@@ -2236,6 +2268,10 @@ fail() {
 if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario" = sharing ]; then
     # shellcheck source=tests/integration/reciprocity-smoke.sh
     . "$source_directory/tests/integration/reciprocity-smoke.sh"
+fi
+if [ "$reciprocal_private_dns" = yes ]; then
+    # shellcheck source=tests/integration/reciprocity-private-dns.sh
+    . "$source_directory/tests/integration/reciprocity-private-dns.sh"
 fi
 if [ "$scenario" = local-link ]; then
     # shellcheck source=tests/integration/local-link-smoke.sh
@@ -2268,6 +2304,10 @@ fi
 if [ "$scenario" = browser-network ]; then
     # shellcheck source=tests/integration/browser-network-smoke.sh
     . "$source_directory/tests/integration/browser-network-smoke.sh"
+fi
+if [ "$scenario" = mptcp-refill ]; then
+    # shellcheck source=tests/integration/mptcp-refill-smoke.sh
+    . "$source_directory/tests/integration/mptcp-refill-smoke.sh"
 fi
 if [ "$scenario" = mixed-link ]; then
     # shellcheck source=tests/integration/mixed-link-smoke.sh
@@ -2822,6 +2862,7 @@ elif [ "$scenario" = local-link ]; then
     [ "$wifi_link" != yes ] || wifi_link_prepare
 elif [ "$scenario" = reciprocity ]; then
     reciprocity_extend_network
+    [ "$reciprocal_private_dns" != yes ] || reciprocity_private_dns_start
 fi
 TOPOLOGY_READY=true
 
@@ -2885,7 +2926,7 @@ jq -S -c -n \
     >"$WORK/a01-expected-peers.json"
 
 set --
-if [ "$scenario" = dns-cache ]; then
+if [ "$scenario" = dns-cache ] || [ "$reciprocal_private_dns" = yes ]; then
     set -- --dns-cache
 elif [ "$scenario" = content-provider ] || [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$scenario" = content-message ] \
     || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
@@ -2924,12 +2965,16 @@ write_config() {
         exit) advertised_asn=64514; advertised_prefix=46.162.3.0/24 ;;
         exit2) exit_capacity=1; advertised_asn=64518; advertised_prefix=51.167.7.0/24 ;;
     esac
-    if { [ "$scenario" = mpquic-growth ] || [ "$scenario" = mptcp-growth ]; } && [ "$node" = relay3 ]; then
+    if { [ "$scenario" = mpquic-growth ] || [ "$scenario" = mptcp-growth ] || [ "$scenario" = mptcp-refill ]; } && [ "$node" = relay3 ]; then
         # Three eligible data relays also need a fourth eligible, distinct control relay.
         # The ordinary 1Mbps provider fixture cannot meet this route's signed 8Mbps minimum.
         # Existing r3x/xr3 links and exact reciprocal routes carry this replaceable contact;
         # no selector result is pinned, and Client still has no direct Exit connectivity.
         relay_capacity=32
+        bootstrap_three="/ip4/46.162.3.1/udp/41000/quic-v1/p2p/$EXIT_PEER"
+    fi
+    if [ "$scenario" = mptcp-refill ] && [ "$node" = relay4 ]; then
+        [ "${mptcp_refill_exposed:-false}" != true ] || relay_capacity=32
         bootstrap_three="/ip4/46.162.3.1/udp/41000/quic-v1/p2p/$EXIT_PEER"
     fi
     if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario" = sharing ]; then
@@ -3034,6 +3079,9 @@ write_config() {
         if [ "$scenario" = browser-network ] && [ "$node" = client ]; then
             printf 'selection:\n  active_multipath_paths: 2\n  minimum_multipath_paths: 2\n'
             printf '  maximum_multipath_paths: 2\n  warm_backup_paths: 0\n'
+        elif [ "$scenario" = mptcp-refill ] && [ "$node" = client ]; then
+            printf 'selection:\n  active_multipath_paths: 2\n  minimum_multipath_paths: 2\n'
+            printf '  maximum_multipath_paths: 4\n  warm_backup_paths: 1\n'
         fi
         printf 'capacity:\n  relay_upload_limit_mbps: %s\n' "$relay_capacity"
         printf '  relay_download_limit_mbps: %s\n' "$relay_capacity"
@@ -3066,13 +3114,27 @@ write_config() {
         printf 'routing:\n  client_minimum_upload_mbps: 8\n'
         printf '  client_minimum_download_mbps: 8\n'
         if [ "$scenario" = dns-cache ]; then
+            # C05 deliberately uses its owned synthetic DNSSEC TCP/53 upstream. Keep
+            # that existing backend explicit; native/private DNS has separate proofs.
             printf 'dns_cache:\n  enabled: %s\n  upstream: %s\n' "$dc_enabled" "$dc_upstream"
+            printf '  fallback:\n    mode: system\n'
+        elif [ "$reciprocal_private_dns" = yes ]; then
+            reciprocity_private_dns_config
+        else
+            # Non-DNS fixtures retain their scoped hosts/OS backend. This override is
+            # never emitted for the reciprocal private-DNS or installed-default proof.
+            printf 'dns_cache:\n  fallback:\n    mode: system\n'
         fi
         printf 'policy:\n  fail_closed: true\n'
         printf '  manifest_path: "%s/development-policy.manifest"\n' "$WORK"
         printf '  minimum_signatures: 3\n  reject_ech: true\n'
         printf '  reject_unverifiable_sni: true\nprivacy:\n'
-        if [ "$scenario" = dns-cache ]; then printf '  metrics_enabled: %s\n' "$dc_metrics"
+        if [ "$reciprocal_private_dns" = yes ]; then
+            case $node in
+                client|relay0|relay2|exit) printf '  metrics_enabled: true\n' ;;
+                *) printf '  metrics_enabled: false\n' ;;
+            esac
+        elif [ "$scenario" = dns-cache ]; then printf '  metrics_enabled: %s\n' "$dc_metrics"
         else printf '  metrics_enabled: false\n'; fi
         printf '  persist_domain_logs: false\n  persist_destination_ips: false\n'
     } >"$WORK/config-$node.yaml"
@@ -4115,6 +4177,9 @@ import sys
 import time
 
 role, output_path, ready_path, *interfaces = sys.argv[1:]
+refill_mode = interfaces[:1] == ["--mptcp-refill"]
+if refill_mode:
+    interfaces.pop(0)
 content_provider_mode = interfaces[:1] == ["--content-providers"]
 if content_provider_mode:
     interfaces.pop(0)
@@ -4135,6 +4200,7 @@ direct_lan_relay1 = interfaces[:1] == ["--direct-lan-relay1"]
 if direct_lan_relay1:
     interfaces.pop(0)
 if (role not in {"client", "relay0", "relay1", "relay2", "exit"}
+        and not (role in {"relay3", "relay4"} and refill_mode)
         and not (role == "content-control" and content_control_pairs)) or not interfaces:
     raise SystemExit("invalid privacy observer arguments")
 client_addresses = {"43.159.1.1"}
@@ -4168,6 +4234,9 @@ counters = {
     "expected_link_down_notifications": 0,
     "unexpected_outer_tuple_overflow_packets": 0,
 }
+if refill_mode:
+    counters["relay3_wireguard_data_datagrams"] = 0
+    counters["relay4_wireguard_data_datagrams"] = 0
 link_down_interfaces = {}
 unexpected_outer_tuples = {}
 provider_addresses = {"49.165.5.1": "relay4", "50.166.6.1": "relay5", "48.164.4.1": "relay3"}
@@ -4512,7 +4581,11 @@ for readable in capture_rounds():
                     destination,
                 } == {"43.159.1.1", "45.161.2.1"}:
                     counters["relay2_wireguard_data_datagrams"] += 1
-            elif role in {"relay0", "relay1", "relay2"}:
+                if refill_mode and is_wireguard_data and interface == "cr3" and {source, destination} == {"43.159.1.1", "48.164.4.1"}:
+                    counters["relay3_wireguard_data_datagrams"] += 1
+                if refill_mode and is_wireguard_data and interface == "cr4" and {source, destination} == {"43.159.1.1", "49.165.5.1"}:
+                    counters["relay4_wireguard_data_datagrams"] += 1
+            elif role in {"relay0", "relay1", "relay2"} or (role in {"relay3", "relay4"} and refill_mode):
                 # The Relay underlay also carries the fixed discovery topology. These public
                 # addresses are control-plane peers, not the forbidden Internet destination
                 # 47.163.4.2 whose appearance in an outer header is counted separately above.
@@ -4545,6 +4618,14 @@ for readable in capture_rounds():
                         "10.241.21.1",
                         "10.241.21.2",
                     }
+                elif role == "relay3":
+                    client_interface, exit_interface = "r3c", "r3x"
+                    relay_public = "48.164.4.1"
+                    allowed = topology_control_public | {"10.241.13.1", "10.241.13.2", "10.241.23.1", "10.241.23.2"}
+                elif role == "relay4":
+                    client_interface, exit_interface = "r4c", "r4x"
+                    relay_public = "49.165.5.1"
+                    allowed = topology_control_public | {"10.241.14.1", "10.241.14.2", "10.241.24.1", "10.241.24.2"}
                 else:
                     client_interface, exit_interface = "r2c", "r2x"
                     relay_public = "45.161.2.1"
@@ -4603,6 +4684,10 @@ for readable in capture_rounds():
                     destination,
                 } == {"45.161.2.1", "46.162.3.1"}:
                     counters["relay2_wireguard_data_datagrams"] += 1
+                if refill_mode and is_wireguard_data and interface == "xr3" and {source, destination} == {"48.164.4.1", "46.162.3.1"}:
+                    counters["relay3_wireguard_data_datagrams"] += 1
+                if refill_mode and is_wireguard_data and interface == "xr4" and {source, destination} == {"49.165.5.1", "46.162.3.1"}:
+                    counters["relay4_wireguard_data_datagrams"] += 1
 
 packet_socket_drops = 0
 for capture, interface in sockets.items():
@@ -4657,7 +4742,7 @@ import time
 run_id = bytes.fromhex(sys.argv[1])
 case_name = sys.argv[2]
 attempt = int(sys.argv[3])
-if case_name not in {"a03-single", "a03-aggregate", "a04-failover", "a14-custody", "mptcp-growth"}:
+if case_name not in {"a03-single", "a03-aggregate", "a04-failover", "a14-custody", "mptcp-growth", "mptcp-refill"}:
     raise SystemExit("invalid bounded MPTCP download case")
 if attempt < 0 or attempt >= 30:
     raise SystemExit("invalid bounded MPTCP download attempt")
@@ -4671,7 +4756,7 @@ request = (
 )
 response_label = b"a03" if case_name.startswith("a03-") else b"a04"
 response_seed = b"volparossa-download:" + response_label + b":" + run_id
-response_bytes = 32 * 1024 * 1024
+response_bytes = (256 if case_name == "mptcp-refill" else 32) * 1024 * 1024
 expected_hash = hashlib.sha256()
 remaining = response_bytes
 while remaining:
@@ -4684,7 +4769,7 @@ while remaining:
 
 destination = ("47.163.4.2", 18080)
 with socket.create_connection(destination, timeout=60) as application:
-    application.settimeout(180)
+    application.settimeout(360 if case_name == "mptcp-refill" else 180)
     application.sendall(request)
     application.shutdown(socket.SHUT_WR)
     received_hash = hashlib.sha256()
@@ -4938,7 +5023,7 @@ while running:
                 evidence_path = os.path.join(sys.argv[3], f"tcp-evidence-{attempt}.json")
             else:
                 matched = None
-                for case_name in ("a03-single", "a03-aggregate", "a04-failover", "a14-custody", "mptcp-growth"):
+                for case_name in ("a03-single", "a03-aggregate", "a04-failover", "a14-custody", "mptcp-growth", "mptcp-refill"):
                     prefix = b"volparossa-" + case_name.encode("ascii") + b":" + run_id
                     if len(received) == len(prefix) + 4 and received.startswith(prefix):
                         matched = (case_name, prefix)
@@ -4987,7 +5072,8 @@ while running:
                 response_label = b"a03" if case_name.startswith("a03-") else b"a04"
                 response_seed = b"volparossa-download:" + response_label + b":" + run_id
                 response_hash = hashlib.sha256()
-                remaining = download_payload_bytes
+                response_size = 256 * 1024 * 1024 if case_name == "mptcp-refill" else download_payload_bytes
+                remaining = response_size
                 while remaining:
                     length = min(64 * 1024, remaining)
                     response = (response_seed * ((length + len(response_seed) - 1) // len(response_seed)))[
@@ -5005,7 +5091,7 @@ while running:
                     "attempt": attempt,
                     "request_bytes": len(received),
                     "request_sha256": hashlib.sha256(received).hexdigest(),
-                    "response_bytes": download_payload_bytes,
+                    "response_bytes": response_size,
                     "response_sha256": response_hash.hexdigest(),
                 }
                 evidence_path = os.path.join(
@@ -5072,6 +5158,7 @@ if [ "$scenario" != mixed-link ] && [ "$scenario" != crash-recovery ] \
     && [ "$scenario" != mpquic-growth ] \
     && [ "$scenario" != mptcp-growth ] \
     && [ "$scenario" != browser-network ] \
+    && [ "$scenario" != mptcp-refill ] \
     && [ "$scenario" != content ] && [ "$scenario" != content-message ] \
     && [ "$scenario" != content-https ] && [ "$scenario" != content-provider ] \
     && [ "$scenario" != content-replication ] && [ "$scenario" != content-repair ] && [ "$scenario" != content-mailbox ] \
@@ -5639,6 +5726,8 @@ start_privacy_observers() {
             [ "$scenario" = mptcp-growth ] || return 1 ;;
         browser-network-first-privacy|browser-network-second-privacy)
             [ "$scenario" = browser-network ] || return 1 ;;
+        mptcp-refill-initial-privacy|mptcp-refill-expanded-privacy)
+            [ "$scenario" = mptcp-refill ] || return 1 ;;
         content-a-privacy|content-b-privacy)
             [ "$scenario" = content ] || [ "$scenario" = content-message ] || return 1 ;;
         content-https-complete-privacy|content-https-missing-privacy)
@@ -5667,6 +5756,10 @@ start_privacy_observers() {
     esac
     set --
     privacy_content_flag=
+    if [ "$scenario" = mptcp-refill ]; then
+        set -- --mptcp-refill
+        privacy_content_flag=--mptcp-refill
+    fi
     if [ "$scenario" = content-provider ] || [ "$privacy_prefix" = content-message-publication-privacy ] \
         || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
         set -- --content-providers
@@ -6365,6 +6458,10 @@ if [ "$scenario" = mptcp-growth ]; then
 fi
 if [ "$scenario" = browser-network ]; then
     browser_network_run
+    exit 0
+fi
+if [ "$scenario" = mptcp-refill ]; then
+    mptcp_refill_run
     exit 0
 fi
 if [ "$scenario" = content ] || [ "$scenario" = content-message ]; then

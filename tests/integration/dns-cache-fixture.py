@@ -31,6 +31,9 @@ QUESTIONS = ((CANDIDATE, 1), (CANDIDATE, 28), (CANDIDATE, 48),
 MAX_WIRE = 4096
 MAX_RECORDING = 128 * 1024
 MAX_SECONDS = 120
+MAX_COLLECTION_SECONDS = 120
+MAX_COLLECTION_ROUNDS = 3
+MIN_REPLAY_REMAINING_MS = 60_000
 TYPE_NAMES = {1: "A", 28: "AAAA", 43: "DS", 48: "DNSKEY"}
 
 
@@ -188,27 +191,52 @@ def read_json(path):
     return json.loads(read_bounded(path))
 
 
+def record_expiry(record):
+    return min(record["received_at_unix_ms"] + record["minimum_ttl_seconds"] * 1000,
+               record["signature_expiry_unix_ms"])
+
+
 def collect(root):
     require(root.is_absolute() and not root.exists(), "recording must be a new absolute directory")
-    deadline = time.monotonic() + 60
-    records = []
-    for question in QUESTIONS:
-        remaining = deadline - time.monotonic()
-        require(remaining > 0, "fixture collection deadline")
-        try:
-            data = fetch_wire(question, remaining)
-            received = int(time.time() * 1000)
-            inspected = inspect_response(data, question, received)
-        except FixtureError as error:
-            # These are the fixed public test questions, not browsing or remote error text.
-            raise FixtureError(f"collect {question[0]} {TYPE_NAMES[question[1]]}: {error}") from None
-        records.append({"name": question[0], "type": question[1], "wire_hex": data.hex(),
+    deadline = time.monotonic() + MAX_COLLECTION_SECONDS
+    collected = {}
+    for attempt in range(MAX_COLLECTION_ROUNDS):
+        for question in QUESTIONS:
+            previous = collected.get(question)
+            if previous and record_expiry(previous) - int(time.time() * 1000) >= MIN_REPLAY_REMAINING_MS:
+                continue
+            remaining = deadline - time.monotonic()
+            require(remaining > 0, "fixture collection deadline")
+            try:
+                data = fetch_wire(question, remaining)
+                received = int(time.time() * 1000)
+                inspected = inspect_response(data, question, received)
+            except FixtureError as error:
+                # These are the fixed public test questions, not browsing or remote error text.
+                raise FixtureError(f"collect {question[0]} {TYPE_NAMES[question[1]]}: {error}") from None
+            collected[question] = {"name": question[0], "type": question[1], "wire_hex": data.hex(),
                         "sha256": hashlib.sha256(data).hexdigest(), "received_at_unix_ms": received,
                         "minimum_ttl_seconds": inspected["minimum_ttl_seconds"],
-                        "signature_expiry_unix_ms": inspected["signature_expiry_unix_ms"]})
-    expires = min(min(record["received_at_unix_ms"] + record["minimum_ttl_seconds"] * 1000,
-                      record["signature_expiry_unix_ms"]) for record in records)
-    require(expires - int(time.time() * 1000) >= 60_000, "insufficient original TTL for fixture")
+                        "signature_expiry_unix_ms": inspected["signature_expiry_unix_ms"]}
+        now = int(time.time() * 1000)
+        require(time.monotonic() <= deadline, "fixture collection deadline")
+        records = [collected[question] for question in QUESTIONS]
+        expires = min(map(record_expiry, records))
+        if expires - now >= MIN_REPLAY_REMAINING_MS:
+            break
+        weakest = min(records, key=record_expiry)
+        reason = ("insufficient original TTL for fixture: " + weakest["name"] + " "
+                  + TYPE_NAMES[weakest["type"]] + f" remaining_ms={max(0, expires - now)}")
+        require(attempt + 1 < MAX_COLLECTION_ROUNDS, reason)
+        # A public recursive resolver can legitimately return a nearly expired cached RRset.
+        # Wait for those original records to expire before re-fetching just the short-lived
+        # fixed questions. Never edit/renew a recorded TTL, signature, receive time or anchor.
+        stale = [record for record in records if record_expiry(record) - now < MIN_REPLAY_REMAINING_MS]
+        delay = max(0, max(map(record_expiry, stale)) - now) / 1000 + 0.05
+        require(delay < deadline - time.monotonic(), reason)
+        wake = time.monotonic() + delay
+        while time.monotonic() < wake:
+            time.sleep(max(0, min(1, wake - time.monotonic())))
     root.mkdir(mode=0o700)
     write_new(root / "recording.json", {"schema_version": 1, "source_url": SOURCE_URL,
               "candidate_name": CANDIDATE, "validation": "shape-and-time-only",

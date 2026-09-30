@@ -11,6 +11,30 @@ refuses to overwrite an existing candidate.
 SOURCE_DATE_EPOCH=1767225600 ./packaging/build-deb.sh --build
 ```
 
+Private Unbound is the packaged Exit default. The core package requires the exact-version
+`volparossa-private-dns-worker` companion; the worker requires `libunbound8 >= 1.26.1`
+and `dns-root-data`, not the core or a standalone Unbound daemon. In a provisioned Debian 13 amd64
+environment with `libunbound-dev >= 1.26.1`, pkg-config and `dns-root-data`, run
+`sh packaging/build-private-dns-worker-deb.sh --preview` or explicit `--build`.
+It installs no packages/services itself and creates a companion archive containing
+only the fixed inherited-pipe worker and notices. Explicit private DNS configuration
+fails startup for an enabled Exit if the companion or root-anchor files are absent/unsafe.
+Roles-off installation remains inert; no DNS service or participation is automatically
+started. `dns_cache.enabled: false` disables cooperative caching, not private resolution.
+The optional OS resolver requires explicit `fallback.mode: system`; see
+[private Unbound readiness](../docs/UNBOUND_FALLBACK.md).
+
+The disposable DNS guest also supports `build-deb.sh --stage-built BIN_DIR NATIVE_FILE`,
+with an explicit `VOLPAROSSA_PACKAGE_SOURCE_REVISION`. This development-only staging mode
+uses the same package layout, dependencies, units and maintainer scripts without recompiling
+the already source-built guest debug binaries or the pinned native runtime. Its embedded
+`development-build.json` records source revision and binary digests; it explicitly makes no
+release-build claim. The guest proof compares those digests to both build outputs and actual
+installed files, runs the existing package install/upgrade/remove lifecycle, and tests the
+real installed agent's roles-off/missing-worker startup. A separate source-built resolver
+probe inherits the shipped agent sandbox; that is not a full agent DNS-query proof.
+This new package proof remains pending an exact-source disposable run.
+
 If `SOURCE_DATE_EPOCH` is absent, the script uses the latest Git commit timestamp and falls back to
 zero in an uncommitted source tree. A release should build the same committed source twice in clean
 Debian 13 environments and compare SHA-256 digests. Locked Cargo sources and the audited native

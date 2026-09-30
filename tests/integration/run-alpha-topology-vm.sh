@@ -33,7 +33,7 @@ usage() {
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|private-storage-handoff|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment]' \
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|private-storage-handoff|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment]' \
         '       --package is required only for alpha; --mpquic is unnecessary for standalone Wi-Fi/model/private-browser proofs.'
 }
 
@@ -50,6 +50,13 @@ print_plan() {
         '  power off and discard the overlay, keys, seed and source archive.' \
         'No TAP, bridge, host route, firewall, DNS, sysctl or VPN state is changed.'
     printf 'Guest resources: 4 vCPUs, %s MiB RAM; model-worker limits are unchanged.\n' "$(guest_memory_for_scenario)"
+    case $scenario in dns-cache|reciprocity-private-dns)
+        printf '%s\n' \
+            'Private-DNS outer uplink: read runner IPv6 addresses and one fixed-root route without sending packets;' \
+            '  disable only QEMU outer usernet IPv6 if the kernel explicitly reports no route; unknown fails preflight;' \
+            '  retain sanitized decision evidence; product and internal overlay IPv6 remain unchanged.'
+        ;;
+    esac
     if [ "$scenario" = agent-reasoning ]; then
         printf '%s\n' \
             'Agent-reasoning: one explicit pinned 1.7B BF16 public worker, original 444-byte source/question;' \
@@ -61,6 +68,12 @@ print_plan() {
             '  two explicit owner grants over distinct real scoped MPTCP routes, normal origin TLS;' \
             '  exact streaming hashes, independent detach, per-path payload and privacy captures;' \
             '  disposable browser-UID loopback containment, not a product browser kill switch.'
+    elif [ "$scenario" = agent-private-code ]; then
+        printf '%s\n' \
+            'Private-code: exact-commit Node PrivateCompute client to real private-serve and pinned 360M;' \
+            '  one model provision, tiny synthetic-code input and actual isolated model worker;' \
+            '  existing cancellation/owner controls, cleanup after client completion, no raw answer export;' \
+            '  no Codex app-server, editor, tool-calling or general coding-quality claim.'
     elif [ "$scenario" = agent-private-browser ]; then
         printf '%s\n' \
             'Private-browser: exact-commit browser modules, pinned ESR runtime and pinned 360M CPU model;' \
@@ -251,6 +264,8 @@ print_plan() {
     elif [ "$scenario" = dns-cache ]; then
         printf '%s\n' \
             'DNS-cache scenario: download only fresh bounded signed DNS wire data from literal dns.google HTTPS;' \
+            '  extra private-Unbound preflight builds a fixed worker from checked guest dependencies;' \
+            '  live signed/unsigned/bogus recursion and owned timeout/cancel cleanup, not a normal-route proof;' \
             '  validate built-in roots, then normal Client single-Relay protected DNS to two actual Exits;' \
             '  upstream A, peer B with no recursive upstream, local B after A shutdown, unsigned fallback;' \
             '  exact control-only Exit peer link, 35 drained physical captures and unchanged guest state.'
@@ -330,6 +345,11 @@ print_plan() {
         printf '%s\n' \
             'Wi-Fi mesh scenario: install one exact hash-verified official generic guest kernel and reboot once;' \
             '  real MeshOwner hwsim association, UDP/counters and cleanup, not physical Wi-Fi or full overlay proof.'
+    elif [ "$scenario" = mptcp-refill ]; then
+        printf '%s\n' \
+            'MPTCP-refill: one 256 MiB same-socket download; two initial paths and one observed warm path.' \
+            'Impair only disposable links, retire the ineffective warm path, then expose R4 capacity 1 to 32 Mbps.' \
+            'Require fresh fourth helper path and R4 payload without replacing the MPTCP meta socket; exact hashes/cleanup, no speed claim.'
     elif [ "$scenario" = mptcp-growth ]; then
         printf '%s\n' \
             'MPTCP-growth: one live TCP download over TLS 1.3 and real kernel MPTCP.' \
@@ -363,6 +383,12 @@ print_plan() {
         printf '%s\n' \
             'Local-link scenario: offline RFC1918 consumer, two LAN Relay contacts and WAN Exit;' \
             '  concurrent real consumption and LAN relay contribution, not radio or aggregate capacity; packaging is skipped.'
+    elif [ "$scenario" = reciprocity-private-dns ]; then
+        printf '%s\n' \
+            'Reciprocity-private-dns: four real simultaneous client/relay/exit nodes;' \
+            '  provision private Unbound only inside the guest; no standalone preflight verdict;' \
+            '  owned TAP uplinks, authorized lookup/local cache reuse and app DNS escape checks;' \
+            '  retain reciprocal and private-DNS reports, cleanup and unchanged host state.'
     elif [ "$scenario" = reciprocity ]; then
         printf '%s\n' \
             'Reciprocity scenario: simultaneous client/relay/exit datapaths;' \
@@ -382,7 +408,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|private-storage-handoff|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|private-storage-handoff|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --image)
@@ -443,7 +469,7 @@ case $image_path:$output_directory in
     *) exit 64 ;;
 esac
 if [ "$scenario" = alpha ] && [ -z "$package_path" ]; then usage >&2; exit 64; fi
-if [ "$scenario" != wifi-mesh ] && [ "$scenario" != agent-training ] && [ "$scenario" != agent-owner-priority ] && [ "$scenario" != agent-owner-cancel ] && [ "$scenario" != agent-private-task ] && [ "$scenario" != agent-private-browser ] && [ "$scenario" != agent-reasoning ] && [ -z "$mpquic_path" ]; then usage >&2; exit 64; fi
+if [ "$scenario" != wifi-mesh ] && [ "$scenario" != agent-training ] && [ "$scenario" != agent-owner-priority ] && [ "$scenario" != agent-owner-cancel ] && [ "$scenario" != agent-private-task ] && [ "$scenario" != agent-private-code ] && [ "$scenario" != agent-private-browser ] && [ "$scenario" != agent-reasoning ] && [ -z "$mpquic_path" ]; then usage >&2; exit 64; fi
 case $mpquic_path in ''|/*) ;; *) exit 64 ;; esac
 case $package_path in ''|/*) ;; *) exit 64 ;; esac
 case $expected_commit in ''|*[!0-9a-f]*) exit 64 ;; esac
@@ -544,6 +570,12 @@ cleanup() {
         install -m 0600 "$RUN_DIRECTORY/console.log" "$output_directory/vm-console.log" \
             2>/dev/null || true
     fi
+    if [ -f "$RUN_DIRECTORY/qemu-outer-uplink.json" ]; then
+        # Keep runner-owned provenance even when guest retrieval fails or a
+        # guest archive happens to contain the same basename.
+        install -m 0600 "$RUN_DIRECTORY/qemu-outer-uplink.json" "$output_directory/qemu-outer-uplink.json" \
+            2>/dev/null || status=1
+    fi
     rm -rf --one-file-system -- "$RUN_DIRECTORY"
     exit "$status"
 }
@@ -628,9 +660,12 @@ FILE_COUNT_LIMIT = 64
 NODES = ("client", "bootstrap1", "bootstrap2", "relay0", "relay1", "relay2",
          "relay3", "relay4", "relay5", "exit", "exit2")
 SAFE_NAMES = {"runner.stdout", "runner.stderr", "guest-exit-status", "current-phase",
+              "reciprocity-private-dns-smoke.json",
+              "private-unbound-proof.json", "private-unbound-build.log",
+              "private-unbound-package.json", "private-unbound-package-lifecycle.json",
               "worker-network-diagnostics.txt", "host-state-before.json", "host-state-after.json",
               "report.json", "local-link-smoke.json", "wifi-link-smoke.json",
-              "reciprocity-smoke.json", "mixed-link-smoke.json", "mpquic-growth-smoke.json", "mptcp-growth-smoke.json", "sharing-smoke.json", "download-sharing-smoke.json",
+              "reciprocity-smoke.json", "mixed-link-smoke.json", "mpquic-growth-smoke.json", "mptcp-growth-smoke.json", "mptcp-refill-smoke.json", "sharing-smoke.json", "download-sharing-smoke.json",
               "uplink-link-smoke.json", "crash-recovery.json", "content-network-smoke.json", "content-message-smoke.json", "content-https-smoke.json", "content-provider-smoke.json", "content-replication-smoke.json", "content-mailbox-smoke.json", "dns-cache-smoke.json",
               "content-custody-smoke.json", "content-custody-evidence.json",
               "private-storage-peer-smoke.json", "private-storage-peer-evidence.json",
@@ -811,9 +846,8 @@ def collect(home, opt, revision, scenario, guest_status,
     file_count_limit = 128 if scenario in ("agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation", "agent-policy-assessment") else FILE_COUNT_LIMIT
     if scenario == "agent-autonomous-aggregation":
         file_count_limit = 192
-    if scenario == "private-storage-handoff":
-        # Six exact eight-file capture phases plus bounded summaries exceed the default 64.
-        # Per-file and total byte limits remain unchanged.
+    if scenario in ("reciprocity-private-dns", "private-storage-handoff"):
+        # Bounded DNS and six-phase custody evidence exceed the default file count.
         file_count_limit = 128
     candidates = [(home / name, f"driver/{name}") for name in
                   ("guest-phase.txt", "cargo-build.log", "egress-netns-test.log",
@@ -842,6 +876,11 @@ def collect(home, opt, revision, scenario, guest_status,
             candidates.extend((root / name, f"{label}/{name}") for name in sorted(REPLICA_NAMES))
         for name in sorted(SAFE_NAMES):
             candidates.append((root / name, f"{label}/{name}"))
+        if scenario == "reciprocity-private-dns":
+            # Fixed JSON-only fixture observations; never export raw DNS packets.
+            candidates.extend((path, f"{label}/{path.name}") for path in
+                              sorted(root.glob("reciprocity-private-dns-*.json"))[:48]
+                              if re.fullmatch(r"reciprocity-private-dns-[a-z0-9-]+\.json", path.name))
         if scenario == "content-custody":
             custody_phases = [path for path in sorted(root.glob("content-custody-*.json"))
                               if re.fullmatch(r"content-custody-(initial|replacement|fetch)-(privacy-(client|relay0|relay1|relay2|exit)|live-selection|gates)\.json", path.name)]
@@ -914,6 +953,14 @@ def collect(home, opt, revision, scenario, guest_status,
                 "agent-private-task-answer.json", "agent-private-task-owner_controls.json",
                 "agent-private-task-stdout_boundary.json", "agent-private-task-provision.log",
                 "agent-private-task-result_boundary.json", "agent-private-task-private_service.json"))
+        if scenario == "agent-private-code":
+            candidates.extend((root / name, f"{label}/{name}") for name in (
+                "agent-private-code-smoke.json", "agent-private-code-provision.json",
+                "agent-private-code-client.json", "agent-private-code-answer.json",
+                "agent-private-task-provision.json", "agent-private-task-provision.log",
+                "agent-private-task-isolation.json", "agent-private-task-snapshot.json",
+                "agent-private-task-owner_controls.json", "agent-private-task-result_boundary.json",
+                "agent-private-task-private_service.json"))
         if scenario == "agent-private-browser":
             # Only the separate empty-profile startup log is public diagnostic data.
             # Never export the combined private session's log/profile or raw answer.
@@ -986,8 +1033,8 @@ def collect(home, opt, revision, scenario, guest_status,
 if __name__ == "__main__":
     if len(sys.argv) != 4 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sys.argv[1]):
         raise SystemExit(64)
-    if sys.argv[2] not in ("alpha", "datapath", "reciprocity", "local-link", "mixed-link", "mpquic-growth", "mptcp-growth",
-                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "private-storage-peer", "private-storage-replicas", "private-storage-handoff", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel", "agent-private-task", "agent-private-browser", "browser-network", "agent-reasoning", "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-artifact-quarantine", "agent-jobs", "agent-jobs-loss", "agent-jobs-follow", "agent-jobs-peer-recovery", "agent-jobs-ready-queue", "agent-jobs-package-queue", "agent-public-task", "agent-public-document", "agent-public-collection", "agent-public-network-sources", "agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation", "agent-policy-assessment"):
+    if sys.argv[2] not in ("alpha", "datapath", "reciprocity", "reciprocity-private-dns", "local-link", "mixed-link", "mpquic-growth", "mptcp-growth", "mptcp-refill",
+                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "private-storage-peer", "private-storage-replicas", "private-storage-handoff", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel", "agent-private-task", "agent-private-code", "agent-private-browser", "browser-network", "agent-reasoning", "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-artifact-quarantine", "agent-jobs", "agent-jobs-loss", "agent-jobs-follow", "agent-jobs-peer-recovery", "agent-jobs-ready-queue", "agent-jobs-package-queue", "agent-public-task", "agent-public-document", "agent-public-collection", "agent-public-network-sources", "agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation", "agent-policy-assessment"):
         raise SystemExit(64)
     status_code = int(sys.argv[3])
     if not 0 <= status_code <= 255 or socket.gethostname() != "volparossa-alpha" or os.geteuid() != 0:
@@ -1014,7 +1061,7 @@ source_sha256=$2
 mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
-case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|private-storage-handoff|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) exit 64 ;; esac
+case $scenario in alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|private-storage-handoff|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
 guest_phase verify-source
@@ -1026,6 +1073,14 @@ if [ "$scenario" = agent-reasoning ]; then
     tar -xzf source.tar.gz
     cd source
     exec sh tests/integration/agent-reasoning-smoke.sh --execute --yes --expected-commit "$expected_commit"
+fi
+if [ "$scenario" = agent-private-code ]; then
+    guest_phase agent-private-code
+    test "$(hostname)" = volparossa-alpha
+    test "$(systemd-detect-virt)" = kvm
+    tar -xzf source.tar.gz
+    cd source
+    exec sh tests/integration/agent-private-task-smoke.sh --execute --yes --expected-commit "$expected_commit" --code
 fi
 if [ "$scenario" = agent-private-browser ]; then
     guest_phase agent-private-browser
@@ -1106,6 +1161,9 @@ test "$(uname -m)" = x86_64
 test "$(sed -n '1p' /proc/1/comm)" = systemd
 test "$(systemctl show --property=Version --value | sed 's/[^0-9].*$//')" = 257
 test "$(systemd-detect-virt)" = kvm
+if [ "$scenario" = reciprocity-private-dns ]; then
+    sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends slirp4netns
+fi
 tar -xzf source.tar.gz
 cd source
 test -x tests/integration/kvm-alpha-topology.sh
@@ -1129,7 +1187,7 @@ CARGO_TARGET_DIR=/home/vpci/target cargo build --locked \
     }
 if [ "$scenario" = dns-cache ]; then
     CARGO_TARGET_DIR=/home/vpci/target cargo build --locked \
-        -p volparossa-udp --example dns-cache-proof >>/home/vpci/cargo-build.log 2>&1 || {
+        -p volparossa-udp --example dns-cache-proof --example private-unbound-proof >>/home/vpci/cargo-build.log 2>&1 || {
             tail -c 131072 /home/vpci/cargo-build.log >&2
             exit 1
         }
@@ -1163,6 +1221,21 @@ if [ "$scenario" = uplink-link ]; then
     tail -c 131072 /home/vpci/egress-netns-test.log
 fi
 mkdir /home/vpci/alpha-output
+private_dns_status=0
+if [ "$scenario" = dns-cache ] || [ "$scenario" = reciprocity-private-dns ] || [ "$scenario" = alpha ]; then
+    guest_phase private-unbound-preflight
+    set --
+    [ "$scenario" != reciprocity-private-dns ] || set -- --provision-only
+    [ "$scenario" != alpha ] || set -- --provision-only
+    set +e
+    sh tests/integration/private-unbound-vm-guest.sh --execute "$expected_commit" "$@" \
+        >/home/vpci/private-unbound-build.log 2>&1
+    private_dns_status=$?
+    set -e
+    if [ "$private_dns_status" -ne 0 ]; then
+        tail -c 131072 /home/vpci/private-unbound-build.log >&2
+    fi
+fi
 
 # The package lifecycle requires a pristine VM, including an absent
 # /run/volparossa. Exercise it before the topology's transient units can create
@@ -1188,7 +1261,7 @@ printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-stat
 fi
 
 topology_scenario=alpha
-case $scenario in reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|private-storage-handoff|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) topology_scenario=$scenario ;; esac
+case $scenario in reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|private-storage-handoff|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) topology_scenario=$scenario ;; esac
 guest_phase topology
 set +e
 sudo -n -- ./tests/integration/kvm-alpha-topology.sh \
@@ -1204,6 +1277,14 @@ sudo -n -- ./tests/integration/kvm-alpha-topology.sh \
 topology_status=$?
 set -e
 guest_phase archive
+if [ "$scenario" = dns-cache ] || [ "$scenario" = reciprocity-private-dns ]; then
+    for retained in private-unbound-proof.json private-unbound-build.log \
+        private-unbound-package.json private-unbound-package-lifecycle.json; do
+        if [ -f "/home/vpci/$retained" ]; then
+            sudo -n cp -- "/home/vpci/$retained" "/home/vpci/alpha-output/$retained"
+        fi
+    done
+fi
 printf '%s\n' "$topology_status" >/home/vpci/alpha-output/guest-exit-status
 sudo -n chown -R vpci:vpci /home/vpci/alpha-output
 find /home/vpci/alpha-output -type d -exec chmod 0700 {} +
@@ -1211,6 +1292,7 @@ find /home/vpci/alpha-output -type f -exec chmod 0600 {} +
 tar -C /home/vpci/alpha-output -czf /home/vpci/alpha-output.tar.gz .
 guest_phase driver-finished
 if [ "$package_status" -ne 0 ]; then exit "$package_status"; fi
+if [ "$private_dns_status" -ne 0 ]; then exit "$private_dns_status"; fi
 exit "$topology_status"
 GUEST_DRIVER_SCRIPT
 chmod 0700 "$GUEST_DRIVER"
@@ -1228,6 +1310,19 @@ if [ "$guest_memory_mib" -gt 4096 ]; then
         exit 69
     fi
 fi
+qemu_usernet=user,id=net0,hostfwd=tcp:127.0.0.1:22223-:22
+case $scenario in dns-cache|reciprocity-private-dns)
+    command -v python3 >/dev/null 2>&1 || { printf '%s\n' 'private DNS uplink preflight requires Python 3' >&2; exit 77; }
+    uplink_preflight_status=0
+    python3 -B "$HERE/qemu-outer-uplink.py" "$scenario" "$expected_commit" \
+        >"$RUN_DIRECTORY/qemu-outer-uplink.json" || uplink_preflight_status=$?
+    install -m 0600 "$RUN_DIRECTORY/qemu-outer-uplink.json" "$output_directory/qemu-outer-uplink.json"
+    [ "$uplink_preflight_status" -eq 0 ] || { printf '%s\n' 'private DNS runner IPv6 observation unknown; QEMU not started' >&2; exit 77; }
+    qemu_outer_ipv6=$(jq -r '.qemu_option' "$RUN_DIRECTORY/qemu-outer-uplink.json")
+    case $qemu_outer_ipv6 in ipv6=on|ipv6=off) ;; *) exit 77 ;; esac
+    qemu_usernet=$qemu_usernet,$qemu_outer_ipv6
+    ;;
+esac
 qemu-system-x86_64 \
     -name volparossa-alpha-topology \
     -no-user-config -nodefaults \
@@ -1237,7 +1332,7 @@ qemu-system-x86_64 \
     -drive "if=virtio,format=raw,readonly=on,file=$SEED" \
     -device virtio-rng-pci \
     -device virtio-net-pci,netdev=net0 \
-    -netdev user,id=net0,hostfwd=tcp:127.0.0.1:22223-:22 \
+    -netdev "$qemu_usernet" \
     -display none -monitor none -serial "file:$CONSOLE" "$@" \
     -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny \
     </dev/null >/dev/null 2>&1 &
@@ -1346,6 +1441,7 @@ driver_time_bound=2400s
 [ "$scenario" != agent-adapter-aggregation ] || driver_time_bound=3600s
 [ "$scenario" != agent-autonomous-aggregation ] || driver_time_bound=7200s
 [ "$scenario" != agent-private-task ] || driver_time_bound=3600s
+[ "$scenario" != agent-private-code ] || driver_time_bound=4200s
 [ "$scenario" != agent-private-browser ] || driver_time_bound=4200s
 [ "$scenario" != agent-reasoning ] || driver_time_bound=4200s
 [ "$scenario" != agent-policy-assessment ] || driver_time_bound=3600s

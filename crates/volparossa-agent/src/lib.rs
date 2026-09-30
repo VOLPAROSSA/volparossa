@@ -13,6 +13,7 @@ mod client_ingress;
 mod client_udp_turns;
 mod control;
 mod discovery;
+mod dns_fallback;
 mod downlink_sharing;
 mod endpoint_leases;
 #[path = "helper_v3.rs"]
@@ -53,7 +54,7 @@ use volparossa_inspection::InspectionError;
 use volparossa_local_control::LogLevel;
 use volparossa_metrics::{LocalMetricsEndpoint, MetricsRegistry};
 use volparossa_peerstore::PeerStore;
-use volparossa_udp::{ExitResolver, MAX_DNS_MESSAGE_BYTES};
+use volparossa_udp::MAX_DNS_MESSAGE_BYTES;
 
 use client_ingress::{
     BrowserQuicIngressDecision, BrowserQuicIngressGate, ClientIngressRuntime,
@@ -159,12 +160,15 @@ impl Agent {
                 mpquic_socket: paths.mpquic_exit_socket(roles),
             },
         )?;
-        if config.dns_cache.enabled {
-            discovery.configure_dns_cache(Arc::new(ExitResolver::new(
-                config.dns_cache.upstream,
-                Some(discovery_control.dns_peer_backend()),
-            )));
-        }
+        let resolver = dns_fallback::configure(
+            config.dns_cache,
+            roles.exit,
+            config
+                .dns_cache
+                .enabled
+                .then(|| discovery_control.dns_peer_backend()),
+        )?;
+        discovery.configure_dns_cache(Arc::new(resolver));
         state.log(LogLevel::Info, "AGENT_INITIALIZED", unix_millis());
         if policy_failed {
             state.log(LogLevel::Warn, "POLICY_LOAD_FAILED", unix_millis());
@@ -368,6 +372,14 @@ impl Agent {
             dns_routes.clone(),
             shutdown_tx.subscribe(),
         ));
+        let mut relay_refill_task = tokio::spawn(run_relay_refill(
+            Arc::clone(&self.state),
+            Arc::clone(&self.config),
+            self.discovery_control.clone(),
+            routes.clone(),
+            dns_routes.clone(),
+            shutdown_tx.subscribe(),
+        ));
         let mut metrics_task = tokio::spawn(run_metrics_endpoint(
             self.config.privacy.metrics_enabled,
             self.config.privacy.metrics_port,
@@ -402,6 +414,7 @@ impl Agent {
             _ = &mut app_task => Err(AgentError::Task),
             _ = &mut maintenance_task => Err(AgentError::Task),
             _ = &mut path_health_task => Err(AgentError::Task),
+            _ = &mut relay_refill_task => Err(AgentError::Task),
             result = &mut contribution_task => match result {
                 Ok(Err(error)) => Err(error),
                 Ok(Ok(())) | Err(_) => Err(AgentError::Task),
@@ -424,6 +437,7 @@ impl Agent {
         stop_task(&mut app_task).await;
         stop_task(&mut maintenance_task).await;
         stop_task(&mut path_health_task).await;
+        stop_task(&mut relay_refill_task).await;
         stop_task(&mut contribution_task).await;
         stop_task(&mut metrics_task).await;
         stop_task(&mut ingress_task).await;
@@ -1097,7 +1111,19 @@ async fn run_client_dns_ingress(
         return;
     };
     loop {
+        let retirement = routes.reusable_dns_retirement_deadline().await;
         let ready = tokio::select! {
+            () = async {
+                if let Some(deadline) = retirement {
+                    tokio::time::sleep_until(deadline).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                let _transaction = routes.lock_dns_transaction().await;
+                routes.retire_expired().await;
+                continue;
+            }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     routes.disconnect().await;
@@ -1179,21 +1205,32 @@ async fn run_client_dns_ingress(
                 transaction
             },
         };
-        if Box::pin(routes.ensure_single_udp(&config, &discovery, &helper))
-            .await
-            .is_err()
-        {
-            state.write().await.log(
-                LogLevel::Warn,
-                "INGRESS_DNS_ROUTE_UNAVAILABLE",
-                unix_millis(),
-            );
+        // Admission may have waited for another query; don't reuse a revoked policy snapshot.
+        let Some(policy) = state.read().await.active_policy(unix_millis()) else {
+            routes.disconnect().await;
             continue;
-        }
-        if Box::pin(routes.activate_dns_ingress(ingress, &policy, unix_millis()))
-            .await
-            .is_err()
-        {
+        };
+        let sent_query = match routes.try_send_reusable_dns(&ingress, &policy).await {
+            Ok(true) => true,
+            Ok(false) => {
+                if Box::pin(routes.ensure_single_udp(&config, &discovery, &helper))
+                    .await
+                    .is_err()
+                {
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "INGRESS_DNS_ROUTE_UNAVAILABLE",
+                        unix_millis(),
+                    );
+                    continue;
+                }
+                Box::pin(routes.activate_reusable_dns_ingress(ingress, &policy, unix_millis()))
+                    .await
+                    .is_ok()
+            }
+            Err(_) => false,
+        };
+        if !sent_query {
             routes.disconnect().await;
             state
                 .write()
@@ -1231,7 +1268,9 @@ async fn run_client_dns_ingress(
             )
             .await
             .is_ok();
-        routes.disconnect().await;
+        if !sent {
+            routes.disconnect().await;
+        }
         state.write().await.log(
             if sent { LogLevel::Info } else { LogLevel::Warn },
             if sent {
@@ -1380,9 +1419,12 @@ async fn run_client_dns_tcp_ingress(
                     transaction
                 },
             };
-            if Box::pin(routes.ensure_single_udp(&config, &discovery, &helper))
-                .await
-                .is_err()
+            // UDP may retain a same-name association between queries. A TCP request
+            // explicitly retires that owner first and keeps its original one-shot behavior.
+            if routes.disconnect_reusable_dns().await.is_err()
+                || Box::pin(routes.ensure_single_udp(&config, &discovery, &helper))
+                    .await
+                    .is_err()
                 || Box::pin(routes.activate_dns_ingress(ingress, &policy, unix_millis()))
                     .await
                     .is_err()
@@ -1610,6 +1652,48 @@ async fn run_path_maintenance(
     .await;
 }
 
+/// Refill discovery and its signed transaction must not run on the native health tick. This
+/// separate joined owner admits at most one transaction at a time, and existing sockets continue
+/// transferring independently. The transport's real telemetry owns attempt cooldowns.
+async fn run_relay_refill(
+    state: Arc<RwLock<AgentState>>,
+    config: Arc<Config>,
+    discovery: DiscoveryControlHandle,
+    routes: ClientRouteControl,
+    dns_routes: ClientRouteControl,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            () = wait_for_shutdown(&mut shutdown) => return,
+            _ = interval.tick() => {}
+        }
+        for owner in [&routes, &dns_routes] {
+            match Box::pin(owner.maintain_mptcp_capacity(&config, &discovery)).await {
+                Ok(ClientPathMaintenance::Unchanged) => {}
+                Ok(ClientPathMaintenance::Reconfigured) => {
+                    state.write().await.log(
+                        LogLevel::Info,
+                        "MPTCP_RELAY_REFILL_COMMITTED",
+                        unix_millis(),
+                    );
+                }
+                Err(_) => {
+                    owner.disconnect().await;
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "MPTCP_RELAY_REFILL_CLEANUP_PENDING",
+                        unix_millis(),
+                    );
+                }
+            }
+        }
+    }
+}
+
 async fn run_path_health_ticks<F: Future<Output = ()>>(
     mut shutdown: watch::Receiver<bool>,
     mut maintain: impl FnMut() -> F,
@@ -1770,6 +1854,11 @@ pub enum AgentError {
     /// Configuration file type, mode, or size was unsafe.
     #[error("agent configuration file is unsafe")]
     UnsafeConfig,
+    /// An enabled Exit using private DNS needs the fixed worker and distribution trust anchors.
+    #[error(
+        "private DNS companion or root anchors unavailable; provision volparossa-private-dns-worker and dns-root-data"
+    )]
+    PrivateDnsWorkerUnavailable,
     /// State directory or role file was unsafe.
     #[error("agent role state is invalid")]
     Roles(#[from] roles::RoleStoreError),
@@ -1828,6 +1917,7 @@ impl AgentError {
             Self::Path(_) => "PATH_INVALID",
             Self::Io(_) => "LOCAL_IO_FAILED",
             Self::Config(_) | Self::UnsafeConfig => "CONFIG_INVALID",
+            Self::PrivateDnsWorkerUnavailable => "DNS_PRIVATE_WORKER_UNAVAILABLE",
             Self::Roles(_) => "ROLE_STATE_INVALID",
             Self::Credential(_) => "IDENTITY_CREDENTIAL_FAILED",
             Self::Identity(_) => "IDENTITY_LOAD_FAILED",

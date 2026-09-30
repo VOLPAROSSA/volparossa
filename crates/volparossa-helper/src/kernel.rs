@@ -916,6 +916,22 @@ impl BirthNamespaceKernel {
         }
         result
     }
+
+    /// Recover only a journal-derived extension birth after the original worker is proven dead.
+    /// Covers both the exact provisional index and the exact durable alias before namespace move.
+    pub(crate) fn cleanup_restart_extension(
+        &mut self,
+        resource: &DurableWireguardResource,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError> {
+        validate_durable_wireguard_resource(resource)?;
+        let index = requested_birth_ifindex(resource)?;
+        self.route.cleanup_alias_sent_wireguard_link(
+            resource,
+            &ProvisionalWireguardBirthLink { index },
+            deadline,
+        )
+    }
 }
 
 fn prove_exact_owned_wireguard_link(

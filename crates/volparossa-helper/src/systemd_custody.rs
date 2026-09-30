@@ -557,6 +557,10 @@ impl RestartMayOwnCleanupEvidence {
     }
 
     #[cfg(test)]
+    #[allow(
+        clippy::large_types_passed_by_value,
+        reason = "test evidence constructor transfers its owned target into the retained vector"
+    )]
     pub(crate) fn from_target_for_test(target: StartupCustodyTarget) -> Self {
         Self::from_targets_for_test(vec![target])
     }
@@ -1499,6 +1503,18 @@ pub(crate) fn settle_exact_may_own_restart_present(
     }
     let mut reaped = Vec::with_capacity(restart_set.len());
     for (target, plan) in &restart_set {
+        let extensions = target
+            .extension_resources()
+            .map_err(|_| restart_settlement_incomplete())?;
+        if !extensions.is_empty() {
+            let mut kernel = crate::kernel::BirthNamespaceKernel::connect(deadline)
+                .map_err(|_| restart_settlement_incomplete())?;
+            for resource in &extensions {
+                kernel
+                    .cleanup_restart_extension(resource, deadline)
+                    .map_err(|_| restart_settlement_incomplete())?;
+            }
+        }
         let custody_name = CustodyFdName::from_durable_digest(target.custody_name_digest());
         let bundle = classification
             .custody

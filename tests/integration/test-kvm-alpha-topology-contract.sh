@@ -14,6 +14,9 @@ WORKFLOW=$HERE/../../.github/workflows/alpha-topology.yml
 RECIPROCITY=$HERE/reciprocity-smoke.sh
 RECIPROCITY_PY=$HERE/reciprocity-smoke.py
 
+# Pure decisions and preview wiring only: never run a runner network probe here.
+python3 -B "$HERE/test-qemu-outer-uplink.py"
+
 # This pressure fixture requires actual nonshared mounts; PrivateMounts alone
 # intentionally keeps systemd's inbound/slave propagation. Other fixtures do not.
 grep -F 'jobs_mount_flags=shared' "$HERE/agent-jobs-smoke.sh" >/dev/null
@@ -25,10 +28,12 @@ for script in "$GUEST" "$HOST"; do
     sh -n "$script"
     "$script" --preview | grep -F 'PREVIEW ONLY:' >/dev/null
     "$script" --preview --scenario reciprocity | grep -Fi 'recipro' >/dev/null
+    "$script" --preview --scenario reciprocity-private-dns | grep -Fi 'Reciprocity-private-dns' >/dev/null
     "$script" --preview --scenario local-link | grep -Fi 'local-link' >/dev/null
     "$script" --preview --scenario mixed-link | grep -Fi 'mixed-link' >/dev/null
     "$script" --preview --scenario mpquic-growth | grep -Fi 'MPQUIC' >/dev/null
     "$script" --preview --scenario mptcp-growth | grep -Fi 'MPTCP' >/dev/null
+    "$script" --preview --scenario mptcp-refill | grep -Fi 'refill' >/dev/null
     "$script" --preview --scenario sharing | grep -Fi 'sharing' >/dev/null
     "$script" --preview --scenario uplink-link | grep -Fi 'uplink-link' >/dev/null
     "$script" --preview --scenario crash-recovery | grep -Fi 'crash-recovery' >/dev/null
@@ -170,6 +175,52 @@ with tempfile.TemporaryDirectory(prefix='volparossa-private-export-') as directo
     assert not {f'published/{name}' for name in unsafe} & names
     assert captured['success'] is False and captured['cleanup']['verified'] is False
 PYTHON_PRIVATE_EXPORT
+
+# The Code client reuses the same single model provision, but keeps its later
+# completion boundary and sanitized answer facts separate from first-byte proof.
+"$HOST" --preview --scenario agent-private-code | grep -F 'Private-code:' >/dev/null
+sh "$HERE/agent-private-task-smoke.sh" --preview --code | grep -F 'no second model download' >/dev/null
+if sh "$HERE/agent-private-task-smoke.sh" --preview --code --browser >/dev/null 2>&1; then exit 1; fi
+grep -F 'exec sh tests/integration/agent-private-task-smoke.sh --execute --yes --expected-commit "$expected_commit" --code' "$HOST" >/dev/null
+grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-private-code'" "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-private-task-smoke.py report-code "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
+python3 -B "$HERE/agent-private-task-code.py" self-test
+python3 -B - "$HOST" <<'PYTHON_CODE_EXPORT'
+from pathlib import Path
+import json
+import sys
+import tempfile
+
+text = Path(sys.argv[1]).read_text()
+driver = text.split("<<'GUEST_DRIVER_SCRIPT'\n", 1)[1].split('\nGUEST_DRIVER_SCRIPT', 1)[0]
+assert driver.index('if [ "$scenario" = agent-private-code ]; then') < driver.index('printf \'%s  volparossa-mpquic\\n\'')
+code = text.split("<<'GUEST_DIAGNOSTICS_PYTHON'\n", 1)[1].split('\nGUEST_DIAGNOSTICS_PYTHON', 1)[0]
+module = dict(__name__='code_fixture_contract')
+exec(compile(code, 'code_fixture_diagnostics', 'exec'), module)
+with tempfile.TemporaryDirectory(prefix='volparossa-code-export-') as directory:
+    base = Path(directory)
+    home = base / 'home'
+    published = home / 'alpha-output'
+    published.mkdir(parents=True)
+    safe = ('agent-private-code-smoke.json', 'agent-private-code-provision.json',
+            'agent-private-code-client.json', 'agent-private-code-answer.json',
+            'agent-private-task-provision.json', 'agent-private-task-provision.log',
+            'agent-private-task-isolation.json', 'agent-private-task-snapshot.json',
+            'agent-private-task-owner_controls.json', 'agent-private-task-result_boundary.json',
+            'agent-private-task-private_service.json')
+    unsafe = ('agent-private-code-input.json', 'agent-private-code-runner.log',
+              'agent-private-code-raw-answer.json', 'agent-private-task-answer.json',
+              'agent-private-task-input.json', 'agent-private-task-report.json')
+    for name in safe + unsafe:
+        (published / name).write_text('{}')
+    archive = module['collect'](home, base / 'opt', 'a' * 40, 'agent-private-code', 1,
+                                cgroups=base / 'cgroups', proc=base / 'proc')
+    captured = json.loads((archive.parent / 'vm-incomplete.json').read_text())
+    names = {entry['file'] for entry in captured['diagnostics']['files']}
+    assert {f'published/{name}' for name in safe} <= names
+    assert not {f'published/{name}' for name in unsafe} & names
+    assert captured['success'] is False and captured['cleanup']['verified'] is False
+PYTHON_CODE_EXPORT
 
 # The browser scenario is separate from the original first-byte v2 proof. It keeps
 # model/control/cleanup checks and exports only exact sanitized panel provenance.
@@ -1182,6 +1233,8 @@ grep -F 'mptcp_growth_run' "$GUEST" >/dev/null
 grep -F 'mptcp_growth_cleanup' "$GUEST" >/dev/null
 grep -F 'Require real two-to-three MPTCP payload growth' "$WORKFLOW" >/dev/null
 python3 -B "$HERE/test-mptcp-growth-smoke.py"
+sh -n "$HERE/mptcp-refill-smoke.sh"
+python3 -B "$HERE/test-mptcp-refill-smoke.py"
 python3 -B "$HERE/test-wifi-link-smoke.py"
 sh -n "$HERE/uplink-link-smoke.sh"
 python3 -B "$HERE/test-uplink-link-smoke.py"
@@ -1203,3 +1256,27 @@ grep -F 'Require actual native provider discovery and protected fetch' "$WORKFLO
 python3 -B "$HERE/test-content-provider-smoke.py"
 python3 -B "$HERE/test-content-provider-https-smoke.py"
 printf '%s\n' 'KVM alpha, reciprocity, local-link, mixed-link, sharing, wifi-link and uplink-link topology static contract passed'
+
+# The private resolver variant is additive: it cannot stand in for the four
+# original same-daemon routes or inherit a standalone DNS preflight verdict.
+python3 -B - "$GUEST" "$HOST" "$WORKFLOW" <<'RECIPROCAL_PRIVATE_DNS_CONTRACT'
+from pathlib import Path
+import sys
+
+guest, host, workflow = (Path(name).read_text() for name in sys.argv[1:])
+assert 'reciprocity-private-dns) scenario=reciprocity; reciprocal_private_dns=yes;' in guest
+for hook in ("start", "stop", "config", "finalize_report"):
+    assert f"reciprocity_private_dns_{hook}" in guest
+assert guest.index('reciprocity_extend_network\n    [ "$reciprocal_private_dns"') < guest.index("TOPOLOGY_READY=true")
+assert guest.index('reciprocity_private_dns_stop || original_status=1') < guest.index("        reciprocity_stop_processes")
+assert guest.index('reciprocity_finalize_report "$original_status"') < guest.index('reciprocity_private_dns_finalize_report "$original_status"')
+assert '[ "$scenario" = dns-cache ] || [ "$reciprocal_private_dns" = yes ]' in guest
+assert 'case $node in\n                client|relay0|relay2|exit) printf' in guest
+assert '[ "$scenario" != reciprocity-private-dns ] || set -- --provision-only' in host
+assert 'private-unbound-vm-guest.sh --execute "$expected_commit" "$@"' in host
+assert 'reciprocity-private-dns-[a-z0-9-]+\\.json' in host
+assert 'test-reciprocity-private-dns.py' in workflow
+assert 'reciprocity-private-dns.py check "$report" "$GITHUB_SHA"' in workflow
+assert "env.VOLPAROSSA_ALPHA_SCENARIO == 'reciprocity' || env.VOLPAROSSA_ALPHA_SCENARIO == 'reciprocity-private-dns'" in workflow
+print("reciprocal private DNS wrapper contract passed (static only)")
+RECIPROCAL_PRIVATE_DNS_CONTRACT

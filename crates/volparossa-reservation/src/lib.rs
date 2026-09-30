@@ -12,7 +12,7 @@ pub use coordinator::{
     ClientNativeRouteAuthorization, CoordinatorError, ExitReservationIntent, RelayPathIntent,
     ReservationCoordinator, SignedExitFinalizeRequest, SignedProbePermitRequest,
     VerifiedExitCapacityHold, VerifiedFinalizedExitBundle, VerifiedProbePermit, VerifiedRelayGrant,
-    VerifiedRelayProbe,
+    VerifiedRelayProbe, VerifiedRouteExtension,
 };
 
 use serde::{Deserialize, Serialize};

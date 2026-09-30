@@ -172,7 +172,8 @@ fn exclusions(scope: &DnsResolutionScope) -> Option<HashSet<PeerId>> {
 }
 
 impl DiscoveryRuntime {
-    /// Configure during synchronous agent construction; capability publication waits for `run()`.
+    /// Configure the selected resolver even with caching disabled. Capability publication
+    /// separately requires the cache flag, an active role and a retained validated proof.
     pub(crate) fn configure_dns_cache(&mut self, resolver: Arc<ExitResolver>) {
         self.stop_dns_cache();
         if let Some(service) = &mut self.exit_service {
@@ -196,7 +197,10 @@ impl DiscoveryRuntime {
                     let _ = reply.send(Ok(None));
                     return;
                 };
-                if !self.roles.exit || self.dns_cache.lookups.len() >= MAX_LOOKUPS {
+                if !self.config.dns_cache.enabled
+                    || !self.roles.exit
+                    || self.dns_cache.lookups.len() >= MAX_LOOKUPS
+                {
                     self.dns_cache.stage("DNS_CACHE_LOOKUP_UNAVAILABLE");
                     let _ = reply.send(Err(DnsResolverError::Unavailable));
                     return;
@@ -421,7 +425,9 @@ impl DiscoveryRuntime {
                     request, channel, ..
                 } => {
                     self.dns_cache.stage("DNS_CACHE_REQUEST_RECEIVED");
-                    if !(self.roles.client || self.roles.relay || self.roles.exit) {
+                    if !self.config.dns_cache.enabled
+                        || !(self.roles.client || self.roles.relay || self.roles.exit)
+                    {
                         return;
                     }
                     if !self
@@ -627,7 +633,8 @@ impl DiscoveryRuntime {
         }
         // Having a resolver configured is not an offer: a cold consumer must not publish its
         // permanent identity/address as an empty cache for unrelated Exits to dial.
-        let available = (self.roles.client || self.roles.relay || self.roles.exit)
+        let available = self.config.dns_cache.enabled
+            && (self.roles.client || self.roles.relay || self.roles.exit)
             && state
                 .read()
                 .await

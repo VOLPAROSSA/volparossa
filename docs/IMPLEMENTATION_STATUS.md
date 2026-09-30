@@ -25,13 +25,241 @@ ESR fixture explicitly disables ECH-GREASE; product-scoped ECH compatibility is 
 being built. The earlier failed-trial history below is retained, but its pending
 live-TCP-proof statements are superseded by this exact successful run.
 
+### Editor-to-core private execution candidate
+
+The separate [VOLPAROSSA Code source milestone](https://github.com/VOLPAROSSA/volparossa-code/pull/1)
+is integrated in that repository. Its explicitly selected-code command uses the actual
+same-owner private compute protocol; the independent Codex app-server client is not yet
+wired into a complete edit/test agent. No proprietary extension source is included.
+
+The new `agent-private-code` disposable scenario pins the unmodified Node client at
+`d5802a024d665a47b42abdbe809bea2b9ee86bd8` and Node 24.19.0, retains both licenses, and
+reuses one pinned 360M provision. A network-isolated client submits a synthetic function
+to the real private service and must receive its generated identifier with EOS and
+confirmed cleanup. Existing owner controls, cancel/disconnect tests, model/input
+isolation and complete guest cleanup still apply. Only bounded facts are exported, not
+the source or raw answer. The [real VM trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/36738995292)
+**passes** on `7605c0ec6f56ea863333558b4c06fdec6a9cd630`: the actual 360M model
+returns the synthetic identifier in a 12-token EOS answer; cancellation/disconnect,
+owner/isolation checks, post-result cleanup and unchanged guest host state pass.
+All 18 original evidence files are retained locally; their archive SHA256 is
+`3d47971aa397ed43b076863912a67251efe69875babf02f1d538b196bd2063eb`.
+This is not yet editor execution, Codex tool use, general coding ability or private peer offload.
+
+### Storage layer and privacy boundaries
+
+**Private storage is now documented as a separate fourth layer**, with actual replicated-byte
+reciprocity, adaptive contribution targets and safe pending drain. The requested storage
+immune system must address prohibited-content admission and abuse without disclosing private
+backups. This is a requirement clarification, not new runtime enforcement: signed grants,
+quotas and ciphertext hashes do not classify encrypted files, and uploader self-attestation
+does not defeat malicious clients. The content-admission/review mechanism remains open; see
+[storage privacy and abuse boundaries](PRIVATE_STORAGE.md#storage-immune-system-and-private-content-limits).
+Different-chunk placement is implemented in the signed fragment CLI with local-service
+evidence below; its real overlay/provider-loss trial remains pending. The earlier
+replica/handoff proofs retain a complete encrypted archive at each selected provider.
+
+### Mailbox import confirmation
+
+The [mailbox import-confirmation candidate](MAILBOX_IMPORT_CONFIRMATION.md) adds a
+reusable split handoff: `content mailbox fetch` retains provider custody while writing
+bounded private payload/token/owner-signed pending receipts; `confirm-import` validates
+the exact owner, original grant/message, token and imported-byte digest before authenticating
+ACKs to both providers. Original expiry is retained, partial ACK progress persists and exact
+retries are idempotent. Legacy `receive` is unchanged. One canonical receipt test and three
+actual CLI/local signed-service tests pass, including interrupted ACK and restart/retry.
+These are not live-overlay tests. This is **not** native Thunderbird/Signal import, Signal
+Protocol, autonomous retention renewal or proof of no message loss; consumer confirmation
+remains an explicit application attestation, not an independently proved database commit.
+
 Automatic authority rounds and the four-job assessment cycle are integrated by
-[PR #163](https://github.com/VOLPAROSSA/volparossa/pull/163), merge `f4e6aa79`, after
-normal Quality/CodeQL checks passed. Model-quality limitations remain unchanged.
+[PR #163](https://github.com/VOLPAROSSA/volparossa/pull/163), normal merge `f4e6aa79`,
+after Quality and all CodeQL analyses passed on `c4060377`. This also prevents local
+passphrase-reader errors from entering the public CLI report channel. It does not change
+the earlier model-quality limitations or promote uncertain judgments to sound reasoning.
 The original README banner is integrated by [PR #164](https://github.com/VOLPAROSSA/volparossa/pull/164).
-Fresh live MPTCP relay refill is a separate candidate in
-[PR #165](https://github.com/VOLPAROSSA/volparossa/pull/165); local tests do not establish
-the pending real fourth-path proof or remove its eight-path-identity lifetime bound.
+
+**Live MPTCP relay refill now passes its complete functional proof:**
+[run `36714634165`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36714634165)
+on `c24fd086ef138f0fa415eca34f2b3bba079104f7` passes the unchanged version-3 checker
+against all 171 original artifacts. One full 256-MiB application retains its context and
+both original kernel MPTCP meta sockets across two-path progress, warm-path growth,
+exact warm retirement under loss and fresh R4 admission. New path 4 gains 168,960 Client
+receive / 170,280 Exit acknowledged bytes while the healthy original path progresses.
+Both application hashes agree; all fourteen physical captures, normal route retirement,
+zero-context final status, owned qdisc removal, zero leftover objects and unchanged host
+state pass. This closes the same-flow fourth-path/normal-cleanup boundary, not broader
+alpha acceptance, unlimited connections or a speed-improvement claim. The eight-issued-
+path-identity lifetime bound and 64-issued-flow-handle bound remain. See
+[the exact source, hashes and limitations](MPTCP_REFILL.md#current-result-complete-same-flow-refill-proof).
+Earlier failures and pending statements below retain their historical source scope.
+
+The live-relay-refill candidate adds signed +1 path extensions to an existing Client/Exit
+context. It retains the original reservation, Exit and hard expiry; newly owned WireGuard
+resources have their own Prepare/Activate/Commit/Abort lifecycle and durable cleanup markers.
+The Exit receives a real adjacent downlink budget before committing the new path. The
+discovery actor yields while that handshake completes, rather than preventing its own budget
+messages from being processed. New paths enter as warm candidates; the passing live proof
+above independently requires actual payload on the newly activated fourth path.
+
+Real same-flow kernel observations drive nomination: idle flows or still-useful warm paths do
+not authorize growth. Failed nominations rotate independently of allocated path IDs, and
+under-capacity advertisements are excluded without treating advertisements as measurements.
+Fresh A1/native sampling, reservation and exact-parent authorization remain required. The
+current signed per-context limit remains eight path identities, including aborted attempts;
+this slice does not remove that implementation bound or implement unlimited connections.
+
+Six targeted helper extension tests, four Exit extension tests, 34 agent MPTCP tests
+(including five client-refill observation tests) and 11 agent extension tests pass locally;
+the selectors overlap and are not an independent aggregate count. Strict all-target,
+all-feature Clippy passes for the nine affected crates. These local checks alone are not a
+live datapath proof. The separate `mptcp-refill` disposable scenario requires exhaustion of the
+original warm path, a newly eligible fourth relay path,
+the same MPTCP socket/context, actual bytes on that new path, retained original paths, full
+payload verification, privacy captures and complete cleanup. Existing `mptcp-growth` evidence
+keeps its original, narrower meaning.
+
+The [first refill run on `ab0a1e6f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36575021665)
+remains **failed**. The connect command returned `ok`; the fixture then rejected an unknown
+physical relay endpoint while collecting owned namespaces. The old report's generic
+`MPTCP_REFILL_ORIGINAL_ROUTE_UNAVAILABLE` is not evidence that route creation failed.
+Cleanup completed with zero owned objects and unchanged host state, but no transfer proof.
+Only post-disconnect network diagnostics were retained, so the exact rejected endpoint cannot
+be reconstructed. R3 is demonstrably eligible in this topology but absent from the old
+classifier; that omission is not proof of the literal endpoint seen in the failed run.
+
+The next candidate uses explicit refill acceptance version 2: any three distinct original
+relays from R0–R3, with R4 still absent initially and required as the exact fresh fourth path.
+It captures/shapes all R0–R4 and requires both physical WireGuard legs of every selected
+original relay, plus the fresh R4 path, to carry real data. Same socket/context, retained
+interfaces, substantial per-path byte progress, full payload hash and owned cleanup remain
+mandatory. Bounded per-draw diagnostics record the actual failed selection stage and unknown
+endpoint before disconnect, without WireGuard keys. Nine refill, nine historical growth and
+eleven generated privacy-observer checks pass. The fixture also fixes one formatting-sensitive
+source test and uses a freshly generated nonce in the helper test; no runtime check is removed.
+The [next run on `5e6560e2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36581328449)
+also remains **failed**, at `MPTCP_REFILL_WARM_NOT_RETIRED`. The Exit's original warm tuple
+and cookie `2002` were retained as `FIN-WAIT-1`; the old parser rejected this closing row,
+while the deliberately blackholed Client still saw its old warm socket as established.
+The helper/agent logged Exit endpoint retirement, but no fresh R4 proof was reached.
+Final fixture teardown completed with unchanged host state; this does not erase the
+route-disconnect failure separately recorded before teardown.
+The Client helper did complete its local route/ingress destruction; the outstanding
+R2-to-Exit retirement exchange did not complete. Its underlying transport failure was
+discarded, so a precise cause is not proved. Fixed, non-private transport-failure classes
+are now logged at that existing failure boundary; one focused mapping test passes.
+Retry, retirement and cleanup behavior are unchanged by that diagnostic addition.
+
+[Refill acceptance version 3](MPTCP_REFILL.md) now keeps exact anchored closing residues
+separate from established subflows and independently observes Exit endpoint withdrawal.
+It requires a sustained ten-second withdrawal interval, no useful progress on surviving
+old warm residues and fresh progress on the unchanged healthy original path before exposing
+R4. Unknown/malformed rows still fail, and all R4 byte/hash/privacy checks remain mandatory.
+Twelve refill and nine unchanged historical growth checker tests pass; no new live proof
+or alpha completion is claimed. The failed original evidence remains unchanged.
+
+The [version-3 run on `05cda509`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36586125461)
+remains **failed**, at `MPTCP_REFILL_FRESH_PATH_MISSING`. Its original evidence passes the
+unchanged warm-retirement checker, but no R4 helper context, fresh R4 payload or complete
+application hash is established. Repeated `PRESELECTION_SAMPLE_INVALID_SNAPSHOT` events
+match a production ordering defect: the refill restriction filtered candidates after their
+affine subject bindings were built. It also ran after a random control choice that could
+discard the existing route's pinned control. The candidate fix selects only that exact
+lineage from the fully revalidated, ambiguity-checked projection and constructs its affine
+bindings afterwards; the sampler and authorization gates remain unchanged. Five focused signed
+snapshot/projection regressions and strict agent Clippy pass, but do not establish a working
+live refill. The separate Quality failure exposed missing extension message tags in the schema
+and its exact-enumeration test; both now track the implemented tags 33–35. Final fixture
+cleanup is complete with unchanged host state; the earlier agent shutdown failure remains,
+with two relay retirement exchanges now specifically reporting outbound dial failures.
+
+The [next run on `4107389b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36591890165)
+remains **failed** at `MPTCP_REFILL_FRESH_PATH_MISSING`. It progresses through two fresh
+native permits and real R4/companion helper Prepare, but never completes native Ready or
+proves fresh R4 payload. The companion was original path 1/R2, explicitly blackholed by
+the saved injection: nomination chose the first advertised original Relay instead of the
+healthy sibling observed on the same flow. The candidate correction carries that progressing,
+non-lossy sibling's exact path ID into original-grant/Relay resolution. It changes no native
+readiness, timing, injected loss, application hash or cleanup gate. Synthetic regressions
+cover the nomination; no passing live refill is claimed. The failed original report retains
+complete disposable cleanup and unchanged host state.
+
+The [run on `258c049e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36596674960)
+still **fails** at fresh-path admission. Its new native measurement reaches real helper
+Commit, followed by additive Client/Exit path-4 Prepare and immediate Abort. The Exit
+verifier incorrectly required that retained path 4 equal the fresh two-path sample's ordinal
+1 or 2. The correction scopes that projection to the exact signed extension parent/permit
+and complete fresh native batch; original-route ordinal, privacy, timing and payload/hash
+requirements remain intact. No passing live refill is claimed. Fixture cleanup/A15 pass,
+but the separate Client `SHUTDOWN_CLEANUP_FAILED` diagnostic remains unresolved in this
+artifact. See [the scoped evidence notes](MPTCP_REFILL.md).
+
+The [run on `82fe0f39`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36601313163)
+remains **failed**, earlier at `MPTCP_REFILL_WARM_NEVER_APPEARED`. Both original paths
+continue carrying data. The Exit successfully adds warm endpoint 1 and retires it about
+eleven seconds later, but the Client never observes its third subflow; no fresh extension
+is attempted. The same primary-2/second-3/warm-1 ordering previously worked, so a simple
+path-ID ordering defect is not established. Original diagnostics do not retain ADD_ADDR/
+echo/JOIN counters or the short announcement window; loss of an announcement is only a
+hypothesis. The fixture now retains those bounded observations without changing loss,
+timers or acceptance gates. Cleanup completes with zero owned objects and unchanged host
+state. This run does not verify the fresh-evidence ordinal correction or prove live refill.
+
+The [run on `0f58f2f2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36604968363)
+remains **failed**, at `MPTCP_REFILL_APPLICATION_ENDED`, although the Client's complete
+256-MiB response matches the expected fixture hash. Original warm-path activation and
+retirement succeed; fresh path 4 now reaches real Client/Exit Prepare, Activate and Commit.
+The Exit installs its fourth-path endpoint, but the new ADD_ADDR is not observed at the
+Client and no fourth JOIN starts before the endpoint retires. Linux's current kernel-PM
+announcement selection can still use an established but blackholed primary; the retained
+120-second announcement retry interval exceeds the unchanged warm-probe interval. This
+is not fourth-path application proof or a reason to weaken the primary-failure fixture.
+An exact owned Client userspace-PM seam is now implemented, without replacing kernel
+scheduling/retransmission; it has a 64-issued-flow/context-generation bound. Later partial
+fourth-path data evidence is recorded below; normal retirement is not yet accepted.
+Disposable teardown and host-state checks pass for the original run; separate agent
+shutdown/retirement failures remain visible. See [the exact evidence and limitations](MPTCP_REFILL.md).
+
+The first userspace-PM run (`01fcabe7`, `36614116209`) fails earlier: its first owned
+subflow update is rejected and the application connection resets. Source review identifies
+a valid Linux IPv6 `ANNOUNCED` form without FAMILY that our parser rejected. The exact-shape
+correction and eight targeted kernel checks pass locally; the original artifact has no raw
+event frame, so its precise event cause remains inferred. Cleanup and unchanged host state
+pass, but there is no new fresh-refill completion claim.
+
+The next run (`0b2e3c59`, `36616966078`) reaches `MPTCP_ENDPOINT_UPDATED` and retains two
+established Client subflows, but still fails before payload release: the fixture rejects
+the real `ss` spelling `[IPv6]%interface:port`, which leaves its baseline/download gate
+closed. The later incomplete EOF is not attributed to a particular timeout without
+evidence. A fixture-only, exact-interface-bound parser correction passes ten growth and
+fifteen refill checks; no lifetime, loss or byte requirements change. Original cleanup
+and unchanged host state pass. Its 118-file artifact remains failed: partial Client
+snapshot reconstruction is not a passed transfer or fresh-fourth-path proof.
+
+Run `36620197695` on `9c1eaff1` now completes the full 256-MiB download with the expected
+hash at both ends and adds fresh path 4 to the same meta socket (124,080 received /
+122,760 acknowledged bytes in its checked progress interval). Original warm retirement
+and retained capture drain/basic privacy checks pass. The run still **fails** normal
+disconnect: Exit retirement admission never included the new Relay, so R4 cannot obtain
+its cleanup receipt although Client/Exit helper contexts are destroyed. A bounded,
+exact-accepted-extension retirement-authority correction and real two-hop regression are
+implemented; the targeted two-hop regression, formatting and strict agent Clippy pass.
+The fresh live transfer/retirement proof remains pending. The original 167-file run remains failed;
+successful disposable teardown and unchanged host state do not replace product cleanup.
+
+Run `36624751596` on `c47e56fd` repeats the complete 256-MiB application with matching
+hashes, unchanged meta sockets, exact warm retirement and fresh fourth-path progress
+(166,320 Client received / Exit acknowledged bytes). R4 now receives its cleanup receipt,
+confirming the accepted-extension retirement correction. The full report still **fails**:
+original warm Relay R1 repeatedly cannot dial the Exit after impairment removal. Source
+inspection finds that transient Kademlia transport failure can remove a known address
+without clearing our admission registry; a destruction-only retry now restores bounded,
+previously Known addresses for the exact Exit. A real Kademlia-event regression passes.
+The original artifact did not retain failed dial endpoints, so this is a reproduced source
+defect and candidate explanation, not proof of that exact remote failure. Scoped fixed-class
+dial diagnostics are added; a new live cleanup proof remains required. The original 169
+files retain failed normal cleanup, successful disposable teardown and unchanged host state;
+see [the exact evidence and remaining limitation](MPTCP_REFILL.md).
 
 The first [Firefox integration PR](https://github.com/VOLPAROSSA/volparossa-browser/pull/1)
 is merged (`bab677ba`): isolated ESR 140.16 privacy defaults and native Strict tracking
@@ -289,6 +517,25 @@ array because it reused an object-only reader. Its exporter also omitted the pha
 route and completion files, so those observations cannot be independently reconstructed from
 this artifact. This is not a completed replica acceptance PASS. All 85 original files remain
 unchanged (ZIP SHA-256 `d3d67e02e7f8b81fadb414cea87ef0de449404021f47d36d820de80d0afc2fcb`).
+
+The **fragment placement candidate** adds
+`storage fragments create/deposit/status/progress/restore/renew/delete`: distinct encrypted
+archive ranges with two or more copies across three to eight explicitly trusted providers.
+An immutable owner-signed reconstruction root binds full length/hash, contiguous fragment
+ranges/hashes, provider/grant pairs and original copy identities; mutable lease journals
+must match that root. It reuses the existing authenticated protected-transfer entrypoints,
+stages one fragment at a time and publishes restored output only after the full signed
+archive identity verifies. Conservative charges include every reserved/committed/uncertain
+fragment copy, including expired or unavailable ones. [Bounds and operator workflow](PRIVATE_STORAGE.md#fragment-placement-candidate-redundant-pieces-not-whole-archives-per-provider)
+are explicit; this is not erasure coding or whole-archive replication at every provider.
+
+All **three focused fragment tests pass**, including real three-store SQLite/signed-frame
+transfers: interrupted Reserve acknowledgement and same-identity retry, subset-only custody,
+source removal, repeated restore with one provider down, fail-closed restoration when a
+fragment loses both holders, renewal and interrupted delete/retry to zero leases. Signed-root
+tampering and coordinated mutation of unsigned nested copy identities are rejected. A real
+protected-overlay fragment-placement run is still pending; these tests do not establish
+independent failure domains, automatic repair/handoff, measured overhead or reciprocal credit.
 
 The next owner-coordinated candidate adds `storage replicas replace`: a durable,
 resumable A/B-to-B/C handoff through the same protected operations. It retrieves and hashes
@@ -3709,6 +3956,151 @@ stopped at formatting because the new mailbox/manifest module declarations were 
 that two-line ordering is corrected without changing behavior. No full Quality pass is claimed.
 
 ## Latest DNS integration checkpoint
+
+- [x] Source-bound development-package and DNS integration on `138787d1`:
+  [KVM run `36719475479`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36719475479)
+  passes the protected A/AAAA upstream/peer/local-cache sequence, unsigned fallback,
+  five real native Unbound cases, installed resolver sandbox and complete package
+  install/upgrade/remove lifecycle. Missing effective-Exit assets are rejected; inert
+  startup and restoration of the fixture-started native service/helper lifetime pass.
+  All 277 original artifacts are retained (ZIP SHA-256
+  `c3e7180d9ccfebe08f35a35fd969e45003bdfc66f99b0184a1d4e9ede21c68c9`).
+  Cleanup leaves zero owned objects and unchanged host state. This is not a release-build,
+  full installed-agent DNS-query or full-alpha proof. The combined revision with the newly
+  merged MPTCP-refill milestone still needs its integration check; historical failures below
+  are not relabelled. See [scope and receipts](UNBOUND_FALLBACK.md#complete-development-package-and-cache-pass).
+
+- [ ] Protected deployed Unbound fallback and measured source selection: an explicit
+  Exit-side TCP backend/configuration is implemented, with targeted parser and isolated TCP
+  evidence. The private inherited-pipe worker candidate now adds genuine libunbound calls,
+  fixed packaged paths, at most two owned children, deadline/cancellation cleanup and a separate
+  native secure verdict. Its ABI build against hash-verified Debian libunbound 1.26.1 passes.
+  The version-2 candidate keeps one native context across the original address query and bounded
+  related DNSKEY/DS queries. Its raw packets feed the existing independent root verifier; only
+  validated proof enters the policy-scoped local/peer cache. Nine focused private protocol,
+  proof, source-choice and real inert-process tests pass, not substituted for live recursion
+  or a completed private-worker-to-peer proof. Initial version-1 configuration and affected-crate
+  all-target Clippy checks remain historical evidence. Version-2's 19 focused DNS tests,
+  strict UDP all-target/all-feature Clippy, formatter and four guest-report checks now pass.
+  Private mode now uses RAM proofs first, then adaptive **sequential** peer/private-Unbound
+  choice with bounded aggregate in-memory timings, cooldown and real-request comparison
+  probes. Its focused sequencing test and strict UDP all-target/all-feature Clippy pass;
+  this is not a live recursive-DNS speed proof or a guarantee of the globally fastest source.
+  Explicit loopback mode retains its fixed order. Peer budgets in private mode cover fetch,
+  independent validation and retention; original TTL, privacy and worker-cleanup bounds remain.
+  Both explicit modes preserve real fallback TTLs and never call the OS resolver after selection.
+  Neither local AD nor a private-library verdict is independent shareable peer proof. Real
+  recursion/validation now passes below; simultaneous Client+Exit privacy/cleanup remains open.
+  There is no persistent libunbound cache, adaptive racing, host package installation/DNS change
+  or default switch. A separate optional Debian 13 companion builder declares the private worker
+  and dependencies; existing core package construction/dependencies remain unchanged.
+  See [Unbound fallback scope and readiness](UNBOUND_FALLBACK.md).
+  The [first native guest run on `9aa777fd`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36594857358)
+  **fails overall**: real signed and unsigned recursion returns the correct native secure flags
+  despite the OS-positive sentinel, but the bogus case emits no result with a retained typed
+  cause; timeout/cancel cases are not reached. The separate protected C05 phase obtains a valid
+  upstream answer and then fails `DNS_CACHE_CAPTURE_INCOMPLETE`. Original artifacts are retained;
+  guest hosts and final host-state bytes are unchanged and topology cleanup completes.
+  The capture failure is a shared observer callback's unsupported `frame` keyword; the current
+  adapter fix passes five focused DNS capture/report tests. The
+  [version-2 run on `6aaa5c95`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36598970370)
+  now passes the separate protected A/AAAA upstream/peer/local-cache and unsigned-fallback
+  report, including a rebuild from its original raw evidence, drained captures and host cleanup.
+  That fixture does not use private Unbound as its upstream. The native preflight still fails:
+  unsigned recursion passes (2,192 ms), and exact child reaping passes on timeout and caller
+  cancellation, but signed and bogus questions return `Unavailable` at the 4.5-second work
+  deadline. No native signed proof-cache linkage or actual `Bogus` verdict is claimed.
+  All 276 original artifact files remain unchanged; see the fallback document for their hash.
+  No default switch or reciprocal deployment proof follows from these partial results.
+  The [diagnostic run on `84be45ac`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36602822670)
+  now proves a genuine native signed lookup, independent root validation and policy-bound
+  local-cache reuse in 3,297 ms. Unsigned recursion and timeout/cancel reaping pass too.
+  It still **fails overall**: the bogus lookup is `Unavailable` at 4,502 ms, and a separate
+  30-second native diagnostic also obtains no complete reply before confirmed kill/reap.
+  The protected C05 report passes independently, not with these native answers as its source.
+  No native `Bogus` verdict, native-to-peer proof or reciprocal deployment is claimed.
+  All 298 original files, including unchanged-host and cleanup evidence, remain retained;
+  the fallback document records their ZIP hash. Default selection remains unchanged.
+  The [IPv6-observed run on `4930f8e9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36605711028)
+  **passes all five native cases** with unchanged worker bytes: signed independent cache
+  linkage (1,436 ms), unsigned recursion (440 ms), actual `Bogus` rejection (937 ms), timeout
+  and caller-cancel reaping. The runner proves no route for outer IPv6; the fixture disables
+  only that QEMU option. The exact-source native checker passes. The overall run still fails
+  in the separate C05 warm-A/AAAA phase with `DNS_CACHE_NORMAL_ROUTE_UNAVAILABLE`; combined
+  protected deployment remains incomplete. Its original 167 files and cleanup evidence remain.
+  A separate `reciprocity-private-dns` fixture now preserves four all-role agent lifetimes
+  and concurrent real UDP routes while checking normal protected DNS, private native worker
+  ownership, independent local-cache reuse, drained captures and complete guest-only uplink
+  cleanup. Its five inert tests and static wrapper contract pass; live execution is pending.
+  The [first reciprocal live run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36605721961)
+  then fails before DNS at `PRIVATE_DNS_UPLINK_ENDED`: the guest-only slirp sandbox cannot
+  pivot into `/tmp`. Uplink/topology cleanup and unchanged guest-parent state pass. This
+  establishes neither reciprocal DNS success nor a reason to disable the sandbox.
+  The new protected UDP-DNS reuse candidate retains the exact application/resolver/name,
+  policy and original selected route for at most 16 sequential questions, 30 idle seconds
+  and the original signed expiry. One outstanding question requires exact response-ID and
+  question correlation; changed bindings get a new ordinary route, and TCP stays one-shot.
+  Three focused Rust tests pass. C05 now observes A/AAAA on one actual application socket
+  and route with separate captures, then explicitly retires before Exit/offline phases.
+  Eight focused fixture checks pass. The [run on `859c9e90`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36613320245)
+  now passes the full C05 workflow: all five live native-Unbound cases and the separate
+  protected A/AAAA upstream/peer/offline-local/unsigned phases pass both exact-source checkers.
+  Same-socket byte progression, captures, explicit retirement, zero leftovers and unchanged
+  host state are verified in 275 retained original files. See the fallback document for hashes.
+  Its [separate reciprocal run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36613323557)
+  still fails: warm private recursion takes 1,610 ms and same-association local reuse 3 ms
+  without a new child, but status polling blocks during retirement and the Exit captures
+  contain unparsed TAP frames/an unrecognized mDNS source. Incoming DNS packets also cross
+  the phase boundary without new outgoing queries. Four echo applications and final cleanup
+  pass, not the full combined privacy/lifetime gate. Missing report checkpoints are not
+  reconstructed as a PASS. All 169 originals remain retained; that run did not change the default.
+  The next reciprocal run (`383b8117`, `36617479438`) preserves unchanged agent/context IDs,
+  warm 819-ms and local 25-ms answers, post-DNS echoes, and natural retirement with 404 status
+  reads/no timeouts. It still fails on one exact gateway-to-TAP ARP reply's capture shape;
+  seven other captures and final cleanup/host-state pass. No historical packet bytes or full
+  PASS are invented. See [the retained evidence](UNBOUND_FALLBACK.md).
+  A separate packaged-default candidate now selects private Unbound even when caching is off,
+  while disabling all proof retention and peer sharing in that mode. Inactive nodes need no
+  worker; effective Exits reject missing assets. Four config, three resolver and three startup
+  checks plus strict three-crate Clippy pass. The source-exact reciprocal run
+  [`36621104333` on `c2e21c6c`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36621104333)
+  now passes: protected private recursion takes 1,053 ms, same-socket local reuse 5 ms,
+  with unchanged four-node agents/flows, post-DNS echoes, a reaped worker, no new cache-hit
+  query/worker, responsive natural retirement, clean captures and unchanged host state.
+  Its 170 originals are retained. The separate package/C05 run `36621100178` remains failed:
+  C05 and all five native cases pass, as do source binding and installed-agent startup guards,
+  but the shipped-sandbox probe fails and upgrade/removal acceptance is not established.
+  No missing probe diagnostics are invented. See [exact results and hashes](UNBOUND_FALLBACK.md).
+  The diagnostic repeat `36624654504` on `d4791119` again passes C05/native/startup checks,
+  but records systemd `203/EXEC` before the probe or worker runs; no underlying exec errno
+  or historical mount flags were retained. The fixture now stages the source-exact probe
+  under a private root-owned `/usr/libexec` directory, keeps its runtime files under `/run`,
+  and checks mount flags plus actual agent-user access without relaxing the shipped sandbox.
+  Ten focused package-proof checks pass; the complete live package lifecycle remains pending.
+  The next run [`36713955757` on `3e5c8051`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36713955757)
+  passes the installed DNS startup/sandbox probe and all five independent native cases.
+  Actual sandbox resolution takes 504 ms, with independent DNSSEC proof, observed/reaped
+  same-UID worker and local reuse; source binding and configuration/unit restoration pass.
+  The full run remains failed: the package lifecycle incorrectly requires a persistent
+  MPQUIC process in roles-off mode, and the separate C05 public-wire collector rejects
+  insufficient original TTL before application queries. Lifecycle report v2 now checks
+  active helper/agent upgrade lifetimes and explicitly successful inert native state; the
+  collector boundedly re-fetches only expiring fixed questions without changing its 60-second
+  validity gate or renewing old bytes. Seven recording, ten package-DNS, six native-proof
+  checks and the nonmutating lifecycle contract pass. A new live run is still required;
+  all 83 originals, failure boundaries and unchanged host-state evidence remain retained.
+  The next run [`36716641748` on `c34af147`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36716641748)
+  passes the refreshed protected C05 sequence, all five native cases and the installed
+  startup/sandbox probe (1,112-ms signed lookup) under their exact-source checkers. It still
+  fails full package acceptance: the startup fixture enabled Exit temporarily and started
+  the native worker through the agent's `Wants=` dependency, but restored only the agent.
+  The unchanged lifecycle gate correctly rejects that still-running Exit worker before
+  upgrade/removal. Fixture cleanup now stops agent plus native, restores the original
+  config/drop-in, restarts the agent and requires inert successful native state/no sockets
+  plus the unchanged helper lifetime. Success and failure paths have stateful regression
+  coverage; all twelve pure package-proof checks pass. New live package acceptance is
+  pending. The 270 originals, complete topology cleanup and equal host hashes are retained
+  in [the exact evidence history](UNBOUND_FALLBACK.md).
 
 The positive DNSSEC cache is now composed into the normal agent: the same bounded RAM resolver
 serves protected DNS, TCP resolution, general UDP and browser-QUIC destination pinning. Its peer

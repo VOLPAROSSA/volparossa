@@ -17,7 +17,11 @@ read, require, text = COMMON["read"], COMMON["require"], COMMON["text"]
 PREFIX = "mptcp-growth"
 BODY_BYTES = 32 * 1024 * 1024
 MIN_DELTA = 65536
-RELAY_IPS = {"42.158.0.1": "relay0", "44.160.1.1": "relay1", "45.161.2.1": "relay2"}
+# R3 is also eligible while the fixture draws a route: the topology explicitly raises
+# its capacity so it can be the distinct control relay. Recognizing its actual endpoint
+# is not permission to accept it in the final {R0,R1,R2} data-path set below.
+RELAY_IPS = {"42.158.0.1": "relay0", "44.160.1.1": "relay1", "45.161.2.1": "relay2",
+             "48.164.4.1": "relay3"}
 
 
 def command(args):
@@ -67,6 +71,36 @@ def socket_rows(value, states=("ESTAB",)):
     return rows
 
 
+def subflow_record(row, layout, role, token):
+    """Parse one already state-classified row without changing scenario acceptance."""
+    direction = "exit" if role == "exit" else "client"
+    other = "client" if role == "exit" else "exit"
+    match = re.search(r"tcp-ulp-mptcp\s+flags:(?P<flags>\S+)\s+"
+                      r"token:(?P<remote>[0-9a-f]+)\(id:(?P<remote_id>\d+)\)/"
+                      r"(?P<local>[0-9a-f]+)\(id:(?P<local_id>\d+)\)", row["line"])
+    require(match is not None and int(match["local"], 16) == int(token, 16)
+            and all(int(match[key]) <= 255 for key in ("local_id", "remote_id")),
+            "TCP row is not a subflow of the exact MPTCP meta socket")
+    path = next((path for path in layout["paths"] if
+                 row["local"][0] == path[f"{direction}_address"]
+                 and row["remote"][0] == path[f"{other}_address"]), None)
+    require(path is not None and (row["local"] if role == "exit" else row["remote"])[1] == 44443,
+            "subflow left exact selected overlay/Exit listener")
+    require(all(row[key] in (None, path[f"{direction}_interface"])
+                for key in ("local_interface", "remote_interface")),
+            "socket interface zone differs from exact owned path")
+    counters = {}
+    for name in ("bytes_acked", "bytes_received", "data_segs_out"):
+        found = re.search(rf"\b{name}:(\d+)\b", row["line"])
+        counters[name] = int(found[1]) if found else 0
+        require(counters[name] < 2**64, "kernel counter overflow")
+    retrans = re.search(r"\bretrans:(\d+)/(\d+)\b", row["line"])
+    counters["total_retrans"] = int(retrans[2]) if retrans else 0
+    return dict(path_id=path["path_id"], local=list(row["local"]), remote=list(row["remote"]),
+                cookie=row["cookie"], flags=match["flags"], remote_token=match["remote"],
+                remote_id=int(match["remote_id"]), local_id=int(match["local_id"]), **counters)
+
+
 def kernel_sample(raw, layout, role):
     # The ordinary application's request-side SHUT_WR is intentionally propagated. Its
     # MPTCP meta socket may be half closed while the download's TCP subflows stay ESTAB.
@@ -77,38 +111,31 @@ def kernel_sample(raw, layout, role):
     token = re.search(r"\btoken:([0-9a-f]+)(?:\s|$)", meta["line"])
     require(token is not None and int(token[1], 16) != 0
             and "fallback" not in meta["line"].lower(), "missing genuine MPTCP token or fallback")
-    direction = "exit" if role == "exit" else "client"
-    other = "client" if role == "exit" else "exit"
-    records = []
-    for row in socket_rows(raw["tcp"]):
-        match = re.search(r"tcp-ulp-mptcp\s+flags:(?P<flags>\S+)\s+"
-                          r"token:(?P<remote>[0-9a-f]+)\(id:(?P<remote_id>\d+)\)/"
-                          r"(?P<local>[0-9a-f]+)\(id:(?P<local_id>\d+)\)", row["line"])
-        require(match is not None and int(match["local"], 16) == int(token[1], 16)
-                and all(int(match[key]) <= 255 for key in ("local_id", "remote_id")),
-                "TCP row is not a subflow of the exact MPTCP meta socket")
-        path = next((path for path in layout["paths"] if
-                     row["local"][0] == path[f"{direction}_address"]
-                     and row["remote"][0] == path[f"{other}_address"]), None)
-        require(path is not None and (row["local"] if role == "exit" else row["remote"])[1] == 44443,
-                "subflow left exact selected overlay/Exit listener")
-        require(all(row[key] in (None, path[f"{direction}_interface"])
-                    for key in ("local_interface", "remote_interface")),
-                "socket interface zone differs from exact owned path")
-        counters = {}
-        for name in ("bytes_acked", "bytes_received", "data_segs_out"):
-            found = re.search(rf"\b{name}:(\d+)\b", row["line"])
-            counters[name] = int(found[1]) if found else 0
-            require(counters[name] < 2**64, "kernel counter overflow")
-        retrans = re.search(r"\bretrans:(\d+)/(\d+)\b", row["line"])
-        counters["total_retrans"] = int(retrans[2]) if retrans else 0
-        records.append(dict(path_id=path["path_id"], local=list(row["local"]), remote=list(row["remote"]),
-                            cookie=row["cookie"], flags=match["flags"], remote_token=match["remote"],
-                            remote_id=int(match["remote_id"]), local_id=int(match["local_id"]), **counters))
+    records = [subflow_record(row, layout, role, token[1]) for row in socket_rows(raw["tcp"])]
     require(2 <= len(records) <= 3 and len({row["path_id"] for row in records}) == len(records)
             and len({row["cookie"] for row in records}) == len(records), "ambiguous/incomplete subflow set")
     return dict(token=token[1], cookie=meta["cookie"], local=list(meta["local"]), remote=list(meta["remote"]),
                 subflows=sorted(records, key=lambda row: row["path_id"]))
+
+
+def relay_endpoint(output, *, role, pid, namespace, path):
+    """Classify one owned WG endpoint; retain failure context, never the WG peer key."""
+    context = dict(role=role, pid=pid, netns=namespace, path_id=path["path_id"],
+                   interface=path[f"{role}_interface"])
+    lines = output.splitlines()
+    if len(lines) != 1 or len(lines[0].split()) != 2:
+        raise ValueError("MPTCP_OWNER_AMBIGUOUS_WG_PEER " + json.dumps(context, sort_keys=True))
+    physical = lines[0].split()[1]
+    # This diagnostic is persisted before the caller disconnects the rejected draw.
+    # Limit and JSON-escape only the endpoint, never include the original wg output.
+    context["endpoint"] = physical[:96]
+    address, separator, port = physical.rpartition(":")
+    if (len(physical) > 96 or not separator or not re.fullmatch(r"[0-9]{1,5}", port)
+            or not 0 < int(port) <= 65535):
+        raise ValueError("MPTCP_OWNER_INVALID_RELAY_ENDPOINT " + json.dumps(context, sort_keys=True))
+    if address not in RELAY_IPS:
+        raise ValueError("MPTCP_OWNER_UNKNOWN_RELAY_ENDPOINT " + json.dumps(context, sort_keys=True))
+    return physical, RELAY_IPS[address]
 
 
 def owner_namespaces(layout):
@@ -140,13 +167,10 @@ def owner_namespaces(layout):
                     name = path[f"{role}_interface"]
                     # Never record WG keys: endpoints only supply exact physical relay bindings.
                     output = command(["nsenter", "-t", str(pid), "-n", "wg", "show", name, "endpoints"])
-                    lines = output.splitlines()
-                    require(len(lines) == 1 and len(lines[0].split()) == 2, "ambiguous WireGuard peer")
-                    physical = lines[0].split()[1]
-                    address, port = physical.rsplit(":", 1)
-                    require(address in RELAY_IPS and 0 < int(port) <= 65535, "unselected physical relay endpoint")
+                    physical, relay = relay_endpoint(output, role=role, pid=pid,
+                                                     namespace=namespace, path=path)
                     paths.append(dict(path_id=path["path_id"], interface=name,
-                                      ifindex=actual[name]["ifindex"], relay_node=RELAY_IPS[address], endpoint=physical))
+                                      ifindex=actual[name]["ifindex"], relay_node=relay, endpoint=physical))
                 stat = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
                 matches.append(dict(unit=unit, cgroup=group, pid=pid, start_ticks=stat[19],
                                     netns=namespace, paths=paths))

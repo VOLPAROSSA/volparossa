@@ -2,8 +2,9 @@ use std::collections::HashSet;
 
 use subtle::ConstantTimeEq;
 use volparossa_protocol::{
-    ExitReservation, RelayReservation, ReplayCache, TimePolicy, Transport, VerifiedControlMessage,
-    verify_control_message, verify_relay_reservation,
+    ClientSessionCapability, ExitReservation, RelayReservation, ReplayCache, RouteExtension,
+    RouteExtensionPhase, TimePolicy, Transport, VerifiedControlMessage,
+    finalized_reservation_bundle_hash, verify_control_message, verify_relay_reservation,
 };
 
 use crate::TcpProxyError;
@@ -43,6 +44,57 @@ impl VerifiedMptcpRoute {
         time_policy: TimePolicy,
         replay_cache: &mut ReplayCache,
     ) -> Result<Self, TcpProxyError> {
+        Self::verify_inner(
+            exit_reservation,
+            relay_reservations,
+            None,
+            now_ms,
+            time_policy,
+            replay_cache,
+        )
+    }
+
+    /// Verify an immutable original route plus a contiguous Exit-signed sequence of one-path
+    /// commits. This creates an effective view for later `OPEN_TCP` without reissuing old grants.
+    ///
+    /// # Errors
+    /// Rejects missing/extra paths, reordered or substituted commits, another original bundle,
+    /// changed session/native identity/expiry or exceeding the original signed capacity limit.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "original authority and additive proofs are separate"
+    )]
+    pub fn verify_with_extensions(
+        exit_reservation: &[u8],
+        relay_reservations: &[&[u8]],
+        signed_extensions: &[&[u8]],
+        signed_capability: &[u8],
+        now_ms: u64,
+        time_policy: TimePolicy,
+        replay_cache: &mut ReplayCache,
+    ) -> Result<Self, TcpProxyError> {
+        Self::verify_inner(
+            exit_reservation,
+            relay_reservations,
+            Some((signed_extensions, signed_capability)),
+            now_ms,
+            time_policy,
+            replay_cache,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "single replay-atomic complete route verification"
+    )]
+    fn verify_inner(
+        exit_reservation: &[u8],
+        relay_reservations: &[&[u8]],
+        extension_proofs: Option<(&[&[u8]], &[u8])>,
+        now_ms: u64,
+        time_policy: TimePolicy,
+        replay_cache: &mut ReplayCache,
+    ) -> Result<Self, TcpProxyError> {
         if !(MINIMUM_MPTCP_PATHS..=usize::from(volparossa_mptcp::MAX_PATHS))
             .contains(&relay_reservations.len())
         {
@@ -66,7 +118,10 @@ impl VerifiedMptcpRoute {
         }
         let maximum_paths = usize::try_from(exit_message.maximum_paths)
             .map_err(|_| TcpProxyError::InvalidBinding("maximum paths"))?;
-        if relay_reservations.len() != maximum_paths {
+        let extension_count = extension_proofs.map_or(0, |(proofs, _)| proofs.len());
+        if extension_count > 8
+            || relay_reservations.len() != maximum_paths.saturating_add(extension_count)
+        {
             return Err(TcpProxyError::InvalidBinding("exit exact path count"));
         }
 
@@ -75,6 +130,7 @@ impl VerifiedMptcpRoute {
         let mut path_ids = HashSet::with_capacity(relay_reservations.len());
         let mut relay_node_ids = Vec::with_capacity(relay_reservations.len());
         let mut expires_at_ms = exit.expires_at_ms();
+        let mut grants = Vec::with_capacity(relay_reservations.len());
 
         for encoded in relay_reservations {
             let (relay, exit_authorization) =
@@ -101,8 +157,21 @@ impl VerifiedMptcpRoute {
             }
             relay_node_ids.push(relay_id);
             expires_at_ms = expires_at_ms.min(relay.expires_at_ms());
+            grants.push(message.clone());
         }
         relay_node_ids.sort_unstable();
+        if let Some((proofs, capability)) = extension_proofs {
+            verify_extensions(
+                exit_reservation,
+                exit_message,
+                &grants,
+                proofs,
+                capability,
+                now_ms,
+                time_policy,
+                &mut replay_transaction,
+            )?;
+        }
 
         let route = Self {
             reservation_id: array(&exit_message.reservation_id, "reservation id")?,
@@ -169,6 +238,120 @@ impl VerifiedMptcpRoute {
         }
         Ok(())
     }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "original immutable authority and all additive path proofs checked atomically"
+)]
+fn verify_extensions(
+    signed_parent: &[u8],
+    parent: &ExitReservation,
+    grants: &[RelayReservation],
+    signed_extensions: &[&[u8]],
+    signed_capability: &[u8],
+    now_ms: u64,
+    time_policy: TimePolicy,
+    replay: &mut ReplayTransaction<'_>,
+) -> Result<(), TcpProxyError> {
+    let capability = verify_control_message::<ClientSessionCapability>(
+        signed_capability,
+        now_ms,
+        time_policy,
+        replay.cache(),
+    )?;
+    replay.record(&capability);
+    let c = capability.message();
+    if c.reservation_id != parent.reservation_id
+        || c.route_context_id != parent.route_context_id
+        || c.client_session_id != parent.client_session_id
+        || c.client_session_public_key != parent.client_session_public_key
+        || c.exit_node_id != parent.exit_node_id
+        || c.exit_peer_id != parent.exit_peer_id
+        || c.exit_boot_id != parent.exit_boot_id
+        || c.capability_id != parent.capability_id
+        || c.control_relay_node_id != parent.control_relay_node_id
+        || c.control_relay_peer_id != parent.control_relay_peer_id
+        || c.policy_hash != parent.policy_hash
+        || c.allowed_transports != parent.allowed_transports
+        || c.reserved_up_mbps != parent.reserved_up_mbps
+        || c.reserved_down_mbps != parent.reserved_down_mbps
+        || c.created_at_ms != parent.created_at_ms
+        || c.expires_at_ms != parent.expires_at_ms
+        || capability.sender_id().as_slice() != parent.exit_node_id
+        || grants.len() > usize::try_from(c.maximum_paths).unwrap_or(0)
+    {
+        return Err(TcpProxyError::InvalidBinding(
+            "extension original capability",
+        ));
+    }
+    let mut extensions = Vec::with_capacity(signed_extensions.len());
+    let mut added = HashSet::new();
+    let mut extension_ids = HashSet::new();
+    for encoded in signed_extensions {
+        let verified =
+            verify_control_message::<RouteExtension>(encoded, now_ms, time_policy, replay.cache())?;
+        replay.record(&verified);
+        let message = verified.message();
+        let scope = message
+            .scope
+            .as_ref()
+            .ok_or(TcpProxyError::InvalidBinding("extension scope"))?;
+        if message.phase != RouteExtensionPhase::Commit as i32
+            || scope.signed_exit_reservation != signed_parent
+            || verified.sender_id().as_slice() != parent.exit_node_id
+            || message.hard_expires_at_ms != parent.expires_at_ms
+            || scope.path_id > c.probe_permit_limit
+            || !added.insert(scope.path_id)
+            || !extension_ids.insert(scope.extension_id.clone())
+        {
+            return Err(TcpProxyError::InvalidBinding("extension committed scope"));
+        }
+        let grant = grants.iter().find(|g| g.path_id == scope.path_id).ok_or(
+            TcpProxyError::InvalidBinding("extension missing Relay grant"),
+        )?;
+        if grant.exit_authorization != message.signed_relay_authorization
+            || grant.relay_node_id != scope.relay_node_id
+            || grant.relay_peer_id != scope.relay_peer_id
+        {
+            return Err(TcpProxyError::InvalidBinding("extension Relay binding"));
+        }
+        extensions.push(message.clone());
+    }
+    let mut originals = grants
+        .iter()
+        .filter(|g| !added.contains(&g.path_id))
+        .collect::<Vec<_>>();
+    originals.sort_unstable_by_key(|g| g.path_id);
+    if originals.len() != usize::try_from(parent.maximum_paths).unwrap_or(0) {
+        return Err(TcpProxyError::InvalidBinding(
+            "extension original path count",
+        ));
+    }
+    let authorizations = originals
+        .iter()
+        .map(|g| g.exit_authorization.clone())
+        .collect::<Vec<_>>();
+    let original_hash = finalized_reservation_bundle_hash(signed_parent, &authorizations)?;
+    let mut selected = originals.iter().map(|g| g.path_id).collect::<Vec<_>>();
+    for extension in extensions {
+        let scope = extension
+            .scope
+            .as_ref()
+            .ok_or(TcpProxyError::InvalidBinding("extension scope"))?;
+        if scope.finalized_bundle_hash.as_slice() != original_hash {
+            return Err(TcpProxyError::InvalidBinding("extension parent bundle"));
+        }
+        selected.push(scope.path_id);
+        selected.sort_unstable();
+        if extension.selected_path_ids != selected {
+            return Err(TcpProxyError::InvalidBinding(
+                "extension contiguous path set",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn verify_finalized_scope(

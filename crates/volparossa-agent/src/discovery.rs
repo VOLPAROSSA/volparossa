@@ -5,9 +5,12 @@ mod content;
 pub(crate) use content::DiscoveredContentProvider;
 mod dns_cache;
 mod downlink;
+mod mptcp_paths;
 mod native_ready;
 mod preselection_observation;
 mod preselection_sampler;
+mod route_extension;
+mod route_extension_relay;
 mod route_retire;
 
 pub(crate) use content::ContentDiscoveryError;
@@ -135,7 +138,8 @@ use crate::{
         start_production_single_path_udp_exit,
     },
     mptcp_flow_runtime::{
-        ProductionMptcpExitCleanup, ProductionMptcpExitCompletion, ProductionMptcpExitRuntime,
+        MptcpExitPathControl, ProductionMptcpExitCleanup, ProductionMptcpExitCompletion,
+        ProductionMptcpExitRuntime,
     },
     mptcp_transport::{ExitMptcpListenerSignal, ExitMptcpTransport, PRODUCTION_MPTCP_EXIT_PORT},
     roles::RoleStore,
@@ -199,8 +203,9 @@ pub(crate) struct DiscoveryRuntimeResources {
 
 /// Route-policy-only input for one actor-owned client preselection attempt.
 ///
-/// No peer, target, endpoint, Exit, request, or dispatch identity can cross this boundary. The
-/// discovery actor derives every network target from its own freshly revalidated snapshot.
+/// The discovery actor derives every network target from its own freshly revalidated snapshot.
+/// An established-route restriction may discard candidates, but cannot add peers, endpoints,
+/// dispatch identity or authority absent from that actor-owned snapshot.
 pub(crate) struct ClientPreselectionParameters {
     transport: Transport,
     address_family: ObservationAddressFamily,
@@ -210,6 +215,7 @@ pub(crate) struct ClientPreselectionParameters {
     minimum_other_relays: usize,
     maximum_other_relays: usize,
     requested_candidate_bound: usize,
+    restriction: Option<route_extension::PreselectionRestriction>,
 }
 
 #[allow(
@@ -240,6 +246,7 @@ impl ClientPreselectionParameters {
             minimum_other_relays,
             maximum_other_relays,
             requested_candidate_bound,
+            restriction: None,
         }
     }
 
@@ -396,6 +403,27 @@ impl DiscoveryControlHandle {
             .await
             .map_err(|_| ClientPreselectionError::Timeout)?
             .map_err(|_| ClientPreselectionError::Closed)?
+    }
+
+    /// Restrict a fresh actor-owned sample to an established Exit/control pair and two relays.
+    /// These IDs are filters, not target authority: missing current peers fail closed.
+    pub(crate) async fn prepare_client_preselection_for_route(
+        &self,
+        mut parameters: ClientPreselectionParameters,
+        exit_node: [u8; 32],
+        exit_peer: Libp2pPeerId,
+        control_node: [u8; 32],
+        control_peer: Libp2pPeerId,
+        data_relays: Vec<([u8; 32], Libp2pPeerId)>,
+    ) -> Result<PreparedPreselectionEvidence, ClientPreselectionError> {
+        parameters.restriction = Some(route_extension::PreselectionRestriction {
+            exit_node,
+            exit_peer,
+            control_node,
+            control_peer,
+            data_relays,
+        });
+        self.prepare_client_preselection(parameters).await
     }
 
     pub(crate) async fn resolve_direct_relay(
@@ -791,6 +819,7 @@ struct ExactNativeExitEvidenceVerifier {
     tickets: Vec<RecentNativeExitEvidence>,
     consumed: Mutex<HashSet<[u8; 32]>>,
     now_ms: u64,
+    extension: Option<route_extension::ExtensionEvidenceBinding>,
 }
 
 impl ExactNativeExitEvidenceVerifier {
@@ -799,7 +828,23 @@ impl ExactNativeExitEvidenceVerifier {
             tickets: tickets.to_vec(),
             consumed: Mutex::new(HashSet::new()),
             now_ms,
+            extension: None,
         }
+    }
+
+    fn for_extension(
+        tickets: &[RecentNativeExitEvidence],
+        now_ms: u64,
+        request: &volparossa_protocol::RouteExtensionRequest,
+    ) -> Option<Self> {
+        Some(Self {
+            tickets: tickets.to_vec(),
+            consumed: Mutex::new(HashSet::new()),
+            now_ms,
+            extension: Some(route_extension::ExtensionEvidenceBinding::new(
+                request, now_ms,
+            )?),
+        })
     }
 
     fn consumed(&self) -> HashSet<[u8; 32]> {
@@ -825,6 +870,8 @@ impl ProbeEvidenceVerifier for ExactNativeExitEvidenceVerifier {
                     &result,
                     evidence,
                     self.now_ms,
+                    self.extension.as_ref(),
+                    &self.tickets,
                 )
         });
         let evidence_id =
@@ -966,6 +1013,9 @@ pub(crate) struct ActiveProductionMptcpExitRoute {
     reservation_id: [u8; FORWARD_ID_BYTES],
     expires_at_ms: u64,
     cleanup_not_before_ms: u64,
+    path_control: Option<MptcpExitPathControl>,
+    extensions: HashMap<[u8; FORWARD_ID_BYTES], route_extension::LiveExtension>,
+    path_state_replay: ReplayCache,
 }
 
 struct MptcpExitRuntimeCompletionEvent {
@@ -2344,8 +2394,12 @@ impl DiscoveryRuntime {
         let captured_at_ms = unix_millis();
         self.purge_completed_at(captured_at_ms);
         let policy = state.read().await.policy_snapshot(captured_at_ms);
-        let snapshot =
-            self.build_route_candidate_snapshot(requested_candidates, captured_at_ms, &policy);
+        let snapshot = self.build_route_candidate_snapshot(
+            requested_candidates,
+            captured_at_ms,
+            &policy,
+            None,
+        );
         let _ = reply.send(snapshot);
     }
 
@@ -2392,6 +2446,7 @@ impl DiscoveryRuntime {
             minimum_other_relays,
             maximum_other_relays,
             requested_candidate_bound,
+            restriction,
         } = parameters;
 
         let captured_at_ms = unix_millis();
@@ -2404,6 +2459,7 @@ impl DiscoveryRuntime {
             requested_candidate_bound,
             captured_at_ms,
             &policy,
+            restriction.as_ref(),
         ) {
             Ok(snapshot) => snapshot,
             Err(RouteCandidateSnapshotError::InvalidLimit) => {
@@ -5072,8 +5128,15 @@ impl DiscoveryRuntime {
             SwarmEvent::Behaviour(BehaviourEvent::DatapathRelay(event)) => {
                 Box::pin(self.handle_datapath_event(event, state)).await;
             }
-            SwarmEvent::OutgoingConnectionError { .. }
-            | SwarmEvent::IncomingConnectionError { .. } => {
+            SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                self.trace_retirement_dial_failure(peer_id, &error);
+                state.write().await.log(
+                    LogLevel::Debug,
+                    "DISCOVERY_CONNECTION_FAILED",
+                    unix_millis(),
+                );
+            }
+            SwarmEvent::IncomingConnectionError { .. } => {
                 state.write().await.log(
                     LogLevel::Debug,
                     "DISCOVERY_CONNECTION_FAILED",
@@ -5679,8 +5742,14 @@ impl DiscoveryRuntime {
                     },
                 ..
             } => {
-                self.answer_exit_forward_upstream(peer, connection_id, request, channel, state)
-                    .await;
+                Box::pin(self.answer_exit_forward_upstream(
+                    peer,
+                    connection_id,
+                    request,
+                    channel,
+                    state,
+                ))
+                .await;
             }
             request_response::Event::Message {
                 peer,
@@ -5705,9 +5774,16 @@ impl DiscoveryRuntime {
                 log_outbound_event(state, outcome).await;
             }
             request_response::Event::OutboundFailure {
-                peer, request_id, ..
+                peer,
+                request_id,
+                error,
+                ..
             } => {
                 if self.fail_route_retire_upstream(request_id) {
+                    tracing::warn!(
+                        diagnostic_code = route_retire_outbound_failure_code(&error),
+                        "route retirement upstream transport failed"
+                    );
                     return;
                 }
                 if self.fail_downlink_budget(request_id) {
@@ -5756,8 +5832,24 @@ impl DiscoveryRuntime {
                     return;
                 }
                 match request.validated_operation() {
-                    Ok(DatapathRelayOperation::ExecuteProbe) => {
+                    Ok(
+                        DatapathRelayOperation::ExecuteProbe
+                        | DatapathRelayOperation::ExtensionProbe,
+                    ) => {
                         self.answer_production_execute_probe(
+                            authenticated_client_peer,
+                            &request,
+                            channel,
+                            state,
+                        )
+                        .await;
+                        return;
+                    }
+                    Ok(
+                        DatapathRelayOperation::ExtensionCommit
+                        | DatapathRelayOperation::ExtensionAbort,
+                    ) => {
+                        self.answer_route_extension_relay(
                             authenticated_client_peer,
                             &request,
                             channel,
@@ -5896,23 +5988,25 @@ impl DiscoveryRuntime {
         channel: request_response::ResponseChannel<DatapathRelayResponse>,
         state: &Arc<RwLock<AgentState>>,
     ) {
+        let Ok(
+            operation @ (DatapathRelayOperation::ExecuteProbe
+            | DatapathRelayOperation::ExtensionProbe),
+        ) = request.validated_operation()
+        else {
+            return;
+        };
         macro_rules! reject {
             ($code:literal) => {{
                 tracing::warn!(rejection = $code, "production Relay ExecuteProbe rejected");
                 log_relay_forward_admission(Some(state), $code);
-                self.send_native_datapath_unavailable(
-                    request,
-                    DatapathRelayOperation::ExecuteProbe,
-                    channel,
-                );
+                self.send_native_datapath_unavailable(request, operation, channel);
                 return;
             }};
         }
         let now_ms = unix_millis();
         let local_peer = *self.service.local_peer_id();
         let request_valid = request.validate().is_ok();
-        let scope_matches =
-            datapath_request_scope_matches(request, DatapathRelayOperation::ExecuteProbe, now_ms);
+        let scope_matches = datapath_request_scope_matches(request, operation, now_ms);
         let remote_client = authenticated_client_peer != local_peer;
         let relay_role = self.roles.relay;
         let relay_service = self.relay_service.is_some();
@@ -6096,7 +6190,7 @@ impl DiscoveryRuntime {
         };
         let Ok(response) = DatapathRelayResponse::granted(
             request.request_id().to_vec(),
-            DatapathRelayOperation::ExecuteProbe,
+            operation,
             self.local_node_id.to_vec(),
             local_peer.to_bytes(),
             signed_result,
@@ -6562,6 +6656,13 @@ impl DiscoveryRuntime {
         {
             reject!("UDP_SESSION_RELAY_HELPER_COMMIT_REJECTED");
         }
+        if self.relay_service.as_mut().is_none_or(|service| {
+            service
+                .mark_tunnel_established(route.accepted.reservation_id(), unix_millis())
+                .is_err()
+        }) {
+            reject!("UDP_SESSION_RELAY_LIVE_RESERVATION_REJECTED");
+        }
         let attempt_deadline =
             rpc_deadline(request.deadline_unix_ms(), EXIT_FORWARD_UPSTREAM_TIMEOUT);
         let Ok(outbound_id) = self
@@ -6812,6 +6913,13 @@ impl DiscoveryRuntime {
         {
             reject!("MPTCP_SESSION_RELAY_HELPER_COMMIT_REJECTED");
         }
+        if self.relay_service.as_mut().is_none_or(|service| {
+            service
+                .mark_tunnel_established(route.accepted.reservation_id(), unix_millis())
+                .is_err()
+        }) {
+            reject!("MPTCP_SESSION_RELAY_LIVE_RESERVATION_REJECTED");
+        }
         let attempt_deadline =
             rpc_deadline(request.deadline_unix_ms(), EXIT_FORWARD_UPSTREAM_TIMEOUT);
         let Ok(outbound_id) = self
@@ -7049,6 +7157,13 @@ impl DiscoveryRuntime {
             .is_err()
         {
             reject!("MPQUIC_SESSION_RELAY_HELPER_COMMIT_REJECTED");
+        }
+        if self.relay_service.as_mut().is_none_or(|service| {
+            service
+                .mark_tunnel_established(route.accepted.reservation_id(), unix_millis())
+                .is_err()
+        }) {
+            reject!("MPQUIC_SESSION_RELAY_LIVE_RESERVATION_REJECTED");
         }
         let attempt_deadline =
             rpc_deadline(request.deadline_unix_ms(), EXIT_FORWARD_UPSTREAM_TIMEOUT);
@@ -9487,12 +9602,12 @@ impl DiscoveryRuntime {
             reject!("EXIT_FORWARD_EXIT_SCOPE_REJECTED");
         }
         if operation == ExitForwardOperation::MptcpSessionStart {
-            self.begin_production_mptcp_exit_session(
+            Box::pin(self.begin_production_mptcp_exit_session(
                 authenticated_control_relay,
                 &request,
                 channel,
                 state,
-            )
+            ))
             .await;
             return;
         }
@@ -9504,6 +9619,21 @@ impl DiscoveryRuntime {
                 state,
             )
             .await;
+            return;
+        }
+        if operation == ExitForwardOperation::ExtendRoute {
+            self.begin_route_extension_forward(
+                authenticated_control_relay,
+                connection_id,
+                request,
+                channel,
+            )
+            .await;
+            return;
+        }
+        if operation == ExitForwardOperation::MptcpPaths {
+            self.answer_mptcp_paths(authenticated_control_relay, connection_id, request, channel)
+                .await;
             return;
         }
         let local_peer_bytes = local_peer.to_bytes();
@@ -9616,6 +9746,8 @@ impl DiscoveryRuntime {
             | ExitForwardOperation::MptcpSessionStart
             | ExitForwardOperation::MpquicSessionStart
             | ExitForwardOperation::AdjacentReceiveBudget
+            | ExitForwardOperation::ExtendRoute
+            | ExitForwardOperation::MptcpPaths
             | ExitForwardOperation::RouteRetire
             | ExitForwardOperation::Unspecified => None,
         };
@@ -10768,6 +10900,10 @@ impl DiscoveryRuntime {
                     reservation_id,
                     expires_at_ms: 0,
                     cleanup_not_before_ms: 0,
+                    path_control: None,
+                    extensions: HashMap::new(),
+                    path_state_replay: ReplayCache::new(64)
+                        .expect("nonzero bounded replay capacity"),
                 };
                 self.active_production_mptcp_exit_routes
                     .insert(route_context_id, active);
@@ -10779,13 +10915,27 @@ impl DiscoveryRuntime {
         let active = ActiveProductionMptcpExitRoute {
             canonical_start: pending.canonical_start.clone(),
             encoded_signal: encoded_signal.clone(),
+            path_control: Some(runtime.path_control()),
             runtime: Some(runtime),
             cleanup: None,
             runtime_started: false,
             reservation_id,
             expires_at_ms,
             cleanup_not_before_ms: 0,
+            extensions: HashMap::new(),
+            path_state_replay: ReplayCache::new(64).expect("nonzero bounded replay capacity"),
         };
+        if self.exit_service.as_mut().is_none_or(|service| {
+            service
+                .mark_route_established(&reservation_id, unix_millis())
+                .is_err()
+        }) {
+            self.retire_active_mptcp_exit_route(route_context_id, active)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_LIVE_RESERVATION_REJECTED").await;
+            return;
+        }
         if self
             .active_production_mptcp_exit_routes
             .contains_key(&route_context_id)
@@ -13301,6 +13451,7 @@ impl DiscoveryRuntime {
         requested_candidates: usize,
         captured_at_ms: u64,
         active: &AgentPolicySnapshot,
+        restriction: Option<&route_extension::PreselectionRestriction>,
     ) -> Result<RouteCandidateSnapshot, RouteCandidateSnapshotError> {
         #[cfg(test)]
         self.route_snapshot_build_attempts
@@ -13308,6 +13459,7 @@ impl DiscoveryRuntime {
         if requested_candidates == 0
             || requested_candidates > MAXIMUM_SELECTION_CANDIDATES
             || captured_at_ms == 0
+            || restriction.is_some_and(|restriction| !restriction.is_valid())
         {
             return Err(RouteCandidateSnapshotError::InvalidLimit);
         }
@@ -13331,8 +13483,16 @@ impl DiscoveryRuntime {
             &mut direct_relays,
             &mut forwarded_exits,
             maximum_candidates,
-            Self::random_exit_control_index,
+            |group| match restriction {
+                Some(restriction) => restriction.control_index(group),
+                None => Self::random_exit_control_index(group.len()),
+            },
         );
+        if let Some(restriction) = restriction {
+            restriction.retain_direct_relays(&mut direct_relays);
+        }
+        // A restriction selects only freshly revalidated actor capabilities. Construct their
+        // affine bindings once, after the exact Exit/control choice and relay projection.
         let preselection_subjects = preselection_observation::PreselectionSubjectSet::from_snapshot(
             &revalidated,
             &direct_relays,
@@ -13630,7 +13790,7 @@ impl DiscoveryRuntime {
         direct_relays: &mut [DirectRelayCandidateSnapshot],
         forwarded_exits: &mut Vec<ForwardedExitCandidateSnapshot>,
         maximum_candidates: usize,
-        mut choose_control: impl FnMut(usize) -> Option<usize>,
+        mut choose_control: impl FnMut(&[ForwardedExitCandidateSnapshot]) -> Option<usize>,
     ) {
         direct_relays.sort_by(|left, right| {
             (left.capability.node_id, left.capability.peer_id.to_bytes()).cmp(&(
@@ -13675,7 +13835,7 @@ impl DiscoveryRuntime {
             {
                 continue;
             }
-            if let Some(index) = choose_control(group.len()).filter(|index| *index < group.len()) {
+            if let Some(index) = choose_control(group).filter(|index| *index < group.len()) {
                 selected.push(group[index].clone());
             }
         }
@@ -14107,6 +14267,40 @@ fn native_exit_ticket_matches_standard_result(
     result: &RelayProbeResult,
     evidence: &ProbeEvidence<'_>,
     now_ms: u64,
+    extension: Option<&route_extension::ExtensionEvidenceBinding>,
+    tickets: &[RecentNativeExitEvidence],
+) -> bool {
+    let Some(permit) = decoded_signed_payload::<RelayProbePermit>(&result.relay_probe_permit)
+    else {
+        return false;
+    };
+    evidence.signed_permit() == result.relay_probe_permit
+        && evidence.path_id() == permit.path_id
+        && evidence.transport() as i32 == ticket.scope.transport
+        && evidence.address_family() as i32 == ticket.scope.address_family
+        && native_exit_ticket_matches_result(ticket, result, &permit, now_ms)
+        && native_exit_path_binding_matches(ticket, result, &permit, now_ms, extension, tickets)
+}
+
+fn native_exit_path_binding_matches(
+    ticket: &RecentNativeExitEvidence,
+    result: &RelayProbeResult,
+    permit: &RelayProbePermit,
+    now_ms: u64,
+    extension: Option<&route_extension::ExtensionEvidenceBinding>,
+    tickets: &[RecentNativeExitEvidence],
+) -> bool {
+    extension.map_or_else(
+        || permit.path_id == ticket.scope.candidate_ordinal,
+        |binding| binding.matches(ticket, tickets, result, permit, now_ms),
+    )
+}
+
+fn native_exit_ticket_matches_result(
+    ticket: &RecentNativeExitEvidence,
+    result: &RelayProbeResult,
+    permit: &RelayProbePermit,
+    now_ms: u64,
 ) -> bool {
     let Some(data_relay) = ticket.scope.data_relay.as_ref() else {
         return false;
@@ -14117,8 +14311,7 @@ fn native_exit_ticket_matches_standard_result(
     let Some(exit) = ticket.scope.exit.as_ref() else {
         return false;
     };
-    let Some(permit) = decoded_signed_payload::<RelayProbePermit>(&result.relay_probe_permit)
-    else {
+    let (Some(client_relay), Some(relay_exit)) = (&result.client_relay, &result.relay_exit) else {
         return false;
     };
     let valid_leg = |leg: &ProbeLegEvidence| {
@@ -14154,11 +14347,8 @@ fn native_exit_ticket_matches_standard_result(
         && result.policy_hash == ticket.scope.policy_hash
         && result.transport == ticket.scope.transport
         && result.address_family == ticket.scope.address_family
-        && evidence.path_id() == ticket.scope.candidate_ordinal
-        && evidence.transport() as i32 == ticket.scope.transport
-        && evidence.address_family() as i32 == ticket.scope.address_family
-        && valid_leg(evidence.client_relay())
-        && valid_leg(evidence.relay_exit())
+        && valid_leg(client_relay)
+        && valid_leg(relay_exit)
 }
 
 fn native_probe_leg_evidence(
@@ -14246,6 +14436,15 @@ fn datapath_request_scope_matches(
     match operation {
         DatapathRelayOperation::ExecuteProbe => {
             execute_probe_scope_matches(request, now_ms, &mut replay)
+        }
+        DatapathRelayOperation::ExtensionProbe => {
+            route_extension_relay::extension_probe_scope_matches(request, now_ms)
+        }
+        DatapathRelayOperation::ExtensionCommit => {
+            route_extension_relay::extension_commit_scope_matches(request, now_ms)
+        }
+        DatapathRelayOperation::ExtensionAbort => {
+            route_extension_relay::extension_abort_scope_matches(request, now_ms)
         }
         DatapathRelayOperation::ReservePath => {
             reserve_path_scope_matches(request, now_ms, &mut replay)
@@ -15688,6 +15887,10 @@ fn forward_request_scope_matches(
         return false;
     };
     match operation {
+        ExitForwardOperation::ExtendRoute => {
+            route_extension::forward_scope_matches(request, now_ms)
+        }
+        ExitForwardOperation::MptcpPaths => mptcp_paths::forward_scope_matches(request, now_ms),
         ExitForwardOperation::CapacityHold => {
             let Ok(verified) = verify_control_message::<ExitCapacityHoldRequest>(
                 request.canonical_request(),
@@ -16725,6 +16928,29 @@ pub enum DiscoveryRuntimeError {
     ReservationService,
 }
 
+// Keep externally sourced error strings, peer identities and addresses out of diagnostics.
+// These fixed classes observe an existing failure; they never change retirement or retries.
+fn route_retire_outbound_failure_code(error: &request_response::OutboundFailure) -> &'static str {
+    match error {
+        request_response::OutboundFailure::DialFailure => "ROUTE_RETIRE_OUTBOUND_DIAL_FAILED",
+        request_response::OutboundFailure::Timeout => "ROUTE_RETIRE_OUTBOUND_TIMED_OUT",
+        request_response::OutboundFailure::ConnectionClosed => {
+            "ROUTE_RETIRE_OUTBOUND_CONNECTION_CLOSED"
+        }
+        request_response::OutboundFailure::UnsupportedProtocols => {
+            "ROUTE_RETIRE_OUTBOUND_PROTOCOL_UNSUPPORTED"
+        }
+        request_response::OutboundFailure::Io(error) => match error.kind() {
+            std::io::ErrorKind::UnexpectedEof => "ROUTE_RETIRE_OUTBOUND_IO_UNEXPECTED_EOF",
+            std::io::ErrorKind::InvalidData => "ROUTE_RETIRE_OUTBOUND_IO_INVALID_DATA",
+            std::io::ErrorKind::ConnectionReset => "ROUTE_RETIRE_OUTBOUND_IO_CONNECTION_RESET",
+            std::io::ErrorKind::BrokenPipe => "ROUTE_RETIRE_OUTBOUND_IO_BROKEN_PIPE",
+            std::io::ErrorKind::TimedOut => "ROUTE_RETIRE_OUTBOUND_IO_TIMED_OUT",
+            _ => "ROUTE_RETIRE_OUTBOUND_IO_OTHER",
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -16754,6 +16980,61 @@ mod tests {
     use super::*;
 
     static NEXT_MEMORY_ADDRESS: AtomicU64 = AtomicU64::new(90_000);
+
+    #[test]
+    fn route_retire_failure_diagnostics_are_fixed_classes_without_private_error_text() {
+        use request_response::OutboundFailure;
+
+        for (error, expected) in [
+            (
+                OutboundFailure::DialFailure,
+                "ROUTE_RETIRE_OUTBOUND_DIAL_FAILED",
+            ),
+            (OutboundFailure::Timeout, "ROUTE_RETIRE_OUTBOUND_TIMED_OUT"),
+            (
+                OutboundFailure::ConnectionClosed,
+                "ROUTE_RETIRE_OUTBOUND_CONNECTION_CLOSED",
+            ),
+            (
+                OutboundFailure::UnsupportedProtocols,
+                "ROUTE_RETIRE_OUTBOUND_PROTOCOL_UNSUPPORTED",
+            ),
+        ] {
+            assert_eq!(route_retire_outbound_failure_code(&error), expected);
+        }
+        for (kind, expected) in [
+            (
+                std::io::ErrorKind::UnexpectedEof,
+                "ROUTE_RETIRE_OUTBOUND_IO_UNEXPECTED_EOF",
+            ),
+            (
+                std::io::ErrorKind::InvalidData,
+                "ROUTE_RETIRE_OUTBOUND_IO_INVALID_DATA",
+            ),
+            (
+                std::io::ErrorKind::ConnectionReset,
+                "ROUTE_RETIRE_OUTBOUND_IO_CONNECTION_RESET",
+            ),
+            (
+                std::io::ErrorKind::BrokenPipe,
+                "ROUTE_RETIRE_OUTBOUND_IO_BROKEN_PIPE",
+            ),
+            (
+                std::io::ErrorKind::TimedOut,
+                "ROUTE_RETIRE_OUTBOUND_IO_TIMED_OUT",
+            ),
+            (
+                std::io::ErrorKind::PermissionDenied,
+                "ROUTE_RETIRE_OUTBOUND_IO_OTHER",
+            ),
+        ] {
+            let error = OutboundFailure::Io(std::io::Error::new(
+                kind,
+                "PRIVATE_DETAILS_MUST_NOT_BE_LOGGED",
+            ));
+            assert_eq!(route_retire_outbound_failure_code(&error), expected);
+        }
+    }
 
     const fn test_client_roles() -> RolesConfig {
         RolesConfig {
@@ -17533,6 +17814,7 @@ mod tests {
     pub(super) struct PreselectionTestCapabilities {
         transports: PreselectionTestTransports,
         families: PreselectionTestFamilies,
+        network_discriminator: Option<u8>,
     }
 
     impl PreselectionTestCapabilities {
@@ -17547,6 +17829,14 @@ mod tests {
                     ipv4: true,
                     ipv6: true,
                 },
+                network_discriminator: None,
+            }
+        }
+
+        const fn all_on_network(discriminator: u8) -> Self {
+            Self {
+                network_discriminator: Some(discriminator),
+                ..Self::all()
             }
         }
     }
@@ -17563,6 +17853,7 @@ mod tests {
                     ipv4: true,
                     ipv6: false,
                 },
+                network_discriminator: None,
             }
         }
     }
@@ -17594,21 +17885,22 @@ mod tests {
         nonce: [u8; 32],
         sequence_number: u64,
     ) {
+        let discriminator = advertised.network_discriminator.unwrap_or(nonce[0]);
         network.country_code = "NL".to_owned();
-        network.operator_id = format!("operator-{}-{sequence_number}", nonce[0]);
+        network.operator_id = format!("operator-{discriminator}-{sequence_number}");
         network.asn = 64_512_u32
-            .saturating_add(u32::from(nonce[0]).saturating_mul(16))
+            .saturating_add(u32::from(discriminator).saturating_mul(16))
             .saturating_add(u32::try_from(sequence_number % 16).expect("bounded sequence suffix"));
         network.ipv4_prefix_hint = advertised
             .families
             .ipv4
-            .then(|| format!("44.{}.{}.0/24", nonce[0], sequence_number % 255))
+            .then(|| format!("44.{discriminator}.{}.0/24", sequence_number % 255))
             .unwrap_or_default();
         network.ipv6_prefix_hint = advertised
             .families
             .ipv6
             .then(|| {
-                let prefix_segment = (u16::from(nonce[0]) << 8)
+                let prefix_segment = (u16::from(discriminator) << 8)
                     | u16::try_from(sequence_number % 255).expect("bounded sequence suffix");
                 format!("2606:4700:{prefix_segment:x}::/48")
             })
@@ -18992,9 +19284,16 @@ mod tests {
             .0;
         let handler = braced_item(production, "async fn handle_exit_forward_upstream_event(");
         assert!(handler.contains("connection_id,"));
-        assert!(handler.contains(
-            "self.answer_exit_forward_upstream(peer, connection_id, request, channel, state)"
-        ));
+        // Boxing this large future may reflow the same call. Check the exact ordered
+        // owners, not rustfmt's whitespace or optional trailing argument comma.
+        let compact_handler: String = handler.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            compact_handler.contains(
+                "self.answer_exit_forward_upstream(peer,connection_id,request,channel,state,)"
+            ) || compact_handler.contains(
+                "self.answer_exit_forward_upstream(peer,connection_id,request,channel,state)"
+            )
+        );
 
         let caller = braced_item(production, "fn prepare_native_probe_permit_response(");
         assert_eq!(
@@ -19470,7 +19769,7 @@ mod tests {
         let policy = fixture.state.read().await.policy_snapshot(now_ms);
         fixture
             .runtime
-            .build_route_candidate_snapshot(requested_candidates, now_ms, &policy)
+            .build_route_candidate_snapshot(requested_candidates, now_ms, &policy, None)
     }
 
     pub(super) struct PreselectionSnapshotFixture {
@@ -25327,9 +25626,8 @@ mod tests {
         let mut fixture = Box::new(fixture(test_client_roles()));
         let now_ms = unix_millis();
         let exit = Identity::generate();
-        let mut exit_nonce = generate_nonce();
-        // Test network diversity derives from this byte; the relays use 40..43.
-        exit_nonce[0] = 43;
+        // Public network hints are fixture inputs, independent of signing nonces.
+        let exit_nonce = generate_nonce();
         let exit_peer = *exit.peer_id();
         let deadline = now_ms.saturating_add(20_000);
         fixture
@@ -25347,7 +25645,7 @@ mod tests {
             exit_nonce,
             now_ms,
             &fixture.directory,
-            PreselectionTestCapabilities::all(),
+            PreselectionTestCapabilities::all_on_network(43),
         );
         for discriminator in 40..43 {
             let identity = Identity::generate();
@@ -25361,9 +25659,9 @@ mod tests {
                         exit: false
                     },
                     1,
-                    [discriminator; 32],
+                    generate_nonce(),
                     now_ms,
-                    PreselectionTestCapabilities::all(),
+                    PreselectionTestCapabilities::all_on_network(discriminator),
                 )
                 .await
                 .is_some()
@@ -25413,8 +25711,8 @@ mod tests {
                 &mut direct,
                 &mut exits,
                 10,
-                |count| {
-                    assert_eq!(count, 3);
+                |group| {
+                    assert_eq!(group.len(), 3);
                     Some(choice)
                 },
             );
@@ -25484,6 +25782,197 @@ mod tests {
         );
     }
 
+    async fn larger_restricted_preselection_fixture() -> (Box<RuntimeFixture>, u64) {
+        let (mut fixture, now_ms) = signed_alternative_exit_controls_fixture().await;
+        // The base fixture uses networks 40..43. Keep added public hints diverse
+        // without overwriting any part of the independently generated nonce.
+        for discriminator in 44..47 {
+            let identity = Identity::generate();
+            let nonce = generate_nonce();
+            assert!(
+                ingest_direct_snapshot_advertisement_with_capabilities(
+                    &mut fixture,
+                    &identity,
+                    RolesConfig {
+                        client: false,
+                        relay: true,
+                        exit: false,
+                    },
+                    1,
+                    nonce,
+                    now_ms,
+                    PreselectionTestCapabilities::all_on_network(discriminator),
+                )
+                .await
+                .is_some()
+            );
+        }
+        let control = fixture
+            .runtime
+            .direct_relays
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        let exit_nonce = generate_nonce();
+        assert!(
+            ingest_forwarded_snapshot_exit_with_capabilities(
+                &mut fixture,
+                &control,
+                &Identity::generate(),
+                RolesConfig {
+                    client: false,
+                    relay: false,
+                    exit: true,
+                },
+                1,
+                exit_nonce,
+                now_ms,
+                PreselectionTestCapabilities::all_on_network(47),
+            )
+            .await
+            .is_some()
+        );
+        (fixture, now_ms)
+    }
+
+    #[tokio::test]
+    async fn route_snapshot_restricted_preselection_binds_exact_control_after_projection() {
+        let (fixture, now_ms) = larger_restricted_preselection_fixture().await;
+        let active = fixture.state.read().await.policy_snapshot(now_ms);
+        let unrestricted = fixture
+            .runtime
+            .build_route_candidate_snapshot(10, now_ms, &active, None)
+            .unwrap();
+        assert_eq!(unrestricted.direct_relays.len(), 6);
+        assert_eq!(unrestricted.forwarded_exits.len(), 2);
+        assert_eq!(unrestricted.preselection_subjects.entries.len(), 8);
+        let policy = unrestricted.policy;
+        let revalidated = fixture
+            .runtime
+            .load_revalidated_route_candidates(10, now_ms, policy)
+            .unwrap();
+        let originals = fixture.runtime.project_forwarded_route_candidates(
+            &revalidated,
+            &unrestricted.direct_relays,
+            now_ms,
+            policy,
+        );
+        assert_eq!(
+            originals.len(),
+            4,
+            "three shared controls plus another Exit"
+        );
+        for original in &originals {
+            let capability = original.capability();
+            let restriction = route_extension::PreselectionRestriction {
+                exit_node: capability.exit_node_id,
+                exit_peer: capability.exit_peer_id,
+                control_node: capability.control_relay_node_id,
+                control_peer: capability.control_relay_peer_id,
+                data_relays: unrestricted
+                    .direct_relays
+                    .iter()
+                    .map(|relay| (relay.capability().node_id, relay.capability().peer_id))
+                    .filter(|(node, _)| *node != capability.control_relay_node_id)
+                    .take(2)
+                    .collect(),
+            };
+            let snapshot = fixture
+                .runtime
+                .build_route_candidate_snapshot(10, now_ms, &active, Some(&restriction))
+                .unwrap();
+            assert_eq!(snapshot.forwarded_exits, vec![original.clone()]);
+            assert_eq!(snapshot.direct_relays.len(), 3);
+            assert_eq!(snapshot.preselection_subjects.entries.len(), 4);
+            assert_eq!(snapshot.preselection_subjects.forwarded_pairs.len(), 1);
+            let narrowed = narrow_route_candidate_snapshot(
+                snapshot,
+                PreselectionSamplingScope::new(
+                    Transport::TcpMptcp,
+                    ObservationAddressFamily::Ipv4,
+                    Bandwidth {
+                        up_mbps: 10,
+                        down_mbps: 10,
+                    },
+                    2,
+                    2,
+                ),
+            )
+            .unwrap_or_else(|failure| panic!("restricted affine shape: {:?}", failure.error));
+            assert!(
+                PreselectionAttemptGate::new()
+                    .unwrap()
+                    .begin(
+                        narrowed,
+                        Transport::TcpMptcp,
+                        ObservationAddressFamily::Ipv4,
+                        Bandwidth {
+                            up_mbps: 10,
+                            down_mbps: 10
+                        },
+                        Bandwidth {
+                            up_mbps: 100,
+                            down_mbps: 100
+                        },
+                        Bandwidth {
+                            up_mbps: 80,
+                            down_mbps: 80
+                        },
+                    )
+                    .is_ok(),
+                "signed actor provenance must survive selection of every exact control"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn route_snapshot_restricted_preselection_rejects_missing_pinned_control() {
+        let (fixture, now_ms) = signed_alternative_exit_controls_fixture().await;
+        let active = fixture.state.read().await.policy_snapshot(now_ms);
+        let original = fixture
+            .runtime
+            .build_route_candidate_snapshot(10, now_ms, &active, None)
+            .unwrap();
+        let capability = original.forwarded_exits[0].capability();
+        let restriction = route_extension::PreselectionRestriction {
+            exit_node: capability.exit_node_id,
+            exit_peer: capability.exit_peer_id,
+            control_node: capability.control_relay_node_id,
+            control_peer: *Identity::generate().peer_id(),
+            data_relays: original
+                .direct_relays
+                .iter()
+                .map(|relay| (relay.capability().node_id, relay.capability().peer_id))
+                .filter(|(node, _)| *node != capability.control_relay_node_id)
+                .collect(),
+        };
+        let restricted = fixture
+            .runtime
+            .build_route_candidate_snapshot(10, now_ms, &active, Some(&restriction))
+            .unwrap();
+        assert!(
+            restricted.forwarded_exits.is_empty(),
+            "no random replacement control"
+        );
+        assert!(
+            narrow_route_candidate_snapshot(
+                restricted,
+                PreselectionSamplingScope::new(
+                    Transport::TcpMptcp,
+                    ObservationAddressFamily::Ipv4,
+                    Bandwidth {
+                        up_mbps: 10,
+                        down_mbps: 10
+                    },
+                    2,
+                    2,
+                ),
+            )
+            .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn route_snapshot_alternative_controls_reject_conflicts_duplicates_and_invalid_choice() {
         let (fixture, now_ms) = signed_alternative_exit_controls_fixture().await;
@@ -25525,9 +26014,9 @@ mod tests {
                 &mut direct,
                 &mut exits,
                 10,
-                |count| match mutation {
+                |group| match mutation {
                     7 => None,
-                    8 => Some(count),
+                    8 => Some(group.len()),
                     _ => Some(0),
                 },
             );

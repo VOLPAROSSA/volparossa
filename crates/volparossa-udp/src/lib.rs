@@ -31,8 +31,8 @@ pub use dns::resolver::{
     ValidatedDnsAnswer,
 };
 pub use dns::{
-    BoundedDnsQuery, DnsQueryType, MAX_DNS_MESSAGE_BYTES, parse_dns_query,
-    resolve_hostname_addresses,
+    BoundedDnsQuery, DnsQueryType, MAX_DNS_ASSOCIATION_QUERIES, MAX_DNS_MESSAGE_BYTES,
+    parse_dns_query, resolve_hostname_addresses, validate_dns_response,
 };
 pub use endpoint::{ManagedQuinnEndpoint, endpoint_from_bound_owned_fd};
 pub use framing::{read_authorized_udp_flow, write_udp_authorization};
