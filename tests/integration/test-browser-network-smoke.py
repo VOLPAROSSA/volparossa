@@ -213,6 +213,45 @@ class BrowserNetworkEvidence(unittest.TestCase):
             with self.assertRaises(ValueError):
                 CHECK["driver_diagnostic"](status, stderr)
 
+    def test_bwrap_failure_operation_is_closed_without_exporting_its_private_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stderr = root / "driver.err"
+            cases = {
+                "source_lookup": "Can't find source path /private/source",
+                "destination_lookup": 'Unable to open destination O_PATH fd "/private/destination"',
+                "directory_creation": "Can't mkdir parents for /private/destination",
+                "file_creation": "Can't create file /private/destination",
+                "readonly_remount": "Can't remount readonly on /private/home",
+                "mount_application": "Unable to mount source on destination",
+                "exec": "execvp /private/python",
+                "identity_mapping": "setting up gid map",
+                "security_setup": "prctl(PR_SET_NO_NEW_PRIVS) failed",
+                "proc_access": "Can't open /proc/self/mountinfo",
+                "root_pivot": "pivot_root(/private/newroot)",
+                "path_access": "Can't reopen /private/file",
+                "permission_change": "Can't chmod 0700 /private/file",
+            }
+            for name, message in cases.items():
+                with self.subTest(operation=name):
+                    stderr.write_text(f"bwrap: {message}: Permission denied secret-canary\n")
+                    result = CHECK["driver_diagnostic"](root / "missing-status", stderr)
+                    self.assertEqual({key for key, present in result["bwrap_operations"].items() if present}, {name})
+                    self.assertFalse(result["bwrap_operation_unknown"])
+                    self.assertTrue(result["stderr_signals"]["permission_denied"])
+                    self.assertNotIn("/private", json.dumps(result))
+                    self.assertNotIn("secret-canary", json.dumps(result))
+            stderr.write_text("unrelated application log: bwrap: execvp /private/python: Permission denied\n")
+            result = CHECK["driver_diagnostic"](root / "missing-status", stderr)
+            self.assertFalse(any(result["bwrap_operations"].values()))
+            self.assertFalse(result["bwrap_operation_unknown"])
+            stderr.write_text("bwrap: Unknown operation on /private/file secret-canary: Permission denied\n")
+            result = CHECK["driver_diagnostic"](root / "missing-status", stderr)
+            self.assertTrue(result["bwrap_operation_unknown"])
+            self.assertFalse(any(result["bwrap_operations"].values()))
+            self.assertNotIn("/private", json.dumps(result))
+            self.assertNotIn("secret-canary", json.dumps(result))
+
     def test_actual_incomplete_collector_excludes_unlisted_private_files(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

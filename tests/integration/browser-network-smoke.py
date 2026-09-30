@@ -74,7 +74,36 @@ def driver_diagnostic(status, stderr):
             require(stat.S_ISREG(info.st_mode), "driver stderr is not a regular file")
             source.seek(max(0, info.st_size - 16384))
             raw = source.read(16384).lower()
+        # A generic permission flag cannot distinguish bwrap's source lookup,
+        # destination setup, remount or exec failures. Match only fixed operation
+        # prefixes; never publish the following path, argv, payload or raw line.
+        bwrap_lines = [line.removeprefix(b"bwrap: ") for line in raw.splitlines()
+                       if line.startswith(b"bwrap: ")]
+        bwrap_operations = {
+            "source_lookup": (b"can't find source path ", b"can't open source ",
+                              b"can't get type of source "),
+            "destination_lookup": (b"unable to open destination o_path fd ", b"can't get type of dest "),
+            "directory_creation": (b"can't mkdir parents for ", b"creating newroot failed",
+                                   b"creating oldroot failed", b"creating proc failed"),
+            "file_creation": (b"can't create file ", b"can't create symlink ",
+                              b"can't make symlink at ", b"can't create tmpfile for "),
+            "readonly_remount": (b"can't remount readonly on ", b"unable to remount destination ",
+                                 b"unable to apply mount flags: remount ", b"can't remount "),
+            "mount_application": (b"unable to mount source on destination", b"setting up newroot bind",
+                                  b"failed to make old root rprivate"),
+            "exec": (b"execvp ",),
+            "identity_mapping": (b"setting up uid map", b"setting up gid map", b"error writing to setgroups"),
+            "security_setup": (b"prctl(", b"prctl:", b"no permissions to create a new namespace"),
+            "proc_access": (b"can't open /proc", b"open /proc/", b"can't read /proc/", b"can't parse /proc/"),
+            "root_pivot": (b"pivot_root", b"unmount old root", b"umount old root"),
+            "path_access": (b"can't access ", b"can't reopen ", b"can't stat "),
+            "permission_change": (b"can't chmod ",),
+        }
         result.update(stderr_available=True, stderr_truncated=info.st_size > 16384,
+            bwrap_operations={name: any(line.startswith(prefix) for line in bwrap_lines for prefix in prefixes)
+                              for name, prefixes in bwrap_operations.items()},
+            bwrap_operation_unknown=any(not any(line.startswith(prefix)
+                for prefixes in bwrap_operations.values() for prefix in prefixes) for line in bwrap_lines),
             stderr_signals={name: any(pattern in raw for pattern in patterns) for name, patterns in {
                 "module_missing": (b"modulenotfounderror:",),
                 "permission_denied": (b"permission denied",),

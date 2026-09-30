@@ -126,6 +126,22 @@ working-directory from bind/mount failures without exporting private paths. Eigh
 driver checks and nine core fixture checks pass. Actual browser payloads remain unproven
 until the next combined run passes.
 
+The [fourth combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36719104806)
+on `9bb16c996a2bb05adaa27704daca8578e21fc54a` also **fails** before HTTPS with browser driver
+`a82e6c6313a4dc56cebaac4fcdff5cd3d12895d4`: the owned working directory did not resolve
+the observed launch failure. The closed status is still `wrapper-launch` /
+`SUBPROCESS_FAILED`, child exit 1, permission denied, without a child-validation phase.
+Working-directory, mount and namespace classifications are false; they do not identify
+the failing operation, because source/destination lookup, remount and exec messages were
+not classified. No raw stderr is retained or exported, so this evidence cannot establish
+an exact failing path or syscall. All 17 originals remain failed (ZIP SHA-256
+`1ab9e6e8c17fdcd1a8fc2140771eeb93877c18793dea8a706afeec7627f9bc6a`), with complete private
+cleanup and unchanged host-state hash
+`904fa278236acb21131d1881e4bcc148e9c82e44a0de2f65a0c9e56455ed72d3`.
+The next diagnostic retains only fixed bwrap operation flags, never their path/argv suffixes;
+the sandbox, application permissions, pinned browser and core datapath are unchanged.
+This is diagnostic coverage, not a claimed launch or browser-payload fix.
+
 Ordinary browsing integration, opportunistic fallback with the user-requested default-off
 browser kill switch, HTTP/3, WebRTC, background traffic and crash-persistent browser-wide
 enforcement remain unfinished. Existing shared-core security defaults are unchanged. Shared
