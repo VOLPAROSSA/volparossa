@@ -312,11 +312,11 @@ async fn three_real_stores_hold_only_subsets_resume_then_restore_without_origina
                 .write_all(&serde_json::to_vec(&restored).unwrap())
                 .unwrap();
         }
-        let checked = checker.wait_with_output().unwrap();
+        let validation_output = checker.wait_with_output().unwrap();
         assert!(
-            checked.status.success(),
+            validation_output.status.success(),
             "fragment fixture checker rejected actual restore: {}",
-            String::from_utf8_lossy(&checked.stderr)
+            String::from_utf8_lossy(&validation_output.stderr)
         );
         assert_eq!(fs::read(&output).unwrap(), bytes);
         assert_eq!(fs::metadata(&output).unwrap().mode() & 0o777, 0o600);
