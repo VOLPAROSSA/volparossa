@@ -19,7 +19,13 @@ reuses one pinned 360M provision. A network-isolated client submits a synthetic 
 to the real private service and must receive its generated identifier with EOS and
 confirmed cleanup. Existing owner controls, cancel/disconnect tests, model/input
 isolation and complete guest cleanup still apply. Only bounded facts are exported, not
-the source or raw answer. Source checks pass; the actual VM trial is pending. This is
+the source or raw answer. The [real VM trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/36738995292)
+**passes** on `7605c0ec6f56ea863333558b4c06fdec6a9cd630`: the actual 360M model
+returns the synthetic identifier in a 12-token EOS answer; cancellation/disconnect,
+owner/isolation checks, post-result cleanup and unchanged guest host state pass.
+All 18 original evidence files are retained locally; their archive SHA256 is
+`3d47971aa397ed43b076863912a67251efe69875babf02f1d538b196bd2063eb`.
+This is
 not yet editor execution, Codex tool use, general coding ability or private peer offload.
 
 Automatic authority rounds and the four-job assessment cycle are integrated by
