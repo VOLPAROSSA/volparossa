@@ -10,10 +10,11 @@ Project VOLPAROSSA brings protected multipath connectivity, distributed content 
 AI into one open-source, participant-operated network. The ambition goes beyond a VPN:
 build a network whose members contribute connections, storage and computation—and benefit
 from what they build together. The design also includes a [shared immune system](#a-shared-immune-system)
-for mutual review, content policy and recovery across the network, cache and compute layers.
+for mutual review, content policy and recovery across the network, cache, storage and compute layers.
 
 [Network-layer](#network-layer-one-network-many-paths) ·
 [Cache-layer](#cache-layer-content-that-travels-with-the-network) ·
+[Storage-layer](#storage-layer-private-cloud-storage) ·
 [Compute-layer](#compute-layer-a-cooperative-brain) ·
 [Applications](#one-core-multiple-applications) ·
 [7 Virtues](#governed-by-7-virtues) ·
@@ -38,10 +39,12 @@ for mutual review, content policy and recovery across the network, cache and com
 - **A network, not just a tunnel.** Direct local links and existing Internet connections form
   the foundation for exchanging content, knowledge and work.
 
-### Three layers, one shared purpose
+### Four layers, one shared purpose
 
 The **network-layer** connects participants. The **cache-layer** makes authorized content reusable
-across those connections. The **compute-layer** uses that foundation to exchange models,
+across those connections. The **storage-layer** keeps private, encrypted backups under a
+separate retention and reciprocal-capacity contract. The **compute-layer** uses the network
+and eligible public content—not private backups—to exchange models,
 learn and cooperate on suitable tasks. The [seven virtues](#governed-by-7-virtues) provide the
 shared compass for agent behavior and policy decisions throughout the design.
 
@@ -50,7 +53,8 @@ Together, these are the project's direction—not a claim that every integration
 ### One core, multiple applications
 
 VOLPAROSSA is a reusable core/daemon, not a network stack tied to a single application.
-Versioned interfaces let separate clients share its connectivity, content and compute services:
+Versioned interfaces let separate clients share its connectivity, content, private storage
+and compute services:
 
 - **[VOLPAROSSA Browser](https://github.com/VOLPAROSSA/volparossa-browser)** connects Firefox to
   the core. Privacy defaults are the first verified slice; network/cache attachment and the
@@ -223,18 +227,72 @@ or permission to redistribute everything a user receives.
 [Content design and scope →](docs/CONTENT_NETWORK_PROPOSAL.md) ·
 [Publishing, retrieval and mailboxes →](docs/OPERATIONS.md#offline-content-commands)
 
-### Private cloud storage, separate from the cache
+---
+
+<a id="private-cloud-storage-separate-from-the-cache"></a>
+
+## Storage-layer: Private cloud storage
+
+**Keep your data private. Contribute the space you use.**
 
 The developing cloud-storage service is designed for **application-encrypted backups**, not public
 content or training data. Storage peers hold opaque chunks; recovery keys stay with the owner.
-Message delivery and backup retention are separate: reading a message may acknowledge its
-delivery, but restoring a backup must not consume or delete that backup.
+The intended placement spreads different encrypted chunks across participants, with recovery
+copies per chunk; no single holder needs to store the whole archive. That placement step is
+not yet implemented by the current full-archive replica sets described below.
+Unlike an opportunistic cache, this layer has explicit retention, renewal and deletion:
+restoring a backup must not consume it. Message delivery has its own lifecycle, separate
+from both backup storage and the public cache.
 
-The contribution design follows **actual remote physical usage**, including every recovery
-copy and counted overhead. A 1 GB archive with two full copies therefore requires roughly
-2 GB plus overhead—not merely 1 GB. If usage falls, the contribution target falls too; space
-holding someone else's live data is released only after an acknowledged handoff to verified,
-independent replacements. Without those replacements, it remains visibly **pending drain**.
+### Give as much usable space as you use
+
+Every storage consumer must make **at least as much usable storage available to others as
+their own data occupies on other participants' devices**. Count the actual encrypted bytes,
+every recovery copy and charged overhead—not just the size of the original file.
+
+- **Use 1 GB remotely → contribute at least 1 GB locally.** This means total charged remote
+  usage, not 1 GB of source data regardless of replication.
+- **Keep two full copies of a 1 GB encrypted archive → contribute roughly 2 GB plus overhead.**
+  That 2 GB already includes the first 1 GB copy and one additional 1 GB recovery copy;
+  it is **not 1 GB + 2 GB = 3 GB**. You make the corresponding space available for other
+  participants' data. Any original you keep on your own device is separate and does not
+  count as that contribution.
+- **Reduce charged usage from 2 GB to 1 GB → the contribution target falls to 1 GB.**
+  Other people's live data is first handed off to verified, independent replacements. Until
+  that completes, occupied space remains visibly **pending drain**, not silently deleted.
+
+Placement should preserve recoverability as participants join, leave or change their usage,
+while respecting the device owner's free-space and activity budgets. A configured disk
+allowance is not proof of usable contribution. Automatic accounting, repair and safe
+downscaling remain development requirements, not completed features.
+
+### The immune system: protection without opening private files
+
+Privacy must not turn the storage layer into an unchecked refuge for prohibited material,
+including **child sexual abuse material (CSAM)**, or for abuse of other participants' disks.
+The [shared immune system](#a-shared-immune-system) must extend here too, guided by the same
+seven virtues and agreed legal boundaries. Its storage-specific design must combine:
+
+- **Prevention at the source:** appropriate checks in the authorized application before
+  encryption, without sending private files or keys to review agents. A modified uploader
+  can evade local checks; a signed “checked” claim alone is not proof of permitted content.
+- **Controlled admission and resource use:** authenticated, limited grants, quota accounting
+  and bounded retention to resist unauthorized deposits, storage exhaustion and false
+  contribution claims. These controls do not classify the contents of a backup.
+- **Evidence-led response:** privacy-minimizing abuse reports and mutually reviewed,
+  narrowly scoped restrictions, quarantine or removal decisions. Unverified accusations
+  must not trigger deletion of someone else's backups; review must not redistribute
+  suspected material or publish private filenames, content fingerprints or recovery keys.
+
+**Encryption is not a certificate of legality.** Peers holding only opaque ciphertext cannot
+reliably decide what the underlying files contain. Integrity hashes, AI judgments and signed
+receipts do not resolve that limitation. The storage-specific content-admission and review
+mechanism is **not implemented**, and its resistance to malicious uploaders still needs to be
+established. No decryption backdoor is introduced, and neither an illegal-content-free
+network nor blanket legal protection for storage providers is promised.
+
+<details>
+<summary><strong>What works today—and what remains open</strong></summary>
 
 The core has durable, resumable storage with provider-issued grants and owner-signed operations.
 A real **1 GiB local trial** passes restart/resume and two complete hash-verified restores.
@@ -246,15 +304,21 @@ plaintext or turn private backups into public-cache or training material.
 
 Real disposable overlay trials now pass for a single provider and **two-provider replica
 failover**: both copies are charged, a survivor restores the complete archive after the
-original file is removed, and repeated restores leave its copy intact. Owner-directed
-replacement is the next candidate: build and fully read back C before releasing A from an
-A/B replica set. Least-authority application enrollment, automatic placement/repair,
-adaptive contribution and safe capacity drain, and independent-device availability remain
-open. A separate **native Signal backup trial now passes**: encrypted export, removal of the
-original archive, real-core retrieval and native import with message/attachment checks.
-Restoring leaves the retained copies intact. This is not yet a completed cloud-storage service.
+original file is removed, and repeated restores leave its copy intact. Although transfers
+are chunked, this replica mode retains the complete encrypted archive at each provider.
+The separate fragment-placement CLI has local-service proof; its protected overlay trial
+remains pending. A separate scoped
+proof also passes for **owner-directed A/B → B/C replacement**: build and fully read back C
+before releasing A. That is explicit handoff, not unattended repair or automatic downsizing.
+A **native Signal backup trial now passes** too: encrypted export, removal of the original
+archive, real-core retrieval and native import with message/attachment checks. Restoring
+leaves the retained copies intact. Least-authority application enrollment, automatic
+placement/repair, adaptive contribution and safe capacity drain, and independent-device
+availability remain open. This is not yet a completed cloud-storage service.
 
-[Private storage scope and commands →](docs/PRIVATE_STORAGE.md)
+</details>
+
+[Private storage, contribution and privacy boundaries →](docs/PRIVATE_STORAGE.md)
 
 ---
 
@@ -496,9 +560,10 @@ agents should examine one another's reasoning, compare evidence and surface conf
 whitelist/blacklist decisions. Supported findings should lead to scoped correction, quarantine
 of defective model artifacts or recovery to an accepted version, followed by reassessment.
 
-Its reach is intended to extend across **all three layers**: which agent updates may be used,
+Its reach is intended to extend across **all four layers**: which agent updates may be used,
 which content may enter or be shared from the cooperative cache, and which Internet access
-the exits may permit. Decisions must keep their defined subject, authority and scope rather
+the exits may permit, plus private-storage admission and abuse response without disclosing
+backups to peers. Decisions must keep their defined subject, authority and scope rather
 than turning one questionable result into an indiscriminate network-wide ban.
 
 ```mermaid
@@ -508,12 +573,14 @@ flowchart TB
     D["Authorized, scoped decisions"]
     N["Network-layer<br/>permitted Internet access"]
     C["Cache-layer<br/>eligible content and sharing"]
+    S["Storage-layer<br/>private custody and abuse controls"]
     A["Compute-layer<br/>accepted agents and model updates"]
 
     P --> R
     R --> D
     D --> N
     D --> C
+    D --> S
     D --> A
 
     classDef principles fill:#fff4df,stroke:#a97724,color:#5b4017;
@@ -521,7 +588,7 @@ flowchart TB
     classDef layer fill:#e8f4f2,stroke:#24766c,color:#143d37;
     class P principles;
     class R,D review;
-    class N,C,A layer;
+    class N,C,S,A layer;
 ```
 
 *Intended cross-layer governance, not a claim that the entire loop is implemented today.*
@@ -535,8 +602,9 @@ Today, exits enforce a threshold-signed **destination/port whitelist**; this is 
 classifier for everything behind a hostname, and it does not make encrypted HTTPS payloads
 visible to the network. Individual cross-review and model-recovery mechanisms have scoped
 evidence; the **complete shared immune system remains in development**.
-Filtering cannot guarantee a perfectly clean cache, eliminate legal risk, or justify breaking
-private encryption.
+Filtering cannot guarantee a perfectly clean cache or private-storage network, eliminate
+legal risk, or justify breaking private encryption. Storage quotas and ciphertext integrity
+checks are not evidence that the encrypted contents are permitted.
 
 <details>
 <summary><strong>Explore the current assessment workflow and its limits</strong></summary>
