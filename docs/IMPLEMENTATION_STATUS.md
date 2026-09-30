@@ -43,7 +43,13 @@ including no proxy credential at the origin and independent detach. The new pinn
 `browser-network` KVM fixture requires actual core MPTCP/WireGuard payloads, two separate
 32-MiB browser hashes, two carrying paths per response and A retirement while B stays active.
 Its disposable browser-UID egress guard is test containment, not a product kill switch.
-The combined live result remains pending; no full Firefox 157 source build is claimed.
+The [first combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36625896567)
+on `b4b2d62b` fails before HTTPS at `BROWSER_NETWORK_APP_BOUNDARY_INVALID`; cleanup is
+complete with unchanged host state. A deterministic checker mismatch is corrected:
+`nft -n -j` emits numeric `NFPROTO_IPV6 = 10`, not the symbolic `ipv6` the checker required.
+Eight pure checks pass and failed boundary stages are now retained as closed metadata;
+firewall/credential checks remain strict. The corrected live proof remains pending, and
+the original failure cannot exclude an additional launch issue. No full Firefox 157 build is claimed.
 
 [Signal integration](https://github.com/VOLPAROSSA/volparossa-chat/pull/1) now has a pinned
 Desktop/libsignal source baseline and explicit device/session/backup contracts, not a

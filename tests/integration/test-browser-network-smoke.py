@@ -21,6 +21,21 @@ DIAGNOSTICS = runpy.run_path(str(HERE / "test-alpha-vm-diagnostics.py"))["MODULE
 REVISION = "c" * 40
 
 
+def numeric_uid_guard():
+    return {"nftables": [
+        {"chain": dict(family="inet", table="vpbrowser", name="output", type="filter",
+                       hook="output", prio=-5, policy="accept")},
+        {"rule": {"expr": [
+            {"match": {"op": "==", "left": {"meta": {"key": "skuid"}}, "right": 985}},
+            {"match": {"op": "!=", "left": {"payload": {"protocol": "ip", "field": "daddr"}},
+                       "right": "127.0.0.1"}}, {"drop": None}]}},
+        {"rule": {"expr": [
+            {"match": {"op": "==", "left": {"meta": {"key": "skuid"}}, "right": 985}},
+            {"match": {"op": "==", "left": {"meta": {"key": "nfproto"}}, "right": 10}},
+            {"drop": None}]}},
+    ]}
+
+
 def fixture(root):
     prior = PRIOR["fixture"]()
     run_id = "b" * 32
@@ -72,6 +87,40 @@ def fixture(root):
 
 
 class BrowserNetworkEvidence(unittest.TestCase):
+    def test_numeric_nft_guard_keeps_exact_uid_protocol_and_drop_scope(self):
+        guard = numeric_uid_guard()
+        CHECK["validate_uid_guard"](guard, 985)
+        for value in ("ipv6", 2, True, None):
+            invalid = copy.deepcopy(guard)
+            invalid["nftables"][2]["rule"]["expr"][1]["match"]["right"] = value
+            with self.assertRaises(ValueError):
+                CHECK["validate_uid_guard"](invalid, 985)
+        # A weaker address restriction, different application or extra accept
+        # must not become valid merely because nfproto serialization is fixed.
+        invalid = copy.deepcopy(guard)
+        invalid["nftables"][1]["rule"]["expr"][1]["match"]["right"] = "127.0.0.0/8"
+        with self.assertRaises(ValueError):
+            CHECK["validate_uid_guard"](invalid, 985)
+        with self.assertRaises(ValueError):
+            CHECK["validate_uid_guard"](guard, 987)
+        guard["nftables"][2]["rule"]["expr"][-1] = {"accept": None}
+        with self.assertRaises(ValueError):
+            CHECK["validate_uid_guard"](guard, 985)
+
+    def test_isolation_failure_retains_closed_stage_not_sensitive_output(self):
+        guard = numeric_uid_guard()
+        guard["nftables"][2]["rule"]["expr"][1]["match"]["right"] = "ipv6"
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "browser-network-isolation.json"
+            helper = {"process_boundary": lambda *args: {"client_namespace": True}}
+            with patch.object(CHECK["runpy"], "run_path", return_value=helper), \
+                 patch.dict(CHECK["isolation"].__globals__, {"command": lambda _args: json.dumps(guard)}):
+                with self.assertRaises(ValueError):
+                    CHECK["isolation"](123, "net:[1]", "net:[2]", 985, 985, 987, output)
+            self.assertEqual(CHECK["read"](output), dict(observation_complete=False,
+                failed_stage="guard_validation", process_boundary_verified=True,
+                fixture_loopback_only_uid_guard=False))
+
     def test_two_independent_native_owners_source_hash_and_cleanup(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

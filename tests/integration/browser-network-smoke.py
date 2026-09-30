@@ -310,28 +310,46 @@ def validate_browser(evidence):
     require(isolation["fixture_loopback_only_uid_guard"] is True, "fixture application containment missing")
 
 
-def isolation(pid, parent_namespace, client_namespace, uid, gid, group):
-    helper = runpy.run_path(str(HERE / "content-provider-https-smoke.py"))
-    # The observed PID initially execs ip/setpriv before reaching the capless driver.
-    end = time.monotonic() + 5
-    while True:
-        try:
-            result = helper["process_boundary"](pid, parent_namespace, client_namespace, uid, gid, group)
-            break
-        except (ValueError, OSError):
-            require(time.monotonic() < end, "capless application did not reach its owned namespace")
-            time.sleep(.05)
-    result["netns"] = client_namespace
-    guard = json.loads(command(["nsenter", "-t", str(pid), "-n", "nft", "-n", "-j", "list", "table", "inet", "vpbrowser"]))
+def validate_uid_guard(guard, uid):
     rules = [row["rule"]["expr"] for row in guard["nftables"] if "rule" in row]
+    # `nft -n -j` requests NUMERIC_ALL, including NUMERIC_SYMBOL: nf_proto's
+    # IPv6 constant is the Linux NFPROTO_IPV6 integer 10, not the text "ipv6".
+    # Keep the exact two rules/UID/address/verdicts; do not loosen containment.
     expected = [[{"match": {"op": "==", "left": {"meta": {"key": "skuid"}}, "right": uid}},
         {"match": {"op": "!=", "left": {"payload": {"protocol": "ip", "field": "daddr"}}, "right": "127.0.0.1"}}, {"drop": None}],
         [{"match": {"op": "==", "left": {"meta": {"key": "skuid"}}, "right": uid}},
-        {"match": {"op": "==", "left": {"meta": {"key": "nfproto"}}, "right": "ipv6"}}, {"drop": None}]]
+        {"match": {"op": "==", "left": {"meta": {"key": "nfproto"}}, "right": 10}}, {"drop": None}]]
     chains = [row["chain"] for row in guard["nftables"] if "chain" in row]
     require(rules == expected and len(chains) == 1 and all(chains[0][key] == value for key, value in
         dict(family="inet", table="vpbrowser", name="output", type="filter", hook="output", prio=-5, policy="accept").items()),
         "disposable application egress guard differs")
+
+
+def isolation(pid, parent_namespace, client_namespace, uid, gid, group, output=None):
+    helper = runpy.run_path(str(HERE / "content-provider-https-smoke.py"))
+    stage, process_verified = "process_boundary", False
+    try:
+        # The observed PID initially execs ip/setpriv before reaching the capless driver.
+        end = time.monotonic() + 5
+        while True:
+            try:
+                result = helper["process_boundary"](pid, parent_namespace, client_namespace, uid, gid, group)
+                break
+            except (ValueError, OSError):
+                require(time.monotonic() < end, "capless application did not reach its owned namespace")
+                time.sleep(.05)
+        process_verified = True
+        result["netns"] = client_namespace
+        stage = "guard_readback"
+        guard = json.loads(command(["nsenter", "-t", str(pid), "-n", "nft", "-n", "-j", "list", "table", "inet", "vpbrowser"]))
+        stage = "guard_validation"
+        validate_uid_guard(guard, uid)
+    except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError):
+        if output is not None:
+            # Closed facts only; never argv/environment, grants or browser output.
+            write(output, dict(observation_complete=False, failed_stage=stage,
+                process_boundary_verified=process_verified, fixture_loopback_only_uid_guard=False))
+        raise
     result["fixture_loopback_only_uid_guard"] = True
     return result
 
@@ -404,7 +422,8 @@ def main():
     elif action == "detached":
         write(Path(sys.argv[3]), detached(read(Path(sys.argv[2]))))
     elif action == "isolation":
-        write(Path(sys.argv[8]), isolation(int(sys.argv[2]), sys.argv[3], sys.argv[4], *map(int, sys.argv[5:8])))
+        output = Path(sys.argv[8])
+        write(output, isolation(int(sys.argv[2]), sys.argv[3], sys.argv[4], *map(int, sys.argv[5:8]), output=output))
     elif action == "cleanup":
         cleanup(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]))
     elif action == "evidence":

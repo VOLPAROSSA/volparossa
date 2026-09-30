@@ -79,7 +79,21 @@ ownership, captures, independent retirement and unchanged host state are checked
 Only sanitized metadata is exported; grants, profiles and temporary test keys are removed.
 The fixture's browser-UID loopback guard contains background traffic in the disposable
 namespace; it is explicitly not the product's browser-wide kill switch. No compute model
-is downloaded or executed for this network-only scenario. The first combined run is pending.
+is downloaded or executed for this network-only scenario.
+
+The [first combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36625896567)
+on `b4b2d62b03046dff9d83e1b8ba1e11bbed92accc` **failed** before HTTPS at
+`BROWSER_NETWORK_APP_BOUNDARY_INVALID`; it does not prove browser overlay traffic. Its
+15 original artifacts retain complete cleanup and matching before/after host-state hashes
+`578e552dc0fa4c9fabed4a26eaa7c7a0d3462e6b5a6fee18b5b7cf587b71cc4b`
+(artifact ZIP SHA-256 `a24aa758425b05386ba1f184b653a4a4c9c8565adff03f89c8c4c24a99e5ec5c`).
+The fixture requested fully numeric `nft -n -j` output but expected the symbolic `ipv6`
+value. It now requires Linux `NFPROTO_IPV6 = 10`, as emitted by nftables' numeric JSON
+serialization, with the same exact UID, loopback address, drop verdicts and chain.
+This corrects a deterministic checker mismatch; the old run did not retain enough boundary
+diagnostics to exclude an additional launch failure. Eight pure fixture checks pass,
+including rejection of weakened guards and closed failure-stage diagnostics; the corrected
+live combined proof remains pending. No firewall or product isolation was relaxed.
 
 Ordinary browsing integration, opportunistic fallback with the user-requested default-off
 browser kill switch, HTTP/3, WebRTC, background traffic and crash-persistent browser-wide
