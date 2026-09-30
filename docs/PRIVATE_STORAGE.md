@@ -440,6 +440,68 @@ bundle cannot independently establish all protected-path/privacy gates. The orig
 remain unchanged and failed; the later passing run above supplies fresh evidence rather than
 relabeling this earlier result.
 
+## Fragment placement candidate: redundant pieces, not whole archives per provider
+
+`storage fragments create/deposit/status/progress/restore/renew/delete` composes the
+existing authenticated replica lifecycle over **distinct ranges of an already-encrypted
+archive**. Select three to eight independently trusted provider/grant pairs and two to
+`providers - 1` copies per fragment. Deterministic rotating placement gives every fragment
+its requested copies while each provider retains only a subset of the archive. It adds no
+new transport, erasure coding, encryption scheme or automatically inferred provider trust.
+
+```sh
+volparossa storage fragments create --state /absolute/fragment-set \
+  --input /absolute/encrypted-archive --sha256 ARCHIVE_SHA256_HEX --already-encrypted \
+  --provider-key PROVIDER_A_KEY_HEX --grant /absolute/provider-a.grant \
+  --provider-key PROVIDER_B_KEY_HEX --grant /absolute/provider-b.grant \
+  --provider-key PROVIDER_C_KEY_HEX --grant /absolute/provider-c.grant \
+  --copies 2 --fragment-bytes 16777216 --lifetime-seconds 604800 \
+  --identity /absolute/owner.identity
+volparossa storage fragments deposit --state /absolute/fragment-set \
+  --input /absolute/encrypted-archive --already-encrypted --identity /absolute/owner.identity
+volparossa storage fragments status --state /absolute/fragment-set
+volparossa storage fragments progress --state /absolute/fragment-set --identity /absolute/owner.identity
+volparossa storage fragments restore --state /absolute/fragment-set \
+  --output /absolute/new-restored-ciphertext --identity /absolute/owner.identity
+volparossa storage fragments renew --state /absolute/fragment-set \
+  --lifetime-seconds 1209600 --identity /absolute/owner.identity
+volparossa storage fragments delete --state /absolute/fragment-set --identity /absolute/owner.identity
+```
+
+Creation is local only. The owner signs an immutable reconstruction manifest binding the
+original ciphertext length/hash, every contiguous fragment range/hash, exact provider keys,
+grant digests and original per-copy archive IDs. Existing private journals retain each
+subsequently issued lease and receipt; opening them verifies their immutable fields against
+the signed root. Keep the complete owner-only state directory independently with recovery
+material: neither peers nor the public cache receive this reconstruction manifest or keys.
+Fragmentation does not itself encrypt a plaintext input; `--already-encrypted` is an explicit
+caller contract, not cryptographic detection.
+
+There are at most 256 fragments, each at most 1 GiB. The default 16 MiB upper fragment size
+supports archives up to 4 GiB; larger archives need an explicitly larger fragment size,
+within the existing 64 GiB archive bound. Small archives split further to ensure at least
+one fragment per selected provider and must contain at least that many bytes. Aggregate
+planned bytes and lease counts must fit every original grant before any state or network
+allocation. Temporary staging contains at most one fragment alongside a restoring output.
+
+Repeat the same deposit command to resume the original reservations after interruption.
+Reserved, committed, uncertain and expired copies remain conservatively charged at their
+**actual fragment lengths**, including every retained replica. Missing confirmations do not
+release those charges. Unknown initial reservations require deposit retry with the original
+input before lease-only reconciliation. Restore independently tries each fragment's surviving
+copies and publishes a new `0600` file only after both fragment and complete-archive checks;
+repeated reads consume nothing. Delete targets **all** owned fragment copies, unlike the
+single-provider replica delete command. Failed deletion remains charged and retryable.
+
+All three focused tests pass, including three real SQLite providers over local signed framed
+streams: lost Reserve acknowledgement, durable same-identity resume, subset-only custody,
+source removal, two non-consuming restores with one provider unavailable, refusal when both
+holders of a fragment are unavailable, renewal and interrupted deletion/retry to zero leases.
+Tampering with the signed root or consistently rewriting both unsigned nested archive-ID
+records is rejected. This is **local transfer/lifecycle evidence**, not a new protected-overlay
+or independent-device proof. Automatic repair, fragment handoff/drain, measured metadata
+overhead and network-wide reciprocal contribution credit remain unfinished.
+
 ## Next end-to-end proof
 
 ### Owner-coordinated replacement candidate

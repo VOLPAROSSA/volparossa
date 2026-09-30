@@ -188,16 +188,16 @@ struct FixturePeer {
     lose_terminal: Arc<AtomicBool>,
 }
 
-struct LocalProviders {
-    socket: PathBuf,
-    online: Vec<Arc<AtomicBool>>,
-    lose_terminal: Vec<Arc<AtomicBool>>,
+pub(super) struct LocalProviders {
+    pub(super) socket: PathBuf,
+    pub(super) online: Vec<Arc<AtomicBool>>,
+    pub(super) lose_terminal: Vec<Arc<AtomicBool>>,
     stop: tokio::sync::oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
 }
 
 impl LocalProviders {
-    fn start(
+    pub(super) fn start(
         root: &Path,
         providers: &[SigningKey],
         grants: &[VerifiedStorageGrant],
@@ -253,7 +253,7 @@ impl LocalProviders {
         }
     }
 
-    async fn stop(self) {
+    pub(super) async fn stop(self) {
         self.stop.send(()).unwrap();
         self.task.await.unwrap();
         fs::remove_file(self.socket).unwrap();
