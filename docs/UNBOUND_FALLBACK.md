@@ -1,11 +1,11 @@
 # Exit-side Unbound fallback
 
-The development default is now the bounded private Unbound worker. This default/package
-integration remains a candidate pending complete package acceptance. The source-exact
-reciprocal-role route and installation-sandbox resolver probe now pass; the complete
-install/upgrade/remove lifecycle is still pending. The refreshed protected C05 sequence
-passes; the latest package run isolates an unretired fixture-started native Exit worker.
-The earlier native and cache results below retain their narrower scopes. No host DNS,
+The development default is now the bounded private Unbound worker. The source-exact
+protected DNS cache sequence, native fallback, installed resolver sandbox and complete
+install/upgrade/remove lifecycle pass on `138787d1`. The reciprocal-role route has a
+separate earlier passing proof. Integration with the subsequently merged MPTCP-refill
+milestone is being checked; this is not a release-build or full-alpha claim.
+The earlier failed runs below remain failures with their original scopes. No host DNS,
 routes, firewall, resolver service or trust anchors are changed automatically.
 
 ## Private packaged worker candidate
@@ -503,6 +503,31 @@ Neither the shipped unit nor the two-active-services/roles-off-native lifecycle 
 All 270 original files remain retained, ZIP SHA-256
 `97c5acadc568ea94a5a5f862352e780d8f31b8a627b32d041d90b7d0c6f67113`.
 Protected topology cleanup leaves zero owned objects; its host-state hashes both remain
+`bb473ef29464a9fca6dcedb2a9187be239956aa1ac8e1ac46ed5a8a1050b7853`.
+
+### Complete development-package and cache pass
+
+[Run `36719475479`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36719475479)
+passes on `138787d148482ece6bc1f2c1f1060b7126a34d1e` (tree
+`03ba08afa61e4987b358f49c0c5b579cbfcd550b`). Its 277 original files are retained unchanged;
+artifact ZIP SHA-256 is `c3e7180d9ccfebe08f35a35fd969e45003bdfc66f99b0184a1d4e9ede21c68c9`.
+
+The real protected A/AAAA sequence exercises independently root-validated upstream,
+peer and local answers, plus the unsigned trusted fallback. All five native Unbound
+cases pass: signed (880 ms), unsigned (474 ms), bogus rejection, timeout and cancellation.
+The latter two explicitly stop and reap the owned worker; no OS-resolver fallback is used.
+
+The installed-agent startup proof rejects missing worker assets for an effective Exit,
+allows inert roles-off startup and restores both the temporary native dependency and
+original helper lifetime. The resolver probe in the installed sandbox observes and reaps
+the same-agent-UID worker, independently verifies its answer and reuses the local cache.
+It remains an explicit resolver example, not a full installed-agent DNS request.
+
+The complete package lifecycle now passes: services are not enabled by installation;
+helper and agent start and restart on upgrade; roles-off native MPQUIC stays inert;
+uninstall stops services and removes package files while preserving identity/configuration.
+This uses source-bound development-staged binaries, not release-build evidence.
+Topology cleanup leaves zero owned objects. Before/after host-state SHA-256 is unchanged:
 `bb473ef29464a9fca6dcedb2a9187be239956aa1ac8e1ac46ed5a8a1050b7853`.
 
 ### Bounded protected DNS connection reuse

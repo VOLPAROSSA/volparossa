@@ -6,6 +6,9 @@ use netlink_sys::{Socket, SocketAddr, protocols::NETLINK_GENERIC};
 
 use crate::{MptcpEndpoint, MptcpError, MptcpLimits};
 
+mod userspace;
+pub use userspace::{MptcpEvent, MptcpEventKind, MptcpEventSubscription};
+
 const NLMSG_HEADER_LEN: usize = 16;
 const NLMSG_ERROR_CODE_LEN: usize = 4;
 const GENL_HEADER_LEN: usize = 4;

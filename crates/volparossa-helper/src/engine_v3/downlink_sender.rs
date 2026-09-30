@@ -29,16 +29,21 @@ impl HelperEngine {
                     None,
                 ));
             };
+            let now = expiry_now(self.inner.clock.as_ref());
+            let owns_sender = context.leases.iter().any(|((_, role), lease)| {
+                *role == WireguardRole::Exit as i32
+                    && matches_handle(&lease.handle, &value.lease_handle)
+            }) || (context.phase == ContextPhase::Committed
+                && context.extensions.values().any(|extension| {
+                    extension.allows_precommit_downlink(&value.lease_handle, now)
+                }));
             if !matches!(
                 context.phase,
                 ContextPhase::Activated | ContextPhase::Committed
             ) || !matches_handle(&context.handle, &value.context_handle)
-                || !context.leases.iter().any(|((_, role), lease)| {
-                    *role == WireguardRole::Exit as i32
-                        && matches_handle(&lease.handle, &value.lease_handle)
-                })
+                || !owns_sender
                 || !deadline_live(
-                    expiry_now(self.inner.clock.as_ref()),
+                    now,
                     context.hard_expires_at_unix,
                     context.hard_expires_at_boottime_ns,
                 )

@@ -5,6 +5,38 @@ use volparossa_protocol::{
     RetirementReceipt, SignedEnvelope, decode_canonical, route_retire_request_hash,
 };
 
+impl crate::DiscoveryService {
+    pub(super) fn restore_retirement_exit_addresses(&mut self, peer: libp2p::PeerId) {
+        // Kademlia removes individual addresses after transient transport failure. Our bounded
+        // admission registry deliberately keeps their provenance, but duplicate admissions do
+        // not reinsert them. A warm Relay whose QUIC connection died must be able to retry the
+        // exact previously known Exit listener after connectivity recovers. This is only reached
+        // for destruction, after the wrapper's exact Relay/Exit identity checks; it imports no
+        // new address, selects no replacement Exit and grants no forwarding authority.
+        let Some(addresses) = self.address_admissions.by_peer.get(&peer) else {
+            return;
+        };
+        for admitted in addresses {
+            if admitted.sources & crate::AddressSource::Known.mask() == 0
+                || !crate::private_address_is_local(&admitted.address)
+                || !crate::prepare_discovery_address(
+                    self.swarm.local_peer_id(),
+                    peer,
+                    &admitted.address,
+                )
+                .is_ok_and(|canonical| canonical == admitted.address)
+            {
+                continue;
+            }
+            let _ = self
+                .swarm
+                .behaviour_mut()
+                .kademlia
+                .add_address(&peer, admitted.address.clone());
+        }
+    }
+}
+
 pub(super) fn validate_request(encoded: &[u8], deadline_ms: u64) -> Result<(), ProtocolError> {
     route_retire_request_hash(encoded)?;
     let envelope: SignedEnvelope = decode_canonical(encoded, MAX_ROUTE_RETIRE_BYTES)?;
@@ -57,6 +89,91 @@ mod tests {
 
     const NOW: u64 = 10_000;
     const DEADLINE: u64 = 20_000;
+
+    #[tokio::test]
+    async fn retirement_restores_only_retained_known_addresses_after_transport_loss() {
+        use libp2p::{
+            core::transport::TransportError,
+            swarm::{ConnectionId, DialError, FromSwarm, NetworkBehaviour, behaviour::DialFailure},
+        };
+
+        fn contains(service: &mut crate::DiscoveryService, address: &libp2p::Multiaddr) -> bool {
+            service
+                .swarm
+                .behaviour_mut()
+                .kademlia
+                .kbuckets()
+                .any(|bucket| {
+                    bucket
+                        .iter()
+                        .any(|entry| entry.node.value.iter().any(|value| value == address))
+                })
+        }
+
+        let local = identity::Keypair::generate_ed25519();
+        let peer = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let mut service = crate::DiscoveryService::new(local).unwrap();
+        let known = format!("/ip4/46.162.3.1/udp/41000/quic-v1/p2p/{peer}")
+            .parse::<libp2p::Multiaddr>()
+            .unwrap();
+        let identify = format!("/ip4/46.162.3.1/udp/41001/quic-v1/p2p/{peer}")
+            .parse::<libp2p::Multiaddr>()
+            .unwrap();
+        let residual = format!("/ip4/46.162.3.1/udp/41002/quic-v1/p2p/{peer}")
+            .parse::<libp2p::Multiaddr>()
+            .unwrap();
+        service.add_known_peer(peer, &known).unwrap();
+        for address in [&identify, &residual] {
+            service
+                .add_prepared_kademlia_address(
+                    peer,
+                    address.clone(),
+                    crate::AddressSource::Identify,
+                )
+                .unwrap();
+        }
+        let failure = DialError::Transport(
+            [&known, &identify]
+                .into_iter()
+                .map(|address| {
+                    (
+                        address.clone(),
+                        TransportError::Other(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+                    )
+                })
+                .collect(),
+        );
+        service
+            .swarm
+            .behaviour_mut()
+            .kademlia
+            .on_swarm_event(FromSwarm::DialFailure(DialFailure {
+                peer_id: Some(peer),
+                error: &failure,
+                connection_id: ConnectionId::new_unchecked(1),
+            }));
+        assert!(!contains(&mut service, &known));
+        assert!(!contains(&mut service, &identify));
+        assert!(contains(&mut service, &residual));
+        assert_eq!(service.address_admissions.by_peer[&peer].len(), 3);
+        service.restore_retirement_exit_addresses(peer);
+        assert!(contains(&mut service, &known));
+        assert!(
+            !contains(&mut service, &identify),
+            "no discovery-only address resurrection"
+        );
+        assert!(contains(&mut service, &residual));
+        service.restore_retirement_exit_addresses(peer);
+        assert_eq!(service.address_admissions.by_peer[&peer].len(), 3);
+
+        // An unsupported/private-DHT client purge is different from transport failure: removed
+        // address authority must never be resurrected by destruction retries.
+        service.address_admissions.forget_peer(&peer);
+        service.swarm.behaviour_mut().kademlia.remove_peer(&peer);
+        service.restore_retirement_exit_addresses(peer);
+        assert!(!contains(&mut service, &known));
+        assert!(!service.address_admissions.contains_peer(&peer));
+    }
 
     fn sign<T: ControlPayload>(value: &T, key: &identity::Keypair) -> Vec<u8> {
         sign_control_message_with(

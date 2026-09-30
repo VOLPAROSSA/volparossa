@@ -95,6 +95,7 @@ struct SendLeg {
     relay_peer: Libp2pPeerId,
     expires_at_ms: u64,
     sequence: u64,
+    positive_until_ms: u64,
 }
 
 struct PendingBudget {
@@ -148,6 +149,7 @@ impl DiscoveryRuntime {
             self.dispatch_downlink_window(&window);
         }
         Box::pin(self.resume_downlink_starts(state)).await;
+        Box::pin(self.resume_exit_extension_commits()).await;
         Ok(())
     }
 
@@ -418,6 +420,7 @@ impl DiscoveryRuntime {
                     signed_grant: activation.signed_relay_reservation.clone(),
                     expires_at_ms: grant.expires_at_ms,
                     sequence: 0,
+                    positive_until_ms: 0,
                 },
             ));
         }
@@ -426,6 +429,81 @@ impl DiscoveryRuntime {
         }
         self.downlink.targets.extend(entries);
         true
+    }
+
+    /// Register the activated extension's update-only target before its Commit is allowed to
+    /// wait for packet proof. The discovery actor remains free to install the Relay's budget.
+    pub(super) fn register_extension_send_leg(
+        &mut self,
+        context: [u8; FORWARD_ID_BYTES],
+        path: u32,
+        target: RuntimeBoundDownlinkBudgetTarget,
+        signed_grant: &[u8],
+    ) -> bool {
+        let Some(grant) = decoded_signed_payload::<RelayReservation>(signed_grant) else {
+            return false;
+        };
+        if !target.matches_route_path(&context, path)
+            || grant.route_context_id != context
+            || grant.path_id != path
+            || grant.exit_node_id != self.local_node_id
+            || grant.exit_peer_id != self.service.local_peer_id().to_bytes()
+            || self
+                .active_production_mptcp_exit_routes
+                .get(&context)
+                .is_none_or(|route| {
+                    !route.runtime_started
+                        || route.expires_at_ms != grant.expires_at_ms
+                        || route.expires_at_ms <= unix_millis()
+                })
+        {
+            return false;
+        }
+        if !grant.receive_budget_required {
+            return true;
+        }
+        let key = (context, path);
+        if let Some(existing) = self.downlink.targets.get(&key) {
+            return existing.signed_grant == signed_grant && existing.target.same_owner(&target);
+        }
+        if self.downlink.targets.len() >= MAX_LEGS {
+            return false;
+        }
+        let Ok(relay_peer) = Libp2pPeerId::from_bytes(&grant.relay_peer_id) else {
+            return false;
+        };
+        self.downlink.targets.insert(
+            key,
+            SendLeg {
+                target,
+                signed_grant: signed_grant.to_vec(),
+                relay_peer,
+                expires_at_ms: grant.expires_at_ms,
+                sequence: 0,
+                positive_until_ms: 0,
+            },
+        );
+        true
+    }
+
+    /// A missing target is not a budget. Only callers with a verified grant may bypass this
+    /// readiness check when that grant explicitly does not require receive-budget enforcement.
+    pub(super) fn extension_send_budget_ready(
+        &self,
+        context: [u8; FORWARD_ID_BYTES],
+        path: u32,
+    ) -> bool {
+        let now = unix_millis();
+        self.downlink
+            .targets
+            .get(&(context, path))
+            .is_some_and(|leg| {
+                leg.expires_at_ms > now && leg.positive_until_ms > now.saturating_add(500)
+            })
+    }
+
+    pub(super) fn retire_extension_send_leg(&mut self, context: [u8; FORWARD_ID_BYTES], path: u32) {
+        self.downlink.targets.remove(&(context, path));
     }
 
     pub(super) async fn answer_downlink_budget(
@@ -515,6 +593,11 @@ impl DiscoveryRuntime {
             return None;
         }
         leg.sequence = budget.sequence;
+        leg.positive_until_ms = if applied.rate_bytes_per_second > 0 {
+            applied.expires_at_ms
+        } else {
+            0
+        };
         drop(
             self.service
                 .bind_native_probe_data_relay_connection(peer, connection)
@@ -671,6 +754,15 @@ impl DiscoveryRuntime {
                     ))
                     .await;
                 }
+                DatapathRelayOperation::ExtensionCommit => {
+                    Box::pin(self.answer_route_extension_relay(
+                        pending.peer,
+                        &pending.request,
+                        pending.channel,
+                        state,
+                    ))
+                    .await;
+                }
                 DatapathRelayOperation::MpquicSessionStart => {
                     Box::pin(self.begin_mpquic_session_start(
                         pending.peer,
@@ -752,6 +844,15 @@ fn session_context(request: &DatapathRelayRequest) -> Option<[u8; FORWARD_ID_BYT
             verified_mptcp_session_start_scope(request.client_signed_request(), now)?
                 .exit
                 .route_context_id
+        }
+        DatapathRelayOperation::ExtensionCommit => {
+            if !super::route_extension_relay::extension_commit_scope_matches(request, now) {
+                return None;
+            }
+            decoded_signed_payload::<volparossa_protocol::ExitReservationConfirmation>(
+                request.client_signed_request(),
+            )?
+            .route_context_id
         }
         DatapathRelayOperation::MpquicSessionStart => {
             verified_mpquic_session_start_scope(request.client_signed_request(), now)?

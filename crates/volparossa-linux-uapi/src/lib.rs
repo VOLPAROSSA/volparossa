@@ -1056,6 +1056,27 @@ impl MptcpInfo {
 /// fails with `InvalidData` if the kernel returns a structure shorter than the
 /// Debian 13 UAPI layout. No partially initialized fields are exposed.
 pub fn mptcp_info<F: AsFd>(socket: &F) -> io::Result<MptcpInfo> {
+    let raw = read_mptcp_info(socket)?;
+    Ok(project_mptcp_info(raw))
+}
+
+/// Read the local kernel PM token from a genuinely negotiated, still-owned meta socket.
+///
+/// This number is only a namespace-local kernel selector, not authorization. A privileged
+/// caller must independently bind its request to the actual descriptor and exact owned lease.
+///
+/// # Errors
+/// Rejects unavailable/truncated observations, incomplete negotiation and TCP fallback.
+pub fn mptcp_local_token<F: AsFd>(socket: &F) -> io::Result<u32> {
+    let raw = read_mptcp_info(socket)?;
+    let token = raw.mptcpi_token;
+    if !project_mptcp_info(raw).is_negotiated() {
+        return Err(invalid_data("PM token requires genuine MPTCP negotiation"));
+    }
+    Ok(token)
+}
+
+fn read_mptcp_info<F: AsFd>(socket: &F) -> io::Result<RawMptcpInfo> {
     let mut raw = RawMptcpInfo::default();
     let mut length = libc::socklen_t::try_from(mem::size_of::<RawMptcpInfo>())
         .expect("mptcp_info size fits socklen_t");
@@ -1084,7 +1105,11 @@ pub fn mptcp_info<F: AsFd>(socket: &F) -> io::Result<MptcpInfo> {
         ));
     }
 
-    Ok(MptcpInfo {
+    Ok(raw)
+}
+
+fn project_mptcp_info(raw: RawMptcpInfo) -> MptcpInfo {
+    MptcpInfo {
         fallback: raw.mptcpi_flags & MPTCP_INFO_FLAG_FALLBACK != 0,
         remote_key_received: raw.mptcpi_flags & MPTCP_INFO_FLAG_REMOTE_KEY_RECEIVED != 0,
         additional_subflows: raw.mptcpi_subflows,
@@ -1092,7 +1117,7 @@ pub fn mptcp_info<F: AsFd>(socket: &F) -> io::Result<MptcpInfo> {
         bytes_sent: raw.mptcpi_bytes_sent,
         bytes_received: raw.mptcpi_bytes_received,
         bytes_retransmitted: raw.mptcpi_bytes_retrans,
-    })
+    }
 }
 
 /// Exact Internet address family expected for an ingress capability.

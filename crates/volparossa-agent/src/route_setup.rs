@@ -14,11 +14,15 @@
 mod bootstrap;
 mod browser_failure;
 mod dns_reuse;
+mod extension;
+mod live_refill;
+mod mptcp_paths;
 mod path_growth;
 mod path_telemetry;
 mod retirement;
 mod selection_bridge;
 
+pub(crate) use extension::CommittedMptcpExtension;
 pub(crate) use selection_bridge::{
     PreProbeContinuation, PreparedPreselectionEvidence, prepare_preselection_evidence,
 };
@@ -436,7 +440,7 @@ impl EstablishedClientRoute {
                 let _ = Box::pin(route.disconnect()).await;
             }
             ClientTransportState::UdpActive(route) => {
-                let _ = route.shutdown().await;
+                let _ = Box::pin(route.shutdown()).await;
             }
             ClientTransportState::NativeUdp(active) => {
                 if retry_native {
@@ -2074,7 +2078,7 @@ impl ClientRouteControl {
                     remote: authorized.destination(),
                 });
                 if active.client.send_payload(authorized.payload()).is_err() {
-                    let _ = active.shutdown().await;
+                    let _ = Box::pin(active.shutdown()).await;
                     orchestrator.shutdown_detached();
                     let mut state = self.state.lock().await;
                     *state = ClientRouteControlState::Idle;
@@ -2165,12 +2169,14 @@ impl ClientRouteControl {
         };
         let context_id = *ready.prepared.path.route_context_id();
         if route.is_some() {
-            self.retire_failed_dns(context_id, orchestrator, async move {
-                let _ = Box::pin(ready.disconnect()).await;
-                if let Some(route) = route {
-                    let _ = route.disconnect().await;
-                }
-            })
+            Box::pin(
+                self.retire_failed_dns(context_id, orchestrator, async move {
+                    let _ = Box::pin(ready.disconnect()).await;
+                    if let Some(route) = route {
+                        let _ = route.disconnect().await;
+                    }
+                }),
+            )
             .await;
             return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
         }
@@ -2209,7 +2215,7 @@ impl ClientRouteControl {
                 if active.client.send_payload(authorized.payload()).is_err() {
                     Box::pin(
                         self.retire_failed_dns(context_id, orchestrator, async move {
-                            let _ = active.shutdown().await;
+                            let _ = Box::pin(active.shutdown()).await;
                         }),
                     )
                     .await;
@@ -2834,9 +2840,16 @@ fn client_open_tcp_material(
         .collect::<Vec<_>>();
     let mut replay = ReplayCache::new(MAXIMUM_REPLAY_CAPACITY)
         .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
-    let verified_route = VerifiedMptcpRoute::verify(
+    let extensions = established
+        .signed_extensions
+        .iter()
+        .map(Vec::as_slice)
+        .collect::<Vec<_>>();
+    let verified_route = VerifiedMptcpRoute::verify_with_extensions(
         &established.signed_exit_reservation,
         &relay_reservations,
+        &extensions,
+        established.exit_bundle.signed_capability(),
         now_ms,
         TimePolicy::default(),
         &mut replay,
@@ -3993,7 +4006,14 @@ impl RouteSetupRequest {
     }
 
     fn probe_permit_limit(&self) -> Result<u32, RouteSetupError> {
-        u32::try_from(self.paths.len()).map_err(|_| RouteSetupError::Invalid("probe permit limit"))
+        let paths = if self.parameters.allowed_transports == [Transport::TcpMptcp] {
+            self.paths
+                .len()
+                .max(self.parameters.post_probe_policy.relay_policy.maximum_paths)
+        } else {
+            self.paths.len()
+        };
+        u32::try_from(paths).map_err(|_| RouteSetupError::Invalid("probe permit limit"))
     }
 
     fn exit_intent(
@@ -4030,7 +4050,14 @@ impl RouteSetupRequest {
             allowed_transports: self.parameters.allowed_transports.clone(),
             reserved_up_mbps: self.parameters.reserved_up_mbps,
             reserved_down_mbps: self.parameters.reserved_down_mbps,
-            maximum_paths: self.final_path_upper()?,
+            // The capability reserves explicit configured refill room. The immutable finalized
+            // grant still describes only the paths actually measured and confirmed at setup.
+            maximum_paths: if self.parameters.allowed_transports == [Transport::TcpMptcp] {
+                u32::try_from(self.parameters.post_probe_policy.relay_policy.maximum_paths)
+                    .map_err(|_| RouteSetupError::Invalid("MPTCP refill capacity"))?
+            } else {
+                self.final_path_upper()?
+            },
             probe_permit_limit: self.probe_permit_limit()?,
             policy_hash: self.parameters.policy_hash,
             created_at_ms: self.parameters.created_at_ms,
@@ -7412,7 +7439,7 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
         cancellation: &mut watch::Receiver<bool>,
         deadline: Instant,
         measurement: VerifiedRouteMeasurement<P>,
-    ) -> Result<ExecutionProof<P::RelayGrant, P::NativeAuthorization>, RouteSetupError>
+    ) -> Result<ExecutionProof<P::RelayGrant, P::NativeAuthorization, P::ExitBundle>, RouteSetupError>
     where
         L: LocalRouteBackend,
         R: ReservationTransport,
@@ -7762,6 +7789,7 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
             commit: committed,
             signed_exit_reservation,
             native_authorization,
+            exit_bundle: finalized,
         })
     }
 
@@ -7861,13 +7889,18 @@ impl<P: ClientReservationProtocol> MeasuredRouteSetup<P> {
                 commit_proof: proof.commit,
                 signed_exit_reservation: proof.signed_exit_reservation,
                 native_authorization: Some(proof.native_authorization),
+                exit_bundle: proof.exit_bundle,
+                signed_extensions: Vec::new(),
+                attempted_extension_paths: BTreeSet::new(),
+                refill_nomination_cursor: 0,
+                pending_extension: None,
             }),
             Err(cause) => Err(transaction.rollback(cause).await),
         }
     }
 }
 
-struct ExecutionProof<G, A> {
+struct ExecutionProof<G, A, B> {
     grants: Vec<G>,
     relay_authorities: Vec<DirectRelayCapability>,
     confirmations: Vec<RelayConfirmationProof>,
@@ -7876,6 +7909,7 @@ struct ExecutionProof<G, A> {
     commit: CommittedLeaseBatch,
     signed_exit_reservation: Vec<u8>,
     native_authorization: A,
+    exit_bundle: B,
 }
 
 struct RelayConfirmationProof {
@@ -7894,6 +7928,14 @@ struct EstablishedRoute<P: ClientReservationProtocol> {
     commit_proof: CommittedLeaseBatch,
     signed_exit_reservation: Vec<u8>,
     native_authorization: Option<P::NativeAuthorization>,
+    // Retain the original bundle unchanged; every later +1 path is separately signed.
+    exit_bundle: P::ExitBundle,
+    signed_extensions: Vec<Vec<u8>>,
+    // A cancelled future retains its precise additive cleanup scope with the parent owner.
+    attempted_extension_paths: BTreeSet<u32>,
+    // Nomination attempts can fail before a helper path ID exists; rotate those independently.
+    refill_nomination_cursor: usize,
+    pending_extension: Option<extension::PendingExtension>,
 }
 
 impl<P: ClientReservationProtocol> EstablishedRoute<P> {
@@ -10136,6 +10178,8 @@ mod tests {
                 | ExitForwardOperation::MpquicSessionStart
                 | ExitForwardOperation::AdjacentReceiveBudget
                 | ExitForwardOperation::RouteRetire
+                | ExitForwardOperation::ExtendRoute
+                | ExitForwardOperation::MptcpPaths
                 | ExitForwardOperation::Unspecified => {
                     return Err(FakeTransportError::Definitive);
                 }
@@ -10253,6 +10297,9 @@ mod tests {
                 | DatapathRelayOperation::MptcpSessionStart
                 | DatapathRelayOperation::MpquicSessionStart
                 | DatapathRelayOperation::RouteRetire
+                | DatapathRelayOperation::ExtensionProbe
+                | DatapathRelayOperation::ExtensionCommit
+                | DatapathRelayOperation::ExtensionAbort
                 | DatapathRelayOperation::Unspecified => {
                     return Err(FakeTransportError::Definitive);
                 }
@@ -10509,6 +10556,8 @@ mod tests {
                 | ExitForwardOperation::MpquicSessionStart
                 | ExitForwardOperation::AdjacentReceiveBudget
                 | ExitForwardOperation::RouteRetire
+                | ExitForwardOperation::ExtendRoute
+                | ExitForwardOperation::MptcpPaths
                 | ExitForwardOperation::Unspecified => return Err(RealTransportError),
             };
             ExitForwardResponse::granted(
@@ -10609,6 +10658,9 @@ mod tests {
                 | DatapathRelayOperation::MptcpSessionStart
                 | DatapathRelayOperation::MpquicSessionStart
                 | DatapathRelayOperation::RouteRetire
+                | DatapathRelayOperation::ExtensionProbe
+                | DatapathRelayOperation::ExtensionCommit
+                | DatapathRelayOperation::ExtensionAbort
                 | DatapathRelayOperation::Unspecified => return Err(RealTransportError),
             };
             DatapathRelayResponse::granted(
