@@ -30,7 +30,8 @@ def synthetic_report():
         result[key] = "b" * 64
     result["startup"] = dict(roles_off_without_worker_started=True,
         effective_exit_without_worker_rejected=True, diagnostic_code="DNS_PRIVATE_WORKER_UNAVAILABLE",
-        actual_packaged_agent=True, worker_hidden_only_in_agent_mount=True)
+        actual_packaged_agent=True, worker_hidden_only_in_agent_mount=True,
+        native_roles_off_restored=True, helper_lifetime_preserved=True)
     result["sandbox"] = dict(native_worker_observed=True, worker_same_agent_uid=True,
         worker_reaped=True, independent_dnssec_proof=True, local_cache_reuse=True,
         full_agent_dns_query=False, deviations=PROOF.DEVIATIONS)
@@ -83,6 +84,8 @@ class PackageProofContract(unittest.TestCase):
                 PROOF.validate(changed, REVISION)
         for group, field, value in (("startup", "actual_packaged_agent", False),
                                    ("startup", "roles_off_without_worker_started", False),
+                                   ("startup", "native_roles_off_restored", False),
+                                   ("startup", "helper_lifetime_preserved", False),
                                    ("startup", "diagnostic_code", "POLICY_LOAD_FAILED"),
                                    ("sandbox", "worker_reaped", False),
                                    ("sandbox", "native_worker_observed", False),
@@ -94,6 +97,94 @@ class PackageProofContract(unittest.TestCase):
             changed[group][field] = value
             with self.subTest(field=field), self.assertRaises(RuntimeError):
                 PROOF.validate(changed, REVISION)
+
+    def test_native_roles_off_requires_successful_exit_and_absent_sockets(self):
+        expected = dict(ActiveState="inactive", Result="success", MainPID="0",
+                        ExecMainCode="1", ExecMainStatus="0")
+        with tempfile.TemporaryDirectory() as temporary:
+            socket = Path(temporary) / "native.sock"
+            with mock.patch.object(PROOF, "NATIVE_SOCKETS", (socket,)), \
+                    mock.patch.object(PROOF, "property_value", side_effect=lambda unit, key: expected[key]):
+                self.assertTrue(PROOF.native_roles_off_idle())
+                socket.touch()
+                self.assertFalse(PROOF.native_roles_off_idle())
+                socket.unlink()
+                socket.symlink_to(Path(temporary) / "absent")
+                self.assertFalse(PROOF.native_roles_off_idle())
+                socket.unlink()
+                for key, value in (("ActiveState", "active"), ("Result", "exit-code"),
+                                   ("MainPID", "303"), ("ExecMainCode", "2"), ("ExecMainStatus", "203")):
+                    previous, expected[key] = expected[key], value
+                    self.assertFalse(PROOF.native_roles_off_idle(), key)
+                    expected[key] = previous
+
+    def test_missing_assets_restores_native_dependency_on_success_and_probe_failure(self):
+        original = (ROOT / "config/examples/default.yaml").read_bytes()
+        for missing_diagnostic in (False, True):
+            with self.subTest(missing_diagnostic=missing_diagnostic), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config, dropins, native_socket = root / "config", root / "dropins", root / "native.sock"
+                config.write_bytes(original)
+                state = {
+                    PROOF.HELPER: dict(ActiveState="active", MainPID="101"),
+                    PROOF.AGENT: dict(ActiveState="active", MainPID="202", InvocationID="a" * 32),
+                    PROOF.NATIVE: dict(ActiveState="inactive", Result="success", MainPID="0",
+                                       ExecMainCode="1", ExecMainStatus="0"),
+                }
+                starts, stops = [], []
+
+                def command(*args, **kwargs):
+                    output = b""
+                    if args[:2] == ("systemctl", "stop"):
+                        stops.append((args[2:], config.read_bytes()))
+                        for service in args[2:]:
+                            state[service].update(ActiveState="inactive", MainPID="0")
+                            if service == PROOF.NATIVE:
+                                native_socket.unlink(missing_ok=True)
+                    elif args[:3] == ("systemctl", "start", PROOF.AGENT):
+                        exit_on = b"  exit: true\n" in config.read_bytes()
+                        starts.append(exit_on)
+                        # Model real Wants semantics: starting an agent does not
+                        # restart/retire an already active native dependency.
+                        if state[PROOF.NATIVE]["ActiveState"] != "active":
+                            if exit_on:
+                                state[PROOF.NATIVE].update(ActiveState="active", MainPID="303")
+                                native_socket.touch()
+                            else:
+                                state[PROOF.NATIVE].update(ActiveState="inactive", MainPID="0",
+                                    Result="success", ExecMainCode="1", ExecMainStatus="0")
+                        state[PROOF.AGENT].update(ActiveState="failed" if exit_on else "active",
+                            MainPID="0" if exit_on else "202", ExecMainStatus="1" if exit_on else "0")
+                    elif args[0] == "journalctl":
+                        diagnostic = "OTHER_DIAGNOSTIC" if missing_diagnostic else "DNS_PRIVATE_WORKER_UNAVAILABLE"
+                        output = json.dumps({"MESSAGE": json.dumps({"fields": {
+                            "diagnostic_code": diagnostic}})}).encode()
+                    return subprocess.CompletedProcess(args, 0, output)
+
+                def roles():
+                    self.assertEqual(state[PROOF.AGENT]["ActiveState"], "active")
+                    self.assertEqual(config.read_bytes(), original)
+
+                with mock.patch.object(PROOF, "CONFIG", config), \
+                        mock.patch.object(PROOF, "AGENT_DROPINS", dropins), \
+                        mock.patch.object(PROOF, "NATIVE_SOCKETS", (native_socket,)), \
+                        mock.patch.object(PROOF, "property_value", side_effect=lambda unit, key: state[unit][key]), \
+                        mock.patch.object(PROOF, "run", side_effect=command), \
+                        mock.patch.object(PROOF, "wait_roles_off", side_effect=roles):
+                    if missing_diagnostic:
+                        with self.assertRaisesRegex(RuntimeError, "WRONG_MISSING_ASSET_DIAGNOSTIC"):
+                            PROOF.missing_assets_start()
+                    else:
+                        result = PROOF.missing_assets_start()
+                        self.assertTrue(result["native_roles_off_restored"])
+                        self.assertTrue(result["helper_lifetime_preserved"])
+                    self.assertTrue(PROOF.native_roles_off_idle())
+                self.assertEqual(starts, [False, True, False])
+                self.assertEqual(stops[-1][0], (PROOF.AGENT, PROOF.NATIVE))
+                self.assertIn(b"  exit: true\n", stops[-1][1])
+                self.assertEqual(config.read_bytes(), original)
+                self.assertFalse(dropins.exists())
+                self.assertEqual(state[PROOF.HELPER], dict(ActiveState="active", MainPID="101"))
 
     def test_probe_derives_all_shipped_sandbox_settings_without_relaxation(self):
         source = (ROOT / "packaging/systemd/volparossa-agent.service").read_text()

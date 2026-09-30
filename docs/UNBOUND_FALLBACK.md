@@ -3,7 +3,8 @@
 The development default is now the bounded private Unbound worker. This default/package
 integration remains a candidate pending complete package acceptance. The source-exact
 reciprocal-role route and installation-sandbox resolver probe now pass; the complete
-install/upgrade/remove lifecycle and refreshed C05 run are still pending.
+install/upgrade/remove lifecycle is still pending. The refreshed protected C05 sequence
+passes; the latest package run isolates an unretired fixture-started native Exit worker.
 The earlier native and cache results below retain their narrower scopes. No host DNS,
 routes, firewall, resolver service or trust anchors are changed automatically.
 
@@ -479,6 +480,29 @@ and protected-query proof.
 All 83 original files remain unchanged, ZIP SHA-256
 `aa98c974133e21fb4a30f6036ee2452a3d864eb1d9e000d500e2161dabf23e0b`.
 Disposable topology cleanup completes with zero owned objects and equal host-state SHA-256
+`bb473ef29464a9fca6dcedb2a9187be239956aa1ac8e1ac46ed5a8a1050b7853`.
+
+The [run on `c34af147`, `36716641748`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36716641748)
+passes the refreshed protected C05 sequence, all five native cases and the installed DNS
+startup/sandbox probe under their exact-source validators. The sandbox's signed lookup
+takes 1,112 ms (1,522 ms including launch/observation); the standalone signed lookup takes
+1,241 ms. Original configuration bytes and installed agent unit are restored. These are
+scoped passes, not complete package acceptance: the lifecycle stops before upgrade/removal,
+and its log shows `volparossa-mpquic --mode exit` still active after the DNS startup fixture.
+
+The fixture's temporary effective-Exit configuration starts that native service through
+the real agent's unchanged `Wants=` dependency. Restoring configuration and restarting only
+the agent cannot retire an already-running dependency. The correction stops both fixture
+agent and native service before restoring configuration/drop-in state, then starts the
+original agent and requires successful roles-off native exit, no remaining native sockets
+and the unchanged active helper PID. The same cleanup runs when the startup proof fails.
+Twelve pure package-proof checks, including a stateful dependency/cleanup regression and
+negative restoration reports, pass; live lifecycle acceptance still requires a new run.
+Neither the shipped unit nor the two-active-services/roles-off-native lifecycle gate is weakened.
+
+All 270 original files remain retained, ZIP SHA-256
+`97c5acadc568ea94a5a5f862352e780d8f31b8a627b32d041d90b7d0c6f67113`.
+Protected topology cleanup leaves zero owned objects; its host-state hashes both remain
 `bb473ef29464a9fca6dcedb2a9187be239956aa1ac8e1ac46ed5a8a1050b7853`.
 
 ### Bounded protected DNS connection reuse

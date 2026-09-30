@@ -16,6 +16,11 @@ import tempfile
 import time
 
 AGENT = "volparossa-agent.service"
+HELPER = "volparossa-helper.service"
+NATIVE = "volparossa-mpquic.service"
+NATIVE_SOCKETS = (Path("/run/volparossa/native/mpquic.sock"),
+                  Path("/run/volparossa/native/mpquic.sock.exit"))
+AGENT_DROPINS = Path("/run/systemd/system/volparossa-agent.service.d")
 WORKER = Path("/usr/libexec/volparossa-dns-worker")
 CONFIG = Path("/etc/volparossa/config.yaml")
 UNIT = Path("/usr/lib/systemd/system/volparossa-agent.service")
@@ -76,6 +81,22 @@ def wait_roles_off():
     raise RuntimeError("PACKAGED_ROLES_OFF_NOT_READY")
 
 
+def native_roles_off_idle():
+    expected = dict(ActiveState="inactive", Result="success", MainPID="0",
+                    ExecMainCode="1", ExecMainStatus="0")
+    return all(property_value(NATIVE, key) == value for key, value in expected.items()) \
+        and all(not path.exists() and not path.is_symlink() for path in NATIVE_SOCKETS)
+
+
+def wait_native_roles_off():
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if native_roles_off_idle():
+            return
+        time.sleep(.1)
+    raise RuntimeError("PACKAGED_NATIVE_ROLES_OFF_NOT_RESTORED")
+
+
 def exit_config(original):
     changes = {"  operator_id: null": "  operator_id: private-dns-package-fixture",
                "  advertised_asn: 0": "  advertised_asn: 64512",
@@ -93,7 +114,12 @@ def exit_config(original):
 
 def missing_assets_start():
     original = CONFIG.read_bytes()
-    directory = Path("/run/systemd/system/volparossa-agent.service.d")
+    helper_pid = property_value(HELPER, "MainPID")
+    require(helper_pid.isdecimal() and int(helper_pid) > 0
+            and property_value(HELPER, "ActiveState") == "active"
+            and property_value(AGENT, "ActiveState") == "active"
+            and native_roles_off_idle(), "PACKAGE_FIXTURE_SERVICE_PRECONDITION")
+    directory = AGENT_DROPINS
     dropin = directory / "90-private-dns-package-proof.conf"
     require(not directory.exists() and not directory.is_symlink(), "EXISTING_AGENT_DROPIN")
     directory.mkdir(mode=0o755)
@@ -128,19 +154,29 @@ def missing_assets_start():
             except (ValueError, TypeError):
                 pass
         require("DNS_PRIVATE_WORKER_UNAVAILABLE" in codes, "WRONG_MISSING_ASSET_DIAGNOSTIC")
-        return dict(roles_off_without_worker_started=True, effective_exit_without_worker_rejected=True,
-                    diagnostic_code="DNS_PRIVATE_WORKER_UNAVAILABLE", actual_packaged_agent=True,
-                    worker_hidden_only_in_agent_mount=True)
     finally:
-        run("systemctl", "stop", AGENT, check=False)
-        CONFIG.write_bytes(original)
-        if dropin.exists():
-            dropin.unlink()
-        directory.rmdir()
-        run("systemctl", "daemon-reload")
-        run("systemctl", "reset-failed", AGENT, check=False)
+        try:
+            # Starting the real agent also starts its native Wants dependency.
+            # A later roles-off agent start does not stop an existing Exit worker.
+            # Stop both owned services before restoring the original configuration.
+            run("systemctl", "stop", AGENT, NATIVE)
+        finally:
+            CONFIG.write_bytes(original)
+            if dropin.exists():
+                dropin.unlink()
+            directory.rmdir()
+            run("systemctl", "daemon-reload")
+            run("systemctl", "reset-failed", AGENT, NATIVE, check=False)
         run("systemctl", "start", AGENT)
         wait_roles_off()
+        wait_native_roles_off()
+        require(property_value(HELPER, "ActiveState") == "active"
+                and property_value(HELPER, "MainPID") == helper_pid,
+                "PACKAGE_FIXTURE_HELPER_LIFETIME_CHANGED")
+    return dict(roles_off_without_worker_started=True, effective_exit_without_worker_rejected=True,
+                diagnostic_code="DNS_PRIVATE_WORKER_UNAVAILABLE", actual_packaged_agent=True,
+                worker_hidden_only_in_agent_mount=True, native_roles_off_restored=True,
+                helper_lifetime_preserved=True)
 
 
 def probe_unit(source, directory, executable, marker, parent):
@@ -385,7 +421,8 @@ def validate(report, revision):
             and report.get("fixture_config_restored") is True, "PACKAGE_CONFIGURATION")
     startup = report.get("startup", {})
     require(all(startup.get(key) is True for key in ("roles_off_without_worker_started",
-            "effective_exit_without_worker_rejected", "actual_packaged_agent", "worker_hidden_only_in_agent_mount"))
+            "effective_exit_without_worker_rejected", "actual_packaged_agent", "worker_hidden_only_in_agent_mount",
+            "native_roles_off_restored", "helper_lifetime_preserved"))
             and startup.get("diagnostic_code") == "DNS_PRIVATE_WORKER_UNAVAILABLE", "PACKAGE_STARTUP")
     sandbox = report.get("sandbox", {})
     require(all(sandbox.get(key) is True for key in ("native_worker_observed", "worker_same_agent_uid",

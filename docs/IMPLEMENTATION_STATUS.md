@@ -3708,6 +3708,18 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   validity gate or renewing old bytes. Seven recording, ten package-DNS, six native-proof
   checks and the nonmutating lifecycle contract pass. A new live run is still required;
   all 83 originals, failure boundaries and unchanged host-state evidence remain retained.
+  The next run [`36716641748` on `c34af147`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36716641748)
+  passes the refreshed protected C05 sequence, all five native cases and the installed
+  startup/sandbox probe (1,112-ms signed lookup) under their exact-source checkers. It still
+  fails full package acceptance: the startup fixture enabled Exit temporarily and started
+  the native worker through the agent's `Wants=` dependency, but restored only the agent.
+  The unchanged lifecycle gate correctly rejects that still-running Exit worker before
+  upgrade/removal. Fixture cleanup now stops agent plus native, restores the original
+  config/drop-in, restarts the agent and requires inert successful native state/no sockets
+  plus the unchanged helper lifetime. Success and failure paths have stateful regression
+  coverage; all twelve pure package-proof checks pass. New live package acceptance is
+  pending. The 270 originals, complete topology cleanup and equal host hashes are retained
+  in [the exact evidence history](UNBOUND_FALLBACK.md).
 
 The positive DNSSEC cache is now composed into the normal agent: the same bounded RAM resolver
 serves protected DNS, TCP resolution, general UDP and browser-QUIC destination pinning. Its peer
