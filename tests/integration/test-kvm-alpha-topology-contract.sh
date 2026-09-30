@@ -457,7 +457,7 @@ guest = (root / "kvm-alpha-topology.sh").read_text()
 jobs = (root / "agent-jobs-smoke.sh").read_text()
 workflow = (root / "../../.github/workflows/alpha-topology.yml").resolve().read_text()
 assert guest.count("agent_autonomous_aggregation=no") == 2
-assert "timeout-minutes: ${{ inputs.scenario == 'agent-autonomous-aggregation' && 180 || 120 }}" in workflow
+assert "timeout-minutes: ${{ inputs.scenario == 'agent-autonomous-aggregation' && 180 || inputs.scenario == 'signal-backup' && 150 || 120 }}" in workflow
 host = (root / "run-alpha-topology-vm.sh").read_text()
 assert 'if scenario == "agent-autonomous-aggregation":\n        file_count_limit = 192' in host
 assert 'if scenario in ("agent-adapter-aggregation", "agent-autonomous-aggregation"):' in host
