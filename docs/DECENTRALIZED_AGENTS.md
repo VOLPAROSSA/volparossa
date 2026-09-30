@@ -98,6 +98,12 @@ it **does not implement** the requested moral/legal content classification. Use 
 non-actionable fixtures and authorized benign corpora for development; never obtain real CSAM
 or illegally redistribute copyrighted works to build the classifier's tests/training set.
 
+The separate [private-storage immune system](PRIVATE_STORAGE.md#storage-immune-system-and-private-content-limits)
+must also address prohibited-content admission and storage abuse. Public-object judgments
+are not private-backup deletion authority. Ciphertext integrity checks, quotas and uploader
+self-attestation do not establish the legality of encrypted files; this privacy-preserving
+admission and response mechanism remains unfinished.
+
 ## Reuse and separation
 
 The user explicitly confirmed on 2026-09-14 that autonomous training should exploit the
