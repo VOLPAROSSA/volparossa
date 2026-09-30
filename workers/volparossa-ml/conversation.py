@@ -9,9 +9,22 @@ fabricates tool choices nor repairs malformed output into executable instruction
 
 import json
 import re
+import sys
 
 MAX_BYTES = 24 * 1024
 IDENTIFIER = re.compile(r"[A-Za-z0-9_.-]{1,64}\Z")
+QWEN = "qwen3-0.6b-v1"
+
+
+def bounds(profile_name=None):
+    return ((262144, 65536, 128, 32, 65536, 8192) if profile_name == QWEN
+            else (MAX_BYTES, 4096, 32, 8, 8192, 2048))
+
+
+def native():
+    module = sys.modules.get("volparossa_qwen_conversation")
+    require(module is not None, "CONVERSATION_NATIVE_MODULE_UNAVAILABLE")
+    return module
 
 
 def require(condition, code):
@@ -55,20 +68,21 @@ def validate_call(value, tools, seen):
             "CONVERSATION_ARGUMENTS")
 
 
-def validate(value):
+def validate(value, profile_name=None):
+    maximum, instructions, history, tools, message, description = bounds(profile_name)
     fields(value, ("version", "visibility", "instructions", "history", "tools"))
     require(type(value["version"]) is int and value["version"] == 1
             and value["visibility"] == "private_local", "CONVERSATION_SCOPE")
-    require(text(value["instructions"], 4096) and type(value["history"]) is list
-            and 1 <= len(value["history"]) <= 32 and type(value["tools"]) is list
-            and len(value["tools"]) <= 8, "CONVERSATION_INPUT_BOUND")
+    require(text(value["instructions"], instructions) and type(value["history"]) is list
+            and 1 <= len(value["history"]) <= history and type(value["tools"]) is list
+            and len(value["tools"]) <= tools, "CONVERSATION_INPUT_BOUND")
     seen_tools = set()
     for tool in value["tools"]:
         require(type(tool) is dict and tool.get("type") in ("function", "custom"), "CONVERSATION_TOOL")
         fields(tool, ("type", "name", "description") + (("parameters",) if tool["type"] == "function" else ()),
                ("namespace",))
         require(identifier(tool["name"]) and (tool.get("namespace") is None or identifier(tool["namespace"]))
-                and text(tool["description"], 2048), "CONVERSATION_TOOL")
+                and text(tool["description"], description), "CONVERSATION_TOOL")
         require(key(tool) not in seen_tools, "CONVERSATION_DUPLICATE_TOOL")
         seen_tools.add(key(tool))
         if tool["type"] == "function":
@@ -80,7 +94,8 @@ def validate(value):
         kind = item.get("type")
         if kind == "message":
             fields(item, ("type", "role", "text"))
-            require(not pending and item["role"] in ("user", "assistant") and text(item["text"], 8192),
+            roles = ("user", "assistant", "system", "developer") if profile_name == QWEN else ("user", "assistant")
+            require(not pending and item["role"] in roles and text(item["text"], message),
                     "CONVERSATION_MESSAGE")
         elif kind in ("function_call", "custom_tool_call"):
             validate_call(item, value["tools"], seen)
@@ -89,14 +104,14 @@ def validate(value):
         elif kind == "tool_result":
             fields(item, ("type", "call_id", "output"))
             require(type(item["call_id"]) is str and item["call_id"] in pending
-                    and text(item["output"], 8192, False), "CONVERSATION_TOOL_RESULT")
+                    and text(item["output"], message, False), "CONVERSATION_TOOL_RESULT")
             pending.remove(item["call_id"])
         else:
             raise ValueError("CONVERSATION_SCHEMA")
     last = value["history"][-1]
     require(not pending and (last["type"] == "tool_result" or
             (last["type"] == "message" and last["role"] == "user")), "CONVERSATION_UNFINISHED_HISTORY")
-    require(len(canonical(value).encode("utf-8")) <= MAX_BYTES, "CONVERSATION_INPUT_BOUND")
+    require(len(canonical(value).encode("utf-8")) <= maximum, "CONVERSATION_INPUT_BOUND")
     return value
 
 
@@ -126,6 +141,8 @@ def messages(value):
 
 
 def encode(tokenizer, value, profile):
+    if profile.get("native_tools"):
+        return native().encode(tokenizer, value, profile)
     tokens = tokenizer.apply_chat_template(messages(value), tokenize=True,
                                           add_generation_prompt=True, return_dict=False)
     require(type(tokens) is list and all(type(token) is int and token >= 0 for token in tokens),
@@ -137,14 +154,17 @@ def encode(tokenizer, value, profile):
 
 
 def capabilities(profile_name, profile):
+    maximum, instructions, history, tools, message, description = bounds(profile_name)
+    qwen = profile_name == QWEN
     return {"version": 1, "visibility": "private_local", "model_profile": profile_name,
-            "max_input_bytes": MAX_BYTES, "max_history_items": 32, "max_tools": 8,
-            "max_instructions_bytes": 4096, "max_message_bytes": 8192, "max_tool_description_bytes": 2048,
+            "max_input_bytes": maximum, "max_history_items": history, "max_tools": tools,
+            "max_instructions_bytes": instructions, "max_message_bytes": message, "max_tool_description_bytes": description,
             "max_tool_payload_bytes": 4096,
             "max_prompt_tokens": profile["prompt_tokens"], "max_new_tokens": profile["new_tokens"],
-            "model_context_tokens": profile["config"]["max_position_embeddings"],
-            "max_output_bytes": profile["wire_bytes"], "conversation_template": "smollm2-json-turn-v1",
-            "native_tool_template": False, "local_only": True, "tool_execution": False,
+            "model_context_tokens": 32768 if qwen else profile["config"]["max_position_embeddings"],
+            "max_output_bytes": profile["wire_bytes"],
+            "conversation_template": "qwen3-tools-nonthinking-v1" if qwen else "smollm2-json-turn-v1",
+            "native_tool_template": qwen, "local_only": True, "tool_execution": False,
             "network_access": False, "public_cache": False, "training": False,
             "cloud_fallback": False, "model_tool_use_proven": False, "arbitrary_json_schema_validation": False}
 
@@ -161,7 +181,9 @@ def invalid_constant(_value):
     raise ValueError("CONVERSATION_JSON_CONSTANT")
 
 
-def decode(value, output):
+def decode(value, output, profile_name=None, request_id=None):
+    if profile_name == QWEN:
+        return native().decode(value, output, request_id)
     if output["text_truncated"]:
         return {"type": "incomplete", "reason": "wire_truncated"}
     if output["generation"]["stop_reason"] != "eos":

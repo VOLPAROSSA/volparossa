@@ -6,6 +6,23 @@ Last updated: 2026-09-30
 
 ## Current integration and active work
 
+Qwen native private-conversation source candidate (2026-09-30): explicit
+`qwen3-0.6b-v1` pins Qwen3-0.6B at `c1899de289a04d12100db370d81485cdf75e47ca`
+and nine original model assets, retaining the existing runtime lock. Native
+`tools=` chat-template encoding, nonthinking generation, ordered role/tool-result
+mapping and strict assistant/function/custom/incomplete decoding are wired into
+the existing same-owner, no-network worker lifecycle. Qwen admits only private
+conversation, not public jobs, Q&A, training or adapters. Its 65,536-byte instruction
+gate accommodates ordinary Codex instruction text, but the whole prompt must still
+tokenize to at most 12,288 tokens with 1,024 output reserve; no truncation or claim
+that all histories/tools fit. BF16/SDPA are required without silent fallback.
+Only conversation submission gets a 524,288-byte request frame; old operations
+retain their original bounds. Twenty focused Rust private protocol/lifecycle tests
+pass; offline worker tests use explicit backend doubles, **not model evidence**.
+Real weights have not been fetched or executed for this candidate. Actual native
+tool use, a hard-4GiB-bounded long-context run and an end-to-end editing loop remain
+**unproved/incomplete**. See the [exact wire contract](../crates/volparossa/src/compute/private_conversation/WIRE.md).
+
 Private conversation source candidate (2026-09-30): additive
 [`conversation_capabilities` / `submit_conversation`](../crates/volparossa/src/compute/private_conversation/WIRE.md)
 operations retain the existing same-owner private Q&A interface and execution slot.

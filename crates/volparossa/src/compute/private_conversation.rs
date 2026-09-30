@@ -8,10 +8,11 @@ use serde_json::{Value, json};
 
 use super::{ModelProfile, inference_output::Generation};
 
+mod limits;
+mod qwen;
 mod strict_json;
 
 pub(super) const MAX_BYTES: usize = 24 * 1024;
-const MAX_TEXT: usize = 8192;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -28,6 +29,8 @@ pub(super) struct Input {
 enum Role {
     User,
     Assistant,
+    System,
+    Developer,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -122,7 +125,7 @@ impl Tool {
         }
     }
 
-    fn validate(&self) -> Result<()> {
+    fn validate(&self, bounds: &limits::Limits) -> Result<()> {
         let (name, namespace) = self.key();
         ensure!(
             identifier(name) && namespace.is_none_or(identifier),
@@ -143,7 +146,7 @@ impl Tool {
             Self::Custom { description, .. } => description,
         };
         ensure!(
-            text(description, 2048, true),
+            text(description, bounds.description, true),
             "conversation_tool_description"
         );
         Ok(())
@@ -151,46 +154,66 @@ impl Tool {
 }
 
 impl Input {
+    #[cfg(test)]
     pub(super) fn decode(raw: &[u8]) -> Result<Self> {
+        Self::decode_profile(raw, ModelProfile::Smol360)
+    }
+
+    pub(super) fn decode_profile(raw: &[u8], profile: ModelProfile) -> Result<Self> {
         ensure!(
-            !raw.is_empty() && raw.len() <= MAX_BYTES,
+            !raw.is_empty() && raw.len() <= limits::for_profile(profile).input,
             "conversation_input_bound"
         );
         let input: Self =
             serde_json::from_slice(raw).map_err(|_| anyhow::anyhow!("conversation_schema"))?;
-        input.validate()?;
+        input.validate_profile(profile)?;
         Ok(input)
     }
 
+    #[cfg(test)]
     pub(super) fn bytes(&self) -> Result<Vec<u8>> {
-        self.validate()?;
+        self.bytes_profile(ModelProfile::Smol360)
+    }
+
+    pub(super) fn bytes_profile(&self, profile: ModelProfile) -> Result<Vec<u8>> {
+        self.validate_profile(profile)?;
         let bytes = serde_json::to_vec(self)?;
-        ensure!(bytes.len() <= MAX_BYTES, "conversation_input_bound");
+        ensure!(
+            bytes.len() <= limits::for_profile(profile).input,
+            "conversation_input_bound"
+        );
         Ok(bytes)
     }
 
-    pub(super) fn validate(&self) -> Result<()> {
+    fn validate_profile(&self, profile: ModelProfile) -> Result<()> {
+        let bounds = limits::for_profile(profile);
         ensure!(
             self.version == 1 && self.visibility == "private_local",
             "conversation_scope"
         );
         ensure!(
-            text(&self.instructions, 4096, true)
-                && (1..=32).contains(&self.history.len())
-                && self.tools.len() <= 8,
+            text(&self.instructions, bounds.instructions, true)
+                && (1..=bounds.history).contains(&self.history.len())
+                && self.tools.len() <= bounds.tools,
             "conversation_input_bound"
         );
         let mut tools = BTreeSet::new();
         for tool in &self.tools {
-            tool.validate()?;
+            tool.validate(&bounds)?;
             ensure!(tools.insert(tool.key()), "conversation_duplicate_tool");
         }
         let mut pending = BTreeSet::new();
         let mut seen = BTreeSet::new();
         for item in &self.history {
             match item {
-                Item::Message { text: content, .. } => ensure!(
-                    pending.is_empty() && text(content, MAX_TEXT, true),
+                Item::Message {
+                    role,
+                    text: content,
+                } => ensure!(
+                    pending.is_empty()
+                        && text(content, bounds.text, true)
+                        && (profile == ModelProfile::Qwen600
+                            || matches!(role, Role::User | Role::Assistant)),
                     "conversation_message"
                 ),
                 Item::FunctionCall {
@@ -216,7 +239,7 @@ impl Input {
                     pending.insert(call_id.as_str());
                 }
                 Item::ToolResult { call_id, output } => ensure!(
-                    pending.remove(call_id.as_str()) && text(output, MAX_TEXT, false),
+                    pending.remove(call_id.as_str()) && text(output, bounds.text, false),
                     "conversation_tool_result"
                 ),
             }
@@ -267,7 +290,7 @@ impl Input {
             .collect();
         match output {
             Output::Assistant { text: content } => {
-                ensure!(text(content, 4096, true), "conversation_empty_answer")
+                ensure!(text(content, 4096, true), "conversation_empty_answer");
             }
             Output::FunctionCall {
                 call_id,
@@ -294,16 +317,22 @@ impl Input {
 
 pub(super) fn capabilities(profile: ModelProfile) -> Value {
     let spec = profile.spec();
+    let bounds = limits::for_profile(profile);
+    let native = profile == ModelProfile::Qwen600;
     json!({"version":1,"visibility":"private_local","model_profile":profile,
-        "max_input_bytes":MAX_BYTES,"max_history_items":32,"max_tools":8,
-        "max_instructions_bytes":4096,"max_message_bytes":8192,"max_tool_description_bytes":2048,
+        "max_input_bytes":bounds.input,"max_history_items":bounds.history,"max_tools":bounds.tools,
+        "max_instructions_bytes":bounds.instructions,"max_message_bytes":bounds.text,"max_tool_description_bytes":bounds.description,
         "max_tool_payload_bytes":4096,
         "max_prompt_tokens":spec.prompt_tokens,"max_new_tokens":spec.max_new_tokens,
-        "model_context_tokens":8192,"max_output_bytes":spec.max_output_bytes,
-        "conversation_template":"smollm2-json-turn-v1","native_tool_template":false,
+        "model_context_tokens":bounds.context_tokens,"max_output_bytes":spec.max_output_bytes,
+        "conversation_template":if native { "qwen3-tools-nonthinking-v1" } else { "smollm2-json-turn-v1" },"native_tool_template":native,
         "local_only":true,"tool_execution":false,"network_access":false,
         "public_cache":false,"training":false,"cloud_fallback":false,
         "model_tool_use_proven":false,"arbitrary_json_schema_validation":false})
+}
+
+pub(super) const fn request_frame(profile: ModelProfile) -> usize {
+    limits::for_profile(profile).request_frame
 }
 
 /// Derive the typed turn from the original model text, never from broker-invented calls.
@@ -327,13 +356,22 @@ pub(super) fn turn(input: &Input, output: &Value) -> Result<Value> {
 }
 
 pub(super) fn validate_report(report: &Value, raw: &[u8], profile: ModelProfile) -> Result<()> {
-    let input = Input::decode(raw)?;
+    let input = Input::decode_profile(raw, profile)?;
+    let expected = if profile == ModelProfile::Qwen600 {
+        qwen::turn(
+            &input,
+            &report["outputs"][0],
+            report["id"].as_str().unwrap_or_default(),
+        )?
+    } else {
+        turn(&input, &report["outputs"][0])?
+    };
     ensure!(
         report["conversation_limits"] == capabilities(profile)
             && report["prompt_tokens"]
                 .as_u64()
                 .is_some_and(|count| (1..=u64::from(profile.spec().prompt_tokens)).contains(&count))
-            && report["conversation"] == turn(&input, &report["outputs"][0])?,
+            && report["conversation"] == expected,
         "conversation_report_binding"
     );
     Ok(())

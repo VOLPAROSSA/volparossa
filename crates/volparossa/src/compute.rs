@@ -384,9 +384,17 @@ fn validate_profile_dataset(
     profile: ModelProfile,
 ) -> Result<()> {
     ensure!(
+        profile != ModelProfile::Qwen600 || mode == Mode::PrivateConversation,
+        "compute_profile_conversation_only"
+    );
+    ensure!(
         profile.is_default() || (mode != Mode::Train && !has_adapter),
         "compute_profile_inference_only"
     );
+    if mode == Mode::PrivateConversation {
+        ensure!(!has_adapter, "compute_private_adapter_unsupported");
+        return private_task::validate_profile_input(mode, dataset, profile);
+    }
     validate_dataset(mode, has_adapter, dataset)?;
     if mode == Mode::PlanTasks {
         ensure!(

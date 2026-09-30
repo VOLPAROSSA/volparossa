@@ -353,6 +353,29 @@ fn check_public_contract(value: &Value, options: &Options) -> Result<()> {
     Ok(())
 }
 
+fn check_model_backend(value: &Value, request: &WorkerRequest) -> Result<()> {
+    if matches!(
+        request.model_profile,
+        super::ModelProfile::Smol1700 | super::ModelProfile::Qwen600
+    ) {
+        ensure!(
+            if request.mode == Mode::PlanDocument {
+                value.get("model_parameter_dtype") == Some(&Value::Null)
+            } else {
+                value["model_parameter_dtype"] == "bfloat16"
+            },
+            "compute_result_model_precision"
+        );
+    }
+    if request.model_profile == super::ModelProfile::Qwen600 {
+        ensure!(
+            request.mode == Mode::PrivateConversation && value["model_attention_backend"] == "sdpa",
+            "compute_result_model_attention"
+        );
+    }
+    Ok(())
+}
+
 fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> Result<()> {
     if value.get("status").and_then(Value::as_str) == Some("error") {
         return Err(worker_failure(value, &request.id, status));
@@ -369,16 +392,7 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
         value.get("device").and_then(Value::as_str) == Some("cpu"),
         "compute_result_device"
     );
-    if request.model_profile == super::ModelProfile::Smol1700 {
-        ensure!(
-            if request.mode == Mode::PlanDocument {
-                value.get("model_parameter_dtype") == Some(&Value::Null)
-            } else {
-                value["model_parameter_dtype"] == "bfloat16"
-            },
-            "compute_result_model_precision"
-        );
-    }
+    check_model_backend(value, request)?;
     let updates = value.get("updates_completed").and_then(Value::as_u64);
     match request.mode {
         Mode::Infer

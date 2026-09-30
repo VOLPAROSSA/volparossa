@@ -8,6 +8,48 @@ const FIRST: &str = "01010101010101010101010101010101";
 const SECOND: &str = "02020202020202020202020202020202";
 const THIRD: &str = "03030303030303030303030303030303";
 
+#[tokio::test]
+async fn qwen_larger_frames_are_only_for_explicit_conversation_submission() {
+    let conversation = request(
+        FIRST,
+        json!({"type":"submit_conversation","conversation":{
+        "version":1,"visibility":"private_local","instructions":"i".repeat(40_000),"tools":[],
+        "history":[{"type":"message","role":"user","text":"Synthetic input."}]}}),
+    );
+    let mut oversized_cancel =
+        serde_json::to_vec(&request(SECOND, json!({"type":"cancel","task_id":FIRST}))).unwrap();
+    oversized_cancel.extend(vec![b' '; wire::MAX_REQUEST_BYTES]);
+    for (raw, profile, accepted) in [
+        (
+            serde_json::to_vec(&conversation).unwrap(),
+            ModelProfile::Qwen600,
+            true,
+        ),
+        (
+            serde_json::to_vec(&conversation).unwrap(),
+            ModelProfile::Smol360,
+            false,
+        ),
+        (oversized_cancel, ModelProfile::Qwen600, false),
+        (
+            serde_json::to_vec(&request(FIRST, json!({"type":"capabilities"}))).unwrap(),
+            ModelProfile::Qwen600,
+            false,
+        ),
+    ] {
+        let (mut writer, mut reader) = tokio::io::duplex(raw.len() + 4);
+        writer
+            .write_all(&u32::try_from(raw.len()).unwrap().to_be_bytes())
+            .await
+            .unwrap();
+        writer.write_all(&raw).await.unwrap();
+        assert_eq!(
+            wire::read_request(&mut reader, profile).await.is_ok(),
+            accepted
+        );
+    }
+}
+
 fn request(id: &str, operation: Value) -> Value {
     let mut request = json!({"version":1,"id":id});
     request["operation"] = operation;

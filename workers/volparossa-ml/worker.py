@@ -107,12 +107,33 @@ MODEL_HASHES = {
 DEFAULT_MODEL_PROFILE = "smollm2-135m-v1"
 LARGE_MODEL_PROFILE = "smollm2-360m-v1"
 REASONING_MODEL_PROFILE = "smollm2-1.7b-v1"
+QWEN_MODEL_PROFILE = "qwen3-0.6b-v1"
 EXTENDED_INFERENCE_PROFILES = (LARGE_MODEL_PROFILE, REASONING_MODEL_PROFILE)
 MODEL_CONFIG = {"architectures": ["LlamaForCausalLM"], "model_type": "llama", "hidden_size": 576,
                 "num_hidden_layers": 30, "num_attention_heads": 9, "num_key_value_heads": 3,
                 "intermediate_size": 1536, "vocab_size": 49152, "max_position_embeddings": 8192,
                 "tie_word_embeddings": True}
 MODEL_PROFILES = {
+    QWEN_MODEL_PROFILE: dict(id="Qwen/Qwen3-0.6B", revision="c1899de289a04d12100db370d81485cdf75e47ca",
+        files={"LICENSE": 11343, "README.md": 13965, "config.json": 726, "generation_config.json": 239,
+               "merges.txt": 1671853, "vocab.json": 2776833, "model.safetensors": 1503300328,
+               "tokenizer.json": 11422654, "tokenizer_config.json": 9732},
+        hashes={
+            "LICENSE": "832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e",
+            "README.md": "1ab64a26fcb3b461423b89a433a8c858f1bf8d4086f979cbb3ff878d47cf20e9",
+            "config.json": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+            "generation_config.json": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2",
+            "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+            "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+            "model.safetensors": "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b",
+            "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+            "tokenizer_config.json": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"},
+        config={"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3", "hidden_size": 1024,
+                "num_hidden_layers": 28, "num_attention_heads": 16, "num_key_value_heads": 8,
+                "head_dim": 128, "intermediate_size": 3072, "vocab_size": 151936,
+                "max_position_embeddings": 40960, "rope_theta": 1000000,
+                "tie_word_embeddings": True, "torch_dtype": "bfloat16"},
+        prompt_tokens=12288, new_tokens=1024, wire_bytes=4096, max_rows=1, native_tools=True),
     DEFAULT_MODEL_PROFILE: dict(id=MODEL_ID, revision=MODEL_REVISION, files=MODEL_FILES,
         hashes=MODEL_HASHES, config=MODEL_CONFIG, prompt_tokens=192, new_tokens=64, wire_bytes=1024, max_rows=4),
     LARGE_MODEL_PROFILE: dict(id="HuggingFaceTB/SmolLM2-360M-Instruct",
@@ -207,6 +228,8 @@ def validate_request(value):
     require(value["mode"] in ("infer", "train", "plan_document", "plan_tasks", "private_infer", "private_conversation", "aggregate_adapter"), "INVALID_JOB_MODE")
     profile_name = value.get("model_profile", DEFAULT_MODEL_PROFILE)
     model_profile(profile_name)
+    require(profile_name != QWEN_MODEL_PROFILE or value["mode"] == "private_conversation",
+            "MODEL_PROFILE_PRIVATE_CONVERSATION_ONLY")
     require(profile_name == DEFAULT_MODEL_PROFILE or (value["mode"] != "train" and "adapter_root" not in value),
             "MODEL_PROFILE_INFERENCE_ONLY")
     require(value["mode"] != "plan_document" or "adapter_root" not in value, "DOCUMENT_PLAN_ADAPTER_UNSUPPORTED")
@@ -247,12 +270,14 @@ def validate_sample(sample, answered):
 
 def validate_dataset(dataset, mode, profile_name=DEFAULT_MODEL_PROFILE):
     profile = model_profile(profile_name)
+    require(profile_name != QWEN_MODEL_PROFILE or mode == "private_conversation",
+            "MODEL_PROFILE_PRIVATE_CONVERSATION_ONLY")
     require(profile_name == DEFAULT_MODEL_PROFILE or mode != "train", "MODEL_PROFILE_INFERENCE_ONLY")
     if mode == "private_infer":
         return validate_private_input(dataset)
     if mode == "private_conversation":
         try:
-            return conversation_module().validate(dataset)
+            return conversation_module().validate(dataset, profile_name)
         except (ValueError, TypeError, UnicodeError, RecursionError) as error:
             raise JobError("INVALID_PRIVATE_CONVERSATION") from error
     if mode == "plan_document":
@@ -1038,12 +1063,13 @@ def load_backend(threads, session):
 
 
 def load_model(transformers, torch, model_root, profile_name=DEFAULT_MODEL_PROFILE):
-    dtype = torch.bfloat16 if profile_name == REASONING_MODEL_PROFILE else torch.float32
+    dtype = torch.bfloat16 if profile_name in (REASONING_MODEL_PROFILE, QWEN_MODEL_PROFILE) else torch.float32
+    attention = "sdpa" if profile_name == QWEN_MODEL_PROFILE else "eager"
     model = transformers.AutoModelForCausalLM.from_pretrained(
         str(model_root), local_files_only=True, trust_remote_code=False, use_safetensors=True,
-        dtype=dtype, device_map=None, attn_implementation="eager")
+        dtype=dtype, device_map=None, attn_implementation=attention)
     model.to(torch.device("cpu"))
-    model.config.use_cache = False
+    model.config.use_cache = profile_name == QWEN_MODEL_PROFILE
     # Generated public adapter metadata must name the original model, never a local path.
     model.config._name_or_path = model_profile(profile_name)["id"]
     model_dtype_report(profile_name, model, torch)
@@ -1056,7 +1082,7 @@ def model_dtype_report(profile_name, model=None, torch=None):
     Old profiles retain their original report shape and FP32 load. No autocast,
     quantization or silent FP32 retry is used for the BF16 profile.
     """
-    if profile_name != REASONING_MODEL_PROFILE:
+    if profile_name not in (REASONING_MODEL_PROFILE, QWEN_MODEL_PROFILE):
         return {}
     if model is None:
         return {"model_parameter_dtype": None}  # Tokenizer-only document planning.
@@ -1066,7 +1092,11 @@ def model_dtype_report(profile_name, model=None, torch=None):
         require(parameter.dtype == torch.bfloat16, "MODEL_PARAMETER_DTYPE_MISMATCH")
         count += parameter.numel()
     require(count > 0, "EMPTY_PARAMETER_SET")
-    return {"model_parameter_dtype": "bfloat16"}
+    report = {"model_parameter_dtype": "bfloat16"}
+    if profile_name == QWEN_MODEL_PROFILE:
+        require(model.config._attn_implementation == "sdpa", "MODEL_ATTENTION_BACKEND_MISMATCH")
+        report["model_attention_backend"] = "sdpa"
+    return report
 
 
 def prompt_messages(row, synthesis=False, private=False, output_contract=None, original_source=None, public_answer=False):
@@ -1706,7 +1736,7 @@ def execute_private_infer(request, session, tokenizer, torch, transformers, vers
               "distributed_execution_claimed": False, "private_training_claimed": False,
               "better_answers_claimed": False, "network_policy_changed": False}
     if conversation:
-        result.update(conversation=conversation_module().decode(dataset, outputs[0]), prompt_tokens=len(prompt),
+        result.update(conversation=conversation_module().decode(dataset, outputs[0], profile_name, request["id"]), prompt_tokens=len(prompt),
                       conversation_limits=conversation_module().capabilities(profile_name, profile))
     result.update(model_dtype_report(profile_name, model, torch))
     return finish_result(result, output_root, session)
@@ -1772,7 +1802,15 @@ def generate(model, samples, tokenizer, torch, session, transformers, profile_na
             generated = output[0, input_ids.shape[1]:]
             require(generated.numel() <= profile["new_tokens"], "GENERATION_TOKEN_LIMIT_EXCEEDED")
             generation = generation_metadata(generated.tolist(), tokenizer.eos_token_id, profile_name)
-            text = tokenizer.decode(generated, skip_special_tokens=True)
+            if profile_name == QWEN_MODEL_PROFILE:
+                # Preserve unexpected model-generated control markers for strict
+                # native parsing; remove only the already confirmed terminal EOS.
+                ids = generated.tolist()
+                if generation["stop_reason"] == "eos":
+                    ids = ids[:-1]
+                text = tokenizer.decode(ids, skip_special_tokens=False)
+            else:
+                text = tokenizer.decode(generated, skip_special_tokens=True)
             # Bound the escaped wire representation too: four multilingual responses must
             # not overflow a frame merely because JSON represents one character as \uXXXX.
             public_text = text[:profile["wire_bytes"]]
@@ -1953,7 +1991,9 @@ def execute_job(request, session):
                                    data_identity, model_files, cohort)
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         str(model_root), local_files_only=True, trust_remote_code=False, use_fast=True)
-    require(tokenizer.pad_token_id == 2 and tokenizer.eos_token_id == 2, "MODEL_TOKENIZER_MISMATCH")
+    expected_pad, expected_eos = (151643, 151645) if profile_name == QWEN_MODEL_PROFILE else (2, 2)
+    require(tokenizer.pad_token_id == expected_pad and tokenizer.eos_token_id == expected_eos,
+            "MODEL_TOKENIZER_MISMATCH")
     session.check()
     if request["mode"] == "plan_document":
         plan = plan_document(tokenizer, dataset, session, profile_name)

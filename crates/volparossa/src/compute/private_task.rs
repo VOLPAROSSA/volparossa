@@ -110,9 +110,19 @@ pub(super) fn validate_input(raw: &[u8]) -> Result<()> {
 }
 
 pub(super) fn validate_mode_input(mode: Mode, raw: &[u8]) -> Result<()> {
+    validate_profile_input(mode, raw, ModelProfile::Smol360)
+}
+
+pub(super) fn validate_profile_input(mode: Mode, raw: &[u8], profile: ModelProfile) -> Result<()> {
+    ensure!(
+        profile != ModelProfile::Qwen600 || mode == Mode::PrivateConversation,
+        "compute_profile_conversation_only"
+    );
     match mode {
         Mode::PrivateInfer => validate_input(raw),
-        Mode::PrivateConversation => super::private_conversation::Input::decode(raw).map(|_| ()),
+        Mode::PrivateConversation => {
+            super::private_conversation::Input::decode_profile(raw, profile).map(|_| ())
+        }
         _ => anyhow::bail!("compute_private_mode"),
     }
 }
@@ -240,7 +250,7 @@ pub(super) fn validate_mode_report(
     profile: ModelProfile,
     mode: Mode,
 ) -> Result<()> {
-    validate_mode_input(mode, raw)?;
+    validate_profile_input(mode, raw, profile)?;
     let spec = profile.spec();
     ensure!(
         report["mode"] == serde_json::to_value(mode)?
@@ -371,7 +381,7 @@ pub(super) async fn execute_mode(
     activity: watch::Receiver<bool>,
     mode: Mode,
 ) -> Result<Value> {
-    validate_mode_input(mode, &input)?;
+    validate_profile_input(mode, &input, config.model_profile)?;
     config.validate()?;
     ensure!(*activity.borrow(), "compute_owner_busy");
     let staged = Staged::from_mode(config, &input, mode)?;

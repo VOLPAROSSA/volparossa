@@ -225,6 +225,91 @@ enum Incoming {
     Invalid,
 }
 
+fn respond(
+    request: wire::Request,
+    config: &Arc<private_task::ExecutionConfig>,
+    gate: &Arc<Semaphore>,
+    active: &mut Option<Active>,
+    handshake: &mut bool,
+    conversation_handshake: &mut bool,
+) -> Value {
+    match request.operation {
+        wire::Operation::Capabilities {} => {
+            *handshake = true;
+            let mut response = wire::response(&request.id, "capabilities");
+            response["capabilities"] = capabilities(config, gate);
+            response
+        }
+        wire::Operation::ConversationCapabilities {} => {
+            *conversation_handshake = true;
+            let mut response = wire::response(&request.id, "conversation_capabilities");
+            response["capabilities"] =
+                super::private_conversation::capabilities(config.model_profile);
+            response["capabilities"]["execution_slots"] = 1.into();
+            response["capabilities"]["max_seconds"] = config.max_seconds.into();
+            response["capabilities"]["max_request_bytes"] =
+                super::private_conversation::request_frame(config.model_profile).into();
+            response["capabilities"]["max_response_bytes"] = wire::MAX_RESPONSE_BYTES.into();
+            response["capabilities"]["quarantined"] = gate.is_closed().into();
+            response
+        }
+        wire::Operation::SubmitConversation { conversation } => {
+            if !*conversation_handshake {
+                wire::error(Some(&request.id), "handshake_required")
+            } else if gate.is_closed() {
+                wire::error(Some(&request.id), "cleanup_unconfirmed")
+            } else if active.is_some() {
+                wire::error(Some(&request.id), "busy")
+            } else if let Some(slot) = ExecutionSlot::admit(gate) {
+                let input = conversation
+                    .bytes_profile(config.model_profile)
+                    .expect("validated conversation serializes");
+                *active = Some(Active::start_mode(
+                    request.id.clone(),
+                    config.clone(),
+                    input,
+                    slot,
+                    super::Mode::PrivateConversation,
+                ));
+                wire::response(&request.id, "admitted")
+            } else {
+                wire::error(Some(&request.id), "busy")
+            }
+        }
+        wire::Operation::Submit { question, context } => {
+            if !*handshake {
+                wire::error(Some(&request.id), "handshake_required")
+            } else if gate.is_closed() {
+                wire::error(Some(&request.id), "cleanup_unconfirmed")
+            } else if active.is_some() {
+                wire::error(Some(&request.id), "busy")
+            } else if let Some(slot) = ExecutionSlot::admit(gate) {
+                let input =
+                    wire::input_bytes(&question, &context).expect("bounded strings serialize");
+                *active = Some(Active::start(
+                    request.id.clone(),
+                    config.clone(),
+                    input,
+                    slot,
+                ));
+                wire::response(&request.id, "admitted")
+            } else {
+                wire::error(Some(&request.id), "busy")
+            }
+        }
+        wire::Operation::Cancel { task_id } => {
+            if let Some(task) = active.as_mut().filter(|task| task.id == task_id) {
+                task.cancel();
+                let mut response = wire::response(&request.id, "cancel_requested");
+                response["task_id"] = task_id.into();
+                response
+            } else {
+                wire::error(Some(&request.id), "no_such_task")
+            }
+        }
+    }
+}
+
 async fn connection(
     stream: UnixStream,
     config: Arc<private_task::ExecutionConfig>,
@@ -233,19 +318,19 @@ async fn connection(
 ) {
     let (mut reader, mut writer) = stream.into_split();
     let (send, mut receive) = mpsc::channel(1);
+    let profile = config.model_profile;
     // A dedicated reader keeps partial frames intact while execution finishes or
     // cancellation/status responses are written; select! never discards half a frame.
     let reader_task = tokio::spawn(async move {
         loop {
-            let message =
-                match wire::read::<wire::Request>(&mut reader, wire::MAX_REQUEST_BYTES).await {
-                    Ok(Some(request)) if request.validate().is_ok() => Incoming::Request(request),
-                    Ok(None) => break,
-                    _ => {
-                        let _ = send.send(Incoming::Invalid).await;
-                        break;
-                    }
-                };
+            let message = match wire::read_request(&mut reader, profile).await {
+                Ok(Some(request)) => Incoming::Request(request),
+                Ok(None) => break,
+                _ => {
+                    let _ = send.send(Incoming::Invalid).await;
+                    break;
+                }
+            };
             if send.send(message).await.is_err() {
                 break;
             }
@@ -270,66 +355,8 @@ async fn connection(
                     let _ = wire::write(&mut writer, &wire::error(Some(&request.id), "invalid_request")).await;
                     break;
                 }
-                let response = match request.operation {
-                    wire::Operation::Capabilities {} => {
-                        handshake = true;
-                        let mut response = wire::response(&request.id, "capabilities");
-                        response["capabilities"] = capabilities(&config, &gate);
-                        response
-                    }
-                    wire::Operation::ConversationCapabilities {} => {
-                        conversation_handshake = true;
-                        let mut response = wire::response(&request.id, "conversation_capabilities");
-                        response["capabilities"] = super::private_conversation::capabilities(config.model_profile);
-                        response["capabilities"]["execution_slots"] = 1.into();
-                        response["capabilities"]["max_seconds"] = config.max_seconds.into();
-                        response["capabilities"]["max_request_bytes"] = wire::MAX_REQUEST_BYTES.into();
-                        response["capabilities"]["max_response_bytes"] = wire::MAX_RESPONSE_BYTES.into();
-                        response["capabilities"]["quarantined"] = gate.is_closed().into();
-                        response
-                    }
-                    wire::Operation::SubmitConversation { conversation } => {
-                        if !conversation_handshake {
-                            wire::error(Some(&request.id), "handshake_required")
-                        } else if gate.is_closed() {
-                            wire::error(Some(&request.id), "cleanup_unconfirmed")
-                        } else if active.is_some() {
-                            wire::error(Some(&request.id), "busy")
-                        } else if let Some(slot) = ExecutionSlot::admit(&gate) {
-                            let input = conversation.bytes().expect("validated conversation serializes");
-                            active = Some(Active::start_mode(request.id.clone(), config.clone(), input, slot,
-                                super::Mode::PrivateConversation));
-                            wire::response(&request.id, "admitted")
-                        } else {
-                            wire::error(Some(&request.id), "busy")
-                        }
-                    }
-                    wire::Operation::Submit { question, context } => {
-                        if !handshake {
-                            wire::error(Some(&request.id), "handshake_required")
-                        } else if gate.is_closed() {
-                            wire::error(Some(&request.id), "cleanup_unconfirmed")
-                        } else if active.is_some() {
-                            wire::error(Some(&request.id), "busy")
-                        } else if let Some(slot) = ExecutionSlot::admit(&gate) {
-                            let input = wire::input_bytes(&question, &context).expect("bounded strings serialize");
-                            active = Some(Active::start(request.id.clone(), config.clone(), input, slot));
-                            wire::response(&request.id, "admitted")
-                        } else {
-                            wire::error(Some(&request.id), "busy")
-                        }
-                    }
-                    wire::Operation::Cancel { task_id } => {
-                        if let Some(task) = active.as_mut().filter(|task| task.id == task_id) {
-                            task.cancel();
-                            let mut response = wire::response(&request.id, "cancel_requested");
-                            response["task_id"] = task_id.into();
-                            response
-                        } else {
-                            wire::error(Some(&request.id), "no_such_task")
-                        }
-                    }
-                };
+                let response = respond(request, &config, &gate, &mut active, &mut handshake,
+                    &mut conversation_handshake);
                 if wire::write(&mut writer, &response).await.is_err() { break; }
             }
             result = async {
