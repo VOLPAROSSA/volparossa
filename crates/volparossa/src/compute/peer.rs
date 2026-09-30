@@ -2,7 +2,7 @@
 
 mod batch;
 mod discovery;
-mod document;
+pub(in crate::compute) mod document;
 mod executors;
 mod follow;
 mod policy_assessment;

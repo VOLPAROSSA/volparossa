@@ -2,6 +2,7 @@
 
 mod collection;
 mod graph;
+pub(in crate::compute) mod public;
 mod storage;
 mod synthesis;
 #[cfg(test)]
@@ -184,6 +185,42 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         return Ok(());
     }
     let cancellation = Cancellation::new()?;
+    if args.task_plan.is_some()
+        || args.plan_tasks
+        || args.plan_task_graph
+        || (args.resume && args.directory.join("graph.json").try_exists()?)
+    {
+        ensure!(
+            args.directory.is_absolute(),
+            "compute_document_absolute_directory"
+        );
+        ensure!(
+            args.resume || args.public_content,
+            "compute_document_public_permission_required"
+        );
+        let _lock = task::open_directory(&args.directory, args.resume)?;
+        return graph::run(args, socket, &cancellation.activity).await;
+    }
+    let result = report_with_activity(args, socket, &cancellation.activity).await?;
+    println!("{}", serde_json::to_string(&result)?);
+    ensure!(
+        args.enroll_only || result["complete"] == true,
+        "compute_document_partial_results_retained"
+    );
+    Ok(())
+}
+
+/// The same document executor for the CLI and local public service. Cancellation is
+/// cooperative: never drop the running coordinator before its exact handles are joined.
+async fn report_with_activity(
+    args: &Options,
+    socket: &Path,
+    cancelled: &watch::Receiver<bool>,
+) -> Result<Value> {
+    ensure!(
+        args.execute && args.task_plan.is_none() && !args.plan_tasks && !args.plan_task_graph,
+        "compute_document_report_mode"
+    );
     ensure!(
         args.directory.is_absolute(),
         "compute_document_absolute_directory"
@@ -193,31 +230,22 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         "compute_document_public_permission_required"
     );
     let _lock = task::open_directory(&args.directory, args.resume)?;
-    if args.task_plan.is_some()
-        || args.plan_tasks
-        || args.plan_task_graph
-        || (args.resume && args.directory.join("graph.json").try_exists()?)
-    {
-        return graph::run(args, socket, &cancellation.activity).await;
-    }
     if !args.resume {
-        prepare(args, socket, &cancellation.activity).await?;
+        prepare(args, socket, cancelled).await?;
     }
     if args.enroll_only {
         let (enrollment, _, _) = storage::load(&args.directory)?;
-        println!(
-            "{}",
+        return Ok(
             json!({"operation":"compute_document_enrolled", "execution_started":false,
             "task_complete":false, "source_manifest_id":enrollment.source_manifest_id,
             "provider_keys":enrollment.provider_keys, "model_fingerprint":enrollment.model_fingerprint,
-            "package_count":enrollment.packages.len(), "private_data_supported":false})
+            "package_count":enrollment.packages.len(), "private_data_supported":false}),
         );
-        return Ok(());
     }
-    let mut result = advance(args, socket, &cancellation.activity).await?;
+    let mut result = advance(args, socket, cancelled).await?;
     if result["synthesis_requested"] == true {
         if result["complete"] == true {
-            synthesis::advance(args, socket, &cancellation.activity, &mut result).await?;
+            synthesis::advance(args, socket, cancelled, &mut result).await?;
         } else {
             result["joining"] = if result["execution_complete"] == true {
                 "incomplete_fragment_answers"
@@ -238,12 +266,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     )? {
         save(&args.directory, "result.json", &result, true)?;
     }
-    println!("{}", serde_json::to_string(&result)?);
-    ensure!(
-        result["complete"] == true,
-        "compute_document_partial_results_retained"
-    );
-    Ok(())
+    Ok(result)
 }
 
 #[allow(
