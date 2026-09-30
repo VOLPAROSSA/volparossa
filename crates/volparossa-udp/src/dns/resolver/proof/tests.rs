@@ -246,6 +246,40 @@ async fn received_rrsig_ttl_and_original_first_seen_deadline_never_renew() {
 }
 
 #[tokio::test]
+async fn disabled_cache_never_retains_reuses_or_shares_independently_validated_proof() {
+    let fixture = fixture(DnsQueryType::A);
+    let policy = [43; 32];
+    let question = fixture.bundle.question().clone();
+    let resolver = ExitResolver::default();
+    let proof = validate_with_anchors(fixture.bundle.clone(), Arc::clone(&fixture.anchors))
+        .await
+        .unwrap();
+    resolver
+        .retain(proof, &policy, DnsAnswerSource::PeerValidated)
+        .unwrap();
+    assert!(resolver.has_shareable_proof(&policy));
+
+    let disabled = resolver.clone().with_cache_enabled(false);
+    assert!(!disabled.has_shareable_proof(&policy));
+    assert!(disabled.cached_bundle(&question, &policy).is_none());
+    assert!(disabled.cached_answer(&question, &policy).is_none());
+    let proof = validate_with_anchors(fixture.bundle, fixture.anchors)
+        .await
+        .unwrap();
+    assert!(
+        disabled
+            .retain(proof, &policy, DnsAnswerSource::PeerValidated)
+            .is_none()
+    );
+    let cache = disabled.cache.lock().unwrap();
+    assert!(cache.entries.is_empty() && cache.first_seen.is_empty());
+    assert!(
+        resolver.has_shareable_proof(&policy),
+        "other configured clones are unchanged"
+    );
+}
+
+#[tokio::test]
 async fn shareable_availability_requires_current_policy_and_both_original_deadlines() {
     let fixture = fixture(DnsQueryType::A);
     let resolver = ExitResolver::default();
@@ -418,5 +452,259 @@ async fn collector_scenario() {
     assert!(
         started.elapsed() < Duration::from_secs(1),
         "offline verification needs no origin socket"
+    );
+}
+
+// The private source fixture returns signed wire packets, not a trusted validation verdict.
+// It deliberately cannot repeat the seeded address question or open a network connection.
+struct PrivateEvidenceFixture {
+    messages: BTreeMap<QueryKey, Vec<u8>>,
+    calls: Mutex<Vec<QueryKey>>,
+    started_at_ms: u64,
+}
+
+impl EvidenceSource for PrivateEvidenceFixture {
+    fn query<'a>(
+        &'a self,
+        request: DnsRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<RawEvidence, DnsResolverError>> + Send + 'a>> {
+        Box::pin(async move {
+            let query = &request.queries()[0];
+            assert!(matches!(
+                query.query_type(),
+                RecordType::DS | RecordType::DNSKEY
+            ));
+            let key = EvidenceHandle::key(query);
+            self.calls.lock().unwrap().push(key.clone());
+            Ok(RawEvidence {
+                packet: self
+                    .messages
+                    .get(&key)
+                    .ok_or(DnsResolverError::InvalidProof)?
+                    .clone(),
+                started_at_ms: self.started_at_ms,
+            })
+        })
+    }
+}
+
+fn private_fixture(fixture: &Fixture, started_at_ms: u64) -> Arc<PrivateEvidenceFixture> {
+    Arc::new(PrivateEvidenceFixture {
+        messages: fixture
+            .bundle
+            .wire
+            .messages
+            .iter()
+            .filter_map(|bytes| {
+                let message = parse_message(bytes).unwrap();
+                let query = &message.queries()[0];
+                if matches!(query.query_type(), RecordType::DS | RecordType::DNSKEY) {
+                    Some((EvidenceHandle::key(query), bytes.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        calls: Mutex::default(),
+        started_at_ms,
+    })
+}
+
+#[test]
+fn private_normalization_preserves_all_answers_and_rejects_unsupported_shapes() {
+    let fixture = fixture(DnsQueryType::A);
+    let question = fixture.bundle.question().query().unwrap();
+    let original = parse_message(fixture.bundle.wire.messages.last().unwrap()).unwrap();
+    let now = unix_millis().unwrap();
+    let normalize = |message: &Message| {
+        normalize_private(
+            &RawEvidence {
+                packet: message.to_vec().unwrap(),
+                started_at_ms: now,
+            },
+            &question,
+        )
+    };
+    let mut extended = original.clone();
+    extended
+        .set_authentic_data(true)
+        .add_name_server(original.answers()[0].clone())
+        .add_additional(original.answers()[0].clone());
+    extended
+        .extensions_mut()
+        .get_or_insert_with(Default::default)
+        .set_dnssec_ok(true);
+    let normalized = normalize(&extended).unwrap();
+    assert_eq!(normalized.message.answers(), original.answers());
+    assert!(!normalized.message.authentic_data());
+    assert!(normalized.message.name_servers().is_empty());
+    assert!(normalized.message.additionals().is_empty());
+    assert!(normalized.message.extensions().is_none());
+    assert_eq!(normalized.received_at_ms, now);
+
+    let mut cname = extended.clone();
+    cname.add_answer(Record::from_rdata(
+        question.name().clone(),
+        60,
+        RData::CNAME(hickory_proto::rr::rdata::CNAME(
+            Name::from_ascii("other.test.").unwrap(),
+        )),
+    ));
+    assert!(
+        normalize(&cname).is_err(),
+        "never filter a CNAME out of the answer"
+    );
+    let mut wildcard = extended.clone();
+    wildcard
+        .answers_mut()
+        .last_mut()
+        .unwrap()
+        .set_data(RData::DNSSEC(DNSSECRData::RRSIG(RRSIG::new(
+            RecordType::A,
+            Algorithm::ED25519,
+            1,
+            60,
+            2_000_000_000,
+            1,
+            1,
+            Name::from_ascii("test.").unwrap(),
+            vec![1; 64],
+        ))));
+    assert!(
+        normalize(&wildcard).is_err(),
+        "wildcard signature must not be stripped"
+    );
+    for variant in 0..4 {
+        let mut invalid = extended.clone();
+        match variant {
+            0 => {
+                invalid.set_id(1);
+            }
+            1 => {
+                invalid.set_truncated(true);
+            }
+            2 => {
+                invalid.set_response_code(ResponseCode::NXDomain);
+            }
+            _ => {
+                invalid.queries_mut()[0].set_query_type(RecordType::AAAA);
+            }
+        }
+        assert!(normalize(&invalid).is_err());
+    }
+    assert!(
+        normalize_private(
+            &RawEvidence {
+                packet: vec![0; MAX_MESSAGE_BYTES + 1],
+                started_at_ms: now,
+            },
+            &question
+        )
+        .is_err()
+    );
+    assert!(
+        normalize_private(
+            &RawEvidence {
+                packet: original.to_vec().unwrap(),
+                started_at_ms: u64::MAX,
+            },
+            &question
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn private_seed_avoids_repeat_address_query_and_exports_independently_validated_chain() {
+    for kind in [DnsQueryType::A, DnsQueryType::Aaaa] {
+        let fixture = fixture(kind);
+        let started = unix_millis().unwrap() - 10_000;
+        let source = private_fixture(&fixture, started);
+        let proof = collect_private_with_anchors(
+            fixture.bundle.question(),
+            source.clone(),
+            RawEvidence {
+                packet: fixture.bundle.wire.messages.last().unwrap().clone(),
+                started_at_ms: started,
+            },
+            fixture.anchors.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            source.calls.lock().unwrap().len(),
+            3,
+            "only DNSKEY/DS ancestry is fetched"
+        );
+        assert_eq!(proof.bundle.wire.messages.len(), 4);
+        assert!(
+            proof.bundle.expires_at_unix_ms() <= started + 60_000,
+            "elapsed native query time must not extend the original TTL"
+        );
+        let calls = source.calls.lock().unwrap().len();
+        let offline = validate_with_anchors(proof.bundle, fixture.anchors)
+            .await
+            .unwrap();
+        assert_eq!(offline.addresses, proof.addresses);
+        assert_eq!(offline.digest, proof.digest);
+        assert_eq!(
+            source.calls.lock().unwrap().len(),
+            calls,
+            "offline proof needs no worker"
+        );
+    }
+}
+
+#[tokio::test]
+async fn private_source_ad_and_complete_packets_do_not_substitute_for_valid_signatures() {
+    let fixture = fixture(DnsQueryType::A);
+    let now = unix_millis().unwrap();
+    let mut forged = parse_message(fixture.bundle.wire.messages.last().unwrap()).unwrap();
+    forged.set_authentic_data(true);
+    forged.answers_mut()[0].set_data(RData::A(A(Ipv4Addr::new(93, 184, 216, 35))));
+    assert!(
+        collect_private_with_anchors(
+            fixture.bundle.question(),
+            private_fixture(&fixture, now),
+            RawEvidence {
+                packet: forged.to_vec().unwrap(),
+                started_at_ms: now,
+            },
+            fixture.anchors.clone(),
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        collect_private(
+            fixture.bundle.question(),
+            private_fixture(&fixture, now),
+            RawEvidence {
+                packet: fixture.bundle.wire.messages.last().unwrap().clone(),
+                started_at_ms: now,
+            },
+        )
+        .await
+        .is_err(),
+        "the source cannot supply a trusted production root"
+    );
+    let mut incomplete = fixture.bundle.clone();
+    incomplete.wire.messages.remove(1);
+    let incomplete = Fixture {
+        bundle: incomplete,
+        anchors: fixture.anchors.clone(),
+    };
+    assert!(
+        collect_private_with_anchors(
+            incomplete.bundle.question(),
+            private_fixture(&incomplete, now),
+            RawEvidence {
+                packet: incomplete.bundle.wire.messages.last().unwrap().clone(),
+                started_at_ms: now,
+            },
+            incomplete.anchors.clone(),
+        )
+        .await
+        .is_err()
     );
 }

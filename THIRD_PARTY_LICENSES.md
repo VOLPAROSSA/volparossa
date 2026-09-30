@@ -536,6 +536,36 @@ is rejected.
 
 ## Notable Rust source dependencies
 
+### Private Unbound system-library integration
+
+The original GPL-3.0-only shim in `native/volparossa-dns-worker` dynamically links
+Debian's `libunbound8`; it does not vendor or silently download an executable.
+Reviewed upstream is [NLnet Labs Unbound](https://github.com/NLnetLabs/unbound/tree/13b6717f1716810523ffb60f971a6c9c5e8ce127),
+release `1.26.1`, exact commit `13b6717f1716810523ffb60f971a6c9c5e8ce127`
+(signed tag object `343a5b81f9803199364f440ebe2fc3195efda25d`). The upstream
+[BSD-3-Clause license](https://github.com/NLnetLabs/unbound/blob/13b6717f1716810523ffb60f971a6c9c5e8ce127/LICENSE)
+and distribution notices remain unchanged. Installed Debian dependencies retain
+their complete copyright/license inventory under `/usr/share/doc/libunbound8/`.
+No local patch to libunbound is applied; Debian packaging/security patches are
+not misrepresented as byte-identical upstream source.
+
+The initial workspace-only ABI build uses authenticated Debian 13 security
+package metadata, version `1.26.1-0+deb13u1`, amd64:
+
+| Package | SHA-256 |
+|---|---|
+| `libunbound8`, 643372 bytes | `2331c4c305f68aab91dbe16245bd76c0e0edc532353b3ce52accad71d24dfbb3` |
+| `libunbound-dev`, 213572 bytes | `e909714ea6d39833cf42e8e48f3dbe68a42147d8853850e7848769d7fd5a3d12` |
+
+Both were checked before extraction into ignored `build/native-unbound-deps/`;
+nothing was installed into the development host. Source provenance is available
+from the [Debian package](https://packages.debian.org/trixie/libunbound8).
+Runtime transitive system dependencies are libc6, libevent and OpenSSL;
+`dns-root-data` supplies read-only root hints/anchors and retains its own notices.
+The package does not depend on or start the standalone Unbound daemon.
+
+### Rust dependency families
+
 | Component family | Purpose | Upstream license expression to verify in release audit |
 |---|---|---|
 | Tokio, tracing, futures | async runtime and structured diagnostics | MIT |

@@ -23,7 +23,8 @@ trap 'exit 143' TERM
 grep -F 'PREVIEW ONLY: no package, service, account, file or network state was changed.' \
     "$temporary/preview" >/dev/null
 grep -F 'agent_control_socket=/run/volparossa/control/agent.sock' "$lifecycle" >/dev/null
-[ "$(grep -Fc 'wait_agent_control_socket' "$lifecycle")" -eq 3 ]
+# Definition, fresh install, optional private-DNS probe restoration, and upgrade.
+[ "$(grep -Fc 'wait_agent_control_socket' "$lifecycle")" -eq 4 ]
 [ "$(grep -Fc -- "--control-socket \"\$agent_control_socket\" status" "$lifecycle")" -eq 1 ]
 grep -F '/usr/bin/timeout --signal=KILL 0.2s' "$lifecycle" >/dev/null
 grep -F 'volparossa-agent control socket did not become ready' "$lifecycle" >/dev/null
@@ -31,6 +32,46 @@ grep -F 'journalctl --no-pager --output=short-iso-precise -n 500' "$lifecycle" >
 # Match the literal runtime variable rather than expanding it in this contract.
 # shellcheck disable=SC2016
 grep -F '>"$output_directory/service-journal.log" 2>&1 || true' "$lifecycle" >/dev/null
+
+# Exercise the exact roles-off predicate with synthetic manager properties, not host services.
+python3 - "$lifecycle" "$temporary" <<'PY'
+from pathlib import Path
+import os
+import subprocess
+import sys
+
+source = Path(sys.argv[1]).read_text()
+body = source.split("native_roles_off_idle() {", 1)[1].split("\n}", 1)[0]
+socket_root = Path(sys.argv[2]) / "native"
+socket_root.mkdir()
+body = body.replace("/run/volparossa/native", str(socket_root))
+script = "native_roles_off_idle() {" + body + "\n}\n" + '''
+systemctl() {
+    case $2 in
+        --property=ActiveState) printf '%s\\n' "$active" ;;
+        --property=Result) printf '%s\\n' "$result" ;;
+        --property=MainPID) printf '%s\\n' "$pid" ;;
+        --property=ExecMainCode) printf '%s\\n' "$code" ;;
+        --property=ExecMainStatus) printf '%s\\n' "$status" ;;
+        *) return 99 ;;
+    esac
+}
+native_roles_off_idle
+'''
+valid = dict(active="inactive", result="success", pid="0", code="1", status="0")
+def accepted(change):
+    return subprocess.run(["sh", "-c", script], env={**os.environ, **valid, **change}, check=False).returncode == 0
+assert accepted({})
+for change in (dict(active="active"), dict(result="exit-code"), dict(pid="42"), dict(code="0"), dict(status="203")):
+    assert not accepted(change), change
+for name in ("mpquic.sock", "mpquic.sock.exit"):
+    path = socket_root / name
+    path.touch()
+    assert not accepted({}), name
+    path.unlink()
+assert "for unit in $active_services; do wait_active" in source
+assert 'native_mpquic_running: false, native_mpquic_roles_off_idle: true' in source
+PY
 
 mkdir "$temporary/bin"
 log=$temporary/commands

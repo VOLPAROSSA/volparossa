@@ -1,0 +1,9 @@
+# Opt-in fragment, not a complete participation configuration.
+# Requires the source-built packaged private worker, libunbound8 and dns-root-data.
+# Missing dependencies, DNSSEC bogus and process failures never use OS fallback.
+# Full reciprocal-role deployment proof is still required; default remains system.
+dns_cache:
+  enabled: true
+  upstream: null
+  fallback:
+    mode: unbound_private

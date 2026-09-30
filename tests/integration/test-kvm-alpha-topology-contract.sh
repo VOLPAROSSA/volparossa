@@ -14,6 +14,9 @@ WORKFLOW=$HERE/../../.github/workflows/alpha-topology.yml
 RECIPROCITY=$HERE/reciprocity-smoke.sh
 RECIPROCITY_PY=$HERE/reciprocity-smoke.py
 
+# Pure decisions and preview wiring only: never run a runner network probe here.
+python3 -B "$HERE/test-qemu-outer-uplink.py"
+
 # This pressure fixture requires actual nonshared mounts; PrivateMounts alone
 # intentionally keeps systemd's inbound/slave propagation. Other fixtures do not.
 grep -F 'jobs_mount_flags=shared' "$HERE/agent-jobs-smoke.sh" >/dev/null
@@ -25,6 +28,7 @@ for script in "$GUEST" "$HOST"; do
     sh -n "$script"
     "$script" --preview | grep -F 'PREVIEW ONLY:' >/dev/null
     "$script" --preview --scenario reciprocity | grep -Fi 'recipro' >/dev/null
+    "$script" --preview --scenario reciprocity-private-dns | grep -Fi 'Reciprocity-private-dns' >/dev/null
     "$script" --preview --scenario local-link | grep -Fi 'local-link' >/dev/null
     "$script" --preview --scenario mixed-link | grep -Fi 'mixed-link' >/dev/null
     "$script" --preview --scenario mpquic-growth | grep -Fi 'MPQUIC' >/dev/null
@@ -1206,3 +1210,27 @@ grep -F 'Require actual native provider discovery and protected fetch' "$WORKFLO
 python3 -B "$HERE/test-content-provider-smoke.py"
 python3 -B "$HERE/test-content-provider-https-smoke.py"
 printf '%s\n' 'KVM alpha, reciprocity, local-link, mixed-link, sharing, wifi-link and uplink-link topology static contract passed'
+
+# The private resolver variant is additive: it cannot stand in for the four
+# original same-daemon routes or inherit a standalone DNS preflight verdict.
+python3 -B - "$GUEST" "$HOST" "$WORKFLOW" <<'RECIPROCAL_PRIVATE_DNS_CONTRACT'
+from pathlib import Path
+import sys
+
+guest, host, workflow = (Path(name).read_text() for name in sys.argv[1:])
+assert 'reciprocity-private-dns) scenario=reciprocity; reciprocal_private_dns=yes;' in guest
+for hook in ("start", "stop", "config", "finalize_report"):
+    assert f"reciprocity_private_dns_{hook}" in guest
+assert guest.index('reciprocity_extend_network\n    [ "$reciprocal_private_dns"') < guest.index("TOPOLOGY_READY=true")
+assert guest.index('reciprocity_private_dns_stop || original_status=1') < guest.index("        reciprocity_stop_processes")
+assert guest.index('reciprocity_finalize_report "$original_status"') < guest.index('reciprocity_private_dns_finalize_report "$original_status"')
+assert '[ "$scenario" = dns-cache ] || [ "$reciprocal_private_dns" = yes ]' in guest
+assert 'case $node in\n                client|relay0|relay2|exit) printf' in guest
+assert '[ "$scenario" != reciprocity-private-dns ] || set -- --provision-only' in host
+assert 'private-unbound-vm-guest.sh --execute "$expected_commit" "$@"' in host
+assert 'reciprocity-private-dns-[a-z0-9-]+\\.json' in host
+assert 'test-reciprocity-private-dns.py' in workflow
+assert 'reciprocity-private-dns.py check "$report" "$GITHUB_SHA"' in workflow
+assert "env.VOLPAROSSA_ALPHA_SCENARIO == 'reciprocity' || env.VOLPAROSSA_ALPHA_SCENARIO == 'reciprocity-private-dns'" in workflow
+print("reciprocal private DNS wrapper contract passed (static only)")
+RECIPROCAL_PRIVATE_DNS_CONTRACT
