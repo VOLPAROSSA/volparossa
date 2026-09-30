@@ -36,6 +36,30 @@ document stage, typed error/RPC category, local cleanup and receipt-validation s
 It exports no prompts, keys, paths or raw errors and does not weaken admission quarantine.
 Three scoped Rust and six fixture tests pass; the next source-exact trial remains pending.
 
+The exact [run `36740238962`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36740238962)
+on `755799dc08270a226044f034bf8ee420f54ad848` again reached the authorized first task.
+Its coordinator returned `Ok`, but retained **six original handles and only five terminal
+receipts**; admission correctly remained `cleanup_unconfirmed`. That diagnostic did not
+record `execution_complete`, so `execution_ok=true` is not proof of a completed answer.
+All 18 originals remain failed (ZIP SHA-256
+`646ea870a53cb759b7cc51814b4685bfefca7d1d5c4402e974a504bd5cf3e58d`); full fixture cleanup
+and identical host snapshots passed. Code inspection found the public backend only scanned
+saved receipts after return: it did not reconcile an abandoned/uncertain original attempt,
+even when a newer attempt had advanced the workflow.
+
+The recovery candidate now polls every exact retained handle lacking a terminal receipt,
+requests cancellation only for an actually running job, and waits for a terminal broker
+observation within one bounded 90-second cleanup budget. Actual correlated observations
+are persisted separately; original handles, workflow results and lease times remain unchanged.
+Missing jobs, unavailable peers, wrong bindings, uncertain final handoffs, Running replies
+and expiry alone never count as terminal evidence. The original all-handles gate still
+decides quarantine. Closed version-2 diagnostics distinguish document/answer completion
+from `Result::Ok` and record reconciliation counts/categories without identities or text.
+The original artifact cannot reveal why its sixth receipt was missing; this fixes the
+demonstrable absent recovery path, not an inferred historical transport cause. Compilation,
+six public-document checks (including three real local framed reconciliation tests), five
+public-service checks and six fixture checks pass. The corrected live trial remains pending.
+
 Automatic authority rounds and the four-job assessment cycle are integrated by
 [PR #163](https://github.com/VOLPAROSSA/volparossa/pull/163), normal merge `f4e6aa79`,
 after Quality and all CodeQL analyses passed on `c4060377`. This also prevents local

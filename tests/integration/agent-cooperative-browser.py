@@ -215,9 +215,11 @@ def closed_status(path):
 
 
 def check_execution_diagnostic(value):
-    require(type(value) is dict and set(value) == {'version', 'phase', 'execution_ok', 'error_class',
-        'rpc', 'local_cleanup_confirmed', 'receipts', 'cleanup_confirmed'}
-        and type(value['version']) is int and value['version'] == 1
+    require(type(value) is dict and type(value.get('version')) is int and value['version'] in (1, 2),
+            'invalid closed coordinator version')
+    extra = {'execution_complete', 'answer_complete', 'reconciliation'} if value['version'] == 2 else set()
+    require(set(value) == {'version', 'phase', 'execution_ok', 'error_class',
+        'rpc', 'local_cleanup_confirmed', 'receipts', 'cleanup_confirmed'} | extra
         and value['phase'] in EXECUTION_PHASES and value['error_class'] in EXECUTION_ERRORS
         and all(type(value[name]) is bool for name in ('execution_ok', 'local_cleanup_confirmed', 'cleanup_confirmed')),
         'invalid closed coordinator diagnostic')
@@ -229,8 +231,9 @@ def check_execution_diagnostic(value):
         and receipt['terminal'] <= receipt['handles']
         and value['cleanup_confirmed'] == (value['local_cleanup_confirmed'] and receipt['confirmed']),
         'invalid closed receipt diagnostic')
-    rpc = value['rpc']
-    if rpc is not None:
+    def check_rpc(rpc, error):
+        if rpc is None:
+            return
         require(type(rpc) is dict and rpc.get('category') in
             ('exchange_unconfirmed', 'broker_rejected', 'receipt_validation')
             and rpc.get('phase') in RPC_PHASES, 'invalid closed RPC diagnostic')
@@ -238,7 +241,20 @@ def check_execution_diagnostic(value):
         if rpc['category'] == 'broker_rejected':
             expected.add('code')
             require(rpc.get('code') in RPC_ERRORS, 'invalid closed broker code')
-        require(set(rpc) == expected and value['error_class'] == 'peer_rpc', 'invalid closed RPC fields')
+        require(set(rpc) == expected and error == 'peer_rpc', 'invalid closed RPC fields')
+    check_rpc(value['rpc'], value['error_class'])
+    if value['version'] == 2:
+        require(all(value[name] is None or type(value[name]) is bool for name in ('execution_complete', 'answer_complete'))
+                and (value['answer_complete'] is not True or value['execution_complete'] is True),
+                'invalid document completion facts')
+        recovery = value['reconciliation']
+        require(type(recovery) is dict and set(recovery) == {'attempted', 'terminal_persisted', 'deadline_reached', 'error', 'rpc'}
+                and all(type(recovery[name]) is int and 0 <= recovery[name] <= 16384
+                        for name in ('attempted', 'terminal_persisted'))
+                and recovery['terminal_persisted'] <= recovery['attempted']
+                and type(recovery['deadline_reached']) is bool and recovery['error'] in EXECUTION_ERRORS,
+                'invalid reconciliation observations')
+        check_rpc(recovery['rpc'], recovery['error'])
     return value
 
 

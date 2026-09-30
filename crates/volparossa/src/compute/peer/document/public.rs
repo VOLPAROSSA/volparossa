@@ -1,6 +1,7 @@
 //! Fixed operator configuration for the real public-document browser backend.
 
 mod diagnostic;
+mod reconciliation;
 
 use anyhow::{Context as _, Result, ensure};
 use clap::Args;
@@ -145,8 +146,18 @@ pub(in crate::compute) async fn execute(
         super::report_with_phase(&options, socket, cancelled, &mut phase).await
     }
     .await;
+    let execution_complete = result
+        .as_ref()
+        .ok()
+        .and_then(|value| value["execution_complete"].as_bool());
+    let answer_complete = result
+        .as_ref()
+        .ok()
+        .and_then(|value| value["answer_complete"].as_bool());
     // Failed/ambiguous execution must never free the admission slot just because the
-    // coordinator future returned. Recheck every original handle, not only latest rows.
+    // coordinator future returned. Reconcile every original handle, including abandoned
+    // retries, without creating or renewing work; then recheck durable terminal receipts.
+    let reconciliation = reconciliation::run(root, socket).await;
     let mut receipts = ReceiptObservation::default();
     let remote_cleanup = terminal_receipts(root, &mut receipts).unwrap_or_else(|error| {
         receipts.error = diagnostic::classify(&error);
@@ -172,8 +183,13 @@ pub(in crate::compute) async fn execute(
         phase = Phase::Complete;
         Ok(compact)
     });
-    let observation =
+    let mut observation =
         diagnostic::report(phase, &result, local_cleanup, &receipts, cleanup_confirmed);
+    observation["version"] = 2.into();
+    observation["execution_complete"] = execution_complete.into();
+    observation["answer_complete"] = answer_complete.into();
+    observation["reconciliation"] =
+        serde_json::to_value(&reconciliation).expect("closed reconciliation fields");
     // Diagnostic write failure does not change execution/cleanup truth or reopen a gate.
     // The fixture reports this file as absent/invalid, never exports raw coordinator state.
     let _ = task::write_bytes(
@@ -276,6 +292,20 @@ fn retained_paths(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn terminal_receipts(root: &Path, observed: &mut ReceiptObservation) -> Result<bool> {
+    let (handles, terminal) = scan_receipts(root, observed)?;
+    let confirmed = handles.keys().all(|id| terminal.contains(id));
+    observed.phase = if confirmed {
+        ReceiptPhase::Complete
+    } else {
+        ReceiptPhase::MissingTerminal
+    };
+    Ok(confirmed)
+}
+
+fn scan_receipts(
+    root: &Path,
+    observed: &mut ReceiptObservation,
+) -> Result<(BTreeMap<String, super::super::JobHandle>, BTreeSet<String>)> {
     let paths = retained_paths(root)?;
     let mut handles = BTreeMap::new();
     for path in &paths {
@@ -335,13 +365,7 @@ fn terminal_receipts(root: &Path, observed: &mut ReceiptObservation) -> Result<b
             observed.terminal = terminal.len();
         }
     }
-    let confirmed = handles.keys().all(|id| terminal.contains(id));
-    observed.phase = if confirmed {
-        ReceiptPhase::Complete
-    } else {
-        ReceiptPhase::MissingTerminal
-    };
-    Ok(confirmed)
+    Ok((handles, terminal))
 }
 
 #[cfg(test)]

@@ -88,6 +88,24 @@ class CooperativeBrowserProof(unittest.TestCase):
         peer = dict(value, phase='peer_execution', error_class='peer_rpc',
                     rpc=dict(category='broker_rejected', phase='submit', code='busy'))
         CHECK['check_execution_diagnostic'](peer)
+        recovered = dict(value, version=2, phase='complete', execution_ok=True, execution_complete=False,
+            answer_complete=False, reconciliation=dict(attempted=1, terminal_persisted=0, deadline_reached=True,
+                error='peer_rpc', rpc=dict(category='exchange_unconfirmed', phase='poll')))
+        CHECK['check_execution_diagnostic'](recovered)
+        # A returned Result::Ok is not complete inference and expiry is not cleanup.
+        self.assertTrue(recovered['execution_ok'])
+        self.assertFalse(recovered['execution_complete'])
+        self.assertFalse(recovered['cleanup_confirmed'])
+        for mutate in (
+            lambda v: v['reconciliation'].update(raw='PRIVATE_PROMPT'),
+            lambda v: v['reconciliation'].update(terminal_persisted=2),
+            lambda v: v['reconciliation']['rpc'].update(path='/private/secret'),
+            lambda v: v.update(answer_complete=True),
+        ):
+            bad = copy.deepcopy(recovered)
+            mutate(bad)
+            with self.assertRaises(ValueError):
+                CHECK['check_execution_diagnostic'](bad)
 
     def test_guest_account_home_is_created_only_when_absent_and_removed_only_when_owned_and_empty(self):
         with tempfile.TemporaryDirectory() as temporary:
