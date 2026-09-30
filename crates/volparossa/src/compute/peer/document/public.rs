@@ -270,7 +270,9 @@ fn terminal_receipts(root: &Path) -> Result<bool> {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if !name.starts_with("receipt-") || !name.ends_with(".json") {
+        if !name.starts_with("receipt-")
+            || path.extension().is_none_or(|extension| extension != "json")
+        {
             continue;
         }
         let receipt: Receipt =

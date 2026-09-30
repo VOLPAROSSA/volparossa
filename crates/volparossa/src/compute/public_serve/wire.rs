@@ -50,7 +50,7 @@ impl Request {
         match &self.operation {
             Operation::Capabilities {} => {}
             Operation::Cancel { task_id } => {
-                ensure!(valid_id(task_id), "public_ipc_invalid_request")
+                ensure!(valid_id(task_id), "public_ipc_invalid_request");
             }
             Operation::Submit {
                 question,

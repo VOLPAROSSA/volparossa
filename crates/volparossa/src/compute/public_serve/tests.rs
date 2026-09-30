@@ -9,7 +9,9 @@ const SECOND: &str = "02020202020202020202020202020202";
 const THIRD: &str = "03030303030303030303030303030303";
 
 fn request(id: &str, operation: Value) -> Value {
-    json!({"version":1,"id":id,"operation":operation})
+    let mut request = json!({"version":1,"id":id});
+    request["operation"] = operation;
+    request
 }
 
 fn submit() -> Value {

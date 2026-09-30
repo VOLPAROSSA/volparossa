@@ -1,5 +1,5 @@
 //! Same-owner public cooperation through the real document/synthesis coordinator.
-//! Unlike private_serve, explicitly authorized inputs are published to selected peers.
+//! Unlike `private_serve`, explicitly authorized inputs are published to selected peers.
 
 #[cfg(test)]
 mod tests;
