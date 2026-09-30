@@ -595,20 +595,27 @@ async fn split_import() {
     assert_eq!(fs::read(root.join(&token)).unwrap(), original_token);
     server.abort();
     let _ = server.await;
+    confirm_import_after_restart(&fixture, &args, id, payload).await;
+}
+
+async fn confirm_import_after_restart(fixture: &Fixture, args: &[&str], id: &str, payload: &[u8]) {
+    let root = fixture.directory.path();
+    let directory = root.join("handoff").join(id);
     fixture.fault.store(0, Ordering::SeqCst);
     let restarted = fixture.server(true);
-    let confirmed = fixture.success(&args).await;
+    let confirmed = fixture.success(args).await;
     assert_eq!(confirmed["acknowledged_providers"], 2);
     assert_eq!(confirmed["consumer_import_attested"], true);
     assert_eq!(confirmed["application_import_proven"], false);
     assert_eq!(confirmed["local_handoff_retained"], true);
     assert!(directory.join("confirmed.json").is_file());
     assert_eq!(
-        fixture.success(&args).await["acknowledged_providers"],
+        fixture.success(args).await["acknowledged_providers"],
         2,
         "exact confirmation retry remains idempotent"
     );
-    fetch_args[4] = "after-confirmation";
+    let mut fetch_args = Fixture::receive_args("after-confirmation", "recipient");
+    fetch_args[0] = "fetch";
     assert_eq!(fixture.success(&fetch_args).await["messages_fetched"], 0);
     assert_eq!(fs::read(root.join("consumer-imported")).unwrap(), payload);
     restarted.abort();

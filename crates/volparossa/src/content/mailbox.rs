@@ -695,6 +695,11 @@ mod tests {
                 .is_ok()
             );
         }
+    }
+
+    #[test]
+    fn mailbox_commands_reject_missing_send_input_and_import_digest() {
+        let key = "01".repeat(32);
         assert!(
             crate::Cli::try_parse_from([
                 "volparossa",
