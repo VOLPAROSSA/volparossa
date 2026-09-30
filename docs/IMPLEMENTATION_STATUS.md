@@ -212,6 +212,27 @@ automatic contribution resizing or measured physical overhead.
   2 GB-to-1 GB handoff and pending drain.
 - [ ] Native Signal encrypted snapshot export/import, including its attachments and recovery keys.
 
+The `signal-backup` disposable KVM scenario is now wired to the **actual native Signal
+backup regression**, with chat integration pinned to `c897667d76bea8140f0bc5f373404e43cbd54552`
+and upstream Signal Desktop `ef3872cb0249ec939d8aff857568a0e87a6b5075`. It explicitly provisions
+the locked Node/pnpm dependencies and audited Electron/RingRTC/native inputs in the guest,
+compiles the real candidate, and runs one exact test under Xvfb with `--forbid-pending`
+and `--fail-zero`. That test exports/encrypts a native snapshot, removes its original local
+ciphertext, restores it from two real VOLPAROSSA storage providers, relinks/imports it,
+and checks messages, attachment hashes and screenshots using Signal's own assertions.
+Two 64 MiB fixture stores are capacity bounds for this test, not product storage limits.
+
+The app runs as a capless UID separate from the agent in the Client namespace, with only
+IPv4/IPv6 loopback IP access; real storage operations use the protected daemon socket and
+selected two-leg MPTCP routes. Bubblewrap scopes writable profile/backup data, while the
+pinned Playwright Electron launcher itself disables Chromium sandboxing: no Electron
+sandbox claim is made. Only bounded structural receipts and drained packet counters may
+leave the guest; private profiles, recovery keys, plaintext snapshots and logs are removed.
+The upstream local mock server still provides registration/relink facilities. This is
+neither server-free Signal messaging nor independent-hardware/contribution-accounting proof.
+**The runtime milestone remains unchecked until its exact-source KVM run passes**; pure
+receipt tests and successful preparatory compilation alone do not prove native restore.
+
 ## Earlier milestone evidence
 
 The completed development milestone is integrated into `main` by
