@@ -765,7 +765,8 @@ jobs:
             jq -r '
               "package lifecycle: \(.overall)",
               "package version: \(.package.version)",
-              "installed services started: \(.service_start.helper and .service_start.native_mpquic and .service_start.agent)",
+              "installed helper and agent started: \(.service_start.helper and .service_start.agent)",
+              "roles-off native launcher completed without workers: \(.service_start.native_mpquic_roles_off_idle)",
               "upgrade restarted active processes: \(.upgrade.active_processes_restarted)",
               "uninstall preserved identity: \(.uninstall.identity_preserved)",
               "package test networking unchanged: \(.network_state_unchanged)"
@@ -1367,8 +1368,12 @@ jobs:
             "$VOLPAROSSA_ALPHA_OUTPUT/private-unbound-proof.json" "$GITHUB_SHA"
           python3 -B tests/packaging/private-dns-package-proof.py report \
             "$VOLPAROSSA_ALPHA_OUTPUT/private-unbound-package.json" "$GITHUB_SHA"
-          jq -e '.overall == "PASS" and .network_state_unchanged == true and
+          jq -e '.schema_version == 2 and .overall == "PASS" and .network_state_unchanged == true and
             .fresh_install.services_enabled == false and .service_start.live_status == true and
+            .service_start.helper == true and .service_start.agent == true and
+            .service_start.native_mpquic_running == false and .service_start.native_mpquic_roles_off_idle == true and
+            .upgrade.native_mpquic_roles_off_idle == true and
+            .upgrade.active_services == ["volparossa-helper.service", "volparossa-agent.service"] and
             .upgrade.active_processes_restarted == true and .uninstall.active_services_stopped == true' \
             "$VOLPAROSSA_ALPHA_OUTPUT/private-unbound-package-lifecycle.json" >/dev/null
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
@@ -1870,7 +1875,7 @@ jobs:
           if test "$VOLPAROSSA_ALPHA_SCENARIO" != alpha; then exit 0; fi
           test "$(cat "$VOLPAROSSA_ALPHA_OUTPUT/package/guest-exit-status")" = 0
           jq -e '
-            .schema_version == 1 and
+            .schema_version == 2 and
             .environment == {
               "debian_version":"13",
               "architecture":"amd64",
@@ -1880,11 +1885,14 @@ jobs:
             .fresh_install.filesystem_contract == true and
             .doctor_before_upgrade == true and
             .service_start.helper == true and
-            .service_start.native_mpquic == true and
+            .service_start.native_mpquic_running == false and
+            .service_start.native_mpquic_roles_off_idle == true and
             .service_start.agent == true and
             .service_start.live_status == true and
             .upgrade.maintainer_path_exercised == true and
             .upgrade.active_processes_restarted == true and
+            .upgrade.active_services == ["volparossa-helper.service", "volparossa-agent.service"] and
+            .upgrade.native_mpquic_roles_off_idle == true and
             .upgrade.identity_preserved == true and
             .doctor_after_upgrade == true and
             .uninstall.active_services_stopped == true and

@@ -268,6 +268,28 @@ wait_active() {
     return 1
 }
 
+native_roles_off_idle() {
+    native_unit=volparossa-mpquic.service
+    [ "$(systemctl show --property=ActiveState --value "$native_unit")" = inactive ] \
+        && [ "$(systemctl show --property=Result --value "$native_unit")" = success ] \
+        && [ "$(systemctl show --property=MainPID --value "$native_unit")" = 0 ] \
+        && [ "$(systemctl show --property=ExecMainCode --value "$native_unit")" = 1 ] \
+        && [ "$(systemctl show --property=ExecMainStatus --value "$native_unit")" = 0 ] \
+        && [ ! -e /run/volparossa/native/mpquic.sock ] \
+        && [ ! -e /run/volparossa/native/mpquic.sock.exit ]
+}
+
+wait_native_roles_off() {
+    attempt=0
+    while [ "$attempt" -lt 100 ]; do
+        if native_roles_off_idle; then return 0; fi
+        sleep 0.1
+        attempt=$((attempt + 1))
+    done
+    systemctl status --no-pager volparossa-mpquic.service >&2 || true
+    return 1
+}
+
 agent_control_socket=/run/volparossa/control/agent.sock
 wait_agent_control_socket() {
     attempt=0
@@ -292,7 +314,11 @@ wait_agent_control_socket() {
 }
 
 services='volparossa-helper.service volparossa-mpquic.service volparossa-agent.service'
-for unit in $services; do wait_active "$unit"; done
+active_services='volparossa-helper.service volparossa-agent.service'
+# The installed default keeps all roles off. Its native launcher must execute and exit
+# successfully without a worker/socket; requiring a persistent native PID races that exit.
+for unit in $active_services; do wait_active "$unit"; done
+wait_native_roles_off
 wait_agent_control_socket
 
 if [ -n "$private_dns_probe" ]; then
@@ -303,10 +329,11 @@ if [ -n "$private_dns_probe" ]; then
     # The additional proof restores the original roles-off agent and config;
     # the ordinary upgrade/removal assertions below remain unchanged.
     wait_agent_control_socket
+    wait_native_roles_off
 fi
 
 before_pids=
-for unit in $services; do
+for unit in $active_services; do
     pid=$(systemctl show --property=MainPID --value "$unit")
     case $pid in ''|0|*[!0-9]*) exit 1 ;; esac
     before_pids="$before_pids $unit:$pid"
@@ -315,7 +342,7 @@ done
 env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
     "$package_path" >/dev/null
 test "$(dpkg-query -W -f='${Version}' volparossa)" = "$package_version"
-for unit in $services; do
+for unit in $active_services; do
     wait_active "$unit"
     old_pid=$(printf '%s\n' "$before_pids" | awk -v unit="$unit" '
         { for (i = 1; i <= NF; i++) if ($i ~ ("^" unit ":")) { sub("^[^:]*:", "", $i); print $i } }
@@ -324,6 +351,7 @@ for unit in $services; do
     case $new_pid in ''|0|*[!0-9]*) exit 1 ;; esac
     test "$new_pid" != "$old_pid"
 done
+wait_native_roles_off
 test "$(sha256sum /var/lib/volparossa/identity.key | awk '{ print $1 }')" \
     = "$identity_before"
 wait_agent_control_socket
@@ -357,13 +385,15 @@ jq -n \
     --arg package_sha256 "$package_sha256" \
     --arg package_version "$package_version" \
     '{
-        schema_version: 1,
+        schema_version: 2,
         environment: {debian_version: "13", architecture: "amd64", virtualization: "kvm"},
         package: {version: $package_version, sha256: $package_sha256},
         fresh_install: {services_enabled: false, filesystem_contract: true},
         doctor_before_upgrade: true,
-        service_start: {helper: true, native_mpquic: true, agent: true, live_status: true},
-        upgrade: {maintainer_path_exercised: true, active_processes_restarted: true, identity_preserved: true},
+        service_start: {helper: true, native_mpquic_running: false, native_mpquic_roles_off_idle: true, agent: true, live_status: true},
+        upgrade: {maintainer_path_exercised: true, active_processes_restarted: true,
+          active_services: ["volparossa-helper.service", "volparossa-agent.service"],
+          native_mpquic_roles_off_idle: true, identity_preserved: true},
         doctor_after_upgrade: true,
         uninstall: {active_services_stopped: true, package_files_absent: true, identity_preserved: true, config_preserved: true},
         network_state_unchanged: true,

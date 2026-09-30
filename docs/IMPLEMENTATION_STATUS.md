@@ -3696,6 +3696,18 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   under a private root-owned `/usr/libexec` directory, keeps its runtime files under `/run`,
   and checks mount flags plus actual agent-user access without relaxing the shipped sandbox.
   Ten focused package-proof checks pass; the complete live package lifecycle remains pending.
+  The next run [`36713955757` on `3e5c8051`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36713955757)
+  passes the installed DNS startup/sandbox probe and all five independent native cases.
+  Actual sandbox resolution takes 504 ms, with independent DNSSEC proof, observed/reaped
+  same-UID worker and local reuse; source binding and configuration/unit restoration pass.
+  The full run remains failed: the package lifecycle incorrectly requires a persistent
+  MPQUIC process in roles-off mode, and the separate C05 public-wire collector rejects
+  insufficient original TTL before application queries. Lifecycle report v2 now checks
+  active helper/agent upgrade lifetimes and explicitly successful inert native state; the
+  collector boundedly re-fetches only expiring fixed questions without changing its 60-second
+  validity gate or renewing old bytes. Seven recording, ten package-DNS, six native-proof
+  checks and the nonmutating lifecycle contract pass. A new live run is still required;
+  all 83 originals, failure boundaries and unchanged host-state evidence remain retained.
 
 The positive DNSSEC cache is now composed into the normal agent: the same bounded RAM resolver
 serves protected DNS, TCP resolution, general UDP and browser-QUIC destination pinning. Its peer

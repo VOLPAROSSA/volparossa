@@ -2,7 +2,8 @@
 
 The development default is now the bounded private Unbound worker. This default/package
 integration remains a candidate pending complete package acceptance. The source-exact
-reciprocal-role route now passes; the installation-sandbox probe does not yet pass.
+reciprocal-role route and installation-sandbox resolver probe now pass; the complete
+install/upgrade/remove lifecycle and refreshed C05 run are still pending.
 The earlier native and cache results below retain their narrower scopes. No host DNS,
 routes, firewall, resolver service or trust anchors are changed automatically.
 
@@ -441,6 +442,44 @@ access before starting the unit, without invoking the probe outside its sandbox.
 owned temporary directories are removed after the unit stops. No shipped service, sandbox,
 production executable or resolver behavior is changed. Ten focused package-proof checks
 pass; live package acceptance remains pending.
+
+The [run on `3e5c8051`, `36713955757`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36713955757)
+now **passes the package DNS probe and all five native cases**, checked against their
+unchanged exact-source validators. The probe really executes under the inherited agent
+sandbox: 857 ms for launch/observation, 504 ms for the positive independently validated
+answer, same-agent-UID worker observation/reaping and local cache reuse. The current
+runtime mount is `noexec` and the `/usr/libexec` staging mount is executable; source hashes
+and actual agent-user read/execute access are retained. Those current mount observations
+do not invent missing historical mount evidence. Source binding, roles-off startup with
+worker hidden, effective-Exit missing-worker rejection, restored configuration and unchanged
+installed unit all pass. The native signed/unsigned/bogus/timeout/cancel cases separately
+pass; the standalone signed lookup takes 1,217 ms.
+
+The full run remains **failed** in two fixture boundaries, not relabelled as package/C05
+acceptance. The ordinary package lifecycle still expects a persistent native MPQUIC PID
+although the roles-off launcher correctly exits with success; its build log records that
+inert exit, and no complete package-lifecycle report was produced. The corrected lifecycle
+version 2 requires the helper and agent to stay active and restart on actual package upgrade,
+while the native launcher must have exited successfully with zero PID and no native sockets.
+It reports `native_mpquic_running: false` explicitly. Existing identity, removal and network
+state checks remain mandatory; no role is enabled just to satisfy a test.
+
+The separate C05 topology stops at `dns-cache-prepare` before any protected application
+query: the fixed public DoH collector reports insufficient remaining original TTL/signature
+validity for its unchanged 60-second replay margin. The artifact does not identify which
+record was shortest. The collector now allows at most three rounds/21 public-record fetches
+within 120 seconds, waiting for a short-lived original record to expire before fetching
+only the fixed questions that lack sufficient remaining validity. Existing still-fresh wire
+records retain their original receive time, TTL and signature; no expiry is extended, no new
+resolver is trusted, and cryptographic validation remains the production resolver's job.
+Seven socket-free recording tests, ten package-DNS checks, six native-proof checks and the
+nonmutating package lifecycle contract pass. These checks are not the pending live lifecycle
+and protected-query proof.
+
+All 83 original files remain unchanged, ZIP SHA-256
+`aa98c974133e21fb4a30f6036ee2452a3d864eb1d9e000d500e2161dabf23e0b`.
+Disposable topology cleanup completes with zero owned objects and equal host-state SHA-256
+`bb473ef29464a9fca6dcedb2a9187be239956aa1ac8e1ac46ed5a8a1050b7853`.
 
 ### Bounded protected DNS connection reuse
 
