@@ -62,6 +62,39 @@ demonstrable absent recovery path, not an inferred historical transport cause. C
 six public-document checks (including three real local framed reconciliation tests), five
 public-service checks and six fixture checks pass. The corrected live trial remains pending.
 
+The following exact [run `36746682885`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36746682885)
+on `3f47bbef16bc78ebf45e5c6e98102e08e6463bb9` still fails the first task. It retains
+six original handles and four terminal receipts; reconciliation attempts both missing
+handles, but each Poll ends `exchange_unconfirmed`, without exhausting its cleanup
+deadline. Both document and answer completion are explicitly false. Full fixture cleanup
+and identical host snapshots pass. This evidence does not identify the failing RPC stage.
+
+Source inspection now establishes a concrete independent transport defect: the helper's
+64-flow ledger counted every flow issued during a route's lifetime, even after its socket
+closed. Its worker path manager already reaped closed flows, but the parent ledger never
+released a slot. The candidate adds descriptor-bound `RetireMptcpFlow`: verify the issued
+kernel socket and context/generation, shut down that exact socket, receive the worker's
+exact ownership-release ACK, then remove the parent's entry. The 64-live-flow limit stays;
+retired handles cannot authorize later subflow mutation. A context-local monotonic prefix
+and existing random capability bytes prevent handle reissue without accumulating retired
+tombstones. The separate 1,024-entry transport-acquire replay bound is unchanged.
+The agent owns pending cleanup and joins it before acquiring another flow or shutting down
+the route; cancellation does not detach a cleanup task. Targeted source tests cover ledger
+slot reuse beyond 64, its simultaneous limit, stale/cross-generation capabilities and
+worker identity binding. A lost retirement ACK remains recoverable after replay-cache
+expiry: an authenticated, absent capability returns only `NotFound`, with no socket or
+worker mutation and no payload-delivery claim. Cancellation or an unconfirmed response
+during socket acquisition marks the route unusable; the route owner destroys it on error
+or next use, while existing hard-expiry cleanup still owns abandoned contexts.
+The agent's four focused ownership/cancellation tests and five helper ledger/absence tests
+pass. A corrected live trial is still pending; the earlier artifacts alone do not prove
+that this defect caused those failures.
+
+The fixture also exports only counts from its allowlisted existing `COMPUTE_RPC_*_FAILED`
+events, with an explicit baseline/ring-coverage indication. Full event records remain
+private and are not collected. Seven focused pure fixture checks, including closed-export
+and invalid-data controls, pass; they do not establish real browser/peer completion.
+
 ### Storage layer and mailbox import confirmation
 
 **Private storage is now documented as a separate fourth layer**, with actual replicated-byte

@@ -90,7 +90,14 @@ agent_cooperative_browser_run() {
     cooperative_browser_status=0
     wait "$jobs_batch_pid" || cooperative_browser_status=$?
     jobs_batch_pid=
+    # Observe existing fixed stage codes before services/private state are retired.
+    # Only closed counts leave the guest; this complete bounded ring is not an export.
+    cooperative_rpc_query_status=0
+    "$binary_directory/volparossa" --control-socket "$WORK/runtime-client/control/agent.sock" \
+        logs --limit 1000 >"$WORK/agent-cooperative-browser-rpc-events.private" \
+        || cooperative_rpc_query_status=$?
     python3 -B "$cooperative_script" diagnostic "$WORK" "$cooperative_browser_status" "$cooperative_observer_status" \
+        "$provider_baseline_ms" "$cooperative_rpc_query_status" \
         || fail COOPERATIVE_BROWSER_DIAGNOSTIC_FAILED
     [ "$cooperative_observer_status" -eq 0 ] || fail COOPERATIVE_BROWSER_PEER_PROOF_FAILED
     [ "$cooperative_browser_status" -eq 0 ] || fail COOPERATIVE_BROWSER_PANEL_FAILED

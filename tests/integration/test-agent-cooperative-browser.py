@@ -5,6 +5,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import re
 import runpy
 import subprocess
 import tarfile
@@ -57,6 +58,42 @@ def fixture():
 
 
 class CooperativeBrowserProof(unittest.TestCase):
+    def test_rpc_stage_counts_are_allowlisted_bounded_and_keep_ring_coverage_explicit(self):
+        source = (HERE.parents[1] / 'crates/volparossa-agent/src/content/compute_remote.rs').read_text()
+        self.assertEqual(CHECK['RPC_EVENT_CODES'], set(re.findall(r'COMPUTE_RPC_[A-Z_]+_FAILED', source)))
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'rpc-events.private'
+            parse = lambda: CHECK['closed_rpc_events'](path, 100, 0)
+            self.assertEqual(parse(), dict(state='absent'))
+            def event(stamp, code):
+                return f'{stamp}\tlevel=1\tevent={code}\tsession={"a" * 64}\tpath=2\n'
+            text = event(99, 'COMPUTE_RPC_ROUTE_FLOW_FAILED') + event(101, 'COMPUTE_RPC_ROUTE_FLOW_FAILED')
+            text += event(102, 'PRIVATE_UNKNOWN_CODE') + event(103, 'COMPUTE_RPC_ROUTE_SETUP_FAILED')
+            path.write_text(text)
+            path.chmod(0o600)
+            value = parse()
+            self.assertEqual(value['state'], 'valid')
+            self.assertTrue(value['window_covers_baseline'])
+            self.assertEqual(value['records'], 4)
+            self.assertEqual(value['matching_failures'], 2)
+            self.assertEqual(value['counts']['COMPUTE_RPC_ROUTE_FLOW_FAILED'], 1)
+            self.assertEqual(value['counts']['COMPUTE_RPC_ROUTE_SETUP_FAILED'], 1)
+            self.assertNotIn('PRIVATE', json.dumps(value))
+            self.assertNotIn('a' * 64, json.dumps(value))
+            path.write_text(event(101, 'COMPUTE_RPC_ROUTE_FLOW_FAILED'))
+            self.assertFalse(parse()['window_covers_baseline'])
+            self.assertEqual(CHECK['closed_rpc_events'](path, 100, 1), dict(state='query_failed'))
+            for invalid in ('PRIVATE_DATA', event(101, 'COMPUTE_RPC_ROUTE_FLOW_FAILED') + event(100, 'COMPUTE_RPC_ROUTE_FLOW_FAILED'),
+                            event(101, 'COMPUTE_RPC_ROUTE_FLOW_FAILED') * 1001, 'x' * 262145):
+                path.write_text(invalid)
+                self.assertEqual(parse(), dict(state='invalid'))
+            path.write_text(text)
+            path.chmod(0o644)
+            self.assertEqual(parse(), dict(state='invalid'))
+        shell = (HERE / 'agent-cooperative-browser.sh').read_text()
+        self.assertLess(shell.index('logs --limit 1000'), shell.index('diagnostic "$WORK"'))
+        self.assertNotIn('agent-cooperative-browser-rpc-events.private', CHECK['EXPORT_NAMES'])
+
     def test_coordinator_diagnostic_retains_only_closed_stage_and_cleanup_facts(self):
         value = dict(version=1, phase='tokenization', execution_ok=False,
             error_class='io_permission', rpc=None, local_cleanup_confirmed=False,
@@ -217,6 +254,7 @@ agent_jobs_cgroup_empty() { return 0; }
             for name in names | extras:
                 (out / name).write_text("{}\n")
             for name in ("runner.stdout", "agent-jobs-private.log", "agent-cooperative-browser-driver.log",
+                         "agent-cooperative-browser-rpc-events.private",
                          "input.json", "identity.key", "passphrase"):
                 (out / name).write_text("PRIVATE_DO_NOT_EXPORT\n")
             archive = module["collect"](home, root / "absent", REVISION, "agent-cooperative-browser", 1,

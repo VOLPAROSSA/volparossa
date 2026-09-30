@@ -53,6 +53,12 @@ RECEIPT_PHASES = frozenset(('scan_tree', 'read_handle', 'decode_handle', 'duplic
 RPC_PHASES = frozenset(('capabilities', 'eligibility', 'submit', 'poll', 'cancel'))
 RPC_ERRORS = frozenset(('invalid', 'busy', 'missing', 'expired', 'model_mismatch', 'worker_failed',
                        'result_mismatch', 'unavailable'))
+RPC_EVENT_CODES = frozenset(("COMPUTE_RPC_LOCAL_REQUEST_FAILED", "COMPUTE_RPC_LOCAL_REPLY_FAILED",
+    "COMPUTE_RPC_ROUTE_SETUP_FAILED", "COMPUTE_RPC_DISCOVERY_FAILED", "COMPUTE_RPC_OFFER_BINDING_FAILED",
+    "COMPUTE_RPC_ROUTE_BINDING_FAILED", "COMPUTE_RPC_ROUTE_FLOW_FAILED", "COMPUTE_RPC_PROVIDER_TLS_FAILED",
+    "COMPUTE_RPC_CHALLENGE_FAILED", "COMPUTE_RPC_PREEXPORT_CHECK_FAILED", "COMPUTE_RPC_SIGNED_EXCHANGE_FAILED",
+    "COMPUTE_RPC_REPLY_BINDING_FAILED", "COMPUTE_RPC_PROVIDER_CLOSE_FAILED", "COMPUTE_RPC_ROUTE_CLOSE_FAILED",
+    "COMPUTE_RPC_FINAL_POLICY_FAILED"))
 
 
 def sha(raw):
@@ -282,13 +288,43 @@ def coordinator_diagnostic(state):
         return dict(state='invalid')
 
 
-def diagnostic(work, browser_code, observer_code):
+def closed_rpc_events(path, baseline, query_code):
+    require(type(baseline) is int and baseline > 0 and type(query_code) is int and 0 <= query_code <= 255,
+            "invalid RPC event observation arguments")
+    if query_code != 0:
+        return dict(state="query_failed")
+    try:
+        info = path.lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= 262144
+                and stat.S_IMODE(info.st_mode) == 0o600 and info.st_uid == os.geteuid(), "invalid private RPC event file")
+        records = []
+        counts = dict.fromkeys(sorted(RPC_EVENT_CODES), 0)
+        for line in path.read_text(encoding="ascii").splitlines():
+            match = re.fullmatch(r"([0-9]{1,20})\tlevel=([0-9])\tevent=([A-Z0-9_]{1,96})\tsession=[0-9a-f]{0,64}\tpath=(?:-|[0-9]{1,10})", line)
+            require(match is not None, "invalid bounded RPC event record")
+            timestamp = int(match[1])
+            require(timestamp > 0 and (not records or timestamp >= records[-1]), "RPC event clock regressed")
+            records.append(timestamp)
+            if timestamp > baseline and match[3] in counts:
+                counts[match[3]] += 1
+        require(len(records) <= 1000, "RPC event ring exceeded")
+        return dict(state="valid", baseline_unix_ms=baseline, limit=1000, records=len(records),
+            window_covers_baseline=bool(records) and records[0] <= baseline,
+            matching_failures=sum(counts.values()), counts=counts)
+    except FileNotFoundError:
+        return dict(state="absent")
+    except (OSError, ValueError, UnicodeError):
+        return dict(state="invalid")
+
+
+def diagnostic(work, browser_code, observer_code, baseline, rpc_query_code):
     JOBS["guest_work"](work)
     require(0 <= browser_code <= 255 and 0 <= observer_code <= 255, "invalid process exit status")
     root, state = paths(work)
-    write(work / f"{NAME}-diagnostic.json", dict(version=1, browser_exit_status=browser_code,
+    write(work / f"{NAME}-diagnostic.json", dict(version=2, browser_exit_status=browser_code,
         observer_exit_status=observer_code, browser=closed_status(root / "build/cooperative-proof/browser-status.json"),
-        coordinator=coordinator_diagnostic(state)))
+        coordinator=coordinator_diagnostic(state),
+        rpc_events=closed_rpc_events(work / f"{NAME}-rpc-events.private", baseline, rpc_query_code)))
 
 
 def authorize(path, event):
@@ -572,8 +608,8 @@ def main(args):
         provision(Path(args[1]))
     elif len(args) == 3 and args[0] == "observe":
         observe(Path(args[1]), int(args[2]))
-    elif len(args) == 4 and args[0] == "diagnostic":
-        diagnostic(Path(args[1]), int(args[2]), int(args[3]))
+    elif len(args) == 6 and args[0] == "diagnostic":
+        diagnostic(Path(args[1]), int(args[2]), int(args[3]), int(args[4]), int(args[5]))
     elif len(args) == 3 and args[0] == "collect":
         collect(Path(args[1]), args[2])
     elif len(args) == 3 and args[0] == "evidence":

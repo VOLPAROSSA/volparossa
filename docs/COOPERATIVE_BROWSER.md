@@ -1,8 +1,9 @@
 # Cooperative browser: real public peer execution
 
-Status: implemented candidate; the first combined live KVM attempt failed in the
-browser proof driver. A corrected attempt remains pending. Local pure fixture checks
-are not a browser, model or network execution claim.
+Status: implemented candidate; the latest combined live KVM attempt reaches the first
+authorized task but cannot confirm all original terminal receipts. A corrected attempt
+remains pending. Local pure fixture checks are not a browser, model or network execution
+claim.
 
 The public browser integration has a separate socket and panel from private local
 compute. `ask(question, context)` prefills the panel only. Sending requires a supported
@@ -75,3 +76,28 @@ host-state files are byte-identical, SHA-256
 `2ab5456d7d3aea708e6564b060e41d7476b66fb1a4908c0f1e6d83516edfb474`.
 Acceptance still requires a new source-bound run with the real peer result, original
 receipts, cancellation and cleanup checks intact.
+
+## Retained-handle reconciliation and flow capacity
+
+[Run `36746682885`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36746682885)
+on core `3f47bbef16bc78ebf45e5c6e98102e08e6463bb9` records six original handles but
+only four terminal receipts. The implemented reconciliation polls both missing handles;
+both exchanges remain unconfirmed, without reaching its deadline. Neither document nor
+answer execution is complete. The terminal-receipt gate correctly quarantines admission.
+Cleanup is complete, zero owned objects remain, and host snapshots are identical.
+
+Independent source inspection identifies a real route-lifetime accounting bug: the helper
+retained issued MPTCP flow capabilities after sockets closed, exhausting its 64-flow bound.
+The new terminal operation closes the exact descriptor-bound socket and obtains a worker
+ownership-release ACK before reclaiming its ledger slot. It does not increase the live
+flow limit, reuse handles, resubmit compute jobs, extend leases or fabricate terminal
+receipts. Tests of the ledger are not proof of more than 64 real overlay transfers; that
+requires the next executable trial. The older artifact lacks enough stage evidence to
+attribute its failed exchanges conclusively to this defect.
+
+The next fixture additionally retains bounded counts of existing fixed compute-RPC stage
+codes. It reads at most the 1,000-record agent ring, reports whether it covers the explicit
+phase baseline, and exports only the allowlisted failure counts. Raw event records,
+session/path identifiers, model inputs, replies and service logs are not exported. A
+missing, invalid or incomplete observation cannot become a success claim. Seven focused
+fixture checks pass, including baseline filtering and rejection of private/unknown data.
