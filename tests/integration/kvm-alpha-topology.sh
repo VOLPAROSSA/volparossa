@@ -879,7 +879,7 @@ if [ "$private_storage_replicas" = yes ] || [ "$signal_backup" = yes ]; then
     done
 fi
 if [ "$signal_backup" = yes ]; then
-    for storage_fixture in signal-backup-smoke.sh signal-backup-smoke.py signal-backup-reporter.cjs; do
+    for storage_fixture in signal-backup-smoke.sh signal-backup-smoke.py signal-backup-reporter.cjs signal-backup-startup.cjs; do
         [ -f "$source_directory/tests/integration/$storage_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
     done
@@ -2528,7 +2528,7 @@ if [ "$private_storage_replicas" = yes ] || [ "$private_storage_handoff" = yes ]
     done
 fi
 if [ "$signal_backup" = yes ]; then
-    for storage_fixture in signal-backup-smoke.py signal-backup-reporter.cjs; do
+    for storage_fixture in signal-backup-smoke.py signal-backup-reporter.cjs signal-backup-startup.cjs; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$storage_fixture" "$WORK/bin/$storage_fixture"
     done
 fi

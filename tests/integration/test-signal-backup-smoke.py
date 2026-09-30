@@ -87,6 +87,7 @@ class SignalBackupEvidence(unittest.TestCase):
         command = CHECK["native_command"](Path("/candidate"), Path("/node"), Path("/reporter"))
         self.assertIn("--forbid-pending", command)
         self.assertIn("--fail-zero", command)
+        self.assertEqual(command[command.index("--require") + 1], "/signal-backup-startup.cjs")
         self.assertEqual(command[-1], "ts/test-mock/backups/backups_test.node.ts")
         self.assertEqual(command[command.index("--grep") + 1], "^" + CHECK["TITLE"] + "$")
         reporter = (HERE / "signal-backup-reporter.cjs").read_text()
@@ -172,6 +173,61 @@ runner.emit('end');
             self.assertNotIn("canary", json.dumps(result))
             with self.assertRaises(ValueError):
                 CHECK["validate_mocha"](json.loads((root / "result.json").read_text()))
+
+    def test_startup_observer_distinguishes_native_child_and_launcher_without_exporting_errors(self):
+        node = os.environ.get("VOLPAROSSA_TEST_NODE") or shutil.which("node")
+        if node is None:
+            self.skipTest("explicit staged Node or system Node required for pure observer test")
+        script = r"""
+const fs = require('node:fs');
+let forwarded = 0;
+console.error = () => { forwarded += 1; };
+const observer = require(process.argv[1]);
+const native = {name:'Error', message:'electron.launch: Process failed to launch!\n'
+  + '<launched> pid=123\n[pid=123][err] crashpad_handler: --database is required\n'
+  + '[pid=123][err] /private-canary/electron exited with signal SIGTRAP\n'
+  + '<process did exit: exitCode=1, signal=null>\nSECRET_CONFIG_CANARY'};
+console.error('Failed to start the app, attempt 1, retrying', native);
+console.error('unrelated private-canary', native);
+const first = JSON.parse(fs.readFileSync(process.env.VOLPAROSSA_BACKUP_STARTUP));
+const timeout = {name:'TimeoutError', message:'<launched> pid=124\nDebugger listening on ws://private-token\nTimeout 30000ms exceeded.'};
+console.error('Failed to start the app, attempt 2, retrying', timeout);
+const second = JSON.parse(fs.readFileSync(process.env.VOLPAROSSA_BACKUP_STARTUP));
+const spawn = observer.classify({name:'Error', code:'ENOENT', errno:-2, message:'spawn /private-canary ENOENT'});
+const connect = observer.classify({name:'TimeoutError', message:'<launched> pid=3\nDebugger listening on ws://private\nDevTools listening on ws://private\nWebSocket error: connect ETIMEDOUT\nTimeout 30000ms exceeded.'});
+const unknown = observer.classify({name:'private-canary', code:'private-canary', message:'private-canary'});
+process.stdout.write(JSON.stringify({forwarded, first, second, spawn, connect, unknown}));
+"""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = dict(os.environ, VOLPAROSSA_BACKUP_STARTUP=str(root / "startup-status.json"))
+            completed = subprocess.run([node, "-e", script, str((HERE / "signal-backup-startup.cjs").resolve())],
+                cwd=root, env=environment, check=True, timeout=5, capture_output=True, text=True)
+            result = json.loads(completed.stdout)
+            self.assertEqual(result["forwarded"], 3)
+            first = result["first"]
+            self.assertEqual(first["failure_class"], "electron_signal")
+            self.assertTrue(first["process"]["launcher_started"])
+            self.assertEqual(first["process"]["launcher_exit_code"], 1)
+            self.assertEqual(first["process"]["electron_exit_signal"], "SIGTRAP")
+            self.assertIsNone(first["process"]["launcher_exit_signal"])
+            self.assertTrue(first["causes"]["crashpad_database"])
+            self.assertFalse(first["cause_unknown"])
+            self.assertEqual(result["second"]["failure_class"], "chromium_endpoint_timeout")
+            self.assertEqual(result["spawn"]["failure_class"], "spawn_error")
+            self.assertFalse(result["spawn"]["process"]["launcher_started"])
+            self.assertEqual(result["connect"]["failure_class"], "debugger_connect_timeout")
+            self.assertEqual(result["unknown"]["failure_class"], "unknown")
+            self.assertTrue(result["unknown"]["cause_unknown"])
+            self.assertNotIn("canary", json.dumps(result).lower())
+            self.assertNotIn("ws://", json.dumps(result))
+            observation = CHECK["bootstrap_diagnostic"](root / "startup-status.json")
+            self.assertTrue(observation["valid"])
+            self.assertEqual(observation["value"], result["second"])
+            self.assertEqual((root / "startup-status.json").stat().st_mode & 0o777, 0o600)
+            first["raw_error"] = "private-canary"
+            (root / "startup-status.json").write_text(json.dumps(first))
+            self.assertFalse(CHECK["bootstrap_diagnostic"](root / "startup-status.json")["valid"])
 
 
 if __name__ == "__main__":

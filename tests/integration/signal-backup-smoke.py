@@ -34,6 +34,11 @@ REPORTER_PHASES = frozenset(("reporter-initialized", "run-start", "hook-start", 
 NATIVE_ERROR_CODES = frozenset(("EACCES", "EPERM", "ENOENT", "EROFS", "ENOSPC", "ENOMEM", "ECONNREFUSED",
     "ETIMEDOUT", "ERR_MODULE_NOT_FOUND", "MODULE_NOT_FOUND", "ERR_DLOPEN_FAILED", "ERR_REQUIRE_ESM",
     "ERR_UNKNOWN_FILE_EXTENSION", "ERR_ASSERTION", "ERR_MOCHA_TIMEOUT", "OTHER"))
+STARTUP_CAUSES = frozenset(("crashpad_database", "chromium_namespace", "chromium_setuid_sandbox",
+    "chromium_display", "native_library", "cpu_instruction", "user_data_directory", "debugger_connect",
+    "chromium_process_launch", "resource_limit"))
+STARTUP_SIGNALS = frozenset(("SIGABRT", "SIGBUS", "SIGFPE", "SIGILL", "SIGKILL", "SIGSEGV", "SIGSYS",
+                           "SIGTERM", "SIGTRAP", "SIGXCPU", "SIGXFSZ", "OTHER"))
 FALSE_SCOPE = ("server_free_messaging_proven", "independent_failure_domains_proven",
                "network_contribution_credit", "electron_sandbox_claimed", "full_alpha_acceptance_claimed")
 EXPORT_NAMES = ("a01-expected-peers.json",) + tuple(f"signal-backup-{name}.json" for name in
@@ -189,13 +194,53 @@ def log_classification(path):
 def native_diagnostic(root, joined):
     return dict(version=1, process_group_joined=joined, sandbox=closed_status(root / "sandbox-status.json"),
         reporter=closed_status(root / "native-status.json", reporter=True),
+        bootstrap=bootstrap_diagnostic(root / "startup-status.json"),
         stdout=log_classification(root / "native.stdout"), stderr=log_classification(root / "native.stderr"),
         private_logs_exported=False)
 
 
+def bootstrap_diagnostic(path):
+    """Closed native-startup observation, never a raw exception or process command line."""
+    result = dict(available=False, valid=False, value=None)
+    try:
+        private_file(path)
+        require(path.stat().st_size <= 4096, "bootstrap diagnostic bound")
+        result["available"] = True
+        value = read(path)
+        require(set(value) == {"version", "phase", "attempt", "exception", "process", "failure_class",
+                              "causes", "cause_unknown", "message_truncated"}
+            and value["version"] == 1 and value["phase"] == "bootstrap-startup-failed"
+            and type(value["attempt"]) is int and 1 <= value["attempt"] <= 4,
+            "bootstrap diagnostic shape")
+        error, process, causes = value["exception"], value["process"], value["causes"]
+        require(set(error) == {"name", "code", "errno"}
+            and error["name"] in ("Error", "TypeError", "RangeError", "TimeoutError", "SystemError", "OTHER")
+            and error["code"] in NATIVE_ERROR_CODES | {"ECONNRESET", "EADDRINUSE", "EADDRNOTAVAIL"}
+            and (error["errno"] is None or type(error["errno"]) is int and 0 < abs(error["errno"]) < 4096),
+            "bootstrap exception shape")
+        process_flags = {"launcher_started", "spawn_failure_observed", "launcher_exit_observed",
+                         "node_endpoint_observed", "chromium_endpoint_observed"}
+        require(set(process) == process_flags | {"launcher_exit_code", "launcher_exit_signal", "electron_exit_signal"}
+            and all(type(process[key]) is bool for key in process_flags)
+            and (process["launcher_exit_code"] is None or type(process["launcher_exit_code"]) is int
+                 and abs(process["launcher_exit_code"]) <= 255)
+            and all(process[key] is None or process[key] in STARTUP_SIGNALS
+                    for key in ("launcher_exit_signal", "electron_exit_signal")), "bootstrap process shape")
+        require(value["failure_class"] in ("electron_signal", "launcher_exit", "debugger_connect_timeout",
+                "chromium_endpoint_timeout", "node_endpoint_timeout", "spawn_error", "unknown")
+            and set(causes) == STARTUP_CAUSES and all(type(flag) is bool for flag in causes.values())
+            and type(value["cause_unknown"]) is bool and value["cause_unknown"] == (not any(causes.values()))
+            and type(value["message_truncated"]) is bool, "bootstrap cause shape")
+        result.update(valid=True, value=value)
+    except (ValueError, OSError, KeyError, TypeError):
+        pass
+    return result
+
+
 def native_command(candidate, node, reporter):
     return ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1280x1024x24 -nolisten tcp",
-        str(node), "node_modules/mocha/bin/mocha.js", "--require", "ts/test-mock/setup-ci.node.ts",
+        str(node), "node_modules/mocha/bin/mocha.js", "--require", str(reporter.with_name("signal-backup-startup.cjs")),
+        "--require", "ts/test-mock/setup-ci.node.ts",
         "--grep", "^" + TITLE + "$", "--forbid-pending", "--fail-zero", "--reporter", str(reporter),
         "ts/test-mock/backups/backups_test.node.ts"]
 
@@ -305,6 +350,7 @@ def run_native(root):
         VOLPAROSSA_BACKUP_CONFIG=str(root / "config.json"), VOLPAROSSA_BACKUP_WORK=str(root / "backup"),
         VOLPAROSSA_BACKUP_RESULT=str(root / "result.json"), PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD="1",
         VOLPAROSSA_BACKUP_STATUS=str(root / "native-status.json"),
+        VOLPAROSSA_BACKUP_STARTUP=str(root / "startup-status.json"),
         PATH=f"{node.parent}:{candidate / 'node_modules/.bin'}:/usr/bin:/bin")
     command = isolated_command(root, candidate, node, Path(__file__).with_name("signal-backup-reporter.cjs"))
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))

@@ -426,6 +426,26 @@ Mocha status, without exporting private logs or weakening isolation. Seven focus
 receipt/reporter checks and three VM-wiring checks pass locally; a fresh native trial
 is still required, and the original failure is not relabelled.
 
+The second native trial on `e2d5abda`,
+[run `36728195128`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36728195128),
+also **fails**. All provisioning/compilation stages and the in-sandbox UID, capability,
+supplementary-group and positive control-socket checks pass through `xvfb-exec`.
+Mocha's reporter initializes, but the pinned global setup fails while starting Electron:
+the observed startup-retry and Electron-launch classifications are true, with zero tests
+started. There is no backup payload or native export/import proof. The closed evidence
+does not retain the underlying Electron exception, so no missing library, sandbox or
+application fix is inferred. All 17 originals are retained (ZIP SHA-256
+`4ca8a4ff161775b0dab458adc1f196829a5c5691a4c098b1274aa1048a97495d`); the native process group
+is joined, all private-data cleanup flags pass and both host snapshots hash to
+`8a3ba5819ee4d9eefdd81ea224a49e9bd383c8952aca67af4ee70ea06e4c19f4`.
+The candidate now observes only the pinned Bootstrap retry error, retaining allowlisted
+exception class/code, separate launcher exit and native Electron signal, debugger-endpoint
+milestones and fixed startup-cause categories. Unknown causes remain unknown; exception
+text, endpoints, process IDs, argv and configuration are never exported. It adds no retry,
+changes no Signal/Playwright behavior or security flag, and preserves the original failed
+phase through cleanup. Eight focused receipt/reporter/observer tests and three VM-wiring
+checks pass; the same exact native test with this observation is the next runtime proof.
+
 ## Earlier milestone evidence
 
 The completed development milestone is integrated into `main` by
