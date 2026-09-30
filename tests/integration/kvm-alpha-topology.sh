@@ -3435,6 +3435,10 @@ launch_agent() {
     if [ "$scenario" = browser-network ] && [ "$node" = client ]; then
         agent_rust_log=$agent_rust_log,volparossa_agent::browser_gateway::connect=debug
     fi
+    if [ "$scenario" = browser-network ] && [ "$node" = exit ]; then
+        # Opt-in static failure classes only, never raw egress errors or destinations.
+        agent_rust_log=$agent_rust_log,volparossa_agent::mptcp_flow_runtime=debug
+    fi
     if [ "$scenario" = mpquic-growth ] && [ "$node" = client ]; then
         # Exact owned-path counters/decisions only, no destination or payload logging.
         agent_rust_log=$agent_rust_log,volparossa_agent::path_health=debug

@@ -67,6 +67,9 @@ pub(crate) enum GatewayError {
     Policy,
     Busy,
     Unavailable,
+    /// Not interchangeable with generic errors. Still requires confirmed retirement,
+    /// live grant/policy and no published Ready before a browser may fall back.
+    NoEligiblePaths,
 }
 
 impl GatewayError {
@@ -76,6 +79,7 @@ impl GatewayError {
             Self::Policy => "BROWSER_GATEWAY_POLICY",
             Self::Busy => "BROWSER_GATEWAY_BUSY",
             Self::Unavailable => "BROWSER_GATEWAY_UNAVAILABLE",
+            Self::NoEligiblePaths => "BROWSER_GATEWAY_NO_ELIGIBLE_PATHS",
         }
     }
 }
@@ -267,9 +271,33 @@ impl BrowserGateway {
         let Ok(attachment) = self.claim(request.0, &request.1, credentials.uid()).await else {
             return;
         };
-        let _ = attachment.serve(&mut stream, &context, shutdown).await;
+        let result = attachment
+            .serve(&mut stream, &context, shutdown.clone())
+            .await;
         // Failure remains retained/quota-charged for daemon cleanup, never global Disconnect.
-        let _ = self.retire(&attachment).await;
+        let retired = self.retire(&attachment).await.is_ok();
+        if let Err(error) = result {
+            // Only pre-Ready admission failures arrive here. After Ready, loss/expiry
+            // closes the attachment and must never authorize a transparent direct retry.
+            let policy_expiry = attachment
+                .scope
+                .policy(&context)
+                .await
+                .ok()
+                .map(|policy| policy.expires_at_ms());
+            let direct_until_ms = wire::direct_deadline(
+                error,
+                retired,
+                !*shutdown.borrow() && shutdown.has_changed().is_ok(),
+                &attachment.scope,
+                policy_expiry,
+            );
+            let _ = timeout(
+                BOOTSTRAP_TIMEOUT,
+                wire::write_failure(&mut stream, &attachment, direct_until_ms),
+            )
+            .await;
+        }
     }
 }
 

@@ -69,16 +69,47 @@ is accepted. The secret is consumed locally, not forwarded to the destination. R
 policy denial, invalid authentication and ambiguous failure never authorize a direct retry.
 CONNECT 200 acknowledges a tunnel, not successful Exit-origin connection or origin TLS.
 
+The app bootstrap now distinguishes a genuine lack of eligible paths from ambiguous
+failure. Only a valid candidate snapshot missing an eligible exit or enough diverse
+relays produces `NoEligiblePaths`; policy/store errors, invalidated snapshots,
+timeouts and transport failures do not. Existing discovery retries remain bounded.
+After exact route retirement succeeds and the original grant/current identical policy
+are revalidated, the core may return a scoped terminal frame:
+`version`, `status`, `reason`, `hostname`, `port`, `partition`, `expires_at_ms`,
+`direct_until_ms`. `unavailable/no_eligible_paths` permits an explicitly killswitch-off
+browser to consider a **new** direct request for at most five seconds, never beyond the
+original monotonic grant or policy expiry. Every other returned failure is
+`denied/blocked` with `direct_until_ms: 0`; invalid bootstrap credentials still close.
+EOF is never fallback authority, and no direct decision is issued after Ready.
+The core itself never connects directly to the origin or weakens exit policy.
+
+Fourteen gateway checks and the actual discovery diversity-rejection check pass;
+these prove the typed boundary, not ordinary-browser dispatch or live fallback.
+
 Three CLI checks, one local-protocol check and five agent checks pass. They cover exact scope,
 private capability-file creation, one-use/UID/expiry admission, strict CONNECT/bootstrap parsing
 and independent controller shutdown. The controller test does not prove two simultaneously
 carrying MPTCP routes. The live disposable Firefox/HTTPS proof is a separate remaining step.
 
 The [Firefox adapter](https://github.com/VOLPAROSSA/volparossa-browser/pull/4) is pinned to
-`e722242a5576dac9031ad7daaf1f1189bcee0b1e` in the next `browser-network` VM candidate.
+`198e288183b06d8a4ff584210ade449f124bc737` in the next `browser-network` VM candidate.
 Its existing isolated ESR 140.16 smoke proves real Gecko Unix IPC and three TLS 1.3
 responses against a **synthetic** gateway, including independent detach and absence of
 proxy credentials at the origin. That result is not a real overlay proof.
+
+The new privileged per-tab controller also passes an actual ordinary Gecko
+`browser.loadURI` navigation through the synthetic gateway, preserving native channel
+listeners and container/private boundaries. This remains distinct from the two explicit
+channels in the pending real-core trial, and does not prove a browser-wide kill switch.
+Pinned ESR sends ECH-GREASE by default, whereas core inspection rejects every ECH
+extension before origin connection. The disposable core proof profile now disables only
+that GREASE experiment; real ECH, TLS and certificate validation are not relaxed at the
+exit. Product-scoped ECH compatibility remains open because the available scripted
+channel interface does not expose `DONT_TRY_ECH`. The fixture's first origin accept
+budget is 270 seconds to cover both 90-second route preparations plus browser startup;
+TLS handshake itself is capped at 30 seconds. Closed exit/origin diagnostics identify
+later failures without private requests or inner error text. Seventeen fixture checks
+and the Rust closed-error classification check pass; a fresh actual transfer is required.
 
 The combined fixture instead uses the actual core, two explicit CLI grants and a temporary
 HTTPS origin CA. Each 32-MiB response must pass its browser-side hash and show two genuine

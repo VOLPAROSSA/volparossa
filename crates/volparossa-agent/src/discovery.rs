@@ -276,6 +276,9 @@ pub(crate) enum ClientPreselectionError {
     Closed,
     Timeout,
     InvalidParameters,
+    /// A valid current snapshot lacks an eligible exit or enough diverse relays.
+    /// Unlike Unavailable, this does not include policy/store/validation failures.
+    NoEligiblePaths,
     Unavailable,
     Invalidated,
     Transport,
@@ -2457,10 +2460,16 @@ impl DiscoveryRuntime {
                     .write()
                     .await
                     .log(LogLevel::Debug, diagnostic, captured_at_ms);
-                let error = if failure.error == PreselectionSamplingError::InvalidPolicy {
-                    ClientPreselectionError::InvalidParameters
-                } else {
-                    ClientPreselectionError::Unavailable
+                let error = match failure.error {
+                    PreselectionSamplingError::InvalidPolicy => {
+                        ClientPreselectionError::InvalidParameters
+                    }
+                    PreselectionSamplingError::NoEligibleForwardedExit
+                    | PreselectionSamplingError::InsufficientDiverseRelays => {
+                        ClientPreselectionError::NoEligiblePaths
+                    }
+                    PreselectionSamplingError::InvalidSnapshot
+                    | PreselectionSamplingError::Entropy => ClientPreselectionError::Unavailable,
                 };
                 let _ = reply.send(Err(error));
                 return;
@@ -24812,7 +24821,7 @@ mod tests {
             .await;
         assert!(matches!(
             response.await.expect("pre-dispatch diversity rejection"),
-            Err(ClientPreselectionError::Unavailable)
+            Err(ClientPreselectionError::NoEligiblePaths)
         ));
         assert!(matches!(
             fixture.runtime.client_preselection,

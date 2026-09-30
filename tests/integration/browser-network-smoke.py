@@ -46,7 +46,7 @@ ATTACH_STAGES = frozenset(("process-gate", "unix-transport", "constructor", "tra
     "bootstrap-reply", "bootstrap-read", "ready-validate", "ready-proxy", "bootstrap-eof", "bootstrap-timeout"))
 REQUEST_STAGES = frozenset(("channel-create", "hash-init", "channel-open", "stream-start",
     "stream-data", "stream-stop", "body-integrity"))
-ROUTE_ERRORS = frozenset(("Busy", "InvalidProfile", "PreselectionUnavailable", "NativePermitUnavailable",
+ROUTE_ERRORS = frozenset(("Busy", "InvalidProfile", "PreselectionUnavailable", "NoEligiblePaths", "NativePermitUnavailable",
     "NativeRelayUnavailable", "NativeHelperPrepareUnavailable", "NativeAuthorizationUnavailable",
     "NativeHelperActivateUnavailable", "NativeStartUnavailable", "NativeHelperCommitUnavailable",
     "NativeProofUnavailable", "NativeSamplerRetirementUnavailable", "NativeRemoteRetirementUnavailable",
@@ -62,6 +62,12 @@ GATEWAY_CODES = {
     "policy_after_flow": frozenset(("denied",)),
     "acknowledgement": frozenset(("write_failed", "forwarding_started")),
 }
+EXIT_CODES = {"egress": frozenset(("encrypted_client_hello", "missing_server_name", "sni_mismatch",
+    "inspection", "resolution", "timeout", "io", "stream", "policy", "other"))}
+ORIGIN_PHASES = frozenset(("setup", "accept-first", "accept-second", "tls-handshake", "request",
+    "wait-release", "transfer", "wait-continue", "complete"))
+ORIGIN_ERRORS = frozenset(("timeout", "tls", "io", "request_rejected", "other"))
+ORIGIN_INITIAL_ACCEPT_SECONDS = 270  # 40s browser launch + two 90s route admissions + fixture margin.
 
 
 def validate_request(value):
@@ -73,7 +79,8 @@ def validate_request(value):
                 for key in ("proxy_status", "http_status")), "request diagnostic is not closed metadata")
 
 
-def gateway_diagnostic(path):
+def gateway_diagnostic(path, *, target="volparossa_agent::browser_gateway::connect",
+                       message="browser_gateway_observation", codes=GATEWAY_CODES):
     """Only fixed codes from the fixture-enabled target; never export a raw log line."""
     result = dict(available=False, truncated=False, events=[], unknown_event=False)
     if path is None or not path.is_file() or path.is_symlink():
@@ -96,13 +103,13 @@ def gateway_diagnostic(path):
             value = json.loads(line)
         except (ValueError, UnicodeError):
             continue
-        if type(value) is not dict or value.get("target") != "volparossa_agent::browser_gateway::connect":
+        if type(value) is not dict or value.get("target") != target:
             continue
         fields = value.get("fields")
-        if type(fields) is not dict or fields.get("message") != "browser_gateway_observation":
+        if type(fields) is not dict or fields.get("message") != message:
             continue
         stage, code = fields.get("stage"), fields.get("code")
-        if type(stage) is not str or type(code) is not str or code not in GATEWAY_CODES.get(stage, ()):
+        if type(stage) is not str or type(code) is not str or code not in codes.get(stage, ()):
             result["unknown_event"] = True
             continue
         result["events"].append(dict(stage=stage, code=code))
@@ -110,6 +117,24 @@ def gateway_diagnostic(path):
             result["events"].pop(0)
             result["truncated"] = True
     return result
+
+
+def origin_diagnostic(path):
+    if path is None or not path.is_file() or path.is_symlink():
+        return None
+    require(path.stat().st_size <= 2048, "origin diagnostic exceeds bound")
+    value = read(path)
+    require(type(value) is dict and set(value) == {"version", "kind", "phase", "status", "error",
+        "accepted_connections", "tls_completed", "requests_ready", "initial_accept_seconds"}
+        and value["version"] == 1 and value["kind"] == "browser-network-origin-diagnostic"
+        and value["phase"] in ORIGIN_PHASES and value["status"] in ("running", "failed", "complete")
+        and (value["error"] is None or value["error"] in ORIGIN_ERRORS)
+        and value["initial_accept_seconds"] == ORIGIN_INITIAL_ACCEPT_SECONDS
+        and all(type(value[key]) is int and 0 <= value[key] <= 2
+            for key in ("accepted_connections", "tls_completed", "requests_ready"))
+        and value["requests_ready"] <= value["tls_completed"] <= value["accepted_connections"],
+        "origin diagnostic is not closed metadata")
+    return value
 
 
 def validate_attachment(value):
@@ -163,10 +188,13 @@ def directory_creation_targets(lines, home=None, work=None):
     return result
 
 
-def driver_diagnostic(status, stderr, home=None, work=None, gateway_log=None):
+def driver_diagnostic(status, stderr, home=None, work=None, gateway_log=None, exit_log=None, origin_status=None):
     """Export only fixed driver stages, errno and classified local stderr signals."""
     result = dict(version=1, status_available=False, status=None, stderr_available=False,
-                  stderr_truncated=False, stderr_signals={}, gateway=gateway_diagnostic(gateway_log))
+                  stderr_truncated=False, stderr_signals={}, gateway=gateway_diagnostic(gateway_log),
+                  exit=gateway_diagnostic(exit_log, target="volparossa_agent::mptcp_flow_runtime",
+                    message="mptcp_exit_egress_observation", codes=EXIT_CODES),
+                  origin=origin_diagnostic(origin_status))
     if status.is_file() and not status.is_symlink():
         require(status.stat().st_size <= 2048, "driver status exceeds bound")
         value = read(status)
@@ -270,6 +298,28 @@ def seed(root, run_id):
 
 
 def origin(root, gates, run_id, report):
+    status = dict(version=1, kind="browser-network-origin-diagnostic", phase="setup", status="running", error=None,
+        accepted_connections=0, tls_completed=0, requests_ready=0, initial_accept_seconds=ORIGIN_INITIAL_ACCEPT_SECONDS)
+    diagnostic = report.with_name("origin-diagnostic.json")
+    def observe(phase):
+        status["phase"] = phase
+        # No raw request, address, certificate, key, traceback or exception text survives.
+        write(diagnostic, status)
+    observe("setup")
+    try:
+        origin_transfer(root, gates, run_id, report, status, observe)
+        status.update(status="complete", phase="complete")
+    except Exception as error:
+        code = ("timeout" if isinstance(error, TimeoutError) else "tls" if isinstance(error, ssl.SSLError)
+                else "io" if isinstance(error, OSError) else "request_rejected" if isinstance(error, ValueError)
+                else "other")
+        status.update(status="failed", error=code)
+        raise
+    finally:
+        write(diagnostic, status)
+
+
+def origin_transfer(root, gates, run_id, report, status, observe):
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.minimum_version = ssl.TLSVersion.TLSv1_3
     tls.load_cert_chain(root / "origin.pem", root / "origin.key")
@@ -279,12 +329,20 @@ def origin(root, gates, run_id, report):
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(("47.163.4.2", PORT))
         listener.listen(2)
-        listener.settimeout(90)
+        listener.settimeout(ORIGIN_INITIAL_ACCEPT_SECONDS)
         write(gates / "origin.ready", dict(version=1, ready=True))
         for phase in PHASES:
+            observe("accept-" + phase)
             accepted, address = listener.accept()
+            status["accepted_connections"] += 1
+            listener.settimeout(90)
             require(address[0] == "47.163.4.1", "origin did not observe selected Exit only")
+            # Bound handshake itself, not only reads after wrap_socket returns.
+            accepted.settimeout(30)
+            observe("tls-handshake")
             with tls.wrap_socket(accepted, server_side=True) as stream:
+                status["tls_completed"] += 1
+                observe("request")
                 stream.settimeout(30)
                 header = bytearray()
                 while not header.endswith(b"\r\n\r\n") and len(header) < 8192:
@@ -301,7 +359,10 @@ def origin(root, gates, run_id, report):
                     and not any("bearer " in value.lower() for value in headers.values()),
                     "proxy capability escaped to origin")
                 write(gates / f"{phase}.ready", dict(version=1, ready=True))
+                status["requests_ready"] += 1
+                observe("wait-release")
                 wait_file(gates / f"{phase}.release")
+                observe("transfer")
                 stream.sendall((f"HTTP/1.1 200 OK\r\nContent-Length: {BODY_BYTES}\r\n"
                     "Content-Type: application/octet-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n").encode())
                 data = block(run_id)
@@ -309,7 +370,9 @@ def origin(root, gates, run_id, report):
                     stream.sendall(data)
                     if index + 1 == BODY_BYTES // len(data) // 2:
                         write(gates / f"{phase}.progress-ready", dict(version=1, ready=True))
+                        observe("wait-continue")
                         wait_file(gates / f"{phase}.continue")
+                        observe("transfer")
                 requests.append(dict(phase=phase, bytes=BODY_BYTES, sha256=body_hash(run_id),
                     peer_is_exit=True, proxy_credentials_absent=True, tls_version=stream.version(),
                     alpn=stream.selected_alpn_protocol()))
@@ -623,7 +686,7 @@ def main():
     elif action == "cleanup":
         cleanup(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]))
     elif action == "driver-diagnostic":
-        require(len(sys.argv) in (5, 7, 8), "driver diagnostic arguments differ")
+        require(len(sys.argv) in (5, 7, 8, 10), "driver diagnostic arguments differ")
         locations = list(map(Path, sys.argv[5:]))
         write(Path(sys.argv[4]), driver_diagnostic(Path(sys.argv[2]), Path(sys.argv[3]), *locations))
     elif action == "evidence":

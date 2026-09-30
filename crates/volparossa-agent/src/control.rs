@@ -343,7 +343,9 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
                         GatewayError::Invalid => ControlResult::InvalidRequest,
                         GatewayError::Policy => ControlResult::Policy,
                         GatewayError::Busy => ControlResult::InvalidState,
-                        GatewayError::Unavailable => ControlResult::Unavailable,
+                        GatewayError::Unavailable | GatewayError::NoEligiblePaths => {
+                            ControlResult::Unavailable
+                        }
                     };
                     response(
                         request_id,
@@ -665,6 +667,12 @@ async fn connect_response(
             ControlResult::Unavailable,
             "PRESELECTION_UNAVAILABLE",
             "CONNECT_PRESELECTION_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::NoEligiblePaths) => (
+            ControlResult::Unavailable,
+            "NO_ELIGIBLE_PATHS",
+            "CONNECT_NO_ELIGIBLE_PATHS",
             LogLevel::Warn,
         ),
         Err(ClientRouteConnectError::NativePermitUnavailable) => (

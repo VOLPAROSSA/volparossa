@@ -92,6 +92,50 @@ def fixture(root):
 
 
 class BrowserNetworkEvidence(unittest.TestCase):
+    def test_exit_export_has_only_allowlisted_egress_codes_not_raw_errors(self):
+        def event(code, **extra):
+            return json.dumps(dict(target="volparossa_agent::mptcp_flow_runtime", fields=dict(
+                message="mptcp_exit_egress_observation", stage="egress", code=code, **extra))) + "\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log = root / "exit.log"
+            log.write_text(event("encrypted_client_hello", hostname="private-host", error="secret-raw-error")
+                + event("timeout") + event("private-error"))
+            result = CHECK["driver_diagnostic"](root / "absent", root / "absent", exit_log=log)
+            self.assertEqual(result["exit"]["events"], [dict(stage="egress", code="encrypted_client_hello"),
+                dict(stage="egress", code="timeout")])
+            self.assertTrue(result["exit"]["unknown_event"])
+            self.assertNotIn("private", json.dumps(result))
+            self.assertNotIn("secret", json.dumps(result))
+
+    def test_origin_failure_retains_closed_stage_and_longer_initial_accept_budget(self):
+        # No sockets/traffic: the fixture's exception-to-closed-metadata contract only.
+        def failing_transfer(root, gates, run_id, report, status, observe):
+            status["accepted_connections"] = 1
+            observe("tls-handshake")
+            raise TimeoutError("private origin address and request must not escape")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.dict(CHECK["origin"].__globals__, origin_transfer=failing_transfer):
+                with self.assertRaises(TimeoutError):
+                    CHECK["origin"](root, root, "1" * 32, root / "origin.json")
+            value = CHECK["origin_diagnostic"](root / "origin-diagnostic.json")
+            self.assertEqual(value["phase"], "tls-handshake")
+            self.assertEqual(value["status"], "failed")
+            self.assertEqual(value["error"], "timeout")
+            self.assertEqual(value["accepted_connections"], 1)
+            self.assertEqual(value["tls_completed"], 0)
+            self.assertGreaterEqual(value["initial_accept_seconds"], 40 + 2 * 90)
+            self.assertNotIn("private", json.dumps(value))
+            for changes in (dict(error="raw-private-message"), dict(phase="private-url"),
+                            dict(accepted_connections=True), dict(tls_completed=2), dict(path="private")):
+                CHECK["write"](root / "origin-diagnostic.json", value | changes)
+                with self.assertRaises(ValueError):
+                    CHECK["origin_diagnostic"](root / "origin-diagnostic.json")
+        source = (HERE / "browser-network-smoke.py").read_text()
+        self.assertIn("listener.settimeout(ORIGIN_INITIAL_ACCEPT_SECONDS)", source)
+        self.assertLess(source.index("accepted.settimeout(30)"), source.index("with tls.wrap_socket"))
+
     def test_request_codes_are_closed_and_preserved(self):
         detail = dict(stage="stream-stop", nsresult=0x804B000D, proxy_status=502,
                       http_status=None, received_body=False)

@@ -353,9 +353,34 @@ async fn run_observed_exit_flow(
     let result = egress
         .run_tcp_egress(&authorized, protected, unix_millis(), limits)
         .await
-        .map_err(|_| ProductionMptcpExitError::Egress);
+        .map_err(|error| {
+            // Fixture-opt-in diagnostics only: no hostname, tuple, certificate, payload,
+            // route identity or inner error text. Policy/inspection still fail closed.
+            tracing::debug!(
+                stage = "egress",
+                code = egress_failure_code(&error),
+                "mptcp_exit_egress_observation"
+            );
+            ProductionMptcpExitError::Egress
+        });
     drop(observation);
     result
+}
+
+fn egress_failure_code(error: &volparossa_exit::ExitError) -> &'static str {
+    use volparossa_exit::ExitError;
+    match error {
+        ExitError::EncryptedClientHello => "encrypted_client_hello",
+        ExitError::MissingServerName => "missing_server_name",
+        ExitError::SniMismatch => "sni_mismatch",
+        ExitError::Inspection(_) => "inspection",
+        ExitError::ResolutionFailed => "resolution",
+        ExitError::EgressTimeout(_) => "timeout",
+        ExitError::Io(_) => "io",
+        ExitError::Tcp(_) => "stream",
+        ExitError::Policy(_) => "policy",
+        _ => "other",
+    }
 }
 
 async fn maintain_path_health(
@@ -667,6 +692,22 @@ fn production_tcp_limits() -> Result<TcpEgressLimits, volparossa_exit::ExitError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exit_egress_diagnostics_never_include_inner_error_text() {
+        use volparossa_exit::ExitError;
+        for (error, code) in [
+            (ExitError::EncryptedClientHello, "encrypted_client_hello"),
+            (ExitError::MissingServerName, "missing_server_name"),
+            (ExitError::SniMismatch, "sni_mismatch"),
+            (ExitError::ResolutionFailed, "resolution"),
+            (ExitError::EgressTimeout("private-stage-canary"), "timeout"),
+            (ExitError::Io(io::Error::other("private-io-canary")), "io"),
+            (ExitError::InvalidGrant("private-grant-canary"), "other"),
+        ] {
+            assert_eq!(egress_failure_code(&error), code);
+        }
+    }
 
     #[tokio::test]
     async fn independent_egress_withdrawal_cancels_pending_exit_work() {

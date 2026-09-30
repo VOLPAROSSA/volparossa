@@ -1120,6 +1120,7 @@ pub(crate) enum ClientRouteConnectError {
     Busy,
     InvalidProfile,
     PreselectionUnavailable,
+    NoEligiblePaths,
     NativePermitUnavailable,
     NativeRelayUnavailable,
     NativeHelperPrepareUnavailable,
@@ -2685,7 +2686,9 @@ fn tcp_connect_retry_delay(
 ) -> Option<Duration> {
     if !matches!(
         error,
-        ClientRouteConnectError::Busy | ClientRouteConnectError::PreselectionUnavailable
+        ClientRouteConnectError::Busy
+            | ClientRouteConnectError::PreselectionUnavailable
+            | ClientRouteConnectError::NoEligiblePaths
     ) || now >= deadline
     {
         return None;
@@ -2700,7 +2703,9 @@ fn single_udp_connect_retry_delay(
 ) -> Option<Duration> {
     if !matches!(
         error,
-        ClientRouteConnectError::Busy | ClientRouteConnectError::PreselectionUnavailable
+        ClientRouteConnectError::Busy
+            | ClientRouteConnectError::PreselectionUnavailable
+            | ClientRouteConnectError::NoEligiblePaths
     ) || now >= deadline
     {
         return None;
@@ -3535,8 +3540,11 @@ fn client_native_path_requirement(
     Ok((transport, required_paths))
 }
 
-fn map_preselection_error(_: ClientPreselectionError) -> ClientRouteConnectError {
-    ClientRouteConnectError::PreselectionUnavailable
+fn map_preselection_error(error: ClientPreselectionError) -> ClientRouteConnectError {
+    match error {
+        ClientPreselectionError::NoEligiblePaths => ClientRouteConnectError::NoEligiblePaths,
+        _ => ClientRouteConnectError::PreselectionUnavailable,
+    }
 }
 
 /// A complete actor snapshot projected into a selection-only identity.

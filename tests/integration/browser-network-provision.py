@@ -17,7 +17,8 @@ PINS = HERE / "browser-network-pins.json"
 ROOT = Path("/home/vpci/browser-network-runtime")
 FILES = ("scripts/smoke_network_core.py", "scripts/smoke_network.py", "scripts/smoke_browser_startup.py",
          "scripts/smoke_compute_model.py", "scripts/smoke_privacy.py", "scripts/stage_firefox.py",
-         "integration/VolparossaNetwork.sys.mjs", "defaults/privacy.json")
+         "integration/VolparossaNetwork.sys.mjs", "integration/VolparossaBrowserNetwork.sys.mjs",
+         "defaults/privacy.json")
 
 
 def require(condition):

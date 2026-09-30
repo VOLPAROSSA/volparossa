@@ -88,7 +88,11 @@ where
             }
             Err(error) => {
                 observe_route_error("attachment_route", error);
-                Err(GatewayError::Unavailable)
+                Err(if error == ClientRouteConnectError::NoEligiblePaths {
+                    GatewayError::NoEligiblePaths
+                } else {
+                    GatewayError::Unavailable
+                })
             }
         }
     }
@@ -256,6 +260,30 @@ fn validate(header: &[u8], scope: &Scope, secret: &[u8; 32]) -> Result<(), Gatew
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn attachment_prepare_keeps_candidate_shortage_separate_from_ambiguous_failure() {
+        for error in [
+            ClientRouteConnectError::NoEligiblePaths,
+            ClientRouteConnectError::PreselectionUnavailable,
+            ClientRouteConnectError::NativeAuthorizationUnavailable,
+            ClientRouteConnectError::TransportRuntimeUnavailable,
+        ] {
+            let (mut bootstrap, _peer) = UnixStream::pair().unwrap();
+            let (_tx, mut shutdown) = watch::channel(false);
+            let result = prepare(
+                &mut bootstrap,
+                &mut shutdown,
+                Instant::now() + PREPARE_TIMEOUT,
+                std::future::ready(Err(error)),
+            )
+            .await;
+            assert_eq!(
+                matches!(result, Err(GatewayError::NoEligiblePaths)),
+                error == ClientRouteConnectError::NoEligiblePaths,
+            );
+        }
+    }
 
     #[tokio::test]
     async fn attachment_prepare_waits_for_active_route_before_ready() {

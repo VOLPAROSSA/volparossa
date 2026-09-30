@@ -173,7 +173,8 @@ browser_network_cleanup() {
         "$WORK/browser-network-driver.err" "$WORK/browser-network-driver.json" \
         "$WORK/client-fixtures/browser-network/home" \
         /home/vpci/browser-network-runtime/build/proofs/session \
-        "$WORK/agent-client.log" || bn_cleanup_status=1
+        "$WORK/agent-client.log" "$WORK/agent-exit.log" \
+        "$WORK/destination/browser-network-gates/origin-diagnostic.json" || bn_cleanup_status=1
     if [ -f "$bn_report" ] && [ ! -L "$bn_report" ] && [ "$(stat -Lc '%s' "$bn_report")" -le 16384 ]; then
         install -o root -g root -m 0600 "$bn_report" "$WORK/browser-network-browser.json" || bn_cleanup_status=1
     fi
