@@ -1133,6 +1133,9 @@ cd source
 test -x tests/integration/kvm-alpha-topology.sh
 test -x tests/packaging/debian13-package-lifecycle.sh
 guest_phase build
+# The 4-GiB guest cannot compile three large Rust crates concurrently. This bounds
+# build resources only; runtime limits and the storage acceptance checks are unchanged.
+export CARGO_BUILD_JOBS=2
 CARGO_TARGET_DIR=/home/vpci/target cargo build --locked \
     -p volparossa --bin volparossa \
     -p volparossa-agent --bin volparossa-agent \

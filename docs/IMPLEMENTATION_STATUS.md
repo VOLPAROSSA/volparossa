@@ -410,6 +410,13 @@ deterministic report-shape mismatch and is not evidence about the failed overlay
 Twelve focused Python receipt/export/wiring checks pass. The next protected-overlay result
 remains pending. This is not a fragment network acceptance PASS or Signal backup proof.
 
+The follow-up trial **36766638354** at
+`f60810373c38e078eabd7f174d6e63f59b020aac` failed earlier, during the VM build:
+the 4-GiB guest killed `rustc` while three large compiler processes ran concurrently.
+It produced no fragment runtime result. Its incomplete report does not verify cleanup
+or unchanged host state; that absence is not converted into a PASS. The build candidate
+limits Cargo to two jobs without changing runtime limits or acceptance checks.
+
 The next owner-coordinated candidate adds `storage replicas replace`: a durable,
 resumable A/B-to-B/C handoff through the same protected operations. It retrieves and hashes
 the surviving copy, retains the exact replacement identity across retries, and fully reads

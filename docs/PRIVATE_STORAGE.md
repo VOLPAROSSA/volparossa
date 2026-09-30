@@ -64,6 +64,22 @@ migration or verified network-wide reciprocity. Reopening a provider with `--reu
 preserves its original capacity/free-space floor and its current admission target; it does
 not choose a new target. No replication factor or coding scheme is prescribed here.
 
+### Queued investigation: storage erasure coding
+
+Investigate erasure coding for private storage as an explicit extension beyond the
+original replication-only v1 scope. Compare it with fragment replication under
+intermittent peers and correlated failures: physical storage charge, parallel-read
+latency, repair bandwidth, owner-device CPU/memory cost and recovery availability.
+This is a queued design investigation, not an implemented format or a promised
+reduction in storage contribution. Select parameters against those tradeoffs;
+preserve encryption, authenticated reconstruction, actual-byte reciprocity and
+safe migration of existing replicas. Repair must not expose plaintext to storage
+peers. This does not authorize transport-layer FEC or change existing archives.
+
+First finish the current fragment/provider-loss recovery path. Automatic placement,
+repair and safe capacity drain remain required alongside this investigation, not
+features that coding alone replaces.
+
 ## First executable slice: local provider storage
 
 `volparossa storage local` operates an explicit, owner-only store. It does not contact
