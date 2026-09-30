@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Pure receipt/fixture controls, never a substitute for the live Signal regression."""
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -228,6 +229,68 @@ process.stdout.write(JSON.stringify({forwarded, first, second, spawn, connect, u
             first["raw_error"] = "private-canary"
             (root / "startup-status.json").write_text(json.dumps(first))
             self.assertFalse(CHECK["bootstrap_diagnostic"](root / "startup-status.json")["valid"])
+
+    def test_startup_fatal_locations_are_bounded_and_never_export_check_values_or_unknown_paths(self):
+        node = os.environ.get("VOLPAROSSA_TEST_NODE") or shutil.which("node")
+        if node is None:
+            self.skipTest("explicit staged Node or system Node required for pure observer test")
+        script = r"""
+const fs = require('node:fs');
+console.error = () => {};
+const observer = require(process.argv[1]);
+const known = '[pid=20][err] [20:20:0930/153000.123456:FATAL:../../electron/shell/browser/electron_browser_main_parts.cc:322] Check failed: PRIVATE_KEY_CANARY == UNKNOWN_URL_CANARY\n';
+const unknown = '[pid=20][err] [0930/153000.123456:FATAL:../../private_canary/user_data.cc(42)] secret-message-canary\n';
+console.error('Failed to start the app, attempt 4, retrying', { name:'Error',
+  message: known + known + unknown + '/private-canary/electron exited with signal SIGTRAP\n' });
+const first = JSON.parse(fs.readFileSync(process.env.VOLPAROSSA_BACKUP_STARTUP));
+const many = observer.classify({ message: Array.from({length: 8}, (_, i) =>
+  `[FATAL:../../base/logging.cc:${i+1}] NOTREACHED hit. PRIVATE_VALUE_CANARY\n`).join('') });
+const malformed = observer.classify({ message:'[FATAL:/private canary/secret.cc(1)] secret\n' });
+const v8 = observer.classify({ message:'[pid=20][err] # Fatal error in: ../../v8/src/sandbox/sandbox.cc, line 811\n'
+  + '[pid=20][err] # Check failed: SECRET_CANARY\n' });
+const truncated = observer.classify({ message: 'x'.repeat(65536) + known });
+process.stdout.write(JSON.stringify({first, many, malformed, v8, truncated}));
+"""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "startup-status.json"
+            environment = dict(os.environ, VOLPAROSSA_BACKUP_STARTUP=str(path))
+            completed = subprocess.run([node, "-e", script, str((HERE / "signal-backup-startup.cjs").resolve())],
+                cwd=root, env=environment, check=True, timeout=5, capture_output=True, text=True)
+            result = json.loads(completed.stdout)
+            first = result["first"]
+            self.assertEqual(first["version"], 2)
+            self.assertTrue(CHECK["bootstrap_diagnostic"](path)["valid"])
+            self.assertEqual(first["fatal"], dict(observed=True, omitted=False, locations=[
+                dict(source="electron_browser_main_parts.cc", line=322, category="check_failed",
+                    source_sha256=hashlib.sha256(b"electron/shell/browser/electron_browser_main_parts.cc").hexdigest()),
+                dict(source="OTHER", line=42, category="fatal_log",
+                    source_sha256=hashlib.sha256(b"private_canary/user_data.cc").hexdigest())]))
+            self.assertTrue(first["cause_unknown"], "a source location alone does not establish a cause")
+            self.assertLess(path.stat().st_size, 4096)
+            self.assertEqual(len(result["many"]["fatal"]["locations"]), 4)
+            self.assertTrue(result["many"]["fatal"]["omitted"])
+            self.assertTrue(all(entry["category"] == "notreached" for entry in result["many"]["fatal"]["locations"]))
+            self.assertEqual(result["malformed"]["fatal"], dict(observed=True, omitted=False, locations=[]))
+            self.assertEqual(result["v8"]["fatal"], dict(observed=True, omitted=False, locations=[
+                dict(source="OTHER", line=811, category="check_failed",
+                    source_sha256=hashlib.sha256(b"v8/src/sandbox/sandbox.cc").hexdigest())]))
+            self.assertTrue(result["truncated"]["message_truncated"])
+            self.assertFalse(result["truncated"]["fatal"]["observed"])
+            self.assertNotIn("canary", json.dumps(result).lower())
+            self.assertNotIn("Check failed", json.dumps(result))
+            self.assertNotIn("../../", json.dumps(result))
+            for field, value in (("source", "private_canary.cc"), ("line", 1000001),
+                                 ("category", "private-canary"), ("source_sha256", "../private-canary")):
+                altered = copy.deepcopy(first)
+                altered["fatal"]["locations"][0][field] = value
+                path.write_text(json.dumps(altered))
+                self.assertFalse(CHECK["bootstrap_diagnostic"](path)["valid"])
+            legacy = copy.deepcopy(first)
+            legacy["version"] = 1
+            del legacy["fatal"]
+            path.write_text(json.dumps(legacy))
+            self.assertTrue(CHECK["bootstrap_diagnostic"](path)["valid"])
 
 
 if __name__ == "__main__":

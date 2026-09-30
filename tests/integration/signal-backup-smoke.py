@@ -39,6 +39,14 @@ STARTUP_CAUSES = frozenset(("crashpad_database", "chromium_namespace", "chromium
     "chromium_process_launch", "resource_limit"))
 STARTUP_SIGNALS = frozenset(("SIGABRT", "SIGBUS", "SIGFPE", "SIGILL", "SIGKILL", "SIGSEGV", "SIGSYS",
                            "SIGTERM", "SIGTRAP", "SIGXCPU", "SIGXFSZ", "OTHER"))
+STARTUP_SOURCES = frozenset(("electron_main_delegate.cc", "electron_browser_main_parts.cc", "electron_browser_context.cc",
+    "electron_api_app.cc", "electron_api_crash_reporter.cc", "node_bindings.cc", "node_bindings_linux.cc",
+    "javascript_environment.cc", "browser_main_loop.cc", "browser_main_runner_impl.cc", "content_main_runner_impl.cc",
+    "zygote_host_impl_linux.cc", "zygote_linux.cc", "setuid_sandbox_host.cc", "sandbox_linux.cc", "thread_helpers.cc",
+    "platform_thread_posix.cc", "platform_thread_linux.cc", "crashpad_client_linux.cc", "process_singleton_posix.cc",
+    "shared_memory_switch.cc", "shared_memory_posix.cc", "platform_shared_memory_region_posix.cc",
+    "memory_mapped_file_posix.cc", "file_util_posix.cc", "v8_initializer.cc", "linux_ui_factory.cc",
+    "ozone_platform_x11.cc", "ozone_platform_wayland.cc", "logging.cc", "check.cc", "OTHER"))
 FALSE_SCOPE = ("server_free_messaging_proven", "independent_failure_domains_proven",
                "network_contribution_credit", "electron_sandbox_claimed", "full_alpha_acceptance_claimed")
 EXPORT_NAMES = ("a01-expected-peers.json",) + tuple(f"signal-backup-{name}.json" for name in
@@ -207,9 +215,10 @@ def bootstrap_diagnostic(path):
         require(path.stat().st_size <= 4096, "bootstrap diagnostic bound")
         result["available"] = True
         value = read(path)
-        require(set(value) == {"version", "phase", "attempt", "exception", "process", "failure_class",
-                              "causes", "cause_unknown", "message_truncated"}
-            and value["version"] == 1 and value["phase"] == "bootstrap-startup-failed"
+        fields = {"version", "phase", "attempt", "exception", "process", "failure_class",
+                  "causes", "cause_unknown", "message_truncated"}
+        require(value["version"] in (1, 2) and set(value) == fields | ({"fatal"} if value["version"] == 2 else set())
+            and value["phase"] == "bootstrap-startup-failed"
             and type(value["attempt"]) is int and 1 <= value["attempt"] <= 4,
             "bootstrap diagnostic shape")
         error, process, causes = value["exception"], value["process"], value["causes"]
@@ -231,6 +240,20 @@ def bootstrap_diagnostic(path):
             and set(causes) == STARTUP_CAUSES and all(type(flag) is bool for flag in causes.values())
             and type(value["cause_unknown"]) is bool and value["cause_unknown"] == (not any(causes.values()))
             and type(value["message_truncated"]) is bool, "bootstrap cause shape")
+        if value["version"] == 2:
+            fatal = value["fatal"]
+            require(isinstance(fatal, dict) and set(fatal) == {"observed", "locations", "omitted"}
+                and type(fatal["observed"]) is bool and type(fatal["omitted"]) is bool
+                and isinstance(fatal["locations"], list) and len(fatal["locations"]) <= 4,
+                "bootstrap fatal shape")
+            require(not fatal["locations"] or fatal["observed"], "fatal locations without observation")
+            require(not fatal["omitted"] or len(fatal["locations"]) == 4, "invalid fatal truncation")
+            for location in fatal["locations"]:
+                require(isinstance(location, dict) and set(location) == {"source", "source_sha256", "line", "category"}
+                    and location["source"] in STARTUP_SOURCES
+                    and isinstance(location["source_sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", location["source_sha256"])
+                    and type(location["line"]) is int and 1 <= location["line"] <= 1000000
+                    and location["category"] in ("check_failed", "notreached", "fatal_log"), "bootstrap fatal location shape")
         result.update(valid=True, value=value)
     except (ValueError, OSError, KeyError, TypeError):
         pass

@@ -446,6 +446,19 @@ changes no Signal/Playwright behavior or security flag, and preserves the origin
 phase through cleanup. Eight focused receipt/reporter/observer tests and three VM-wiring
 checks pass; the same exact native test with this observation is the next runtime proof.
 
+The third native trial on `82a767aa`,
+[run `36732954164`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36732954164),
+also fails before any test starts: the launcher exits 1 after native Electron receives
+`SIGTRAP`. The Node debugger opens, but the Chromium debugger does not. Provisioning,
+compilation and the isolated socket-access preflight pass; all previous closed cause
+categories are false, so the cause remains unknown. All 17 original artifacts are retained
+(ZIP SHA-256 `124c148728399a58d1f6ae13eee49d1f95cf361ffb322223bca6b2271c3cae43`).
+Private cleanup, process-group joining and unchanged host-state checks pass. No native
+backup export, restore or import is proved. The next diagnostic candidate records at most
+four Chromium/V8 fatal source locations and closed categories, never CHECK expressions,
+values, arbitrary filenames or error text. It changes no sandbox or launch flags. Nine
+focused tests and three VM-wiring checks pass; a new exact-source runtime trial is pending.
+
 ## Earlier milestone evidence
 
 The completed development milestone is integrated into `main` by

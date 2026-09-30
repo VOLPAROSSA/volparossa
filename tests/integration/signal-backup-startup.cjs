@@ -2,6 +2,7 @@
 // Observe only the pinned Bootstrap retry error; never export error text, argv or config.
 'use strict';
 const fs = require('node:fs');
+const { createHash } = require('node:crypto');
 const names = new Set(['Error', 'TypeError', 'RangeError', 'TimeoutError', 'SystemError']);
 const codes = new Set(['EACCES', 'EPERM', 'ENOENT', 'EROFS', 'ENOSPC', 'ENOMEM', 'ECONNREFUSED',
   'ECONNRESET', 'EADDRINUSE', 'EADDRNOTAVAIL', 'ETIMEDOUT', 'ERR_MODULE_NOT_FOUND', 'MODULE_NOT_FOUND',
@@ -20,6 +21,47 @@ const patterns = {
   chromium_process_launch: /zygote could not fork|failed to launch (?:the )?(?:gpu|renderer) process/i,
   resource_limit: /out of memory|cannot allocate memory|no space left on device|file size limit exceeded/i,
 };
+// These are upstream source names, not runtime filesystem paths. Unknown names are
+// hashed so an operator can match the exact pinned binary's source-string inventory
+// without exporting an arbitrary filename, CHECK expression, value, or fatal text.
+const sourceNames = new Set([
+  'electron_main_delegate.cc', 'electron_browser_main_parts.cc', 'electron_browser_context.cc',
+  'electron_api_app.cc', 'electron_api_crash_reporter.cc', 'node_bindings.cc', 'node_bindings_linux.cc',
+  'javascript_environment.cc', 'browser_main_loop.cc', 'browser_main_runner_impl.cc',
+  'content_main_runner_impl.cc', 'zygote_host_impl_linux.cc', 'zygote_linux.cc',
+  'setuid_sandbox_host.cc', 'sandbox_linux.cc', 'thread_helpers.cc', 'platform_thread_posix.cc',
+  'platform_thread_linux.cc', 'crashpad_client_linux.cc', 'process_singleton_posix.cc',
+  'shared_memory_switch.cc', 'shared_memory_posix.cc', 'platform_shared_memory_region_posix.cc',
+  'memory_mapped_file_posix.cc', 'file_util_posix.cc', 'v8_initializer.cc',
+  'linux_ui_factory.cc', 'ozone_platform_x11.cc', 'ozone_platform_wayland.cc',
+  'logging.cc', 'check.cc',
+]);
+function fatalLocations(raw) {
+  // Both Chromium header forms and the V8 format embedded in pinned Electron
+  // 44.1.0 ("# Fatal error in: %s, line %d"). This does not export its message.
+  const header = /\b(?:FATAL|DFATAL):([^\]\[\r\n]{1,512}?)(?:\((\d{1,7})\)|:(\d{1,7}))\]|# Fatal error in:? ([^\r\n]{1,512}?), line (\d{1,7})/g;
+  const locations = [];
+  const seen = new Set();
+  let omitted = false;
+  for (const match of raw.matchAll(header)) {
+    const source = (match[1] || match[4]).replace(/^(?:\.\.\/)+/, '');
+    const line = Number(match[2] || match[3] || match[5]);
+    if (!/^(?:[A-Za-z0-9_.+-]+\/)*[A-Za-z0-9_+-]+\.(?:cc|cpp|c|h)$/.test(source)
+        || line < 1 || line > 1000000) continue;
+    const sourceHash = createHash('sha256').update(source).digest('hex');
+    const key = `${sourceHash}:${line}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (locations.length === 4) { omitted = true; continue; }
+    const basename = source.split('/').pop();
+    const suffix = raw.slice(match.index + match[0].length, match.index + match[0].length + 4096);
+    const after = suffix.split('\n', match[4] ? 3 : 1).join('\n');
+    locations.push({ source: sourceNames.has(basename) ? basename : 'OTHER', source_sha256: sourceHash,
+      line, category: /\bCheck failed:|\bCHECK failed:/i.test(after) ? 'check_failed'
+        : /\bNOTREACHED hit\b/.test(after) ? 'notreached' : 'fatal_log' });
+  }
+  return { observed: /\b(?:FATAL|DFATAL):|# Fatal error in\b|\bFATAL ERROR:/.test(raw), locations, omitted };
+}
 function knownSignal(value) {
   return value == null || value === 'null' ? null : signals.has(value) ? value : 'OTHER';
 }
@@ -57,6 +99,7 @@ function classify(error) {
       errno: Number.isInteger(error?.errno) && Math.abs(error.errno) > 0 && Math.abs(error.errno) < 4096 ? error.errno : null },
     process: processState, failure_class: failure, causes,
     cause_unknown: !Object.values(causes).some(Boolean), message_truncated: original.length > 65536,
+    fatal: fatalLocations(raw),
   };
 }
 function install(destination) {
@@ -65,7 +108,7 @@ function install(destination) {
     const attempt = typeof args[0] === 'string' && /^Failed to start the app, attempt ([1-4]), retrying$/.exec(args[0]);
     if (attempt && args.length === 2) {
       try {
-        const record = { version: 1, phase: 'bootstrap-startup-failed', attempt: Number(attempt[1]), ...classify(args[1]) };
+        const record = { version: 2, phase: 'bootstrap-startup-failed', attempt: Number(attempt[1]), ...classify(args[1]) };
         fs.writeFileSync(`${destination}.tmp`, JSON.stringify(record) + '\n', { flag: 'wx', mode: 0o600 });
         fs.renameSync(`${destination}.tmp`, destination);
       } catch {
