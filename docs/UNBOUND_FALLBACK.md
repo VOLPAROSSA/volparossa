@@ -423,6 +423,25 @@ shipped sandbox or export raw output. Nine focused package-proof checks pass. Th
 quality-gate failure was a stale static readiness-call count after adding the optional
 probe; the corrected lifecycle contract now passes without changing production behavior.
 
+The diagnostic [repeat on `d4791119`, run `36624654504`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36624654504)
+also remains **failed**. C05 and all five native cases pass again, but the sandbox fixture
+stops before executing its probe: systemd reports `ExecMainCode=1`, `ExecMainStatus=203`
+(`EXEC`), after 343 ms, with no worker observed and empty result/stderr. Installed-agent
+startup guards, source bindings and restoration pass. This identifies the executable-start
+boundary, not a libunbound runtime failure; the underlying exec errno and historical mount
+flags were not retained, so a specific permission or `noexec` cause is not asserted.
+All 270 original files are retained, ZIP SHA-256
+`bf579e6c2a4e89f45d44b64857e5445b9e42450bee1831e410257fb692276873`.
+
+The next fixture stages only its source-exact probe executable in a root-owned temporary
+`/usr/libexec` directory, alongside the packaged worker's executable location, instead of
+executing from `/run`. ACK, hosts sentinel and bounded outputs remain private runtime data.
+It retains the executable/runtime mount flags and checks the actual agent user's read/execute
+access before starting the unit, without invoking the probe outside its sandbox. Both exact
+owned temporary directories are removed after the unit stops. No shipped service, sandbox,
+production executable or resolver behavior is changed. Ten focused package-proof checks
+pass; live package acceptance remains pending.
+
 ### Bounded protected DNS connection reuse
 
 The Client can now keep a successful UDP DNS association for subsequent questions about

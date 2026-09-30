@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -96,12 +97,14 @@ class PackageProofContract(unittest.TestCase):
 
     def test_probe_derives_all_shipped_sandbox_settings_without_relaxation(self):
         source = (ROOT / "packaging/systemd/volparossa-agent.service").read_text()
-        unit = PROOF.probe_unit(source, "/run/volparossa/proof", "owned-proof", "mnt:[123]")
+        unit = PROOF.probe_unit(source, "/run/volparossa/proof", "/usr/libexec/owned-proof/probe",
+                               "owned-proof", "mnt:[123]")
         service = source.split("[Service]\n", 1)[1].split("[Install]", 1)[0]
         for line in service.splitlines():
             if line and not line.startswith(("Type=", "ExecStart=", "Restart=")):
                 self.assertIn(line, unit)
-        self.assertIn("ExecStart=/run/volparossa/proof/probe signed", unit)
+        self.assertIn("ExecStart=/usr/libexec/owned-proof/probe signed", unit)
+        self.assertNotIn("ExecStart=/run/", unit)
         self.assertIn("Type=oneshot", unit)
         self.assertIn("Restart=no", unit)
         self.assertIn("NoNewPrivileges=yes", unit)
@@ -112,6 +115,36 @@ class PackageProofContract(unittest.TestCase):
         self.assertNotIn("StandardError=null", unit)
         self.assertNotIn("Wants=", unit)
         self.assertNotIn("WantedBy=", unit)
+
+    def test_executable_preflight_distinguishes_mount_and_agent_access_without_running_probe(self):
+        source, executable, runtime = Path("source"), Path("staged"), Path("runtime")
+        for noexec, read_status, exec_status, source_match in (
+            (False, 0, 0, True), (True, 0, 0, True), (False, 1, 0, True),
+            (False, 0, 1, True), (False, 0, 0, False),
+        ):
+            diagnostics = {}
+            with self.subTest(noexec=noexec, read_status=read_status, exec_status=exec_status,
+                              source_match=source_match), \
+                    mock.patch.object(PROOF.os, "statvfs", side_effect=[
+                        SimpleNamespace(f_flag=PROOF.os.ST_NOEXEC if noexec else 0),
+                        SimpleNamespace(f_flag=PROOF.os.ST_NOEXEC)]), \
+                    mock.patch.object(PROOF, "digest", side_effect=["a", "a" if source_match else "b"]), \
+                    mock.patch.object(PROOF, "run", side_effect=[
+                        subprocess.CompletedProcess([], read_status),
+                        subprocess.CompletedProcess([], exec_status)]) as command:
+                if noexec or read_status or exec_status or not source_match:
+                    with self.assertRaisesRegex(RuntimeError, "PROBE_EXECUTABLE_PREFLIGHT_FAILED"):
+                        PROOF.executable_preflight(source, executable, runtime, diagnostics)
+                else:
+                    PROOF.executable_preflight(source, executable, runtime, diagnostics)
+            self.assertEqual(diagnostics["executable_mount_noexec"], noexec)
+            self.assertTrue(diagnostics["runtime_mount_noexec"])
+            self.assertEqual(diagnostics["executable_readable_by_agent"], read_status == 0)
+            self.assertEqual(diagnostics["executable_traversable_by_agent"], exec_status == 0)
+            self.assertEqual(diagnostics["executable_source_bound"], source_match)
+            self.assertEqual(command.call_args_list, [
+                mock.call("runuser", "-u", "volparossa", "--", "/usr/bin/test", "-r", "staged", check=False),
+                mock.call("runuser", "-u", "volparossa", "--", "/usr/bin/test", "-x", "staged", check=False)])
 
     def test_sandbox_failure_keeps_fixed_status_and_guard_without_raw_private_text(self):
         raw = b"Result=exit-code\nExecMainCode=1\nExecMainStatus=203\nActiveState=failed\n"

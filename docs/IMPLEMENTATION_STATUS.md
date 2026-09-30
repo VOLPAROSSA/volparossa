@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-29
+Last updated: 2026-09-30
 
 ## Current integration and active work
 
@@ -3656,6 +3656,12 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   C05 and all five native cases pass, as do source binding and installed-agent startup guards,
   but the shipped-sandbox probe fails and upgrade/removal acceptance is not established.
   No missing probe diagnostics are invented. See [exact results and hashes](UNBOUND_FALLBACK.md).
+  The diagnostic repeat `36624654504` on `d4791119` again passes C05/native/startup checks,
+  but records systemd `203/EXEC` before the probe or worker runs; no underlying exec errno
+  or historical mount flags were retained. The fixture now stages the source-exact probe
+  under a private root-owned `/usr/libexec` directory, keeps its runtime files under `/run`,
+  and checks mount flags plus actual agent-user access without relaxing the shipped sandbox.
+  Ten focused package-proof checks pass; the complete live package lifecycle remains pending.
 
 The positive DNSSEC cache is now composed into the normal agent: the same bounded RAM resolver
 serves protected DNS, TCP resolution, general UDP and browser-QUIC destination pinning. Its peer

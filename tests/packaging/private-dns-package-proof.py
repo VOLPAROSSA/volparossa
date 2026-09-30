@@ -20,7 +20,8 @@ WORKER = Path("/usr/libexec/volparossa-dns-worker")
 CONFIG = Path("/etc/volparossa/config.yaml")
 UNIT = Path("/usr/lib/systemd/system/volparossa-agent.service")
 PROBE_UNIT = "volparossa-private-dns-package-probe.service"
-DEVIATIONS = ["source-built resolver example replaces agent ExecStart", "Type=oneshot",
+DEVIATIONS = ["source-built resolver example replaces agent ExecStart",
+              "probe executable staged in a root-owned temporary /usr/libexec directory", "Type=oneshot",
               "Restart=no", "no helper/native Wants", "synthetic hosts bind read-only",
               "fixed observer ACK on stdin; bounded synthetic result on stdout",
               "bounded startup stderr classified before owned temporary cleanup",
@@ -142,7 +143,7 @@ def missing_assets_start():
         wait_roles_off()
 
 
-def probe_unit(source, directory, marker, parent):
+def probe_unit(source, directory, executable, marker, parent):
     result = []
     for line in source.splitlines():
         if line.startswith("Wants="):
@@ -152,7 +153,7 @@ def probe_unit(source, directory, marker, parent):
         elif line == "Type=simple":
             line = "Type=oneshot"
         elif line.startswith("ExecStart="):
-            line = f"ExecStart={directory}/probe signed"
+            line = f"ExecStart={executable} signed"
         elif line.startswith("Restart="):
             line = "Restart=no"
         elif line == "[Install]":
@@ -163,6 +164,24 @@ def probe_unit(source, directory, marker, parent):
             break
         result.append(line)
     return "\n".join(result) + "\n"
+
+
+def executable_preflight(source, executable, runtime, diagnostics):
+    # /run is for data, not an executable location. Keep its mount flag as
+    # diagnostic evidence without assuming that it explains older 203/EXEC runs.
+    # Both paths are fixed-parent, probe-owned guest temporary directories.
+    diagnostics.update(
+        executable_mount_noexec=bool(os.statvfs(executable).f_flag & os.ST_NOEXEC),
+        runtime_mount_noexec=bool(os.statvfs(runtime).f_flag & os.ST_NOEXEC),
+        executable_source_bound=digest(executable) == digest(source),
+        executable_readable_by_agent=run("runuser", "-u", "volparossa", "--", "/usr/bin/test",
+                                        "-r", str(executable), check=False).returncode == 0,
+        executable_traversable_by_agent=run("runuser", "-u", "volparossa", "--", "/usr/bin/test",
+                                           "-x", str(executable), check=False).returncode == 0,
+    )
+    require(not diagnostics["executable_mount_noexec"] and diagnostics["executable_source_bound"]
+            and diagnostics["executable_readable_by_agent"]
+            and diagnostics["executable_traversable_by_agent"], "PROBE_EXECUTABLE_PREFLIGHT_FAILED")
 
 
 def process_identity(pid):
@@ -274,17 +293,23 @@ def sandbox_probe(probe, diagnostics):
     observed = None
     started = False
     started_at = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix="private-dns-package-", dir="/run/volparossa") as temporary:
+    with tempfile.TemporaryDirectory(prefix="private-dns-package-", dir="/run/volparossa") as temporary, \
+            tempfile.TemporaryDirectory(prefix="volparossa-private-dns-probe-", dir="/usr/libexec") as staged:
         directory = Path(temporary)
+        executable_directory = Path(staged)
         os.chown(directory, 0, account.pw_gid)
         directory.chmod(0o750)
-        shutil.copyfile(probe, directory / "probe")
-        (directory / "probe").chmod(0o755)
+        os.chown(executable_directory, 0, account.pw_gid)
+        executable_directory.chmod(0o750)
+        executable = executable_directory / "probe"
+        shutil.copyfile(probe, executable)
+        executable.chmod(0o755)
+        executable_preflight(probe, executable, directory, diagnostics)
         (directory / "ack").write_bytes(b"\1")
         (directory / "hosts").write_text("127.0.0.1 localhost\n93.184.216.34 iana.org\n")
         for name in ("ack", "hosts"):
             (directory / name).chmod(0o644)
-        definition = probe_unit(UNIT.read_text(), directory, marker, os.readlink("/proc/self/ns/mnt"))
+        definition = probe_unit(UNIT.read_text(), directory, executable, marker, os.readlink("/proc/self/ns/mnt"))
         target.write_text(definition)
         try:
             run("systemctl", "daemon-reload")
