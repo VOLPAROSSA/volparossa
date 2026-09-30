@@ -6,6 +6,17 @@ Last updated: 2026-09-30
 
 ## Current integration and active work
 
+The [mailbox import-confirmation candidate](MAILBOX_IMPORT_CONFIRMATION.md) adds a
+reusable split handoff: `content mailbox fetch` retains provider custody while writing
+bounded private payload/token/owner-signed pending receipts; `confirm-import` validates
+the exact owner, original grant/message, token and imported-byte digest before authenticating
+ACKs to both providers. Original expiry is retained, partial ACK progress persists and exact
+retries are idempotent. Legacy `receive` is unchanged. One canonical receipt test and three
+actual CLI/local signed-service tests pass, including interrupted ACK and restart/retry.
+These are not live-overlay tests. This is **not** native Thunderbird/Signal import, Signal
+Protocol, autonomous retention renewal or proof of no message loss; consumer confirmation
+remains an explicit application attestation, not an independently proved database commit.
+
 Automatic authority rounds and the four-job assessment cycle are integrated by
 [PR #163](https://github.com/VOLPAROSSA/volparossa/pull/163), normal merge `f4e6aa79`,
 after Quality and all CodeQL analyses passed on `c4060377`. This also prevents local

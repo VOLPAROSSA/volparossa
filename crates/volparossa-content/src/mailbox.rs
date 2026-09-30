@@ -6,6 +6,7 @@
 //! Mailbox signing keys may be independently created encrypted application identities; no
 //! permanent network identity or decryption key is required by storage providers.
 
+pub mod import;
 pub mod store;
 pub mod wire;
 
