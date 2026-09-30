@@ -42,6 +42,9 @@ fn worker_source() -> String {
     let aggregation = serde_json::json!(include_str!(
         "../../../../workers/volparossa-ml/adapter_aggregation.py"
     ));
+    let conversation = serde_json::json!(include_str!(
+        "../../../../workers/volparossa-ml/conversation.py"
+    ));
     format!(
         "import sys as _vp_sys, types as _vp_types\n\
          _vp_decoder = _vp_types.ModuleType('volparossa_task_graph_decoder')\n\
@@ -49,7 +52,10 @@ fn worker_source() -> String {
          _vp_sys.modules['volparossa_task_graph_decoder'] = _vp_decoder\n\
          _vp_aggregation = _vp_types.ModuleType('volparossa_adapter_aggregation')\n\
          exec({aggregation}, _vp_aggregation.__dict__)\n\
-         _vp_sys.modules['volparossa_adapter_aggregation'] = _vp_aggregation\n{}",
+         _vp_sys.modules['volparossa_adapter_aggregation'] = _vp_aggregation\n\
+         _vp_conversation = _vp_types.ModuleType('volparossa_conversation')\n\
+         exec({conversation}, _vp_conversation.__dict__)\n\
+         _vp_sys.modules['volparossa_conversation'] = _vp_conversation\n{}",
         include_str!("../../../../workers/volparossa-ml/worker.py")
     )
 }

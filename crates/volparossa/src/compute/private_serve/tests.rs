@@ -242,6 +242,69 @@ fn private_serve_unconfirmed_cleanup_or_dropped_execution_quarantines_admission(
 }
 
 #[tokio::test]
+async fn conversation_handshake_is_separate_but_shares_the_private_execution_slot() {
+    let root = tempfile::tempdir().unwrap();
+    let gate = Arc::new(Semaphore::new(1));
+    let mut occupied = ExecutionSlot::admit(&gate).unwrap();
+    let (server, mut client) = UnixStream::pair().unwrap();
+    let (stop, shutdown) = watch::channel(false);
+    let serving = tokio::spawn(connection(
+        server,
+        Arc::new(config(root.path())),
+        gate.clone(),
+        shutdown,
+    ));
+    let submit = json!({"type":"submit_conversation","conversation":{
+        "version":1,"visibility":"private_local","instructions":"Review synthetic code.",
+        "history":[{"type":"message","role":"user","text":"Explain 1+1."}],"tools":[]}});
+    for (index, operation, expected) in [
+        (1, json!({"type":"capabilities"}), "capabilities"),
+        (2, submit.clone(), "handshake_required"),
+        (
+            3,
+            json!({"type":"conversation_capabilities"}),
+            "conversation_capabilities",
+        ),
+        (4, submit.clone(), "busy"),
+    ] {
+        wire::write(&mut client, &request(&format!("{index:032x}"), operation))
+            .await
+            .unwrap();
+        let reply: Value = wire::read(&mut client, wire::MAX_RESPONSE_BYTES)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reply[if reply["event"] == "error" {
+                "code"
+            } else {
+                "event"
+            }],
+            expected
+        );
+        if expected == "capabilities" {
+            assert!(reply["capabilities"].get("max_prompt_tokens").is_none());
+        }
+        if expected == "conversation_capabilities" {
+            assert_eq!(reply["capabilities"]["max_prompt_tokens"], 1024);
+            assert_eq!(reply["capabilities"]["tool_execution"], false);
+        }
+    }
+    gate.close();
+    wire::write(&mut client, &request(&format!("{:032x}", 5), submit))
+        .await
+        .unwrap();
+    let reply: Value = wire::read(&mut client, wire::MAX_RESPONSE_BYTES)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply["code"], "cleanup_unconfirmed");
+    stop.send(true).unwrap();
+    serving.await.unwrap();
+    occupied.finish(&Err(anyhow::anyhow!("no model invoked")));
+}
+
+#[tokio::test]
 async fn private_serve_uses_real_private_staging_and_cleans_it_on_backend_validation_failure() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
@@ -259,9 +322,22 @@ async fn private_serve_uses_real_private_staging_and_cleans_it_on_backend_valida
         "Private canary, never a public dataset.",
     )
     .unwrap();
-    let result = private_task::execute_bytes(&config, input, activity).await;
+    let result = private_task::execute_bytes(&config, input, activity.clone()).await;
     // No runtime/model was provisioned: this exercises the real validation and
     // staging cleanup path, not an inference-success or sandbox-reaping claim.
+    assert!(result.is_err());
+    assert_eq!(fs::read_dir(&config.work_parent).unwrap().count(), 0);
+    assert!(fs::read_dir(&config.runtime_root).unwrap().next().is_none());
+    let input = serde_json::to_vec(&json!({"version":1,"visibility":"private_local",
+        "instructions":"Review synthetic code.","history":[{"type":"message","role":"user","text":"Explain 1+1."}],
+        "tools":[]})).unwrap();
+    let result = private_task::execute_mode(
+        &config,
+        input,
+        activity,
+        super::super::Mode::PrivateConversation,
+    )
+    .await;
     assert!(result.is_err());
     assert_eq!(fs::read_dir(&config.work_parent).unwrap().count(), 0);
     assert!(fs::read_dir(&config.runtime_root).unwrap().next().is_none());

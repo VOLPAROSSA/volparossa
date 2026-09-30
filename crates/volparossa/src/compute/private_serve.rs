@@ -157,11 +157,21 @@ impl Active {
         id: String,
         config: Arc<private_task::ExecutionConfig>,
         input: Vec<u8>,
+        slot: ExecutionSlot,
+    ) -> Self {
+        Self::start_mode(id, config, input, slot, super::Mode::PrivateInfer)
+    }
+
+    fn start_mode(
+        id: String,
+        config: Arc<private_task::ExecutionConfig>,
+        input: Vec<u8>,
         mut slot: ExecutionSlot,
+        mode: super::Mode,
     ) -> Self {
         let (activity, signal) = watch::channel(true);
         let execution = tokio::spawn(async move {
-            let result = private_task::execute_bytes(&config, input, signal).await;
+            let result = private_task::execute_mode(&config, input, signal, mode).await;
             slot.finish(&result);
             result
         });
@@ -242,6 +252,7 @@ async fn connection(
         }
     });
     let mut handshake = false;
+    let mut conversation_handshake = false;
     let mut seen = BTreeSet::new();
     let mut active: Option<Active> = None;
     loop {
@@ -265,6 +276,33 @@ async fn connection(
                         let mut response = wire::response(&request.id, "capabilities");
                         response["capabilities"] = capabilities(&config, &gate);
                         response
+                    }
+                    wire::Operation::ConversationCapabilities {} => {
+                        conversation_handshake = true;
+                        let mut response = wire::response(&request.id, "conversation_capabilities");
+                        response["capabilities"] = super::private_conversation::capabilities(config.model_profile);
+                        response["capabilities"]["execution_slots"] = 1.into();
+                        response["capabilities"]["max_seconds"] = config.max_seconds.into();
+                        response["capabilities"]["max_request_bytes"] = wire::MAX_REQUEST_BYTES.into();
+                        response["capabilities"]["max_response_bytes"] = wire::MAX_RESPONSE_BYTES.into();
+                        response["capabilities"]["quarantined"] = gate.is_closed().into();
+                        response
+                    }
+                    wire::Operation::SubmitConversation { conversation } => {
+                        if !conversation_handshake {
+                            wire::error(Some(&request.id), "handshake_required")
+                        } else if gate.is_closed() {
+                            wire::error(Some(&request.id), "cleanup_unconfirmed")
+                        } else if active.is_some() {
+                            wire::error(Some(&request.id), "busy")
+                        } else if let Some(slot) = ExecutionSlot::admit(&gate) {
+                            let input = conversation.bytes().expect("validated conversation serializes");
+                            active = Some(Active::start_mode(request.id.clone(), config.clone(), input, slot,
+                                super::Mode::PrivateConversation));
+                            wire::response(&request.id, "admitted")
+                        } else {
+                            wire::error(Some(&request.id), "busy")
+                        }
                     }
                     wire::Operation::Submit { question, context } => {
                         if !handshake {

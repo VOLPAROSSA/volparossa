@@ -22,8 +22,17 @@ pub(super) struct Request {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Operation {
     Capabilities {},
-    Submit { question: String, context: String },
-    Cancel { task_id: String },
+    Submit {
+        question: String,
+        context: String,
+    },
+    ConversationCapabilities {},
+    SubmitConversation {
+        conversation: super::super::private_conversation::Input,
+    },
+    Cancel {
+        task_id: String,
+    },
 }
 
 fn valid_id(id: &str) -> bool {
@@ -44,6 +53,9 @@ impl Request {
         }
         if let Operation::Submit { question, context } = &self.operation {
             super::super::private_task::validate_input(&input_bytes(question, context)?)?;
+        }
+        if let Operation::SubmitConversation { conversation } = &self.operation {
+            conversation.bytes()?;
         }
         Ok(())
     }

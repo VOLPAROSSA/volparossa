@@ -6,6 +6,19 @@ Last updated: 2026-09-30
 
 ## Current integration and active work
 
+Private conversation source candidate (2026-09-30): additive
+[`conversation_capabilities` / `submit_conversation`](../crates/volparossa/src/compute/private_conversation/WIRE.md)
+operations retain the existing same-owner private Q&A interface and execution slot.
+Typed instructions, ordered history, offered function/custom tools and correlated
+tool results reach the actual chat-template/generation backend; outputs are validated
+assistant text, tool proposals or explicit incomplete turns. The worker never executes
+tools. Existing model budgets remain 192/64 or 1024/256 prompt/output tokens, with
+whole-prompt token admission and no truncation; ordinary Codex inputs do not fit yet.
+Sixteen focused Rust protocol/lifecycle/report tests and eleven offline Python
+conversation/private-worker tests pass. Backend doubles in those tests are not model
+inference evidence. Larger coding-model profiles, real tool-use quality, a Responses
+provider and an actual Codex editing loop remain **unproved/incomplete**.
+
 The [mailbox import-confirmation candidate](MAILBOX_IMPORT_CONFIRMATION.md) adds a
 reusable split handoff: `content mailbox fetch` retains provider custody while writing
 bounded private payload/token/owner-signed pending receipts; `confirm-import` validates

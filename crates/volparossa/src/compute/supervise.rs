@@ -133,8 +133,10 @@ pub(super) async fn run(
     mut owner_idle: watch::Receiver<bool>,
 ) -> Result<Value> {
     let pid = child.id().context("compute_child_id")?;
-    let mut private_lifetimes =
-        (options.mode == Mode::PrivateInfer).then(|| lifetime::OwnedLifetimes::capture(pid));
+    let mut private_lifetimes = options
+        .mode
+        .is_private()
+        .then(|| lifetime::OwnedLifetimes::capture(pid));
     let mut stdin = child.stdin.take().context("compute_child_stdin")?;
     let stdout = child.stdout.take().context("compute_child_stdout")?;
     let stderr = child.stderr.take().context("compute_child_stderr")?;
@@ -217,9 +219,14 @@ pub(super) async fn run(
     result["supervisor"] = supervisor_report(options, peak_rss, controls.as_ref(), &budget);
     if options.mode == Mode::PlanTasks {
         check_task_plan_result(&result, options)?;
-    } else if options.mode == Mode::PrivateInfer {
+    } else if options.mode.is_private() {
         let input = super::read_file(&options.dataset, super::MAX_DATASET_BYTES)?;
-        super::private_task::validate_report(&result, &input, options.model_profile)?;
+        super::private_task::validate_mode_report(
+            &result,
+            &input,
+            options.model_profile,
+            options.mode,
+        )?;
     }
     Ok(result)
 }
@@ -291,7 +298,7 @@ async fn reap_failed_child(
         .await
         .context("compute_reap_deadline")
         .and_then(|result| result.context("compute_reap"));
-    if mode == Mode::PrivateInfer && reaped.is_err() {
+    if mode.is_private() && reaped.is_err() {
         return Err(super::private_task::CleanupUnconfirmed.into());
     }
     reaped?;
@@ -376,6 +383,7 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
     match request.mode {
         Mode::Infer
         | Mode::PrivateInfer
+        | Mode::PrivateConversation
         | Mode::PlanDocument
         | Mode::PlanTasks
         | Mode::AggregateAdapter => {
@@ -409,7 +417,7 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
             "compute_aggregation_result_scope"
         );
     }
-    if request.mode == Mode::PrivateInfer {
+    if request.mode.is_private() {
         ensure!(
             value["private_data_supported"] == true
                 && value["distributed_execution_claimed"] == false
@@ -421,7 +429,10 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
             "compute_private_result_scope"
         );
     }
-    if matches!(request.mode, Mode::Infer | Mode::PrivateInfer | Mode::Train) {
+    if matches!(
+        request.mode,
+        Mode::Infer | Mode::PrivateInfer | Mode::PrivateConversation | Mode::Train
+    ) {
         let outputs = value["outputs"]
             .as_array()
             .context("compute_result_outputs")?;
@@ -482,7 +493,10 @@ fn check_artifacts(value: &Value, mode: Mode, output: &Path) -> Result<()> {
         .get("artifacts")
         .and_then(Value::as_array)
         .context("compute_artifacts")?;
-    if matches!(mode, Mode::Infer | Mode::PrivateInfer) {
+    if matches!(
+        mode,
+        Mode::Infer | Mode::PrivateInfer | Mode::PrivateConversation
+    ) {
         ensure!(artifacts.is_empty(), "compute_inference_artifacts");
         return Ok(());
     }
