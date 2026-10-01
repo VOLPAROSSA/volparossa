@@ -17,7 +17,27 @@ const children = new Set();
 const cancel = new AbortController();
 let cleanupFailed = false;
 let stage = 'not_started';
+let uiFailure = null;
 const insist = value => assert.ok(value, 'Cloud SDK boundary or operation failed');
+
+// Only fixed phase names and process termination metadata cross this boundary.
+// Browser text, URLs, bearer input and stderr never become diagnostics.
+export function closedUIFailure(stdout, status) {
+  const stages = new Set(['input', 'browser_start', 'locked_ui', 'wrong_token', 'unlock',
+    'original_download_1', 'original_download_2', 'logout']);
+  const signals = new Set(['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGHUP', 'SIGABRT',
+    'SIGSEGV', 'SIGBUS', 'SIGILL', 'SIGPIPE']);
+  let childStage = 'unreported';
+  try {
+    const record = JSON.parse(stdout);
+    if (record && Object.keys(record).sort().join(',') === 'kind,stage,success'
+      && record.success === false && record.kind === 'cloud-private-file-ui-failure'
+      && stages.has(record.stage)) childStage = record.stage;
+  } catch { /* No extraction, repair or raw output on malformed child reports. */ }
+  return { stage: childStage,
+    exit_status: Number.isInteger(status?.code) && status.code >= 0 && status.code <= 255 ? status.code : null,
+    signal: status?.signal === null ? null : signals.has(status?.signal) ? status.signal : 'UNREPORTED' };
+}
 
 async function privateDirectory(directory) {
   const info = await lstat(directory);
@@ -126,8 +146,9 @@ async function originalUI(root, origin, bearerToken, content) {
   insist(Buffer.byteLength(input) < 4096);
   const state = launchProcess('/usr/bin/python3', ['-B', script, root], input);
   const timer = setTimeout(() => state.child.kill('SIGTERM'), 1900000);
+  let status;
   try {
-    const status = await state.finished;
+    status = await state.finished;
     insist(status.code === 0 && status.signal === null && !state.overflow && !state.stderr);
     const result = JSON.parse(state.stdout.trim());
     assert.deepEqual(result, { version: 1, kind: 'cloud-private-file-original-ui', success: true,
@@ -137,6 +158,9 @@ async function originalUI(root, origin, bearerToken, content) {
       private_profile_removed: true, browser_stopped_and_joined: true,
       browser_version: '140.16.0', owner_secrets_exported: false });
     return result;
+  } catch (error) {
+    uiFailure = closedUIFailure(state.stdout, status);
+    throw error;
   } finally { clearTimeout(timer); await stop(state); }
 }
 
@@ -221,17 +245,19 @@ async function main(root) {
     original_files_ui_reads_proven: true, full_web_ui_proven: false, owner_secrets_exported: false };
 }
 
-const interrupted = () => { cancel.abort(); for (const state of children) state.child.kill('SIGTERM'); };
-for (const kind of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(kind, interrupted);
-const deadline = setTimeout(interrupted, 2300000);
-try { console.log(JSON.stringify(await main(process.argv[2]))); }
-catch {
-  console.log(JSON.stringify({ success: false, kind: 'cloud-private-file-sdk-failure', stage }));
-  process.exitCode = 1;
-} finally {
-  clearTimeout(deadline);
-  try { await Promise.all([...children].map(stop)); }
-  catch { cleanupFailed = true; process.exitCode = 1; }
-  for (const kind of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.removeListener(kind, interrupted);
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+  const interrupted = () => { cancel.abort(); for (const state of children) state.child.kill('SIGTERM'); };
+  for (const kind of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(kind, interrupted);
+  const deadline = setTimeout(interrupted, 2300000);
+  try { console.log(JSON.stringify(await main(process.argv[2]))); }
+  catch {
+    console.log(JSON.stringify({ success: false, kind: 'cloud-private-file-sdk-failure', stage, ui: uiFailure }));
+    process.exitCode = 1;
+  } finally {
+    clearTimeout(deadline);
+    try { await Promise.all([...children].map(stop)); }
+    catch { cleanupFailed = true; process.exitCode = 1; }
+    for (const kind of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.removeListener(kind, interrupted);
+  }
+  if (cleanupFailed) console.error('Cloud SDK child cleanup unconfirmed; private diagnostics withheld');
 }
-if (cleanupFailed) console.error('Cloud SDK child cleanup unconfirmed; private diagnostics withheld');

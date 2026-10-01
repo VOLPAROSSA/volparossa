@@ -39,6 +39,66 @@ EXPORT_NAMES = tuple(name for name in FRAGMENTS["EXPORT_NAMES"] if name not in (
     "cloud-private-file-smoke.json", "cloud-private-file-evidence.json", "cloud-private-file-provision.json",
     "cloud-private-file-route-diagnostic.json")
 STAGE = "not_started"
+SDK_FAILURE = None
+
+
+def closed_sdk_failure(stdout, returncode):
+    """Retain only closed child phase/termination metadata, never raw output."""
+    signals = {name for name in ("SIGTERM", "SIGKILL", "SIGINT", "SIGHUP", "SIGABRT",
+                               "SIGSEGV", "SIGBUS", "SIGILL", "SIGPIPE")}
+    sdk_stages = {"not_started", "catalog_create", "service_start", "sdk_list", "sdk_full_get",
+                  "sdk_range_get", "sdk_auth", "original_files_ui", "service_close"}
+    ui_stages = {"unreported", "input", "browser_start", "locked_ui", "wrong_token", "unlock",
+                 "original_download_1", "original_download_2", "logout"}
+    code = returncode if type(returncode) is int and 0 <= returncode <= 255 else None
+    signum = -returncode if type(returncode) is int and returncode < 0 else None
+    killed = next((name for name in signals if getattr(signal, name) == signum), "UNREPORTED")
+    result = dict(stage="unreported", exit_status=code,
+                  signal=None if code is not None else killed, ui=None)
+    try:
+        require(len(stdout) <= 65536, "child record too large")
+        value = json.loads(stdout)
+        require(type(value) is dict and set(value) == {"success", "kind", "stage", "ui"}
+                and value["success"] is False and value["kind"] == "cloud-private-file-sdk-failure"
+                and value["stage"] in sdk_stages, "child record is not closed")
+        result["stage"] = value["stage"]
+        ui = value["ui"]
+        if ui is not None:
+            require(type(ui) is dict and set(ui) == {"stage", "exit_status", "signal"}
+                    and ui["stage"] in ui_stages
+                    and (ui["exit_status"] is None or type(ui["exit_status"]) is int
+                         and 0 <= ui["exit_status"] <= 255)
+                    and (ui["signal"] is None or ui["signal"] in signals | {"UNREPORTED"}),
+                    "UI record is not closed")
+            result["ui"] = ui
+    except (ValueError, TypeError, KeyError, UnicodeError):
+        pass
+    return result
+
+
+def sdk_process_json(command, deadline=2350):
+    """Same deadline/cleanup as before, but preserve the driver's closed failure."""
+    global SDK_FAILURE
+    process = subprocess.Popen(list(map(str, command)), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               start_new_session=True)
+    stdout, complete = b"", False
+    try:
+        stdout, stderr = process.communicate(timeout=deadline)
+        require(len(stdout) <= 65536 and len(stderr) <= 16384 and process.returncode == 0,
+                "Cloud SDK command failed")
+        value = json.loads(stdout)
+        complete = True
+        return value
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+        if not complete:
+            SDK_FAILURE = closed_sdk_failure(stdout, process.returncode)
 
 
 def tools():
@@ -266,7 +326,7 @@ def restore(root, binary, client, keys):
     verify_plain(root / "restore-1", metadata)
     STAGE = "cloud_catalog_sdk_and_original_ui_reads"
     _, node = tools()
-    sdk = process_json([node, Path(__file__).with_name("cloud-private-file-sdk.mjs"), root], deadline=2350)
+    sdk = sdk_process_json([node, Path(__file__).with_name("cloud-private-file-sdk.mjs"), root])
     raw_status(root, binary, client, keys, "restore")
     FRAGMENTS["check_identity"](root)
     FRAGMENTS["staged_files_absent"](root)
@@ -445,6 +505,9 @@ if __name__ == "__main__":
     try:
         main(sys.argv[1:])
     except (KeyError, TypeError, ValueError, OSError, StopIteration, subprocess.SubprocessError):
-        print(json.dumps(dict(success=False, kind="cloud-private-file-failure", stage=STAGE)))
+        failure = dict(success=False, kind="cloud-private-file-failure", stage=STAGE)
+        if SDK_FAILURE is not None:
+            failure["child"] = SDK_FAILURE
+        print(json.dumps(failure))
         print("Cloud private-file fixture failed; private diagnostics not exported", file=sys.stderr)
         sys.exit(1)

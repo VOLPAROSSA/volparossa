@@ -48,7 +48,23 @@ Last updated: 2026-10-01
   protected B/C reconstructions including two original Download actions with the
   source and A still offline. It retains authentication, logout, resource bounds,
   complete private cleanup and unchanged host-state checks. This new combined
-  UI/peer scenario is **not yet run** and remains unchecked.
+  UI/peer scenario remains unchecked. Its first actual
+  [run36930150960](https://github.com/VOLPAROSSA/volparossa/actions/runs/36930150960)
+  on `2156abb84c384e7f07667b2870e041563a728ea0` failed after provisioning,
+  authenticated import, eight committed copies, renewal, source shutdown and the
+  first successful peer restore/decryption. The last retained child phase is
+  `cloud_catalog_sdk_and_original_ui_reads`; the parent discarded the nested
+  SDK/UI failure record, so the original reports do not establish which subsequent
+  operation failed. The next candidate preserves only allowlisted child phases,
+  exit status and signals. It changes no timeout, product behavior or success gate;
+  a real Node-to-Python synthetic failure test confirms propagation without private
+  output, not a fixed UI datapath. The original run remains failed. Cleanup removed
+  every owned object and host hashes match
+  `52287c2c8b5a1751e5b679b14d95ab81b0b04937b9b6a910a6640f4e5b3e0bef`.
+  Its original 29-file ZIP SHA-256 is
+  `275539662385106e8a6570be9f5a9fd294135638a02402078540ac742913dc08`;
+  original job110597144662 log SHA-256 is
+  `0f0f1981975520b714d99d7fd9d4caec0b4819e903d6c582d1e50fef38f2ee55`.
 - [ ] Cooperative maintenance of current/future VOLPAROSSA organization repositories:
   actual coding jobs, independent immune review and exact-revision scoped GitHub
   publication. [Agreed scope](REPOSITORY_MAINTENANCE.md); no autonomous publisher,
