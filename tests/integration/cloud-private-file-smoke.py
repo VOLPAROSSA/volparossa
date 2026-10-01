@@ -20,13 +20,14 @@ FRAGMENTS = IMAGE["FRAGMENTS"]
 require, read, create = FRAGMENTS["require"], FRAGMENTS["read"], FRAGMENTS["create"]
 private_file, invoke, unlock = FRAGMENTS["private_file"], FRAGMENTS["invoke"], FRAGMENTS["unlock"]
 owner_root, cleanup, process_json = IMAGE["owner_root"], IMAGE["cleanup"], IMAGE["process_json"]
-REVISION = "541cc826fe14ce69cf89a82ecb600ad14dd534c6"
+REVISION = "a67b91fbed42ecd23ba215eb21ef54397fc9f06a"
 PIN_PATH = Path(__file__).with_name("cloud-private-file-pins.json")
 PINS = json.loads(PIN_PATH.read_text())
 SOURCE_HASHES = {name: record["sha256"] for name, record in PINS["files"].items()}
 CHUNK = FRAGMENTS["CHUNK"]
 CONTENT = bytes(range(256)) * (3 * CHUNK // 256) + b"C"
 CONTENT_SHA = hashlib.sha256(CONTENT).hexdigest()
+SDK_SHA = "8954d9ad90e44a6f62d0e32d3280ca92fd7b0ce30042fe07cdde5c653e0739b3"
 ETAG = '"synthetic-cloud-file-v1"'
 DAV_PATH = "/dav/spaces/synthetic-owner/private-file.bin"
 FALSE_CLAIMS = ("opencloud_server_started", "serverless_opencloud_proven", "web_client_proven",
@@ -249,7 +250,7 @@ def restore(root, binary, client, keys):
     metadata = fixture(root)
     require(not (root / "bundle/file.pgp").exists() and not (root / "source.private.json").exists(),
         "Cloud source or credentials remain")
-    for number in (1, 2):
+    for number in (1,):
         STAGE = f"cloud_restore_{number}"
         value = cloud(root, "restore", "--output", root / f"restore-{number}")
         check_bridge(value["storage"], metadata, "restore")
@@ -263,13 +264,30 @@ def restore(root, binary, client, keys):
     STAGE = "existing_output"
     cloud(root, "restore", "--output", root / "restore-1", expected=1)
     verify_plain(root / "restore-1", metadata)
+    STAGE = "cloud_catalog_and_sdk_reads"
+    _, node = tools()
+    sdk = process_json([node, Path(__file__).with_name("cloud-private-file-sdk.mjs"), root], deadline=1250)
+    raw_status(root, binary, client, keys, "restore")
+    FRAGMENTS["check_identity"](root)
     FRAGMENTS["staged_files_absent"](root)
     require(not any(path.name.startswith("receive-") for path in root.iterdir()), "Cloud received ciphertext remains")
-    return restore_report(metadata["ciphertext_bytes"])
+    return restore_report(metadata["ciphertext_bytes"], sdk)
 
 
-def restore_report(size):
-    return dict(actual_cloud_cli=True, restores=2, actual_gpg_decryptions=2,
+def sdk_report(receipt_hash):
+    return dict(version=1, kind="cloud-private-file-sdk-read", sdk_version="8.0.0",
+        sdk_archive_sha256=SDK_SHA, sdk_pins_sha256=SOURCE_HASHES["third_party/opencloud-web-sdk.json"],
+        sdk_receipt_sha256=receipt_hash, catalog_verified_full_restore=True, catalog_encrypted=True,
+        metadata_list_verified=True, full_get_bytes=len(CONTENT), full_get_sha256=CONTENT_SHA,
+        range_get_bytes=12, range_get_sha256=hashlib.sha256(CONTENT[3:15]).hexdigest(),
+        actual_cloud_cli_service=True, actual_published_sdk=True, file_reconstructions=3,
+        wrong_token_rejected=True, stale_etag_rejected=True, read_service_stopped_and_joined=True,
+        temporary_plaintext_removed=True, original_source_fallback=False, local_ciphertext_fallback=False,
+        full_web_ui_proven=False, owner_secrets_exported=False)
+
+
+def restore_report(size, sdk):
+    return dict(actual_cloud_cli=True, restores=4, actual_gpg_decryptions=4, sdk=sdk,
         plaintext_sha256=[CONTENT_SHA, CONTENT_SHA], source_ciphertext_absent=True, source_service_stopped=True,
         openpgp_integrity_verified=True, manifest_verified=True, private_source_metadata_verified=True,
         whole_archive_sha256_verified=True, reads_nonconsuming=True, existing_output_preserved=True,
@@ -294,7 +312,8 @@ def build_evidence(work):
     value = {name: read(work / f"private-storage-fragments-{name}.json") for name in names}
     for name in ("uploaded_usage", "restored_usage", "deleted_usage"):
         value[name] = FRAGMENTS["read_usage"](work / f"private-storage-fragments-{name}.json")
-    value.update(success=True, archive_encryption_proven=True, expected_peers=read(work / "a01-expected-peers.json"),
+    value.update(success=True, archive_encryption_proven=True, web_sdk_read_proven=True,
+        expected_peers=read(work / "a01-expected-peers.json"),
         provision=read(work / "cloud-private-file-provision.json"), **dict.fromkeys(FALSE_CLAIMS, False))
     value["network"] = {name: dict(selected_route=read(work / f"private-storage-fragments-{name}-live-selection.json"),
         privacy={role: read(work / f"private-storage-fragments-{name}-privacy-{role}.json") for role in FRAGMENTS["ROLES"]},
@@ -305,7 +324,7 @@ def build_evidence(work):
 
 
 def validate_evidence(value):
-    require(value["success"] is True and value["archive_encryption_proven"] is True
+    require(value["success"] is True and value["archive_encryption_proven"] is True and value["web_sdk_read_proven"] is True
         and all(value[field] is False for field in FALSE_CLAIMS), "Cloud scope overstated")
     provision = value["provision"]
     require(provision["version"] == 1 and provision["kind"] == "cloud-private-file-runtime-provision"
@@ -314,6 +333,11 @@ def validate_evidence(value):
             "runtime_files_verified", "original_licenses_retained"))
         and all(provision[key] is False for key in ("private_file_created", "peer_storage_proven", "opencloud_server_started")),
         "exact Cloud guest provisioning absent")
+    sdk = provision["sdk"]
+    require(re.fullmatch(r"[0-9a-f]{64}", sdk["receipt_sha256"])
+        and sdk == dict(pins_sha256=SOURCE_HASHES["third_party/opencloud-web-sdk.json"],
+            archive_sha256=SDK_SHA, receipt_sha256=sdk["receipt_sha256"], files_verified=True,
+            files=109, source_build_claimed=False, sdk_reads_proven=False), "published SDK provenance absent")
     require(set(provision["tools"]) == {"gpg", "gpg-agent", "gpgconf", "tar"}, "guest crypto tools absent")
     for tool in provision["tools"].values():
         require(type(tool["bytes"]) is int and tool["bytes"] > 0 and re.fullmatch(r"[0-9a-f]{64}", tool["sha256"])
@@ -328,7 +352,8 @@ def validate_evidence(value):
         and prepare["owner_secrets_exported"] is False
         and prepare["grant_payload_bytes"] == list(geometry["PROVIDER_BYTES"])
         and prepare["grant_max_leases"] == list(geometry["PROVIDER_LEASES"]), "Cloud import or grants absent")
-    require(value["upload"] == upload_report(size) and value["restore"] == restore_report(size), "Cloud peer recovery absent")
+    require(value["upload"] == upload_report(size)
+        and value["restore"] == restore_report(size, sdk_report(sdk["receipt_sha256"])), "Cloud SDK peer recovery absent")
     require(value["finish"] == dict(actual_core_cli=True, reopened_copies_confirmed=True,
         all_eight_copies_deleted=True, delete_retry_idempotent=True, final_payload_charge=0), "Cloud deletion absent")
     retained = [dict(reserved_bytes=0, committed_bytes=n, leases=c)
@@ -351,11 +376,16 @@ def validate_evidence(value):
     require(set(value["network"]) == set(FRAGMENTS["PHASES"]), "network phase missing")
     for name, phase in value["network"].items():
         FRAGMENTS["validate_network"](phase, value["expected_peers"], value["layout"], name)
+    network = value["network"]["restore"]
+    require(network["gates"]["exit_mptcp_tls_completed"] >= 32, "four actual protected reconstructions absent")
+    app = network["privacy"]["exit"]["provider_application"]
+    require(app["relay5"]["response_payload_bytes"] >= 4 * (2 * CHUNK + geometry["LENGTHS"][-1])
+        and app["relay3"]["response_payload_bytes"] >= 4 * CHUNK, "catalog and SDK survivor payload absent")
 
 
 def validate_report(report, revision):
     require(re.fullmatch(r"[0-9a-f]{40}", revision) and report["source_revision"] == revision
-        and report["schema_version"] == 1 and report["report_kind"] == "volparossa-cloud-private-file"
+        and report["schema_version"] == 2 and report["report_kind"] == "volparossa-cloud-private-file"
         and report["success"] is True and report["runner_exit_status"] == 0
         and report["phase"] == "cloud-private-file-complete" and report["observed_blocker"] is None
         and report["cleanup"]["complete"] is True and report["cleanup"]["remaining_owned_objects"] == 0

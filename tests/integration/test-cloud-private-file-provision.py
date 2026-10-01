@@ -23,14 +23,27 @@ SPEC.loader.exec_module(PROVISION)
 class CloudProvision(unittest.TestCase):
     def test_exact_cloud_and_node_pins_retain_licenses(self):
         pins = PROVISION.load_pins()
-        self.assertEqual(pins["revision"], "541cc826fe14ce69cf89a82ecb600ad14dd534c6")
+        self.assertEqual(pins["revision"], "a67b91fbed42ecd23ba215eb21ef54397fc9f06a")
         self.assertEqual(set(pins["files"]), {
             "scripts/cloud-file.mjs", "scripts/private_file.py", "src/private-file.mjs", "src/opencloud-dav.mjs",
             "vendor/volparossa-image/immich_snapshot.py", "vendor/volparossa-image/core-storage.mjs",
-            "vendor/volparossa-image/LICENSE", "third_party/volparossa-image-source.json", "LICENSE"})
+            "vendor/volparossa-image/LICENSE", "third_party/volparossa-image-source.json", "LICENSE",
+            "scripts/cloud-catalog.mjs", "scripts/cloud-serve.mjs", "scripts/private_catalog.py",
+            "scripts/stage_web_sdk.py", "src/private-catalog.mjs", "src/private-dav-server.mjs",
+            "third_party/opencloud-web-sdk.json", "THIRD_PARTY_LICENSES.md"})
         self.assertEqual(set(pins["runtime"]["files"]), {"bin/node", "LICENSE"})
         self.assertEqual(pins["runtime"]["version"], "24.19.0")
         self.assertEqual(pins["files"]["vendor/volparossa-image/LICENSE"], pins["files"]["LICENSE"])
+
+    def test_published_sdk_is_staged_and_verified_before_public_exposure(self):
+        source = (HERE / "cloud-private-file-provision.py").read_text()
+        self.assertLess(source.index('SOURCE / "scripts/stage_web_sdk.py"'), source.index('expose(SOURCE)'))
+        self.assertLess(source.index('sdk = verify_sdk(SOURCE)'), source.index('expose(SOURCE)'))
+        self.assertIn('"--download", "--yes"', source)
+        self.assertIn('receipt["archive_sha256"] == SDK_SHA', source)
+        self.assertIn('len(receipt["files"]) == 109', source)
+        self.assertIn('"package/LICENSE" in receipt["files"]', source)
+        self.assertIn('sdk_reads_proven=False', source)
 
     def test_guest_guard_refuses_before_subprocess_or_mutation(self):
         with mock.patch.object(PROVISION.os, "geteuid", return_value=0), \

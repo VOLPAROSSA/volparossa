@@ -1,7 +1,7 @@
 {
   "version": 1,
   "repository": "https://github.com/VOLPAROSSA/volparossa-cloud",
-  "revision": "541cc826fe14ce69cf89a82ecb600ad14dd534c6",
+  "revision": "a67b91fbed42ecd23ba215eb21ef54397fc9f06a",
   "files": {
     "scripts/cloud-file.mjs": {
       "bytes": 2474,
@@ -38,6 +38,38 @@
     "LICENSE": {
       "bytes": 35149,
       "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    "scripts/cloud-catalog.mjs": {
+      "bytes": 3137,
+      "sha256": "5c15631c8add400d361e1851263115c5d72b5ce89d280a5e1f4b001b830d73f9"
+    },
+    "scripts/cloud-serve.mjs": {
+      "bytes": 6172,
+      "sha256": "6be4c8bb736aba48dd59065bdd82cb679dfc51cb638cf24dd450d986760a71a3"
+    },
+    "scripts/private_catalog.py": {
+      "bytes": 5249,
+      "sha256": "d5896b994e07d39b85d517b34690e360ed7b4a3210de0dfde223e4da9d684c06"
+    },
+    "scripts/stage_web_sdk.py": {
+      "bytes": 5255,
+      "sha256": "7b496a31c957093d3697ff0893f80e05066e13cf40c6b8d927cbe3c63a9a64b4"
+    },
+    "src/private-catalog.mjs": {
+      "bytes": 18854,
+      "sha256": "d26037a4ebf708c348d0bb1dde23afbece30759c7aa40abcc26750e363befb7f"
+    },
+    "src/private-dav-server.mjs": {
+      "bytes": 19486,
+      "sha256": "d14156325eb66381eaa372d316c0b92425b507648a9e4b7e376494ad4431a052"
+    },
+    "third_party/opencloud-web-sdk.json": {
+      "bytes": 837,
+      "sha256": "014ebcb6d372b5d9205d53697bde1bba3193c48c82ac31d11b6955890e084de0"
+    },
+    "THIRD_PARTY_LICENSES.md": {
+      "bytes": 3542,
+      "sha256": "7b7f44eee2aefe4707bfee1b864e133a2df47ed374424aa6c10a953d0f032352"
     }
   },
   "runtime": {

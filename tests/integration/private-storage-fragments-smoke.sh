@@ -181,7 +181,7 @@ PY
     private_storage_fragments_private restore "$storage_user" "$binary_directory/volparossa" \
         "$WORK/runtime-client/control/agent.sock" "$storage_key_a" "$storage_key_b" "$storage_key_c" \
         >"$WORK/private-storage-fragments-restore.json" || fail FRAGMENTS_SURVIVOR_RESTORE_FAILED
-    private_storage_fragments_phase_finish 16
+    private_storage_fragments_phase_finish "${storage_restore_flows:-16}"
     private_storage_fragments_usage restored_usage
     private_storage_fragments_reopen relay4 relay5 relay3
     jq -n '{first_provider_stopped_before_restore:true,first_store_retained:true,other_two_providers_serving:true,
