@@ -13,7 +13,7 @@ use anyhow::{Result, ensure};
 use clap::{Args, Subcommand};
 use ed25519_dalek::VerifyingKey;
 use volparossa_content::private_storage::{
-    MAX_LEASE_SECONDS,
+    ARCHIVE_COPY_TARGET, MAX_LEASE_SECONDS,
     protocol::{MAX_GRANT_BYTES, SignedStorageGrant},
 };
 
@@ -69,9 +69,9 @@ pub(crate) struct Create {
     /// Upper fragment size; smaller archives split further to spread distinct fragments.
     #[arg(long, default_value_t = 16 * 1024 * 1024, value_parser = clap::value_parser!(u64).range(1..=retained::MAX_FRAGMENT_BYTES))]
     fragment_bytes: u64,
-    /// Copies per fragment, strictly fewer than the number of selected providers.
-    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(2..=7))]
-    copies: u8,
+    /// Compatibility assertion only; redundancy is owned by the core, not the application.
+    #[arg(long, hide = true, default_value_t = ARCHIVE_COPY_TARGET, value_parser = parse_copy_target)]
+    copies: usize,
     #[arg(long, default_value_t = 604_800, value_parser = clap::value_parser!(u64).range(1..=MAX_LEASE_SECONDS))]
     lifetime_seconds: u64,
     #[command(flatten)]
@@ -187,6 +187,15 @@ pub(in crate::storage) async fn run(command: Command, socket: &Path) -> Result<(
     Ok(())
 }
 
+fn parse_copy_target(value: &str) -> Result<usize, String> {
+    match value.parse::<usize>() {
+        Ok(copies) if copies == ARCHIVE_COPY_TARGET => Ok(copies),
+        _ => Err(format!(
+            "storage redundancy is core-owned: {ARCHIVE_COPY_TARGET} copies"
+        )),
+    }
+}
+
 fn create(args: &Create) -> Result<serde_json::Value> {
     ensure!(
         args.already_encrypted,
@@ -213,7 +222,7 @@ fn create(args: &Create) -> Result<serde_json::Value> {
             ciphertext_bytes: length,
             sha256: expected,
             fragment_bytes: args.fragment_bytes,
-            copies: usize::from(args.copies),
+            copies: args.copies,
         },
         &grants,
         args.lifetime_seconds,

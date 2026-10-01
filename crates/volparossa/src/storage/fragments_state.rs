@@ -15,7 +15,7 @@ use sha2::{Digest as _, Sha256};
 use volparossa_content::{
     CHUNK_BYTES,
     private_storage::{
-        MAX_ARCHIVE_BYTES,
+        ARCHIVE_COPY_TARGET, MAX_ARCHIVE_BYTES,
         protocol::{ReceiptState, VerifiedStorageGrant},
     },
 };
@@ -31,6 +31,10 @@ const MAX_FRAGMENTS: usize = 256;
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MANIFEST: &str = "fragments.json";
 const DOMAIN: &[u8] = b"VOLPAROSSA/private-storage-fragments/v1\0";
+
+#[cfg(test)]
+#[path = "storage_uniform_policy_tests.rs"]
+mod uniform_tests;
 
 #[derive(Clone, Copy)]
 pub(super) struct Plan {
@@ -163,11 +167,11 @@ impl LockedFragments {
         grants: &[VerifiedStorageGrant],
         lifetime: u64,
     ) -> Result<Self> {
-        state::new_output(path)?;
         ensure!(
-            (3..=8).contains(&grants.len()) && (2..grants.len()).contains(&plan.copies),
-            "fragments need 3..8 providers and 2..providers-1 copies"
+            plan.copies == ARCHIVE_COPY_TARGET && (3..=8).contains(&grants.len()),
+            "new fragment archives require 3..8 providers and the core-owned {ARCHIVE_COPY_TARGET}-copy target"
         );
+        state::new_output(path)?;
         ensure!(
             (grants.len() as u64..=MAX_ARCHIVE_BYTES).contains(&plan.ciphertext_bytes)
                 && (1..=MAX_FRAGMENT_BYTES).contains(&plan.fragment_bytes),

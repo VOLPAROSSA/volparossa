@@ -4,6 +4,23 @@ Development scope: reusable core storage for encrypted application backups, incl
 the separately developed [Signal client](https://github.com/VOLPAROSSA/volparossa-chat).
 This is **not** the public cache, a training-data source or the message-delivery mailbox.
 
+## One core-owned redundancy policy
+
+Every **new logical storage archive** uses the same core-owned target: two independently
+pinned copies of each encrypted fragment, or two complete copies for the legacy replica
+format. Applications do not choose a redundancy tier. More providers can spread fragments
+more widely; that does not change the copy target. `ARCHIVE_COPY_TARGET` is the shared core
+constant. The hidden legacy `--copies 2` argument is only a compatibility assertion;
+other values are rejected before creating state or contacting peers.
+
+Previously created higher-copy archives remain fully readable, renewable and deletable.
+Their original target and all retained physical charges remain visible; no migration,
+silent pruning or relabeling to two copies occurs. Replacement may temporarily retain more
+than two copies and must continue counting every uncertain or retained copy until deletion
+is confirmed. Single-provider lease commands are underlying custody primitives, not a
+different application backup tier or proof of archive redundancy. This fixed creation
+policy is not automatic repair, independent-device availability or adaptive capacity drain.
+
 ## Separate lifecycles
 
 Message delivery can acknowledge and consume an inbox item. A backup restore must not
@@ -415,7 +432,7 @@ follows from it.
 
 `volparossa storage replicas` adds **create, deposit, status, progress, restore, renew and
 delete** around the same authenticated peer transfers. It does not invent another transport,
-discover provider trust or manage placement automatically. Select two to eight distinct,
+discover provider trust or manage placement automatically. Select exactly two distinct,
 independently trusted provider identities and obtain an owner-bound grant from each. This
 is a bounded capacity of the current command, not a network-wide replication limit. Different
 keys do not prove different operators, devices or failure domains.
@@ -523,9 +540,9 @@ relabeling this earlier result.
 
 `storage fragments create/deposit/status/progress/restore/renew/delete` composes the
 existing authenticated replica lifecycle over **distinct ranges of an already-encrypted
-archive**. Select three to eight independently trusted provider/grant pairs and two to
-`providers - 1` copies per fragment. Deterministic rotating placement gives every fragment
-its requested copies while each provider retains only a subset of the archive. It adds no
+archive**. Select three to eight independently trusted provider/grant pairs; the core gives
+every fragment exactly two copies. Deterministic rotating placement spreads those copies
+while each provider retains only a subset of the archive. It adds no
 new transport, erasure coding, encryption scheme or automatically inferred provider trust.
 
 ```sh
@@ -534,7 +551,7 @@ volparossa storage fragments create --state /absolute/fragment-set \
   --provider-key PROVIDER_A_KEY_HEX --grant /absolute/provider-a.grant \
   --provider-key PROVIDER_B_KEY_HEX --grant /absolute/provider-b.grant \
   --provider-key PROVIDER_C_KEY_HEX --grant /absolute/provider-c.grant \
-  --copies 2 --fragment-bytes 16777216 --lifetime-seconds 604800 \
+  --fragment-bytes 16777216 --lifetime-seconds 604800 \
   --identity /absolute/owner.identity
 volparossa storage fragments deposit --state /absolute/fragment-set \
   --input /absolute/encrypted-archive --already-encrypted --identity /absolute/owner.identity
