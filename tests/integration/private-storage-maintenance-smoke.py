@@ -423,7 +423,7 @@ def validate_evidence(value):
         'private owner/provider isolation missing')
     require(set(value['network']) == set(F['PHASES']), 'network phase missing')
     for name, phase in value['network'].items():
-        F['validate_network'](phase, value['expected_peers'], value['layout'], name)
+        F['validate_network'](phase, value['expected_peers'], value['layout'], name, maintenance_contexts=True)
 
 
 def evidence(work):
@@ -468,7 +468,9 @@ def main(args):
         require(socket.parts[-3:] == ('runtime-client', 'control', 'agent.sock'), 'fixture client socket differs')
         exit_socket = socket.parents[2] / 'runtime-exit/control/agent.sock'
         baseline = int(os.environ['STORAGE_PROOF_BASELINE_MS'])
-        with SAMPLER['capture'](args[2], exit_socket, baseline, F['PHASES'][args[0]]) as coverage:
+        scope = json.loads(os.environ['STORAGE_PROOF_ROUTE_SCOPE'])
+        SAMPLER['validate_route_scope'](scope)
+        with SAMPLER['capture'](args[2], exit_socket, baseline, F['PHASES'][args[0]], client=socket, scope=scope) as coverage:
             result = {'upload': upload, 'restore': restore, 'finish': finish}[args[0]](
                 root, args[2], args[3], args[4:])
         summary = coverage.report(joined=coverage.joined)

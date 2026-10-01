@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Pure coverage/counter contracts, not real core or protected-flow evidence."""
 from pathlib import Path
+import copy
 import runpy
 from types import SimpleNamespace
 import unittest
@@ -11,11 +12,100 @@ HERE = Path(__file__).parent
 S = runpy.run_path(str(HERE / 'private-storage-log-sampler.py'))
 
 
-def event(timestamp, code='MPTCP_EXIT_FLOW_COMPLETED'):
-    return f'{timestamp}\tlevel=1\tevent={code}\tsession=\tpath=-\n'.encode()
+def event(timestamp, code='MPTCP_EXIT_FLOW_COMPLETED', context=''):
+    return f'{timestamp}\tlevel=1\tevent={code}\tsession={context}\tpath=-\n'.encode()
+
+
+SCOPE = dict(exit_peer_id='exit', paths=[dict(path_id=1, relay_peer_id='one'), dict(path_id=2, relay_peer_id='two')])
+
+
+def paths(context):
+    return ''.join(f'context={context} path={p["path_id"]} relay={p["relay_peer_id"]} exit=exit state=1 rtt_us=0 bytes=0\n'
+        for p in SCOPE['paths']).encode()
+
+
+def selected(context):
+    return dict(transport='mptcp', route_context_id=context, exact_selected_exit='exit',
+        exact_selected_relays=['one', 'two'],
+        paths=[dict(**p, route_context_id=context, exit_peer_id='exit', state=1) for p in SCOPE['paths']],
+        benchmark_slots=copy.deepcopy(SCOPE['paths']))
 
 
 class CoveredExitLogs(unittest.TestCase):
+    def test_fresh_context_requires_its_own_completed_flow_and_identical_observed_scope(self):
+        a, b = 'a' * 32, 'b' * 32
+        coverage = S['Coverage'](10, SCOPE)
+        coverage.route(paths(a))
+        first = event(9, 'STARTED') + event(11, context=a) + event(12, 'MPTCP_EXIT_FLOW_FAILED', a)
+        coverage.add(first)
+        coverage.route(paths(b))
+        coverage.add(first + event(13, context=b))
+        report = coverage.report(True)
+        S['validate_summary'](report, 10, 2)
+        S['validate_phase_route'](SCOPE, selected(b), report)
+        self.assertEqual(report['exit_flow_contexts'], [dict(route_context_id=a, completed=1, failed=1),
+            dict(route_context_id=b, completed=1, failed=0)])
+        for mutate in (
+            lambda v: v['exit_flow_contexts'][1].update(completed=0),
+            lambda v: v['exit_flow_contexts'][1].update(route_context_id='c' * 32),
+            lambda v: v.update(observed_route_context_ids=[a]),
+            lambda v: v['exit_route_scope'].update(exit_peer_id='other'),
+            lambda v: v['exit_route_scope']['paths'][0].update(relay_peer_id='other'),
+        ):
+            invalid = copy.deepcopy(report); mutate(invalid)
+            with self.assertRaises(ValueError):
+                S['validate_phase_route'](SCOPE, selected(b), invalid)
+        # Even with the same total and both IDs observed, old completed counts
+        # cannot substitute for a new-context failure with no completion.
+        wrong = copy.deepcopy(report)
+        wrong['exit_flow_contexts'][0].update(completed=2, failed=0)
+        wrong['exit_flow_contexts'][1].update(completed=0, failed=1)
+        S['validate_summary'](wrong, 10, 2)
+        with self.assertRaises(ValueError):
+            S['validate_phase_route'](SCOPE, selected(b), wrong)
+
+    def test_contextual_sampler_rejects_missing_scope_and_foreign_paths(self):
+        for raw in (paths('a' * 32).replace(b'exit=exit', b'exit=other'),
+                    paths('a' * 32).replace(b'relay=one', b'relay=other'),
+                    paths('a' * 32).replace(b'path=1', b'path=3')):
+            with self.assertRaises(ValueError):
+                S['Coverage'](10, SCOPE).route(raw)
+        for row in (event(11), event(11, context='0' * 32), event(11, context='abc'),
+                    event(11, 'MPTCP_EXIT_FLOW_SCOPE_MISMATCH'), event(11, 'MPTCP_EXIT_FLOW_OWNER_MISSING')):
+            with self.assertRaises(ValueError):
+                S['Coverage'](10, SCOPE).add(event(9, 'STARTED') + row)
+
+    def test_contextual_capture_reads_only_live_paths_and_existing_exit_ring(self):
+        a, b = 'a' * 32, 'b' * 32
+        first = event(9, 'STARTED')
+        replies = [paths(a), first, paths(b), first + event(11, context=a) + event(12, context=b)]
+        with patch.object(S['subprocess'], 'run', side_effect=[SimpleNamespace(stdout=row) for row in replies]) as command:
+            with S['capture']('/synthetic/cli', '/synthetic/exit.sock', 10, 2,
+                              client='/synthetic/client.sock', scope=SCOPE) as coverage:
+                pass
+        report = coverage.report(True)
+        S['validate_phase_route'](SCOPE, selected(b), report)
+        self.assertEqual(command.call_count, 4)
+        self.assertEqual([call.args[0][2:] for call in command.call_args_list], [
+            ['/synthetic/client.sock', 'paths'], ['/synthetic/exit.sock', 'logs', '--limit', '1000'],
+            ['/synthetic/client.sock', 'paths'], ['/synthetic/exit.sock', 'logs', '--limit', '1000']])
+        self.assertTrue(all(0 < call.kwargs['timeout'] <= 3 for call in command.call_args_list))
+
+    def test_final_drain_does_not_use_old_context_minimum_for_new_context(self):
+        a, b = 'a' * 32, 'b' * 32
+        initial = event(9, 'STARTED') + event(11, context=a)
+        replies = [paths(a), initial, paths(b), initial, paths(b), initial + event(12, context=b)]
+        now = [0.0]
+        with patch.object(S['subprocess'], 'run', side_effect=[SimpleNamespace(stdout=row) for row in replies]) as command, \
+                patch.object(S['time'], 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(S['time'], 'sleep', side_effect=lambda delay: now.__setitem__(0, now[0] + delay)):
+            with S['capture']('/synthetic/cli', '/synthetic/exit.sock', 10, 1,
+                              client='/synthetic/client.sock', scope=SCOPE) as coverage:
+                pass
+        self.assertEqual(command.call_count, 6)
+        self.assertEqual(now[0], 0.2)
+        S['validate_phase_route'](SCOPE, selected(b), coverage.report(True))
+
     def test_more_than_one_thousand_events_preserve_exact_counts_and_coverage(self):
         rows = [event(number) for number in range(1, 2402)]
         coverage = S['Coverage'](100)
@@ -76,7 +166,7 @@ class CoveredExitLogs(unittest.TestCase):
 
     def test_sampler_is_owner_joined_and_exports_only_closed_existing_gate_files(self):
         maintenance = (HERE / 'private-storage-maintenance-smoke.py').read_text()
-        self.assertIn("with SAMPLER['capture'](args[2], exit_socket, baseline, F['PHASES'][args[0]]) as coverage:", maintenance)
+        self.assertIn("with SAMPLER['capture'](args[2], exit_socket, baseline, F['PHASES'][args[0]], client=socket, scope=scope) as coverage:", maintenance)
         self.assertIn('summary = coverage.report(joined=coverage.joined)', maintenance)
         shell = (HERE / 'private-storage-fragments-smoke.sh').read_text()
         self.assertIn('STORAGE_PROOF_BASELINE_MS=${provider_baseline_ms:-0}', shell)

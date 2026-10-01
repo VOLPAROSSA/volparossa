@@ -7,6 +7,7 @@ private_storage_fragments_private() {
     # One phase may perform two restores, each trying stopped A twice. This
     # fixture-only bound does not widen core exchange deadlines or leases.
     STORAGE_PROOF_BASELINE_MS=${provider_baseline_ms:-0} \
+      STORAGE_PROOF_ROUTE_SCOPE=${storage_route_scope:-} \
       timeout --signal=TERM --kill-after=5s "${storage_phase_timeout_seconds:-1500}s" setpriv \
         --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$custody_control_gid" \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
@@ -32,8 +33,15 @@ private_storage_fragments_phase_start() {
 private_storage_fragments_phase_finish() {
     storage_expected_flows=$1
     benchmark_capture_paths "private-storage-fragments-$storage_phase-live" mptcp || fail FRAGMENTS_ROUTE_UNAVAILABLE
-    jq -e --arg context "$storage_context" '.route_context_id == $context' \
-        "$WORK/private-storage-fragments-$storage_phase-live-selection.json" >/dev/null || fail FRAGMENTS_ROUTE_CHANGED
+    if [ "${private_storage_maintenance:-no}" = yes ]; then
+        python3 -B "$WORK/bin/private-storage-log-sampler.py" route-check \
+            "$WORK/private-storage-fragments-layout.json" \
+            "$WORK/private-storage-fragments-$storage_phase-live-selection.json" \
+            "$storage_user/flow-$storage_phase.json" || fail FRAGMENTS_ROUTE_CHANGED
+    else
+        jq -e --arg context "$storage_context" '.route_context_id == $context' \
+            "$WORK/private-storage-fragments-$storage_phase-live-selection.json" >/dev/null || fail FRAGMENTS_ROUTE_CHANGED
+    fi
     stop_privacy_observers || fail FRAGMENTS_CAPTURE_INCOMPLETE
     content_provider_stop_control_observer || fail FRAGMENTS_CONTROL_CAPTURE_INCOMPLETE
     if [ "${private_storage_maintenance:-no}" = yes ]; then
@@ -161,8 +169,17 @@ PY
             -- test -r "$storage_private"; then fail FRAGMENTS_LOCAL_SHORTCUT; fi
     done
     jq -n --arg control "$provider_control_peer" --arg context "$storage_context" \
-        '{provider_nodes:["relay4","relay5","relay3"],control_relay_peer_id:$control,route_context_id:$context}' \
+        --arg maintenance "${private_storage_maintenance:-no}" \
+        --slurpfile selected "$WORK/private-storage-fragments-selection.json" \
+        '{provider_nodes:["relay4","relay5","relay3"],control_relay_peer_id:$control,route_context_id:$context}
+         + (if $maintenance == "yes" then {route_scope:{exit_peer_id:$selected[0].exact_selected_exit,
+             paths:[$selected[0].paths[] | {path_id,relay_peer_id}]}} else {} end)' \
         >"$WORK/private-storage-fragments-layout.json"
+    storage_route_scope=
+    if [ "${private_storage_maintenance:-no}" = yes ]; then
+        storage_route_scope=$(jq -ce '.route_scope' "$WORK/private-storage-fragments-layout.json") \
+            || fail FRAGMENTS_ROUTE_UNAVAILABLE
+    fi
     jq -n --argjson user "$WORKER_UID" --argjson agent "$AGENT_UID" --argjson control "$custody_control_gid" \
         --argjson group "$AGENT_GID" '{user_uid:$user,agent_uid:$agent,control_gid:$control,agent_gid:$group,
         agent_cannot_read_user_state:true,client_cannot_read_any_provider_store:true,agent_mount_positive_control:true,

@@ -59,6 +59,38 @@ Last updated: 2026-10-01
   focused sampler checks include 2,401 events, duplicate timestamps, rejected missing
   overlap and late/missing completion. No raw logs are newly persisted or exported;
   no product log limit changes. This candidate still requires a fresh real trial.
+  The next original [run36936987353 on `9cd3f660`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36936987353)
+  confirms continuous upload/restore coverage (42/54 overlapping samples,
+  1,142/2,005 records, 74/55 completed protected flows), three actual replacement
+  readbacks and two source-free B/C restores. Its owner finish report confirms
+  retirement, eleven copy deletions and zero remaining owner-side charge, but the
+  old phase gate rejects a new route-context ID (`FRAGMENTS_ROUTE_CHANGED`), even
+  though the selected exit and both relay/path identities are unchanged. The final
+  provider-store zero-lease snapshot and final flow gate were not reached, so this
+  is still a failed run, not completed acceptance. Private cleanup passes and host
+  SHA-256 stays `3d0ee3b059bc28fb89e22635ace6a06875a011326415ec4efb84b8169c087376`.
+  Original 39-file ZIP SHA-256:
+  `ae1b27afe1c51ec6fe861d631a8bb4fd03ee977483411612e4f7bb63ae65e54b`;
+  job110619445478 log SHA-256:
+  `11fa60b284d1eee18e3875183389f77c97b91ecdad01e95a6b5a2407d76bebce`.
+  Source inspection confirms that each new private-storage exchange calls the
+  existing `connect_tcp` expiry/reselection path; a whole maintenance round is not
+  one established flow. The candidate therefore permits a new context only in this
+  maintenance fixture, within the same selected exit and exact two relay/path scopes.
+  Both completed and failed Exit-flow events now carry their already owner-validated
+  ephemeral context ID in the existing bounded RAM-only local-control log; no new
+  routing behavior, timer, destination field or persistent log is introduced.
+  The joined sampler correlates those actual post-baseline events with live committed
+  client path snapshots, rejects foreign/unobserved scopes and requires the final
+  context's own completed flow. Old-context counts cannot satisfy a new-context gate.
+  Ordinary fragments/Image/Cloud checks remain initial-context strict. Signed owner
+  operations, flow minima, privacy captures, physical accounting and cleanup remain
+  required; the exact original exports do not establish the cause/time of retirement.
+  The targeted AgentState test passes for both outcomes, unchanged generic logs and
+  bounded eviction. Eleven sampler, seven maintenance, four wiring and nine ordinary
+  fragment checks pass, including rejection of old-context-only counts and a bounded
+  final drain that waits for the new context's own asynchronous completion.
+  This diagnostic/fixture correction still needs a new real combined trial.
   See [private storage maintenance](PRIVATE_STORAGE.md#explicit-owner-private-background-maintenance).
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):

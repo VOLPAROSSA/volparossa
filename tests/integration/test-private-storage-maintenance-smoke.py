@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Pure maintenance receipt/cleanup contracts, not a running-core or peer proof."""
 from pathlib import Path
+import copy
 import runpy
 import tempfile
 import unittest
@@ -38,6 +39,21 @@ def fixture():
     value['restored_usage'] = [dict(reserved_bytes=0, committed_bytes=b, leases=n)
         for b, n in zip((a, size + fg, size), (3, 5, 4))]
     value['private_cleanup'].update(enrollment_checkpoint_removed=True, foreground_journal_removed=True)
+    for phase in value['network'].values():
+        selected = phase['selected_route']
+        selected['exact_selected_exit'] = selected['paths'][0]['exit_peer_id']
+        selected['exact_selected_relays'] = [p['relay_peer_id'] for p in selected['paths']]
+        for path, slot in zip(selected['paths'], selected['benchmark_slots']):
+            path['state'] = 1
+            slot['path_id'] = path['path_id']
+        gates = phase['gates']
+        gates.update(exit_log_sampling_version=2, exit_log_samples=2,
+            exit_log_observed_records=gates['exit_log_records'], exit_log_overlap_verified=True,
+            exit_log_sampler_joined=True, exit_route_scope=CHECK['SAMPLER']['route_scope'](selected),
+            observed_route_context_ids=[selected['route_context_id']],
+            exit_flow_contexts=[dict(route_context_id=selected['route_context_id'],
+                completed=gates['exit_mptcp_tls_completed'], failed=gates['exit_mptcp_tls_failed'])])
+    value['layout']['route_scope'] = copy.deepcopy(value['network']['upload']['gates']['exit_route_scope'])
     return value
 
 
@@ -49,6 +65,25 @@ def report(value):
 
 
 class MaintenanceEvidence(unittest.TestCase):
+    def test_new_context_requires_same_paths_and_new_actual_flow_evidence(self):
+        value = fixture()
+        phase = value['network']['finish']
+        newer = 'b' * 32
+        phase['selected_route']['route_context_id'] = newer
+        for path in phase['selected_route']['paths']:
+            path['route_context_id'] = newer
+        with self.assertRaises(ValueError):
+            CHECK['validate_evidence'](value)
+        phase['gates']['observed_route_context_ids'] = [newer]
+        phase['gates']['exit_flow_contexts'][0]['route_context_id'] = newer
+        CHECK['validate_evidence'](value)
+        # Normal fragment validation remains initial-context strict.
+        with self.assertRaises(ValueError):
+            CHECK['F']['validate_network'](phase, value['expected_peers'], value['layout'], 'finish')
+        phase['selected_route']['paths'][0]['relay_peer_id'] = 'other'
+        with self.assertRaises(ValueError):
+            CHECK['validate_evidence'](value)
+
     def test_retirement_readback_is_not_a_new_replacement(self):
         before = dict(placement_authorizations=3, retained_copy_records=11)
         for fresh in (0, 1):

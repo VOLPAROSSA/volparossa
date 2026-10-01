@@ -128,6 +128,20 @@ This corrects evidence collection, not production maintenance or a proven passin
 overlay result. Original artifact hashes and partial evidence remain in
 [implementation status](IMPLEMENTATION_STATUS.md#additional-application-and-autonomous-maintenance-scope).
 
+Run `36936987353` subsequently completes the actual repair/restore and owner-side
+retirement/deletion operations, but fails its final network gate because a fresh
+route context replaced the initial one. The exit and relay/path identities remain
+the same. Final provider accounting and the final flow gate were not reached; the
+run remains failed despite successful private/topology cleanup and unchanged host
+state. New signed storage operations may use a freshly authorized route; they are
+not permission to move an established flow. The maintenance-only candidate now
+requires unchanged exit/relay/path scope plus actual post-baseline completed flows
+for the observed new context. Completion and failure context IDs stay in the
+existing bounded in-memory log, without destinations or persistent browsing data.
+Missing/unobserved scopes, old-context-only successes and changed paths fail closed.
+Other storage fixtures retain their initial-context check. No routing timeout or
+success/accounting requirement is relaxed, and no new passing overlay proof is claimed.
+
 Message delivery can acknowledge and consume an inbox item. A backup restore must not
 consume its storage lease. Backup retention, renewal, expiry and owner deletion are
 separate operations with separate authorization. They may share protected network

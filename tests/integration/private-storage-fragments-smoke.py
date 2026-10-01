@@ -396,13 +396,17 @@ def cleanup(path):
         fragment_metadata_removed=True, input_and_outputs_removed=True, fragment_staging_removed=True, user_directory_removed=True)
 
 
-def validate_network(phase, peers, layout, name):
+def validate_network(phase, peers, layout, name, *, maintenance_contexts=False):
     selected, privacy = phase["selected_route"], phase["privacy"]
     paths, slots, nodes = selected["paths"], selected["benchmark_slots"], layout["provider_nodes"]
     require(nodes == list(NODES) and len({peers[node] for node in nodes}) == 3
             and layout["control_relay_peer_id"] in {peers[node] for node in ROLES[1:4]},
             "three providers or ordinary control relay changed")
-    require(selected["transport"] == "mptcp" and selected["route_context_id"] == layout["route_context_id"]
+    if maintenance_contexts:
+        sampler = runpy.run_path(str(Path(__file__).with_name("private-storage-log-sampler.py")))
+        sampler['validate_phase_route'](layout['route_scope'], selected, phase['gates'])
+    require(selected["transport"] == "mptcp"
+            and (maintenance_contexts or selected["route_context_id"] == layout["route_context_id"])
             and len(paths) == len(slots) == 2 and len({p["relay_peer_id"] for p in paths}) == 2
             and {p["exit_peer_id"] for p in paths} == {peers["exit"]}
             and all(p["route_context_id"] == selected["route_context_id"] for p in paths)
