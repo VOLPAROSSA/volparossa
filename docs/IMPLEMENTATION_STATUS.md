@@ -215,6 +215,24 @@ addresses or owner data. Selection predicates and retry budgets are unchanged;
 an identified product fix or a passing rerun. Neither trial proves running
 Immich/PostgreSQL recovery, mobile/web integration or serverless availability.
 
+The next [run `36901573120`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36901573120)
+on `3906203088fe496eb42271876171babb32ae7212` completes the actual guest scenario:
+799,146 encrypted bytes, eight fragment copies charged at 1,598,292 bytes, two
+independently hash-verified decryptions after A stops, deletion with zero retained
+provider usage, complete private/topology cleanup and identical host-state hashes.
+The 44 original artifacts are retained; ZIP SHA256 is
+`1711a5704c8879416d4e072ba29c6bad296a308f722cb25d0f5feb3830fc2f28`.
+The **workflow still fails** at its runner-side report check: the fixture generated
+`database.sql.gz` with `gzip.compress(mtime=0)`, whose OS-header byte differs between
+Python 3.12 and 3.13. Reproducing the older compression behavior rejects that same
+original report as `synthetic snapshot identity differs`; the unchanged validator
+passes it under Python 3.13. The narrow correction fixes the synthetic gzip bytes
+to the exact guest-tested value instead of generating environment-dependent bytes.
+It preserves all identity, plaintext, network, accounting and cleanup checks. This
+is local reproduction/revalidation, not a new green CI run or a retroactive change
+to the failed job. The live source remains pinned Image `e177afeb`, not a newer
+Image adapter, and still does not prove running Immich or general serverless use.
+
 ### Mailbox import confirmation
 
 The [mailbox import-confirmation candidate](MAILBOX_IMPORT_CONFIRMATION.md) adds a

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Evidence mutation checks and optional real local GPG; never live peer proof."""
 import copy
+import gzip
 import hashlib
 import json
 import os
@@ -58,6 +59,23 @@ def fixture():
 
 
 class ImageEvidence(unittest.TestCase):
+    def test_synthetic_gzip_identity_is_runtime_independent(self):
+        canonical = CHECK["SOURCE_FILES"]["database.sql.gz"]
+        self.assertEqual(hashlib.sha256(canonical).hexdigest(),
+            "b0ef0fe0c174ad355d36b731cf29bc2ccdbbbeab0681e02e14fcce8f6e37e7bd")
+        self.assertEqual(gzip.decompress(canonical),
+            b"-- Synthetic isolated Image snapshot; no actual user data.\nSELECT 1;\n")
+        # Python 3.12 delegates mtime=0 to zlib, whose Unix OS byte is 3;
+        # Python 3.13 replaces that byte with 255. Both decode identically.
+        legacy = canonical[:9] + b"\x03" + canonical[10:]
+        self.assertEqual(gzip.decompress(legacy), gzip.decompress(canonical))
+        self.assertNotEqual(hashlib.sha256(legacy).hexdigest(), CHECK["SOURCE_DIGESTS"]["database.sql.gz"])
+        with mock.patch("gzip.compress", return_value=legacy) as compress:
+            runner = runpy.run_path(str(HERE / "image-snapshot-smoke.py"))
+        compress.assert_not_called()
+        self.assertEqual(runner["SOURCE_FILES"], CHECK["SOURCE_FILES"])
+        runner["validate_evidence"](fixture())
+
     def test_exact_image_candidate_and_fragment_network_evidence(self):
         value = fixture()
         CHECK["validate_evidence"](value)

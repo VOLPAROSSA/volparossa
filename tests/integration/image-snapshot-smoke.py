@@ -26,7 +26,14 @@ SOURCE_HASHES = {
 }
 CHUNK = FRAGMENTS["CHUNK"]
 SOURCE_FILES = {
-    "database.sql.gz": gzip.compress(b"-- Synthetic isolated Image snapshot; no actual user data.\nSELECT 1;\n", mtime=0),
+    # Fixed synthetic gzip bytes: gzip.compress(mtime=0) emits different OS
+    # header bytes on Python 3.12 (runner) and 3.13 (guest). Runtime compression
+    # must not change the plaintext identity checked across those environments.
+    "database.sql.gz": bytes.fromhex(
+        "1f8b08000000000002ffd3d55508aecc2bc9482dc94c56c82ccecf492c494d51f0cc4d4c4f55"
+        "28ce4b2c28cec82fb156c8cb57484c2e294dcc51282d4e2d5248492c49d4e30a76f571750e51"
+        "30b4e6020098ab8baa45000000"
+    ),
     "upload/synthetic.bin": bytes(range(256)) * (3 * CHUNK // 256) + b"I",
     "thumbs/synthetic.bin": b"VOLPAROSSA synthetic thumbnail fixture, not a user image.\n",
 }
