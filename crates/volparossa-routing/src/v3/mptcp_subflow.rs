@@ -27,6 +27,27 @@ pub struct UpdateMptcpSubflow {
     pub action: i32,
 }
 
+/// Terminal release of one issued Client meta socket, not a route or path retirement.
+/// The helper verifies the accompanying descriptor and shuts down that exact socket before
+/// reclaiming its flow slot. Keeping another duplicate cannot bypass the live-flow bound.
+#[derive(Clone, PartialEq, Message)]
+pub struct RetireMptcpFlow {
+    /// Exact route context that issued the flow.
+    #[prost(bytes = "vec", tag = "1")]
+    pub route_context_id: Vec<u8>,
+    /// Original helper-issued context capability.
+    #[prost(bytes = "vec", tag = "2")]
+    pub context_handle: Vec<u8>,
+    /// Exact original flow capability; never a caller-supplied kernel token.
+    #[prost(bytes = "vec", tag = "3")]
+    pub mptcp_flow_handle: Vec<u8>,
+}
+
+pub(super) fn validate_retire(value: &RetireMptcpFlow) -> Result<(), HelperProtocolError> {
+    bound_context(&value.route_context_id, &value.context_handle)?;
+    handle(&value.mptcp_flow_handle)
+}
+
 /// Closed actions for the Client userspace path manager.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
 #[repr(i32)]
@@ -65,7 +86,10 @@ pub fn request_descriptor_fd_binding(
     validate_request(value)?;
     if !matches!(
         value.operation.as_ref(),
-        Some(helper_request::Operation::UpdateMptcpSubflow(_))
+        Some(
+            helper_request::Operation::UpdateMptcpSubflow(_)
+                | helper_request::Operation::RetireMptcpFlow(_)
+        )
     ) {
         return Err(HelperProtocolError::Invalid("request descriptor operation"));
     }
@@ -80,6 +104,52 @@ pub fn request_descriptor_fd_binding(
 mod tests {
     use super::*;
     use crate::{HELPER_PROTOCOL_VERSION, decode_request, encode_request, safe_preview};
+
+    #[test]
+    fn terminal_mptcp_flow_request_binds_exact_capabilities_and_descriptor() {
+        let original = HelperRequest {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            request_id: vec![1; 16],
+            operation: Some(helper_request::Operation::RetireMptcpFlow(
+                RetireMptcpFlow {
+                    route_context_id: vec![2; 16],
+                    context_handle: vec![3; 32],
+                    mptcp_flow_handle: vec![4; 32],
+                },
+            )),
+        };
+        assert_eq!(
+            decode_request(&encode_request(&original).unwrap()[4..]).unwrap(),
+            original
+        );
+        let binding = request_descriptor_fd_binding(&original).unwrap();
+        for field in 0..4 {
+            let mut changed = original.clone();
+            let Some(helper_request::Operation::RetireMptcpFlow(value)) =
+                changed.operation.as_mut()
+            else {
+                unreachable!()
+            };
+            match field {
+                0 => changed.request_id[0] += 1,
+                1 => value.route_context_id[0] += 1,
+                2 => value.context_handle[0] += 1,
+                _ => value.mptcp_flow_handle[0] += 1,
+            }
+            assert_ne!(request_descriptor_fd_binding(&changed).unwrap(), binding);
+        }
+        let mut bad = original.clone();
+        let Some(helper_request::Operation::RetireMptcpFlow(value)) = bad.operation.as_mut() else {
+            unreachable!()
+        };
+        value.mptcp_flow_handle.fill(0);
+        assert!(encode_request(&bad).is_err());
+        assert!(
+            safe_preview(&original)
+                .unwrap()
+                .starts_with("retire one owned MPTCP flow;")
+        );
+    }
 
     fn request() -> HelperRequest {
         HelperRequest {

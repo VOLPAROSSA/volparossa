@@ -16,6 +16,7 @@ reciprocal_private_dns=no
 private_storage_peer=no
 private_storage_replicas=no
 private_storage_handoff=no
+private_storage_fragments=no
 agent_jobs_loss=no
 agent_jobs_follow=no
 agent_jobs_peer_recovery=no
@@ -53,10 +54,20 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|private-storage-handoff|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|private-storage-handoff|private-storage-fragments|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
 }
 
 print_plan() {
+    if [ "$private_storage_fragments" = yes ]; then
+        printf '%s\n' \
+            'VOLPAROSSA private-storage-fragments protected network smoke plan:' \
+            '  three pinned provider stores; four signed fragments with two copies, never whole copies per provider;' \
+            '  use two real MPTCP paths, each Client -> exactly one Relay -> Exit -> provider;' \
+            '  remove the source, stop provider A, restore twice from B/C and verify unchanged subset usage;' \
+            '  reopen original stores, delete all eight copies and verify exact private/host cleanup;' \
+            '  no automatic placement/repair, reciprocal quota, archive encryption or Signal claim.'
+        return
+    fi
     if [ "$private_storage_handoff" = yes ]; then
         printf '%s\n' \
             'VOLPAROSSA private-storage-handoff protected network smoke plan:' \
@@ -650,6 +661,7 @@ while [ "$#" -gt 0 ]; do
             private_storage_peer=no
             private_storage_replicas=no
             private_storage_handoff=no
+            private_storage_fragments=no
             download_sharing=no
             agent_jobs_loss=no
             agent_jobs_follow=no
@@ -677,6 +689,7 @@ while [ "$#" -gt 0 ]; do
                 private-storage-peer) scenario=content-custody; private_storage_peer=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-replicas) scenario=content-custody; private_storage_replicas=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-handoff) scenario=content-custody; private_storage_handoff=yes; wifi_link=no; uplink_link=no ;;
+                private-storage-fragments) scenario=content-custody; private_storage_fragments=yes; wifi_link=no; uplink_link=no ;;
                 agent-artifact-quarantine) scenario=agent-artifact; agent_train_loop=yes; agent_artifact_quarantine=yes; wifi_link=no; uplink_link=no ;;
                 agent-train-loop) scenario=agent-artifact; agent_train_loop=yes; wifi_link=no; uplink_link=no ;;
                 agent-train-cycle) scenario=agent-artifact; agent_train_cycle=yes; wifi_link=no; uplink_link=no ;;
@@ -892,6 +905,13 @@ if [ "$private_storage_peer" = yes ]; then
 fi
 if [ "$private_storage_replicas" = yes ]; then
     for storage_fixture in private-storage-replicas-smoke.sh private-storage-replicas-smoke.py private-storage-peer-smoke.py; do
+        [ -f "$source_directory/tests/integration/$storage_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
+    done
+fi
+if [ "$private_storage_fragments" = yes ]; then
+    for storage_fixture in private-storage-fragments-smoke.sh private-storage-fragments-smoke.py \
+        private-storage-replicas-smoke.sh private-storage-replicas-smoke.py private-storage-peer-smoke.py; do
         [ -f "$source_directory/tests/integration/$storage_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
     done
@@ -1919,7 +1939,9 @@ cleanup() {
     if [ "$scenario" = content-mailbox ] && command -v content_mailbox_cleanup >/dev/null 2>&1; then
         content_mailbox_cleanup || original_status=1
     fi
-    if [ "$private_storage_handoff" = yes ] && command -v private_storage_handoff_cleanup >/dev/null 2>&1; then
+    if [ "$private_storage_fragments" = yes ] && command -v private_storage_fragments_cleanup >/dev/null 2>&1; then
+        private_storage_fragments_cleanup || original_status=1
+    elif [ "$private_storage_handoff" = yes ] && command -v private_storage_handoff_cleanup >/dev/null 2>&1; then
         private_storage_handoff_cleanup || original_status=1
     elif [ "$private_storage_replicas" = yes ] && command -v private_storage_replicas_cleanup >/dev/null 2>&1; then
         private_storage_replicas_cleanup || original_status=1
@@ -2200,6 +2222,8 @@ cleanup() {
         content_repair_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-mailbox ]; then
         content_mailbox_finalize_report "$original_status" || original_status=1
+    elif [ "$private_storage_fragments" = yes ]; then
+        private_storage_fragments_finalize_report "$original_status" || original_status=1
     elif [ "$private_storage_handoff" = yes ]; then
         private_storage_handoff_finalize_report "$original_status" || original_status=1
     elif [ "$private_storage_replicas" = yes ]; then
@@ -2364,9 +2388,13 @@ if [ "$private_storage_peer" = yes ]; then
     # shellcheck source=tests/integration/private-storage-peer-smoke.sh
     . "$source_directory/tests/integration/private-storage-peer-smoke.sh"
 fi
-if [ "$private_storage_replicas" = yes ] || [ "$private_storage_handoff" = yes ]; then
+if [ "$private_storage_replicas" = yes ] || [ "$private_storage_handoff" = yes ] || [ "$private_storage_fragments" = yes ]; then
     # shellcheck source=tests/integration/private-storage-replicas-smoke.sh
     . "$source_directory/tests/integration/private-storage-replicas-smoke.sh"
+fi
+if [ "$private_storage_fragments" = yes ]; then
+    # shellcheck source=tests/integration/private-storage-fragments-smoke.sh
+    . "$source_directory/tests/integration/private-storage-fragments-smoke.sh"
 fi
 if [ "$private_storage_handoff" = yes ]; then
     # shellcheck source=tests/integration/private-storage-handoff-smoke.sh
@@ -2552,10 +2580,14 @@ if [ "$private_storage_peer" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/private-storage-peer-smoke.py" \
         "$WORK/bin/private-storage-peer-smoke.py"
 fi
-if [ "$private_storage_replicas" = yes ] || [ "$private_storage_handoff" = yes ]; then
+if [ "$private_storage_replicas" = yes ] || [ "$private_storage_handoff" = yes ] || [ "$private_storage_fragments" = yes ]; then
     for storage_fixture in private-storage-replicas-smoke.py private-storage-peer-smoke.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$storage_fixture" "$WORK/bin/$storage_fixture"
     done
+fi
+if [ "$private_storage_fragments" = yes ]; then
+    install -o root -g root -m 0555 "$source_directory/tests/integration/private-storage-fragments-smoke.py" \
+        "$WORK/bin/private-storage-fragments-smoke.py"
 fi
 if [ "$private_storage_handoff" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/private-storage-handoff-smoke.py" \
@@ -5742,6 +5774,8 @@ start_privacy_observers() {
             [ "$private_storage_peer" = yes ] || return 1 ;;
         private-storage-replicas-upload-privacy|private-storage-replicas-failover-privacy|private-storage-replicas-finish-privacy)
             [ "$private_storage_replicas" = yes ] || return 1 ;;
+        private-storage-fragments-upload-privacy|private-storage-fragments-restore-privacy|private-storage-fragments-finish-privacy)
+            [ "$private_storage_fragments" = yes ] || return 1 ;;
         private-storage-handoff-upload-privacy|private-storage-handoff-pending-privacy|private-storage-handoff-complete-privacy|private-storage-handoff-restore_b-privacy|private-storage-handoff-restore_c-privacy|private-storage-handoff-finish-privacy)
             [ "$private_storage_handoff" = yes ] || return 1 ;;
         content-custody-deposit-privacy|content-custody-inspect-privacy|content-custody-fetch-privacy)
@@ -6490,6 +6524,10 @@ if [ "$agent_train_loop" = yes ]; then
 fi
 if [ "$scenario" = agent-artifact ]; then
     agent_artifact_run
+    exit 0
+fi
+if [ "$private_storage_fragments" = yes ]; then
+    private_storage_fragments_run
     exit 0
 fi
 if [ "$private_storage_handoff" = yes ]; then

@@ -3267,9 +3267,10 @@ fn random_mptcp_source_port(exit_listener_port: u16) -> Result<u16, ClientRouteC
 fn mptcp_acquire_failure_lost_helper_route(error: &MptcpTransportError) -> bool {
     matches!(
         error,
-        MptcpTransportError::Helper(HelperClientError::Rejected(
-            HelperResult::CleanupIncomplete | HelperResult::NotFound
-        ))
+        MptcpTransportError::AcquireUnconfirmed
+            | MptcpTransportError::Helper(HelperClientError::Rejected(
+                HelperResult::CleanupIncomplete | HelperResult::NotFound
+            ))
     )
 }
 
@@ -8639,7 +8640,10 @@ mod tests {
     }
 
     #[test]
-    fn mptcp_acquire_retires_only_a_helper_route_that_is_no_longer_owned() {
+    fn mptcp_acquire_retires_lost_or_unconfirmed_helper_route_ownership() {
+        assert!(mptcp_acquire_failure_lost_helper_route(
+            &MptcpTransportError::AcquireUnconfirmed
+        ));
         for result in [HelperResult::CleanupIncomplete, HelperResult::NotFound] {
             assert!(mptcp_acquire_failure_lost_helper_route(
                 &MptcpTransportError::Helper(HelperClientError::Rejected(result))

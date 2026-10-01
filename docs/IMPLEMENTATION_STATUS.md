@@ -537,6 +537,72 @@ tampering and coordinated mutation of unsigned nested copy identities are reject
 protected-overlay fragment-placement run is still pending; these tests do not establish
 independent failure domains, automatic repair/handoff, measured overhead or reciprocal credit.
 
+The separate **`private-storage-fragments` protected-overlay smoke candidate** now wires
+the real fragment CLI into the disposable three-provider topology. Its four distinct
+fragments have two copies each; exact provider grants and stopped-service usage snapshots
+must show subset-only custody. After removing the owner source and stopping provider A,
+the fixture requires two full B/C reconstructions, unchanged physical charges, original
+store reopen and explicit deletion of all eight copies. Each transfer phase requires the
+same two-path protected MPTCP route, drained privacy captures and original host cleanup.
+The first exact protected-overlay trial **36741590268** at
+`3d8d24bc9ac19006af7798a727c2e67377576f6d` failed after successful upload, same-identity
+retry and renewal of all eight copies: its bounded completion counter observed 43 rather
+than the required 56 protected exchanges. The source was removed, but the trial stopped
+before provider withdrawal, survivor restores and store-accounting snapshots. Private
+cleanup and unchanged guest-host state passed; the original 19-file evidence bundle remains
+unchanged (ZIP SHA-256 `bf83447621179be27faff66eb315e3749d5fc209ee83711ab9e1d56ffc7caebe`).
+The fixture had read only the latest 400 event records, not the complete existing 1000-record
+agent ring, without checking whether that tail covered the phase baseline. The candidate
+now reads the full bounded Exit window and explicitly rejects truncated/clock-regressed
+evidence, retaining the original **56/16/16** completion thresholds and every data/privacy
+gate. Exported metadata includes window coverage and separate failed-flow counts, not raw
+logs. The original artifact lacks that window metadata, so it does not retrospectively
+prove all missing events were cropped.
+
+The next exact trial **36744395110** at
+`04b20481c575b269d7ea2ff5bfc7d82b063b41d7` confirms all **56/56** upload flows with zero
+failed flows and a 631-record window covering the original phase baseline. The real three
+store snapshots account for all eight copies (1,573,010 payload bytes); the source was
+removed before provider A was stopped. The trial then failed at survivor restore. Captures
+show 536,146 / 266,175 response bytes from B / C and zero from A, but the original empty
+restore report does **not** establish a complete reconstruction or identify the failing
+CLI/checker step. Two restores, non-consuming post-restore accounting and deletion remain
+unproven. Private cleanup and unchanged guest-host state pass; the original 27-file bundle
+is preserved (ZIP SHA-256 `191d0f2f95472a81c57c476d08abdea829b00d2dc47db9d177f506b9165aa37f`).
+The candidate retains closed restore-phase/number/error codes, CLI exit/timeout state and
+bounded incomplete-report counters/outcome categories on failure, without provider keys,
+private reports or stderr. An incomplete CLI report is inspected before its nonzero exit
+remains a failure. The genuine signed local three-store lifecycle also checks its actual
+restore reports with the same Python validator and passes (26.60 seconds); this finds no
+deterministic report-shape mismatch and is not evidence about the failed overlay run.
+Twelve focused Python receipt/export/wiring checks pass. The next protected-overlay result
+remains pending. This is not a fragment network acceptance PASS or Signal backup proof.
+
+The follow-up trial **36766638354** at
+`f60810373c38e078eabd7f174d6e63f59b020aac` failed earlier, during the VM build:
+the 4-GiB guest killed `rustc` while three large compiler processes ran concurrently.
+It produced no fragment runtime result. Its incomplete report does not verify cleanup
+or unchanged host state; that absence is not converted into a PASS. The build candidate
+limits Cargo to two jobs without changing runtime limits or acceptance checks.
+
+**The protected fragment lifecycle now passes:** exact
+[trial 36773683946](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773683946)
+at `64c4f18cadb839ad6024c21166d6154e6665733f` completes all three phases with the
+original 56/16/16 successful protected-flow thresholds. Four distinct fragments,
+eight copies and three separate provider namespaces account for 786,505 logical /
+1,573,010 retained physical payload bytes. After the source is removed and A stopped,
+two complete SHA-256-verified restores combine B/C fragments without consuming copies.
+All three original stores reopen before renewal/deletion; idempotent deletion reaches
+zero leases/reserved/committed payload on each. Exact route/privacy gates, private-file
+cleanup, zero leftover objects and unchanged guest-host state pass. The original
+42-file artifact is retained (ZIP SHA-256
+`74a8544f5461e434fc67f9eb723f95d9ae9e9a8a8625caa25e3a0683db727c8c`).
+The candidate includes confirmed MPTCP-flow retirement and the two-job guest build
+limit; this success does not retrospectively diagnose every earlier failure.
+The fixture uses synthetic opaque bytes, not actual encrypted app backups. It proves
+neither independent physical failure domains, automatic placement/repair/contribution
+resize, network reciprocal credit, erasure coding nor completed Immich/Signal integration.
+
 The next owner-coordinated candidate adds `storage replicas replace`: a durable,
 resumable A/B-to-B/C handoff through the same protected operations. It retrieves and hashes
 the surviving copy, retains the exact replacement identity across retries, and fully reads

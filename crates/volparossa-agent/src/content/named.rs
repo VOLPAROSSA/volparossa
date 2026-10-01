@@ -417,7 +417,11 @@ pub(super) async fn download(
         source_root,
         source_limits,
         receipt,
-    } = super::cancellation::until_requester_closed(stream, retrieve(request, context)).await?;
+    } = Box::pin(super::cancellation::until_requester_closed(
+        stream,
+        retrieve(request, context),
+    ))
+    .await?;
     let verified = &selected.manifest;
     context.content.check_object_policy(verified)?;
     let remaining = verified

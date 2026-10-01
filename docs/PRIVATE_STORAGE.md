@@ -127,6 +127,22 @@ migration or verified network-wide reciprocity. Reopening a provider with `--reu
 preserves its original capacity/free-space floor and its current admission target; it does
 not choose a new target. No replication factor or coding scheme is prescribed here.
 
+### Queued investigation: storage erasure coding
+
+Investigate erasure coding for private storage as an explicit extension beyond the
+original replication-only v1 scope. Compare it with fragment replication under
+intermittent peers and correlated failures: physical storage charge, parallel-read
+latency, repair bandwidth, owner-device CPU/memory cost and recovery availability.
+This is a queued design investigation, not an implemented format or a promised
+reduction in storage contribution. Select parameters against those tradeoffs;
+preserve encryption, authenticated reconstruction, actual-byte reciprocity and
+safe migration of existing replicas. Repair must not expose plaintext to storage
+peers. This does not authorize transport-layer FEC or change existing archives.
+
+First finish the current fragment/provider-loss recovery path. Automatic placement,
+repair and safe capacity drain remain required alongside this investigation, not
+features that coding alone replaces.
+
 ## First executable slice: local provider storage
 
 `volparossa storage local` operates an explicit, owner-only store. It does not contact
@@ -564,6 +580,47 @@ Tampering with the signed root or consistently rewriting both unsigned nested ar
 records is rejected. This is **local transfer/lifecycle evidence**, not a new protected-overlay
 or independent-device proof. Automatic repair, fragment handoff/drain, measured metadata
 overhead and network-wide reciprocal contribution credit remain unfinished.
+
+### Disposable protected-fragment proof
+
+The `private-storage-fragments` scenario is separate from the older whole-archive
+`private-storage-replicas` and replacement `private-storage-handoff` proofs. Preview it with:
+
+```sh
+sh tests/integration/run-alpha-topology-vm.sh --preview --scenario private-storage-fragments
+```
+
+The executable fixture places four distinct ranges (three 256-KiB fragments and 73 bytes)
+with two copies each on three explicitly pinned providers. Exact per-provider grants and
+usage snapshots require 524,361 / 524,361 / 524,288 retained bytes and 3 / 3 / 2 leases,
+respectively, not a whole archive on each provider. With the original source removed and
+the first provider stopped, two complete restores must combine fragments from the other
+two stores. Unavailable copies remain charged; repeated reads must leave all three stores'
+usage unchanged. Reopening the same stores precedes deletion of all eight copies and
+confirmation of zero retained leases/payload. All store inspection happens after stopping
+the corresponding service, never by bypassing its live lock.
+
+The fixture retains two-path MPTCP, exactly one relay on each path, TLS, control/data-plane
+privacy captures and disposable-host cleanup gates. Only a closed list of sanitized reports
+is exported, never private owner keys, grants, journals or raw ciphertext. Twelve focused
+receipt/export/wiring tests pass. Exact trial `36744395110` verifies the full upload phase
+and subset accounting, then fails during survivor restore; returned B/C traffic
+alone is not proof of complete reconstruction. Its private cleanup and host-state checks
+pass. The genuine local three-store lifecycle passes the actual fixture's restore validator.
+A closed failure record now distinguishes CLI, accounting, survivor-receipt, output,
+identity and cleanup stages, preserving only fixed incomplete-report categories/counters
+before rejecting a nonzero CLI exit, without exporting raw private diagnostics. See
+[implementation status](IMPLEMENTATION_STATUS.md) for the original failure evidence.
+
+The subsequent exact [trial 36773683946](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773683946)
+at `64c4f18cadb839ad6024c21166d6154e6665733f` **passes the complete protected-fragment
+lifecycle**, including the unchanged 56/16/16 protected-flow thresholds, two complete
+survivor reconstructions, non-consuming accounting, reopening all original stores and
+idempotent all-copy deletion to zero leases/payload. Both WireGuard relay paths, all
+privacy captures, private artifact removal and unchanged disposable guest-host state
+pass. This is a three-provider namespace proof, not independent-device availability,
+automatic repair, contribution resizing or network-wide reciprocal credit.
+The public synthetic opaque fixture proves no archive encryption or native Signal integration.
 
 ## Next end-to-end proof
 
