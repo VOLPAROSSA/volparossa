@@ -87,8 +87,17 @@ The subsequent catalog/SDK integration uses Cloud
 `a67b91fbed42ecd23ba215eb21ef54397fc9f06a`: an encrypted immutable owner selection,
 private restoration through the core and authenticated loopback DAV listing and
 reads. Its real GPG/OpenCloud SDK local integration test passes with an explicitly
-injected storage adapter. The new protected-peer client proof is still pending;
-do not infer it from the earlier CLI-only success. Accounts, shared permissions,
+injected storage adapter. The new protected-peer client proof now independently
+passes in [run36916040042](https://github.com/VOLPAROSSA/volparossa/actions/runs/36916040042)
+on core `5d9d347fc52e4cc13498ed3b6790d1f00de370c3`. The original source and local
+ciphertext are absent and provider A is offline before direct recovery, catalog
+creation and actual SDK full/range reads reconstruct from B/C. All 32 required
+MPTCP/TLS exchanges complete; authentication/ETag denial, private cleanup, retained
+physical charges and final zero leases pass. Exact-source replay of the 44
+original artifacts reproduces the aggregate; ZIP SHA-256
+`f59a2c2baf693b5087c0827c0971589da23bf15610f96c885db6f2bbe0abdaef`.
+Range requests still reconstruct and verify the complete encrypted file before
+selecting plaintext bytes. This is not the full web UI. Accounts, shared permissions,
 writes, peer-distributed catalogs and second-device recovery are not completed.
 Preview with
 `sh tests/integration/run-alpha-topology-vm.sh --preview --scenario cloud-private-file`;

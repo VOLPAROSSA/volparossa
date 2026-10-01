@@ -28,10 +28,17 @@ Last updated: 2026-10-01
   Cloud `a67b91fbed42ecd23ba215eb21ef54397fc9f06a` adds an encrypted owner catalog
   and authenticated loopback DAV read service. Actual OpenCloud Web8 SDK listing,
   full/range/repeated reads and cleanup pass locally with real GPG and only the
-  core storage boundary explicitly injected. The next protected-peer proof joins
-  that new client/service path; it is not covered by the earlier one-file trial.
+  core storage boundary explicitly injected. The joined protected-peer proof now
+  passes in [run36916040042](https://github.com/VOLPAROSSA/volparossa/actions/runs/36916040042)
+  on core `5d9d347fc52e4cc13498ed3b6790d1f00de370c3`: source off, local ciphertext
+  absent and provider A offline before four genuine B/C reconstructions, including
+  SDK full/range reads. All 32 required MPTCP/TLS exchanges, private cleanup,
+  retained charges, final zero leases and unchanged host state pass. Exact-source
+  replay reconstructs the original aggregate from all 44 artifacts; ZIP SHA-256
+  `f59a2c2baf693b5087c0827c0971589da23bf15610f96c885db6f2bbe0abdaef`.
   Accounts, sharing, writable synchronization and second-device owner-state
-  recovery remain open, as does general server-independent OpenCloud service.
+  recovery remain open, as does the full web UI and general server-independent
+  OpenCloud service. Range reads currently reconstruct the whole encrypted file.
 - [ ] Cooperative maintenance of current/future VOLPAROSSA organization repositories:
   actual coding jobs, independent immune review and exact-revision scoped GitHub
   publication. [Agreed scope](REPOSITORY_MAINTENANCE.md); no autonomous publisher,
