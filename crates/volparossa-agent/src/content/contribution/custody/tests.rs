@@ -147,6 +147,10 @@ fn context(root: &Path) -> (ControlContext, watch::Sender<bool>, JoinHandle<()>)
     let task = tokio::spawn(runtime.run(Arc::clone(&state), receiver));
     (
         ControlContext {
+            browser_gateway: crate::browser_gateway::BrowserGateway::new(
+                root.join("apps.sock"),
+                root.join("absent-app-mpquic.sock"),
+            ),
             config: Arc::new(config),
             state,
             helper,

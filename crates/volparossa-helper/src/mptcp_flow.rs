@@ -20,6 +20,18 @@ pub(crate) struct MptcpFlowIdentity {
 }
 
 impl MptcpFlowIdentity {
+    #[cfg(test)]
+    pub(crate) fn fixture() -> Self {
+        // Ledger-only tests, never treated as kernel socket or datapath proof.
+        Self {
+            cookie: 1,
+            token: 2,
+            local: "[fd00::1]:40000".parse().unwrap(),
+            remote: "[fd00::4]:44443".parse().unwrap(),
+            namespace_device: 3,
+            namespace_inode: 4,
+        }
+    }
     pub(crate) fn capture(descriptor: &OwnedFd) -> io::Result<Self> {
         let socket = SockRef::from(descriptor);
         if socket.domain()? != Domain::IPV6
@@ -55,6 +67,26 @@ impl MptcpFlowIdentity {
 
     pub(crate) fn verify(self, descriptor: &OwnedFd) -> io::Result<()> {
         if Self::capture(descriptor)? != self {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+
+    /// A terminal/peer-closed socket may no longer expose its token or peer tuple. Its immutable
+    /// kernel cookie, socket kind and original namespace still bind the exact issued FD. This
+    /// weaker *terminal-only* check must never authorize creating or modifying live subflows.
+    pub(crate) fn verify_for_retirement(self, descriptor: &OwnedFd) -> io::Result<()> {
+        let socket = SockRef::from(descriptor);
+        let namespace = socket_network_namespace(descriptor)?;
+        let stat = rustix::fs::fstat(&namespace)?;
+        if socket.domain()? != Domain::IPV6
+            || socket.r#type()? != Type::STREAM
+            || socket.protocol()? != Some(Protocol::MPTCP)
+            || socket.is_listener()?
+            || socket.cookie()? != self.cookie
+            || stat.st_dev != self.namespace_device
+            || stat.st_ino != self.namespace_inode
+        {
             return Err(invalid());
         }
         Ok(())

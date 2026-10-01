@@ -94,7 +94,8 @@ payload, EOS and owner-call-ID rules. It does not scrape JSON from prose, repair
 invalid JSON, choose a tool for the model or execute tools in the worker. The
 caller remains responsible for argument validation and execution permissions.
 Model weights, prompt, sampling, seed, limits and the two-turn success check are
-unchanged. Focused decoder checks are not new model evidence; an actual fresh
+unchanged. Eight focused Rust conversation tests and seven offline Qwen bridge
+tests pass. These decoder checks are not new model evidence; an actual fresh
 two-turn run is still required.
 
 Actual completed tool use,
@@ -114,6 +115,33 @@ Sixteen focused Rust protocol/lifecycle/report tests and eleven offline Python
 conversation/private-worker tests pass. Backend doubles in those tests are not model
 inference evidence. Real tool-use quality, a connected Responses provider and an
 actual Codex editing loop remain **unproved/incomplete**.
+
+### Scoped browser TCP: live component proof passed
+
+The exact [browser/core trial 36776940049](https://github.com/VOLPAROSSA/volparossa/actions/runs/36776940049)
+on core `b8a1dd6e52978c40ced4c92c006f8301a587c659` and browser
+`198e288183b06d8a4ff584210ade449f124bc737` passes. Two real Gecko HTTPS responses,
+each 32 MiB and fully hash-verified, cross the protected core with two carrying kernel
+MPTCP subflows through distinct WireGuard relays per transfer. End-to-origin TLS 1.3,
+absence of proxy credentials at the origin, wrong-scope rejection and independent A
+retirement while B remains active are verified. All 30 original artifacts revalidate
+against the source; privacy captures, private-file/topology cleanup and unchanged
+guest-root host state pass. See [the exact evidence and boundaries](BROWSER_NETWORK.md).
+
+After incorporating the merged storage-flow lifetime fix, the exact follow-up
+[trial 36893366706](https://github.com/VOLPAROSSA/volparossa/actions/runs/36893366706)
+also passes on `f0f54fc7c0e30918ef2405aca30bc69e4382ccc1`. Its 30 original
+artifacts revalidate with the unchanged checker; original ZIP SHA-256 is
+`b7089d466a2275f2a4e3457c2334e8ca0060c5ee8608d97c7ca983317ab36475`.
+The component is integrated by normal PR #176 merge `5376d882`; fresh Quality,
+all CodeQL analyses and the aggregate passed before merging.
+
+This establishes the scoped TCP component, not the complete browser integration.
+Ordinary tab navigation over the actual overlay, live availability fallback, full
+browser kill switch, HTTP/3 and the native Firefox 157 build remain open. The actual
+ESR fixture explicitly disables ECH-GREASE; product-scoped ECH compatibility is still
+being built. The earlier failed-trial history below is retained, but its pending
+live-TCP-proof statements are superseded by this exact successful run.
 
 ### Editor-to-core private execution candidate
 
@@ -146,7 +174,8 @@ quotas and ciphertext hashes do not classify encrypted files, and uploader self-
 does not defeat malicious clients. The content-admission/review mechanism remains open; see
 [storage privacy and abuse boundaries](PRIVATE_STORAGE.md#storage-immune-system-and-private-content-limits).
 Different-chunk placement is implemented in the signed fragment CLI with local-service
-evidence below; its real overlay/provider-loss trial remains pending. The earlier
+evidence below; the actual overlay/provider-loss trial 36773683946 passes and is
+integrated through PR #183. Automatic placement/repair remains incomplete. The earlier
 replica/handoff proofs retain a complete encrypted archive at each selected provider.
 
 ### Mailbox import confirmation
@@ -366,6 +395,108 @@ selector. Daemon network attachment, browser-scoped kill switch (requested off b
 and cache integration remain unfinished. Core defaults for other consumers are not weakened
 by the requested browser availability fallback.
 
+The [scoped TCP gateway candidate](BROWSER_NETWORK.md) now connects operator-delegated
+application scopes to the existing MPTCP route API. A separate UID/capability-authenticated
+Unix attachment owns its own loopback CONNECT endpoint and route controller; EOF/expiry
+does not disconnect other apps or the main/DNS controllers. Three CLI, one protocol and
+five agent checks plus strict CLI/local-control/agent Clippy pass. These establish executable
+wiring and local boundaries, not live Firefox payloads, two simultaneously carrying app
+routes, a browser-wide kill switch, or direct fallback. The disposable combined proof remains
+pending; other core security defaults are unchanged.
+The corresponding [browser adapter PR #4](https://github.com/VOLPAROSSA/volparossa-browser/pull/4)
+at `18a74235` passes a real ESR Unix-IPC/three-TLS-response smoke with a synthetic gateway,
+including no proxy credential at the origin and independent detach. The new pinned
+`browser-network` KVM fixture requires actual core MPTCP/WireGuard payloads, two separate
+32-MiB browser hashes, two carrying paths per response and A retirement while B stays active.
+Its disposable browser-UID egress guard is test containment, not a product kill switch.
+The [first combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36625896567)
+on `b4b2d62b` fails before HTTPS at `BROWSER_NETWORK_APP_BOUNDARY_INVALID`; cleanup is
+complete with unchanged host state. A deterministic checker mismatch is corrected:
+`nft -n -j` emits numeric `NFPROTO_IPV6 = 10`, not the symbolic `ipv6` the checker required.
+Eight pure checks pass and failed boundary stages are now retained as closed metadata;
+firewall/credential checks remain strict. The corrected live proof remains pending, and
+the original failure cannot exclude an additional launch issue. No full Firefox 157 build is claimed.
+The [second run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36714093009)
+on `fd2d7eb2` confirms the capless application/namespace/numeric-firewall boundary, then
+fails before the first HTTPS request without a browser report or WireGuard payload.
+Cleanup again preserves host state. Closed driver-stage/error diagnostics now cover the
+previous pre-browser reporting gap; nine pure fixture checks pass, but the live cause and
+combined payload proof remain pending. No core gateway behavior is changed speculatively.
+The [third run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36716815095)
+on `e53034f6` now locates the failure at bubblewrap launch with permission denied,
+before child runtime validation; isolation, cleanup and unchanged host state still pass.
+The candidate driver explicitly uses its owned work directory before/inside bubblewrap,
+avoiding the inherited private provisioning checkout. Eight browser driver and nine core
+fixture checks pass, but the corrected live proof remains pending. No browser overlay
+success, permissions relaxation or full-browser kill-switch claim is implied.
+The [fourth run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36719104806)
+on `9bb16c99` still fails at wrapper launch: the owned-cwd change did not resolve it.
+Permission denied is observed, but no child validation or exact failing operation is
+available. Isolation, private cleanup and unchanged host state pass. Closed diagnostics
+now distinguish fixed bwrap source/destination lookup, remount, exec and setup operations
+without exporting private paths or changing sandbox permissions. This is not a live fix;
+actual browser HTTPS/MPTCP payload proof remains pending.
+The [fifth run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36722045933)
+on `ff98dc8c` narrows the launch failure to bwrap directory creation. Its 17 retained
+original artifacts still prove no browser payload; private cleanup and unchanged host
+state pass. Exact closed destination categories are now recorded without raw paths;
+eleven focused checks pass. This remains diagnosis, not a verified permission fix.
+The [sixth run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36726326554)
+on `4808fe06` identifies the exact failing destination category as the browser work
+directory; it still fails before child validation or HTTPS. Cleanup and unchanged host
+state pass. A bounded bubblewrap-only reproduction distinguishes an unmapped, search-only
+parent from an owned parent. The candidate browser driver now places only the verified
+runtime beneath an anonymous, read-only provisioning-parent shell inside its mount
+namespace. It does not change parent permissions, grants, UID, capabilities or network
+access. Nine browser driver checks pass; the corrected combined live proof remains pending.
+
+The [seventh run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36732926403)
+on exact `cd3e630d243739e1d3188074907af0e8d5e03f81` launches actual Gecko and reaches
+`attach-a`, then fails with `unavailable` before Ready or overlay payload. All 18 originals
+are retained; browser/profile/private/topology cleanup and unchanged host state pass.
+Closed attachment substages and numeric `nsresult` now distinguish stream setup/write,
+EOF and timeout, with a same-sandbox Unix socket access probe that sends no capability.
+Eleven browser tests, twelve fixture tests and a real-ESR/synthetic-gateway smoke pass.
+This is improved diagnosis and preserved local functionality, not a successful real-core
+browser route; no speculative permission relaxation or core routing change is included.
+
+The [eighth run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36738800599)
+on `be2c6cd6` isolates `socket-path / ENOENT`: the grant's agent-namespace path was not
+published in the browser namespace. Private/topology cleanup and unchanged host state
+pass. The fixture candidate read-only maps only the original client control directory
+to that unchanged path, requiring matching parent/socket inodes and ownership. Twelve
+pure browser checks, a real unprivileged namespace/socket check and thirteen core
+evidence checks pass; the corrected real browser/MPTCP payload proof remains pending.
+
+The latest [browser-network run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36766377022)
+on exact `3f89c5ab5a43bfa1df19cca55b81ec2bdc1ea839` passes both real attachments but
+fails its first request with `NS_ERROR_NET_TIMEOUT`, CONNECT status 0 and no body.
+Closed core events prove the CONNECT header was accepted, not that route setup completed.
+All 18 originals retain complete cleanup and unchanged host state. Source inspection finds
+core published `Ready` before cold signed discovery/native route preparation; the candidate
+now prepares the independently owned route first, bounded by 90 seconds and the original
+grant expiry. EOF/shutdown/expiry still joins through existing retained route ownership.
+The companion browser waits at most 95 seconds for bootstrap without changing native TLS
+timeouts; serial fixture orchestration accounts for both preparations. This corrects the
+source ordering, not a proven historical 30-second timing cause. Fifteen Python checks and
+shell syntax pass; all six focused Rust preparation checks now pass, including an expired
+capability never polling route admission and expiry/shutdown winning during the final
+ready poll. Actual browser payload
+on two protected MPTCP paths, ordinary browsing interception and a full browser kill switch
+remain unproven. See [the scoped evidence and boundaries](BROWSER_NETWORK.md).
+
+The next exact [run 36773190344](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773190344)
+at `d58e5514759d421a1ee3a629d5569b4c67c06639` now prepares both routes before Ready,
+accepts CONNECT and reaches forwarding twice. Gecko then reports `NS_ERROR_NET_INTERRUPT`
+(`0x804b0047`), CONNECT status 200, no HTTP status/body. It is still a failure, not TLS or
+payload proof. All 18 original artifacts retain complete cleanup and unchanged host state.
+The next ordinary-channel candidate also adds an explicit scoped bootstrap failure
+contract: only confirmed-clean lack of eligible paths under a still-valid policy/grant
+can authorize a killswitch-off browser decision for at most five seconds. EOF, ambiguous
+failure, policy denial and expired authority cannot. Fourteen gateway checks plus one
+discovery diversity check pass; ordinary Firefox channel integration and actual payload
+evidence remain separate requirements.
+
 [Signal integration](https://github.com/VOLPAROSSA/volparossa-chat/pull/1) now has a pinned
 Desktop/libsignal source baseline and explicit device/session/backup contracts, not a
 working modified client. Ordinary Signal compatibility, authenticated direct ciphertext
@@ -524,6 +655,72 @@ fragment loses both holders, renewal and interrupted delete/retry to zero leases
 tampering and coordinated mutation of unsigned nested copy identities are rejected. A real
 protected-overlay fragment-placement run is still pending; these tests do not establish
 independent failure domains, automatic repair/handoff, measured overhead or reciprocal credit.
+
+The separate **`private-storage-fragments` protected-overlay smoke candidate** now wires
+the real fragment CLI into the disposable three-provider topology. Its four distinct
+fragments have two copies each; exact provider grants and stopped-service usage snapshots
+must show subset-only custody. After removing the owner source and stopping provider A,
+the fixture requires two full B/C reconstructions, unchanged physical charges, original
+store reopen and explicit deletion of all eight copies. Each transfer phase requires the
+same two-path protected MPTCP route, drained privacy captures and original host cleanup.
+The first exact protected-overlay trial **36741590268** at
+`3d8d24bc9ac19006af7798a727c2e67377576f6d` failed after successful upload, same-identity
+retry and renewal of all eight copies: its bounded completion counter observed 43 rather
+than the required 56 protected exchanges. The source was removed, but the trial stopped
+before provider withdrawal, survivor restores and store-accounting snapshots. Private
+cleanup and unchanged guest-host state passed; the original 19-file evidence bundle remains
+unchanged (ZIP SHA-256 `bf83447621179be27faff66eb315e3749d5fc209ee83711ab9e1d56ffc7caebe`).
+The fixture had read only the latest 400 event records, not the complete existing 1000-record
+agent ring, without checking whether that tail covered the phase baseline. The candidate
+now reads the full bounded Exit window and explicitly rejects truncated/clock-regressed
+evidence, retaining the original **56/16/16** completion thresholds and every data/privacy
+gate. Exported metadata includes window coverage and separate failed-flow counts, not raw
+logs. The original artifact lacks that window metadata, so it does not retrospectively
+prove all missing events were cropped.
+
+The next exact trial **36744395110** at
+`04b20481c575b269d7ea2ff5bfc7d82b063b41d7` confirms all **56/56** upload flows with zero
+failed flows and a 631-record window covering the original phase baseline. The real three
+store snapshots account for all eight copies (1,573,010 payload bytes); the source was
+removed before provider A was stopped. The trial then failed at survivor restore. Captures
+show 536,146 / 266,175 response bytes from B / C and zero from A, but the original empty
+restore report does **not** establish a complete reconstruction or identify the failing
+CLI/checker step. Two restores, non-consuming post-restore accounting and deletion remain
+unproven. Private cleanup and unchanged guest-host state pass; the original 27-file bundle
+is preserved (ZIP SHA-256 `191d0f2f95472a81c57c476d08abdea829b00d2dc47db9d177f506b9165aa37f`).
+The candidate retains closed restore-phase/number/error codes, CLI exit/timeout state and
+bounded incomplete-report counters/outcome categories on failure, without provider keys,
+private reports or stderr. An incomplete CLI report is inspected before its nonzero exit
+remains a failure. The genuine signed local three-store lifecycle also checks its actual
+restore reports with the same Python validator and passes (26.60 seconds); this finds no
+deterministic report-shape mismatch and is not evidence about the failed overlay run.
+Twelve focused Python receipt/export/wiring checks pass. The next protected-overlay result
+remains pending. This is not a fragment network acceptance PASS or Signal backup proof.
+
+The follow-up trial **36766638354** at
+`f60810373c38e078eabd7f174d6e63f59b020aac` failed earlier, during the VM build:
+the 4-GiB guest killed `rustc` while three large compiler processes ran concurrently.
+It produced no fragment runtime result. Its incomplete report does not verify cleanup
+or unchanged host state; that absence is not converted into a PASS. The build candidate
+limits Cargo to two jobs without changing runtime limits or acceptance checks.
+
+**The protected fragment lifecycle now passes:** exact
+[trial 36773683946](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773683946)
+at `64c4f18cadb839ad6024c21166d6154e6665733f` completes all three phases with the
+original 56/16/16 successful protected-flow thresholds. Four distinct fragments,
+eight copies and three separate provider namespaces account for 786,505 logical /
+1,573,010 retained physical payload bytes. After the source is removed and A stopped,
+two complete SHA-256-verified restores combine B/C fragments without consuming copies.
+All three original stores reopen before renewal/deletion; idempotent deletion reaches
+zero leases/reserved/committed payload on each. Exact route/privacy gates, private-file
+cleanup, zero leftover objects and unchanged guest-host state pass. The original
+42-file artifact is retained (ZIP SHA-256
+`74a8544f5461e434fc67f9eb723f95d9ae9e9a8a8625caa25e3a0683db727c8c`).
+The candidate includes confirmed MPTCP-flow retirement and the two-job guest build
+limit; this success does not retrospectively diagnose every earlier failure.
+The fixture uses synthetic opaque bytes, not actual encrypted app backups. It proves
+neither independent physical failure domains, automatic placement/repair/contribution
+resize, network reciprocal credit, erasure coding nor completed Immich/Signal integration.
 
 The next owner-coordinated candidate adds `storage replicas replace`: a durable,
 resumable A/B-to-B/C handoff through the same protected operations. It retrieves and hashes

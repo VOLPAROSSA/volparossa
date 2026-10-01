@@ -584,7 +584,10 @@ async fn process_connection(
         tracing::info!(operation = %preview, "helper request accepted");
         let descriptor = if matches!(
             request.operation.as_ref(),
-            Some(helper_request::Operation::UpdateMptcpSubflow(_))
+            Some(
+                helper_request::Operation::UpdateMptcpSubflow(_)
+                    | helper_request::Operation::RetireMptcpFlow(_)
+            )
         ) {
             let binding = request_descriptor_fd_binding(&request)
                 .map_err(|_| ConnectionError::InvalidFrame)?;

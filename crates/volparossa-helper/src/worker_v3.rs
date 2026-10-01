@@ -4181,6 +4181,11 @@ fn child_loop(
                     mptcp_subflow::execute(context.as_ref(), operation, bound_context, deadline);
                 (result, outcome, exit, None)
             }
+            internal_worker_request::Operation::RetireMptcpFlow(operation) => {
+                let (result, outcome, exit) =
+                    mptcp_subflow::retire(context.as_ref(), operation, bound_context, deadline);
+                (result, outcome, exit, None)
+            }
             internal_worker_request::Operation::RemoveMptcpEndpoint(operation) => {
                 let (result, outcome, exit) = remove_mptcp_child_context(
                     context.as_ref(),
@@ -4334,6 +4339,7 @@ fn request_context(request: &InternalWorkerRequest) -> Result<ContextId, WorkerV
         Operation::AddMptcpEndpoint(value) => &value.route_context_id,
         Operation::RemoveMptcpEndpoint(value) => &value.route_context_id,
         Operation::UpdateMptcpSubflow(value) => &value.route_context_id,
+        Operation::RetireMptcpFlow(value) => &value.route_context_id,
         Operation::AcquireTransportSocket(value) => &value.route_context_id,
         Operation::InitialiseClientIngress(value) => &value.client_runtime_id,
         Operation::PrepareClientIngress(value) => &value.client_runtime_id,
@@ -8005,7 +8011,8 @@ fn transition(
             Some(
                 Operation::AddMptcpEndpoint(_)
                 | Operation::RemoveMptcpEndpoint(_)
-                | Operation::UpdateMptcpSubflow(_),
+                | Operation::UpdateMptcpSubflow(_)
+                | Operation::RetireMptcpFlow(_),
             ),
         ) => Ok((StablePhase::Committed, false)),
         (StablePhase::Committed, Some(Operation::AcquireTransportSocket(value)))
