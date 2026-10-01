@@ -330,6 +330,26 @@ This is not yet a background capacity-shrink service, discovery-based repair, ne
 storage credit or a new overlay proof. See
 [bounded drain and its scope](PRIVATE_STORAGE.md#bounded-owner-driven-archive-drain).
 
+### Bounded owner repair without blocking on an offline source
+
+`storage fragments repair` adds a separate bounded pass over one owner's archive.
+It first resumes exact signed copying intents, then repairs other selected-provider
+fragments, and finally retries pending retirements. It advances past an incomplete
+handoff only after that invocation verified the survivor and fully read back its exact
+replacement, with only the original provider's deletion unconfirmed. Old retirement
+records do not count as fresh proof; no pending fragment gets another replacement.
+All original and temporary charges remain until authenticated deletion, and the stricter
+`drain` behavior is unchanged.
+
+A targeted real signed-service/SQLite lifecycle exercises a lost reservation reply,
+owner/provider restart, max-one passes advancing across all three affected fragments,
+two full restores from only C/D after the original ciphertext is removed and A/B are
+unavailable, then A's return and confirmed retirement. Retry identities, unchanged
+signed reconstruction root, conservative charges and final zero-lease cleanup are checked.
+This is an explicit owner-online operation, not background peer discovery, automatic
+contribution resizing, a new redundancy policy or new protected-overlay evidence. See
+[repair progress versus outstanding retirement](PRIVATE_STORAGE.md#bounded-owner-driven-repair-pass).
+
 ### Mailbox import confirmation
 
 The [mailbox import-confirmation candidate](MAILBOX_IMPORT_CONFIRMATION.md) adds a
