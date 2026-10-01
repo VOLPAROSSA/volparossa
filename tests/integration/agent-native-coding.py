@@ -140,6 +140,43 @@ def model_provenance():
         requirements_sha256=hashlib.sha256(requirements).hexdigest())
 
 
+def check_native_diagnostics(value):
+    for key in ('turns_started', 'turns_completed'):
+        require(type(value[key]) is int and 0 <= value[key] <= 2, 'receipt-turn-count')
+    require(value['turns_completed'] <= value['turns_started'], 'receipt-turn-order')
+    counts = value['item_types']
+    require(type(counts) is dict and set(counts) == {'commandExecution', 'agentMessage', 'userMessage', 'reasoning', 'other'}
+            and all(type(n) is int and 0 <= n <= 64 for n in counts.values())
+            and sum(counts.values()) <= 64, 'receipt-item-counts')
+    diagnostic = value['response_diagnostics']
+    if diagnostic is None:
+        require(value['responses'] is None, 'receipt-diagnostics-missing')
+        return
+    require(type(diagnostic) is dict and set(diagnostic) == {'version', 'records', 'truncated'}
+            and type(diagnostic['version']) is int and diagnostic['version'] == 1
+            and type(diagnostic['truncated']) is bool and type(diagnostic['records']) is list
+            and len(diagnostic['records']) <= 16, 'receipt-response-diagnostics')
+    for row in diagnostic['records']:
+        require(type(row) is dict and set(row) == {'output_kind', 'prompt_tokens', 'generated_tokens',
+                'turn_complete', 'incomplete_reason', 'elapsed_ms'}
+                and row['output_kind'] in ('assistant', 'function_call', 'custom_tool_call', 'incomplete')
+                and type(row['turn_complete']) is bool
+                and row['turn_complete'] == (row['output_kind'] != 'incomplete')
+                and (row['incomplete_reason'] is None if row['turn_complete'] else
+                     row['incomplete_reason'] in ('token_limit', 'wire_truncated', 'invalid_output')),
+                'receipt-response-shape')
+        for key, minimum, maximum in (('prompt_tokens', 1, 12288), ('generated_tokens', 1, 1024),
+                                      ('elapsed_ms', 0, 3600000)):
+            require(type(row[key]) is int and minimum <= row[key] <= maximum, 'receipt-response-bound')
+    counters = value['responses']
+    require(counters is not None and len(diagnostic['records']) == min(16, counters['cleanup_confirmed'])
+            and diagnostic['truncated'] == (counters['cleanup_confirmed'] > 16), 'receipt-response-coverage')
+    if not diagnostic['truncated']:
+        require(sum(row['turn_complete'] for row in diagnostic['records']) == counters['completed']
+                and sum(not row['turn_complete'] for row in diagnostic['records']) == counters['incomplete'],
+                'receipt-response-correlation')
+
+
 def native_receipt(value):
     """Closed projection only: no prompts, model text, commands or tool contents."""
     booleans = {'success', 'native_turn_completed', 'read', 'edit', 'test', 'independent_test_passed',
@@ -147,8 +184,9 @@ def native_receipt(value):
         'general_coding_quality_claimed', 'forced_stop'}
     require(isinstance(value, dict) and set(value) == booleans | {'version', 'kind', 'phase', 'model',
         'full_native_prompt_sha256', 'before_sha256', 'after_sha256', 'accepted_commands',
-        'declined_commands', 'approval_denials', 'responses', 'runtime_exit', 'diagnostic'}, 'native receipt keys')
-    require(type(value['version']) is int and value['version'] == 2 and value['kind'] == 'native-codex-core-coding'
+        'declined_commands', 'approval_denials', 'responses', 'runtime_exit', 'diagnostic',
+        'turns_started', 'turns_completed', 'item_types', 'response_diagnostics'}, 'native receipt keys')
+    require(type(value['version']) is int and value['version'] == 3 and value['kind'] == 'native-codex-core-coding'
         and value['model'] == PROFILE and value['phase'] in ('capabilities', 'launch', 'initialize',
         'thread-start', 'native-turn', 'independent-check', 'unsubscribe', 'complete')
         and value['diagnostic'] in (None, 'stderr_bound', 'turn_deadline', 'native_coding_incomplete',
@@ -169,6 +207,7 @@ def native_receipt(value):
     require(counters is None or isinstance(counters, dict)
         and set(counters) == {'submitted', 'completed', 'incomplete', 'cleanup_confirmed'}
         and all(type(count) is int and 0 <= count <= 32 for count in counters.values()), 'response counters')
+    check_native_diagnostics(value)
     if value['success']:
         require(all(value[key] for key in ('native_turn_completed', 'read', 'edit', 'test',
             'independent_test_passed', 'thread_unsubscribed')) and value['phase'] == 'complete'
@@ -176,6 +215,9 @@ def native_receipt(value):
             and value['diagnostic'] is None and value['after_sha256'] not in (None, value['before_sha256'])
             and counters is not None and counters['completed'] >= 4 and counters['incomplete'] == 0
             and counters['submitted'] == counters['completed'] == counters['cleanup_confirmed'], 'native loop unproven')
+        require(1 <= value['turns_started'] == value['turns_completed'] <= 2
+                and value['response_diagnostics']['truncated'] is False
+                and value['item_types']['commandExecution'] >= 3, 'native task unproven')
     return value
 
 

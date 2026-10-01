@@ -15,7 +15,7 @@ FIX = runpy.run_path(str(HERE / 'agent-native-coding.py'))
 
 
 def synthetic_receipt():
-    return dict(version=2, kind='native-codex-core-coding', success=True, phase='complete',
+    return dict(version=3, kind='native-codex-core-coding', success=True, phase='complete',
         model='qwen3-0.6b-v1', full_native_prompt_sha256=FIX['PROMPT_SHA'],
         before_sha256=hashlib.sha256(b'def add(a, b):\n    return a - b\n').hexdigest(),
         after_sha256=hashlib.sha256(b'def add(a, b):\n    return a + b\n').hexdigest(),
@@ -24,6 +24,11 @@ def synthetic_receipt():
         approval_denials=dict.fromkeys(FIX['APPROVAL_DENIALS'], 0),
         thread_unsubscribed=True, private_peer_execution_claimed=False,
         general_coding_quality_claimed=False, runtime_exit=0, forced_stop=False, diagnostic=None,
+        turns_started=1, turns_completed=1,
+        item_types=dict(commandExecution=3, agentMessage=1, userMessage=1, reasoning=0, other=0),
+        response_diagnostics=dict(version=1, truncated=False, records=[dict(output_kind=kind,
+            prompt_tokens=9000, generated_tokens=100, turn_complete=True, incomplete_reason=None, elapsed_ms=200000)
+            for kind in ('function_call', 'function_call', 'function_call', 'assistant')]),
         responses=dict(submitted=4, completed=4, incomplete=0, cleanup_confirmed=4))
 
 
@@ -154,7 +159,7 @@ class ContractTests(unittest.TestCase):
         denials = dict(value['approval_denials'], command=1)
         value.update(approval_denials=denials, declined_commands=1)
         self.assertEqual(FIX['native_receipt'](value), value)
-        for change in ({'version': 1}, {'version': True}, {'version': 3},
+        for change in ({'version': 1}, {'version': True}, {'version': 2},
                        {'declined_commands': 0}, {'approval_denials': {}},
                        {'approval_denials': dict(denials, private_command='PRIVATE_CANARY')},
                        {'approval_denials': dict(denials, command=True)},
@@ -182,12 +187,33 @@ class ContractTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 FIX['native_receipt'](changed)
         failed = dict(value, success=False, phase='native-turn', diagnostic='native_coding_incomplete',
-                      after_sha256=None, read=False, edit=False, test=False, responses=None)
+                      after_sha256=None, read=False, edit=False, test=False, responses=None, response_diagnostics=None)
         self.assertFalse(FIX['native_receipt'](failed)['success'])
+
+    def test_diagnostics_are_closed_bounded_and_correlated_with_real_response_counts(self):
+        value = synthetic_receipt()
+        for changes in ({'turns_started': 3}, {'turns_completed': True}, {'turns_completed': 2},
+                        {'item_types': dict(value['item_types'], private_text='PRIVATE_CANARY')},
+                        {'item_types': dict(value['item_types'], other=65)}, {'response_diagnostics': None}):
+            with self.assertRaises(ValueError):
+                FIX['native_receipt'](dict(value, **changes))
+        for changes in ({'output_kind': 'PRIVATE_CANARY'}, {'prompt_tokens': 12289},
+                        {'generated_tokens': 1025}, {'elapsed_ms': -1}, {'elapsed_ms': 3600001},
+                        {'turn_complete': 1}, {'incomplete_reason': 'PRIVATE_CANARY'},
+                        {'text': 'PRIVATE_CANARY'}):
+            changed = copy.deepcopy(value)
+            changed['response_diagnostics']['records'][0].update(changes)
+            with self.assertRaises(ValueError):
+                FIX['native_receipt'](changed)
+        for changes in ({'truncated': True}, {'records': []}, {'version': True}, {'private': 'PRIVATE_CANARY'}):
+            changed = copy.deepcopy(value)
+            changed['response_diagnostics'].update(changes)
+            with self.assertRaises(ValueError):
+                FIX['native_receipt'](changed)
 
     def test_pins_are_exact_and_closed_exports_exclude_private_runtime(self):
         pins = FIX['pins']()
-        self.assertEqual(pins['revision'], 'eb48696eb37afb9cda59bffc350845309b963dbb')
+        self.assertEqual(pins['revision'], '2f7014b0014b90e488b15364d6e596d7d1a30782')
         self.assertEqual(set(pins['files']), FIX['SOURCE_NAMES'])
         self.assertEqual(FIX['EXPORT_NAMES'], {'agent-native-coding-smoke.json', 'host-state-before.json',
             'host-state-after.json', 'current-phase', 'guest-exit-status', 'runner.stdout', 'runner.stderr'})

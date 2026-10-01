@@ -14,8 +14,8 @@ import tarfile
 import urllib.request
 
 HERE = Path(__file__).resolve().parent
-CODE_REVISION = 'eb48696eb37afb9cda59bffc350845309b963dbb'
-CODE_TREE = '60ddc9be734aa17bc95464cda8d81dc50e39cb6a'
+CODE_REVISION = '2f7014b0014b90e488b15364d6e596d7d1a30782'
+CODE_TREE = '1ead810cf341ac9fd0e368c53c0784104ad72b46'
 MAIL_REVISION = '92dac0280ab741000199f342876644341c83f127'
 MAIL_FILES = {
     'scripts/prepare_stalwart.py': 'a9272b1fb6015635f4937049d211c1c03d1cade86f42f9285db38ecd130dcce1',

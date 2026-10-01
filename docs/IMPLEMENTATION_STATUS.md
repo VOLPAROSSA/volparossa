@@ -135,6 +135,30 @@ records bounded service-cgroup CPU-time and elapsed-time deltas. The earlier kil
 source remains **unproven**; the original evidence lacks CPU observations, and no
 new actual coding-loop success is claimed.
 
+The original [attempt 36925945880](https://github.com/VOLPAROSSA/volparossa/actions/runs/36925945880)
+on core `ff2abe632a6779494301685014f89ec49aa2d259` / Code `eb48696e` now
+executes the actual native read: one accepted command, zero declined, two completed
+real model responses and two confirmed worker cleanups. The native turn completes
+normally but neither edit nor test runs. The task therefore fails at the genuine
+read/edit/test assertion, not an approval, OOM or timeout. Harness elapsed time is
+790,763 ms, service CPU usage 1,559,652,831 microseconds and memory peak
+1,883,226,112 bytes. Runtime/private cleanup passes and host state is unchanged.
+Original eight-file artifact SHA-256:
+`6aafeaee20a247d05f0e334bad07ac630e810417719783f8c8d45138ac80abe4`;
+original job-log SHA-256:
+`863e804f7441742006bd168f21649c80f50004469fb46c922d01837800d936df`.
+Its unretained second response cannot establish why the model stopped.
+
+The next candidate distinguishes native **turn completion from task completion**.
+After a normal but unfinished turn it permits at most one neutral continuation in
+the same thread, without supplying a solution, command or fallback answer. The
+same full upstream prompt, 2,400-second total native deadline, six-command approval
+budget and all permission/lineage checks remain. Receipt v3 adds fixed item-type
+and turn counters plus at most 16 content-free per-response records (output kind,
+tokens, completion reason and elapsed time through confirmed cleanup). Offline
+event-controller/protocol and closed-parser checks cover this candidate; no new
+actual coding-loop success is claimed and no broader model or permission is selected.
+
 ### Additional application and autonomous-maintenance scope
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
