@@ -50,6 +50,7 @@ output_directory=
 expected_commit=
 
 usage() {
+    printf '%s\n' 'Additional scenario: browser-network (two real app-scoped Firefox HTTPS/MPTCP transfers).'
     printf '%s\n' \
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
@@ -379,6 +380,17 @@ print_plan() {
             '  remove original source bytes, restart providers and fill a fresh consumer cache over the protected route;' \
             '  retain original publication expiry, complete role-specific captures and unchanged guest host cleanup;' \
             '  no automatic placement/repair, future availability or general offline mesh claim.'
+        return
+    fi
+    if [ "$scenario" = browser-network ]; then
+        printf '%s\n' \
+            'VOLPAROSSA real Firefox app-scoped HTTPS gateway smoke plan:' \
+            '  use the pinned ESR runtime/module, two explicit CLI grants and a capless Client application;' \
+            '  trust one synthetic origin CA only in the temporary browser profile; never disable TLS checks;' \
+            '  restrict only disposable browser UID egress to loopback; this is not a product kill switch;' \
+            '  transfer/hash two real 32 MiB HTTPS responses over actual MPTCP with two carrying relay paths;' \
+            '  retire attachment A while independently owned B remains active; reject wrong-authority scope;' \
+            '  drain metadata-only captures, erase grants/profile/test keys and verify unchanged guest host state.'
         return
     fi
     if [ "$scenario" = mptcp-refill ]; then
@@ -715,7 +727,7 @@ while [ "$#" -gt 0 ]; do
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
                 uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
-                alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-jobs|dns-cache) scenario=$2; wifi_link=no; uplink_link=no ;;
+                alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|browser-network|mptcp-refill|sharing|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-jobs|dns-cache) scenario=$2; wifi_link=no; uplink_link=no ;;
                 *) usage >&2; exit 64 ;;
             esac
             shift
@@ -832,6 +844,15 @@ if [ "$scenario" = mpquic-growth ] || [ "$scenario" = mptcp-growth ] || [ "$scen
             printf '%s\n' 'Multipath growth fixture unavailable' >&2
             exit 69
         fi
+    done
+fi
+if [ "$scenario" = browser-network ]; then
+    for browser_fixture in browser-network-smoke.sh browser-network-smoke.py browser-network-provision.py \
+        browser-network-pins.json agent-private-task-browser-pins.json mptcp-growth-smoke.py \
+        mpquic-growth-smoke.py content-network-smoke.py content-provider-https-smoke.py; do
+        [ -f "$source_directory/tests/integration/$browser_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$browser_fixture" ] \
+            || { printf '%s\n' 'browser network fixture unavailable' >&2; exit 69; }
     done
 fi
 if [ "$scenario" = mixed-link ]; then
@@ -1330,6 +1351,14 @@ capture_host_state() {
 }
 
 copy_artifacts() {
+    if [ "$scenario" = browser-network ]; then
+        # The application proof has a closed JSON-only export; never copy grant/profile/log files.
+        for artifact in host-state-before.json host-state-after.json a15-evidence.json; do
+            [ ! -f "$WORK/$artifact" ] || [ -L "$WORK/$artifact" ] || \
+                install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$WORK/$artifact" "$output_directory/$artifact" || return 1
+        done
+        return 0
+    fi
     for artifact in \
         benchmark-selection-draws.jsonl a02-selected-paths.json \
         a03-single-selected-paths.json a03-aggregate-selected-paths.json \
@@ -1972,6 +2001,9 @@ cleanup() {
     if [ "$scenario" = mptcp-growth ] && command -v mptcp_growth_cleanup >/dev/null 2>&1; then
         mptcp_growth_cleanup || original_status=1
     fi
+    if [ "$scenario" = browser-network ] && command -v browser_network_cleanup >/dev/null 2>&1; then
+        browser_network_cleanup || original_status=1
+    fi
     if [ "$scenario" = mptcp-refill ] && command -v mptcp_refill_cleanup >/dev/null 2>&1; then
         mptcp_refill_cleanup || original_status=1
     fi
@@ -2200,6 +2232,8 @@ cleanup() {
         mpquic_growth_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = mptcp-growth ]; then
         mptcp_growth_finalize_report "$original_status" || original_status=1
+    elif [ "$scenario" = browser-network ]; then
+        browser_network_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = mptcp-refill ]; then
         mptcp_refill_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = dns-cache ]; then
@@ -2314,6 +2348,10 @@ fi
 if [ "$scenario" = mptcp-growth ]; then
     # shellcheck source=tests/integration/mptcp-growth-smoke.sh
     . "$source_directory/tests/integration/mptcp-growth-smoke.sh"
+fi
+if [ "$scenario" = browser-network ]; then
+    # shellcheck source=tests/integration/browser-network-smoke.sh
+    . "$source_directory/tests/integration/browser-network-smoke.sh"
 fi
 if [ "$scenario" = mptcp-refill ]; then
     # shellcheck source=tests/integration/mptcp-refill-smoke.sh
@@ -3104,7 +3142,10 @@ write_config() {
             printf 'selection:\n  active_multipath_paths: 2\n  minimum_multipath_paths: 2\n'
             printf '  maximum_multipath_paths: 3\n  warm_backup_paths: 1\n'
         fi
-        if [ "$scenario" = mptcp-refill ] && [ "$node" = client ]; then
+        if [ "$scenario" = browser-network ] && [ "$node" = client ]; then
+            printf 'selection:\n  active_multipath_paths: 2\n  minimum_multipath_paths: 2\n'
+            printf '  maximum_multipath_paths: 2\n  warm_backup_paths: 0\n'
+        elif [ "$scenario" = mptcp-refill ] && [ "$node" = client ]; then
             printf 'selection:\n  active_multipath_paths: 2\n  minimum_multipath_paths: 2\n'
             printf '  maximum_multipath_paths: 4\n  warm_backup_paths: 1\n'
         fi
@@ -3519,6 +3560,13 @@ launch_agent() {
     [ "$(unit_load_state "$agent_unit")" = not-found ] || fail AGENT_UNIT_COLLISION
     AGENT_UNITS="$AGENT_UNITS $agent_unit"
     agent_rust_log=volparossa_agent=info
+    if [ "$scenario" = browser-network ] && [ "$node" = client ]; then
+        agent_rust_log=$agent_rust_log,volparossa_agent::browser_gateway::connect=debug
+    fi
+    if [ "$scenario" = browser-network ] && [ "$node" = exit ]; then
+        # Opt-in static failure classes only, never raw egress errors or destinations.
+        agent_rust_log=$agent_rust_log,volparossa_agent::mptcp_flow_runtime=debug
+    fi
     if [ "$scenario" = mpquic-growth ] && [ "$node" = client ]; then
         # Exact owned-path counters/decisions only, no destination or payload logging.
         agent_rust_log=$agent_rust_log,volparossa_agent::path_health=debug
@@ -5175,6 +5223,7 @@ fi
 if [ "$scenario" != mixed-link ] && [ "$scenario" != crash-recovery ] \
     && [ "$scenario" != mpquic-growth ] \
     && [ "$scenario" != mptcp-growth ] \
+    && [ "$scenario" != browser-network ] \
     && [ "$scenario" != mptcp-refill ] \
     && [ "$scenario" != content ] && [ "$scenario" != content-message ] \
     && [ "$scenario" != content-https ] && [ "$scenario" != content-provider ] \
@@ -5741,6 +5790,8 @@ start_privacy_observers() {
             [ "$scenario" = mpquic-growth ] || return 1 ;;
         mptcp-growth-initial-privacy|mptcp-growth-expanded-privacy)
             [ "$scenario" = mptcp-growth ] || return 1 ;;
+        browser-network-first-privacy|browser-network-second-privacy)
+            [ "$scenario" = browser-network ] || return 1 ;;
         mptcp-refill-initial-privacy|mptcp-refill-expanded-privacy)
             [ "$scenario" = mptcp-refill ] || return 1 ;;
         content-a-privacy|content-b-privacy)
@@ -6471,6 +6522,10 @@ if [ "$scenario" = mpquic-growth ]; then
 fi
 if [ "$scenario" = mptcp-growth ]; then
     mptcp_growth_run
+    exit 0
+fi
+if [ "$scenario" = browser-network ]; then
+    browser_network_run
     exit 0
 fi
 if [ "$scenario" = mptcp-refill ]; then
