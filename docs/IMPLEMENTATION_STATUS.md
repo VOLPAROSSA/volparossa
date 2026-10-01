@@ -54,8 +54,18 @@ and independently verify every original hash, then delete all remote copies. The
 never goes to peers; the ordinary original source remains intact until disposable cleanup.
 Seven targeted fixture checks pass locally, including actual pinned GPG encryption and
 two independently verified decryptions; six provision and four wiring checks also pass.
-Live overlay execution is still pending. This is not a running Immich/PostgreSQL recovery
-or mobile, web or general serverless-availability claim.
+The [first live run `36894316849`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36894316849)
+on `f1d90f6494dde652940bdae4353b57f53b3c3d1d` **fails overall at private cleanup**.
+Its original phase receipts record real encryption, eight deposited fragment copies,
+two independently hash-verified GPG decryptions through B/C after A stops, and deletion
+of all copies with zero final provider usage. Host-state hashes match, but the worker
+cannot remove its short `$WORK/i` directory from root-owned mode-0755 `$WORK`.
+The pending correction uses worker-owned mode-0700 `$WORK/u` as its short parent;
+the same strict cleanup still has to remove `i`, after which root removes empty `u`.
+The original 42-file artifact ZIP SHA256 is
+`4867ad268bdfd7bef43d3d2966cd38dd2146245080c1e65a033c030bbe86041a`.
+A passing complete rerun remains required. This is not a running Immich/PostgreSQL
+recovery or mobile, web or general serverless-availability claim.
 
 ### Mailbox import confirmation
 

@@ -6,8 +6,17 @@
 image_snapshot_run() {
     # Keep GnuPG's private Unix socket below sockaddr_un's path limit. This is
     # inside the exact disposable WORK tree, never an external /tmp shortcut.
-    storage_owner_directory=$WORK/i
+    # WORK is root-owned 0755: the worker cannot rmdir a direct child there.
+    # A short private parent lets the same owner remove its complete i tree.
+    storage_owner_parent=$WORK/u
+    storage_owner_directory=$storage_owner_parent/i
     storage_fixture_driver=image-snapshot-smoke.py
+    if [ -e "$storage_owner_parent" ] || [ -L "$storage_owner_parent" ]; then
+        fail IMAGE_OWNER_PARENT_NOT_NEW
+    fi
+    longest_image_socket=$storage_owner_directory/g-xxxxxxxx/S.gpg-agent
+    [ "${#longest_image_socket}" -lt 104 ] || fail IMAGE_SOCKET_PATH_TOO_LONG
+    install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$storage_owner_parent"
     [ "$IMAGE_SOURCE" = /opt/volparossa-image ] || fail IMAGE_SOURCE_INVALID
     [ "$IMAGE_NODE" = /opt/volparossa-node/bin/node ] || fail IMAGE_NODE_INVALID
     [ "$IMAGE_REVISION" = e177afebabd99ac0773de2a73d60275346a5de52 ] || fail IMAGE_REVISION_INVALID
@@ -16,6 +25,8 @@ image_snapshot_run() {
     fi
     install -o root -g root -m 0600 "$IMAGE_SOURCE/provision.json" "$WORK/image-snapshot-provision.json"
     private_storage_fragments_run
+    # The worker has proved private cleanup; root removes only the empty parent.
+    rmdir "$storage_owner_parent" || fail IMAGE_OWNER_PARENT_CLEANUP_FAILED
 }
 
 image_snapshot_finalize_report() {

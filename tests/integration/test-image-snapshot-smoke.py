@@ -132,6 +132,33 @@ class ImageEvidence(unittest.TestCase):
             with self.assertRaises(ValueError):
                 CHECK["cleanup"](root)
 
+    @unittest.skipIf(os.geteuid() == 0, "requires ordinary DAC, not root capabilities")
+    def test_cleanup_requires_writable_parent_not_only_owned_root(self):
+        # Reproduce the VM's root-owned 0755 WORK permission boundary without
+        # root/chown: a non-writable parent denies the same final rmdir syscall.
+        with tempfile.TemporaryDirectory(prefix="vp-img-permission-") as temporary:
+            work = Path(temporary)
+            old = work / "i"
+            old.mkdir(mode=0o700)
+            CHECK["create"](old / "recovery.key", b"synthetic")
+            parent = work / "u"
+            parent.mkdir(mode=0o700)
+            fixed = parent / "i"
+            fixed.mkdir(mode=0o700)
+            CHECK["create"](fixed / "recovery.key", b"synthetic")
+            work.chmod(0o555)
+            try:
+                with self.assertRaises(PermissionError):
+                    CHECK["cleanup"](str(old))
+                self.assertTrue(old.is_dir())
+                self.assertEqual(list(old.iterdir()), [])
+                self.assertTrue(CHECK["cleanup"](str(fixed))["user_directory_removed"])
+                self.assertFalse(fixed.exists())
+                self.assertEqual(list(parent.iterdir()), [])
+                self.assertTrue(CHECK["cleanup"](str(fixed))["user_directory_removed"])
+            finally:
+                work.chmod(0o700)
+
     def test_real_plaintext_verifier_rejects_changed_asset(self):
         with tempfile.TemporaryDirectory(prefix="vp-img-") as temporary:
             root = Path(temporary)

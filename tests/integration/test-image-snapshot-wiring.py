@@ -23,6 +23,21 @@ def diagnostics():
 
 
 class ImageSnapshotWiring(unittest.TestCase):
+    def test_owner_parent_is_private_removable_and_gpg_socket_stays_short(self):
+        source = (HERE / "image-snapshot-smoke.sh").read_text()
+        self.assertIn('storage_owner_parent=$WORK/u', source)
+        self.assertIn('storage_owner_directory=$storage_owner_parent/i', source)
+        self.assertIn('install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$storage_owner_parent"', source)
+        self.assertIn('[ "${#longest_image_socket}" -lt 104 ]', source)
+        self.assertLess(source.index('private_storage_fragments_run\n'),
+                        source.index('rmdir "$storage_owner_parent"'))
+        # Exact topology prefix, 32-character run ID, mktemp suffix and pinned
+        # Image tempfile prefix/suffix. No longer client-fixtures component.
+        work = '/opt/va.' + 'a' * 32 + '.abcdef'
+        socket = work + '/u/i/g-abcdefgh/S.gpg-agent'
+        self.assertEqual(len(socket.encode()), 74)
+        self.assertLess(len(socket.encode()), 104)
+
     def test_runner_preview_and_repeated_selection(self):
         for first, last in ((SCENARIO, "private-storage-fragments"), ("private-storage-fragments", SCENARIO)):
             with self.subTest(first=first, last=last):
