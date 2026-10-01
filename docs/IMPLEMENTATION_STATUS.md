@@ -6,6 +6,22 @@ Last updated: 2026-09-30
 
 ## Current integration and active work
 
+### Additional application and autonomous-maintenance scope
+
+- [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
+  authenticated source import, private fragment storage and source-off file access,
+  followed by the account/metadata/sharing/synchronization functions needed for
+  normal use without the original server. Distributed blobs alone are not a
+  server-independent OpenCloud service.
+- [ ] Cooperative maintenance of current/future VOLPAROSSA organization repositories:
+  actual coding jobs, independent immune review and exact-revision scoped GitHub
+  publication. [Agreed scope](REPOSITORY_MAINTENANCE.md); no autonomous publisher,
+  independent code-review quorum or automatic client updater is implemented.
+- [ ] Automatically distribute and install independently authorized releases on
+  VOLPAROSSA clients (explicit user approval 2026-10-01), with client-side update
+  verification, staged rollout, permission boundaries, data-preserving activation
+  and recovery. No development-host installer or update channel has been enabled.
+
 ### Scoped browser TCP: live component proof passed
 
 The exact [browser/core trial 36776940049](https://github.com/VOLPAROSSA/volparossa/actions/runs/36776940049)
