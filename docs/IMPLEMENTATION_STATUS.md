@@ -65,6 +65,23 @@ Last updated: 2026-10-01
   `275539662385106e8a6570be9f5a9fd294135638a02402078540ac742913dc08`;
   original job110597144662 log SHA-256 is
   `0f0f1981975520b714d99d7fd9d4caec0b4819e903d6c582d1e50fef38f2ee55`.
+  The next exact [run36933015558 on `5a96bb50`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36933015558)
+  also failed, but earlier: `FRAGMENTS_ROUTE_UNAVAILABLE` before any Cloud import
+  or SDK/UI operation. Its route receipt records a rejected connect, exit 1,
+  17 attempts and 16 retries; `last_connect_reason` is `UNRECOGNIZED`. Neither its
+  original console nor job log retains a more specific control error, and no agent
+  log was exported. The observer previously recognized only the seven transient
+  codes, so terminal refusals could not be distinguished. The diagnostic candidate
+  now recognizes all 22 fixed Connect refusal/result pairs from the existing agent
+  dispatch; unknown text is still withheld. Two focused shell-execution tests verify
+  all pairs and unchanged terminal-versus-transient selection behavior. Retry policy,
+  limits and product behavior are unchanged; no route or UI fix is claimed.
+  Cleanup completed with zero objects and matching host SHA-256
+  `282fccb543cc5ae75596506ab61913f9d1acbd6080f0a848780d21c6f771a930`.
+  Original nine-file ZIP SHA-256:
+  `ff0398ee220793304c8c1726bdf31acc3b20ce00fcd18661961b4184b2dd9162`;
+  original job110606672586 log SHA-256:
+  `6bb00a1aa0bb6363caa14adcd469f9c5a53ebcaf63f4aa0715bd2845a7c8f7e2`.
 - [ ] Cooperative maintenance of current/future VOLPAROSSA organization repositories:
   actual coding jobs, independent immune review and exact-revision scoped GitHub
   publication. [Agreed scope](REPOSITORY_MAINTENANCE.md); no autonomous publisher,

@@ -3,6 +3,7 @@
 import importlib.util
 import copy
 import json
+import re
 from pathlib import Path
 import socket
 import struct
@@ -276,6 +277,9 @@ timeout() {
             printf '%s\n' 'PRIVATE token=secret 192.0.2.99 prompt=private' >&2
             return 9 ;;
         deadline) return 124 ;;
+        terminal)
+            printf '%s\n' 'Error: agent rejected request: NO_ELIGIBLE_PATHS (Unavailable)' >&2
+            return 1 ;;
         retry)
             if [ "$benchmark_connect_count" -eq 1 ]; then
                 printf '%s\n' 'Error: agent rejected request: NATIVE_PERMIT_UNAVAILABLE (Unavailable)' >&2
@@ -294,6 +298,7 @@ benchmark_select_route private-storage-fragments mptcp || result=$?
 printf '%s\n' "$result"
 '''
         cases = (("unknown", 1, "connect", "CONNECT_REJECTED", 9, 1),
+                 ("terminal", 1, "connect", "CONNECT_REJECTED", 1, 1),
                  ("deadline", 1, "connect", "CONNECT_TIMEOUT", 124, 1),
                  ("invalid", 1, "paths", "PATHS_INVALID_OR_QUERY_FAILED", 0, 1),
                  ("empty", 1, "paths", "PATHS_EMPTY", 0, 1),
@@ -317,6 +322,8 @@ printf '%s\n' "$result"
                 self.assertEqual(record["connect_exit_status"], connect_exit)
                 self.assertEqual(record["attempts"], attempts)
                 self.assertEqual(record["retries"], attempts - 1)
+                if mode == "terminal":
+                    self.assertEqual(record["last_connect_reason"], "NO_ELIGIBLE_PATHS")
                 self.assertLess(len(encoded), 1024)
                 for private in ("PRIVATE", "token", "secret", "192.0.2.99", "prompt", directory):
                     self.assertNotIn(private, encoded)
@@ -338,11 +345,21 @@ printf '%s\n' "$benchmark_connect_reason"
 '''
         with tempfile.TemporaryDirectory(prefix="image-route-reason-", dir=HERE) as directory:
             source = Path(directory, "synthetic.err")
-            for text, expected in ((
-                    "Error: agent rejected request: NATIVE_HELPER_COMMIT_UNAVAILABLE (Unavailable)\n",
-                    "NATIVE_HELPER_COMMIT_UNAVAILABLE"), (
+            # Exercise every fixed refusal from the actual typed Connect dispatch,
+            # without pretending that synthetic error text proves a runtime cause.
+            control = (HERE.parents[1] / "crates/volparossa-agent/src/control.rs").read_text()
+            connect = control.split("async fn connect_response(", 1)[1].split(
+                "\nfn requested_connect_profile(", 1)[0]
+            codes = {(result, code) for result, code in re.findall(
+                r'ControlResult::(\w+),\s*"([A-Z_]+)"', connect) if result != "Ok"}
+            self.assertEqual(len(codes), 22)
+            cases = [(f"Error: agent rejected request: {code} ({result})\n", code)
+                     for result, code in sorted(codes)]
+            cases.extend(((
+                    "Error: agent rejected request: NO_ELIGIBLE_PATHS (Helper)\n", "UNRECOGNIZED"), (
                     "Error: agent rejected request: PRIVATE_ADDRESS_TOKEN (Unavailable)\n", "UNRECOGNIZED"), (
-                    "NATIVE_PERMIT_UNAVAILABLE secret=private\n", "UNRECOGNIZED")):
+                    "NATIVE_PERMIT_UNAVAILABLE secret=private\n", "UNRECOGNIZED")))
+            for text, expected in cases:
                 source.write_text(text)
                 result = subprocess.run(["sh", "-c", script, "test", str(HERE), str(source)],
                     check=True, text=True, capture_output=True, timeout=10)
