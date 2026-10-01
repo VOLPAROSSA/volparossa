@@ -657,6 +657,48 @@ same-identity restart, survivor reconstruction without the local source, renewal
 pending retirement and all-copy deletion. These are not new overlay or independent-device
 availability proofs, automatic repair, safe provider-capacity drain or network-wide credit.
 
+### Bounded owner-driven archive drain
+
+`storage fragments drain` applies the same verified replacement lifecycle across one
+archive, without manually selecting a destination for each fragment:
+
+```sh
+volparossa storage fragments drain --state /absolute/fragment-set \
+  --from-provider-key RETIRING_PROVIDER_KEY_HEX \
+  --provider-key CANDIDATE_A_KEY_HEX --grant /absolute/candidate-a.grant \
+  --provider-key CANDIDATE_B_KEY_HEX --grant /absolute/candidate-b.grant \
+  --max-fragments 16 --lifetime-seconds 604800 --identity /absolute/owner.identity
+```
+
+The owner explicitly supplies 1–8 independently trusted candidate grants. For each new
+placement, the controller chooses the eligible provider with the lowest **this-archive
+retained charge**, using the provider key as a stable tie-break. It excludes current and
+historical holders of that fragment, insufficient rights/retention, exhausted history,
+and candidate quotas too small for the archive's retained allocations plus the new copy.
+Original unattempted allocations reserve planning room too. This local estimate is not a
+global capacity or uptime claim: the real provider still enforces its actual storage and
+grant quota, including other archives.
+
+Before creating **any** new placement, a pass resumes earlier signed handoffs using their
+exact retained provider, grant, archive identity and expiry—even when that provider is
+not in the new candidate list. A failed upload, readback, survivor check or deletion stops
+the pass visibly. The existing charge ledger retains all uncertain copies; no replacement
+is redirected to another provider and no source is retired before verified replacement.
+Expired pending authority remains incomplete rather than silently acquiring new authority.
+
+The default bound is 16 handoff attempts per invocation (maximum 256), including resumed
+intents. A partial pass returns nonzero with `operation_complete: false`, a closed
+`drain_stage`, per-fragment outcomes and `remaining_provider_fragments`. Repeat the command
+to continue after restart. Completion concerns **only this owner's archive**: it neither
+changes the uniform two-copy target nor frees unrelated users' leases. The original signed
+manifest is unchanged. The v2 consumer boundary above still applies.
+
+This is an owner-online, explicit bounded pass, not background repair, automatic discovery,
+network-wide contribution resizing or a promise that an offline provider's uncertain
+charge can be removed. Local signed-service tests exercise lost replies, restart, exact
+retry identity, a bounded partial pass, least-charged placement, restore without the local
+source and final zero-lease cleanup; they are not a new protected-overlay proof.
+
 ### Disposable protected-fragment proof
 
 The `private-storage-fragments` scenario is separate from the older whole-archive

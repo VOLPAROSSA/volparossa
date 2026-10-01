@@ -1,5 +1,7 @@
 //! Distinct ciphertext fragments, each using the existing authenticated replica lifecycle.
 
+#[path = "fragments_drain.rs"]
+mod drain;
 #[path = "fragments_transfer.rs"]
 mod operations;
 #[path = "fragments_placement.rs"]
@@ -42,6 +44,8 @@ pub(crate) enum Command {
     Delete(Existing),
     /// Replace one fragment copy; verify replacement bytes before retiring its original.
     Replace(Box<Replace>),
+    /// Move this archive's copies away from one provider in a bounded owner-driven pass.
+    Drain(Box<Drain>),
 }
 
 #[derive(Debug, Args)]
@@ -120,6 +124,24 @@ pub(crate) struct Replace {
     existing: Existing,
 }
 
+#[derive(Debug, Args)]
+pub(crate) struct Drain {
+    #[arg(long, value_parser = parse_publisher_key)]
+    from_provider_key: VerifyingKey,
+    /// Explicit trusted replacement candidates; pair each key with its --grant.
+    #[arg(long, value_parser = parse_publisher_key, required = true)]
+    provider_key: Vec<VerifyingKey>,
+    #[arg(long, required = true)]
+    grant: Vec<PathBuf>,
+    /// Maximum handoffs attempted in this pass, including previously pending intents.
+    #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u16).range(1..=256))]
+    max_fragments: u16,
+    #[arg(long, default_value_t = 604_800, value_parser = clap::value_parser!(u64).range(1..=MAX_LEASE_SECONDS))]
+    lifetime_seconds: u64,
+    #[command(flatten)]
+    existing: Existing,
+}
+
 pub(in crate::storage) async fn run(command: Command, socket: &Path) -> Result<()> {
     let report = match command {
         Command::Create(args) => create(&args)?,
@@ -174,6 +196,33 @@ pub(in crate::storage) async fn run(command: Command, socket: &Path) -> Result<(
                 args.from_provider_key,
                 &grant,
                 args.lifetime_seconds,
+            )
+            .await?
+        }
+        Command::Drain(args) => {
+            ensure!(
+                (1..=8).contains(&args.provider_key.len())
+                    && args.provider_key.len() == args.grant.len(),
+                "specify 1..8 replacement provider keys and corresponding grants"
+            );
+            let signer = args.existing.unlock.signer()?;
+            let mut set = LockedFragments::open(&args.existing.state)?;
+            let mut grants = Vec::with_capacity(args.grant.len());
+            for (provider, path) in args.provider_key.iter().zip(&args.grant) {
+                let encoded = state::read_private(path, MAX_GRANT_BYTES as u64)?;
+                grants.push(
+                    SignedStorageGrant::decode(&encoded)?
+                        .verify(provider, crate::storage::now()?)?,
+                );
+            }
+            drain::drain(
+                &mut set,
+                socket,
+                &signer,
+                args.from_provider_key,
+                &grants,
+                args.lifetime_seconds,
+                usize::from(args.max_fragments),
             )
             .await?
         }

@@ -210,6 +210,21 @@ charges. The pinned Image v1 parser needs a coordinated update before it can con
 archives; no Image compatibility is claimed for repaired archives yet. See
 [the command, accounting contract and remaining limits](PRIVATE_STORAGE.md#explicit-fragment-copy-replacement).
 
+### Owner-driven archive drain candidate
+
+`storage fragments drain` adds one bounded owner-driven pass across an archive. It resumes
+existing signed handoffs before allocating any new placement, then chooses the least-charged
+eligible provider from explicit verified grants. The original reconstruction root, uniform
+two-copy target, verified readback-before-retirement and conservative charge ledger remain
+unchanged. A pass limit, unavailable peer, insufficient candidate capacity or uncertain
+deletion leaves a visible incomplete result; repeating the command resumes exact identities.
+Three targeted local tests pass, including real signed provider stores, lost reserve/readback/
+delete replies, provider restart, source-free restore, bounded partial completion, least-charged
+placement and final zero-lease cleanup. CLI bounds and ineligible candidate handling are covered.
+This is not yet a background capacity-shrink service, discovery-based repair, network-wide
+storage credit or a new overlay proof. See
+[bounded drain and its scope](PRIVATE_STORAGE.md#bounded-owner-driven-archive-drain).
+
 ### Mailbox import confirmation
 
 The [mailbox import-confirmation candidate](MAILBOX_IMPORT_CONFIRMATION.md) adds a
