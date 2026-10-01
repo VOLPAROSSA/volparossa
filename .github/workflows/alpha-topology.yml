@@ -149,6 +149,7 @@ jobs:
           sh -n tests/integration/private-storage-maintenance-smoke.sh
           python3 -B tests/integration/test-private-storage-maintenance-smoke.py
           python3 -B tests/integration/test-private-storage-adaptive-maintenance-smoke.py
+          python3 -B tests/integration/test-private-storage-log-sampler.py
           python3 -B tests/integration/test-private-storage-maintenance-wiring.py
           python3 -B tests/integration/test-image-snapshot-provision.py
           python3 -B tests/integration/test-image-snapshot-wiring.py

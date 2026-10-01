@@ -40,6 +40,25 @@ Last updated: 2026-10-01
   `94776714aa211d2df2b6e8c06a1486414a5e17fd6f44511f3392de44ec02b93d`;
   original job-log SHA-256:
   `4081f8be0933b6f871fcd6ae1ba99bc4202720839204010348e1c79984368bf5`.
+  The next original [run36933314111 on `23891274`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36933314111)
+  confirms upload, real core renewal, owner EOF/restart and independent foreground
+  revocation, but fails before provider withdrawal: the late Exit snapshot contains
+  exactly 1,000 records, starting 5,449 ms after the phase baseline
+  (`FRAGMENTS_EXIT_LOG_WINDOW_TRUNCATED`). Its 72 completed flows are only a partial
+  window, not accepted full-phase evidence. Cleanup has zero remaining owned objects
+  and host state is unchanged. Original 19-file ZIP SHA-256:
+  `19a993b2c93ff6a71d9d12eb90d050f4a953f359ec3405470e5132be215d3163`;
+  original job-log SHA-256:
+  `359e1e027bb5eafd0e6f69f3ece6bb0db817fce2bcc213da20c519e013310eb8`.
+  The fixture-only correction samples the unchanged 1,000-record ring every five
+  seconds, verifies exact overlapping event identities and timestamp groups, fails
+  on gaps/ambiguity and joins the observer before producing closed counters. Only
+  this maintenance fixture gives its owner the existing package-style Exit control
+  group/traversal; service state, credentials and native sockets remain private.
+  The original five-second final completion drain and flow minima remain. Seven
+  focused sampler checks include 2,401 events, duplicate timestamps, rejected missing
+  overlap and late/missing completion. No raw logs are newly persisted or exported;
+  no product log limit changes. This candidate still requires a fresh real trial.
   See [private storage maintenance](PRIVATE_STORAGE.md#explicit-owner-private-background-maintenance).
   Adaptive source selection is now implemented as an explicit version-two enrollment:
   repeating `--from-provider-key` authorizes only those exact sources, including a
@@ -64,6 +83,19 @@ Last updated: 2026-10-01
   conservative pending charges, acknowledged B retirement and complete deletion/
   private/host cleanup. Local receipt/wiring checks do not constitute a live result;
   the original fixed-A v1 scenario remains independently available.
+  The first original [v2 run36933990330 on `1fdace93`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36933990330)
+  also fails at upload evidence collection, before B is withdrawn. Its real upload
+  receipt confirms signed v2 A/B/C sources, the retained fixed-A v1 enrollment,
+  renewal, owner EOF/restart and independent foreground revocation. The final
+  1,000-record Exit snapshot starts 9,810 ms after the phase baseline; its 69
+  completed flows and one failed flow do not prove full-phase coverage. Cleanup has
+  zero remaining owned objects and host state is unchanged. Original 19-file ZIP
+  SHA-256: `4c41d754bd12e6ed2a9dd15d74dad7e24e3a173ba6ebe881f7a20faa0ab297fc`;
+  original job-log SHA-256:
+  `a16a694134cb2a6c457dfca83f73f49876d830cb564ca0f26764557a9b2426d1`.
+  The shared strict bounded sampler correction above is now merged normally from
+  the v1 branch. Both originals remain failed; B-selection, retirement and complete
+  adaptive-overlay execution still require a new immutable trial.
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
   authenticated source import, private fragment storage and source-off file access,

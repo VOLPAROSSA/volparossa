@@ -6,7 +6,8 @@
 private_storage_fragments_private() {
     # One phase may perform two restores, each trying stopped A twice. This
     # fixture-only bound does not widen core exchange deadlines or leases.
-    timeout --signal=TERM --kill-after=5s "${storage_phase_timeout_seconds:-1500}s" setpriv \
+    STORAGE_PROOF_BASELINE_MS=${provider_baseline_ms:-0} \
+      timeout --signal=TERM --kill-after=5s "${storage_phase_timeout_seconds:-1500}s" setpriv \
         --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$custody_control_gid" \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- python3 -B "$WORK/bin/${storage_fixture_driver:-private-storage-fragments-smoke.py}" "$@"
@@ -35,6 +36,15 @@ private_storage_fragments_phase_finish() {
         "$WORK/private-storage-fragments-$storage_phase-live-selection.json" >/dev/null || fail FRAGMENTS_ROUTE_CHANGED
     stop_privacy_observers || fail FRAGMENTS_CAPTURE_INCOMPLETE
     content_provider_stop_control_observer || fail FRAGMENTS_CONTROL_CAPTURE_INCOMPLETE
+    if [ "${private_storage_maintenance:-no}" = yes ]; then
+        # The owner phase continuously samples and joins before emitting success.
+        # Every overlap must match; a late truncated ring cannot replace coverage.
+        python3 -B "$WORK/bin/private-storage-log-sampler.py" check \
+            "$storage_user/flow-$storage_phase.json" "$provider_baseline_ms" "$storage_expected_flows" \
+            >"$WORK/private-storage-fragments-$storage_phase-gates.json" \
+            || fail FRAGMENTS_EXIT_LOG_WINDOW_TRUNCATED
+        return
+    fi
     storage_poll=0
     while [ "$storage_poll" -lt 50 ]; do
         # The shared diagnostic snapshot requests only the newest 400 records.

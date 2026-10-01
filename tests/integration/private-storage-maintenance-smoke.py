@@ -15,6 +15,7 @@ import sys
 import time
 
 F = runpy.run_path(str(Path(__file__).with_name('private-storage-fragments-smoke.py')))
+SAMPLER = runpy.run_path(str(Path(__file__).with_name('private-storage-log-sampler.py')))
 read, require = F['read'], F['require']
 private_root, private_file, create, invoke, unlock = (F[key] for key in
     ('private_root', 'private_file', 'create', 'invoke', 'unlock'))
@@ -398,7 +399,8 @@ def cleanup(path):
                     visit(child, depth + 1)
                     directories.append(child)
                 else:
-                    allowed = ((depth == 0 and child.name in F['FILES'] | {'foreground.bin', 'foreground-grant.bin'})
+                    allowed = ((depth == 0 and child.name in F['FILES'] | {'foreground.bin', 'foreground-grant.bin',
+                            'flow-upload.json', 'flow-restore.json', 'flow-finish.json'})
                         or (depth == 1 and child.name in ('fragments.json', 'placement-authorizations.json',
                             'enrollment.json', 'checkpoint.json', 'archive.json'))
                         or (depth == 2 and child.name in ('replicas.json', 'restored-fragment'))
@@ -524,8 +526,17 @@ def main(args):
     if len(args) == 10 and args[0] == 'prepare':
         result = prepare(private_root(args[1]), *args[2:])
     elif len(args) == 7 and args[0] in ('upload', 'restore', 'finish'):
-        result = {'upload': upload, 'restore': restore, 'finish': finish}[args[0]](
-            private_root(args[1]), args[2], args[3], args[4:])
+        root = private_root(args[1])
+        socket = Path(args[3])
+        require(socket.parts[-3:] == ('runtime-client', 'control', 'agent.sock'), 'fixture client socket differs')
+        exit_socket = socket.parents[2] / 'runtime-exit/control/agent.sock'
+        baseline = int(os.environ['STORAGE_PROOF_BASELINE_MS'])
+        with SAMPLER['capture'](args[2], exit_socket, baseline, F['PHASES'][args[0]]) as coverage:
+            result = {'upload': upload, 'restore': restore, 'finish': finish}[args[0]](
+                root, args[2], args[3], args[4:])
+        summary = coverage.report(joined=coverage.joined)
+        SAMPLER['validate_summary'](summary, baseline, F['PHASES'][args[0]])
+        create(root / f'flow-{args[0]}.json', json.dumps(summary, sort_keys=True).encode())
     elif len(args) == 2 and args[0] == 'cleanup':
         result = cleanup(args[1])
     else:

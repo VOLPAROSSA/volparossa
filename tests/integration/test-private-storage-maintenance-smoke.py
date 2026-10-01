@@ -145,6 +145,7 @@ class MaintenanceEvidence(unittest.TestCase):
                          'fragment-set/fragments.json', 'fragment-set/placement-authorizations.json',
                          'maintenance/enrollment.json', 'maintenance/checkpoint.json', 'foreground/archive.json',
                          'maintenance-fixed-a/enrollment.json', 'maintenance-fixed-a/checkpoint.json',
+                         'flow-upload.json', 'flow-restore.json', 'flow-finish.json',
                          'fragment-set/fragment-0000/copy-2/archive.json',
                          'fragment-set/fragment-0000/.handoff-journal-X1/copy/archive.json',
                          'fragment-set/fragment-0000/.handoff-transfer-X2/survivor-1',
