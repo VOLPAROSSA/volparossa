@@ -25,7 +25,7 @@ HERE = Path(__file__).resolve().parent
 PINS = HERE / "cloud-private-file-pins.json"
 SOURCE = Path("/opt/volparossa-cloud")
 RUNTIME = Path("/opt/volparossa-node")
-REVISION = "c81980dd71297b257f1df6aa382c28a18f9c2f57"
+REVISION = "63bba5d1163a69e1ee6b4218c9e7462d941f22f7"
 FILES = frozenset(("scripts/cloud-file.mjs", "scripts/private_file.py", "src/private-file.mjs",
     "src/opencloud-dav.mjs", "vendor/volparossa-image/immich_snapshot.py",
     "vendor/volparossa-image/core-storage.mjs", "vendor/volparossa-image/LICENSE",

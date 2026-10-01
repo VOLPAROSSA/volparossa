@@ -99,7 +99,7 @@ original artifacts reproduces the aggregate; ZIP SHA-256
 Range requests still reconstruct and verify the complete encrypted file before
 selecting plaintext bytes. This is not the full web UI. Accounts, shared permissions,
 writes, peer-distributed catalogs and second-device recovery are not completed.
-The next candidate pins Cloud `c81980dd71297b257f1df6aa382c28a18f9c2f57` and builds
+The next candidate pins Cloud `63bba5d1163a69e1ee6b4218c9e7462d941f22f7` and builds
 the original OpenCloud Web8 Files UI from its exact source in the disposable guest.
 It connects a fresh isolated Firefox profile to the same owner-private read service
 and requires two actual Download actions, in addition to the four preceding SDK/
@@ -108,6 +108,14 @@ unavailable. At least 48 completed protected exchanges and the corresponding B/C
 payloads are required; browser profiles, temporary plaintext and all leases must
 be cleaned up. This combined original-UI/peer result is **not yet proven**. The
 passing Cloud-local UI test uses a synthetic backend and does not fill that gap.
+The original joined run `36935715873` using Cloud `c81980dd` failed during UI
+unlock, after the preceding recovery/catalog/SDK operations; private cleanup and
+unchanged host state passed. A local original-Web8 synthetic diagnostic reproduced
+the same failure when six idle browser connections exhausted the service's socket
+limit. The new Cloud pin keeps at least eight transport slots only for web mode,
+while private request/restoration concurrency, authentication and all joined-proof
+gates stay unchanged. Focused HTTP and synthetic UI checks pass; a fresh joined
+original-UI/peer-storage result is still required.
 Preview with
 `sh tests/integration/run-alpha-topology-vm.sh --preview --scenario cloud-private-file`;
 execution belongs only in the explicitly approved disposable KVM workflow.

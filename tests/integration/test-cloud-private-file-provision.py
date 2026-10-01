@@ -27,7 +27,7 @@ UI_SPEC.loader.exec_module(UI)
 class CloudProvision(unittest.TestCase):
     def test_exact_cloud_and_node_pins_retain_licenses(self):
         pins = PROVISION.load_pins()
-        self.assertEqual(pins["revision"], "c81980dd71297b257f1df6aa382c28a18f9c2f57")
+        self.assertEqual(pins["revision"], "63bba5d1163a69e1ee6b4218c9e7462d941f22f7")
         self.assertEqual(set(pins["files"]), {
             "scripts/cloud-file.mjs", "scripts/private_file.py", "src/private-file.mjs", "src/opencloud-dav.mjs",
             "vendor/volparossa-image/immich_snapshot.py", "vendor/volparossa-image/core-storage.mjs",

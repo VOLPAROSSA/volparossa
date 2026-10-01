@@ -1357,7 +1357,7 @@ if [ "$scenario" = image-snapshot ]; then
         IMAGE_REVISION=e177afebabd99ac0773de2a73d60275346a5de52
 elif [ "$scenario" = cloud-private-file ]; then
     set -- CLOUD_SOURCE=/opt/volparossa-cloud CLOUD_NODE=/opt/volparossa-node/bin/node \
-        CLOUD_REVISION=c81980dd71297b257f1df6aa382c28a18f9c2f57
+        CLOUD_REVISION=63bba5d1163a69e1ee6b4218c9e7462d941f22f7
 fi
 set +e
 sudo -n -- env "$@" ./tests/integration/kvm-alpha-topology.sh \

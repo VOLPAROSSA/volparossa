@@ -82,6 +82,29 @@ Last updated: 2026-10-01
   `ff0398ee220793304c8c1726bdf31acc3b20ce00fcd18661961b4184b2dd9162`;
   original job110606672586 log SHA-256:
   `6bb00a1aa0bb6363caa14adcd469f9c5a53ebcaf63f4aa0715bd2845a7c8f7e2`.
+  The next [run36935715873 on `a7d244a7`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36935715873)
+  passed provisioning, import, eight committed copies, renewal and source shutdown,
+  then failed at the preserved `original_files_ui` / `unlock` child stage. The actual
+  driver reaches that stage only after direct recovery, encrypted catalog creation
+  and SDK full/range/auth checks; no original UI Download or complete restore-flow
+  aggregate passed. The original 29-file ZIP SHA-256 is
+  `7257947c7cff32fec326ef093c120c0a7aacba6b7922b405cc40aee7daa53901`;
+  job110615376820 log SHA-256 is
+  `8f40b126986a6b7833709738367b0a4d9dc48cb26aeb1fd77e30a494b738ac28`.
+  Private/topology cleanup completed and host SHA-256 remained
+  `0144da43747c66e2c7b519abfb374f20331e9b876d8043fe78b021791ac0b842`.
+  A separate local original-Web8/Firefox diagnostic reproduced the same unlock
+  failure with synthetic metadata: the default two-request service allowed only
+  six transport connections; six browser sockets occupied that cap and both login
+  requests failed before the HTTP handler. Eight transport slots passed (peak seven,
+  zero drops), without increasing private request/restoration concurrency. Cloud
+  `63bba5d1163a69e1ee6b4218c9e7462d941f22f7` applies that minimum only in explicit
+  recovery-web mode; ordinary DAV, auth, timers and the content budget are unchanged.
+  The regression fails on the old source with `ECONNRESET`; three focused real-HTTP
+  tests pass on the correction. The original UI also passes unlock and selected-file
+  navigation against that candidate in the isolated synthetic diagnostic, with no
+  private files opened and fresh-profile cleanup. The next joined candidate pins
+  this exact Cloud source; no new peer-storage/UI success is claimed yet.
 - [ ] Cooperative maintenance of current/future VOLPAROSSA organization repositories:
   actual coding jobs, independent immune review and exact-revision scoped GitHub
   publication. [Agreed scope](REPOSITORY_MAINTENANCE.md); no autonomous publisher,

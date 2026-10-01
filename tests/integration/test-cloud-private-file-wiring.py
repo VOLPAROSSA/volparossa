@@ -63,7 +63,7 @@ class CloudSnapshotWiring(unittest.TestCase):
         self.assertIn("sudo -n python3 -B tests/integration/cloud-private-file-provision.py provision --download", guest)
         self.assertIn("--no-install-recommends gpg gpg-agent gpgconf tar", guest)
         for value in ("CLOUD_SOURCE=/opt/volparossa-cloud", "CLOUD_NODE=/opt/volparossa-node/bin/node",
-                      "CLOUD_REVISION=c81980dd71297b257f1df6aa382c28a18f9c2f57"):
+                      "CLOUD_REVISION=63bba5d1163a69e1ee6b4218c9e7462d941f22f7"):
             self.assertIn(value, guest)
         self.assertIn('sudo -n -- env "$@" ./tests/integration/kvm-alpha-topology.sh', guest)
         self.assertIn('"tests/integration/$scenario-smoke.py" export-names', guest)
