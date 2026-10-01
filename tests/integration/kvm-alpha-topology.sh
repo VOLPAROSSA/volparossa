@@ -943,7 +943,7 @@ if [ "$private_storage_fragments" = yes ]; then
     done
 fi
 if [ "$cloud_private_file" = yes ]; then
-    for cloud_fixture in cloud-private-file-smoke.sh cloud-private-file-smoke.py cloud-private-file-pins.json \
+    for cloud_fixture in cloud-private-file-smoke.sh cloud-private-file-smoke.py cloud-private-file-pins.json cloud-private-file-sdk.mjs \
         image-snapshot-smoke.py image-snapshot-pins.json; do
         [ -f "$source_directory/tests/integration/$cloud_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$cloud_fixture" ] || exit 69
@@ -2655,6 +2655,8 @@ fi
 if [ "$cloud_private_file" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/cloud-private-file-smoke.py" \
         "$WORK/bin/cloud-private-file-smoke.py"
+    install -o root -g root -m 0555 "$source_directory/tests/integration/cloud-private-file-sdk.mjs" \
+        "$WORK/bin/cloud-private-file-sdk.mjs"
     install -o root -g root -m 0444 "$source_directory/tests/integration/cloud-private-file-pins.json" \
         "$WORK/bin/cloud-private-file-pins.json"
 fi

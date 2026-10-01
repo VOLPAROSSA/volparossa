@@ -16,13 +16,22 @@ Last updated: 2026-10-01
   Cloud `541cc826fe14ce69cf89a82ecb600ad14dd534c6` implements one-file
   authenticated DAV import, owner-side GPG encryption and a core-storage bridge.
   Its local synthetic-DAV/actual-GPG tests pass; its injected storage contract
-  test is not peer evidence. The new `cloud-private-file` disposable scenario
+  test is not peer evidence. The `cloud-private-file` disposable scenario
   pins that exact source and reuses the protected fragment topology: stop the
   DAV source, deposit, remove local ciphertext, stop provider A, restore/decrypt
   twice from B/C, then delete every lease and require private/topology cleanup
-  plus unchanged host state. Provision, parser and wiring checks pass; this
-  Cloud network scenario has not yet run. No live OpenCloud server, client
-  browsing or general server-independent service is claimed.
+  plus unchanged host state. The original [run36909989038](https://github.com/VOLPAROSSA/volparossa/actions/runs/36909989038)
+  on core `41e404a40312f039827f761dea7b90be48d0c21f` passed, including exact-source
+  replay of its original 44-file artifact. Eight encrypted fragment copies on
+  three providers were charged until retirement; two complete restores survived
+  provider A loss. No live OpenCloud server or full application is claimed.
+  Cloud `a67b91fbed42ecd23ba215eb21ef54397fc9f06a` adds an encrypted owner catalog
+  and authenticated loopback DAV read service. Actual OpenCloud Web8 SDK listing,
+  full/range/repeated reads and cleanup pass locally with real GPG and only the
+  core storage boundary explicitly injected. The next protected-peer proof joins
+  that new client/service path; it is not covered by the earlier one-file trial.
+  Accounts, sharing, writable synchronization and second-device owner-state
+  recovery remain open, as does general server-independent OpenCloud service.
 - [ ] Cooperative maintenance of current/future VOLPAROSSA organization repositories:
   actual coding jobs, independent immune review and exact-revision scoped GitHub
   publication. [Agreed scope](REPOSITORY_MAINTENANCE.md); no autonomous publisher,
