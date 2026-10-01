@@ -6,6 +6,31 @@ Last updated: 2026-10-01
 
 ## Current integration and active work
 
+### Native Codex read/edit/test integration candidate
+
+The separate [Code candidate](https://github.com/VOLPAROSSA/volparossa-code/pull/3)
+at `91265808c6349ced83448b5bf9921c12673c8e88` connects the pinned source-built
+Codex app-server to the VOLPAROSSA Responses adapter and private Qwen conversation
+service. It retains the complete 20,903-byte upstream prompt. The owner approves
+only synthetic-project read, model-chosen arithmetic edit and actual test commands;
+normal editor defaults remain read-only with declined tool approvals.
+
+The new `agent-native-coding` disposable guest scenario composes that actual
+runtime with the core model worker. Its source-build bundle pins source, compiler,
+patches and notices, and records the newly built binary digest without claiming
+bit-for-bit reproducibility. Success requires at least four real cleanup-confirmed
+model responses, native command completions, a changed file, independent passing
+tests and full runtime/service cleanup. The separate 2,700-second service window
+does not widen the existing 600-second request or worker memory limits.
+
+The 28 focused Code protocol/helper checks passed. A separate isolated no-model
+preflight also admitted the real app-server's 32,626-byte first request through
+the Qwen adapter, including the complete prompt and actual native tool schemas;
+runtime exit and unchanged host routes/DNS were checked. This is transport
+compatibility, **not proof of the actual native model-driven coding loop**. The live
+trial remains pending; general coding quality, complete editor integration and
+private distributed inference are not proved by this candidate.
+
 ### Native private conversation candidate
 
 Qwen native private-conversation source candidate (2026-09-30): explicit

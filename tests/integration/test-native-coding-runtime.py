@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+"""Synthetic bundle contracts/wiring only: no download, compiler, runtime or model."""
+import hashlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import tarfile
+import tempfile
+import unittest
+from unittest.mock import patch
+
+HERE = Path(__file__).resolve().parent
+spec = importlib.util.spec_from_file_location('runtime_bundle', HERE / 'native-coding-runtime.py')
+runtime = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runtime)
+REVISION = 'a' * 40
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+class BundleTests(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.TemporaryDirectory(prefix='volparossa-native-bundle-contract-')
+        self.addCleanup(self.root.cleanup)
+        self.path = Path(self.root.name) / 'synthetic.tar.gz'
+        self.code = {'LICENSE': b'original synthetic license', 'src/fixture.cjs': b'synthetic fixture'}
+        self.files = {f'code/{name}': value for name, value in self.code.items()}
+        self.files.update({'runtime/runtime/codex-app-server': b'\x7fELF synthetic never executed',
+            'runtime/BUILD_REPORT.json': b'{"synthetic":true}', 'runtime/TOOLCHAIN_REPORT.json': b'synthetic compiler',
+            'runtime/prompt.md': b'complete synthetic prompt'})
+        self.record = dict(version=1, kind='volparossa-native-coding-runtime-bundle', core_revision=REVISION,
+            code_revision=runtime.CODE_REVISION, code_tree=runtime.CODE_TREE, codex_revision=runtime.CODEX_REVISION,
+            codex_tree=runtime.CODEX_TREE, toolchain_report_sha256=sha(self.files['runtime/TOOLCHAIN_REPORT.json']),
+            binary_sha256=sha(self.files['runtime/runtime/codex-app-server']),
+            build_report_sha256=sha(self.files['runtime/BUILD_REPORT.json']), prompt_sha256=sha(self.files['runtime/prompt.md']),
+            source_build=True, existing_binary_reused=False, bit_reproducibility_proven=False,
+            app_server_executed=False, files={name: dict(bytes=len(data), sha256=sha(data),
+                mode=0o555 if name == 'runtime/runtime/codex-app-server' else 0o444) for name, data in self.files.items()})
+        for mocked in (patch.object(runtime, 'code_files', return_value={name: sha(data) for name, data in self.code.items()}),
+                       patch.object(runtime, 'TOOLCHAIN_SHA', self.record['toolchain_report_sha256']),
+                       patch.object(runtime, 'PROMPT_SHA', self.record['prompt_sha256'])):
+            mocked.start()
+            self.addCleanup(mocked.stop)
+
+    def archive(self, *, extra=None, altered=None, wrong_mode=None):
+        with tarfile.open(self.path, 'w:gz') as stream:
+            values = dict(self.files)
+            values[runtime.MANIFEST] = json.dumps(self.record).encode()
+            if altered:
+                values.update(altered)
+            for name, data in values.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(data)
+                member.mode = 0o555 if name == 'runtime/runtime/codex-app-server' else 0o444
+                if wrong_mode == name:
+                    member.mode = 0o644
+                stream.addfile(member, io.BytesIO(data))
+            if extra:
+                stream.addfile(extra, io.BytesIO(b'x' * extra.size))
+
+    def test_complete_bundle_checks_all_bytes_and_modes(self):
+        self.archive()
+        self.assertEqual(runtime.verify(self.path, REVISION), self.record)
+        with self.assertRaisesRegex(ValueError, 'authority'):
+            runtime.verify(self.path, 'b' * 40)
+
+    def test_tamper_and_writable_files_reject(self):
+        for options in ({'altered': {'runtime/runtime/codex-app-server': b'wrong binary'}},
+                        {'wrong_mode': 'code/src/fixture.cjs'}):
+            self.archive(**options)
+            with self.assertRaisesRegex(ValueError, 'bytes or mode'):
+                runtime.verify(self.path, REVISION)
+
+    def test_special_entries_duplicates_and_path_escape_reject(self):
+        for name, kind in [('runtime/../../escape', tarfile.REGTYPE),
+                           ('runtime/newlink', tarfile.SYMTYPE),
+                           ('code/src/fixture.cjs', tarfile.REGTYPE)]:
+            extra = tarfile.TarInfo(name)
+            extra.type = kind
+            extra.linkname = '/etc/passwd' if kind == tarfile.SYMTYPE else ''
+            self.archive(extra=extra)
+            with self.assertRaises(ValueError):
+                runtime.verify(self.path, REVISION)
+
+    def test_undeclared_file_and_binary_receipt_rebinding_reject(self):
+        extra = tarfile.TarInfo('runtime/undeclared')
+        self.archive(extra=extra)
+        with self.assertRaisesRegex(ValueError, 'inventory'):
+            runtime.verify(self.path, REVISION)
+        self.record['binary_sha256'] = '0' * 64
+        self.archive()
+        with self.assertRaisesRegex(ValueError, 'binding'):
+            runtime.verify(self.path, REVISION)
+
+    def test_existing_binary_or_unproven_reproducibility_cannot_be_claimed(self):
+        for key in ('existing_binary_reused', 'app_server_executed', 'bit_reproducibility_proven'):
+            self.record[key] = True
+            self.archive()
+            with self.assertRaisesRegex(ValueError, 'authority'):
+                runtime.verify(self.path, REVISION)
+            self.record[key] = False
+
+
+class WiringTests(unittest.TestCase):
+    def test_build_cannot_run_on_development_host(self):
+        with patch.dict(os.environ, {'GITHUB_ACTIONS': 'false'}), patch.object(runtime, 'checkout') as checkout:
+            with self.assertRaisesRegex(ValueError, 'CI runner'):
+                runtime.build(REVISION)
+            checkout.assert_not_called()
+
+    def test_exact_code_pin_and_guest_runner_contract(self):
+        files = runtime.code_files()
+        self.assertEqual(len(files), 10)
+        self.assertEqual(files['LICENSE'], runtime.CODE_LICENSE_SHA)
+        runner = (HERE / 'run-alpha-topology-vm.sh').read_text()
+        self.assertIn('agent-reasoning|agent-private-conversation|agent-native-coding) printf', runner)
+        self.assertIn('[ "$scenario" != agent-native-coding ] || driver_time_bound=6000s', runner)
+        self.assertIn('native-coding-runtime.py stage --yes', runner)
+        self.assertIn('native_runtime_sha256=${6:-none}', runner)
+        self.assertIn('"$PACKAGE_SHA256" "$scenario" "$NATIVE_RUNTIME_SHA256"', runner)
+        self.assertIn('if scenario in ("agent-private-conversation", "agent-native-coding"):', runner)
+        self.assertIn('f"{scenario}-smoke.json"', runner)
+        preview = subprocess.run(['sh', str(HERE / 'run-alpha-topology-vm.sh'), '--preview',
+                                  '--scenario', 'agent-native-coding'], check=True, capture_output=True, text=True)
+        self.assertIn('source-built Codex', preview.stdout)
+        self.assertIn('8192 MiB', preview.stdout)
+
+    def test_workflow_is_explicit_source_build_and_closed_exports(self):
+        workflow = (HERE.parents[1] / '.github/workflows/alpha-topology.yml').read_text()
+        self.assertIn('- agent-native-coding', workflow)
+        self.assertIn("inputs.scenario == 'agent-native-coding' && 240", workflow)
+        self.assertIn('native-coding-runtime.py build --yes --expected-commit "$GITHUB_SHA"', workflow)
+        self.assertIn('coding_args=(--native-runtime "$VOLPAROSSA_NATIVE_RUNTIME")', workflow)
+        self.assertIn('agent-native-coding.py report "$report" "$GITHUB_SHA"', workflow)
+        upload = workflow.split('- name: Upload bounded native coding fixture evidence', 1)[1].split('- name:', 1)[0]
+        self.assertIn('/agent-native-coding-smoke.json', upload)
+        self.assertNotIn('native-runtime.tar.gz', upload)
+        self.assertNotIn('/opt/', upload)
+        self.assertNotIn('*', upload)
+
+
+if __name__ == '__main__':
+    unittest.main()
