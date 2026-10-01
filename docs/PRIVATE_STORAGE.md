@@ -86,6 +86,20 @@ CLI/agent Clippy and formatting pass. A combined running-daemon/protected-overla
 maintenance trial remains required; earlier fragment and Image proofs do not prove
 this new worker, and the local checks do not establish positive live-link admission.
 
+The new disposable `private-storage-maintenance` scenario is wired but **not yet
+executed**. It reuses the three protected fragment providers and explicitly enables
+both sharing budgets on the client's existing guest `cr0` veth; there is no loopback
+exception or host network change. Its proposed passing receipt requires actual
+core-issued renewal, cursor retention after owner-process EOF, revocation by a separate
+foreground journal, and one verified replacement per turn while A is stopped.
+The B/C replica set must then support two source-free archive reconstructions, with
+all unavailable A copies still charged until A returns and confirms deletion. Cleanup covers all eleven
+retained copy records, the separate foreground lease and private owner/enrollment state.
+Five pure receipt/cleanup tests and four dispatch/export tests pass; these check the
+fixture contract, not the missing live-daemon/protected-overlay result. No reciprocal
+credit, capacity resizing, physical failure diversity or owner-device-offline claim is
+made by this scenario.
+
 Message delivery can acknowledge and consume an inbox item. A backup restore must not
 consume its storage lease. Backup retention, renewal, expiry and owner deletion are
 separate operations with separate authorization. They may share protected network

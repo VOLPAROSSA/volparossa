@@ -6,7 +6,7 @@
 private_storage_fragments_private() {
     # One phase may perform two restores, each trying stopped A twice. This
     # fixture-only bound does not widen core exchange deadlines or leases.
-    timeout --signal=TERM --kill-after=5s 1500s setpriv \
+    timeout --signal=TERM --kill-after=5s "${storage_phase_timeout_seconds:-1500}s" setpriv \
         --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$custody_control_gid" \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- python3 -B "$WORK/bin/${storage_fixture_driver:-private-storage-fragments-smoke.py}" "$@"
@@ -197,7 +197,10 @@ PY
     private_storage_fragments_usage deleted_usage
     benchmark_disconnect_route private-storage-fragments || fail FRAGMENTS_ROUTE_CLEANUP_FAILED
     private_storage_fragments_cleanup || fail FRAGMENTS_PRIVATE_CLEANUP_FAILED
-    if [ "${cloud_private_file:-no}" = yes ]; then
+    if [ "${private_storage_maintenance:-no}" = yes ]; then
+        python3 -B "$source_directory/tests/integration/private-storage-maintenance-smoke.py" evidence "$WORK" \
+            "$WORK/private-storage-maintenance-evidence.json" >/dev/null || fail MAINTENANCE_EVIDENCE_INVALID
+    elif [ "${cloud_private_file:-no}" = yes ]; then
         python3 -B "$source_directory/tests/integration/cloud-private-file-smoke.py" evidence "$WORK" \
             "$WORK/cloud-private-file-evidence.json" >/dev/null || fail CLOUD_PRIVATE_FILE_EVIDENCE_INVALID
     elif [ "${image_snapshot:-no}" = yes ]; then
@@ -208,7 +211,8 @@ PY
             "$WORK/private-storage-fragments-evidence.json" >/dev/null || fail FRAGMENTS_EVIDENCE_INVALID
     fi
     OBSERVED_BLOCKER=NONE
-    if [ "${cloud_private_file:-no}" = yes ]; then PHASE=cloud-private-file-complete
+    if [ "${private_storage_maintenance:-no}" = yes ]; then PHASE=private-storage-maintenance-complete
+    elif [ "${cloud_private_file:-no}" = yes ]; then PHASE=cloud-private-file-complete
     elif [ "${image_snapshot:-no}" = yes ]; then PHASE=image-snapshot-complete
     else PHASE=private-storage-fragments-complete; fi
 }

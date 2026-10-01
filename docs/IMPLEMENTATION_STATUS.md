@@ -19,6 +19,11 @@ Last updated: 2026-10-01
   seven existing), including actual signed SQLite provider renew/repair/restart and
   repeated source-free C/D restore; four focused bridge tests and strict CLI/agent
   Clippy also pass. Positive live-link idle admission still needs the combined trial.
+  A disposable `private-storage-maintenance` scenario now wires explicit guest `cr0`
+  idle budgets, actual CLI enrollment/core turns, renewal, EOF/foreground cancellation,
+  A-offline B/C repair and repeated source-free restore, conservative charges and full
+  cleanup. Its five pure receipt/cleanup and four wiring/export checks pass; the new
+  VM scenario has **not been run**, so combined execution remains unchecked.
   See [private storage maintenance](PRIVATE_STORAGE.md#explicit-owner-private-background-maintenance).
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
