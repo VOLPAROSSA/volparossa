@@ -77,6 +77,13 @@ copies during real daemon-issued resource turns. Its two A/C reconstructions,
 pending physical charges, B-return retirement, all-copy deletion and unchanged-host
 checks remain mandatory. Until an exact run passes, this is an executable candidate,
 not new overlay evidence or a replacement for the existing v1 scenario.
+The original v2 run `36936986464` on `b0b7b0d0` failed before owner operations
+because the initial protected route was unavailable; cleanup and unchanged host
+state passed. Its exports establish no more specific cause. The candidate now
+also inherits `4c31ac3b`'s context-correlated maintenance evidence: each phase's
+final context needs its own actual completion within the unchanged authorized
+exit/relay/path scope. This is combined with B-loss accounting and the fixed-A v1
+negative control, not substituted for either. All original failures remain failures.
 
 The worker has no independent maintenance timer. The existing core maintenance tick
 may issue one live, owner/UID-bound turn when its foreground and shared resource
@@ -160,6 +167,20 @@ traversal to the owner observer, never agent state, credentials or native socket
 This corrects evidence collection, not production maintenance or a proven passing
 overlay result. Original artifact hashes and partial evidence remain in
 [implementation status](IMPLEMENTATION_STATUS.md#additional-application-and-autonomous-maintenance-scope).
+
+Run `36936987353` subsequently completes the actual repair/restore and owner-side
+retirement/deletion operations, but fails its final network gate because a fresh
+route context replaced the initial one. The exit and relay/path identities remain
+the same. Final provider accounting and the final flow gate were not reached; the
+run remains failed despite successful private/topology cleanup and unchanged host
+state. New signed storage operations may use a freshly authorized route; they are
+not permission to move an established flow. The maintenance-only candidate now
+requires unchanged exit/relay/path scope plus actual post-baseline completed flows
+for the observed new context. Completion and failure context IDs stay in the
+existing bounded in-memory log, without destinations or persistent browsing data.
+Missing/unobserved scopes, old-context-only successes and changed paths fail closed.
+Other storage fixtures retain their initial-context check. No routing timeout or
+success/accounting requirement is relaxed, and no new passing overlay proof is claimed.
 
 Message delivery can acknowledge and consume an inbox item. A backup restore must not
 consume its storage lease. Backup retention, renewal, expiry and owner deletion are

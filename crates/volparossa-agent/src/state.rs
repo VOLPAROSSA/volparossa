@@ -386,6 +386,41 @@ impl AgentState {
 
     /// Appends one bounded code-only record to the in-memory ring.
     pub fn log(&mut self, level: LogLevel, event_code: &'static str, now_ms: u64) {
+        self.log_record(level, event_code, now_ms, Vec::new());
+    }
+
+    /// Correlate an already owner-validated completion with its ephemeral route.
+    /// This stays in the existing bounded in-memory ring: no destination, peer,
+    /// payload or new durable log is introduced.
+    pub(crate) fn log_mptcp_exit_flow(
+        &mut self,
+        succeeded: bool,
+        route_context_id: [u8; ROUTE_CONTEXT_ID_BYTES],
+        now_ms: u64,
+    ) {
+        self.log_record(
+            if succeeded {
+                LogLevel::Info
+            } else {
+                LogLevel::Warn
+            },
+            if succeeded {
+                "MPTCP_EXIT_FLOW_COMPLETED"
+            } else {
+                "MPTCP_EXIT_FLOW_FAILED"
+            },
+            now_ms,
+            route_context_id.to_vec(),
+        );
+    }
+
+    fn log_record(
+        &mut self,
+        level: LogLevel,
+        event_code: &'static str,
+        now_ms: u64,
+        session_id: Vec<u8>,
+    ) {
         if self.logs.len() == MAX_LOG_RECORDS {
             self.logs.pop_front();
         }
@@ -393,7 +428,7 @@ impl AgentState {
             timestamp_ms: now_ms,
             level: level as i32,
             event_code: event_code.to_owned(),
-            session_id: Vec::new(),
+            session_id,
             path_id: None,
         });
     }
@@ -523,6 +558,34 @@ pub enum StateError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mptcp_flow_logs_bind_both_outcomes_to_ephemeral_context_in_the_same_ring() {
+        let config = Config::default();
+        let mut state =
+            AgentState::new(&config, config.roles, None, MetricsRegistry::new()).unwrap();
+        state.log(LogLevel::Info, "UNSCOPED", 1);
+        state.log_mptcp_exit_flow(true, [3; 16], 2);
+        state.log_mptcp_exit_flow(false, [4; 16], 3);
+        let logs = state.logs(1000).records;
+        assert!(logs[0].session_id.is_empty());
+        assert_eq!(logs[1].session_id, [3; 16]);
+        assert_eq!(logs[1].event_code, "MPTCP_EXIT_FLOW_COMPLETED");
+        assert_eq!(logs[2].session_id, [4; 16]);
+        assert_eq!(logs[2].event_code, "MPTCP_EXIT_FLOW_FAILED");
+        assert!(logs.iter().all(|record| record.path_id.is_none()));
+        for stamp in 4..=1004 {
+            state.log_mptcp_exit_flow(true, [5; 16], stamp);
+        }
+        assert_eq!(state.logs(1001).records.len(), MAX_LOG_RECORDS);
+        assert!(
+            state
+                .logs(1000)
+                .records
+                .iter()
+                .all(|record| record.session_id == [5; 16])
+        );
+    }
 
     #[test]
     fn default_agent_role_snapshot_is_dormant_and_disconnected() {

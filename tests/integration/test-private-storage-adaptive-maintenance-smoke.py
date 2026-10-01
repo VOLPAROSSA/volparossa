@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Pure v2 dispatch/evidence contracts; these are not live daemon/overlay proof."""
 from pathlib import Path
+import copy
 import runpy
 import subprocess
 import tarfile
@@ -40,6 +41,47 @@ def report(value):
 
 
 class AdaptiveMaintenanceContracts(unittest.TestCase):
+    def test_adaptive_new_context_requires_its_own_flows_and_unchanged_authorized_scope(self):
+        for name in ADAPTIVE['F']['PHASES']:
+            with self.subTest(phase=name):
+                value = fixture()
+                phase = value['network'][name]
+                selected, gates = phase['selected_route'], phase['gates']
+                previous, newer = selected['route_context_id'], 'b' * 32
+                selected['route_context_id'] = newer
+                for path in selected['paths']:
+                    path['route_context_id'] = newer
+                with self.assertRaises(ValueError):
+                    ADAPTIVE['validate_evidence'](value)
+                # Same total, but one completion must actually belong to the new
+                # observed context. The other original completions remain pinned.
+                gates['observed_route_context_ids'] = sorted([previous, newer])
+                gates['exit_flow_contexts'][0]['completed'] -= 1
+                gates['exit_flow_contexts'].append(dict(route_context_id=newer, completed=1, failed=0))
+                gates['exit_flow_contexts'].sort(key=lambda row: row['route_context_id'])
+                ADAPTIVE['validate_evidence'](value)
+                ADAPTIVE['validate_report'](report(value), '1' * 40)
+                for mutate in (
+                    lambda p: p['gates'].update(observed_route_context_ids=[previous]),
+                    lambda p: p['gates'].update(exit_log_sampling_version=1),
+                    lambda p: p['selected_route'].update(exact_selected_exit='other'),
+                    lambda p: p['selected_route']['paths'][0].update(relay_peer_id='other'),
+                    lambda p: p['selected_route']['paths'][0].update(path_id=8),
+                ):
+                    invalid = copy.deepcopy(value)
+                    mutate(invalid['network'][name])
+                    with self.assertRaises(ValueError):
+                        ADAPTIVE['validate_evidence'](invalid)
+                old_only = copy.deepcopy(value)
+                for row in old_only['network'][name]['gates']['exit_flow_contexts']:
+                    row['completed'] += 1 if row['route_context_id'] == previous else -1
+                with self.assertRaises(ValueError):
+                    ADAPTIVE['validate_evidence'](old_only)
+                # Non-maintenance fragment trials still require the initial ID.
+                with self.assertRaises(ValueError):
+                    ADAPTIVE['F']['validate_network'](phase, value['expected_peers'],
+                        value['layout'], name, withdrawn_index=1)
+
     def test_separate_v1_and_v2_receipts_do_not_substitute_for_each_other(self):
         value = fixture()
         ADAPTIVE['validate_evidence'](value)
