@@ -471,9 +471,38 @@ def helper_members(role):
     return result
 
 
-def native_owner(role, diagnostics=None):
+def exact_flow_raw(raw, expected):
+    """Select the baseline socket, never a concurrent browser connection's counters."""
+    states = ("ESTAB", "SYN-SENT", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2",
+              "TIME-WAIT", "CLOSE-WAIT", "LAST-ACK", "CLOSING")
+    metas = []
+    for row in MPTCP["socket_rows"](raw["meta"], states):
+        token = re.search(r"\btoken:([0-9a-f]+)(?:\s|$)", row["line"])
+        if (row["cookie"] == expected["cookie"] and list(row["local"]) == expected["local"]
+                and list(row["remote"]) == expected["remote"] and token is not None
+                and int(token[1], 16) == int(expected["token"], 16)):
+            metas.append(row["line"])
+    require(len(metas) == 1, "exact baseline MPTCP meta socket missing or ambiguous")
+    subflows = []
+    for row in MPTCP["socket_rows"](raw["tcp"], states):
+        token = re.search(r"tcp-ulp-mptcp\s+flags:\S+\s+token:[0-9a-f]+\(id:\d+\)/"
+                          r"([0-9a-f]+)\(id:\d+\)", row["line"])
+        if token is not None and int(token[1], 16) == int(expected["token"], 16):
+            subflows.append(row["line"])
+    # kernel_sample still requires established subflows, their exact path set and genuine
+    # MPTCP. The independent progress checker also pins every subflow cookie/tuple/ID.
+    return dict(meta=metas[0] + "\n", tcp="\n".join(subflows) + "\n")
+
+
+def native_owner(role, diagnostics=None, expected=None, observation=None):
+    observation = {} if observation is None else observation
+    observation["stage"] = "worker-selection"
     matches = []
     for owner in helper_members(role):
+        if expected is not None and any(owner[key] != expected["owner"][key]
+                for key in ("unit", "pid", "start_ticks", "netns")):
+            continue
+        observation["stage"] = "socket-readback"
         prefix = ["nsenter", "-t", str(owner["pid"]), "-n"]
         selector = "( sport = :44443 )" if role == "exit" else "( dport = :44443 )"
         raw = dict(meta=command([*prefix, "ss", "-HOnMie", selector]),
@@ -484,10 +513,15 @@ def native_owner(role, diagnostics=None):
             # Fixed synthetic-network socket metadata only; never application/grant bytes.
             diagnostics.append(dict(owner=dict(owner), raw={key: text[:4096] for key, text in raw.items()},
                 diagnostic_only=True, raw_truncated=any(len(text) > 4096 for text in raw.values())))
+        observed_raw = raw
+        observation["stage"] = "flow-selection"
+        if expected is not None:
+            raw = exact_flow_raw(raw, expected["kernel"])
         metas = MPTCP["socket_rows"](raw["meta"], ("ESTAB", "FIN-WAIT-1", "FIN-WAIT-2", "CLOSE-WAIT", "LAST-ACK"))
         if not any(row["state"] == "ESTAB" for row in metas):
             continue
         require(len(MPTCP["socket_rows"](raw["meta"])) == 1, "ambiguous app flow in worker")
+        observation["stage"] = "path-bindings"
         links = json.loads(command([*prefix, "ip", "-j", "-6", "address", "show"]))
         layout, paths = [], []
         for row in MPTCP["socket_rows"](raw["tcp"]):
@@ -512,21 +546,36 @@ def native_owner(role, diagnostics=None):
                 f"{role}_address": str(local), f"{role}_interface": link["ifname"],
                 f"{'client' if role == 'exit' else 'exit'}_address": str(remote)}))
         owner["paths"] = sorted(paths, key=lambda row: row["path_id"])
-        matches.append(dict(owner=owner, raw=raw, kernel=MPTCP["kernel_sample"](raw, dict(paths=layout), role)))
+        observation["stage"] = "worker-lifetime"
+        require(expected is None or owner == expected["owner"], "original worker/path ownership changed")
+        observation["stage"] = "kernel-projection"
+        matches.append(dict(owner=owner, raw=observed_raw, kernel=MPTCP["kernel_sample"](raw, dict(paths=layout), role)))
     require(len(matches) == 1, "one attributable active app worker required")
     return matches[0]
 
 
-def sample(output=None):
+def sample(output=None, before=None):
+    if before is not None:
+        validate_sample(before)
     value = dict(started_monotonic_ns=time.monotonic_ns())
     for role in ("client", "exit"):
-        diagnostics = []
+        diagnostics, observation = [], {}
         try:
-            value[role] = native_owner(role, diagnostics)
+            value[role] = native_owner(role, diagnostics, None if before is None else before[role], observation)
         except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError):
             if output is not None:
-                write(output, dict(observation_complete=False, failed_role=role,
-                    fixed_error="native_owner_not_verified", candidates=diagnostics))
+                failure = dict(observation_complete=False, failed_role=role,
+                    fixed_error="native_owner_not_verified", failed_stage=observation["stage"],
+                    started_monotonic_ns=value["started_monotonic_ns"], observed_monotonic_ns=time.monotonic_ns(),
+                    candidates=diagnostics)
+                # Preserve the first failed observation when later retries see closed sockets.
+                # This remains bounded synthetic socket metadata, not browser/request content.
+                first = dict(failure)
+                if output.is_file() and not output.is_symlink() and output.stat().st_size <= 65536:
+                    previous = read(output)
+                    if previous.get("observation_complete") is False:
+                        first = previous.get("first_failure", previous)
+                write(output, failure | dict(first_failure=first))
             raise
     value["observed_monotonic_ns"] = time.monotonic_ns()
     validate_sample(value)
@@ -556,7 +605,7 @@ def validate_sample(value):
             f"{role}_interface": next(path["interface"] for path in paths if path["path_id"] == row["path_id"]),
             f"{'client' if role == 'exit' else 'exit'}_address": row["remote"][0]})
             for row in entry["kernel"]["subflows"]]
-        require(entry["kernel"] == MPTCP["kernel_sample"](entry["raw"], dict(paths=layout), role),
+        require(entry["kernel"] == MPTCP["kernel_sample"](exact_flow_raw(entry["raw"], entry["kernel"]), dict(paths=layout), role),
             "raw kernel data disagrees with projection")
         bindings.append({row["path_id"]: row["relay_node"] for row in paths})
     require(bindings[0] == bindings[1], "Client/Exit used different physical relays")
@@ -751,7 +800,9 @@ def main():
         write(Path(sys.argv[3]), value)
     elif action == "sample":
         output = Path(sys.argv[2])
-        write(output, sample(output))
+        require(len(sys.argv) in (3, 4), "unexpected sample arguments")
+        before = read(Path(sys.argv[3])) if len(sys.argv) == 4 else None
+        write(output, sample(output, before))
     elif action == "progress":
         before, after = read(Path(sys.argv[2])), read(Path(sys.argv[3]))
         validate_sample(before); validate_sample(after); MPTCP["progress"](before, after, 2)

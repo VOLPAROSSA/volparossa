@@ -92,6 +92,89 @@ def fixture(root):
 
 
 class BrowserNetworkEvidence(unittest.TestCase):
+    def test_progress_pins_original_worker_and_flow_despite_concurrent_browser_connection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            report = fixture(Path(temporary))
+            phase = report["network"]["phases"][0]
+            before, after = phase["baseline"], copy.deepcopy(phase["progress"])
+            for role in ("client", "exit"):
+                expected = before[role]
+                entry = after[role]
+                # Same worker, different meta/token/cookies/ports; place the new connection
+                # first so a first-socket shortcut would select the wrong application flow.
+                own = entry["kernel"]["token"]
+                extra = {key: raw.replace(own, "fedcba").replace("sk:a1", "sk:c1")
+                    .replace("sk:b1", "sk:d1").replace(":40001", ":41001").replace(":40002", ":41002")
+                    for key, raw in entry["raw"].items()}
+                entry["raw"] = {key: extra[key] + raw for key, raw in entry["raw"].items()}
+                self.assertEqual(len(CHECK["MPTCP"]["socket_rows"](entry["raw"]["meta"])), 2)
+                links = [dict(ifname=path["interface"], ifindex=path["ifindex"],
+                    addr_info=[dict(local=row["local"][0])])
+                    for path, row in zip(entry["owner"]["paths"], entry["kernel"]["subflows"], strict=True)]
+                owner = {key: entry["owner"][key] for key in ("unit", "pid", "start_ticks", "netns")}
+                def command(args):
+                    if "ss" in args:
+                        return entry["raw"]["meta" if "-HOnMie" in args else "tcp"]
+                    if "ip" in args:
+                        return json.dumps(links)
+                    interface = args[-2]
+                    endpoint = next(path["endpoint"] for path in entry["owner"]["paths"] if path["interface"] == interface)
+                    return "not-exported-wg-key " + endpoint + "\n"
+                with patch.dict(CHECK["native_owner"].__globals__,
+                        command=command, helper_members=lambda _role: [dict(owner)]):
+                    # Reproduces the old global-one-flow observer failure, without traffic.
+                    with self.assertRaisesRegex(ValueError, "ambiguous app flow"):
+                        CHECK["native_owner"](role)
+                    self.assertEqual(CHECK["native_owner"](role, expected=expected), entry)
+                    for field in ("pid", "start_ticks", "netns"):
+                        invalid = copy.deepcopy(expected)
+                        invalid["owner"][field] = 999 if field == "pid" else "999"
+                        with self.assertRaises(ValueError):
+                            CHECK["native_owner"](role, expected=invalid)
+                # A different meta lifetime, token or tuple cannot replace the original.
+                for field, replacement in (("cookie", "ffff"), ("token", "ffffff"),
+                        ("local", [expected["kernel"]["local"][0], 54321])):
+                    with self.assertRaises(ValueError):
+                        CHECK["exact_flow_raw"](entry["raw"], expected["kernel"] | {field: replacement})
+                duplicate = dict(entry["raw"])
+                duplicate["meta"] += duplicate["meta"].splitlines()[-1] + "\n"
+                with self.assertRaises(ValueError):
+                    CHECK["exact_flow_raw"](duplicate, expected["kernel"])
+            CHECK["validate_sample"](after)
+            CHECK["MPTCP"]["progress"](before, after, 2)
+            # Fresh counters from the extra connection cannot satisfy an idle selected path.
+            invalid = copy.deepcopy(after)
+            invalid["client"]["kernel"]["subflows"][1]["bytes_received"] = 1000
+            with self.assertRaises(ValueError):
+                CHECK["MPTCP"]["progress"](before, invalid, 2)
+            invalid = copy.deepcopy(after)
+            invalid["client"]["kernel"]["subflows"][1]["cookie"] = "ffff"
+            with self.assertRaises(ValueError):
+                CHECK["MPTCP"]["progress"](before, invalid, 2)
+
+    def test_first_owner_failure_survives_later_missing_socket_observations(self):
+        def failure(role, diagnostics, expected, observation):
+            observation["stage"] = "flow-selection"
+            diagnostics.append(dict(diagnostic_only=True, attempt=1))
+            raise ValueError("raw private exception must not escape")
+        def later_failure(role, diagnostics, expected, observation):
+            observation["stage"] = "worker-selection"
+            raise ValueError("raw private exception must not escape")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "progress.json"
+            for failing in (failure, later_failure, later_failure):
+                with patch.dict(CHECK["sample"].__globals__, native_owner=failing), self.assertRaises(ValueError):
+                    CHECK["sample"](output)
+            value = CHECK["read"](output)
+            self.assertEqual(value["failed_stage"], "worker-selection")
+            self.assertEqual(value["candidates"], [])
+            first = value["first_failure"]
+            self.assertEqual(first["failed_stage"], "flow-selection")
+            self.assertEqual(first["candidates"], [dict(diagnostic_only=True, attempt=1)])
+            self.assertLessEqual(first["observed_monotonic_ns"], value["started_monotonic_ns"])
+            self.assertNotIn("first_failure", first)
+            self.assertNotIn("private", json.dumps(value))
+
     def test_native_text_payload_keeps_size_full_hash_and_historical_binary_contract(self):
         # This ID guarantees control bytes in the historical binary body, rather than relying
         # on random luck. The native body is printable UTF-8 for genuine ordinary-tab rendering.

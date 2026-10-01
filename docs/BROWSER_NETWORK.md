@@ -37,7 +37,7 @@ The separate native candidate uses the locally compiled Firefox 157.0.1 source
 binaries are unchanged; a separately recorded product-JavaScript resource overlay
 fixes DOM-owner lookup. It does not substitute ESR compatibility modules or disable
 ECH-GREASE globally. The actual disposable core VM trials below have **not** yet
-proved ordinary tab traffic through WireGuard/MPTCP.
+completed the ordinary-tab WireGuard/MPTCP integration proof.
 
 - Local `build/browser-native-vm-02`, core `683e0ede8e0061f9efaf521006af4f61f300d0ba`,
   failed before attachments/origin connections. Its original browser report SHA-256 is
@@ -118,6 +118,41 @@ cause or fix of trials05/06**. Historical ESR binary content is unchanged; nativ
 responses still require exactly 32 MiB, independently recomputed full hashes and
 the same two carrying-path/cleanup proofs. No browser preference, product code,
 native binary, route deadline or retry has changed.
+
+Local `build/browser-native-vm-07` on
+`10479854ee8cef1fd82e004aa0058d8699d1a15f`, with unchanged bundle05,
+reaches two ready attachments and receives **16,777,216 bytes** in the actual
+first tab. It still fails: `stream-stop` reports `NS_ERROR_NET_PARTIAL_TRANSFER`
+(`0x804b004c`), and the topology reports `BROWSER_NETWORK_TWO_CARRYING_PATHS_MISSING`.
+The original baseline revalidates two real MPTCP subflows on relay1/relay2; its
+monotonic sampling interval is 639.074547001–639.209327516 seconds. The final
+progress receipt instead says `native_owner_not_verified` with no candidates.
+There is no valid same-lifetime progress delta, complete 32-MiB hash, second
+response or independent detach proof. Original browser, driver and baseline hashes:
+
+- `5fc698c83eed0739115c68be30e45853876f3cd5d935d32169609689c91e0a82`
+- `bce9aae06dc9bb5f13dea49ead6c36ced14a8f1b13061ec63a34c50a70fcd0c5`
+- `009ea687717655f296fe966ffa5b84289e26a8c790de814a0540045a3eeb13db`
+
+The gateway records two accepted CONNECTs during the first request. A source-level
+observer defect is reproduced by a focused test: it rejected any worker containing
+more than one MPTCP connection, even when the original transfer remained present.
+The candidate now pins progress to the original worker incarnation and exact meta
+cookie/token/tuple, retaining full bounded kernel dumps and every original subflow
+lifetime, path and byte-delta check. Unrelated connections cannot supply progress.
+It also retains the first failed observation with a closed stage and monotonic
+timestamps instead of overwriting it with later empty-socket observations.
+
+The origin's `request_rejected` is recorded at `wait-continue`, after its first
+16 MiB, not while parsing the HTTP request. That fixture gate is released only
+after successful path sampling; its unchanged timeout is 60 seconds. The original
+first failed sample was overwritten, and origin/gateway events have no retained
+timestamps, so the exact ordering of observer and transport failure is **not
+recoverable**. The concurrent-connection defect is not yet proved to be this
+trial's cause or a live fix. A15/private/profile cleanup passes with unchanged
+guest-state hash `0fec7e486a2ec776598501c8ca26bdb2fa2349e62dee6914dc00592368460890`;
+VM/scratch removal and unchanged host DNS/routes are verified. All earlier failed
+receipts remain intact; no native ECH wire or complete browser claim is made.
 
 ## One daemon, independent application connections
 

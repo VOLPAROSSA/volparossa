@@ -153,6 +153,7 @@ EOF
         bn_poll=0
         while [ "$bn_poll" -lt 300 ]; do
             if browser_network_check sample "$WORK/browser-network-$bn_phase-progress.json" \
+                "$WORK/browser-network-$bn_phase-baseline.json" \
                 && browser_network_check progress "$WORK/browser-network-$bn_phase-baseline.json" \
                 "$WORK/browser-network-$bn_phase-progress.json"; then break; fi
             sleep 0.1

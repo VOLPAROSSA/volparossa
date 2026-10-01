@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-10-01
+Last updated: 2026-10-02
 
 ## Current integration and active work
 
@@ -38,6 +38,16 @@ cleanup/host-state checks pass. The candidate now retains existing bounded actor
 event codes/counts before cleanup and fixes native-only binary-as-text fixture
 content to genuine ASCII, keeping 32 MiB and full path/hash gates. Neither change
 is evidence of a successful native transfer or a fix for the preselection failure.
+Actual `browser-native-vm-07` reaches both attachments and receives 16 MiB in the
+ordinary first tab, but ends in partial transfer and missing two-path progress
+proof. Its real two-subflow baseline passes; the final observation has no verified
+owner. The gateway also records a second CONNECT. A focused test reproduces the
+observer's erroneous one-connection-per-worker assumption; the candidate now pins
+progress to the exact original worker/flow and retains the first failed sample.
+The original intermediate observations were overwritten, so this is not yet a
+proved cause/fix of trial07. Full hashes, the second tab and detach remain unproved;
+all cleanup and unchanged host-state checks pass. Details and original hashes are
+in the native trial record linked above.
 Successful native ordinary-tab/core integration remains pending. This is not a full
 browser kill-switch, HTTP/3 or native ECH wire-proof claim. Workspace-only
 pinned QEMU tools are explicit local test inputs, not a host installation or
