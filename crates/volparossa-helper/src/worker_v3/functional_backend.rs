@@ -2784,6 +2784,16 @@ impl FunctionalAlphaLeaseBackend {
 }
 
 impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
+    fn retire_mptcp_flow(
+        self: Arc<Self>,
+        request: BackendRequest<crate::engine::BackendMptcpFlowRetirement>,
+    ) -> BackendFuture<BackendCompletion<()>> {
+        let (completion, value) = request.into_parts();
+        let binding = completion.binding();
+        Box::pin(
+            async move { completion.complete(self.retire_mptcp_flow_one(binding, value).await) },
+        )
+    }
     fn update_mptcp_subflow(
         self: Arc<Self>,
         request: BackendRequest<crate::engine::BackendMptcpSubflow>,
@@ -3601,6 +3611,7 @@ fn validate_mptcp_endpoint_binding(
         BackendAction::AddMptcpEndpoint
             | BackendAction::RemoveMptcpEndpoint
             | BackendAction::UpdateMptcpSubflow
+            | BackendAction::RetireMptcpFlow
     ) || binding.action != action
         || binding.phase != BackendPhase::Committed
         || binding.prior_phase != Some(ContextPhase::Committed)

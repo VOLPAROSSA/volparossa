@@ -556,6 +556,7 @@ pub(crate) enum ProductionMptcpExitError {
 #[must_use = "the active MPTCP client flow must be used or shut down"]
 pub(crate) struct ActiveProductionMptcpClientFlow {
     stream: observed::ObservedTls,
+    retirement: crate::mptcp_transport::retirement::Guard,
 }
 
 impl ActiveProductionMptcpClientFlow {
@@ -564,7 +565,7 @@ impl ActiveProductionMptcpClientFlow {
     }
 
     pub(crate) fn shutdown(self) {
-        drop(self.stream);
+        drop(self);
     }
 
     /// Proxy one accepted local application stream over the already authenticated MPTCP/TLS
@@ -580,9 +581,12 @@ impl ActiveProductionMptcpClientFlow {
             STREAM_IDLE_TIMEOUT,
         )
         .map_err(|_| ProductionMptcpClientError::Stream)?;
-        proxy_bidirectional(application, self.stream, limits)
+        let Self { stream, retirement } = self;
+        let result = proxy_bidirectional(application, stream, limits)
             .await
-            .map_err(|_| ProductionMptcpClientError::Stream)
+            .map_err(|_| ProductionMptcpClientError::Stream);
+        drop(retirement);
+        result
     }
 }
 
@@ -650,7 +654,10 @@ pub(crate) async fn activate_production_mptcp_client_flow(
     let stream = observations
         .attach(stream, paths.flow_handle())
         .map_err(|_| ProductionMptcpClientFailure::new(ProductionMptcpClientError::Stream))?;
-    Ok(ActiveProductionMptcpClientFlow { stream })
+    Ok(ActiveProductionMptcpClientFlow {
+        stream,
+        retirement: paths.into_retirement(),
+    })
 }
 
 async fn prime_open_tcp_and_wait_for_subflows<W, F>(

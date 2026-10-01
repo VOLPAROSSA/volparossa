@@ -699,11 +699,39 @@ impl HelperClient {
         value: volparossa_routing::UpdateMptcpSubflow,
         descriptor: OwnedFd,
     ) -> Result<(), HelperClientError> {
-        let id = random_request_id(&[]);
+        self.execute_mptcp_descriptor_operation(
+            helper_request::Operation::UpdateMptcpSubflow(value),
+            random_request_id(&[]),
+            descriptor,
+        )
+        .await
+    }
+
+    /// Retire an exact issued flow. The route owner keeps a stable ID across lost ACKs.
+    pub(crate) async fn retire_mptcp_flow(
+        &self,
+        value: volparossa_routing::RetireMptcpFlow,
+        id: [u8; 16],
+        descriptor: OwnedFd,
+    ) -> Result<(), HelperClientError> {
+        self.execute_mptcp_descriptor_operation(
+            helper_request::Operation::RetireMptcpFlow(value),
+            id,
+            descriptor,
+        )
+        .await
+    }
+
+    async fn execute_mptcp_descriptor_operation(
+        &self,
+        operation: helper_request::Operation,
+        id: [u8; 16],
+        descriptor: OwnedFd,
+    ) -> Result<(), HelperClientError> {
         let request = HelperRequest {
             protocol_version: HELPER_PROTOCOL_VERSION,
             request_id: id.to_vec(),
-            operation: Some(helper_request::Operation::UpdateMptcpSubflow(value)),
+            operation: Some(operation),
         };
         let digest = operation_digest(&request).map_err(HelperClientError::Protocol)?;
         let frame = Zeroizing::new(encode_request(&request).map_err(HelperClientError::Protocol)?);
