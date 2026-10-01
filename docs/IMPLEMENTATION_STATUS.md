@@ -103,8 +103,34 @@ Last updated: 2026-10-01
   The regression fails on the old source with `ECONNRESET`; three focused real-HTTP
   tests pass on the correction. The original UI also passes unlock and selected-file
   navigation against that candidate in the isolated synthetic diagnostic, with no
-  private files opened and fresh-profile cleanup. The next joined candidate pins
-  this exact Cloud source; no new peer-storage/UI success is claimed yet.
+  private files opened and fresh-profile cleanup.
+  The subsequent joined [run36940326270 on `d7403106`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36940326270)
+  **passes** with exact Cloud `63bba5d1163a69e1ee6b4218c9e7462d941f22f7`, original
+  source-built Web8 `11e699ac82fda4dd113ac3ceb2ecb2dd74574045` and pinned Firefox
+  ESR140.16.0. The actual original Files UI authenticates against the real owner
+  read service, lists/navigates the selected file and completes two Download actions
+  of 786,433 bytes, independently checked against SHA-256
+  `5cb6c6ae54a29c1769e7189e1e6d4457e65afdbf78c48c89beb5780f86593f5c`.
+  Source-off/local-ciphertext-absent/provider-A-offline conditions remain in force
+  through six real protected B/C reconstructions and GPG decryptions: direct restore,
+  encrypted catalog creation, SDK full/range reads and both UI downloads. Restore
+  has 48 completed MPTCP/TLS exchanges with zero failed flows; upload/finish have
+  56/16. All phase baselines are covered, all 18 captures are drained with no drops
+  or direct client/exit traffic, and A sends no restore payload. Wrong-token/ETag
+  denial, in-memory-only browser token, logout/relock and nonconsuming reads pass.
+  Eight fragment copies retain their 1,598,292-byte charge until deletion; all three
+  reopened provider stores then report zero reservations, committed bytes and leases.
+  The read service/browser are joined, private plaintext/ciphertext/keys/journals and
+  browser profile are removed, and host SHA-256 remains
+  `7d5e0ab24417617ae5361f08517d3fd48c638fc8b7903385a64298a548b7ea26`.
+  Exact-source replay of all 44 original artifacts reconstructs both stored
+  aggregates unchanged. ZIP SHA-256:
+  `9815e1ee6435f39a03c9b566008068e471aa4ac2ad405006df530044b65ffbab`;
+  job110630073052 log SHA-256:
+  `5fe9eac6ea7723287f545ec03e51275b18a9a566d6fdeb2c04cd2d849735c3f5`.
+  This proves selected owner-local read-only recovery through the original UI, not
+  ordinary OpenCloud account/ACL recovery, writes, sharing, synchronization or
+  general server-independent OpenCloud availability.
 - [ ] Cooperative maintenance of current/future VOLPAROSSA organization repositories:
   actual coding jobs, independent immune review and exact-revision scoped GitHub
   publication. [Agreed scope](REPOSITORY_MAINTENANCE.md); no autonomous publisher,

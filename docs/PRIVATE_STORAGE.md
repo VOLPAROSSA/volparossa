@@ -99,15 +99,15 @@ original artifacts reproduces the aggregate; ZIP SHA-256
 Range requests still reconstruct and verify the complete encrypted file before
 selecting plaintext bytes. This is not the full web UI. Accounts, shared permissions,
 writes, peer-distributed catalogs and second-device recovery are not completed.
-The next candidate pins Cloud `63bba5d1163a69e1ee6b4218c9e7462d941f22f7` and builds
+The joined original-UI scenario pins Cloud `63bba5d1163a69e1ee6b4218c9e7462d941f22f7` and builds
 the original OpenCloud Web8 Files UI from its exact source in the disposable guest.
 It connects a fresh isolated Firefox profile to the same owner-private read service
 and requires two actual Download actions, in addition to the four preceding SDK/
 catalog/direct reconstructions. The source, local ciphertext and provider A remain
 unavailable. At least 48 completed protected exchanges and the corresponding B/C
 payloads are required; browser profiles, temporary plaintext and all leases must
-be cleaned up. This combined original-UI/peer result is **not yet proven**. The
-passing Cloud-local UI test uses a synthetic backend and does not fill that gap.
+be cleaned up. The earlier Cloud-local UI test uses a synthetic backend and is
+not peer-storage evidence.
 The original joined run `36935715873` using Cloud `c81980dd` failed during UI
 unlock, after the preceding recovery/catalog/SDK operations; private cleanup and
 unchanged host state passed. A local original-Web8 synthetic diagnostic reproduced
@@ -115,7 +115,27 @@ the same failure when six idle browser connections exhausted the service's socke
 limit. The new Cloud pin keeps at least eight transport slots only for web mode,
 while private request/restoration concurrency, authentication and all joined-proof
 gates stay unchanged. Focused HTTP and synthetic UI checks pass; a fresh joined
-original-UI/peer-storage result is still required.
+original-UI/peer-storage result was still required at that stage.
+
+That combined result now **passes** in
+[run36940326270](https://github.com/VOLPAROSSA/volparossa/actions/runs/36940326270)
+on exact core `d7403106837962c66cd0af0e049236785d8053cb`. The original Files UI,
+using the real owner-local service rather than a synthetic backend, completes two
+786,433-byte Downloads with independently checked hash
+`5cb6c6ae54a29c1769e7189e1e6d4457e65afdbf78c48c89beb5780f86593f5c`.
+All six protected B/C reconstructions and actual GPG decryptions succeed with the
+source off, local ciphertext absent and A offline. All 48 restore exchanges finish;
+A contributes zero restore payload. Authentication/ETag checks, listing, logout,
+private browser/service cleanup and unchanged host state pass. Eight retained
+fragment copies keep their 1,598,292-byte charge through nonconsuming reads, then
+all three reopened provider stores reach zero reservations, committed bytes and
+leases after idempotent deletion. The 18 privacy captures have zero drops and no
+direct client/exit traffic. Exact-source replay reconstructs both aggregates from
+44 original files; ZIP SHA-256
+`9815e1ee6435f39a03c9b566008068e471aa4ac2ad405006df530044b65ffbab`.
+This is selected owner-local read-only recovery in the original Files application,
+not general account/permission recovery, writable synchronization, sharing or
+complete server-independent OpenCloud. Earlier failures remain failures.
 Preview with
 `sh tests/integration/run-alpha-topology-vm.sh --preview --scenario cloud-private-file`;
 execution belongs only in the explicitly approved disposable KVM workflow.
