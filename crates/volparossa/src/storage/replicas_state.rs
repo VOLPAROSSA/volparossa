@@ -13,7 +13,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use volparossa_content::private_storage::{
-    MAX_ARCHIVE_BYTES,
+    ARCHIVE_COPY_TARGET, MAX_ARCHIVE_BYTES,
     protocol::{MAX_GRANT_BYTES, ReceiptState, VerifiedStorageGrant},
 };
 
@@ -89,11 +89,11 @@ impl LockedSet {
         grants: &[VerifiedStorageGrant],
         lifetime: u64,
     ) -> Result<Self> {
-        state::new_output(path)?;
         ensure!(
-            (2..=MAX_COPIES).contains(&grants.len()),
-            "replica set requires 2..8 providers"
+            grants.len() == ARCHIVE_COPY_TARGET,
+            "new storage archives require the core-owned {ARCHIVE_COPY_TARGET}-copy target"
         );
+        state::new_output(path)?;
         ensure!(
             (1..=MAX_ARCHIVE_BYTES).contains(&length),
             "invalid replica ciphertext length"

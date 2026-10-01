@@ -46,6 +46,19 @@ All 18 original evidence files are retained locally; their archive SHA256 is
 `3d47971aa397ed43b076863912a67251efe69875babf02f1d538b196bd2063eb`.
 This is not yet editor execution, Codex tool use, general coding ability or private peer offload.
 
+### Uniform storage redundancy candidate
+
+New fragment and complete-replica archive creation use the same core-owned two-copy
+target. Applications cannot request another target; hidden `--copies 2` compatibility
+preserves existing pinned callers. Existing higher-copy archives keep their original
+metadata, restore/renew/delete paths and every physical charge. No existing copy is
+automatically removed, and temporary replacement overhead is not a separate redundancy
+tier. This change does not implement automatic repair or application-wide migration; see
+[the policy and legacy boundary](PRIVATE_STORAGE.md#one-core-owned-redundancy-policy).
+Two targeted tests pass: fixed-target CLI handling and a real four-provider signed-service
+lifecycle for legacy three-copy fragments and complete replicas, including source removal,
+provider-loss restore, renewal and deletion to zero leases. Package Clippy also passes.
+
 ### Storage layer and privacy boundaries
 
 **Private storage is now documented as a separate fourth layer**, with actual replicated-byte
