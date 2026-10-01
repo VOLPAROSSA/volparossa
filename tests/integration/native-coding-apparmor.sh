@@ -112,19 +112,23 @@ if sys.argv[2] == "online":
     assert hashlib.sha256(resolver.read_bytes()).hexdigest() == sys.argv[5]
     allowed = {p for p in (resolver, *resolver.parents) if p.is_relative_to("/run") and p != Path("/run")}
     assert set(Path("/run").rglob("*")) == allowed
+    assert os.statvfs(resolver).f_flag & os.ST_RDONLY
     try:
         fd = os.open(resolver, os.O_WRONLY)
     except OSError as error:
-        assert error.errno == errno.EROFS
+        # DAC can reject a root-owned resolver before the read-only mount does.
+        # The independent mount check above still requires actual read-onlyness.
+        assert error.errno in (errno.EROFS, errno.EACCES)
     else:
         os.close(fd)
         raise AssertionError("resolver mount unexpectedly writable")
 else:
     assert not list(Path("/run").iterdir())
+assert os.statvfs(".").f_flag & os.ST_RDONLY
 try:
     os.open("forbidden-write", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
 except OSError as error:
-    assert error.errno == errno.EROFS
+    assert error.errno in (errno.EROFS, errno.EACCES)
 else:
     raise AssertionError("source mount unexpectedly writable")
 if sys.argv[2] == "offline":

@@ -133,6 +133,9 @@ class WiringTests(unittest.TestCase):
         self.assertIn('if test "$network" = offline; then isolation=(--unshare-net); fi', wrapper)
         self.assertIn('set(Path("/run").rglob("*")) == allowed', wrapper)
         self.assertIn('hashlib.sha256(resolver.read_bytes()).hexdigest() == sys.argv[5]', wrapper)
+        self.assertIn('os.statvfs(resolver).f_flag & os.ST_RDONLY', wrapper)
+        self.assertIn('os.statvfs(".").f_flag & os.ST_RDONLY', wrapper)
+        self.assertEqual(wrapper.count('assert error.errno in (errno.EROFS, errno.EACCES)'), 2)
         self.assertNotIn('--ro-bind /run /run', wrapper)
         self.assertIn("trap 'cleanup' EXIT", wrapper)
         self.assertIn('setsid python3 -B', wrapper)
@@ -161,6 +164,7 @@ class WiringTests(unittest.TestCase):
             (root / 'etc').mkdir()
             (root / 'etc/resolv.conf').symlink_to('/run/synthetic-resolver/resolv.conf')
             (root / 'resolver').write_text('nameserver 192.0.2.53\n')
+            (root / 'resolver').chmod(0o444)
             probe = '''
 import errno,json,os,sys
 from pathlib import Path
@@ -170,9 +174,18 @@ if sys.argv[1] == 'online':
     assert Path('/etc/resolv.conf').read_text() == 'nameserver 192.0.2.53\\n'
     assert set(str(p) for p in Path('/run').rglob('*')) == {
         '/run/synthetic-resolver', '/run/synthetic-resolver/resolv.conf'}
+    assert os.statvfs('/etc/resolv.conf').f_flag & os.ST_RDONLY
+    try:
+        fd = os.open('/etc/resolv.conf', os.O_WRONLY)
+    except OSError as error:
+        assert error.errno in (errno.EROFS, errno.EACCES)
+    else:
+        os.close(fd)
+        raise AssertionError('resolver writable')
 else:
     assert not list(Path('/run').iterdir())
     assert os.readlink('/proc/self/ns/net') != sys.argv[2]
+assert os.statvfs('.').f_flag & os.ST_RDONLY
 try:
     Path('forbidden-write').write_text('x')
 except OSError as error:
@@ -203,6 +216,38 @@ for state, expected in [('/home/runner/work/_temp/volparossa-bwrap.synthetic', F
                 env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}, check=True, timeout=60)
             self.assertEqual(private.read_text(), 'synthetic-only-never-real-home')
             self.assertEqual((root / 'resolver').read_text(), 'nameserver 192.0.2.53\n')
+
+    @unittest.skipUnless(os.environ.get('VOLPAROSSA_TEST_LOCAL_BWRAP') == '1',
+                         'explicit local disposable namespaces; no DNS requests or policy loading')
+    def test_permission_denial_does_not_substitute_for_a_readonly_mount(self):
+        with tempfile.TemporaryDirectory(prefix='volparossa-bwrap-denial-', dir='/tmp') as name:
+            resolver = Path(name) / 'resolver'
+            resolver.write_text('nameserver 192.0.2.53\n')
+            resolver.chmod(0o444)
+            probe = '''
+import errno,json,os
+from pathlib import Path
+p = Path('/tmp/synthetic-resolver')
+assert p.read_text() == 'nameserver 192.0.2.53\\n'
+readonly = bool(os.statvfs(p).f_flag & os.ST_RDONLY)
+try:
+    fd = os.open(p, os.O_WRONLY)
+except OSError as error:
+    assert error.errno == errno.EACCES
+else:
+    os.close(fd)
+    raise AssertionError('mode0444 unexpectedly writable')
+print(json.dumps({'read_only_mount': readonly, 'access_denied': True}))
+'''
+            for binding, readonly in (('--ro-bind', True), ('--bind', False)):
+                result = subprocess.run(['/usr/bin/bwrap', '--die-with-parent', '--unshare-net',
+                    '--ro-bind', '/', '/', '--tmpfs', '/home', '--tmpfs', '/root', '--tmpfs', '/run',
+                    '--tmpfs', '/tmp', binding, str(resolver), '/tmp/synthetic-resolver',
+                    '--proc', '/proc', '--dev', '/dev', '--chdir', '/tmp', '--',
+                    '/usr/bin/python3', '-I', '-c', probe], env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'},
+                    check=True, capture_output=True, text=True, timeout=15)
+                self.assertEqual(json.loads(result.stdout), {'read_only_mount': readonly, 'access_denied': True})
+            self.assertEqual(resolver.read_text(), 'nameserver 192.0.2.53\n')
 
     def test_failure_diagnostic_reads_only_bounded_public_build_logs(self):
         with tempfile.TemporaryDirectory(prefix='volparossa-build-log-contract-') as temporary:
