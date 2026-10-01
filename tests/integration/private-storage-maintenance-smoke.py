@@ -277,15 +277,32 @@ def restore(root, binary, client, keys):
         original_identities_retained=True, staging_removed=True)
 
 
+def validate_retirement_progress(before, value, detail):
+    # A completed retirement freshly reads back its existing replacement. That is
+    # not a new placement; compare actual retained identities/counts instead.
+    fresh = detail.get('freshly_verified_replacements', 0)
+    require(type(fresh) is int and 0 <= fresh <= 1, 'unbounded retirement readbacks')
+    require(value['placement_authorizations'] == before['placement_authorizations']
+        and value['retained_copy_records'] == before['retained_copy_records'],
+        'duplicate replacement after restart')
+
+
 def finish(root, binary, client, keys):
     global STAGE
     STAGE = 'retirement'
     turns = 0
+    before = status(root, binary, client)
+    require(before['placement_authorizations'] == 3 and before['retained_copy_records'] == 11,
+        'replacement set incomplete before retirement')
+    placements = root / 'fragment-set' / 'placement-authorizations.json'
+    require(private_file(placements).st_size <= 1048576, 'placement journal exceeds bound')
+    original_placements = placements.read_bytes()
     for _ in range(4):
         turn = run_turn(root, binary, client, keys[1])
         turns += 1
-        require(turn['detail'].get('freshly_verified_replacements', 0) == 0, 'duplicate replacement after restart')
         value = status(root, binary, client)
+        validate_retirement_progress(before, value, turn['detail'])
+        require(placements.read_bytes() == original_placements, 'signed replacement identities changed')
         if value['pending_retirements'] == 0:
             break
     require(value['pending_retirements'] == 0 and value['placement_authorizations'] == 3

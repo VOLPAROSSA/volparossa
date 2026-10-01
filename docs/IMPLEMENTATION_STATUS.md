@@ -28,6 +28,18 @@ Last updated: 2026-10-01
   were emitted in client YAML. The emitter is consolidated and a full-client real
   configuration-parser regression added. Original cleanup/unchanged-host evidence
   passes, but combined maintenance execution remains unchecked pending a fresh trial.
+  The original [run36930275639 on `0ce48bb7`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36930275639)
+  reaches three replacement readbacks, eleven retained copy records, three pending
+  retirements and two genuine source-free B/C reconstructions. It then fails at
+  `retirement`, with successful cleanup and unchanged host state. The fixture
+  incorrectly treated a fresh readback of an existing replacement as a duplicate
+  placement. The candidate now checks unchanged placement/copy counts and exact
+  signed placement-journal bytes, while retaining the retirement, zero-charge and
+  deletion requirements. The original remains failed; complete retirement/deletion
+  is not yet proven. Original 38-file ZIP SHA-256:
+  `94776714aa211d2df2b6e8c06a1486414a5e17fd6f44511f3392de44ec02b93d`;
+  original job-log SHA-256:
+  `4081f8be0933b6f871fcd6ae1ba99bc4202720839204010348e1c79984368bf5`.
   See [private storage maintenance](PRIVATE_STORAGE.md#explicit-owner-private-background-maintenance).
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
