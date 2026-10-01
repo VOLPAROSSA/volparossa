@@ -6,7 +6,9 @@ import hashlib
 from pathlib import Path
 import runpy
 import subprocess
+import tempfile
 import unittest
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 FIX = runpy.run_path(str(HERE / 'agent-native-coding.py'))
@@ -52,6 +54,8 @@ def synthetic_report():
         codex_app_server_proven=True, code_edit_test_loop_proven=True, native=synthetic_receipt(), runtime=runtime,
         runtime_bundle=dict(sha256='3' * 64, **FIX['bundle_summary'](bundle, 'a' * 40, runtime, FIX['pins']())),
         memory_before=memory, memory_final=copy.deepcopy(memory),
+        execution_timing=dict(version=1, scope='service_cgroup_during_native_harness',
+            elapsed_ms=310000, cpu_usage_usec=601000000),
         native_cleanup=dict(process_joined=True, private_state_removed=True, host_network_unchanged=True),
         cleanup=dict(client_group_joined=True, provision_group_joined=True, service_stopped=True,
             service_cgroup_empty=True, observed_lifetimes_ended=True, guest_root_removed=True, code_output_removed=True),
@@ -60,6 +64,34 @@ def synthetic_report():
 
 
 class ContractTests(unittest.TestCase):
+    def test_closed_service_cpu_observation_uses_counter_delta_and_monotonic_elapsed_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            counter = path / 'cpu.stat'
+            counter.write_text('usage_usec 900\nuser_usec 700\nsystem_usec 200\n')
+            with patch.object(FIX['PRIVATE'], 'CGROUP', path):
+                before = FIX['service_cpu_usage']()
+                counter.write_text('usage_usec 600000900\nuser_usec 500000700\nsystem_usec 100000200\n')
+                with patch.object(FIX['time'], 'monotonic', return_value=410):
+                    measured = FIX['execution_timing'](100, before)
+                self.assertEqual(measured, dict(version=1, scope='service_cgroup_during_native_harness',
+                    elapsed_ms=310000, cpu_usage_usec=600000000))
+                for bad in ('usage_usec 1\nusage_usec 2\n', 'usage_usec PRIVATE_CANARY\n',
+                            'usage_usec -1\n', 'x' * 4097, 'user_usec 1\n'):
+                    counter.write_text(bad)
+                    with self.assertRaises(ValueError):
+                        FIX['service_cpu_usage']()
+
+    def test_timing_is_bounded_content_free_and_does_not_assert_a_kill_cause(self):
+        value = synthetic_report()['execution_timing']
+        FIX['check_execution_timing'](value)
+        for changes in ({'elapsed_ms': -1}, {'elapsed_ms': 3600001}, {'elapsed_ms': True},
+                        {'cpu_usage_usec': -1}, {'cpu_usage_usec': 128 * 3600 * 1000000 + 1},
+                        {'cpu_usage_usec': True}, {'version': True}, {'scope': 'PRIVATE_CANARY'},
+                        {'kill_cause': 'cpu_limit'}, {'prompt': 'PRIVATE_CANARY'}):
+            with self.assertRaises(ValueError):
+                FIX['check_execution_timing'](dict(value, **changes))
+
     def test_runtime_bundle_binds_fresh_source_build_and_exact_cross_repo_sources(self):
         runtime, value = synthetic_bundle()
         summary = FIX['bundle_summary'](value, 'a' * 40, runtime, FIX['pins']())

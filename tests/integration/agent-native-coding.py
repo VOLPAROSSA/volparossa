@@ -179,6 +179,35 @@ def native_receipt(value):
     return value
 
 
+def service_cpu_usage():
+    """Only a fixed cgroup counter, never process arguments or workload content."""
+    with (PRIVATE.CGROUP / 'cpu.stat').open('rb') as stream:
+        raw = stream.read(4097)
+    require(len(raw) <= 4096, 'CPU accounting size')
+    values = [line.split()[1] for line in raw.splitlines()
+              if len(line.split()) == 2 and line.split()[0] == b'usage_usec']
+    require(len(values) == 1 and re.fullmatch(rb'[0-9]{1,18}', values[0]), 'CPU accounting counter')
+    return int(values[0])
+
+
+def check_execution_timing(value):
+    require(isinstance(value, dict) and set(value) == {'version', 'scope', 'elapsed_ms', 'cpu_usage_usec'}
+        and type(value['version']) is int and value['version'] == 1
+        and value['scope'] == 'service_cgroup_during_native_harness'
+        and type(value['elapsed_ms']) is int and 0 <= value['elapsed_ms'] <= 3600000
+        and type(value['cpu_usage_usec']) is int and 0 <= value['cpu_usage_usec'] <= 128 * 3600 * 1000000,
+        'execution timing')
+    return value
+
+
+def execution_timing(started, cpu_before):
+    # This includes the service and all its worker descendants across the native
+    # harness, not the separate Codex process and not a per-inference diagnosis.
+    return check_execution_timing(dict(version=1, scope='service_cgroup_during_native_harness',
+        elapsed_ms=int((time.monotonic() - started) * 1000),
+        cpu_usage_usec=service_cpu_usage() - cpu_before))
+
+
 def check_report(value, revision):
     require(value['report_kind'] == 'volparossa-agent-native-coding' and value['proof_version'] == 1
         and re.fullmatch('[0-9a-f]{40}', revision) and value['source_revision'] == revision
@@ -220,6 +249,7 @@ def check_report(value, revision):
             and 0 <= memory['current_bytes'] <= memory['peak_bytes'] <= MEMORY_MAX
             and memory['admission_headroom_bytes'] == MEMORY_MAX - memory['current_bytes'], 'service memory')
     require(value['memory_before']['admission_headroom_bytes'] >= 9 * GIB // 2, 'admission headroom')
+    check_execution_timing(value['execution_timing'])
     require(value['native_cleanup'] == dict(process_joined=True, private_state_removed=True, host_network_unchanged=True)
         and value['cleanup'] == dict(client_group_joined=True, provision_group_joined=True, service_stopped=True,
             service_cgroup_empty=True, observed_lifetimes_ended=True, guest_root_removed=True, code_output_removed=True)
@@ -263,6 +293,7 @@ def execute(output, revision):
     ROOT.mkdir(mode=0o700)
     (ROOT / 'work').mkdir(mode=0o700)
     process, provision_process, service_created, members = None, None, False, {}
+    native_started, cpu_before = None, None
     try:
         result['phase'] = 'runtime-verification'
         result['runtime'] = verify_runtime(value)
@@ -325,6 +356,8 @@ def execute(output, revision):
             '--upstream-prompt', str(RUNTIME / 'prompt.md'), '--socket', str(ROOT / 'private.sock'),
             '--output', str(native_output), '--execute', '--yes']
         with (ROOT / 'client.log').open('xb') as diagnostics:
+            cpu_before = service_cpu_usage()
+            native_started = time.monotonic()
             process = subprocess.Popen(launch, stdout=diagnostics, stderr=diagnostics, start_new_session=True)
             deadline = time.monotonic() + 2530
             while process.poll() is None:
@@ -333,6 +366,7 @@ def execute(output, revision):
                     members[(member['pid'], member['start_ticks'])] = member
                 require(len(members) <= 1024, 'observed lifetime bound')
                 time.sleep(0.25)
+        result['execution_timing'] = execution_timing(native_started, cpu_before)
         report = read(native_output / 'report.json', 65536)
         if 'observed' in report:
             result['native'] = native_receipt(report['observed'])
@@ -366,6 +400,8 @@ def execute(output, revision):
             result['client_launcher'] = PRIVATE.closed_log(ROOT / 'client.log')
             if PRIVATE.CGROUP.exists():
                 result['memory_final'] = PRIVATE.memory()
+                if native_started is not None and 'execution_timing' not in result:
+                    result['execution_timing'] = execution_timing(native_started, cpu_before)
         except (OSError, ValueError, KeyError, TypeError):
             result['diagnostic_invalid'] = True
         client_joined = PRIVATE.stop_client(process)

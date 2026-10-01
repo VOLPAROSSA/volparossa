@@ -9,7 +9,7 @@ Last updated: 2026-10-01
 ### Native Codex read/edit/test integration candidate
 
 The separate [Code candidate](https://github.com/VOLPAROSSA/volparossa-code/pull/3)
-at `7e35ba8d56df8ec43715119ceb0a1ae3f02f1f63` connects the pinned source-built
+at `eb48696eb37afb9cda59bffc350845309b963dbb` connects the pinned source-built
 Codex app-server to the VOLPAROSSA Responses adapter and private Qwen conversation
 service. It retains the complete 20,903-byte upstream prompt. The owner approves
 only synthetic-project read, model-chosen arithmetic edit and actual test commands;
@@ -116,6 +116,24 @@ and `1ba245d00f749c66ba1dd4af5500420d9be05c078d21f2db8fb8c57ba0d7abe6`.
 The next exact-source trial requires native receipt v2 with closed denial counts,
 not command text, so any further rejection can be distinguished. Twenty-one
 focused Code checks pass; a complete actual read/edit/test loop remains required.
+
+The next original [attempt 36919718465](https://github.com/VOLPAROSSA/volparossa/actions/runs/36919718465)
+on core `d18aa4b7` / Code `eb48696e` fails **before any command approval**:
+one model request is submitted, none completes, and every approval/denial counter
+is zero. The service reports no terminal worker result and exit 137; its measured
+peak is 1,641,885,696 bytes with zero cgroup OOM events. Runtime/private cleanup
+and unchanged host state pass. Original artifact SHA-256:
+`cd948b7733411a125fe1b9f96e008d15d189fb18e008bf8a1dec87fbdde8e7e5`.
+
+Source inspection finds a real budget mismatch: the documented 600-second
+wall-clock window was also applied as 600 aggregate CPU-seconds, although two
+compute threads are allowed. The candidate aligns the finite CPU backstop to
+`threads × max_seconds` (at most 1,200 CPU-seconds), without changing wall time,
+memory limits, prompt, model or approvals. Four sandbox checks pass, including
+actual kernel-limit reads; fourteen focused fixture checks pass. The new receipt
+records bounded service-cgroup CPU-time and elapsed-time deltas. The earlier kill
+source remains **unproven**; the original evidence lacks CPU observations, and no
+new actual coding-loop success is claimed.
 
 ### Additional application and autonomous-maintenance scope
 
