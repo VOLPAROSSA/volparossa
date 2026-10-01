@@ -62,14 +62,25 @@ pub(super) async fn deposit(
             "input fragment changed from signed original identity"
         );
         let mut copies = set.fragment(index)?;
-        let result = replicas::deposit(&mut copies, socket, signer, staged.as_file_mut()).await?;
+        let retiring = super::placement::retired(set, index);
+        let result = replicas::deposit_selected(
+            &mut copies,
+            socket,
+            signer,
+            staged.as_file_mut(),
+            &retiring,
+        )
+        .await?;
         // Existing replica deposit deliberately skips explicitly deleted copies. Fragment
         // deposit may not present reduced redundancy as its original requested completion.
         let committed = copies
             .data
             .copies
             .iter()
-            .all(|copy| copy.charge == Charge::Committed);
+            .enumerate()
+            .filter(|(index, copy)| !retiring.contains(index) && copy.charge == Charge::Committed)
+            .count()
+            >= set.data.copies_per_fragment;
         complete &= result["operation_complete"] == true && committed;
         outcomes.push(serde_json::json!({"index": index, "operation_complete": result["operation_complete"] == true && committed,
             "copy_outcomes": result["copy_outcomes"]}));
@@ -88,7 +99,16 @@ pub(super) async fn refresh(
     let mut outcomes = Vec::new();
     for index in 0..set.data.fragments.len() {
         let mut copies = set.fragment(index)?;
-        let result = replicas::refresh(&mut copies, socket, signer, renewal).await?;
+        let mut retiring = super::placement::retired(set, index);
+        if let Some(intent) = &copies.data.handoff {
+            // While replacement is still copying, the original remains a useful
+            // retention obligation. Only verified readback advances to DeletePending.
+            if intent.phase == super::super::retained::HandoffPhase::Copying {
+                retiring.remove(&intent.from);
+            }
+        }
+        let result =
+            replicas::refresh_selected(&mut copies, socket, signer, renewal, &retiring).await?;
         complete &= result["operation_complete"] == true;
         outcomes.push(
             serde_json::json!({"index": index, "operation_complete": result["operation_complete"],

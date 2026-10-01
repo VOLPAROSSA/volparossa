@@ -4,6 +4,23 @@ Development scope: reusable core storage for encrypted application backups, incl
 the separately developed [Signal client](https://github.com/VOLPAROSSA/volparossa-chat).
 This is **not** the public cache, a training-data source or the message-delivery mailbox.
 
+## One core-owned redundancy policy
+
+Every **new logical storage archive** uses the same core-owned target: two independently
+pinned copies of each encrypted fragment, or two complete copies for the legacy replica
+format. Applications do not choose a redundancy tier. More providers can spread fragments
+more widely; that does not change the copy target. `ARCHIVE_COPY_TARGET` is the shared core
+constant. The hidden legacy `--copies 2` argument is only a compatibility assertion;
+other values are rejected before creating state or contacting peers.
+
+Previously created higher-copy archives remain fully readable, renewable and deletable.
+Their original target and all retained physical charges remain visible; no migration,
+silent pruning or relabeling to two copies occurs. Replacement may temporarily retain more
+than two copies and must continue counting every uncertain or retained copy until deletion
+is confirmed. Single-provider lease commands are underlying custody primitives, not a
+different application backup tier or proof of archive redundancy. This fixed creation
+policy is not automatic repair, independent-device availability or adaptive capacity drain.
+
 ## Separate lifecycles
 
 Message delivery can acknowledge and consume an inbox item. A backup restore must not
@@ -415,7 +432,7 @@ follows from it.
 
 `volparossa storage replicas` adds **create, deposit, status, progress, restore, renew and
 delete** around the same authenticated peer transfers. It does not invent another transport,
-discover provider trust or manage placement automatically. Select two to eight distinct,
+discover provider trust or manage placement automatically. Select exactly two distinct,
 independently trusted provider identities and obtain an owner-bound grant from each. This
 is a bounded capacity of the current command, not a network-wide replication limit. Different
 keys do not prove different operators, devices or failure domains.
@@ -523,9 +540,9 @@ relabeling this earlier result.
 
 `storage fragments create/deposit/status/progress/restore/renew/delete` composes the
 existing authenticated replica lifecycle over **distinct ranges of an already-encrypted
-archive**. Select three to eight independently trusted provider/grant pairs and two to
-`providers - 1` copies per fragment. Deterministic rotating placement gives every fragment
-its requested copies while each provider retains only a subset of the archive. It adds no
+archive**. Select three to eight independently trusted provider/grant pairs; the core gives
+every fragment exactly two copies. Deterministic rotating placement spreads those copies
+while each provider retains only a subset of the archive. It adds no
 new transport, erasure coding, encryption scheme or automatically inferred provider trust.
 
 ```sh
@@ -534,7 +551,7 @@ volparossa storage fragments create --state /absolute/fragment-set \
   --provider-key PROVIDER_A_KEY_HEX --grant /absolute/provider-a.grant \
   --provider-key PROVIDER_B_KEY_HEX --grant /absolute/provider-b.grant \
   --provider-key PROVIDER_C_KEY_HEX --grant /absolute/provider-c.grant \
-  --copies 2 --fragment-bytes 16777216 --lifetime-seconds 604800 \
+  --fragment-bytes 16777216 --lifetime-seconds 604800 \
   --identity /absolute/owner.identity
 volparossa storage fragments deposit --state /absolute/fragment-set \
   --input /absolute/encrypted-archive --already-encrypted --identity /absolute/owner.identity
@@ -578,8 +595,67 @@ source removal, two non-consuming restores with one provider unavailable, refusa
 holders of a fragment are unavailable, renewal and interrupted deletion/retry to zero leases.
 Tampering with the signed root or consistently rewriting both unsigned nested archive-ID
 records is rejected. This is **local transfer/lifecycle evidence**, not a new protected-overlay
-or independent-device proof. Automatic repair, fragment handoff/drain, measured metadata
-overhead and network-wide reciprocal contribution credit remain unfinished.
+or independent-device proof. The explicit fragment-copy replacement primitive below extends
+this lifecycle; automatic repair/drain, measured metadata overhead and network-wide
+reciprocal contribution credit remain unfinished.
+
+### Explicit fragment-copy replacement
+
+`storage fragments replace` repairs or moves **one copy of one fragment**, not a complete
+backup. It reuses the existing replica transfer, readback, deletion and accounting path:
+
+```sh
+volparossa storage fragments replace --state /absolute/fragment-set \
+  --fragment-index 0 --from-provider-key OLD_PROVIDER_KEY_HEX \
+  --provider-key NEW_PROVIDER_KEY_HEX --grant /absolute/replacement.grant \
+  --lifetime-seconds 604800 --identity /absolute/owner.identity
+```
+
+The owner supplies a new independently trusted provider for that fragment. The same provider
+may already hold other fragments, but cannot be another current or historical holder of the
+selected fragment. A surviving copy is required; this command cannot recreate missing bytes
+when every copy has disappeared. The owner stays online and signs the operations. It is a
+repair **primitive**, not an automatic placement or maintenance service.
+
+Before changing the child replica set, the owner durably signs a placement extension bound
+to the exact original reconstruction root, fragment, retiring copy, new provider, grant,
+archive identity and initial expiry. The immutable `fragments.json` stays unchanged. Keep
+`placement-authorizations.json` with the rest of the private recovery state. Reopening
+authenticates the parent extension before recovering any child journal; an interrupted
+installation resumes the exact allocated identity, never a fresh reservation.
+
+The source is restored from a surviving provider, uploaded to the replacement, then read
+back completely and hash-verified. Only after verification and survivor reconciliation may
+the original copy be deleted. Retention must still cover the original obligation at deletion
+time. A lost delete confirmation leaves retirement pending and the original fully charged.
+Repeat the exact command to retry. Progress, non-consuming restore, renewal and all-copy
+deletion remain available; renewal keeps the old obligation while copying and excludes it
+only after verified replacement advances to pending deletion. Historical copies are never
+silently forgotten. The existing bound of eight retained copy identities per fragment also
+limits repeated replacements; journal compaction is not implemented.
+
+The existing copy journals remain the **only charge ledger**. During replacement the charge
+may exceed `logical_ciphertext_bytes * copies_per_fragment`; all reserved, committed,
+uncertain and expired copies count at their actual fragment length until confirmed deletion.
+Only archives with a placement extension emit the additive `report_version: 2`, with
+`desired_copies_per_fragment`, `placement_authorizations`, `retained_copy_records`,
+`pending_retirements` and `replacement_overhead_included`. Desired redundancy is not the
+length of a historical `fragments[].copies` array. Providers include newly authorized
+identities; each provider's charge still sums its retained records. Unmodified archives
+retain their old manifest and report shape.
+
+**Consumer boundary:** the pinned Image v1 adapter currently rejects this extended history
+and temporary overhead. Before Image initiates replacement, its report parser must accept
+the explicit v2 shape, keep the original desired copy count, validate up to eight historical
+records per fragment and sum actual per-copy/per-provider charges rather than cap them at
+the original target. Until that coordinated update, Image should use unreplaced archives;
+this core change does not claim repaired-archive Image compatibility.
+
+Targeted local tests use real signed storage services and SQLite stores: parent/child crash
+windows, rejected unsigned recovery, lost reservation/readback/deletion confirmations,
+same-identity restart, survivor reconstruction without the local source, renewal during
+pending retirement and all-copy deletion. These are not new overlay or independent-device
+availability proofs, automatic repair, safe provider-capacity drain or network-wide credit.
 
 ### Disposable protected-fragment proof
 

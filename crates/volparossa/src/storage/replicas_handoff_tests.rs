@@ -35,7 +35,7 @@ use super::super::{
 use super::{keys_and_grants, peer_id};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Step {
+pub(crate) enum Step {
     Reserve,
     Read,
     Delete,
@@ -43,11 +43,11 @@ enum Step {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Event {
-    provider: usize,
-    step: Step,
-    bytes: u64,
-    terminal_sent: bool,
+pub(crate) struct Event {
+    pub(crate) provider: usize,
+    pub(crate) step: Step,
+    pub(crate) bytes: u64,
+    pub(crate) terminal_sent: bool,
 }
 
 struct Peer {
@@ -55,8 +55,8 @@ struct Peer {
     grant: VerifiedStorageGrant,
 }
 
-struct HandoffPeers {
-    socket: PathBuf,
+pub(crate) struct HandoffPeers {
+    pub(crate) socket: PathBuf,
     lose: Arc<Mutex<Option<(usize, Step)>>>,
     trace: Arc<Mutex<Vec<Event>>>,
     stop: tokio::sync::oneshot::Sender<()>,
@@ -64,7 +64,7 @@ struct HandoffPeers {
 }
 
 impl HandoffPeers {
-    fn start(
+    pub(crate) fn start(
         root: &Path,
         signers: &[SigningKey],
         grants: &[VerifiedStorageGrant],
@@ -119,7 +119,7 @@ impl HandoffPeers {
         }
     }
 
-    fn lose_next(&self, provider: usize, step: Step) {
+    pub(crate) fn lose_next(&self, provider: usize, step: Step) {
         assert!(
             self.lose
                 .lock()
@@ -129,11 +129,11 @@ impl HandoffPeers {
         );
     }
 
-    fn events(&self) -> Vec<Event> {
+    pub(crate) fn events(&self) -> Vec<Event> {
         self.trace.lock().unwrap().clone()
     }
 
-    async fn stop(self) {
+    pub(crate) async fn stop(self) {
         assert!(
             self.lose.lock().unwrap().is_none(),
             "fault was not exercised"
@@ -164,9 +164,7 @@ async fn exchange(
     let mut registry = PublicationRegistry::new();
     registry.set_private_storage(Arc::clone(&peer.service));
     let serving = tokio::spawn(async move {
-        serve_publication(&mut provider, &registry, TransferLimits::default())
-            .await
-            .unwrap();
+        serve_publication(&mut provider, &registry, TransferLimits::default()).await
     });
     let challenge = wire::begin(&mut remote, &peer.grant).await.unwrap();
     let mut response = ControlResponse {
@@ -180,10 +178,15 @@ async fn exchange(
         })),
     };
     write_response(&mut local, &response).await.unwrap();
-    let receipt = wire::bridge(&mut local, &mut remote, &peer.grant, &challenge)
-        .await
-        .unwrap();
-    serving.await.unwrap();
+    let bridged = wire::bridge(&mut local, &mut remote, &peer.grant, &challenge).await;
+    let served = serving.await.unwrap();
+    let Ok(receipt) = bridged else {
+        // A real service rejects a read of an already deleted lease. Close only this
+        // request so the owner can try another retained copy, as with a remote peer.
+        assert!(served.is_err());
+        return;
+    };
+    served.unwrap();
     let result = receipt.receipt.result();
     let step = if result.range_sha256.is_some() {
         Step::Read
