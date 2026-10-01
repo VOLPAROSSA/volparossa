@@ -71,11 +71,21 @@ cleanup:{complete:true,retained_input:false,retained_report:false} }`.
 - `{ "type":"incomplete", "reason":"token_limit"|"wire_truncated"|"invalid_output" }`.
 
 Only complete EOS generation can produce a complete assistant/tool proposal.
-Smol requires strict JSON; Qwen accepts plain assistant text or exactly one native
-`<tool_call>{"name":"vp_N","arguments":{...}}</tool_call>` with strict JSON.
-Mixed prose/calls, multiple new calls, reasoning markers and partial calls are
-incomplete rather than silently repaired. No Markdown stripping, JSON repair or invented
-tool call. `turn_complete` means syntactic completion, not correctness or task
+Smol requires strict JSON. Qwen accepts plain assistant text or a tool proposal in
+either of two exact encodings: the native
+`<tool_call>{"name":"vp_N","arguments":{...}}</tool_call>`, or the complete
+standalone `{"name":"vp_N","arguments":{...}}` object when tools are offered.
+The latter is an explicit compatibility encoding, **not proof of native wrapper
+generation**. Both use the same strict duplicate-key rejection, offered-alias
+mapping, payload bounds and fresh owner-assigned call ID. The JSON-only form
+reserves precisely the `name`/`arguments` object; it does not extract a proposal
+from prose, code fences, concatenated objects or malformed JSON. Those unwrapped
+non-proposals remain assistant text and must never be executed as calls. An exact
+proposal for an unknown alias is incomplete. Tagged mixed/partial calls and
+reasoning markers also remain incomplete. No Markdown stripping, JSON repair or
+invented tool choice occurs. The worker never executes a proposal; the caller
+must still validate tool arguments and authorize every action within its own
+workspace/permission scope. `turn_complete` means syntactic completion, not correctness or task
 completion. Do not execute an incomplete result or count it as an answer.
 
 Cancel uses the unchanged `{ "type":"cancel", "task_id": SUBMIT_ID }` operation.

@@ -26,16 +26,27 @@ fn parse(input: &Input, raw: &str, id: &str) -> Result<Output> {
         "conversation_native_marker"
     );
     let trimmed = raw.trim();
-    if !trimmed.contains("<tool_call") && !trimmed.contains("</tool_call") {
-        return Ok(Output::Assistant {
-            text: raw.to_owned(),
-        });
-    }
-    let body = trimmed
-        .strip_prefix("<tool_call>")
-        .and_then(|v| v.strip_suffix("</tool_call>"))
-        .ok_or_else(|| anyhow::anyhow!("conversation_native_call"))?;
-    let call: Call = serde_json::from_str(body)?;
+    let call: Call = if !trimmed.contains("<tool_call") && !trimmed.contains("</tool_call") {
+        // The exact standalone JSON object is a second proposal encoding, not
+        // authority to execute. Never extract JSON from prose or repair a call.
+        match (!input.tools.is_empty())
+            .then(|| serde_json::from_str(trimmed).ok())
+            .flatten()
+        {
+            Some(call) => call,
+            None => {
+                return Ok(Output::Assistant {
+                    text: raw.to_owned(),
+                });
+            }
+        }
+    } else {
+        let body = trimmed
+            .strip_prefix("<tool_call>")
+            .and_then(|v| v.strip_suffix("</tool_call>"))
+            .ok_or_else(|| anyhow::anyhow!("conversation_native_call"))?;
+        serde_json::from_str(body)?
+    };
     let tool = input
         .tools
         .iter()

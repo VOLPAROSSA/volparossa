@@ -83,13 +83,23 @@ def decode(value, output, request_id):
         raw = output["text"]
         c.require(type(raw) is str and not any(marker in raw for marker in
                   ("<think", "</think", "<|im_", "<|endoftext|>")), "NATIVE_MARKER")
-        if "<tool_call" not in raw and "</tool_call" not in raw:
-            c.require(c.text(raw, 4096), "EMPTY_ANSWER")
-            return {"type": "assistant", "text": raw}
         trimmed = raw.strip()
-        c.require(trimmed.startswith("<tool_call>") and trimmed.endswith("</tool_call>"), "NATIVE_CALL")
-        parsed = json.loads(trimmed[len("<tool_call>"):-len("</tool_call>")],
-                            object_pairs_hook=c.unique, parse_constant=c.invalid_constant)
+        if "<tool_call" not in raw and "</tool_call" not in raw:
+            # Qwen can emit the exact tool object without its XML wrapper. Accept
+            # only that complete strict object, never extract/repair JSON in prose
+            # or Markdown. These remain proposals; the owner authorizes execution.
+            try:
+                c.require(bool(value["tools"]), "NO_OFFERED_TOOLS")
+                parsed = json.loads(trimmed, object_pairs_hook=c.unique, parse_constant=c.invalid_constant)
+                c.fields(parsed, ("name", "arguments"))
+                c.require(type(parsed["name"]) is str, "TOOL_NAME")
+            except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+                c.require(c.text(raw, 4096), "EMPTY_ANSWER")
+                return {"type": "assistant", "text": raw}
+        else:
+            c.require(trimmed.startswith("<tool_call>") and trimmed.endswith("</tool_call>"), "NATIVE_CALL")
+            parsed = json.loads(trimmed[len("<tool_call>"):-len("</tool_call>")],
+                                object_pairs_hook=c.unique, parse_constant=c.invalid_constant)
         c.fields(parsed, ("name", "arguments"))
         selected = [tool for index, tool in enumerate(value["tools"]) if parsed["name"] == f"vp_{index}"]
         c.require(len(selected) == 1, "UNKNOWN_TOOL")

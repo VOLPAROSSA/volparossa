@@ -283,3 +283,56 @@ fn qwen_custom_wrapper_preserves_namespace_and_rejects_partial_turns() {
         "wire_truncated"
     );
 }
+
+#[test]
+fn qwen_standalone_json_requires_exact_proposal_and_keeps_owner_authority() {
+    let mut value = input();
+    let input =
+        Input::decode_profile(&serde_json::to_vec(&value).unwrap(), ModelProfile::Qwen600).unwrap();
+    let id = "abcd".repeat(8);
+    let raw = r#"{"name": "vp_0", "arguments": {"path": "fixture.js"}}"#;
+    let proposal = qwen::turn(&input, &native_output(raw), &id).unwrap();
+    assert_eq!(proposal["type"], "function_call");
+    assert_eq!(proposal["name"], "read_file");
+    assert_eq!(proposal["arguments"], json!({"path":"fixture.js"}));
+    assert_eq!(proposal["call_id"], format!("vp-{id}"));
+    let wrapped = format!("<tool_call>{raw}</tool_call>");
+    assert_eq!(
+        proposal,
+        qwen::turn(&input, &native_output(&wrapped), &id).unwrap()
+    );
+    for text in [
+        format!("```json\n{raw}\n```"),
+        format!("Example: {raw}"),
+        format!("{raw} done"),
+        format!("{raw}{raw}"),
+        raw[..raw.len() - 1].into(),
+        raw.replace("\"vp_0\"", "\"vp_0\", \"name\": \"vp_0\""),
+        raw.replace("\"fixture.js\"", "\"fixture.js\", \"path\": \"other\""),
+        raw.replace("\"name\": \"vp_0\"", "\"name\": \"vp_0\", \"extra\": 1"),
+    ] {
+        assert_eq!(
+            qwen::turn(&input, &native_output(&text), &id).unwrap(),
+            json!({"type":"assistant","text":text})
+        );
+    }
+    assert_eq!(
+        qwen::turn(&input, &native_output(&raw.replace("vp_0", "vp_99")), &id).unwrap()["reason"],
+        "invalid_output"
+    );
+    let report = json!({"id":id,"outputs":[native_output(raw)],"conversation":proposal,
+        "prompt_tokens":279,"conversation_limits":capabilities(ModelProfile::Qwen600)});
+    validate_report(
+        &report,
+        &serde_json::to_vec(&value).unwrap(),
+        ModelProfile::Qwen600,
+    )
+    .unwrap();
+    value["tools"] = json!([]);
+    let no_tools =
+        Input::decode_profile(&serde_json::to_vec(&value).unwrap(), ModelProfile::Qwen600).unwrap();
+    assert_eq!(
+        qwen::turn(&no_tools, &native_output(raw), &id).unwrap(),
+        json!({"type":"assistant","text":raw})
+    );
+}

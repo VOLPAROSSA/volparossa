@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-30
+Last updated: 2026-10-01
 
 ## Current integration and active work
 
@@ -77,7 +77,27 @@ these use synthetic validator inputs/backend doubles, not new model inference.
 The three strict-Clippy findings from the same head's Quality run are corrected
 without changing diagnostic or cleanup semantics; targeted package/all-targets/
 all-features strict Clippy passes locally.
-Actual native tool use,
+The exact diagnostic [trial 36892800286](https://github.com/VOLPAROSSA/volparossa/actions/runs/36892800286)
+on `b333fbfc45d07dcd46514f9cf890b73f4f1bd5b6` failed the unchanged tool check but
+now identifies its actual first output: the complete 53-byte JSON object
+`{"name": "vp_0", "arguments": {"path": "fixture.js"}}`, **without native tool
+tags**. Generation completed at EOS (279 prompt / 19 generated tokens); worker
+cleanup, no-OOM and unchanged-host checks passed. The original artifact ZIP is
+`2fd80d7cdec9138cf958b5e524e6a4b40c8a04535a01c7469dfcaf7d5885ebb3`.
+This trial remains failed; it proves neither an authorized file read nor a
+correlated second turn, and cannot retroactively classify older unexported answers.
+
+The next production candidate accepts that exact standalone JSON proposal as a
+documented second encoding alongside native tagged proposals. Python and Rust
+independently apply strict JSON/duplicate-key checks and the same offered-alias,
+payload, EOS and owner-call-ID rules. It does not scrape JSON from prose, repair
+invalid JSON, choose a tool for the model or execute tools in the worker. The
+caller remains responsible for argument validation and execution permissions.
+Model weights, prompt, sampling, seed, limits and the two-turn success check are
+unchanged. Focused decoder checks are not new model evidence; an actual fresh
+two-turn run is still required.
+
+Actual completed tool use,
 a hard-4GiB-bounded long-context run and an end-to-end editing loop remain
 **unproved/incomplete**. See the [exact wire contract](../crates/volparossa/src/compute/private_conversation/WIRE.md).
 

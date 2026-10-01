@@ -146,6 +146,27 @@ class QwenConversationTests(unittest.TestCase):
             raw = '<tool_call>' + json.dumps({"name": "vp_0", "arguments": arguments}) + '</tool_call>'
             self.assertEqual(NATIVE.decode(data, output(raw), ID)["reason"], "invalid_output")
 
+    def test_standalone_json_is_exact_offered_proposal_not_prose_extraction(self):
+        data = conversation()
+        raw = '{"name": "vp_0", "arguments": {"path": "fixture.js"}}'
+        proposal = NATIVE.decode(data, output(raw), ID)
+        self.assertEqual(proposal, dict(call(), call_id="vp-" + ID, arguments={"path": "fixture.js"}))
+        self.assertEqual(proposal, NATIVE.decode(data, output('<tool_call>' + raw + '</tool_call>'), ID))
+        for text in ('```json\n' + raw + '\n```', 'Example: ' + raw, raw + ' done', raw + raw,
+                     raw[:-1], raw.replace('"vp_0"', '"vp_0", "name": "vp_0"'),
+                     raw.replace('"fixture.js"', '"fixture.js", "path": "other"'),
+                     raw.replace('"name": "vp_0"', '"name": "vp_0", "extra": 1')):
+            self.assertEqual(NATIVE.decode(data, output(text), ID), {"type": "assistant", "text": text})
+        self.assertEqual(NATIVE.decode(data, output(raw.replace('vp_0', 'vp_99')), ID)["reason"], "invalid_output")
+        self.assertEqual(NATIVE.decode(data, output(raw, "token_limit"), ID)["reason"], "token_limit")
+        self.assertEqual(NATIVE.decode(data, output(raw, truncated=True), ID)["reason"], "wire_truncated")
+        data["tools"] = []
+        self.assertEqual(NATIVE.decode(data, output(raw), ID), {"type": "assistant", "text": raw})
+        data["tools"] = [{"type": "custom", "name": "patch", "namespace": "local", "description": "Propose patch."}]
+        custom = '{"name":"vp_0","arguments":{"input":"patch text"}}'
+        self.assertEqual(NATIVE.decode(data, output(custom), ID), {"type": "custom_tool_call", "call_id": "vp-" + ID,
+                         "name": "patch", "namespace": "local", "input": "patch text"})
+
     def test_bf16_sdpa_no_fallback_and_caps_bind_actual_budget(self):
         profile = WORKER.model_profile(PROFILE)
         model, torch, transformers = mock.Mock(), mock.Mock(), mock.Mock()
