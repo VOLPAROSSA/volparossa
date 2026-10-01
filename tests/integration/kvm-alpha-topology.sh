@@ -18,6 +18,7 @@ private_storage_replicas=no
 private_storage_handoff=no
 private_storage_fragments=no
 private_storage_maintenance=no
+private_storage_adaptive_maintenance=no
 image_snapshot=no
 cloud_private_file=no
 agent_jobs_loss=no
@@ -57,10 +58,19 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|private-storage-handoff|private-storage-fragments|private-storage-maintenance|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|private-storage-handoff|private-storage-fragments|private-storage-maintenance|private-storage-adaptive-maintenance|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
 }
 
 print_plan() {
+    if [ "$private_storage_adaptive_maintenance" = yes ]; then
+        printf '%s\n' \
+            'VOLPAROSSA private-storage-adaptive-maintenance protected network smoke plan:' \
+            '  signed v2 A/B/C sources, actual owner renewal/EOF/restart/foreground revocation;' \
+            '  stop provider B; fixed-A v1 negative control must not repair the observed B failure;' \
+            '  core-issued v2 turns replace exact B fragments, retaining uncertain physical charges;' \
+            '  two A/C restores, B-return retirement, all-copy deletion and exact host/private cleanup.'
+        return
+    fi
     if [ "$private_storage_maintenance" = yes ]; then
         printf '%s\n' \
             'VOLPAROSSA private-storage-maintenance protected network smoke plan:' \
@@ -696,6 +706,7 @@ while [ "$#" -gt 0 ]; do
             private_storage_handoff=no
             private_storage_fragments=no
             private_storage_maintenance=no
+            private_storage_adaptive_maintenance=no
             image_snapshot=no
             cloud_private_file=no
             download_sharing=no
@@ -727,6 +738,7 @@ while [ "$#" -gt 0 ]; do
                 private-storage-handoff) scenario=content-custody; private_storage_handoff=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-fragments) scenario=content-custody; private_storage_fragments=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-maintenance) scenario=content-custody; private_storage_fragments=yes; private_storage_maintenance=yes; wifi_link=no; uplink_link=no ;;
+                private-storage-adaptive-maintenance) scenario=content-custody; private_storage_fragments=yes; private_storage_maintenance=yes; private_storage_adaptive_maintenance=yes; wifi_link=no; uplink_link=no ;;
                 image-snapshot) scenario=content-custody; private_storage_fragments=yes; image_snapshot=yes; wifi_link=no; uplink_link=no ;;
                 cloud-private-file) scenario=content-custody; private_storage_fragments=yes; cloud_private_file=yes; wifi_link=no; uplink_link=no ;;
                 agent-artifact-quarantine) scenario=agent-artifact; agent_train_loop=yes; agent_artifact_quarantine=yes; wifi_link=no; uplink_link=no ;;
@@ -956,7 +968,7 @@ if [ "$private_storage_fragments" = yes ]; then
     done
 fi
 if [ "$private_storage_maintenance" = yes ]; then
-    for storage_fixture in private-storage-maintenance-smoke.sh private-storage-maintenance-smoke.py private-storage-log-sampler.py; do
+    for storage_fixture in private-storage-maintenance-smoke.sh private-storage-maintenance-smoke.py private-storage-adaptive-maintenance-smoke.py private-storage-log-sampler.py; do
         [ -f "$source_directory/tests/integration/$storage_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
     done
@@ -2674,6 +2686,8 @@ fi
 if [ "$private_storage_maintenance" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/private-storage-maintenance-smoke.py" \
         "$WORK/bin/private-storage-maintenance-smoke.py"
+    install -o root -g root -m 0555 "$source_directory/tests/integration/private-storage-adaptive-maintenance-smoke.py" \
+        "$WORK/bin/private-storage-adaptive-maintenance-smoke.py"
     install -o root -g root -m 0555 "$source_directory/tests/integration/private-storage-log-sampler.py" \
         "$WORK/bin/private-storage-log-sampler.py"
 fi

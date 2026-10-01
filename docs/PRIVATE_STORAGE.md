@@ -45,6 +45,46 @@ volparossa storage fragments maintenance serve \
 volparossa storage fragments maintenance status --enrollment /absolute/private-maintenance
 ```
 
+To allow automatic repair of **any explicitly selected source provider**, repeat
+`--from-provider-key` when enrolling. For example, append
+`--from-provider-key PROVIDER_B_KEY_HEX --from-provider-key PROVIDER_C_KEY_HEX`
+to authorize A/B/C, and supply the individually signed candidate grants using paired
+`--provider-key` / `--grant` arguments. A future replacement provider may also be
+authorized as a source, but only when its candidate grant is explicitly supplied.
+Neither a discovered peer nor an unrelated pending handoff widens this authority.
+
+One source retains the exact version-one enrollment signature format and fixed-source
+behavior. Multiple sources create a version-two owner-signed enrollment; existing
+enrollments are not silently migrated. This mode chooses the exact observed uncertain
+fragment copy, so a healthy earlier copy belonging to the same provider is not replaced.
+Copying resumes first with its retained identity; verified retirement remains charged
+and does not cause a second replacement for the same pending fragment. A retry may
+perform another real readback, but that is not another placement or freed source space.
+The source set contains at most eight explicit identities, matching the bounded
+candidate set; identities do not establish independent physical failure domains.
+Four targeted maintenance tests pass, including a real signed SQLite-provider trial
+where B, rather than the former fixed A source, disappears. It repairs B's exact
+observed fragments, resumes the same replacement identity after a lost confirmation
+and reopening owner/provider state, restores the removed source twice from C/D while A/B are offline,
+and releases B's retained charges only after B returns and confirms deletion. The
+rotating renewal/repair engine is exercised locally; this is not an additional
+running-daemon/protected-overlay proof of version-two enrollment.
+
+The separate `private-storage-adaptive-maintenance` disposable overlay scenario is
+prepared for that combined proof. It retains a fixed-A v1 enrollment as an actual
+negative control, withdraws B, then requires v2 A/B/C authority to repair B's exact
+copies during real daemon-issued resource turns. Its two A/C reconstructions,
+pending physical charges, B-return retirement, all-copy deletion and unchanged-host
+checks remain mandatory. Until an exact run passes, this is an executable candidate,
+not new overlay evidence or a replacement for the existing v1 scenario.
+The original v2 run `36936986464` on `b0b7b0d0` failed before owner operations
+because the initial protected route was unavailable; cleanup and unchanged host
+state passed. Its exports establish no more specific cause. The candidate now
+also inherits `4c31ac3b`'s context-correlated maintenance evidence: each phase's
+final context needs its own actual completion within the unchanged authorized
+exit/relay/path scope. This is combined with B-loss accounting and the fixed-A v1
+negative control, not substituted for either. All original failures remain failures.
+
 The worker has no independent maintenance timer. The existing core maintenance tick
 may issue one live, owner/UID-bound turn when its foreground and shared resource
 conditions permit. Both existing upload/download sharing budgets must be explicitly

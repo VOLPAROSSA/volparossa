@@ -24,6 +24,7 @@ use volparossa_local_control::{
 };
 
 const DOMAIN: &[u8] = b"VOLPAROSSA/private-storage-maintenance-enrollment/v1\0";
+const ADAPTIVE_DOMAIN: &[u8] = b"VOLPAROSSA/private-storage-maintenance-enrollment/v2\0";
 const MAX_ENROLLMENT: u64 = 32768;
 
 #[cfg(test)]
@@ -49,8 +50,10 @@ pub(crate) struct Enroll {
     enrollment: PathBuf,
     #[arg(long)]
     state: PathBuf,
-    #[arg(long, value_parser = parse_publisher_key)]
-    from_provider_key: VerifyingKey,
+    /// Repeat to authorize automatic selection among these exact source providers.
+    /// A single source retains the original version-one fixed-provider behavior.
+    #[arg(long, required = true, value_parser = parse_publisher_key)]
+    from_provider_key: Vec<VerifyingKey>,
     #[arg(long, required = true, value_parser = parse_publisher_key)]
     provider_key: Vec<VerifyingKey>,
     #[arg(long, required = true)]
@@ -99,6 +102,9 @@ struct Enrollment {
     renew_before: u64,
     maximum_charged: u64,
     maximum_turn: u64,
+    // Omitted for v1: existing enrollment signatures retain their exact bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    repair_sources: Vec<[u8; 32]>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -109,7 +115,12 @@ struct SignedEnrollment {
 }
 
 fn signing(enrollment: &Enrollment) -> Result<Vec<u8>> {
-    let mut bytes = DOMAIN.to_vec();
+    let mut bytes = match enrollment.version {
+        1 => DOMAIN,
+        2 => ADAPTIVE_DOMAIN,
+        _ => bail!("unsupported maintenance enrollment"),
+    }
+    .to_vec();
     bytes.extend(serde_json::to_vec(enrollment)?);
     ensure!(
         bytes.len() as u64 <= MAX_ENROLLMENT,
@@ -148,7 +159,7 @@ fn load(directory: &File) -> Result<Enrollment> {
     )?;
     let enrollment = signed.enrollment;
     ensure!(
-        enrollment.version == 1
+        matches!(enrollment.version, 1 | 2)
             && enrollment.created < enrollment.expires
             && enrollment.expires - enrollment.created <= MAX_LEASE_SECONDS
             && (1..=8).contains(&enrollment.providers.len())
@@ -159,6 +170,22 @@ fn load(directory: &File) -> Result<Enrollment> {
             && enrollment.maximum_charged > 0,
         "invalid maintenance enrollment"
     );
+    ensure!(
+        (enrollment.version == 1 && enrollment.repair_sources.is_empty())
+            || (enrollment.version == 2
+                && (2..=8).contains(&enrollment.repair_sources.len())
+                && enrollment.repair_sources.first() == Some(&enrollment.source)
+                && enrollment
+                    .repair_sources
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+                && !enrollment.repair_sources.contains(&enrollment.owner)),
+        "invalid explicit maintenance source authority"
+    );
+    VerifyingKey::from_bytes(&enrollment.source)?;
+    for source in &enrollment.repair_sources {
+        VerifyingKey::from_bytes(source)?;
+    }
     crate::storage::require_absolute(&enrollment.archive)?;
     Ok(enrollment)
 }
@@ -183,7 +210,8 @@ fn candidates(enrollment: &Enrollment) -> Result<Vec<VerifiedStorageGrant>> {
                 .verify(&VerifyingKey::from_bytes(key)?, now)?;
             ensure!(
                 grant.owner_key().to_bytes() == enrollment.owner
-                    && grant.provider_key().to_bytes() != enrollment.source
+                    && (enrollment.version == 2
+                        || grant.provider_key().to_bytes() != enrollment.source)
                     && grant.provider_key() != grant.owner_key(),
                 "maintenance candidate authority mismatch"
             );
@@ -233,9 +261,27 @@ fn enroll(args: Enroll) -> Result<serde_json::Value> {
     let set = LockedFragments::open(&args.state)?;
     set.check_owner(&signer)?;
     check_turn_size(&set, args.maximum_turn_bytes)?;
+    let mut sources: Vec<_> = args
+        .from_provider_key
+        .iter()
+        .map(VerifyingKey::to_bytes)
+        .collect();
+    sources.sort_unstable();
     ensure!(
-        placement::providers(&set).contains(&args.from_provider_key.to_bytes()),
-        "unknown maintenance source"
+        (1..=8).contains(&sources.len())
+            && sources.windows(2).all(|pair| pair[0] < pair[1])
+            && !sources.contains(&signer.verifying_key().to_bytes()),
+        "one to eight distinct explicit maintenance sources required"
+    );
+    let current = placement::providers(&set);
+    ensure!(
+        sources.iter().all(|source| current.contains(source)
+            || (sources.len() > 1
+                && args
+                    .provider_key
+                    .iter()
+                    .any(|key| key.to_bytes() == *source))),
+        "maintenance source is neither a retained provider nor an explicit candidate"
     );
     let charge = set.report("status")?["physical_payload_charge_upper_bound"]
         .as_u64()
@@ -248,12 +294,12 @@ fn enroll(args: Enroll) -> Result<serde_json::Value> {
     OsRng.fill_bytes(&mut id);
     let created = crate::storage::now()?;
     let enrollment = Enrollment {
-        version: 1,
+        version: if sources.len() == 1 { 1 } else { 2 },
         id,
         owner: signer.verifying_key().to_bytes(),
         root: set.root_sha256,
         archive: args.state,
-        source: args.from_provider_key.to_bytes(),
+        source: sources[0],
         providers: args
             .provider_key
             .iter()
@@ -272,6 +318,11 @@ fn enroll(args: Enroll) -> Result<serde_json::Value> {
         renew_before: args.renew_before_seconds,
         maximum_charged: args.maximum_charged_bytes,
         maximum_turn: args.maximum_turn_bytes,
+        repair_sources: if sources.len() == 1 {
+            Vec::new()
+        } else {
+            sources
+        },
     };
     candidates(&enrollment)?;
     let signature = hex::encode(signer.sign(&signing(&enrollment)?).to_bytes());
@@ -333,6 +384,121 @@ fn renewal_due(
     Ok(due)
 }
 
+/// A v2 enrollment selects an exact observed failure, never an inferred network-wide
+/// failure. Historical retirement charges are not new missing copies. Pending intents
+/// retain their own identities and must remain inside this enrollment's source authority.
+fn repair_target(
+    set: &LockedFragments,
+    enrollment: &Enrollment,
+    scan: u64,
+) -> Result<Option<(Option<usize>, VerifyingKey)>> {
+    let mut copying = None;
+    let mut uncertain = None;
+    let mut retiring = None;
+    let count = set.data.fragments.len();
+    let start = usize::try_from(scan % u64::try_from(count)?)?;
+    for offset in 0..count {
+        let index = (start + offset) % count;
+        let copies = set.fragment(index)?;
+        let pending = copies
+            .data
+            .handoff
+            .as_ref()
+            .filter(|intent| intent.phase != HandoffPhase::Complete);
+        if enrollment.version == 1 {
+            if pending.is_some()
+                || copies.data.copies.iter().any(|copy| {
+                    copy.provider_key == enrollment.source && copy.charge == Charge::Uncertain
+                })
+            {
+                return Ok(Some((None, VerifyingKey::from_bytes(&enrollment.source)?)));
+            }
+            continue;
+        }
+        if let Some(intent) = pending {
+            let source = copies.data.copies[intent.from].provider_key;
+            ensure!(
+                enrollment.repair_sources.contains(&source),
+                "pending repair source is outside enrollment authority"
+            );
+            let target = Some((Some(index), VerifyingKey::from_bytes(&source)?));
+            if intent.phase == HandoffPhase::Copying {
+                if copying.is_none() {
+                    copying = target;
+                }
+            } else if retiring.is_none() {
+                retiring = target;
+            }
+            continue; // Never allocate another replacement for a pending fragment.
+        }
+        let retired = placement::retired(set, index);
+        if uncertain.is_none() {
+            for (copy_index, copy) in copies.data.copies.iter().enumerate() {
+                if !retired.contains(&copy_index)
+                    && copy.charge == Charge::Uncertain
+                    && enrollment.repair_sources.contains(&copy.provider_key)
+                {
+                    uncertain = Some((Some(index), VerifyingKey::from_bytes(&copy.provider_key)?));
+                    break;
+                }
+            }
+        }
+    }
+    Ok(copying.or(uncertain).or(retiring))
+}
+
+async fn repair_turn(
+    set: &mut LockedFragments,
+    enrollment: &Enrollment,
+    socket: &Path,
+    signer: &SigningKey,
+    grants: &[VerifiedStorageGrant],
+    target: (Option<usize>, VerifyingKey),
+    refresh: serde_json::Value,
+) -> Result<serde_json::Value> {
+    let (index, from) = target;
+    let charged = set.report("status")?["physical_payload_charge_upper_bound"]
+        .as_u64()
+        .context("missing charge")?;
+    let additional = match index {
+        Some(index) => repair::selected_additional_charge(set, index, &from)?,
+        None => repair::next_additional_charge(set, &from)?,
+    };
+    if charged.saturating_add(additional) > enrollment.maximum_charged {
+        return Ok(serde_json::json!({"maintenance_stage":"charge_limit","refresh":refresh}));
+    }
+    let eligible: Vec<_> = grants
+        .iter()
+        .filter(|grant| grant.provider_key() != &from)
+        .cloned()
+        .collect();
+    if eligible.is_empty() {
+        return Ok(
+            serde_json::json!({"maintenance_stage":"no_eligible_candidate","refresh":refresh}),
+        );
+    }
+    let lifetime = enrollment
+        .lifetime
+        .min(enrollment.expires.saturating_sub(crate::storage::now()?));
+    let repaired = match index {
+        Some(index) => {
+            repair::repair_selected(set, socket, signer, (index, from), &eligible, lifetime).await?
+        }
+        None => repair::repair(set, socket, signer, from, &eligible, lifetime, 1).await?,
+    };
+    let mut result = serde_json::json!({"maintenance_stage":"maintained","refresh":refresh,
+        "repair_stage":repaired["repair_stage"],"attempted_handoffs":repaired["attempted_handoffs"],
+        "freshly_verified_replacements":repaired["freshly_verified_replacements"],
+        "pending_retirements":repaired["pending_retirements"],
+        "physical_payload_charge_upper_bound":repaired["physical_payload_charge_upper_bound"]});
+    if let Some(index) = index {
+        result["selected_fragment_index"] = index.into();
+        result["selected_source_provider"] = hex::encode(from.as_bytes()).into();
+        result["repair_scope"] = "explicit_sources_observed_copy".into();
+    }
+    Ok(result)
+}
+
 async fn maintain(
     enrollment: &Enrollment,
     socket: &Path,
@@ -365,47 +531,13 @@ async fn maintain(
     let refreshed =
         operations::refresh_fragment(&set, index, socket, signer, renewal, true).await?;
     let refresh = serde_json::json!({"fragment_index":index,"renewal":renewal.is_some(),"operation_complete":refreshed["operation_complete"]});
-    let mut needs_repair = false;
-    for index in 0..set.data.fragments.len() {
-        let copies = set.fragment(index)?;
-        needs_repair |= copies
-            .data
-            .handoff
-            .as_ref()
-            .is_some_and(|intent| intent.phase != HandoffPhase::Complete)
-            || copies.data.copies.iter().any(|copy| {
-                copy.provider_key == enrollment.source && copy.charge == Charge::Uncertain
-            });
-    }
-    if !needs_repair {
+    let Some(target) = repair_target(&set, enrollment, scan)? else {
         return Ok(serde_json::json!({"maintenance_stage":"observed","refresh":refresh}));
-    }
-    let from = VerifyingKey::from_bytes(&enrollment.source)?;
-    let charged = set.report("status")?["physical_payload_charge_upper_bound"]
-        .as_u64()
-        .context("missing charge")?;
-    if charged.saturating_add(repair::next_additional_charge(&set, &from)?)
-        > enrollment.maximum_charged
-    {
-        return Ok(serde_json::json!({"maintenance_stage":"charge_limit","refresh":refresh}));
-    }
-    let repaired = repair::repair(
-        &mut set,
-        socket,
-        signer,
-        from,
-        &grants,
-        enrollment.lifetime.min(enrollment.expires - now),
-        1,
+    };
+    repair_turn(
+        &mut set, enrollment, socket, signer, &grants, target, refresh,
     )
-    .await?;
-    Ok(
-        serde_json::json!({"maintenance_stage":"maintained","refresh":refresh,
-        "repair_stage":repaired["repair_stage"],"attempted_handoffs":repaired["attempted_handoffs"],
-        "freshly_verified_replacements":repaired["freshly_verified_replacements"],
-        "pending_retirements":repaired["pending_retirements"],
-        "physical_payload_charge_upper_bound":repaired["physical_payload_charge_upper_bound"]}),
-    )
+    .await
 }
 
 async fn serve(args: Serve, socket: &Path) -> Result<()> {

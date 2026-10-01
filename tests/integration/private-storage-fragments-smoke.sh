@@ -195,11 +195,17 @@ PY
     private_storage_fragments_usage uploaded_usage
 
     PHASE=private-storage-fragments-withdrawal
-    # A remains stopped with its original store intact; only B/C serve restores.
-    private_storage_fragments_reopen relay5 relay3
-    content_custody_cli relay4 content status | jq -e '.serving == false' >/dev/null \
+    # The explicit adaptive-maintenance variant loses B; existing scenarios lose A.
+    storage_withdrawn_node=relay4
+    storage_survivor_node=relay5
+    if [ "${private_storage_adaptive_maintenance:-no}" = yes ]; then
+        storage_withdrawn_node=relay5
+        storage_survivor_node=relay4
+    fi
+    private_storage_fragments_reopen "$storage_survivor_node" relay3
+    content_custody_cli "$storage_withdrawn_node" content status | jq -e '.serving == false' >/dev/null \
         || fail FRAGMENTS_FIRST_PROVIDER_STILL_SERVING
-    for storage_node in relay5 relay3; do
+    for storage_node in "$storage_survivor_node" relay3; do
         content_custody_cli "$storage_node" content status | jq -e '.serving == true' >/dev/null \
             || fail FRAGMENTS_SURVIVOR_NOT_SERVING
     done
@@ -211,9 +217,13 @@ PY
     private_storage_fragments_phase_finish "${storage_restore_flows:-16}"
     private_storage_fragments_usage restored_usage
     private_storage_fragments_reopen relay4 relay5 relay3
-    jq -n '{first_provider_stopped_before_restore:true,first_store_retained:true,other_two_providers_serving:true,
+    jq -n --arg withdrawn "$storage_withdrawn_node" '{other_two_providers_serving:true,
         same_three_stores_reopened:true,all_usage_snapshots_with_services_stopped:true,
-        all_three_store_inodes_preserved:true,agent_restart_claimed:false}' >"$WORK/private-storage-fragments-withdrawal.json"
+        all_three_store_inodes_preserved:true,agent_restart_claimed:false} +
+        (if $withdrawn == "relay5" then {withdrawn_provider_index:1,withdrawn_provider_node:$withdrawn,
+          withdrawn_provider_stopped_before_restore:true,withdrawn_store_retained:true}
+         else {first_provider_stopped_before_restore:true,first_store_retained:true} end)' \
+        >"$WORK/private-storage-fragments-withdrawal.json"
 
     PHASE=private-storage-fragments-finish
     private_storage_fragments_phase_start finish
@@ -225,8 +235,8 @@ PY
     benchmark_disconnect_route private-storage-fragments || fail FRAGMENTS_ROUTE_CLEANUP_FAILED
     private_storage_fragments_cleanup || fail FRAGMENTS_PRIVATE_CLEANUP_FAILED
     if [ "${private_storage_maintenance:-no}" = yes ]; then
-        python3 -B "$source_directory/tests/integration/private-storage-maintenance-smoke.py" evidence "$WORK" \
-            "$WORK/private-storage-maintenance-evidence.json" >/dev/null || fail MAINTENANCE_EVIDENCE_INVALID
+        python3 -B "$source_directory/tests/integration/$storage_maintenance_name-smoke.py" evidence "$WORK" \
+            "$WORK/$storage_maintenance_name-evidence.json" >/dev/null || fail MAINTENANCE_EVIDENCE_INVALID
     elif [ "${cloud_private_file:-no}" = yes ]; then
         python3 -B "$source_directory/tests/integration/cloud-private-file-smoke.py" evidence "$WORK" \
             "$WORK/cloud-private-file-evidence.json" >/dev/null || fail CLOUD_PRIVATE_FILE_EVIDENCE_INVALID
@@ -238,7 +248,7 @@ PY
             "$WORK/private-storage-fragments-evidence.json" >/dev/null || fail FRAGMENTS_EVIDENCE_INVALID
     fi
     OBSERVED_BLOCKER=NONE
-    if [ "${private_storage_maintenance:-no}" = yes ]; then PHASE=private-storage-maintenance-complete
+    if [ "${private_storage_maintenance:-no}" = yes ]; then PHASE=$storage_maintenance_name-complete
     elif [ "${cloud_private_file:-no}" = yes ]; then PHASE=cloud-private-file-complete
     elif [ "${image_snapshot:-no}" = yes ]; then PHASE=image-snapshot-complete
     else PHASE=private-storage-fragments-complete; fi

@@ -64,9 +64,9 @@ class PrivateStorageMaintenanceWiring(unittest.TestCase):
         start = workflow.index("      - name: Require actual owner-private storage maintenance")
         end = workflow.index("\n      - name:", start + 1)
         gate = workflow[start:end]
-        self.assertIn("if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'private-storage-maintenance'", gate)
+        self.assertIn("if: always() && (env.VOLPAROSSA_ALPHA_SCENARIO == 'private-storage-maintenance' || env.VOLPAROSSA_ALPHA_SCENARIO == 'private-storage-adaptive-maintenance')", gate)
         self.assertIn('test "$TOPOLOGY_EXIT_CODE" = 0', gate)
-        self.assertIn('private-storage-maintenance-smoke.py report "$report" "$GITHUB_SHA"', gate)
+        self.assertIn('"tests/integration/$VOLPAROSSA_ALPHA_SCENARIO-smoke.py" report "$report" "$GITHUB_SHA"', gate)
         self.assertIn("host-state-before.json", gate)
         self.assertIn("host-state-after.json", gate)
 

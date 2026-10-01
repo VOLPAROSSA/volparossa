@@ -23,6 +23,11 @@ BYTES, CHUNK, LENGTHS, SHA = (F[key] for key in ('BYTES', 'CHUNK', 'LENGTHS', 'S
 A_BYTES = F['PROVIDER_BYTES'][0]
 FG = b'VOLPAROSSA independent foreground fixture'.ljust(64, b'.')
 MAX_CHARGE = 2 * BYTES + A_BYTES
+ADAPTIVE = False
+OFFLINE = 0
+SURVIVORS = (1, 2)
+FOREGROUND = 1
+NAME = 'private-storage-maintenance'
 EXPORT_NAMES = tuple(name for name in F['EXPORT_NAMES'] if name not in
     ('private-storage-fragments-smoke.json', 'private-storage-fragments-evidence.json')) + (
     'private-storage-maintenance-smoke.json', 'private-storage-maintenance-evidence.json')
@@ -30,6 +35,14 @@ SCOPE_FALSE = ('independent_failure_domains_proven', 'network_contribution_credi
     'archive_encryption_proven', 'automatic_archive_discovery', 'automatic_grant_refresh',
     'contribution_resize_proven', 'full_alpha_acceptance_claimed')
 STAGE = 'not_started'
+
+
+def configure_adaptive():
+    """Explicit separate scenario; the original fixed-A v1 fixture stays available."""
+    global ADAPTIVE, OFFLINE, SURVIVORS, FOREGROUND, NAME, EXPORT_NAMES
+    ADAPTIVE, OFFLINE, SURVIVORS, FOREGROUND = True, 1, (0, 2), 0
+    NAME = 'private-storage-adaptive-maintenance'
+    EXPORT_NAMES = tuple(name.replace('private-storage-maintenance-', NAME + '-') for name in EXPORT_NAMES)
 
 
 def private_json(path, maximum=32768):
@@ -45,9 +58,9 @@ def status(root, binary, client):
     return invoke(binary, client, ['storage', 'fragments', 'status', '--state', root / 'fragment-set'])
 
 
-def checkpoint(root, binary, client):
+def checkpoint(root, binary, client, enrollment='maintenance'):
     value = invoke(binary, client, ['storage', 'fragments', 'maintenance', 'status',
-        '--enrollment', root / 'maintenance'])
+        '--enrollment', root / enrollment])
     require(value['version'] == 1 and value['scope'] == 'owner-private-maintenance'
         and type(value['turns']) is int and 0 <= value['turns'] <= 32
         and value['core_coordinated'] is True and value['new_network_node'] is False
@@ -60,17 +73,17 @@ def peer_args(root, key):
     return ['--state', root / 'foreground', '--provider-key', key, *unlock(root)]
 
 
-def run_turn(root, binary, client, key_b, interrupt=None):
+def run_turn(root, binary, client, key_b, interrupt=None, enrollment='maintenance'):
     """One real daemon-issued turn; no owner-side scheduler or direct provider socket."""
-    before = checkpoint(root, binary, client)['turns']
+    before = checkpoint(root, binary, client, enrollment)['turns']
     process = subprocess.Popen([binary, '--control-socket', client, 'storage', 'fragments',
-        'maintenance', 'serve', '--enrollment', str(root / 'maintenance'), '--maximum-turns', '1',
+        'maintenance', 'serve', '--enrollment', str(root / enrollment), '--maximum-turns', '1',
         *map(str, unlock(root))], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         if interrupt:
             deadline = time.monotonic() + 100
             while True:
-                current = private_json(root / 'maintenance/checkpoint.json')
+                current = private_json(root / enrollment / 'checkpoint.json')
                 if current['turns'] == before + 1 and current['stage'] == 'working':
                     break
                 require(process.poll() is None and time.monotonic() < deadline, 'core turn not observed')
@@ -87,7 +100,7 @@ def run_turn(root, binary, client, key_b, interrupt=None):
         stdout, stderr = process.communicate(timeout=650)
         require(len(stdout) <= 32768 and len(stderr) <= 16384, 'bounded owner output')
         require(process.returncode == (-signal.SIGKILL if interrupt == 'eof' else 0), 'owner process exit')
-        result = checkpoint(root, binary, client)
+        result = checkpoint(root, binary, client, enrollment)
         require(result['turns'] == before + 1, 'cursor did not resume exactly one turn')
         if interrupt == 'eof':
             require(result['stage'] == 'working', 'owner EOF was not during an admitted turn')
@@ -126,7 +139,8 @@ def prepare(root, binary, client, provider_a, provider_b, provider_c, key_a, key
         require(grant['grant_written'] is True and grant['max_payload_bytes'] == BYTES
             and grant['max_leases'] == 4 and grant['reserved_bytes'] == 0
             and grant['network_contribution_credit'] is False, 'bounded provider grant')
-    grant = invoke(binary, provider_b, ['storage', 'peer', 'grant', '--provider-key', key_b,
+    foreground_control = (provider_a, provider_b, provider_c)[FOREGROUND]
+    grant = invoke(binary, foreground_control, ['storage', 'peer', 'grant', '--provider-key', keys[FOREGROUND],
         '--owner-key', owner, '--max-payload-bytes', len(FG), '--max-leases', 1,
         '--max-retention-seconds', 7200, '--lifetime-seconds', 7200,
         '--output', root / 'foreground-grant.bin'])
@@ -143,7 +157,7 @@ def upload(root, binary, client, keys):
     # Existing real foreground deposit/retry/renew/progress, immutable identity checks,
     # and deletion of the original local bytes. Grants reserve no extra physical bytes.
     uploaded = F['upload'](root, binary, client, keys)
-    foreground = invoke(binary, client, ['storage', 'peer', 'deposit', *peer_args(root, keys[1]),
+    foreground = invoke(binary, client, ['storage', 'peer', 'deposit', *peer_args(root, keys[FOREGROUND]),
         '--grant', root / 'foreground-grant.bin', '--input', root / 'foreground.bin',
         '--sha256', hashlib.sha256(FG).hexdigest(), '--already-encrypted', '--lifetime-seconds', 5400])
     require(foreground['committed'] is True and foreground['stored_bytes'] == len(FG), 'foreground seed')
@@ -157,9 +171,23 @@ def upload(root, binary, client, keys):
         arguments += ['--provider-key', key, '--grant', root / f'grant-{label}.bin']
     enrolled = invoke(binary, client, arguments)
     require(enrolled['stage'] == 'enrolled' and enrolled['turns'] == 0, 'enrollment failed')
+    record = private_json(root / 'maintenance/enrollment.json')['enrollment']
+    require(record['version'] == 1 and 'repair_sources' not in record and record['source'] == list(bytes.fromhex(keys[0])),
+        'original fixed-A v1 authority changed')
+    if ADAPTIVE:
+        # Preserve the real v1 enrollment unchanged as a negative control. Its
+        # separately retained cursor will later observe B's failure without repair.
+        (root / 'maintenance').rename(root / 'maintenance-fixed-a')
+        arguments += ['--from-provider-key', keys[1], '--from-provider-key', keys[2],
+            '--provider-key', keys[0], '--grant', root / 'grant-a.bin']
+        enrolled = invoke(binary, client, arguments)
+        require(enrolled['stage'] == 'enrolled' and enrolled['turns'] == 0, 'adaptive enrollment failed')
+        record = private_json(root / 'maintenance/enrollment.json')['enrollment']
+        require(record['version'] == 2 and record['repair_sources'] == sorted(list(bytes.fromhex(key)) for key in keys),
+            'explicit signed source set differs')
     before = status(root, binary, client)
     STAGE = 'renew'
-    renewal = run_turn(root, binary, client, keys[1])
+    renewal = run_turn(root, binary, client, keys[FOREGROUND])
     require(renewal['detail']['refresh'] == dict(fragment_index=0, renewal=True, operation_complete=True),
         'real rotating renewal not observed')
     after = status(root, binary, client)
@@ -167,9 +195,9 @@ def upload(root, binary, client, keys):
         require(new['last_confirmed_expiry'] > old['last_confirmed_expiry'] + 1000,
             'provider did not extend the actual lease')
     STAGE = 'owner_eof'
-    eof = run_turn(root, binary, client, keys[1], 'eof')
+    eof = run_turn(root, binary, client, keys[FOREGROUND], 'eof')
     STAGE = 'foreground'
-    revoked = run_turn(root, binary, client, keys[1], 'foreground')
+    revoked = run_turn(root, binary, client, keys[FOREGROUND], 'foreground')
     require((renewal['turns'], eof['turns'], revoked['turns']) == (1, 2, 3), 'restart cursor reset')
     STAGE = 'reconcile_cancelled_turns'
     # Interruption can leave an honest uncertain renewal/progress journal even
@@ -178,7 +206,9 @@ def upload(root, binary, client, keys):
     F['validate_cli'](invoke(binary, client, ['storage', 'fragments', 'progress', *existing(root)], deadline=900),
         'progress', keys, 'committed')
     F['check_identity'](root)
-    return dict(uploaded, core_renewal_confirmed=True, renewal_fragment_index=0,
+    return dict(uploaded, **(dict(enrollment_version=2, authorized_source_indexes=[0, 1, 2],
+        fixed_a_v1_enrollment_preserved=True) if ADAPTIVE else {}),
+        core_renewal_confirmed=True, renewal_fragment_index=0,
         owner_eof_during_admitted_turn=True, subsequent_core_turn_proves_lane_released=True,
         independent_foreground_progress_confirmed=True, foreground_turn_revoked=True,
         cursor_before_restart=2, cursor_after_restart=3, cancelled_turns_reconciled=True, enrollment_owner_private=True)
@@ -195,7 +225,8 @@ def validate_repaired(value, keys):
         and value['fully_redundant_from_retained_receipts'] is True
         and value['fragments_with_confirmed_unexpired_copy'] == 4
         and value['providers'] == [dict(provider_key=key, physical_payload_charge_upper_bound=size)
-            for key, size in zip(keys, (A_BYTES, BYTES, BYTES))], 'replacement custody or accounting incomplete')
+            for index, key in enumerate(keys) for size in (A_BYTES if index == OFFLINE else BYTES,)],
+        'replacement custody or accounting incomplete')
     require(all(value[key] is False for key in ('read_consumes_archive', 'metadata_overhead_measured',
         'current_remote_availability_proven', 'independent_failure_domains_proven',
         'network_contribution_credit', 'erasure_coding')), 'replacement scope changed')
@@ -205,9 +236,9 @@ def validate_repaired(value, keys):
             'fragment reconstruction geometry changed')
         committed = [copy for copy in fragment['copies'] if copy['charge'] == 'committed']
         uncertain = [copy for copy in fragment['copies'] if copy['charge'] == 'uncertain']
-        require(len(committed) == 2 and {copy['provider_key'] for copy in committed} == set(keys[1:])
-            and len(uncertain) == (0 if index == 1 else 1)
-            and all(copy['provider_key'] == keys[0] for copy in uncertain)
+        require(len(committed) == 2 and {copy['provider_key'] for copy in committed} == {keys[i] for i in SURVIVORS}
+            and len(uncertain) == (0 if index == (2 if ADAPTIVE else 1) else 1)
+            and all(copy['provider_key'] == keys[OFFLINE] for copy in uncertain)
             and len(fragment['copies']) == len(committed) + len(uncertain), 'effective replacement placement')
 
 
@@ -233,17 +264,38 @@ def restore(root, binary, client, keys):
     require(not (root / 'input.bin').exists(), 'original bytes still present')
     begin = checkpoint(root, binary, client)['turns']
     require(begin == 3, 'initial restart cursor differs')
+    baseline = {}
+    if ADAPTIVE:
+        STAGE = 'fixed_a_negative_control'
+        original = status(root, binary, client)
+        control = run_turn(root, binary, client, keys[FOREGROUND], enrollment='maintenance-fixed-a')
+        observed = status(root, binary, client)
+        require(control['turns'] == 1 and control['detail']['maintenance_stage'] == 'observed'
+            and control['detail']['refresh']['fragment_index'] == 0
+            and control['detail']['refresh']['operation_complete'] is False
+            and original['placement_authorizations'] == observed['placement_authorizations'] == 0
+            and observed['physical_payload_charge_upper_bound'] == 2 * BYTES
+            and any(copy['provider_key'] == keys[1] and copy['charge'] == 'uncertain'
+                for copy in observed['fragments'][0]['copies']), 'fixed-A baseline repaired B or did not observe it')
+        baseline = dict(fixed_a_v1_turn_observed_b_failure=True, fixed_a_v1_new_placements=0,
+            fixed_a_v1_physical_payload_charge=2 * BYTES, selected_source_provider_index=1)
+    STAGE = 'repair'
     fresh, turns = 0, 0
     for _ in range(12):
         previous = status(root, binary, client)
         previous_charge = previous['physical_payload_charge_upper_bound']
-        turn = run_turn(root, binary, client, keys[1])
+        turn = run_turn(root, binary, client, keys[FOREGROUND])
         turns += 1
         detail = turn['detail']
         require(detail['refresh']['fragment_index'] == (turn['turns'] - 1) % 4,
             'durable scan cursor did not rotate')
         replacement = detail.get('freshly_verified_replacements', 0)
         require(type(replacement) is int and 0 <= replacement <= 1, 'unbounded replacements per turn')
+        if ADAPTIVE and detail.get('attempted_handoffs', 0):
+            require(detail['repair_scope'] == 'explicit_sources_observed_copy'
+                and detail['selected_source_provider'] == keys[1]
+                and detail['selected_fragment_index'] in (0, 1, 3)
+                and detail['attempted_handoffs'] <= 1, 'adaptive repair did not select an exact B copy')
         fresh += replacement
         value = status(root, binary, client)
         require(previous_charge <= value['physical_payload_charge_upper_bound'] <= MAX_CHARGE,
@@ -262,7 +314,7 @@ def restore(root, binary, client, keys):
         value = invoke(binary, client, ['storage', 'fragments', 'restore', *existing(root), '--output', path], deadline=900)
         validate_repaired(value, keys)
         require(value['restored'] is True and value['whole_archive_sha256_verified'] is True
-            and all(entry['restored'] is True and entry['provider_key'] in keys[1:]
+            and all(entry['restored'] is True and entry['provider_key'] in {keys[i] for i in SURVIVORS}
                 for entry in value['fragment_outcomes']), 'replacement-only reconstruction failed')
         require(private_file(path).st_size == BYTES and hashlib.sha256(path.read_bytes()).hexdigest() == SHA,
             'restored bytes differ')
@@ -270,10 +322,10 @@ def restore(root, binary, client, keys):
     invoke(binary, client, ['storage', 'fragments', 'restore', *existing(root), '--output', root / 'restore-1.bin'], expected=1)
     require(hashlib.sha256((root / 'restore-1.bin').read_bytes()).hexdigest() == SHA, 'restore clobbered output')
     staged_files_absent(root)
-    return dict(restores=2, source_absent=True, owner_worker_starts=turns, scan_cursor_before=begin,
+    return dict(baseline, restores=2, source_absent=True, owner_worker_starts=turns, scan_cursor_before=begin,
         scan_cursor_after=checkpoint(root, binary, client)['turns'], fresh_verified_replacements=fresh,
         retained_copy_records=11, pending_retirements=3, physical_payload_charge=MAX_CHARGE,
-        uncertain_payload_charge=A_BYTES, survivor_provider_indexes=[1, 2], uniform_target_copies=2,
+        uncertain_payload_charge=A_BYTES, survivor_provider_indexes=list(SURVIVORS), uniform_target_copies=2,
         whole_archive_sha256_verified=True, reads_nonconsuming=True, existing_output_preserved=True,
         original_identities_retained=True, staging_removed=True)
 
@@ -299,7 +351,7 @@ def finish(root, binary, client, keys):
     require(private_file(placements).st_size <= 1048576, 'placement journal exceeds bound')
     original_placements = placements.read_bytes()
     for _ in range(4):
-        turn = run_turn(root, binary, client, keys[1])
+        turn = run_turn(root, binary, client, keys[FOREGROUND])
         turns += 1
         value = status(root, binary, client)
         validate_retirement_progress(before, value, turn['detail'])
@@ -316,7 +368,7 @@ def finish(root, binary, client, keys):
             and all(copy['charge'] == 'deleted' for fragment in deleted['fragments'] for copy in fragment['copies']),
             'all retained copies must be explicitly deleted')
         F['check_identity'](root)
-    foreground = invoke(binary, client, ['storage', 'peer', 'delete', *peer_args(root, keys[1])])
+    foreground = invoke(binary, client, ['storage', 'peer', 'delete', *peer_args(root, keys[FOREGROUND])])
     require(foreground['state'] == 'Deleted', 'foreground copy not deleted')
     staged_files_absent(root)
     return dict(owner_worker_starts=turns, pending_retirements=0, duplicate_replacements=0,
@@ -335,7 +387,7 @@ def cleanup(path):
             for child in entries:
                 info = child.lstat()
                 if stat.S_ISDIR(info.st_mode):
-                    allowed = ((depth == 0 and (child.name in ('fragment-set', 'maintenance', 'foreground')
+                    allowed = ((depth == 0 and (child.name in ('fragment-set', 'maintenance', 'maintenance-fixed-a', 'foreground')
                             or re.fullmatch(r'\.fragments-[A-Za-z0-9]+', child.name)))
                         or (depth == 1 and (re.fullmatch('fragment-000[0-3]', child.name)
                             or re.fullmatch(r'\.(?:replicas|fragment-transfer)-[A-Za-z0-9]+', child.name)))
@@ -386,13 +438,18 @@ def validate_evidence(value):
         subsequent_core_turn_proves_lane_released=True, independent_foreground_progress_confirmed=True,
         foreground_turn_revoked=True, cursor_before_restart=2, cursor_after_restart=3,
         cancelled_turns_reconciled=True, enrollment_owner_private=True)
+    if ADAPTIVE:
+        expected_upload.update(enrollment_version=2, authorized_source_indexes=[0, 1, 2],
+            fixed_a_v1_enrollment_preserved=True)
     require(value['upload'] == expected_upload, 'core renewal/revocation/restart proof missing')
     restored = value['restore']
     require(type(restored['owner_worker_starts']) is int and 1 <= restored['owner_worker_starts'] <= 12
-        and restored == dict(restores=2, source_absent=True, owner_worker_starts=restored['owner_worker_starts'],
+        and restored == dict(**(dict(fixed_a_v1_turn_observed_b_failure=True, fixed_a_v1_new_placements=0,
+                fixed_a_v1_physical_payload_charge=2 * BYTES, selected_source_provider_index=1) if ADAPTIVE else {}),
+            restores=2, source_absent=True, owner_worker_starts=restored['owner_worker_starts'],
             scan_cursor_before=3, scan_cursor_after=3 + restored['owner_worker_starts'], fresh_verified_replacements=3,
             retained_copy_records=11, pending_retirements=3, physical_payload_charge=MAX_CHARGE,
-            uncertain_payload_charge=A_BYTES, survivor_provider_indexes=[1, 2], uniform_target_copies=2,
+            uncertain_payload_charge=A_BYTES, survivor_provider_indexes=list(SURVIVORS), uniform_target_copies=2,
             whole_archive_sha256_verified=True, reads_nonconsuming=True, existing_output_preserved=True,
             original_identities_retained=True, staging_removed=True), 'actual repair and restored custody missing')
     finished = value['finish']
@@ -401,13 +458,19 @@ def validate_evidence(value):
             duplicate_replacements=0, acknowledged_source_retirement=True, all_eleven_copies_deleted=True,
             foreground_copy_deleted=True, delete_retry_idempotent=True, original_identities_retained=True,
             final_payload_charge=0, staging_removed=True), 'retirement/deletion missing')
-    require(value['withdrawal'] == dict(first_provider_stopped_before_restore=True, first_store_retained=True,
+    withdrawal = (dict(withdrawn_provider_index=1, withdrawn_provider_node='relay5',
+        withdrawn_provider_stopped_before_restore=True, withdrawn_store_retained=True) if ADAPTIVE else
+        dict(first_provider_stopped_before_restore=True, first_store_retained=True))
+    require(value['withdrawal'] == dict(withdrawal,
         other_two_providers_serving=True, same_three_stores_reopened=True, all_usage_snapshots_with_services_stopped=True,
         all_three_store_inodes_preserved=True, agent_restart_claimed=False), 'provider withdrawal not observed')
     require(value['uploaded_usage'] == [dict(reserved_bytes=0, committed_bytes=size, leases=count)
-        for size, count in zip((A_BYTES, F['PROVIDER_BYTES'][1] + len(FG), F['PROVIDER_BYTES'][2]), (3, 4, 2))]
+        for index, (size, count) in enumerate(zip(F['PROVIDER_BYTES'], F['PROVIDER_LEASES']))
+        for size, count in ((size + (len(FG) if index == FOREGROUND else 0), count + int(index == FOREGROUND)),)]
         and value['restored_usage'] == [dict(reserved_bytes=0, committed_bytes=size, leases=count)
-        for size, count in zip((A_BYTES, BYTES + len(FG), BYTES), (3, 5, 4))]
+        for index in range(3)
+        for size, count in (((A_BYTES if index == OFFLINE else BYTES) + (len(FG) if index == FOREGROUND else 0),
+                            (3 if index == OFFLINE else 4) + int(index == FOREGROUND)),)]
         and value['deleted_usage'] == [dict(reserved_bytes=0, committed_bytes=0, leases=0)] * 3,
         'actual provider store accounting differs')
     require(value['private_cleanup'] == dict(owner_identity_removed=True, passphrase_removed=True, grants_removed=True,
@@ -423,7 +486,8 @@ def validate_evidence(value):
         'private owner/provider isolation missing')
     require(set(value['network']) == set(F['PHASES']), 'network phase missing')
     for name, phase in value['network'].items():
-        F['validate_network'](phase, value['expected_peers'], value['layout'], name, maintenance_contexts=True)
+        F['validate_network'](phase, value['expected_peers'], value['layout'], name,
+            withdrawn_index=OFFLINE, maintenance_contexts=True)
 
 
 def evidence(work):
@@ -443,9 +507,9 @@ def evidence(work):
 
 def validate_report(report, revision):
     require(re.fullmatch('[0-9a-f]{40}', revision) and report['source_revision'] == revision
-        and report['schema_version'] == 1 and report['report_kind'] == 'volparossa-private-storage-maintenance'
+        and report['schema_version'] == 1 and report['report_kind'] == 'volparossa-' + NAME
         and report['success'] is True and report['runner_exit_status'] == 0
-        and report['phase'] == 'private-storage-maintenance-complete' and report['observed_blocker'] is None
+        and report['phase'] == NAME + '-complete' and report['observed_blocker'] is None
         and report['cleanup'] == dict(complete=True, remaining_owned_objects=0)
         and report['host_state']['unchanged'] is True, 'source-bound cleanup missing')
     validate_evidence(report['maintenance'])

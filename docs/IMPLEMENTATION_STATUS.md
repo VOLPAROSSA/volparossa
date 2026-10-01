@@ -92,6 +92,60 @@ Last updated: 2026-10-01
   final drain that waits for the new context's own asynchronous completion.
   This diagnostic/fixture correction still needs a new real combined trial.
   See [private storage maintenance](PRIVATE_STORAGE.md#explicit-owner-private-background-maintenance).
+  Adaptive source selection is now implemented as an explicit version-two enrollment:
+  repeating `--from-provider-key` authorizes only those exact sources, including a
+  future replacement only when its candidate grant is supplied. One-key version-one
+  enrollments retain their original signing bytes and behavior. Each core-issued turn
+  selects an exact observed uncertain fragment, resumes Copying before new placement,
+  and rejects pending sources outside its authority. Healthy earlier copies are not
+  replaced merely because another copy on the same provider failed. The existing
+  signed handoff, grant/capacity admission, max-one-repair limit, readback and retained
+  charges remain authoritative; this is not new provider discovery, automatic grant
+  refresh, contribution resizing or owner-offline maintenance.
+  Four targeted maintenance tests pass: unchanged v1 signature bytes/private modes,
+  single/multi-source CLI enrollment, the existing renewal/repair lifecycle, and a new
+  real signed SQLite-provider B-offline trial with lost confirmation, restart of the
+  same intent, all B-fragment replacements, two source-free C/D reconstructions and
+  confirmed retirement after B returns. The v2 worker has no combined live-daemon/
+  protected-overlay result yet.
+  A separate `private-storage-adaptive-maintenance` overlay candidate now reuses
+  that owner/core lifecycle with B withdrawn, signed A/B/C source authority and
+  a real fixed-A v1 negative-control turn that must observe B without placing a
+  replacement. Its gates require exact B-copy selection, two A/C reconstructions,
+  conservative pending charges, acknowledged B retirement and complete deletion/
+  private/host cleanup. Local receipt/wiring checks do not constitute a live result;
+  the original fixed-A v1 scenario remains independently available.
+  The first original [v2 run36933990330 on `1fdace93`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36933990330)
+  also fails at upload evidence collection, before B is withdrawn. Its real upload
+  receipt confirms signed v2 A/B/C sources, the retained fixed-A v1 enrollment,
+  renewal, owner EOF/restart and independent foreground revocation. The final
+  1,000-record Exit snapshot starts 9,810 ms after the phase baseline; its 69
+  completed flows and one failed flow do not prove full-phase coverage. Cleanup has
+  zero remaining owned objects and host state is unchanged. Original 19-file ZIP
+  SHA-256: `4c41d754bd12e6ed2a9dd15d74dad7e24e3a173ba6ebe881f7a20faa0ab297fc`;
+  original job-log SHA-256:
+  `a16a694134cb2a6c457dfca83f73f49876d830cb564ca0f26764557a9b2426d1`.
+  The shared strict bounded sampler correction above is now merged normally from
+  the v1 branch. Both originals remain failed; B-selection, retirement and complete
+  adaptive-overlay execution still require a new immutable trial.
+  The subsequent original [v2 run36936986464 on `b0b7b0d0`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36936986464)
+  fails earlier in `private-storage-fragments-prepare` with
+  `FRAGMENTS_ROUTE_UNAVAILABLE`, before owner maintenance operations; its maintenance
+  evidence is null. The exported records do not identify a more specific route cause.
+  Cleanup leaves zero owned objects and before/after host hashes match. Original
+  seven-file ZIP SHA-256:
+  `78b006ee1465dbb58a31e47725b8a9b82c5c39eb8ff629a2c9154a247d967ffb`;
+  job110619443488 log SHA-256:
+  `0cdc314623432b391a47ceb9fc79d0e0e534be0eaa22b6b96f2ed7bc1c9e91c0`.
+  The v1 branch's `4c31ac3b` correction is now integrated into the v2 candidate:
+  upload, restore and finish require the same exact route scope and each final
+  context's own observed completion, while B remains the withdrawn provider.
+  Eight adaptive, seven v1-maintenance, eleven sampler, four wiring and nine ordinary
+  fragment checks pass. The added adaptive contract rejects old-context-only counts,
+  missing observed contexts and changed exit/relay/path scope. Fixed-A v1 negative
+  control, v2 source authorization, A/C reconstruction, pending charges and all final
+  deletion/cleanup gates remain mandatory. This does not repair or reinterpret the
+  earlier route-unavailable result, and no new passing adaptive-overlay run is claimed.
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
   authenticated source import, private fragment storage and source-off file access,
