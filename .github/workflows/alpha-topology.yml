@@ -258,9 +258,9 @@ jobs:
           test ! -L /opt/volparossa-native-coding-build
           df -h /opt
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
-            python3 bubblewrap patch clang libssl-dev libclang-dev protobuf-compiler binutils
+            python3 apparmor bubblewrap patch clang libssl-dev libclang-dev protobuf-compiler binutils
           sudo install -d -o "$(id -u)" -g "$(id -g)" -m 0700 /opt/volparossa-native-coding-build
-          python3 -B tests/integration/native-coding-runtime.py build --yes --expected-commit "$GITHUB_SHA"
+          bash tests/integration/native-coding-apparmor.sh "$GITHUB_SHA"
           printf 'VOLPAROSSA_NATIVE_RUNTIME=%s\n' /opt/volparossa-native-coding-build/native-runtime.tar.gz >>"$GITHUB_ENV"
 
       - name: Build exact pinned mqvpn/xquic runtime

@@ -38,6 +38,22 @@ The original job log reports the failure without the underlying build-step log.
 The next candidate exports only bounded public source-build log tails on failure;
 this diagnostic does not change source pins, sandbox settings or success criteria.
 
+The diagnostic [attempt 36905626120](https://github.com/VOLPAROSSA/volparossa/actions/runs/36905626120)
+again stops before dependency fetch/compilation can proceed: its complete 45-byte
+step log is `bwrap: setting up uid map: Permission denied`. The original job log
+SHA-256 is `f366f1c7ae9635d9a168984a2051e8f328444790569ace0aea3c7d7948003ec3`.
+A CI-only candidate now loads uniquely named AppArmor profiles for the official
+Ubuntu `/usr/bin/bwrap`, with capability-denying child stacking. It refuses existing
+bwrap policy rather than overwriting it, keeps the source builder unprivileged,
+and requires actual online/offline sandbox preflights with zero child capabilities,
+no-new-privileges and read-only source mounts. Exit traps remove only the added
+profiles and report cleanup separately from build status. No global sysctl,
+setuid bit, model/source pin, build sandbox or developer-host policy is changed.
+Ten local bundle/static checks, shell syntax and ShellCheck pass; profile loading,
+the actual source build and native model-driven loop remain pending disposable CI.
+The outer wrapper does not independently prove all nested build children joined
+after forced termination; the pinned builder retains its own process lifecycle.
+
 ### Additional application and autonomous-maintenance scope
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):

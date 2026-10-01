@@ -108,6 +108,36 @@ class BundleTests(unittest.TestCase):
 
 
 class WiringTests(unittest.TestCase):
+    def test_ci_bwrap_policy_is_scoped_stacked_and_rejects_host_execution(self):
+        policy = (HERE / 'native-coding-bwrap.apparmor').read_text()
+        wrapper = (HERE / 'native-coding-apparmor.sh').read_text()
+        self.assertIn('profile volparossa_ci_native_bwrap /usr/bin/bwrap', policy)
+        self.assertIn('-> volparossa_ci_native_bwrap//&volparossa_ci_native_child,', policy)
+        child = policy.split('profile volparossa_ci_native_child ', 1)[1]
+        self.assertIn('audit deny capability,', child)
+        self.assertIn('allow pix /** -> &volparossa_ci_native_child,', child)
+        self.assertNotIn('flags=(unconfined)', policy)
+        self.assertNotIn('include if exists <local/', policy)
+        self.assertIn(hashlib.sha256(policy.encode()).hexdigest(), wrapper)
+        self.assertIn('"$parser" --add --skip-cache', wrapper)
+        self.assertIn('"$parser" --remove --skip-cache', wrapper)
+        self.assertNotIn('--replace', wrapper)
+        self.assertNotIn('sysctl -w', wrapper)
+        self.assertIn('int(s["CapEff"], 16) == int(s["CapPrm"], 16) == 0', wrapper)
+        self.assertIn('int(s["NoNewPrivs"]) == 1', wrapper)
+        self.assertIn('for network in online offline', wrapper)
+        self.assertIn("trap 'cleanup' EXIT", wrapper)
+        self.assertIn('setsid python3 -B', wrapper)
+        self.assertIn('build_status=null', wrapper)
+        self.assertIn('"$build_status" "$result"', wrapper)
+        self.assertIn('if test "$cleanup_result" != 0; then result=1; fi', wrapper)
+        subprocess.run(['bash', '-n', str(HERE / 'native-coding-apparmor.sh')], check=True)
+        rejected = subprocess.run(['bash', str(HERE / 'native-coding-apparmor.sh'), REVISION],
+                                  env={'PATH': '/usr/bin:/bin', 'GITHUB_ACTIONS': 'false'},
+                                  capture_output=True, text=True)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(rejected.stdout, '')
+
     def test_failure_diagnostic_reads_only_bounded_public_build_logs(self):
         with tempfile.TemporaryDirectory(prefix='volparossa-build-log-contract-') as temporary:
             root = Path(temporary)
@@ -152,7 +182,8 @@ class WiringTests(unittest.TestCase):
         workflow = (HERE.parents[1] / '.github/workflows/alpha-topology.yml').read_text()
         self.assertIn('- agent-native-coding', workflow)
         self.assertIn("inputs.scenario == 'agent-native-coding' && 240", workflow)
-        self.assertIn('native-coding-runtime.py build --yes --expected-commit "$GITHUB_SHA"', workflow)
+        self.assertIn('bash tests/integration/native-coding-apparmor.sh "$GITHUB_SHA"', workflow)
+        self.assertIn('python3 apparmor bubblewrap', workflow)
         self.assertIn('coding_args=(--native-runtime "$VOLPAROSSA_NATIVE_RUNTIME")', workflow)
         self.assertIn('agent-native-coding.py report "$report" "$GITHUB_SHA"', workflow)
         upload = workflow.split('- name: Upload bounded native coding fixture evidence', 1)[1].split('- name:', 1)[0]
