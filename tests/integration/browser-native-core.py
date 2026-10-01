@@ -220,6 +220,12 @@ def window_handles(client):
     return set(handles)
 
 
+def initial_window_handles(client):
+    handles = window_handles(client)
+    runtime.require(bool(handles))
+    return handles
+
+
 def inside(args, work, provision):
     require = runtime.require
     core.guest_guard(args)
@@ -280,9 +286,8 @@ def inside(args, work, provision):
         client.command("WebDriver:NewSession", {"capabilities": {"alwaysMatch": {}}})
         startup["session_created"] = True
         startup["phase"] = "window-handles"
-        initial_tabs = window_handles(client)
+        initial_tabs = initial_window_handles(client)
         startup["initial_window_count"] = len(initial_tabs)
-        require(len(initial_tabs) == 1)
         startup["phase"] = "chrome-context"
         client.command("Marionette:SetContext", {"value": "chrome"})
         client.command("WebDriver:SetTimeouts", {"script": 300000})

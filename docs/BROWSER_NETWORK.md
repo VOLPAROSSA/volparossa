@@ -29,6 +29,39 @@ ECH-GREASE to match the existing Exit inspection boundary; product-scoped native
 compatibility remains separate work. Earlier failed trials below remain historical
 failures; their pending-proof descriptions are superseded only for this component.
 
+## Native ordinary-tab integration: actual trials remain failed
+
+The separate native candidate uses the locally compiled Firefox 157.0.1 source
+`47c5f402c8d3a5369f1fb1b6cd61b0bb92725af1` and browser adapter
+`c3311ebedcc02dc45ff9c9822cee62f091609f86`. Its original native build receipt and
+binaries are unchanged; a separately recorded product-JavaScript resource overlay
+fixes DOM-owner lookup. It does not substitute ESR compatibility modules or disable
+ECH-GREASE globally. The actual disposable core VM trials below have **not** yet
+proved ordinary tab traffic through WireGuard/MPTCP.
+
+- Local `build/browser-native-vm-02`, core `683e0ede8e0061f9efaf521006af4f61f300d0ba`,
+  failed before attachments/origin connections. Its original browser report SHA-256 is
+  `8ed5cf164e8ac6d7553781533e7142504043359d4423caa1631ceb9d2fd2e4dd`.
+  The original diagnostic does not establish a Firefox crash. A subsequent source
+  check proved that pinned Marionette returns `GetWindowHandles` as a direct array,
+  while the driver incorrectly indexed a `value` field; that harness bug was fixed.
+- Local `build/browser-native-vm-03`, core `b3f31a98dab04538124aa4e464a18c52b26a10f2`,
+  confirms Firefox startup and an actual Marionette session. It failed because two
+  initial tabs were present while the driver required exactly one. Firefox was still
+  running before cleanup; it was then terminated by the driver's own SIGTERM.
+  No attachment or origin connection had started. Original browser report SHA-256:
+  `05f24c95d9088b442c11e5a283231d69a2c3eafda297bed36147e3cab5205192`.
+  The corrected candidate accepts a nonempty initial set bounded to 128 handles;
+  it still requires exactly two **new** tab handles and both real body hashes.
+
+Both original failures are retained. Private/profile cleanup and guest A15 pass;
+before/after guest-state hashes are respectively
+`fb3e9a997cb35de534b2394cebe5c82d4db945f8bfa0f5891c03720788ed09ef` and
+`13cd2d65376c4f841df6b19da3b030bca6b47a3ea2cd0153b78e8efd10c13192`.
+Both temporary VMs were removed and host DNS/route hashes stayed unchanged.
+Native ordinary-tab/core payload, HTTP/3, a browser-wide kill switch and raw
+ECH ClientHello wire evidence remain unproved by these trials.
+
 ## One daemon, independent application connections
 
 An explicitly authorized application can obtain its own short-lived TCP gateway from the

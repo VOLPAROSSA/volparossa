@@ -65,6 +65,22 @@ class NativeBrowserTests(unittest.TestCase):
         self.assertEqual(diagnostic["captured_sha256"], hashlib.sha256(payload[:65536]).hexdigest())
         self.assertNotIn("private-canary-path", json.dumps(diagnostic))
 
+    def test_two_initial_tabs_preserve_exactly_two_new_tabs_and_reject_empty_baseline(self):
+        tree = ast.parse((HERE / "browser-native-core.py").read_text())
+        helpers = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                   and node.name in ("window_handles", "initial_window_handles")]
+        namespace = dict(runtime=SimpleNamespace(require=RUNTIME["require"]))
+        exec(compile(ast.Module(body=helpers, type_ignores=[]), "native-tab-baseline", "exec"), namespace)
+        replies = iter([["initial-a", "initial-b"], ["initial-a", "initial-b", "route-a", "route-b"]])
+        client = SimpleNamespace(command=lambda *_: next(replies))
+        initial = namespace["initial_window_handles"](client)
+        self.assertEqual(initial, {"initial-a", "initial-b"})
+        self.assertEqual(namespace["window_handles"](client) - initial, {"route-a", "route-b"})
+        with self.assertRaises(ValueError):
+            namespace["initial_window_handles"](SimpleNamespace(command=lambda *_: []))
+        # Keep the actual driver check, not merely a two-item synthetic assertion.
+        self.assertIn("require(len(handles) == 2)", (HERE / "browser-native-core.py").read_text())
+
     def test_inventory_excludes_private_proofs_but_rejects_runtime_links(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
