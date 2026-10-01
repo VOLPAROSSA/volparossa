@@ -945,7 +945,23 @@ and acknowledged drain/handoff controller above. Demonstrate both a growing targ
 2 GB-to-1 GB target reduction without losing other participants' live data, including the
 pending-drain case when replacement capacity is insufficient.
 
-The Signal bridge must export a completed upstream encrypted snapshot, including its
-referenced encrypted attachments and private metadata, then reconstruct and validate that
-snapshot through Signal's importer. Merely restoring an opaque file is not Signal restore.
-The same core interface should serve other applications without reimplementing storage.
+### Native Signal backup round trip
+
+The [exact native Signal trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/36742201942)
+on core `90dbea789b57efcbc6cab941e54dfb6a5240511e` and chat
+`c897667d76bea8140f0bc5f373404e43cbd54552` passes. Signal exports and encrypts its real snapshot
+and referenced attachments; after the original ciphertext is removed, the connector restores
+through the real protected core and Signal's importer verifies messages, attachment hashes
+and screenshots. The 198,352-byte archive occupies two independently identified provider
+stores (396,704 charged payload bytes). Import consumes neither copy; explicit deletion then
+returns both stores to zero charged bytes and leases. Twelve protected MPTCP/TLS exchanges,
+two selected relay paths carrying data, privacy captures and full private/host cleanup pass.
+
+This is one actual native regression in a disposable guest, not merely opaque-file testing.
+Its local upstream mock server still handles registration/relink, its Electron test launcher
+does not establish Chromium sandboxing, and the provider namespaces are not independent
+hardware failure domains. Production account recovery UX, least-authority app enrollment,
+automatic repair/contribution accounting and decentralized Signal messages/calls remain open.
+The [implementation status](IMPLEMENTATION_STATUS.md) retains the exact artifact hashes and
+earlier failed trials. Other applications can use the same core storage interface without
+reimplementing custody or acquiring Signal's private recovery keys.

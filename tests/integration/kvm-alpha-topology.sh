@@ -16,6 +16,7 @@ reciprocal_private_dns=no
 private_storage_peer=no
 private_storage_replicas=no
 private_storage_handoff=no
+signal_backup=no
 private_storage_fragments=no
 image_snapshot=no
 cloud_private_file=no
@@ -56,10 +57,22 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|private-storage-handoff|private-storage-fragments|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
+        '         --scenario signal-backup also runs the exact pinned native Signal backup test' \
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
 }
 
 print_plan() {
+    if [ "$signal_backup" = yes ]; then
+        printf '%s\n' \
+            'VOLPAROSSA Signal native backup protected network smoke plan:' \
+            '  run one exact pinned Electron/Signal export/import test under Xvfb as a capless app UID;' \
+            '  app IP traffic is restricted to IPv4/IPv6 loopback inside Client network namespace;' \
+            '  two real 64MiB storage providers receive only encrypted backup data over protected routes;' \
+            '  native Signal checks messages, attachment hashes and screenshots after original ciphertext removal;' \
+            '  verify retained receipts, delete remote copies, remove private profiles/keys/logs and restore guest state;' \
+            '  registration/relink uses upstream local mock server; no server-free messaging or full-alpha claim.'
+        return
+    fi
     if [ "$cloud_private_file" = yes ]; then
         printf '%s\n' \
             'VOLPAROSSA Cloud private-file protected network smoke plan:' \
@@ -683,6 +696,7 @@ while [ "$#" -gt 0 ]; do
             private_storage_peer=no
             private_storage_replicas=no
             private_storage_handoff=no
+            signal_backup=no
             private_storage_fragments=no
             image_snapshot=no
             cloud_private_file=no
@@ -709,6 +723,7 @@ while [ "$#" -gt 0 ]; do
             agent_train_loop=no
             agent_artifact_quarantine=no
             case $2 in
+                signal-backup) scenario=content-custody; signal_backup=yes; wifi_link=no; uplink_link=no ;;
                 reciprocity-private-dns) scenario=reciprocity; reciprocal_private_dns=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-peer) scenario=content-custody; private_storage_peer=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-replicas) scenario=content-custody; private_storage_replicas=yes; wifi_link=no; uplink_link=no ;;
@@ -929,11 +944,18 @@ if [ "$private_storage_peer" = yes ]; then
             && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
     done
 fi
-if [ "$private_storage_replicas" = yes ]; then
+if [ "$private_storage_replicas" = yes ] || [ "$signal_backup" = yes ]; then
     for storage_fixture in private-storage-replicas-smoke.sh private-storage-replicas-smoke.py private-storage-peer-smoke.py; do
         [ -f "$source_directory/tests/integration/$storage_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
     done
+fi
+if [ "$signal_backup" = yes ]; then
+    for storage_fixture in signal-backup-smoke.sh signal-backup-smoke.py signal-backup-reporter.cjs signal-backup-startup.cjs; do
+        [ -f "$source_directory/tests/integration/$storage_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
+    done
+    for signal_tool in bwrap xvfb-run Xvfb; do command -v "$signal_tool" >/dev/null 2>&1 || exit 69; done
 fi
 if [ "$private_storage_fragments" = yes ]; then
     for storage_fixture in private-storage-fragments-smoke.sh private-storage-fragments-smoke.py \
@@ -1984,6 +2006,9 @@ cleanup() {
     if [ "$scenario" = content-mailbox ] && command -v content_mailbox_cleanup >/dev/null 2>&1; then
         content_mailbox_cleanup || original_status=1
     fi
+    if [ "$signal_backup" = yes ] && command -v signal_backup_cleanup >/dev/null 2>&1; then
+        signal_backup_cleanup || original_status=1
+    fi
     if [ "$private_storage_fragments" = yes ] && command -v private_storage_fragments_cleanup >/dev/null 2>&1; then
         private_storage_fragments_cleanup || original_status=1
     elif [ "$private_storage_handoff" = yes ] && command -v private_storage_handoff_cleanup >/dev/null 2>&1; then
@@ -2267,6 +2292,8 @@ cleanup() {
         content_repair_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-mailbox ]; then
         content_mailbox_finalize_report "$original_status" || original_status=1
+    elif [ "$signal_backup" = yes ]; then
+        signal_backup_finalize_report "$original_status" || original_status=1
     elif [ "$cloud_private_file" = yes ]; then
         cloud_private_file_finalize_report "$original_status" || original_status=1
     elif [ "$image_snapshot" = yes ]; then
@@ -2437,9 +2464,13 @@ if [ "$private_storage_peer" = yes ]; then
     # shellcheck source=tests/integration/private-storage-peer-smoke.sh
     . "$source_directory/tests/integration/private-storage-peer-smoke.sh"
 fi
-if [ "$private_storage_replicas" = yes ] || [ "$private_storage_handoff" = yes ] || [ "$private_storage_fragments" = yes ]; then
+if [ "$private_storage_fragments" = yes ] || [ "$private_storage_replicas" = yes ] || [ "$private_storage_handoff" = yes ] || [ "$signal_backup" = yes ]; then
     # shellcheck source=tests/integration/private-storage-replicas-smoke.sh
     . "$source_directory/tests/integration/private-storage-replicas-smoke.sh"
+fi
+if [ "$signal_backup" = yes ]; then
+    # shellcheck source=tests/integration/signal-backup-smoke.sh
+    . "$source_directory/tests/integration/signal-backup-smoke.sh"
 fi
 if [ "$private_storage_fragments" = yes ]; then
     # shellcheck source=tests/integration/private-storage-fragments-smoke.sh
@@ -2637,8 +2668,13 @@ if [ "$private_storage_peer" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/private-storage-peer-smoke.py" \
         "$WORK/bin/private-storage-peer-smoke.py"
 fi
-if [ "$private_storage_replicas" = yes ] || [ "$private_storage_handoff" = yes ] || [ "$private_storage_fragments" = yes ]; then
+if [ "$signal_backup" = yes ] || [ "$private_storage_replicas" = yes ] || [ "$private_storage_handoff" = yes ] || [ "$private_storage_fragments" = yes ]; then
     for storage_fixture in private-storage-replicas-smoke.py private-storage-peer-smoke.py; do
+        install -o root -g root -m 0555 "$source_directory/tests/integration/$storage_fixture" "$WORK/bin/$storage_fixture"
+    done
+fi
+if [ "$signal_backup" = yes ]; then
+    for storage_fixture in signal-backup-smoke.py signal-backup-reporter.cjs signal-backup-startup.cjs; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$storage_fixture" "$WORK/bin/$storage_fixture"
     done
 fi
@@ -5845,6 +5881,8 @@ start_privacy_observers() {
             [ "$scenario" = content-mailbox ] || return 1 ;;
         private-storage-peer-privacy)
             [ "$private_storage_peer" = yes ] || return 1 ;;
+        signal-backup-native-privacy)
+            [ "$signal_backup" = yes ] || return 1 ;;
         private-storage-replicas-upload-privacy|private-storage-replicas-failover-privacy|private-storage-replicas-finish-privacy)
             [ "$private_storage_replicas" = yes ] || return 1 ;;
         private-storage-fragments-upload-privacy|private-storage-fragments-restore-privacy|private-storage-fragments-finish-privacy)
@@ -6597,6 +6635,10 @@ if [ "$agent_train_loop" = yes ]; then
 fi
 if [ "$scenario" = agent-artifact ]; then
     agent_artifact_run
+    exit 0
+fi
+if [ "$signal_backup" = yes ]; then
+    signal_backup_run
     exit 0
 fi
 if [ "$cloud_private_file" = yes ]; then

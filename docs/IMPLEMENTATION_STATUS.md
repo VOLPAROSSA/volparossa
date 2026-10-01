@@ -1045,6 +1045,108 @@ automatic contribution resizing or measured physical overhead.
   2 GB-to-1 GB handoff and pending drain.
 - [ ] Native Signal encrypted snapshot export/import, including its attachments and recovery keys.
 
+The `signal-backup` disposable KVM scenario is now wired to the **actual native Signal
+backup regression**, with chat integration pinned to `c897667d76bea8140f0bc5f373404e43cbd54552`
+and upstream Signal Desktop `ef3872cb0249ec939d8aff857568a0e87a6b5075`. It explicitly provisions
+the locked Node/pnpm dependencies and audited Electron/RingRTC/native inputs in the guest,
+compiles the real candidate, and runs one exact test under Xvfb with `--forbid-pending`
+and `--fail-zero`. That test exports/encrypts a native snapshot, removes its original local
+ciphertext, restores it from two real VOLPAROSSA storage providers, relinks/imports it,
+and checks messages, attachment hashes and screenshots using Signal's own assertions.
+Two 64 MiB fixture stores are capacity bounds for this test, not product storage limits.
+
+The app runs as a capless UID separate from the agent in the Client namespace, with only
+IPv4/IPv6 loopback IP access; real storage operations use the protected daemon socket and
+selected two-leg MPTCP routes. Bubblewrap scopes writable profile/backup data, while the
+pinned Playwright Electron launcher itself disables Chromium sandboxing: no Electron
+sandbox claim is made. Only bounded structural receipts and drained packet counters may
+leave the guest; private profiles, recovery keys, plaintext snapshots and logs are removed.
+The upstream local mock server still provides registration/relink facilities. This is
+neither server-free Signal messaging nor independent-hardware/contribution-accounting proof.
+The exact-source native round trip now **passes**, as recorded below. This proves the
+bounded encrypted-backup integration, not completed messaging, calling or cloud storage.
+
+The first native trial on `6dd21b18`,
+[run `36722947365`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36722947365),
+failed with native exit status 1. All ten source/runtime/dependency/native-build
+provisioning stages passed, but the original bounded receipt cannot distinguish
+sandbox startup, Xvfb, module loading, global setup or the selected test as the cause.
+It does not prove native backup export/import. All 17 original artifact files are
+retained; private cleanup and unchanged host snapshots passed. The next candidate
+adds closed sandbox-stage/errno diagnostics, bounded log classifications and incremental
+Mocha status, without exporting private logs or weakening isolation. Seven focused
+receipt/reporter checks and three VM-wiring checks pass locally; a fresh native trial
+is still required, and the original failure is not relabelled.
+
+The second native trial on `e2d5abda`,
+[run `36728195128`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36728195128),
+also **fails**. All provisioning/compilation stages and the in-sandbox UID, capability,
+supplementary-group and positive control-socket checks pass through `xvfb-exec`.
+Mocha's reporter initializes, but the pinned global setup fails while starting Electron:
+the observed startup-retry and Electron-launch classifications are true, with zero tests
+started. There is no backup payload or native export/import proof. The closed evidence
+does not retain the underlying Electron exception, so no missing library, sandbox or
+application fix is inferred. All 17 originals are retained (ZIP SHA-256
+`4ca8a4ff161775b0dab458adc1f196829a5c5691a4c098b1274aa1048a97495d`); the native process group
+is joined, all private-data cleanup flags pass and both host snapshots hash to
+`8a3ba5819ee4d9eefdd81ea224a49e9bd383c8952aca67af4ee70ea06e4c19f4`.
+The candidate now observes only the pinned Bootstrap retry error, retaining allowlisted
+exception class/code, separate launcher exit and native Electron signal, debugger-endpoint
+milestones and fixed startup-cause categories. Unknown causes remain unknown; exception
+text, endpoints, process IDs, argv and configuration are never exported. It adds no retry,
+changes no Signal/Playwright behavior or security flag, and preserves the original failed
+phase through cleanup. Eight focused receipt/reporter/observer tests and three VM-wiring
+checks pass; the same exact native test with this observation is the next runtime proof.
+
+The third native trial on `82a767aa`,
+[run `36732954164`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36732954164),
+also fails before any test starts: the launcher exits 1 after native Electron receives
+`SIGTRAP`. The Node debugger opens, but the Chromium debugger does not. Provisioning,
+compilation and the isolated socket-access preflight pass; all previous closed cause
+categories are false, so the cause remains unknown. All 17 original artifacts are retained
+(ZIP SHA-256 `124c148728399a58d1f6ae13eee49d1f95cf361ffb322223bca6b2271c3cae43`).
+Private cleanup, process-group joining and unchanged host-state checks pass. No native
+backup export, restore or import is proved. The next diagnostic candidate records at most
+four Chromium/V8 fatal source locations and closed categories, never CHECK expressions,
+values, arbitrary filenames or error text. It changes no sandbox or launch flags. Nine
+focused tests and three VM-wiring checks pass; a new exact-source runtime trial is pending.
+
+The fourth native trial on `b9a579a5`,
+[run `36738793723`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36738793723),
+still fails before any test, but now identifies the exact Chromium fatal site:
+`process_singleton_posix.cc:335`. In Electron 44.1.0's pinned Chromium 152.0.7977.65,
+the two Electron singleton patches move `SetupSocket`'s socket-path-too-long fatal from
+upstream line 313 to line 335. The fixture's long `TMPDIR` plus the generated singleton
+directory/socket exceeds Linux's 108-byte Unix socket address. This is a fixture path
+failure, not evidence that Signal needs relaxed sandbox permissions. The candidate binds
+the same owned `tmp` directory at `/tmp/signal` inside its existing private `/tmp` mount,
+sets `TMPDIR` only for that sandbox child, and checks that the alias retains the original
+directory identity, owner and mode 0700. The existing cleanup still removes the underlying
+private profile/temp tree. No Signal source, launch security flags or host paths change.
+The 17 original artifacts remain retained (ZIP SHA-256
+`205ca2c6b3e14959428e1fe7766b716c159017c36e34b79326c23b560e5ef2ce`);
+process joining, private cleanup and unchanged host-state checks passed. That failed run
+does not prove native backup export/import.
+
+The corrected native trial on `90dbea789b57efcbc6cab941e54dfb6a5240511e`,
+[run `36742201942`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36742201942),
+**passes** the exact upstream encrypted-export/import test: one test, one pass, zero failed
+or pending tests. Signal creates the encrypted archive, the original ciphertext is removed,
+and a real protected-core restore reaches Signal's native importer. Upstream assertions
+verify messages, attachment plaintext hashes and screenshots. The archive is 198,352 bytes;
+both retained copies are charged (396,704 payload bytes) and survive import until explicit
+owner deletion, after which both stores report zero leases, reservations and committed bytes.
+Twelve Exit MPTCP/TLS exchanges complete. Both selected WireGuard relay paths carry data;
+the drained captures report no dropped packets, direct Client-to-Exit traffic or unexpected
+outer traffic. The app's non-loopback guard blocks 208 packets. Private profiles, recovery
+keys and grants are removed, the native process group joins, and no owned topology objects
+remain. Original guest-host snapshots are byte-identical (SHA-256
+`1c00c8ef8efc642f6f60728d3542700188ca7d8579e17d05364592eee4c1e7e5`). All 23 original artifacts
+remain retained, ZIP SHA-256 `8eb0cfa37d26f9864e28ca13c570c7c251736d9e196c97e0c1e000ecfc9df4f2`.
+The source-exact report checker also passes locally. Registration/relink still uses the
+upstream local mock server; this is not server-free Signal messaging, calling, independent
+hardware availability, automatic storage repair, reciprocal accounting or a full-alpha PASS.
+
 ## Earlier milestone evidence
 
 The completed development milestone is integrated into `main` by
