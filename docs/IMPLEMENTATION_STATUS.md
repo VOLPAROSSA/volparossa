@@ -39,6 +39,16 @@ Last updated: 2026-10-01
   Accounts, sharing, writable synchronization and second-device owner-state
   recovery remain open, as does the full web UI and general server-independent
   OpenCloud service. Range reads currently reconstruct the whole encrypted file.
+  Cloud `c81980dd71297b257f1df6aa382c28a18f9c2f57` now includes the original
+  source-built OpenCloud Web8 Files interface for explicit owner-local recovery.
+  Its two real browser downloads pass against an explicitly synthetic backend;
+  that result is not a peer-storage proof. The next joined candidate stages those
+  exact assets and Firefox ESR140.16 in the disposable guest, attaches the UI to
+  the same actual Cloud/core read service used by the SDK, and requires six real
+  protected B/C reconstructions including two original Download actions with the
+  source and A still offline. It retains authentication, logout, resource bounds,
+  complete private cleanup and unchanged host-state checks. This new combined
+  UI/peer scenario is **not yet run** and remains unchecked.
 - [ ] Cooperative maintenance of current/future VOLPAROSSA organization repositories:
   actual coding jobs, independent immune review and exact-revision scoped GitHub
   publication. [Agreed scope](REPOSITORY_MAINTENANCE.md); no autonomous publisher,

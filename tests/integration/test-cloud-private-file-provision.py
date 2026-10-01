@@ -5,6 +5,7 @@
 import hashlib
 import io
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -18,19 +19,25 @@ HERE = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location("cloud_provision", HERE / "cloud-private-file-provision.py")
 PROVISION = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PROVISION)
+UI_SPEC = importlib.util.spec_from_file_location("cloud_ui_provision", HERE / "cloud-private-file-ui-provision.py")
+UI = importlib.util.module_from_spec(UI_SPEC)
+UI_SPEC.loader.exec_module(UI)
 
 
 class CloudProvision(unittest.TestCase):
     def test_exact_cloud_and_node_pins_retain_licenses(self):
         pins = PROVISION.load_pins()
-        self.assertEqual(pins["revision"], "a67b91fbed42ecd23ba215eb21ef54397fc9f06a")
+        self.assertEqual(pins["revision"], "c81980dd71297b257f1df6aa382c28a18f9c2f57")
         self.assertEqual(set(pins["files"]), {
             "scripts/cloud-file.mjs", "scripts/private_file.py", "src/private-file.mjs", "src/opencloud-dav.mjs",
             "vendor/volparossa-image/immich_snapshot.py", "vendor/volparossa-image/core-storage.mjs",
             "vendor/volparossa-image/LICENSE", "third_party/volparossa-image-source.json", "LICENSE",
             "scripts/cloud-catalog.mjs", "scripts/cloud-serve.mjs", "scripts/private_catalog.py",
             "scripts/stage_web_sdk.py", "src/private-catalog.mjs", "src/private-dav-server.mjs",
-            "third_party/opencloud-web-sdk.json", "THIRD_PARTY_LICENSES.md"})
+            "third_party/opencloud-web-sdk.json", "THIRD_PARTY_LICENSES.md", "src/private-resource-id.mjs",
+            "src/recovery-web-metadata.mjs", "scripts/recovery-web-assets.mjs", "scripts/build_web_ui.py",
+            "scripts/smoke_web_ui.py", "third_party/opencloud-web-ui.json",
+            "patches/opencloud-web-owner-recovery.patch"})
         self.assertEqual(set(pins["runtime"]["files"]), {"bin/node", "LICENSE"})
         self.assertEqual(pins["runtime"]["version"], "24.19.0")
         self.assertEqual(pins["files"]["vendor/volparossa-image/LICENSE"], pins["files"]["LICENSE"])
@@ -44,6 +51,113 @@ class CloudProvision(unittest.TestCase):
         self.assertIn('len(receipt["files"]) == 109', source)
         self.assertIn('"package/LICENSE" in receipt["files"]', source)
         self.assertIn('sdk_reads_proven=False', source)
+
+    def test_ui_and_browser_are_guest_only_verified_before_exposure(self):
+        source = (HERE / "cloud-private-file-provision.py").read_text()
+        helper = (HERE / "cloud-private-file-ui-provision.py").read_text()
+        self.assertLess(source.index('guard()\n'), source.index('SOURCE.mkdir('))
+        self.assertLess(source.index('expose(RUNTIME)'), source.index('ui_stage["provision_ui"]'))
+        self.assertLess(source.index('ui_stage["provision_browser"]'), source.index('expose(SOURCE)'))
+        self.assertIn("'--no-new-privs'", helper)
+        self.assertIn("'--bounding-set=-all'", helper)
+        self.assertIn("'GIT_CONFIG_GLOBAL': '/dev/null'", helper)
+        self.assertIn("'core.hooksPath=/dev/null'", helper)
+        self.assertIn("'credential.helper='", helper)
+        self.assertIn("'--depth=1'", helper)
+        self.assertIn("'browser-network-provision.py'", helper)
+        self.assertIn("'build/firefox-esr'", helper)
+        self.assertIn("'build/web-ui'", helper)
+        self.assertIn("'build/FIREFOX_COPYRIGHT'", helper)
+        self.assertIn("'build/PNPM_LICENSE'", helper)
+        self.assertIn("ui_execution_proven=False", helper)
+        self.assertIn("browser_execution_proven=False", helper)
+
+    def synthetic_ui(self, root):
+        """Parser fixture only; no source build, browser or peer proof."""
+        source, dist = root / "source", root / "dist"
+        (source / 'third_party').mkdir(parents=True)
+        (source / 'patches').mkdir()
+        dist.mkdir()
+        (source / 'patches/owner.patch').write_bytes(b'synthetic patch')
+        (dist / 'index.html').write_bytes(b'synthetic index')
+        (dist / 'UPSTREAM_LICENSE').write_bytes(b'synthetic license')
+        pins = dict(repository='https://github.com/opencloud-eu/web.git', revision=UI.UPSTREAM,
+                    tree=UI.UPSTREAM_TREE, patch='patches/owner.patch', lock_sha256='1' * 64,
+                    license_sha256=UI.digest(dist / 'UPSTREAM_LICENSE'))
+        (source / 'third_party/opencloud-web-ui.json').write_text(json.dumps(pins))
+        report = dict(version=1, kind='opencloud-web-owner-recovery-build', source_revision=UI.UPSTREAM,
+            source_tree=UI.UPSTREAM_TREE, pins_sha256=UI.digest(source / 'third_party/opencloud-web-ui.json'),
+            patch_sha256=UI.digest(source / 'patches/owner.patch'), lock_sha256=pins['lock_sha256'],
+            node='24.19.0', pnpm='11.27.0', lifecycle_scripts=False, build_network=False,
+            global_installation=False, files={name: dict(bytes=(dist / name).stat().st_size,
+            sha256=UI.digest(dist / name)) for name in ('index.html', 'UPSTREAM_LICENSE')})
+        (dist / 'BUILD_REPORT.json').write_text(json.dumps(report))
+        return source, dist, report
+
+    def test_ui_receipt_requires_exact_bytes_and_closed_execution_scope(self):
+        with tempfile.TemporaryDirectory(prefix='cloud-ui-contract-') as temporary:
+            source, dist, _ = self.synthetic_ui(Path(temporary))
+            receipt = UI.verify_ui(source, dist)
+            self.assertEqual(set(receipt), {'source_revision', 'source_tree', 'pins_sha256',
+                'patch_sha256', 'build_report_sha256', 'source_built', 'files_verified', 'ui_execution_proven'})
+            self.assertFalse(receipt['ui_execution_proven'])
+            self.assertEqual(receipt['build_report_sha256'], UI.digest(dist / 'BUILD_REPORT.json'))
+            (dist / 'index.html').write_bytes(b'changed')
+            with self.assertRaises(ValueError):
+                UI.verify_ui(source, dist)
+
+    def test_ui_receipt_rejects_unreported_assets_and_links(self):
+        with tempfile.TemporaryDirectory(prefix='cloud-ui-contract-') as temporary:
+            source, dist, _ = self.synthetic_ui(Path(temporary))
+            extra = dist / 'unreported'
+            extra.write_bytes(b'x')
+            with self.assertRaises(ValueError):
+                UI.verify_ui(source, dist)
+            extra.unlink()
+            original = dist / 'index.html'
+            target = Path(temporary) / 'outside'
+            original.rename(target)
+            original.symlink_to(target)
+            with self.assertRaises(ValueError):
+                UI.verify_ui(source, dist)
+
+    def test_ui_receipt_rejects_build_network_or_lifecycle_claims(self):
+        with tempfile.TemporaryDirectory(prefix='cloud-ui-contract-') as temporary:
+            source, dist, report = self.synthetic_ui(Path(temporary))
+            for key in ('build_network', 'lifecycle_scripts', 'global_installation'):
+                report[key] = True
+                (dist / 'BUILD_REPORT.json').write_text(json.dumps(report))
+                with self.assertRaises(ValueError):
+                    UI.verify_ui(source, dist)
+                report[key] = False
+
+    def test_public_copy_preserves_executable_only_readonly_and_rejects_links(self):
+        with tempfile.TemporaryDirectory(prefix='cloud-ui-contract-') as temporary:
+            source, destination = Path(temporary) / 'source', Path(temporary) / 'final'
+            source.mkdir()
+            (source / 'firefox-esr').write_bytes(b'synthetic nonexecutable test bytes')
+            (source / 'firefox-esr').chmod(0o700)
+            (source / 'LICENSE').write_bytes(b'synthetic license')
+            (source / 'LICENSE').chmod(0o600)
+            UI.copy_public_tree(source, destination)
+            self.assertEqual((destination / 'firefox-esr').stat().st_mode & 0o777, 0o555)
+            self.assertEqual((destination / 'LICENSE').stat().st_mode & 0o777, 0o444)
+            (source / 'linked').symlink_to(source / 'LICENSE')
+            with self.assertRaises(ValueError):
+                UI.copy_public_tree(source, Path(temporary) / 'rejected')
+
+    def test_owner_command_has_private_home_and_no_inherited_credentials(self):
+        owner = mock.Mock(pw_uid=1001, pw_gid=1001)
+        child = mock.Mock(pid=12345)
+        child.wait.return_value, child.poll.return_value = 0, 0
+        with mock.patch.object(UI.subprocess, 'Popen', return_value=child) as start:
+            UI.owner_run(['/usr/bin/true'], owner, Path('/opt/temporary-home'), Path('/opt/temporary-cwd'))
+        args, kwargs = start.call_args
+        self.assertEqual(args[0][-1], '/usr/bin/true')
+        self.assertIn('--no-new-privs', args[0])
+        self.assertEqual(kwargs['env']['HOME'], '/opt/temporary-home')
+        self.assertEqual(set(kwargs['env']), {'PATH', 'HOME', 'LC_ALL', 'GIT_CONFIG_NOSYSTEM',
+            'GIT_CONFIG_GLOBAL', 'GIT_TERMINAL_PROMPT'})
 
     def test_guest_guard_refuses_before_subprocess_or_mutation(self):
         with mock.patch.object(PROVISION.os, "geteuid", return_value=0), \
