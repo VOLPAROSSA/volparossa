@@ -734,6 +734,50 @@ charge can be removed. Local signed-service tests exercise lost replies, restart
 retry identity, a bounded partial pass, least-charged placement, restore without the local
 source and final zero-lease cleanup; they are not a new protected-overlay proof.
 
+### Bounded owner-driven repair pass
+
+`storage fragments repair` uses the same explicit owner authority, candidate grants,
+least-charged selection and real replacement/readback operations as `drain`, but separates
+repair progress from an unreachable source's outstanding deletion:
+
+```sh
+volparossa storage fragments repair --state /absolute/fragment-set \
+  --from-provider-key UNAVAILABLE_PROVIDER_KEY_HEX \
+  --provider-key CANDIDATE_KEY_HEX --grant /absolute/candidate.grant \
+  --max-fragments 16 --lifetime-seconds 604800 --identity /absolute/owner.identity
+```
+
+Copying intents resume first with their exact signed provider, archive identity, grant and
+expiry, including when that provider is absent from the fresh candidate list. New repairs
+come next; already pending retirements come last so repeated small passes can repair the
+other fragments while the original provider remains offline. Every fragment is attempted
+at most once per pass and the same total 1–256 attempt bound applies. A fragment with a
+pending handoff never receives another replacement intent.
+
+An incomplete handoff permits continuation **only** when that invocation verified the
+survivor and fully read back the exact replacement, with only `source_delete_unconfirmed`
+remaining. A failed upload, readback or survivor check still stops the pass. A persisted
+`DeletePending` phase is not counted as new verification; a retirement retry performs the
+existing real handoff checks again before it can delete anything. The original provider's
+uncertain bytes remain fully charged even when the replacement is usable.
+
+The JSON report distinguishes `freshly_verified_replacements` and per-fragment
+`replacement_verified_this_pass` from `pending_retirements` and
+`remaining_provider_fragments` (the original copies not yet confirmed deleted).
+`repair_stage: retirement_pending` and nonzero exit status remain visible until all source
+copies are confirmed deleted. `pass_limit`, `pending_handoff`, `pending_grant_unavailable`
+and `no_eligible_candidate` also remain incomplete. `repair_pending` means another pass is
+needed after a fragment's earlier handoff for a different source provider was completed;
+the pass does not schedule two handoffs for that fragment. Repeating the command after provider
+or owner restart retains the same identities and charges. `drain` keeps its stricter
+stop-on-unconfirmed-deletion behavior.
+
+This is a bounded owner-online controller, not background availability detection, automatic
+contribution resizing, a new redundancy policy or proof of independent device availability.
+The original signed reconstruction root and the existing v2 consumer boundary are unchanged.
+Its functional probe uses actual signed local provider services and SQLite stores, not a
+new protected-overlay run.
+
 ### Disposable protected-fragment proof
 
 The `private-storage-fragments` scenario is separate from the older whole-archive
