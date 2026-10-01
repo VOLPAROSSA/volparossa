@@ -6,6 +6,22 @@ Last updated: 2026-10-01
 
 ## Current integration and active work
 
+### Additional application and autonomous-maintenance scope
+
+- [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
+  authenticated source import, private fragment storage and source-off file access,
+  followed by the account/metadata/sharing/synchronization functions needed for
+  normal use without the original server. Distributed blobs alone are not a
+  server-independent OpenCloud service.
+- [ ] Cooperative maintenance of current/future VOLPAROSSA organization repositories:
+  actual coding jobs, independent immune review and exact-revision scoped GitHub
+  publication. [Agreed scope](REPOSITORY_MAINTENANCE.md); no autonomous publisher,
+  independent code-review quorum or automatic client updater is implemented.
+- [ ] Automatically distribute and install independently authorized releases on
+  VOLPAROSSA clients (explicit user approval 2026-10-01), with client-side update
+  verification, staged rollout, permission boundaries, data-preserving activation
+  and recovery. No development-host installer or update channel has been enabled.
+
 ### Native private conversation candidate
 
 Qwen native private-conversation source candidate (2026-09-30): explicit
@@ -95,12 +111,22 @@ invalid JSON, choose a tool for the model or execute tools in the worker. The
 caller remains responsible for argument validation and execution permissions.
 Model weights, prompt, sampling, seed, limits and the two-turn success check are
 unchanged. Eight focused Rust conversation tests and seven offline Qwen bridge
-tests pass. These decoder checks are not new model evidence; an actual fresh
-two-turn run is still required.
+tests pass. These decoder checks alone are not model evidence.
 
-Actual completed tool use,
-a hard-4GiB-bounded long-context run and an end-to-end editing loop remain
-**unproved/incomplete**. See the [exact wire contract](../crates/volparossa/src/compute/private_conversation/WIRE.md).
+The fresh exact [trial 36896857071](https://github.com/VOLPAROSSA/volparossa/actions/runs/36896857071)
+on `d681567924b439a78a7a12d531f2dbd67849f462` now passes the unchanged two-turn
+checker against all eight original artifacts. The actual pinned Qwen model
+requests the offered `read_file` tool, the owner executes one authorized synthetic
+file read, and a correlated second actual inference returns the previously unseen
+file canary. Original inputs, worker isolation, complete cleanup and unchanged
+guest host state pass. The artifact ZIP SHA-256 is
+`50ed85e0afbc49b677e59a0d981399ccf7290037e716c880f57a6c57bc08517f`.
+This source is merged through PR #184. Earlier failed trials remain failed.
+
+This proves the scoped two-turn file-read interaction, not general tool-use or
+coding quality, a hard-4GiB-bounded long-context run, remote private execution or
+a native Codex editing/test loop. Those remain **unproved/incomplete**. See the
+[exact wire contract](../crates/volparossa/src/compute/private_conversation/WIRE.md).
 
 Private conversation source candidate (2026-09-30): additive
 [`conversation_capabilities` / `submit_conversation`](../crates/volparossa/src/compute/private_conversation/WIRE.md)
@@ -113,7 +139,7 @@ with whole-prompt token admission and no truncation; the Qwen profile above expa
 the conversation budget without changing those legacy profiles.
 Sixteen focused Rust protocol/lifecycle/report tests and eleven offline Python
 conversation/private-worker tests pass. Backend doubles in those tests are not model
-inference evidence. Real tool-use quality, a connected Responses provider and an
+inference evidence. General tool-use quality, a connected Responses provider and an
 actual Codex editing loop remain **unproved/incomplete**.
 
 ### Scoped browser TCP: live component proof passed
