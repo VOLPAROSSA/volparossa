@@ -7,21 +7,76 @@ packet observations. This driver neither creates routes nor disables global ECH.
 """
 import argparse
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import selectors
 import signal
 import socket
 import ssl
 import subprocess
 import sys
+import threading
 import time
 
 import browser_native_runtime as runtime
 import smoke_network_core as core
 from smoke_privacy import Marionette
 from stage_firefox import ROOT, build_path, validate_isolated_browser_home
+
+
+def stderr_diagnostic(data, total_bytes, eof):
+    """Closed observations only: never export stderr text, paths or URLs."""
+    patterns = {
+        "shared_library_load": (b"error while loading shared libraries", b"XPCOMGlueLoad error"),
+        "xpcom_initialization": (b"Couldn't load XPCOM", b"Could not initialize XPCOM"),
+        "display_unavailable": (b"cannot open display", b"no DISPLAY environment variable"),
+        "profile_unavailable": (b"profile cannot be loaded", b"profile cannot be used"),
+        "permission_denied": (b"Permission denied",),
+        "read_only_filesystem": (b"Read-only file system",),
+        "user_namespace_warning": (b"CanCreateUserNamespace()",),
+        "marionette_listening": (b"Listening on port 2828",),
+        "crash_indicator": (b"Segmentation fault", b"Fatal error"),
+    }
+    observed = {name: any(pattern in data for pattern in values) for name, values in patterns.items()}
+    return dict(captured_bytes=len(data), total_bytes=total_bytes, truncated=total_bytes > len(data),
+                captured_sha256=hashlib.sha256(data).hexdigest(), eof=eof,
+                observed=observed, unclassified_output=bool(data) and not any(observed.values()))
+
+
+class StartupStderr:
+    """Drain stderr without backpressure; retain at most 64 KiB in RAM."""
+    def __init__(self, stream):
+        self.stream, self.data, self.total, self.eof = stream, bytearray(), 0, False
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._read, daemon=True)
+        self.thread.start()
+
+    def _read(self):
+        os.set_blocking(self.stream.fileno(), False)
+        with selectors.DefaultSelector() as selector:
+            selector.register(self.stream, selectors.EVENT_READ)
+            while not self.stop.is_set():
+                if not selector.select(.1):
+                    continue
+                chunk = os.read(self.stream.fileno(), 4096)
+                if not chunk:
+                    self.eof = True
+                    break
+                self.total += len(chunk)
+                self.data.extend(chunk[:max(0, 65536 - len(self.data))])
+
+    def finish(self):
+        self.thread.join(timeout=1)
+        self.stop.set()
+        self.thread.join(timeout=2)
+        if self.thread.is_alive():
+            raise RuntimeError("stderr_reader_unfinished")
+        self.stream.close()
+        return stderr_diagnostic(bytes(self.data), self.total, self.eof)
+
 
 SCRIPT = r"""
 const [grants, urls, expectedSha, expectedBytes, certificate, output, done] = arguments;
@@ -156,6 +211,15 @@ def check_result(value, count):
                        ("native_ech_abi", "builtin_modules", "ordinary_tabs")}, count)
 
 
+def window_handles(client):
+    # Pinned Marionette GetWindowHandles is in commandsNoValueResponse:
+    # response[3] is the array itself, not a {"value": ...} wrapper.
+    handles = client.command("WebDriver:GetWindowHandles", {})
+    runtime.require(type(handles) is list and len(handles) <= 128
+                    and all(type(handle) is str for handle in handles))
+    return set(handles)
+
+
 def inside(args, work, provision):
     require = runtime.require
     core.guest_guard(args)
@@ -186,12 +250,19 @@ def inside(args, work, provision):
         expected_bytes=args.expected_bytes, expected_sha256=args.expected_sha256,
         overlay_kernel_proof_external=True, namespace=os.readlink("/proc/self/ns/net"),
         socket_access=access, control_namespace=control)
-    browser, client = None, None
+    startup = dict(phase="browser-spawn", marionette_connected=False, session_created=False,
+                   initial_window_count=None, firefox_exit_before_cleanup=None,
+                   firefox_exit_after_cleanup=None, stderr=None, stderr_collection_failed=False)
+    report["startup"] = startup
+    browser, client, stderr = None, None, None
     try:
         core.driver_status(work, "browser-start")
         browser = subprocess.Popen([str(args.stage / "firefox"), "--headless", "--no-remote", "--new-instance",
             "--profile", str(work / "profile"), "--marionette", "--remote-allow-system-access", "about:blank"],
-            env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
+        stderr = StartupStderr(browser.stderr)
+        startup["phase"] = "marionette-connect"
+        core.driver_status(work, "marionette-connect")
         deadline = time.monotonic() + 40
         while time.monotonic() < deadline:
             require(browser.poll() is None)
@@ -203,18 +274,27 @@ def inside(args, work, provision):
             except (ConnectionRefusedError, TimeoutError):
                 time.sleep(.2)
         require(client is not None)
+        startup["marionette_connected"] = True
+        startup["phase"] = "marionette-session"
+        core.driver_status(work, "marionette-session")
         client.command("WebDriver:NewSession", {"capabilities": {"alwaysMatch": {}}})
-        initial_tabs = set(client.command("WebDriver:GetWindowHandles", {})["value"])
+        startup["session_created"] = True
+        startup["phase"] = "window-handles"
+        initial_tabs = window_handles(client)
+        startup["initial_window_count"] = len(initial_tabs)
         require(len(initial_tabs) == 1)
+        startup["phase"] = "chrome-context"
         client.command("Marionette:SetContext", {"value": "chrome"})
         client.command("WebDriver:SetTimeouts", {"script": 300000})
+        startup["phase"] = "ready"
+        core.driver_status(work, "script-start")
         result = client.command("WebDriver:ExecuteAsyncScript", {"script": SCRIPT,
             "args": [grants, [args.url_a, args.url_b], args.expected_sha256, args.expected_bytes, certificate, str(work)],
             "newSandbox": True, "sandbox": "system"})["value"]
         report["result"] = result
         check_result(result, args.expected_bytes)
         client.command("Marionette:SetContext", {"value": "content"})
-        handles = set(client.command("WebDriver:GetWindowHandles", {})["value"]) - initial_tabs
+        handles = window_handles(client) - initial_tabs
         require(len(handles) == 2)
         for handle in handles:
             client.command("WebDriver:SwitchToWindow", {"handle": handle})
@@ -226,6 +306,7 @@ def inside(args, work, provision):
         require(browser.wait(timeout=20) == 0)
         report["passed"] = True
     finally:
+        startup["firefox_exit_before_cleanup"] = browser.poll() if browser is not None else None
         if client is not None:
             client.socket.close()
         if browser is not None and browser.poll() is None:
@@ -235,10 +316,18 @@ def inside(args, work, provision):
             except subprocess.TimeoutExpired:
                 os.killpg(browser.pid, signal.SIGKILL)
                 browser.wait(timeout=5)
-        report["cleanup"] = dict(browser_exited=browser is None or browser.poll() is not None,
-                                 profile_removed=core.remove_profile(work))
-        report["passed"] = report["passed"] and all(report["cleanup"].values())
-        (work / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+        startup["firefox_exit_after_cleanup"] = browser.poll() if browser is not None else None
+        try:
+            if stderr is not None:
+                startup["stderr"] = stderr.finish()
+        except (OSError, ValueError, RuntimeError):
+            startup["stderr_collection_failed"] = True
+            report["passed"] = False
+        finally:
+            report["cleanup"] = dict(browser_exited=browser is None or browser.poll() is not None,
+                                     profile_removed=core.remove_profile(work))
+            report["passed"] = report["passed"] and all(report["cleanup"].values())
+            (work / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     require(report["passed"])
 
 

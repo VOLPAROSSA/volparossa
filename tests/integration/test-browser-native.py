@@ -3,10 +3,15 @@
 """Narrow native provenance/evidence checks, not a substitute for the live VM."""
 import ast
 import copy
+import hashlib
 import json
+import os
 from pathlib import Path
 import runpy
+import selectors
 import tempfile
+import threading
+from types import SimpleNamespace
 import unittest
 
 HERE = Path(__file__).resolve().parent
@@ -16,6 +21,50 @@ OLD = runpy.run_path(str(HERE / "test-browser-network-smoke.py"))
 
 
 class NativeBrowserTests(unittest.TestCase):
+    def test_pinned_marionette_window_handles_are_a_direct_array(self):
+        tree = ast.parse((HERE / "browser-native-core.py").read_text())
+        helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                      and node.name == "window_handles")
+        namespace = dict(runtime=SimpleNamespace(require=RUNTIME["require"]))
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), "native-window-handles", "exec"), namespace)
+        calls = []
+        def command(name, parameters):
+            calls.append((name, parameters))
+            return ["fixture-window-a", "fixture-window-b"]
+        self.assertEqual(namespace["window_handles"](SimpleNamespace(command=command)),
+                         {"fixture-window-a", "fixture-window-b"})
+        self.assertEqual(calls, [("WebDriver:GetWindowHandles", {})])
+        for malformed in ({"value": ["fixture-window"]}, None, [3]):
+            with self.assertRaises(ValueError):
+                namespace["window_handles"](SimpleNamespace(command=lambda *_: malformed))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "driver_status":
+                self.assertIn(node.args[1].value, OLD["CHECK"]["DRIVER_PHASES"])
+
+    def test_native_stderr_is_bounded_and_exports_no_raw_content(self):
+        tree = ast.parse((HERE / "browser-native-core.py").read_text())
+        helpers = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+                   and node.name in ("stderr_diagnostic", "StartupStderr")]
+        namespace = dict(hashlib=hashlib, os=os, selectors=selectors, threading=threading)
+        exec(compile(ast.Module(body=helpers, type_ignores=[]), "native-stderr-helpers", "exec"), namespace)
+        read_fd, write_fd = os.pipe()
+        reader = namespace["StartupStderr"](os.fdopen(read_fd, "rb"))
+        payload = b"XPCOMGlueLoad error: private-canary-path\n" + b"x" * 100000
+        def write():
+            with os.fdopen(write_fd, "wb") as stream:
+                stream.write(payload)
+        writer = threading.Thread(target=write)
+        writer.start()
+        writer.join(timeout=3)
+        self.assertFalse(writer.is_alive())
+        diagnostic = reader.finish()
+        self.assertEqual(diagnostic["captured_bytes"], 65536)
+        self.assertEqual(diagnostic["total_bytes"], len(payload))
+        self.assertTrue(diagnostic["truncated"] and diagnostic["eof"])
+        self.assertTrue(diagnostic["observed"]["shared_library_load"])
+        self.assertEqual(diagnostic["captured_sha256"], hashlib.sha256(payload[:65536]).hexdigest())
+        self.assertNotIn("private-canary-path", json.dumps(diagnostic))
+
     def test_inventory_excludes_private_proofs_but_rejects_runtime_links(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -87,6 +136,10 @@ class NativeBrowserTests(unittest.TestCase):
         self.assertNotIn('security.tls.ech.grease_probability', source)
         self.assertNotIn('fixture_modules(', source)
         self.assertIn('ordinary_tab_bodies_verified', source)
+        for phase in ("browser-spawn", "marionette-connect", "marionette-session", "window-handles", "chrome-context"):
+            self.assertIn('"' + phase + '"', source)
+        self.assertIn('firefox_exit_before_cleanup', source)
+        self.assertIn('firefox_exit_after_cleanup', source)
 
 
 if __name__ == "__main__":
