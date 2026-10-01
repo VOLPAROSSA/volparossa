@@ -510,8 +510,10 @@ assert guest.count("agent_autonomous_aggregation=no") == 2
 timeout_line = next(line.strip() for line in workflow.splitlines() if line.strip().startswith('timeout-minutes:'))
 overrides = dict(re.findall(r"inputs.scenario == '([^']+)' && ([0-9]+)", timeout_line))
 assert overrides.get('agent-autonomous-aggregation') == '180' and timeout_line.endswith('|| 120 }}')
-# The independent native Signal build may require its existing 150-minute window.
-assert all((name, bound) in {('agent-autonomous-aggregation', '180'), ('signal-native-backup', '150')}
+# Native Codex is built from pinned source before the guest trial; only that
+# scenario gets a 240-minute window. Keep all existing scenario bounds intact.
+assert overrides.get('agent-native-coding') == '240'
+assert all((name, bound) in {('agent-autonomous-aggregation', '180'), ('signal-native-backup', '150'), ('agent-native-coding', '240')}
            for name, bound in overrides.items())
 host = (root / "run-alpha-topology-vm.sh").read_text()
 assert 'if scenario == "agent-autonomous-aggregation":\n        file_count_limit = 192' in host

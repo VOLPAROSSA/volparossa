@@ -25,6 +25,20 @@ successful staging alone is not evidence of actual SDK or protected-peer reads.
 
 ## Explicit development ML inputs
 
+The disposable native-coding CI build uses a separately licensed AppArmor policy,
+`tests/integration/native-coding-bwrap.apparmor`, derived from AppArmor v4.0.1,
+commit `b0eb95457bc2de401920308869d016e696c73664`,
+[`profiles/apparmor/profiles/extras/bwrap-userns-restrict`](https://gitlab.com/apparmor/apparmor/-/blob/b0eb95457bc2de401920308869d016e696c73664/profiles/apparmor/profiles/extras/bwrap-userns-restrict).
+The upstream GPL version 2 [LICENSE](https://gitlab.com/apparmor/apparmor/-/blob/b0eb95457bc2de401920308869d016e696c73664/LICENSE)
+is retained unchanged in `third_party/apparmor-ci/LICENSE`, SHA-256
+`a7e0cdcbea5c14927cedfc600d46526bdcbb1eb0a4d951e2ea53c2a6de159cb4`.
+The policy retains its own GPL-2.0-only designation, separate from original core code.
+Local changes (2026-10-01) give both profiles unique CI names and omit host-local
+policy includes; capability-denying child stacking and the original explanatory
+comments remain. The workflow uses Ubuntu's package-owned `/usr/bin/bwrap` and
+adds/removes these profiles only for the selected disposable CI build. It neither
+ships this policy in the product nor changes developer-host policy or global sysctls.
+
 The optional, guest-only `workers/volparossa-ml/provision.py` installer is not an automatic
 agent update channel. `model-pins.json` and `requirements.lock` pin 38 original CPython 3.13
 Linux amd64 CPU wheels and eight original model assets by exact download URL, byte size and

@@ -159,7 +159,14 @@ pub(super) fn command(options: &Options) -> Command {
                 super::resources::limits(options.model_profile).address_space
             ),
             &format!("--fsize={MAX_FILE_BYTES}"),
-            &format!("--cpu={}", options.max_seconds),
+            // RLIMIT_CPU counts aggregate process CPU time across threads, not
+            // elapsed time. The supervisor still enforces max_seconds wall time;
+            // this finite kernel backstop must allow the approved worker threads
+            // to use that same window rather than killing a two-thread job early.
+            &format!(
+                "--cpu={}",
+                u64::from(options.max_seconds) * u64::from(options.threads)
+            ),
             "/usr/bin/nice",
             "-n",
             "19",
@@ -181,6 +188,57 @@ pub(super) fn command(options: &Options) -> Command {
 #[cfg(test)]
 mod tests {
     use super::{SOURCE_ARGUMENT_BYTES, WORKER_BOOTSTRAP, source_arguments, worker_source};
+
+    #[test]
+    fn kernel_cpu_limit_covers_only_the_authorized_wall_window_and_worker_threads() {
+        for threads in [1, 2] {
+            for seconds in [1, 600] {
+                let options = super::Options {
+                    mode: crate::compute::Mode::PrivateConversation,
+                    runtime_root: "/runtime-fixture".into(),
+                    model_root: "/model-fixture".into(),
+                    model_profile: crate::compute::ModelProfile::Qwen600,
+                    adapter_root: None,
+                    dataset: "/dataset-fixture".into(),
+                    output: "/output-fixture".into(),
+                    steps: 1,
+                    threads,
+                    max_seconds: seconds,
+                    spare_capacity: true,
+                    execute: true,
+                };
+                let command = super::command(&options);
+                let arguments: Vec<_> = command.as_std().get_args().collect();
+                let cpu: Vec<_> = arguments
+                    .iter()
+                    .filter(|arg| arg.to_string_lossy().starts_with("--cpu="))
+                    .collect();
+                assert_eq!(cpu.len(), 1);
+                let expected = u64::from(seconds) * u64::from(threads);
+                assert_eq!(cpu[0].to_string_lossy(), format!("--cpu={expected}"));
+                assert!(expected <= 1200);
+                for variable in ["OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"] {
+                    let at = arguments.iter().position(|arg| *arg == variable).unwrap();
+                    assert_eq!(arguments[at + 1], threads.to_string().as_str());
+                }
+                // Exercise the exact emitted prlimit argument with an inert local
+                // interpreter: no model, namespace, mounts, networking or busy loop.
+                let result = std::process::Command::new("/usr/bin/prlimit")
+                    .arg(cpu[0])
+                    .args([
+                        "/usr/bin/python3",
+                        "-I",
+                        "-c",
+                        "import resource; print(*resource.getrlimit(resource.RLIMIT_CPU))",
+                    ])
+                    .output()
+                    .unwrap();
+                assert!(result.status.success());
+                assert_eq!(result.stdout, format!("{expected} {expected}\n").as_bytes());
+                assert!(result.stderr.is_empty());
+            }
+        }
+    }
 
     #[test]
     fn fixed_worker_bundles_decoder_without_a_filesystem_import_or_oversized_argument() {

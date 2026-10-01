@@ -6,6 +6,159 @@ Last updated: 2026-10-01
 
 ## Current integration and active work
 
+### Native Codex read/edit/test integration candidate
+
+The separate [Code candidate](https://github.com/VOLPAROSSA/volparossa-code/pull/3)
+at `eb48696eb37afb9cda59bffc350845309b963dbb` connects the pinned source-built
+Codex app-server to the VOLPAROSSA Responses adapter and private Qwen conversation
+service. It retains the complete 20,903-byte upstream prompt. The owner approves
+only synthetic-project read, model-chosen arithmetic edit and actual test commands;
+normal editor defaults remain read-only with declined tool approvals.
+
+The new `agent-native-coding` disposable guest scenario composes that actual
+runtime with the core model worker. Its source-build bundle pins source, compiler,
+patches and notices, and records the newly built binary digest without claiming
+bit-for-bit reproducibility. Success requires at least four real cleanup-confirmed
+model responses, native command completions, a changed file, independent passing
+tests and full runtime/service cleanup. The separate 2,700-second service window
+does not widen the existing 600-second request or worker memory limits.
+
+The 28 focused Code protocol/helper checks passed. A separate isolated no-model
+preflight also admitted the real app-server's 32,626-byte first request through
+the Qwen adapter, including the complete prompt and actual native tool schemas;
+runtime exit and unchanged host routes/DNS were checked. This is transport
+compatibility, **not proof of the actual native model-driven coding loop**. The live
+trial now reaches real model execution but fails as recorded below; general coding
+quality, complete editor integration and private distributed inference remain unproved.
+
+The first exact CI attempt, [36904824814](https://github.com/VOLPAROSSA/volparossa/actions/runs/36904824814)
+on `347a510c620c1df41723f824cf2a9686e7f74e3b`, had over 85 GiB free but stopped
+in the pinned builder's dependency-fetch step, before compilation or model execution.
+The original job log reports the failure without the underlying build-step log.
+The next candidate exports only bounded public source-build log tails on failure;
+this diagnostic does not change source pins, sandbox settings or success criteria.
+
+The diagnostic [attempt 36905626120](https://github.com/VOLPAROSSA/volparossa/actions/runs/36905626120)
+again stops before dependency fetch/compilation can proceed: its complete 45-byte
+step log is `bwrap: setting up uid map: Permission denied`. The original job log
+SHA-256 is `f366f1c7ae9635d9a168984a2051e8f328444790569ace0aea3c7d7948003ec3`.
+A CI-only candidate now loads uniquely named AppArmor profiles for the official
+Ubuntu `/usr/bin/bwrap`, with capability-denying child stacking. It refuses existing
+bwrap policy rather than overwriting it, keeps the source builder unprivileged,
+and requires actual online/offline sandbox preflights with zero child capabilities,
+no-new-privileges and read-only source mounts. Exit traps remove only the added
+profiles and report cleanup separately from build status. No global sysctl,
+setuid bit, model/source pin, build sandbox or developer-host policy is changed.
+Ten local bundle/static checks, shell syntax and ShellCheck pass.
+The outer wrapper does not independently prove all nested build children joined
+after forced termination; the pinned builder retains its own process lifecycle.
+
+The next exact [attempt 36908029526](https://github.com/VOLPAROSSA/volparossa/actions/runs/36908029526)
+on `03b80484` passes both actual sandbox preflights and AppArmor cleanup. Dependency
+fetch then fails with `Could not resolve host: github.com`; compilation and the
+model-driven loop have not started. The original log SHA-256 is
+`627ff9b24e8a4f7309c07a450985b1c53c4e808ade30a3074a8b8d1fec5367dc`.
+The next Code builder candidate read-only binds only the resolved `/etc/resolv.conf`
+file during network-enabled dependency fetch, including when that file is beneath
+the otherwise hidden `/run`. Offline compilation retains its separate network
+namespace and hidden `/run`; source pins, credentials isolation and AppArmor policy
+are unchanged. Seven targeted builder checks pass, including real nested disposable
+bwrap namespaces with a synthetic `/etc` to `/run` resolver symlink, read-only checks
+and unrelated runtime files remaining hidden. That probe makes no DNS requests.
+Actual CI dependency fetch, source compilation and the native coding loop remain
+unproved pending the next exact-source run.
+
+The following [attempt 36909914170](https://github.com/VOLPAROSSA/volparossa/actions/runs/36909914170)
+on `6da46505` stops in the preflight's empty-home assertion: its probe was placed
+under the runner's `/home/runner/work/_temp` and intentionally bound back into
+that hidden tree. AppArmor cleanup succeeds; dependency fetch was not reached.
+Original log SHA-256: `316b67ea55ad824adafca2fd29ff884d124cc6e7bbaf7550efd31ab0437203bc`.
+The correction places only the exact temporary probe under `/tmp`, outside private
+homes like the actual `/opt` build state, without weakening the empty-home check.
+A real local disposable bwrap test reproduces the old synthetic-home mismatch and
+passes the corrected online/offline layout with hidden private homes, read-only
+source and the existing fetch-only resolver exposure. It makes no DNS requests
+and loads no AppArmor policy. Actual CI source build/native coding remain pending.
+
+The original [attempt 36912197160](https://github.com/VOLPAROSSA/volparossa/actions/runs/36912197160)
+on `caae14565e92d574ace0241ce35c3f10c6b3cb10` stops before compilation: the
+resolved read-only resolver file returns EACCES rather than EROFS to the write
+probe. The correction independently verifies `ST_RDONLY` before accepting either
+denial, so ordinary file permissions cannot stand in for a read-only mount.
+
+The exact [attempt 36913897403](https://github.com/VOLPAROSSA/volparossa/actions/runs/36913897403)
+on `527e8ac35d9a0c0e461f76fac17e97ed10a93db9` **successfully source-builds and
+executes the native app-server** with Code `7e35ba8d` and the real private Qwen
+worker. The coding task still fails: one command approval is declined, none is
+accepted, and neither reading, editing nor testing completes. Two real model
+requests return one completed and one incomplete response, both cleanup-confirmed.
+The closed original receipt does not retain the rejected command or rejection
+reason; do not infer a model or approval-policy cause from the counters alone.
+No OOM occurs (service peak 1,949,880,320 bytes), runtime exit is graceful, all
+private/service cleanup checks pass and host state is unchanged. The original
+eight-file artifact SHA-256 is
+`0389a4754bd08470e815b2e452089ee933010711ca4bd3ddb02c1a6dbae002b4`;
+original job-log SHA-256 is
+`9a1f1c26355abc66277eee8bb81f3cf982d2679c540f207d2c969fa79d7e4519`.
+This is actual runtime/model integration, **not a working native coding loop**.
+
+A subsequent actual native protocol probe isolates one real incompatibility:
+the pinned app-server includes an optional execpolicy proposal on the canonical
+read request, which the old fixture rejected. Code `eb48696eb37afb9cda59bffc350845309b963dbb`
+now distinguishes that proposal from the one-shot approval: command, cwd,
+thread/turn, action and extra-permission checks stay unchanged; responses remain
+only `accept`/`decline`, never a persistent-rule or session grant. The corrected
+policy accepts the actual observed shape in a second native probe, while the
+probe itself still declines all commands. Both are synthetic-protocol evidence,
+not a reconstructed CI payload or model-directed execution proof. Their report
+hashes are `e58ea8b86b803821a1d7930e44a920c20ac2ccb2f12009c9da5ad252734af2dd`
+and `1ba245d00f749c66ba1dd4af5500420d9be05c078d21f2db8fb8c57ba0d7abe6`.
+The next exact-source trial requires native receipt v2 with closed denial counts,
+not command text, so any further rejection can be distinguished. Twenty-one
+focused Code checks pass; a complete actual read/edit/test loop remains required.
+
+The next original [attempt 36919718465](https://github.com/VOLPAROSSA/volparossa/actions/runs/36919718465)
+on core `d18aa4b7` / Code `eb48696e` fails **before any command approval**:
+one model request is submitted, none completes, and every approval/denial counter
+is zero. The service reports no terminal worker result and exit 137; its measured
+peak is 1,641,885,696 bytes with zero cgroup OOM events. Runtime/private cleanup
+and unchanged host state pass. Original artifact SHA-256:
+`cd948b7733411a125fe1b9f96e008d15d189fb18e008bf8a1dec87fbdde8e7e5`.
+
+Source inspection finds a real budget mismatch: the documented 600-second
+wall-clock window was also applied as 600 aggregate CPU-seconds, although two
+compute threads are allowed. The candidate aligns the finite CPU backstop to
+`threads × max_seconds` (at most 1,200 CPU-seconds), without changing wall time,
+memory limits, prompt, model or approvals. Four sandbox checks pass, including
+actual kernel-limit reads; fourteen focused fixture checks pass. The new receipt
+records bounded service-cgroup CPU-time and elapsed-time deltas. The earlier kill
+source remains **unproven**; the original evidence lacks CPU observations, and no
+new actual coding-loop success is claimed.
+
+The original [attempt 36925945880](https://github.com/VOLPAROSSA/volparossa/actions/runs/36925945880)
+on core `ff2abe632a6779494301685014f89ec49aa2d259` / Code `eb48696e` now
+executes the actual native read: one accepted command, zero declined, two completed
+real model responses and two confirmed worker cleanups. The native turn completes
+normally but neither edit nor test runs. The task therefore fails at the genuine
+read/edit/test assertion, not an approval, OOM or timeout. Harness elapsed time is
+790,763 ms, service CPU usage 1,559,652,831 microseconds and memory peak
+1,883,226,112 bytes. Runtime/private cleanup passes and host state is unchanged.
+Original eight-file artifact SHA-256:
+`6aafeaee20a247d05f0e334bad07ac630e810417719783f8c8d45138ac80abe4`;
+original job-log SHA-256:
+`863e804f7441742006bd168f21649c80f50004469fb46c922d01837800d936df`.
+Its unretained second response cannot establish why the model stopped.
+
+The next candidate distinguishes native **turn completion from task completion**.
+After a normal but unfinished turn it permits at most one neutral continuation in
+the same thread, without supplying a solution, command or fallback answer. The
+same full upstream prompt, 2,400-second total native deadline, six-command approval
+budget and all permission/lineage checks remain. Receipt v3 adds fixed item-type
+and turn counters plus at most 16 content-free per-response records (output kind,
+tokens, completion reason and elapsed time through confirmed cleanup). Offline
+event-controller/protocol and closed-parser checks cover this candidate; no new
+actual coding-loop success is claimed and no broader model or permission is selected.
+
 ### Additional application and autonomous-maintenance scope
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
