@@ -42,11 +42,27 @@ The owner restores by gathering and verifying the required chunks; no single pro
 needs a complete archive. Contribution accounting counts every actual retained chunk copy
 and charged overhead, regardless of how many holders share them.
 
-The current transport streams bounded chunks, but `storage replicas` deposits the **same
-complete encrypted archive at each selected provider**. Chunked transfer and full-archive
-replica failover do not prove distributed fragment placement. Per-chunk placement,
-independent replica repair and recovery of the private reconstruction metadata remain
-unfinished; the existing complete-copy proofs must not be presented as that end state.
+`storage replicas` deposits the **same complete encrypted archive at each selected
+provider**. The separate `storage fragments` path now distributes different encrypted
+fragments: its real protected-overlay trial
+[36773683946](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773683946)
+restores the removed synthetic archive twice after provider A stops, using B/C's subsets,
+then deletes all eight copies with exact zero final usage. No provider holds the whole
+archive in this trial. Automatic placement, independent replica repair and recovery of
+the private reconstruction metadata remain unfinished. Complete-copy proofs are still
+not interchangeable with distributed-fragment evidence.
+
+The `image-snapshot` scenario is a cross-repository **candidate**: it uses pinned
+VOLPAROSSA Image code to encrypt a synthetic quiesced database/assets snapshot with GPG,
+passes only that ciphertext through the actual Image Node storage CLI, and requires two
+independently hash-verified plaintext restorations after provider A stops. The owner keeps
+the recovery key private. In [trial 36901573120](https://github.com/VOLPAROSSA/volparossa/actions/runs/36901573120),
+the actual guest report confirms those operations and complete cleanup, but the overall
+workflow fails its runner-side report check because runtime-generated synthetic gzip
+headers differ between Python versions. Fixed synthetic bytes preserve the exact guest
+identity and remove that cross-version dependency; a new green CI run remains pending.
+This trial uses pinned Image `e177afeb`, not a newer adapter, and does not establish a
+running Immich database, mobile synchronization or general serverless Immich availability.
 
 ## Reciprocal contribution
 

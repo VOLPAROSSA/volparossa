@@ -274,10 +274,65 @@ backups. This is a requirement clarification, not new runtime enforcement: signe
 quotas and ciphertext hashes do not classify encrypted files, and uploader self-attestation
 does not defeat malicious clients. The content-admission/review mechanism remains open; see
 [storage privacy and abuse boundaries](PRIVATE_STORAGE.md#storage-immune-system-and-private-content-limits).
-Different-chunk placement is implemented in the signed fragment CLI with local-service
-evidence below; the actual overlay/provider-loss trial 36773683946 passes and is
-integrated through PR #183. Automatic placement/repair remains incomplete. The earlier
-replica/handoff proofs retain a complete encrypted archive at each selected provider.
+Different-chunk placement now has a passing real overlay/provider-loss trial:
+[36773683946](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773683946)
+on `64c4f18cadb839ad6024c21166d6154e6665733f` restores the removed 786,505-byte
+synthetic archive twice using B/C after A stops. Eight copies of four fragments charge
+1,573,010 payload bytes across three providers, with non-consuming restore and zero final
+usage after explicit deletion. Privacy captures and exact host/owned-object cleanup pass.
+This proves fragment transport, not application encryption, automatic placement/repair or
+reciprocal quotas, and is integrated through PR #183. The earlier replica/handoff
+proofs retain a complete encrypted archive at each selected provider.
+
+The new `image-snapshot` cross-repository candidate pins Image
+`e177afebabd99ac0773de2a73d60275346a5de52`. Its actual Python GPG creator and Node storage
+CLI must encrypt synthetic quiesced database/assets, deposit/renew their fragments through
+the real core, remove the local ciphertext, restore twice through B/C after A stops, decrypt
+and independently verify every original hash, then delete all remote copies. The owner key
+never goes to peers; the ordinary original source remains intact until disposable cleanup.
+Seven targeted fixture checks pass locally, including actual pinned GPG encryption and
+two independently verified decryptions; six provision and four wiring checks also pass.
+The [first live run `36894316849`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36894316849)
+on `f1d90f6494dde652940bdae4353b57f53b3c3d1d` **fails overall at private cleanup**.
+Its original phase receipts record real encryption, eight deposited fragment copies,
+two independently hash-verified GPG decryptions through B/C after A stops, and deletion
+of all copies with zero final provider usage. Host-state hashes match, but the worker
+cannot remove its short `$WORK/i` directory from root-owned mode-0755 `$WORK`.
+The pending correction uses worker-owned mode-0700 `$WORK/u` as its short parent;
+the same strict cleanup still has to remove `i`, after which root removes empty `u`.
+The original 42-file artifact ZIP SHA256 is
+`4867ad268bdfd7bef43d3d2966cd38dd2146245080c1e65a033c030bbe86041a`.
+A passing complete rerun remains required. The follow-up
+[run `36897550023`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36897550023)
+on `4f63bfdf4aa062b5533a70b7767571b922265769` fails earlier, during initial route
+selection (`FRAGMENTS_ROUTE_UNAVAILABLE`), before Image preparation or transfers.
+Its eight original artifacts prove private/topology cleanup and unchanged guest
+host state, but do not retain the underlying connect/path failure. The artifact
+ZIP SHA256 is `a8382df6d363c239e11ec9d8206f2881aa4a0c7055162defdb8fa5639983a7dd`.
+A closed Image-only diagnostic now records the exact selection stage, typed
+connect reason, exit status and bounded attempt/path counters without raw logs,
+addresses or owner data. Selection predicates and retry budgets are unchanged;
+15 selection and five Image wiring checks pass. This is diagnostic coverage, not
+an identified product fix or a passing rerun. Neither trial proves running
+Immich/PostgreSQL recovery, mobile/web integration or serverless availability.
+
+The next [run `36901573120`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36901573120)
+on `3906203088fe496eb42271876171babb32ae7212` completes the actual guest scenario:
+799,146 encrypted bytes, eight fragment copies charged at 1,598,292 bytes, two
+independently hash-verified decryptions after A stops, deletion with zero retained
+provider usage, complete private/topology cleanup and identical host-state hashes.
+The 44 original artifacts are retained; ZIP SHA256 is
+`1711a5704c8879416d4e072ba29c6bad296a308f722cb25d0f5feb3830fc2f28`.
+The **workflow still fails** at its runner-side report check: the fixture generated
+`database.sql.gz` with `gzip.compress(mtime=0)`, whose OS-header byte differs between
+Python 3.12 and 3.13. Reproducing the older compression behavior rejects that same
+original report as `synthetic snapshot identity differs`; the unchanged validator
+passes it under Python 3.13. The narrow correction fixes the synthetic gzip bytes
+to the exact guest-tested value instead of generating environment-dependent bytes.
+It preserves all identity, plaintext, network, accounting and cleanup checks. This
+is local reproduction/revalidation, not a new green CI run or a retroactive change
+to the failed job. The live source remains pinned Image `e177afeb`, not a newer
+Image adapter, and still does not prove running Immich or general serverless use.
 
 ### Explicit fragment-copy repair candidate
 
