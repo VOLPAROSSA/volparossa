@@ -277,12 +277,16 @@ print(json.dumps({'read_only_mount': readonly, 'access_denied': True}))
         self.assertEqual(len(files), 10)
         self.assertEqual(files['LICENSE'], runtime.CODE_LICENSE_SHA)
         runner = (HERE / 'run-alpha-topology-vm.sh').read_text()
-        self.assertIn('agent-reasoning|agent-private-conversation|agent-native-coding) printf', runner)
+        preview = subprocess.run(['sh', str(HERE / 'run-alpha-topology-vm.sh'), '--preview',
+                                  '--scenario', 'agent-native-coding'], check=True,
+                                 capture_output=True, text=True, timeout=5)
+        self.assertIn('8192 MiB RAM', preview.stdout)
         self.assertIn('[ "$scenario" != agent-native-coding ] || driver_time_bound=6000s', runner)
         self.assertIn('native-coding-runtime.py stage --yes', runner)
         self.assertIn('native_runtime_sha256=${6:-none}', runner)
         self.assertIn('"$PACKAGE_SHA256" "$scenario" "$NATIVE_RUNTIME_SHA256"', runner)
-        self.assertIn('if scenario in ("agent-private-conversation", "agent-native-coding"):', runner)
+        self.assertTrue('if scenario in ("agent-private-conversation", "agent-native-coding", "agent-native-editor"):'
+                        in runner, 'native scenarios must keep closed private diagnostic exports')
         self.assertIn('f"{scenario}-smoke.json"', runner)
         preview = subprocess.run(['sh', str(HERE / 'run-alpha-topology-vm.sh'), '--preview',
                                   '--scenario', 'agent-native-coding'], check=True, capture_output=True, text=True)

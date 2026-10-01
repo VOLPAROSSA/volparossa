@@ -4,6 +4,27 @@ Original VOLPAROSSA source in this repository is licensed under GPL-3.0-only. De
 vendored components retain their own licenses. This file is a provenance record, not a substitute
 for the license text shipped by each upstream project.
 
+## Explicit native editor integration trial
+
+The `agent-native-editor` guest trial uses VOLPAROSSA Code commit
+`41a4320f0a819819adcfa9969ed4780506d6c747` (GPL-3.0-only), the already
+source-built open Codex app-server at upstream commit
+`67727e7cf114cf3e1b71db368d74b24e32f6cb12` (Apache-2.0), and a verified copy
+of the installed VSCodium `1.135.06055` package. VSCodium's declared source
+commit is `1a46a584725d5dd330e0bcd7f5510f24990efcf2`; this trial does **not**
+claim to have reproduced its source build. It uses no proprietary Codex editor
+extension. The complete editor tree, including original MIT/Chromium and
+dependency notices, is copied unchanged; setuid/setgid modes are not retained.
+
+`tests/integration/agent-native-editor-pins.json` binds every Code input,
+the complete editor inventory, native binary/build report, full upstream prompt,
+and all 1,824 native notice files. The native report preserves its original
+one-file recursion-limit patch and compiler provenance. Packaging reuses that
+verified build and does not execute it, download another executable or install
+anything on the development host. Guest execution remains a separate test.
+The workspace-only Debian QEMU provisioner/pins are reused unchanged from the
+native-browser candidate `ca37a68a48a352b3e2edf62a24a10cf7aca84cd0`.
+
 ## Explicit OpenCloud client integration trial
 
 The disposable `cloud-private-file` scenario stages VOLPAROSSA Cloud at

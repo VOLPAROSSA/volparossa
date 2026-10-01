@@ -6,6 +6,27 @@ Last updated: 2026-10-02
 
 ## Current integration and active work
 
+### Native editor, core and model integration candidate
+
+The separate Code PR4 at `41a4320f0a819819adcfa9969ed4780506d6c747`
+provides an explicit native coding command, selected-workspace consent and
+one-shot tool approvals. A real isolated VSCodium admission probe reached the
+command, prompt and consent dialog, then cancelled; it did not execute a model
+or prove that a coding task succeeds.
+
+The new `agent-native-editor` guest scenario composes that real UI driver,
+the source-built native runtime and the core's private Qwen service. It reuses
+the verified build rather than compiling the unchanged native app-server again.
+An independently pinned complete VSCodium package tree is staged only in the
+guest; the active development editor and its profile are not used. The original
+`agent-native-coding` scenario and its failed results below remain separate.
+
+Success requires actual UI consent/command approvals, model-selected read,
+edit and test operations, independent verification of the changed fixture,
+runtime/service cleanup and unchanged host networking. Bundle/source checks
+and UI admission alone are not that result. The joined editor/model test and
+general-purpose coding ability remain unproved.
+
 ### Native Codex read/edit/test integration candidate
 
 The separate [Code candidate](https://github.com/VOLPAROSSA/volparossa-code/pull/3)
