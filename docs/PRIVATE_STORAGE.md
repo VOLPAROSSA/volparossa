@@ -45,6 +45,31 @@ volparossa storage fragments maintenance serve \
 volparossa storage fragments maintenance status --enrollment /absolute/private-maintenance
 ```
 
+To allow automatic repair of **any explicitly selected source provider**, repeat
+`--from-provider-key` when enrolling. For example, append
+`--from-provider-key PROVIDER_B_KEY_HEX --from-provider-key PROVIDER_C_KEY_HEX`
+to authorize A/B/C, and supply the individually signed candidate grants using paired
+`--provider-key` / `--grant` arguments. A future replacement provider may also be
+authorized as a source, but only when its candidate grant is explicitly supplied.
+Neither a discovered peer nor an unrelated pending handoff widens this authority.
+
+One source retains the exact version-one enrollment signature format and fixed-source
+behavior. Multiple sources create a version-two owner-signed enrollment; existing
+enrollments are not silently migrated. This mode chooses the exact observed uncertain
+fragment copy, so a healthy earlier copy belonging to the same provider is not replaced.
+Copying resumes first with its retained identity; verified retirement remains charged
+and does not cause a second replacement for the same pending fragment. A retry may
+perform another real readback, but that is not another placement or freed source space.
+The source set contains at most eight explicit identities, matching the bounded
+candidate set; identities do not establish independent physical failure domains.
+Four targeted maintenance tests pass, including a real signed SQLite-provider trial
+where B, rather than the former fixed A source, disappears. It repairs B's exact
+observed fragments, resumes the same replacement identity after a lost confirmation
+and reopening owner/provider state, restores the removed source twice from C/D while A/B are offline,
+and releases B's retained charges only after B returns and confirms deletion. The
+rotating renewal/repair engine is exercised locally; this is not an additional
+running-daemon/protected-overlay proof of version-two enrollment.
+
 The worker has no independent maintenance timer. The existing core maintenance tick
 may issue one live, owner/UID-bound turn when its foreground and shared resource
 conditions permit. Both existing upload/download sharing budgets must be explicitly

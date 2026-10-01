@@ -21,7 +21,11 @@ enum Work {
 
 /// Conservative additional payload for the first actual attempt, not another charge ledger.
 pub(super) fn next_additional_charge(set: &LockedFragments, from: &VerifyingKey) -> Result<u64> {
-    Ok(match work(set, from)?.first() {
+    additional_charge(set, work(set, from)?.first())
+}
+
+fn additional_charge(set: &LockedFragments, work: Option<&Work>) -> Result<u64> {
+    Ok(match work {
         Some(Work::New(index)) => set.data.fragments[*index].length,
         Some(Work::Resume(index)) => {
             let copies = set.fragment(*index)?;
@@ -38,6 +42,63 @@ pub(super) fn next_additional_charge(set: &LockedFragments, from: &VerifyingKey)
         }
         None => 0,
     })
+}
+
+/// Maintenance's adaptive mode may repair only the exact observed failed copy,
+/// not every healthy copy belonging to the same provider earlier in the archive.
+fn selected_work(set: &LockedFragments, index: usize, from: &VerifyingKey) -> Result<Work> {
+    let copies = set.fragment(index)?;
+    if let Some(intent) = &copies.data.handoff {
+        if intent.phase != HandoffPhase::Complete {
+            ensure!(
+                copies.data.copies[intent.from].provider_key == from.to_bytes(),
+                "selected pending source changed"
+            );
+            return Ok(Work::Resume(index));
+        }
+    }
+    let retired = placement::retired(set, index);
+    ensure!(
+        copies
+            .data
+            .copies
+            .iter()
+            .enumerate()
+            .any(|(copy_index, copy)| !retired.contains(&copy_index)
+                && copy.provider_key == from.to_bytes()
+                && copy.charge == Charge::Uncertain),
+        "selected effective copy is not uncertain"
+    );
+    Ok(Work::New(index))
+}
+
+pub(super) fn selected_additional_charge(
+    set: &LockedFragments,
+    index: usize,
+    from: &VerifyingKey,
+) -> Result<u64> {
+    additional_charge(set, Some(&selected_work(set, index, from)?))
+}
+
+struct Plan {
+    tasks: Vec<Work>,
+    maximum: usize,
+}
+
+pub(super) async fn repair_selected(
+    set: &mut LockedFragments,
+    socket: &Path,
+    signer: &SigningKey,
+    target: (usize, VerifyingKey),
+    grants: &[VerifiedStorageGrant],
+    lifetime: u64,
+) -> Result<serde_json::Value> {
+    let (index, from) = target;
+    let plan = Plan {
+        tasks: vec![selected_work(set, index, &from)?],
+        maximum: 1,
+    };
+    execute(set, socket, signer, from, grants, lifetime, plan).await
 }
 
 /// Copying intents retain priority. Already verified retirements stay charged,
@@ -162,9 +223,25 @@ pub(super) async fn repair(
     lifetime: u64,
     maximum: usize,
 ) -> Result<serde_json::Value> {
+    let plan = Plan {
+        tasks: work(set, &from)?,
+        maximum,
+    };
+    execute(set, socket, signer, from, grants, lifetime, plan).await
+}
+
+async fn execute(
+    set: &mut LockedFragments,
+    socket: &Path,
+    signer: &SigningKey,
+    from: VerifyingKey,
+    grants: &[VerifiedStorageGrant],
+    lifetime: u64,
+    plan: Plan,
+) -> Result<serde_json::Value> {
     set.check_owner(signer)?;
     ensure!(
-        (1..=256).contains(&maximum),
+        (1..=256).contains(&plan.maximum),
         "repair pass must attempt 1..256 handoffs"
     );
     ensure!(
@@ -185,10 +262,9 @@ pub(super) async fn repair(
             "invalid or duplicate repair candidate authority"
         );
     }
-    let tasks = work(set, &from)?;
     let mut outcomes = Vec::new();
-    for task in tasks {
-        if outcomes.len() == maximum {
+    for task in plan.tasks {
+        if outcomes.len() == plan.maximum {
             return report(set, &from, "pass_limit", outcomes);
         }
         let (index, original, grant, resumed) = match task {

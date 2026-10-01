@@ -29,6 +29,22 @@ Last updated: 2026-10-01
   configuration-parser regression added. Original cleanup/unchanged-host evidence
   passes, but combined maintenance execution remains unchecked pending a fresh trial.
   See [private storage maintenance](PRIVATE_STORAGE.md#explicit-owner-private-background-maintenance).
+  Adaptive source selection is now implemented as an explicit version-two enrollment:
+  repeating `--from-provider-key` authorizes only those exact sources, including a
+  future replacement only when its candidate grant is supplied. One-key version-one
+  enrollments retain their original signing bytes and behavior. Each core-issued turn
+  selects an exact observed uncertain fragment, resumes Copying before new placement,
+  and rejects pending sources outside its authority. Healthy earlier copies are not
+  replaced merely because another copy on the same provider failed. The existing
+  signed handoff, grant/capacity admission, max-one-repair limit, readback and retained
+  charges remain authoritative; this is not new provider discovery, automatic grant
+  refresh, contribution resizing or owner-offline maintenance.
+  Four targeted maintenance tests pass: unchanged v1 signature bytes/private modes,
+  single/multi-source CLI enrollment, the existing renewal/repair lifecycle, and a new
+  real signed SQLite-provider B-offline trial with lost confirmation, restart of the
+  same intent, all B-fragment replacements, two source-free C/D reconstructions and
+  confirmed retirement after B returns. The v2 worker has no combined live-daemon/
+  protected-overlay result yet.
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
   authenticated source import, private fragment storage and source-off file access,
