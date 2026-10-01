@@ -9,13 +9,13 @@ private_storage_fragments_private() {
     timeout --signal=TERM --kill-after=5s 1500s setpriv \
         --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$custody_control_gid" \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
-        -- python3 -B "$WORK/bin/private-storage-fragments-smoke.py" "$@"
+        -- python3 -B "$WORK/bin/${storage_fixture_driver:-private-storage-fragments-smoke.py}" "$@"
 }
 
 private_storage_fragments_cleanup() {
     [ -f "$WORK/bin/private-storage-fragments-smoke.py" ] || return 0
     custody_control_gid=$(getent group volparossa-users | cut -d: -f3)
-    private_storage_fragments_private cleanup "$WORK/client-fixtures/private-storage-user" \
+    private_storage_fragments_private cleanup "${storage_owner_directory:-$WORK/client-fixtures/private-storage-user}" \
         >"$WORK/private-storage-fragments-private_cleanup.json"
 }
 
@@ -98,7 +98,7 @@ private_storage_fragments_run() {
     custody_control_gid=$(getent group volparossa-users | cut -d: -f3)
     case $custody_control_gid in ''|*[!0-9]*) fail FRAGMENTS_CONTROL_GROUP_INVALID ;; esac
     [ "$custody_control_gid" != "$AGENT_GID" ] || fail FRAGMENTS_CONTROL_GROUP_INVALID
-    storage_user=$WORK/client-fixtures/private-storage-user
+    storage_user=${storage_owner_directory:-$WORK/client-fixtures/private-storage-user}
     if [ -e "$storage_user" ] || [ -L "$storage_user" ]; then fail FRAGMENTS_USER_NOT_NEW; fi
     install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$storage_user"
     benchmark_select_route private-storage-fragments mptcp || fail FRAGMENTS_ROUTE_UNAVAILABLE
@@ -197,10 +197,16 @@ PY
     private_storage_fragments_usage deleted_usage
     benchmark_disconnect_route private-storage-fragments || fail FRAGMENTS_ROUTE_CLEANUP_FAILED
     private_storage_fragments_cleanup || fail FRAGMENTS_PRIVATE_CLEANUP_FAILED
-    python3 -B "$source_directory/tests/integration/private-storage-fragments-smoke.py" evidence "$WORK" \
-        "$WORK/private-storage-fragments-evidence.json" >/dev/null || fail FRAGMENTS_EVIDENCE_INVALID
+    if [ "${image_snapshot:-no}" = yes ]; then
+        python3 -B "$source_directory/tests/integration/image-snapshot-smoke.py" evidence "$WORK" \
+            "$WORK/image-snapshot-evidence.json" >/dev/null || fail IMAGE_SNAPSHOT_EVIDENCE_INVALID
+    else
+        python3 -B "$source_directory/tests/integration/private-storage-fragments-smoke.py" evidence "$WORK" \
+            "$WORK/private-storage-fragments-evidence.json" >/dev/null || fail FRAGMENTS_EVIDENCE_INVALID
+    fi
     OBSERVED_BLOCKER=NONE
-    PHASE=private-storage-fragments-complete
+    if [ "${image_snapshot:-no}" = yes ]; then PHASE=image-snapshot-complete
+    else PHASE=private-storage-fragments-complete; fi
 }
 
 private_storage_fragments_finalize_report() {

@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-30
+Last updated: 2026-10-01
 
 ## Current integration and active work
 
@@ -36,9 +36,26 @@ backups. This is a requirement clarification, not new runtime enforcement: signe
 quotas and ciphertext hashes do not classify encrypted files, and uploader self-attestation
 does not defeat malicious clients. The content-admission/review mechanism remains open; see
 [storage privacy and abuse boundaries](PRIVATE_STORAGE.md#storage-immune-system-and-private-content-limits).
-Different-chunk placement is implemented in the signed fragment CLI with local-service
-evidence below; its real overlay/provider-loss trial remains pending. The earlier
-replica/handoff proofs retain a complete encrypted archive at each selected provider.
+Different-chunk placement now has a passing real overlay/provider-loss trial:
+[36773683946](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773683946)
+on `64c4f18cadb839ad6024c21166d6154e6665733f` restores the removed 786,505-byte
+synthetic archive twice using B/C after A stops. Eight copies of four fragments charge
+1,573,010 payload bytes across three providers, with non-consuming restore and zero final
+usage after explicit deletion. Privacy captures and exact host/owned-object cleanup pass.
+This proves fragment transport, not application encryption, automatic placement/repair or
+reciprocal quotas. The earlier replica/handoff proofs retain a complete encrypted archive
+at each selected provider.
+
+The new `image-snapshot` cross-repository candidate pins Image
+`e177afebabd99ac0773de2a73d60275346a5de52`. Its actual Python GPG creator and Node storage
+CLI must encrypt synthetic quiesced database/assets, deposit/renew their fragments through
+the real core, remove the local ciphertext, restore twice through B/C after A stops, decrypt
+and independently verify every original hash, then delete all remote copies. The owner key
+never goes to peers; the ordinary original source remains intact until disposable cleanup.
+Seven targeted fixture checks pass locally, including actual pinned GPG encryption and
+two independently verified decryptions; six provision and four wiring checks also pass.
+Live overlay execution is still pending. This is not a running Immich/PostgreSQL recovery
+or mobile, web or general serverless-availability claim.
 
 ### Mailbox import confirmation
 
