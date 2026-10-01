@@ -396,7 +396,8 @@ def cleanup(path):
         fragment_metadata_removed=True, input_and_outputs_removed=True, fragment_staging_removed=True, user_directory_removed=True)
 
 
-def validate_network(phase, peers, layout, name):
+def validate_network(phase, peers, layout, name, withdrawn_index=0):
+    require(type(withdrawn_index) is int and withdrawn_index in (0, 1), 'withdrawn fixture provider')
     selected, privacy = phase["selected_route"], phase["privacy"]
     paths, slots, nodes = selected["paths"], selected["benchmark_slots"], layout["provider_nodes"]
     require(nodes == list(NODES) and len({peers[node] for node in nodes}) == 3
@@ -430,7 +431,7 @@ def validate_network(phase, peers, layout, name):
     for relay in relays:
         require(privacy[relay]["client_leg_wireguard_data_datagrams"] > 16
                 and privacy[relay]["exit_leg_wireguard_data_datagrams"] > 16, "real two-leg traffic missing")
-    active = NODES[1:] if name == "restore" else NODES
+    active = tuple(node for index, node in enumerate(NODES) if index != withdrawn_index) if name == "restore" else NODES
     app = privacy["exit"]["provider_application"]
     for node in NODES:
         if node in active:
@@ -439,7 +440,12 @@ def validate_network(phase, peers, layout, name):
         else:
             require(app[node]["response_payload_bytes"] == 0, "stopped or untouched provider returned payload")
     if name == "restore":
-        for node, minimum in ((NODES[1], 2 * (2 * CHUNK + LENGTHS[-1])), (NODES[2], 2 * CHUNK)):
+        # Two full reconstructions: A-loss selects B/B/C/B; B-loss selects
+        # A/C/C/A. Maintenance also transfers/readbacks replacements, but those
+        # extra bytes do not reduce these concrete original-survivor minima.
+        minima = ((NODES[1], 2 * (2 * CHUNK + LENGTHS[-1])), (NODES[2], 2 * CHUNK)) if withdrawn_index == 0 else (
+            (NODES[0], 2 * (CHUNK + LENGTHS[-1])), (NODES[2], 4 * CHUNK))
+        for node, minimum in minima:
             require(app[node]["response_payload_bytes"] >= minimum, "actual survivor fragment payload absent")
     control = phase["control_privacy"]
     control_node = next(node for node in ROLES[1:4] if peers[node] == layout["control_relay_peer_id"])

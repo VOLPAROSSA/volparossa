@@ -49,6 +49,18 @@ def report(value):
 
 
 class MaintenanceEvidence(unittest.TestCase):
+    def test_retirement_readback_is_not_a_new_replacement(self):
+        before = dict(placement_authorizations=3, retained_copy_records=11)
+        for fresh in (0, 1):
+            CHECK['validate_retirement_progress'](before, dict(before),
+                dict(freshly_verified_replacements=fresh))
+        for value, fresh in ((dict(before, placement_authorizations=4), 0),
+                             (dict(before, retained_copy_records=12), 1),
+                             (before, 2), (before, True)):
+            with self.assertRaises(ValueError):
+                CHECK['validate_retirement_progress'](before, value,
+                    dict(freshly_verified_replacements=fresh))
+
     def test_closed_source_bound_bundle_reuses_actual_network_proof_contracts(self):
         value = fixture()
         CHECK['validate_evidence'](value)
@@ -132,6 +144,7 @@ class MaintenanceEvidence(unittest.TestCase):
             for name in ('identity.key', 'passphrase', 'foreground-grant.bin',
                          'fragment-set/fragments.json', 'fragment-set/placement-authorizations.json',
                          'maintenance/enrollment.json', 'maintenance/checkpoint.json', 'foreground/archive.json',
+                         'maintenance-fixed-a/enrollment.json', 'maintenance-fixed-a/checkpoint.json',
                          'fragment-set/fragment-0000/copy-2/archive.json',
                          'fragment-set/fragment-0000/.handoff-journal-X1/copy/archive.json',
                          'fragment-set/fragment-0000/.handoff-transfer-X2/survivor-1',

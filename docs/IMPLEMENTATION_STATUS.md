@@ -45,6 +45,13 @@ Last updated: 2026-10-01
   same intent, all B-fragment replacements, two source-free C/D reconstructions and
   confirmed retirement after B returns. The v2 worker has no combined live-daemon/
   protected-overlay result yet.
+  A separate `private-storage-adaptive-maintenance` overlay candidate now reuses
+  that owner/core lifecycle with B withdrawn, signed A/B/C source authority and
+  a real fixed-A v1 negative-control turn that must observe B without placing a
+  replacement. Its gates require exact B-copy selection, two A/C reconstructions,
+  conservative pending charges, acknowledged B retirement and complete deletion/
+  private/host cleanup. Local receipt/wiring checks do not constitute a live result;
+  the original fixed-A v1 scenario remains independently available.
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
   authenticated source import, private fragment storage and source-off file access,

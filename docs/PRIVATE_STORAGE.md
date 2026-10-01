@@ -70,6 +70,14 @@ and releases B's retained charges only after B returns and confirms deletion. Th
 rotating renewal/repair engine is exercised locally; this is not an additional
 running-daemon/protected-overlay proof of version-two enrollment.
 
+The separate `private-storage-adaptive-maintenance` disposable overlay scenario is
+prepared for that combined proof. It retains a fixed-A v1 enrollment as an actual
+negative control, withdraws B, then requires v2 A/B/C authority to repair B's exact
+copies during real daemon-issued resource turns. Its two A/C reconstructions,
+pending physical charges, B-return retirement, all-copy deletion and unchanged-host
+checks remain mandatory. Until an exact run passes, this is an executable candidate,
+not new overlay evidence or a replacement for the existing v1 scenario.
+
 The worker has no independent maintenance timer. The existing core maintenance tick
 may issue one live, owner/UID-bound turn when its foreground and shared resource
 conditions permit. Both existing upload/download sharing budgets must be explicitly
