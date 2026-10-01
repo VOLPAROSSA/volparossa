@@ -98,11 +98,13 @@ benchmark_disconnect_route() {
     wait_disconnected
 }
 
-# Image keeps a closed metadata-only archive. Preserve the selection failure
+# Image and Cloud keep closed metadata-only archives. Preserve the selection failure
 # branch without exporting raw stderr, addresses, identities or owner data.
 # This observation must never change selection, its retry budget or its result.
 benchmark_image_route_diagnostic() {
-    [ "${image_snapshot:-no}" = yes ] || return 0
+    [ "${image_snapshot:-no}" = yes ] || [ "${cloud_private_file:-no}" = yes ] || return 0
+    benchmark_diagnostic_prefix=image-snapshot
+    if [ "${cloud_private_file:-no}" = yes ]; then benchmark_diagnostic_prefix=cloud-private-file; fi
     benchmark_diagnostic_retries=$((benchmark_connect_count - 1))
     [ "$benchmark_diagnostic_retries" -ge 0 ] || benchmark_diagnostic_retries=0
     if jq -cn --arg stage "$1" --arg reason "$2" \
@@ -114,8 +116,8 @@ benchmark_image_route_diagnostic() {
         '{schema_version:1,stage:$stage,reason:$reason,last_connect_reason:$last_connect_reason,
           connect_exit_status:$connect_exit_status,attempts:$attempts,retries:$retries,
           redraws:$redraws,path_polls:$path_polls,path_status:$path_status}' \
-        >"$WORK/image-snapshot-route-diagnostic.part"; then
-        mv -- "$WORK/image-snapshot-route-diagnostic.part" "$WORK/image-snapshot-route-diagnostic.json" || true
+        >"$WORK/$benchmark_diagnostic_prefix-route-diagnostic.part"; then
+        mv -- "$WORK/$benchmark_diagnostic_prefix-route-diagnostic.part" "$WORK/$benchmark_diagnostic_prefix-route-diagnostic.json" || true
     fi
     return 0
 }
@@ -199,7 +201,7 @@ benchmark_select_route() {
             benchmark_draw=$((benchmark_draw + 1))
         else
             benchmark_connect_exit=$?
-            if [ "${image_snapshot:-no}" = yes ]; then
+            if [ "${image_snapshot:-no}" = yes ] || [ "${cloud_private_file:-no}" = yes ]; then
                 benchmark_image_connect_reason "$WORK/$benchmark_label-connect.err"
             fi
             if ! a01_transient_connect_unavailable "$WORK/$benchmark_label-connect.err"; then

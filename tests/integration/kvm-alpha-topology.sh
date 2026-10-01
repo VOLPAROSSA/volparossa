@@ -18,6 +18,7 @@ private_storage_replicas=no
 private_storage_handoff=no
 private_storage_fragments=no
 image_snapshot=no
+cloud_private_file=no
 agent_jobs_loss=no
 agent_jobs_follow=no
 agent_jobs_peer_recovery=no
@@ -59,6 +60,16 @@ usage() {
 }
 
 print_plan() {
+    if [ "$cloud_private_file" = yes ]; then
+        printf '%s\n' \
+            'VOLPAROSSA Cloud private-file protected network smoke plan:' \
+            '  exact Cloud CLI: authenticated synthetic DAV import, real GPG encryption, stop source;' \
+            '  four encrypted fragments, two copies across three providers through protected MPTCP;' \
+            '  remove local ciphertext, stop A, restore twice via B/C and verify plaintext and private metadata;' \
+            '  keep owner keys private; delete every lease, prove cleanup and unchanged host state;' \
+            '  no running OpenCloud server, web client or serverless availability claim.'
+        return
+    fi
     if [ "$image_snapshot" = yes ]; then
         printf '%s\n' \
             'VOLPAROSSA Image encrypted snapshot protected network smoke plan:' \
@@ -674,6 +685,7 @@ while [ "$#" -gt 0 ]; do
             private_storage_handoff=no
             private_storage_fragments=no
             image_snapshot=no
+            cloud_private_file=no
             download_sharing=no
             agent_jobs_loss=no
             agent_jobs_follow=no
@@ -703,6 +715,7 @@ while [ "$#" -gt 0 ]; do
                 private-storage-handoff) scenario=content-custody; private_storage_handoff=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-fragments) scenario=content-custody; private_storage_fragments=yes; wifi_link=no; uplink_link=no ;;
                 image-snapshot) scenario=content-custody; private_storage_fragments=yes; image_snapshot=yes; wifi_link=no; uplink_link=no ;;
+                cloud-private-file) scenario=content-custody; private_storage_fragments=yes; cloud_private_file=yes; wifi_link=no; uplink_link=no ;;
                 agent-artifact-quarantine) scenario=agent-artifact; agent_train_loop=yes; agent_artifact_quarantine=yes; wifi_link=no; uplink_link=no ;;
                 agent-train-loop) scenario=agent-artifact; agent_train_loop=yes; wifi_link=no; uplink_link=no ;;
                 agent-train-cycle) scenario=agent-artifact; agent_train_cycle=yes; wifi_link=no; uplink_link=no ;;
@@ -927,6 +940,16 @@ if [ "$private_storage_fragments" = yes ]; then
         private-storage-replicas-smoke.sh private-storage-replicas-smoke.py private-storage-peer-smoke.py; do
         [ -f "$source_directory/tests/integration/$storage_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
+    done
+fi
+if [ "$cloud_private_file" = yes ]; then
+    for cloud_fixture in cloud-private-file-smoke.sh cloud-private-file-smoke.py cloud-private-file-pins.json \
+        image-snapshot-smoke.py image-snapshot-pins.json; do
+        [ -f "$source_directory/tests/integration/$cloud_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$cloud_fixture" ] || exit 69
+    done
+    for cloud_tool in gpg gpg-agent gpgconf; do
+        command -v "$cloud_tool" >/dev/null 2>&1 || exit 69
     done
 fi
 if [ "$image_snapshot" = yes ]; then
@@ -2244,6 +2267,8 @@ cleanup() {
         content_repair_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-mailbox ]; then
         content_mailbox_finalize_report "$original_status" || original_status=1
+    elif [ "$cloud_private_file" = yes ]; then
+        cloud_private_file_finalize_report "$original_status" || original_status=1
     elif [ "$image_snapshot" = yes ]; then
         image_snapshot_finalize_report "$original_status" || original_status=1
     elif [ "$private_storage_fragments" = yes ]; then
@@ -2423,6 +2448,10 @@ fi
 if [ "$image_snapshot" = yes ]; then
     # shellcheck source=tests/integration/image-snapshot-smoke.sh
     . "$source_directory/tests/integration/image-snapshot-smoke.sh"
+fi
+if [ "$cloud_private_file" = yes ]; then
+    # shellcheck source=tests/integration/cloud-private-file-smoke.sh
+    . "$source_directory/tests/integration/cloud-private-file-smoke.sh"
 fi
 if [ "$private_storage_handoff" = yes ]; then
     # shellcheck source=tests/integration/private-storage-handoff-smoke.sh
@@ -2617,11 +2646,17 @@ if [ "$private_storage_fragments" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/private-storage-fragments-smoke.py" \
         "$WORK/bin/private-storage-fragments-smoke.py"
 fi
-if [ "$image_snapshot" = yes ]; then
+if [ "$image_snapshot" = yes ] || [ "$cloud_private_file" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/image-snapshot-smoke.py" \
         "$WORK/bin/image-snapshot-smoke.py"
     install -o root -g root -m 0444 "$source_directory/tests/integration/image-snapshot-pins.json" \
         "$WORK/bin/image-snapshot-pins.json"
+fi
+if [ "$cloud_private_file" = yes ]; then
+    install -o root -g root -m 0555 "$source_directory/tests/integration/cloud-private-file-smoke.py" \
+        "$WORK/bin/cloud-private-file-smoke.py"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/cloud-private-file-pins.json" \
+        "$WORK/bin/cloud-private-file-pins.json"
 fi
 if [ "$private_storage_handoff" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/private-storage-handoff-smoke.py" \
@@ -6558,6 +6593,10 @@ if [ "$agent_train_loop" = yes ]; then
 fi
 if [ "$scenario" = agent-artifact ]; then
     agent_artifact_run
+    exit 0
+fi
+if [ "$cloud_private_file" = yes ]; then
+    cloud_private_file_run
     exit 0
 fi
 if [ "$image_snapshot" = yes ]; then
