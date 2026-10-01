@@ -66,6 +66,7 @@ class ImageSnapshotWiring(unittest.TestCase):
         module = diagnostics()
         names = set(checker["EXPORT_NAMES"])
         self.assertEqual(names, module["IMAGE_NAMES"])
+        self.assertIn("image-snapshot-route-diagnostic.json", names)
         self.assertNotIn("private-storage-fragments-smoke.json", names)
         self.assertLess(len(names), 128)
         with tempfile.TemporaryDirectory(prefix="image-snapshot-export-") as temporary:
@@ -78,7 +79,9 @@ class ImageSnapshotWiring(unittest.TestCase):
                 (published / name).write_text("{}\n")
             for name in ("image-snapshot-owner.key", "image-snapshot-cipher.bin", "image-snapshot-result.log",
                          "image-snapshot-raw-receipt.json", "private-storage-fragments-request.json",
-                         "private-storage-fragments-journal.json", "content-private-owner.json"):
+                         "private-storage-fragments-journal.json", "content-private-owner.json",
+                         "private-storage-fragments-connect.err", "private-storage-fragments-connect.out",
+                         "logs-client.txt", "image-snapshot-route-diagnostic.part"):
                 (published / name).write_text("PRIVATE_DO_NOT_EXPORT\n")
             archive = module["collect"](home, base / "missing-opt", "a" * 40, SCENARIO, 124,
                                        cgroups=base / "missing-cgroups", proc=base / "missing-proc")

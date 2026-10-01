@@ -800,6 +800,7 @@ FRAGMENTS_NAMES = {"a01-expected-peers.json"} | {
 
 IMAGE_NAMES = (FRAGMENTS_NAMES - {"private-storage-fragments-smoke.json", "private-storage-fragments-evidence.json"}) | {
     "image-snapshot-smoke.json", "image-snapshot-evidence.json", "image-snapshot-provision.json",
+    "image-snapshot-route-diagnostic.json",
 }
 
 

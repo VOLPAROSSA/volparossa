@@ -83,8 +83,19 @@ The pending correction uses worker-owned mode-0700 `$WORK/u` as its short parent
 the same strict cleanup still has to remove `i`, after which root removes empty `u`.
 The original 42-file artifact ZIP SHA256 is
 `4867ad268bdfd7bef43d3d2966cd38dd2146245080c1e65a033c030bbe86041a`.
-A passing complete rerun remains required. This is not a running Immich/PostgreSQL
-recovery or mobile, web or general serverless-availability claim.
+A passing complete rerun remains required. The follow-up
+[run `36897550023`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36897550023)
+on `4f63bfdf4aa062b5533a70b7767571b922265769` fails earlier, during initial route
+selection (`FRAGMENTS_ROUTE_UNAVAILABLE`), before Image preparation or transfers.
+Its eight original artifacts prove private/topology cleanup and unchanged guest
+host state, but do not retain the underlying connect/path failure. The artifact
+ZIP SHA256 is `a8382df6d363c239e11ec9d8206f2881aa4a0c7055162defdb8fa5639983a7dd`.
+A closed Image-only diagnostic now records the exact selection stage, typed
+connect reason, exit status and bounded attempt/path counters without raw logs,
+addresses or owner data. Selection predicates and retry budgets are unchanged;
+15 selection and five Image wiring checks pass. This is diagnostic coverage, not
+an identified product fix or a passing rerun. Neither trial proves running
+Immich/PostgreSQL recovery, mobile/web integration or serverless availability.
 
 ### Mailbox import confirmation
 

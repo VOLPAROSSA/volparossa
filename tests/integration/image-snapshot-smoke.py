@@ -38,7 +38,8 @@ FALSE_CLAIMS = ("immich_server_restore_proven", "serverless_immich_proven", "mob
     "erasure_coding", "full_alpha_acceptance_claimed", "owner_secrets_exported")
 EXPORT_NAMES = tuple(name for name in FRAGMENTS["EXPORT_NAMES"] if name not in (
     "private-storage-fragments-smoke.json", "private-storage-fragments-evidence.json")) + (
-    "image-snapshot-smoke.json", "image-snapshot-evidence.json", "image-snapshot-provision.json")
+    "image-snapshot-smoke.json", "image-snapshot-evidence.json", "image-snapshot-provision.json",
+    "image-snapshot-route-diagnostic.json")
 STAGE = "not_started"
 
 
