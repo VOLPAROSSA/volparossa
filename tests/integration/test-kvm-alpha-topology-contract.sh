@@ -511,7 +511,7 @@ timeout_line = next(line.strip() for line in workflow.splitlines() if line.strip
 overrides = dict(re.findall(r"inputs.scenario == '([^']+)' && ([0-9]+)", timeout_line))
 assert overrides.get('agent-autonomous-aggregation') == '180' and timeout_line.endswith('|| 120 }}')
 # The independent native Signal build may require its existing 150-minute window.
-assert all((name, bound) in {('agent-autonomous-aggregation', '180'), ('signal-native-backup', '150')}
+assert all((name, bound) in {('agent-autonomous-aggregation', '180'), ('signal-backup', '150')}
            for name, bound in overrides.items())
 host = (root / "run-alpha-topology-vm.sh").read_text()
 assert 'if scenario == "agent-autonomous-aggregation":\n        file_count_limit = 192' in host
