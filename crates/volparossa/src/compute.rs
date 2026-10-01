@@ -7,6 +7,7 @@ mod inference_output;
 mod owner_control;
 mod peer;
 mod policy_assessment;
+mod private_conversation;
 mod private_serve;
 mod private_task;
 mod resources;
@@ -76,8 +77,17 @@ pub(crate) enum Mode {
     #[serde(rename = "private_infer")]
     PrivateInfer,
     #[value(skip)]
+    #[serde(rename = "private_conversation")]
+    PrivateConversation,
+    #[value(skip)]
     #[serde(rename = "aggregate_adapter")]
     AggregateAdapter,
+}
+
+impl Mode {
+    const fn is_private(self) -> bool {
+        matches!(self, Self::PrivateInfer | Self::PrivateConversation)
+    }
 }
 
 #[derive(Debug, Args)]
@@ -256,7 +266,7 @@ impl Options {
                 "compute_aggregation_execution_scope"
             );
         }
-        if self.mode == Mode::PrivateInfer {
+        if self.mode.is_private() {
             ensure!(
                 self.adapter_root.is_none() && self.steps == 1 && self.spare_capacity,
                 "compute_private_execution_scope"
@@ -314,9 +324,9 @@ fn validate_dataset(mode: Mode, has_adapter: bool, dataset: &[u8]) -> Result<()>
     if mode == Mode::AggregateAdapter {
         ensure!(has_adapter, "compute_aggregation_cohort_required");
     }
-    if mode == Mode::PrivateInfer {
+    if mode.is_private() {
         ensure!(!has_adapter, "compute_private_adapter_forbidden");
-        return private_task::validate_input(dataset);
+        return private_task::validate_mode_input(mode, dataset);
     }
     if mode == Mode::PlanTasks {
         ensure!(!has_adapter, "compute_task_plan_adapter");
@@ -374,9 +384,17 @@ fn validate_profile_dataset(
     profile: ModelProfile,
 ) -> Result<()> {
     ensure!(
+        profile != ModelProfile::Qwen600 || mode == Mode::PrivateConversation,
+        "compute_profile_conversation_only"
+    );
+    ensure!(
         profile.is_default() || (mode != Mode::Train && !has_adapter),
         "compute_profile_inference_only"
     );
+    if mode == Mode::PrivateConversation {
+        ensure!(!has_adapter, "compute_private_adapter_unsupported");
+        return private_task::validate_profile_input(mode, dataset, profile);
+    }
     validate_dataset(mode, has_adapter, dataset)?;
     if mode == Mode::PlanTasks {
         ensure!(

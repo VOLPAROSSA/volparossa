@@ -22,8 +22,17 @@ pub(super) struct Request {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Operation {
     Capabilities {},
-    Submit { question: String, context: String },
-    Cancel { task_id: String },
+    Submit {
+        question: String,
+        context: String,
+    },
+    ConversationCapabilities {},
+    SubmitConversation {
+        conversation: super::super::private_conversation::Input,
+    },
+    Cancel {
+        task_id: String,
+    },
 }
 
 fn valid_id(id: &str) -> bool {
@@ -34,7 +43,20 @@ fn valid_id(id: &str) -> bool {
 }
 
 impl Request {
+    #[cfg(test)]
     pub(super) fn validate(&self) -> Result<()> {
+        self.validate_profile(super::super::ModelProfile::Smol360)
+    }
+
+    pub(super) fn validate_profile(&self, profile: super::super::ModelProfile) -> Result<()> {
+        ensure!(
+            profile != super::super::ModelProfile::Qwen600
+                || !matches!(
+                    self.operation,
+                    Operation::Capabilities { .. } | Operation::Submit { .. }
+                ),
+            "private_ipc_unsupported_mode"
+        );
         ensure!(
             self.version == VERSION && valid_id(&self.id),
             "private_ipc_invalid_request"
@@ -43,7 +65,14 @@ impl Request {
             ensure!(valid_id(task_id), "private_ipc_invalid_request");
         }
         if let Operation::Submit { question, context } = &self.operation {
+            ensure!(
+                profile != super::super::ModelProfile::Qwen600,
+                "private_ipc_unsupported_mode"
+            );
             super::super::private_task::validate_input(&input_bytes(question, context)?)?;
+        }
+        if let Operation::SubmitConversation { conversation } = &self.operation {
+            conversation.bytes_profile(profile)?;
         }
         Ok(())
     }
@@ -55,9 +84,34 @@ pub(super) fn input_bytes(question: &str, context: &str) -> Result<Vec<u8>> {
     }))?)
 }
 
+#[cfg(test)]
 pub(super) async fn read<T: DeserializeOwned>(
     stream: &mut (impl AsyncRead + Unpin),
     maximum: usize,
+) -> Result<Option<T>> {
+    read_checked(stream, maximum, |_, _| true).await
+}
+
+pub(super) async fn read_request(
+    stream: &mut (impl AsyncRead + Unpin),
+    profile: super::super::ModelProfile,
+) -> Result<Option<Request>> {
+    read_checked(
+        stream,
+        super::super::private_conversation::request_frame(profile),
+        |request: &Request, size| {
+            (size <= MAX_REQUEST_BYTES
+                || matches!(request.operation, Operation::SubmitConversation { .. }))
+                && request.validate_profile(profile).is_ok()
+        },
+    )
+    .await
+}
+
+async fn read_checked<T: DeserializeOwned>(
+    stream: &mut (impl AsyncRead + Unpin),
+    maximum: usize,
+    valid: impl Fn(&T, usize) -> bool,
 ) -> Result<Option<T>> {
     // Waiting for a first byte is distinct from finishing a frame. A running job
     // requires no heartbeat, but a partial length/body cannot occupy a reader forever.
@@ -74,6 +128,7 @@ pub(super) async fn read<T: DeserializeOwned>(
         // Never forward parser diagnostics: field names can contain private text.
         let value = serde_json::from_slice(&payload)
             .map_err(|_| anyhow::anyhow!("private_ipc_invalid_request"))?;
+        ensure!(valid(&value, length), "private_ipc_invalid_request");
         Ok(Some(value))
     })
     .await
