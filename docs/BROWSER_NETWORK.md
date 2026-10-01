@@ -154,6 +154,33 @@ guest-state hash `0fec7e486a2ec776598501c8ca26bdb2fa2349e62dee6914dc005923684608
 VM/scratch removal and unchanged host DNS/routes are verified. All earlier failed
 receipts remain intact; no native ECH wire or complete browser claim is made.
 
+Local `build/browser-native-vm-08` on
+`ca37a68a48a352b3e2edf62a24a10cf7aca84cd0`, still using unchanged bundle05,
+fails earlier at attachment A with `PreselectionUnavailable`. Its untruncated
+client event window identifies **34 `PRESELECTION_SAMPLE_INVALID_SNAPSHOT`**
+events. The origin accepts no connection; no baseline or progress sample exists,
+so this run does not exercise the exact-flow observer correction. The category
+does not identify which snapshot predicate failed. Relay provider-unavailable
+events are also present, but do not establish the client's precise failure cause.
+Original browser, driver and readiness hashes:
+
+- `022a7d5556ff34532f107243a1459b344d1854f6c0bba5d8691b7b79202b2b97`
+- `e9219f612f9a0a5be257baf0a87f00c7235bf5a538e8fff19fd3f26b86d48e5c`
+- `4d15f7aadc89a6a169dd9ecf452600c037b2321f4fc6f48b08903c9c2b59d709`
+
+A15/private/browser cleanup passes with unchanged guest-state hash
+`0c45d14704680dd97bae8e12fffa70df500a5ad127c4d23b5325f12949cb36f0`.
+VM/scratch removal and unchanged host DNS/routes are verified; trials02–07
+remain intact. The next diagnostic candidate reports one of eight closed
+snapshot-clause categories through the existing bounded in-memory event ring;
+it retains every existing rejection, wire format, timer and privacy boundary.
+Six focused Rust tests pass, including an actor-local sequence that rejects a
+provider index without a signed Exit, then admits preselection after real
+signature-verified forwarded ingestion on the same connected control. This
+does not reproduce provider-network delivery or identify trial08's missing
+clause. The 22 browser fixture checks and nine native-driver checks also pass.
+This remains diagnosis, not a product fix or a successful browser datapath claim.
+
 ## One daemon, independent application connections
 
 An explicitly authorized application can obtain its own short-lived TCP gateway from the

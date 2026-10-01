@@ -2512,10 +2512,13 @@ impl DiscoveryRuntime {
                     }
                     PreselectionSamplingError::Entropy => "PRESELECTION_SAMPLE_ENTROPY",
                 };
-                state
-                    .write()
-                    .await
-                    .log(LogLevel::Debug, diagnostic, captured_at_ms);
+                {
+                    let mut agent_state = state.write().await;
+                    agent_state.log(LogLevel::Debug, diagnostic, captured_at_ms);
+                    if let Some(reason) = failure.snapshot_reason {
+                        agent_state.log(LogLevel::Debug, reason.diagnostic_code(), captured_at_ms);
+                    }
+                }
                 let error = match failure.error {
                     PreselectionSamplingError::InvalidPolicy => {
                         ClientPreselectionError::InvalidParameters
@@ -24519,6 +24522,145 @@ mod tests {
                 "case: {case}"
             );
         }
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one actor-local sequence checks provider-only rejection and signed admission"
+    )]
+    async fn provider_index_alone_cannot_admit_preselection_but_signed_forwarded_exit_can() {
+        let mut fixture = Box::new(fixture(test_client_roles()));
+        let now_ms = unix_millis();
+        let control_identity = Identity::generate();
+        for identity in [
+            &control_identity,
+            &Identity::generate(),
+            &Identity::generate(),
+        ] {
+            assert!(
+                ingest_direct_snapshot_advertisement_with_capabilities(
+                    &mut fixture,
+                    identity,
+                    RolesConfig {
+                        client: false,
+                        relay: true,
+                        exit: false,
+                    },
+                    1,
+                    generated_nonce_with_unique_network_discriminator(),
+                    now_ms,
+                    PreselectionTestCapabilities::all(),
+                )
+                .await
+                .is_some()
+            );
+        }
+        let control = fixture.runtime.direct_relays[control_identity.peer_id()].clone();
+        let exit = Identity::generate();
+        fixture.runtime.exit_provider_peers.insert(
+            *exit.peer_id(),
+            now_ms.saturating_add(PROVIDER_OBSERVATION_TTL_MS),
+        );
+        let mut control_service = DiscoveryService::new_with_protocol_roles(
+            control_identity.keypair().clone(),
+            DiscoveryProtocolRoles::new(false, true, false),
+        )
+        .expect("control discovery service");
+        connect_runtime_client_to_control(&mut fixture.runtime, &mut control_service).await;
+
+        let parameters = || {
+            let mut parameters = valid_client_preselection_parameters();
+            parameters.transport = Transport::TcpMptcp;
+            parameters.minimum_other_relays = 2;
+            parameters.maximum_other_relays = 2;
+            parameters
+        };
+        let state = Arc::clone(&fixture.state);
+        let (reply, response) = oneshot::channel();
+        fixture
+            .runtime
+            .begin_client_preselection(parameters(), reply, &state)
+            .await;
+        assert!(matches!(
+            response.await.expect("provider-only reply"),
+            Err(ClientPreselectionError::Unavailable)
+        ));
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Available(_)
+        ));
+        assert!(
+            !fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
+        let diagnostics: Vec<_> = state
+            .read()
+            .await
+            .logs(100)
+            .records
+            .into_iter()
+            .filter(|record| record.event_code.starts_with("PRESELECTION_"))
+            .map(|record| record.event_code)
+            .collect();
+        assert_eq!(
+            diagnostics,
+            [
+                "PRESELECTION_SAMPLE_INVALID_SNAPSHOT",
+                "PRESELECTION_SNAPSHOT_NO_FORWARDED_EXIT"
+            ]
+        );
+
+        // Actor-local ingestion still verifies the real signature, policy and exact control
+        // lineage. This is a sequencing test, not a forwarded-network transport substitute.
+        assert!(
+            ingest_forwarded_snapshot_exit_with_capabilities(
+                &mut fixture,
+                &control,
+                &exit,
+                RolesConfig {
+                    client: false,
+                    relay: false,
+                    exit: true,
+                },
+                1,
+                generated_nonce_with_unique_network_discriminator(),
+                now_ms,
+                PreselectionTestCapabilities::all(),
+            )
+            .await
+            .is_some()
+        );
+        let (reply, response) = oneshot::channel();
+        fixture
+            .runtime
+            .begin_client_preselection(parameters(), reply, &state)
+            .await;
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Active(_)
+        ));
+        assert!(
+            fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
+        fixture
+            .runtime
+            .cancel_client_preselection(ClientPreselectionError::Closed);
+        assert!(matches!(
+            response.await.expect("cancel active slot"),
+            Err(ClientPreselectionError::Closed)
+        ));
+        assert!(
+            !fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
     }
 
     #[tokio::test]

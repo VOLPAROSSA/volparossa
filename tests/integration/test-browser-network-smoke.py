@@ -195,6 +195,7 @@ class BrowserNetworkEvidence(unittest.TestCase):
 
     def test_readiness_exports_only_existing_ring_codes_counts_and_status_before_cleanup(self):
         source = (HERE.parents[1] / "crates/volparossa-agent/src/discovery.rs").read_text()
+        source += (HERE.parents[1] / "crates/volparossa-agent/src/discovery/preselection_sampler.rs").read_text()
         for code in CHECK["READINESS_CODES"]:
             self.assertIn('"' + code + '"', source)
         with tempfile.TemporaryDirectory() as temporary:
@@ -203,12 +204,14 @@ class BrowserNetworkEvidence(unittest.TestCase):
                 return f"1790882077582\tlevel=1\tevent={code}\tsession=abcdef\tpath=123\n"
             log = root / "logs-client.txt"
             log.write_text(row("PRESELECTION_SAMPLE_INVALID_SNAPSHOT") * 2
+                + row("PRESELECTION_SNAPSHOT_NO_FORWARDED_EXIT")
                 + row("ADVERTISEMENT_STORE_REJECTED") + row("PRESELECTION_PRIVATE_CANARY") + "private-canary raw line\n")
             (root / "status-client.txt").write_text("connected: false\nactive peers: 6\ncandidate pool: 8\n"
                 "active contexts: 0\nMPTCP subflows: 0\nMPQUIC paths: 0\nprivate-canary hostname\n")
             value = CHECK["readiness_diagnostic"](root)
             client = value["nodes"]["client"]
-            self.assertEqual(client["counts"], dict(PRESELECTION_SAMPLE_INVALID_SNAPSHOT=2, ADVERTISEMENT_STORE_REJECTED=1))
+            self.assertEqual(client["counts"], dict(PRESELECTION_SAMPLE_INVALID_SNAPSHOT=2,
+                PRESELECTION_SNAPSHOT_NO_FORWARDED_EXIT=1, ADVERTISEMENT_STORE_REJECTED=1))
             self.assertTrue(client["unknown_event"])
             self.assertFalse(client["events_truncated"])
             self.assertEqual(client["status"], dict(active_peers=6, candidate_pool=8, active_contexts=0, mptcp_subflows=0, mpquic_paths=0))

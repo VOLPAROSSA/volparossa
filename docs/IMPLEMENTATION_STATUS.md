@@ -48,6 +48,12 @@ The original intermediate observations were overwritten, so this is not yet a
 proved cause/fix of trial07. Full hashes, the second tab and detach remain unproved;
 all cleanup and unchanged host-state checks pass. Details and original hashes are
 in the native trial record linked above.
+Actual `browser-native-vm-08` fails at attachment A with 34 untruncated
+`PRESELECTION_SAMPLE_INVALID_SNAPSHOT` events and no origin connection. It does
+not exercise the exact-flow observer fix; the failed snapshot clause is not yet
+known. A bounded eight-category diagnostic candidate retains the existing
+admission rules, wire format and timers. Original receipts, successful cleanup
+and unchanged host state are preserved; this is not a preselection fix.
 Successful native ordinary-tab/core integration remains pending. This is not a full
 browser kill-switch, HTTP/3 or native ECH wire-proof claim. Workspace-only
 pinned QEMU tools are explicit local test inputs, not a host installation or
