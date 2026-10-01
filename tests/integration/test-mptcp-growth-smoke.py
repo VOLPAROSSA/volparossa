@@ -169,7 +169,6 @@ class MptcpGrowthEvidence(unittest.TestCase):
             CHECK["relay_endpoint"]("secret-one 42.158.0.1:41001\nsecret-two 44.160.1.1:41001\n",
                 role="exit", pid=1234, namespace="5678", path=path)
         self.assertNotIn("secret", str(raised.exception))
-
     @classmethod
     def setUpClass(cls):
         cls.evidence = fixture()

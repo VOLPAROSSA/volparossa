@@ -2,9 +2,146 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-30
+Last updated: 2026-10-01
 
 ## Current integration and active work
+
+### Native private conversation candidate
+
+Qwen native private-conversation source candidate (2026-09-30): explicit
+`qwen3-0.6b-v1` pins Qwen3-0.6B at `c1899de289a04d12100db370d81485cdf75e47ca`
+and nine original model assets, retaining the existing runtime lock. Native
+`tools=` chat-template encoding, nonthinking generation, ordered role/tool-result
+mapping and strict assistant/function/custom/incomplete decoding are wired into
+the existing same-owner, no-network worker lifecycle. Qwen admits only private
+conversation, not public jobs, Q&A, training or adapters. Its 65,536-byte instruction
+gate accommodates ordinary Codex instruction text, but the whole prompt must still
+tokenize to at most 12,288 tokens with 1,024 output reserve; no truncation or claim
+that all histories/tools fit. BF16/SDPA are required without silent fallback.
+Only conversation submission gets a 524,288-byte request frame; old operations
+retain their original bounds. Twenty focused Rust private protocol/lifecycle tests
+pass; offline worker tests use explicit backend doubles, **not model evidence**.
+The exact disposable [trial 36771139938](https://github.com/VOLPAROSSA/volparossa/actions/runs/36771139938)
+on `866db5b8e036c8ebfd093564f7adb651ef8f708e` provisioned the pinned runtime/model and
+observed the actual isolated Python worker, but failed at `turn-1-result` with
+`cleanup_unconfirmed` before any model-selected tool result was proved. The 5-GiB,
+no-swap service reported no OOM events; all fixture process/service cleanup and
+unchanged-host checks passed. These facts do not identify the original execution
+or lifetime-observation error. A follow-up source candidate adds opt-in, closed
+execution/capture/refresh/lifetime/reap/storage/task diagnostics before the existing
+cleanup error masks that cause. Only fixed operation/error categories, errno classes
+and bounded startup exit/signal metadata may be exported; its private local log is
+removed with the fixture. Quarantine, cleanup conditions and all deadlines remain
+unchanged; these diagnostics are **not a demonstrated cleanup fix**. Focused checks passed: 23 existing
+and new supervisor tests, the additional actual tracing-formatter-to-fixture-parser
+bridge, and 12 offline Python fixture checks; none executes model inference.
+
+The subsequent exact [trial 36774164207](https://github.com/VOLPAROSSA/volparossa/actions/runs/36774164207)
+on `c5781c476c3779b91dcea68427de75506e1ec6b8` completed its actual first model turn
+and confirmed worker/input cleanup (279 prompt tokens, 19 generated tokens), but
+returned an `assistant` response rather than the required `read_file` proposal.
+The client consequently failed `tool-check`; the second model turn never started.
+The closed service diagnostic recorded `execution/result_observed`, not a cleanup
+error. No OOM occurred and all fixture cleanup/unchanged-host checks passed. This
+does not explain or resolve the earlier intermittent cleanup failure, nor does it
+prove tool execution or a correct answer; raw response text was not exported.
+
+A bounded follow-up candidate corrects Qwen's generation options to the exact
+[pinned upstream nonthinking recommendation](https://huggingface.co/Qwen/Qwen3-0.6B/blob/c1899de289a04d12100db370d81485cdf75e47ca/README.md):
+sampling with temperature 0.7, top-p 0.8, top-k 20 and min-p 0. The existing seed 7,
+single attempt, original prompt, strict native tool parser, owner checkpoints,
+token/memory/deadline limits and cleanup requirements remain unchanged. Legacy
+Smol profiles retain greedy generation. This is a generation-profile correction,
+**not a proved cause or fix for the missing tool proposal**. Eight focused offline
+generation/bridge checks pass with explicit backend doubles, not inference evidence.
+The exact follow-up [trial 36776441427](https://github.com/VOLPAROSSA/volparossa/actions/runs/36776441427)
+on `db4be2b6fae370cc41c2218fd9fe7adc83f660c6` again returned an actual `assistant`
+first turn (279 prompt / 19 generated tokens), rather than a tool proposal. It
+failed the unchanged client `tool-check`; no second turn or authorized file read
+was proved. Actual isolation, cleanup, no-OOM and unchanged-host checks passed.
+The response text was not exported, so neither refusal, bare tool-intent JSON nor
+another answer can be distinguished from these original artifacts.
+
+The next diagnostic candidate leaves the production worker, generation settings,
+seed, prompt, aliases and strict success checks unchanged. Its disposable scenario
+explicitly opts in to exporting at most 4,096 UTF-8 bytes of the **actual first
+assistant response**, only after the entire first input matches a fixed SHA-256
+of the published synthetic fixture. That input contains neither the file nor its
+generated canary. Such an artifact truthfully sets `raw_model_output_exported`
+and `synthetic_only`; it is untrusted model text, not tool-use proof. No second
+response, tool-result/file contents, general worker log or private-user input is
+exported. If the first turn is a tool proposal, no response text is exported.
+The normal non-opted-in fixture path retains the closed-only export behavior.
+Fifteen offline fixture-contract tests and six existing Qwen bridge tests pass;
+these use synthetic validator inputs/backend doubles, not new model inference.
+The three strict-Clippy findings from the same head's Quality run are corrected
+without changing diagnostic or cleanup semantics; targeted package/all-targets/
+all-features strict Clippy passes locally.
+The exact diagnostic [trial 36892800286](https://github.com/VOLPAROSSA/volparossa/actions/runs/36892800286)
+on `b333fbfc45d07dcd46514f9cf890b73f4f1bd5b6` failed the unchanged tool check but
+now identifies its actual first output: the complete 53-byte JSON object
+`{"name": "vp_0", "arguments": {"path": "fixture.js"}}`, **without native tool
+tags**. Generation completed at EOS (279 prompt / 19 generated tokens); worker
+cleanup, no-OOM and unchanged-host checks passed. The original artifact ZIP is
+`2fd80d7cdec9138cf958b5e524e6a4b40c8a04535a01c7469dfcaf7d5885ebb3`.
+This trial remains failed; it proves neither an authorized file read nor a
+correlated second turn, and cannot retroactively classify older unexported answers.
+
+The next production candidate accepts that exact standalone JSON proposal as a
+documented second encoding alongside native tagged proposals. Python and Rust
+independently apply strict JSON/duplicate-key checks and the same offered-alias,
+payload, EOS and owner-call-ID rules. It does not scrape JSON from prose, repair
+invalid JSON, choose a tool for the model or execute tools in the worker. The
+caller remains responsible for argument validation and execution permissions.
+Model weights, prompt, sampling, seed, limits and the two-turn success check are
+unchanged. Eight focused Rust conversation tests and seven offline Qwen bridge
+tests pass. These decoder checks are not new model evidence; an actual fresh
+two-turn run is still required.
+
+Actual completed tool use,
+a hard-4GiB-bounded long-context run and an end-to-end editing loop remain
+**unproved/incomplete**. See the [exact wire contract](../crates/volparossa/src/compute/private_conversation/WIRE.md).
+
+Private conversation source candidate (2026-09-30): additive
+[`conversation_capabilities` / `submit_conversation`](../crates/volparossa/src/compute/private_conversation/WIRE.md)
+operations retain the existing same-owner private Q&A interface and execution slot.
+Typed instructions, ordered history, offered function/custom tools and correlated
+tool results reach the actual chat-template/generation backend; outputs are validated
+assistant text, tool proposals or explicit incomplete turns. The worker never executes
+tools. Existing SmolLM2 model budgets remain 192/64 or 1024/256 prompt/output tokens,
+with whole-prompt token admission and no truncation; the Qwen profile above expands
+the conversation budget without changing those legacy profiles.
+Sixteen focused Rust protocol/lifecycle/report tests and eleven offline Python
+conversation/private-worker tests pass. Backend doubles in those tests are not model
+inference evidence. Real tool-use quality, a connected Responses provider and an
+actual Codex editing loop remain **unproved/incomplete**.
+
+### Scoped browser TCP: live component proof passed
+
+The exact [browser/core trial 36776940049](https://github.com/VOLPAROSSA/volparossa/actions/runs/36776940049)
+on core `b8a1dd6e52978c40ced4c92c006f8301a587c659` and browser
+`198e288183b06d8a4ff584210ade449f124bc737` passes. Two real Gecko HTTPS responses,
+each 32 MiB and fully hash-verified, cross the protected core with two carrying kernel
+MPTCP subflows through distinct WireGuard relays per transfer. End-to-origin TLS 1.3,
+absence of proxy credentials at the origin, wrong-scope rejection and independent A
+retirement while B remains active are verified. All 30 original artifacts revalidate
+against the source; privacy captures, private-file/topology cleanup and unchanged
+guest-root host state pass. See [the exact evidence and boundaries](BROWSER_NETWORK.md).
+
+After incorporating the merged storage-flow lifetime fix, the exact follow-up
+[trial 36893366706](https://github.com/VOLPAROSSA/volparossa/actions/runs/36893366706)
+also passes on `f0f54fc7c0e30918ef2405aca30bc69e4382ccc1`. Its 30 original
+artifacts revalidate with the unchanged checker; original ZIP SHA-256 is
+`b7089d466a2275f2a4e3457c2334e8ca0060c5ee8608d97c7ca983317ab36475`.
+The component is integrated by normal PR #176 merge `5376d882`; fresh Quality,
+all CodeQL analyses and the aggregate passed before merging.
+
+This establishes the scoped TCP component, not the complete browser integration.
+Ordinary tab navigation over the actual overlay, live availability fallback, full
+browser kill switch, HTTP/3 and the native Firefox 157 build remain open. The actual
+ESR fixture explicitly disables ECH-GREASE; product-scoped ECH compatibility is still
+being built. The earlier failed-trial history below is retained, but its pending
+live-TCP-proof statements are superseded by this exact successful run.
 
 ### Editor-to-core private execution candidate
 
@@ -37,7 +174,8 @@ quotas and ciphertext hashes do not classify encrypted files, and uploader self-
 does not defeat malicious clients. The content-admission/review mechanism remains open; see
 [storage privacy and abuse boundaries](PRIVATE_STORAGE.md#storage-immune-system-and-private-content-limits).
 Different-chunk placement is implemented in the signed fragment CLI with local-service
-evidence below; its real overlay/provider-loss trial remains pending. The earlier
+evidence below; the actual overlay/provider-loss trial 36773683946 passes and is
+integrated through PR #183. Automatic placement/repair remains incomplete. The earlier
 replica/handoff proofs retain a complete encrypted archive at each selected provider.
 
 ### Explicit fragment-copy repair candidate
@@ -275,6 +413,108 @@ now passes: the real ESR sidebar renders one synthetic EOS answer from the actua
 selector. Daemon network attachment, browser-scoped kill switch (requested off by default)
 and cache integration remain unfinished. Core defaults for other consumers are not weakened
 by the requested browser availability fallback.
+
+The [scoped TCP gateway candidate](BROWSER_NETWORK.md) now connects operator-delegated
+application scopes to the existing MPTCP route API. A separate UID/capability-authenticated
+Unix attachment owns its own loopback CONNECT endpoint and route controller; EOF/expiry
+does not disconnect other apps or the main/DNS controllers. Three CLI, one protocol and
+five agent checks plus strict CLI/local-control/agent Clippy pass. These establish executable
+wiring and local boundaries, not live Firefox payloads, two simultaneously carrying app
+routes, a browser-wide kill switch, or direct fallback. The disposable combined proof remains
+pending; other core security defaults are unchanged.
+The corresponding [browser adapter PR #4](https://github.com/VOLPAROSSA/volparossa-browser/pull/4)
+at `18a74235` passes a real ESR Unix-IPC/three-TLS-response smoke with a synthetic gateway,
+including no proxy credential at the origin and independent detach. The new pinned
+`browser-network` KVM fixture requires actual core MPTCP/WireGuard payloads, two separate
+32-MiB browser hashes, two carrying paths per response and A retirement while B stays active.
+Its disposable browser-UID egress guard is test containment, not a product kill switch.
+The [first combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36625896567)
+on `b4b2d62b` fails before HTTPS at `BROWSER_NETWORK_APP_BOUNDARY_INVALID`; cleanup is
+complete with unchanged host state. A deterministic checker mismatch is corrected:
+`nft -n -j` emits numeric `NFPROTO_IPV6 = 10`, not the symbolic `ipv6` the checker required.
+Eight pure checks pass and failed boundary stages are now retained as closed metadata;
+firewall/credential checks remain strict. The corrected live proof remains pending, and
+the original failure cannot exclude an additional launch issue. No full Firefox 157 build is claimed.
+The [second run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36714093009)
+on `fd2d7eb2` confirms the capless application/namespace/numeric-firewall boundary, then
+fails before the first HTTPS request without a browser report or WireGuard payload.
+Cleanup again preserves host state. Closed driver-stage/error diagnostics now cover the
+previous pre-browser reporting gap; nine pure fixture checks pass, but the live cause and
+combined payload proof remain pending. No core gateway behavior is changed speculatively.
+The [third run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36716815095)
+on `e53034f6` now locates the failure at bubblewrap launch with permission denied,
+before child runtime validation; isolation, cleanup and unchanged host state still pass.
+The candidate driver explicitly uses its owned work directory before/inside bubblewrap,
+avoiding the inherited private provisioning checkout. Eight browser driver and nine core
+fixture checks pass, but the corrected live proof remains pending. No browser overlay
+success, permissions relaxation or full-browser kill-switch claim is implied.
+The [fourth run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36719104806)
+on `9bb16c99` still fails at wrapper launch: the owned-cwd change did not resolve it.
+Permission denied is observed, but no child validation or exact failing operation is
+available. Isolation, private cleanup and unchanged host state pass. Closed diagnostics
+now distinguish fixed bwrap source/destination lookup, remount, exec and setup operations
+without exporting private paths or changing sandbox permissions. This is not a live fix;
+actual browser HTTPS/MPTCP payload proof remains pending.
+The [fifth run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36722045933)
+on `ff98dc8c` narrows the launch failure to bwrap directory creation. Its 17 retained
+original artifacts still prove no browser payload; private cleanup and unchanged host
+state pass. Exact closed destination categories are now recorded without raw paths;
+eleven focused checks pass. This remains diagnosis, not a verified permission fix.
+The [sixth run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36726326554)
+on `4808fe06` identifies the exact failing destination category as the browser work
+directory; it still fails before child validation or HTTPS. Cleanup and unchanged host
+state pass. A bounded bubblewrap-only reproduction distinguishes an unmapped, search-only
+parent from an owned parent. The candidate browser driver now places only the verified
+runtime beneath an anonymous, read-only provisioning-parent shell inside its mount
+namespace. It does not change parent permissions, grants, UID, capabilities or network
+access. Nine browser driver checks pass; the corrected combined live proof remains pending.
+
+The [seventh run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36732926403)
+on exact `cd3e630d243739e1d3188074907af0e8d5e03f81` launches actual Gecko and reaches
+`attach-a`, then fails with `unavailable` before Ready or overlay payload. All 18 originals
+are retained; browser/profile/private/topology cleanup and unchanged host state pass.
+Closed attachment substages and numeric `nsresult` now distinguish stream setup/write,
+EOF and timeout, with a same-sandbox Unix socket access probe that sends no capability.
+Eleven browser tests, twelve fixture tests and a real-ESR/synthetic-gateway smoke pass.
+This is improved diagnosis and preserved local functionality, not a successful real-core
+browser route; no speculative permission relaxation or core routing change is included.
+
+The [eighth run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36738800599)
+on `be2c6cd6` isolates `socket-path / ENOENT`: the grant's agent-namespace path was not
+published in the browser namespace. Private/topology cleanup and unchanged host state
+pass. The fixture candidate read-only maps only the original client control directory
+to that unchanged path, requiring matching parent/socket inodes and ownership. Twelve
+pure browser checks, a real unprivileged namespace/socket check and thirteen core
+evidence checks pass; the corrected real browser/MPTCP payload proof remains pending.
+
+The latest [browser-network run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36766377022)
+on exact `3f89c5ab5a43bfa1df19cca55b81ec2bdc1ea839` passes both real attachments but
+fails its first request with `NS_ERROR_NET_TIMEOUT`, CONNECT status 0 and no body.
+Closed core events prove the CONNECT header was accepted, not that route setup completed.
+All 18 originals retain complete cleanup and unchanged host state. Source inspection finds
+core published `Ready` before cold signed discovery/native route preparation; the candidate
+now prepares the independently owned route first, bounded by 90 seconds and the original
+grant expiry. EOF/shutdown/expiry still joins through existing retained route ownership.
+The companion browser waits at most 95 seconds for bootstrap without changing native TLS
+timeouts; serial fixture orchestration accounts for both preparations. This corrects the
+source ordering, not a proven historical 30-second timing cause. Fifteen Python checks and
+shell syntax pass; all six focused Rust preparation checks now pass, including an expired
+capability never polling route admission and expiry/shutdown winning during the final
+ready poll. Actual browser payload
+on two protected MPTCP paths, ordinary browsing interception and a full browser kill switch
+remain unproven. See [the scoped evidence and boundaries](BROWSER_NETWORK.md).
+
+The next exact [run 36773190344](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773190344)
+at `d58e5514759d421a1ee3a629d5569b4c67c06639` now prepares both routes before Ready,
+accepts CONNECT and reaches forwarding twice. Gecko then reports `NS_ERROR_NET_INTERRUPT`
+(`0x804b0047`), CONNECT status 200, no HTTP status/body. It is still a failure, not TLS or
+payload proof. All 18 original artifacts retain complete cleanup and unchanged host state.
+The next ordinary-channel candidate also adds an explicit scoped bootstrap failure
+contract: only confirmed-clean lack of eligible paths under a still-valid policy/grant
+can authorize a killswitch-off browser decision for at most five seconds. EOF, ambiguous
+failure, policy denial and expired authority cannot. Fourteen gateway checks plus one
+discovery diversity check pass; ordinary Firefox channel integration and actual payload
+evidence remain separate requirements.
 
 [Signal integration](https://github.com/VOLPAROSSA/volparossa-chat/pull/1) now has a pinned
 Desktop/libsignal source baseline and explicit device/session/backup contracts, not a
