@@ -52,7 +52,10 @@ ROUTE_ERRORS = frozenset(("Busy", "InvalidProfile", "PreselectionUnavailable", "
     "NativeProofUnavailable", "NativeSamplerRetirementUnavailable", "NativeRemoteRetirementUnavailable",
     "NativeTransportIdentityUnavailable", "RouteAdmissionUnavailable", "MptcpExitListenerSignalUnavailable",
     "TransportRuntimeUnavailable", "UdpExitSessionSignalUnavailable", "UdpIngressUnavailable"))
+PRESELECTION_ERRORS = frozenset(("Busy", "Closed", "Timeout", "InvalidParameters", "NoEligiblePaths",
+    "Unavailable", "Invalidated", "Transport"))
 GATEWAY_CODES = {
+    "preselection": PRESELECTION_ERRORS,
     "attachment_route": ROUTE_ERRORS | {"preparing", "ready", "timeout", "revoked", "shutdown"},
     "connect_header": frozenset(("received", "timeout", "invalid", "accepted")),
     "policy_before_route": frozenset(("denied",)),

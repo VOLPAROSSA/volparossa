@@ -62,6 +62,20 @@ Both temporary VMs were removed and host DNS/route hashes stayed unchanged.
 Native ordinary-tab/core payload, HTTP/3, a browser-wide kill switch and raw
 ECH ClientHello wire evidence remain unproved by these trials.
 
+Local `build/browser-native-vm-04` on
+`76e9edbfe33c91c66d399209302102d32f96d00f` passes those startup/initial-tab
+steps and enters attachment A. The actual core reports route preparation followed
+by `PreselectionUnavailable`, before any origin connection. This is not a Firefox
+startup failure, and does not establish a specific policy, candidate, address-family
+or connection-lineage cause: the existing mapping collapses several discovery
+errors, separately from `NoEligiblePaths`. The candidate now records only that
+closed inner enum through the existing opt-in, bounded gateway diagnostic; no
+retry, timer, policy or network authority changes. The original browser receipt
+SHA-256 is `6d2000d87b03792ce9657ecd3d3fa8347480db42f13842234488fa542f9405f6`.
+A15/private/profile cleanup passes; guest-state hash
+`5c78a1aa3fe989c5e031e05593e551c05aac0885fe893f9adeed2983b8bfb93b`
+matches before/after, the VM is removed and host DNS/routes remain unchanged.
+
 ## One daemon, independent application connections
 
 An explicitly authorized application can obtain its own short-lived TCP gateway from the

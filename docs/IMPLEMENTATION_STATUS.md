@@ -22,6 +22,10 @@ one; Firefox was alive before deliberate cleanup. The candidate now accepts a
 nonempty, bounded initial set while retaining exactly two new tabs and full
 body checks. Both failed receipts, successful A15/private cleanup and unchanged
 host state are retained in [the native trial record](BROWSER_NETWORK.md#native-ordinary-tab-integration-actual-trials-remain-failed).
+The next actual trial `browser-native-vm-04` passes startup and reaches attachment A,
+but fails at core `PreselectionUnavailable` before origin traffic. Its cleanup and
+unchanged host-state checks pass. A closed inner-enum diagnostic is prepared; the
+original evidence does not identify policy, readiness, family or lineage as the cause.
 Successful native ordinary-tab/core integration remains pending. This is not a full
 browser kill-switch, HTTP/3 or native ECH wire-proof claim. Workspace-only
 pinned QEMU tools are explicit local test inputs, not a host installation or

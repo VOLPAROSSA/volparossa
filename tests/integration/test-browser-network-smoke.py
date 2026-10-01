@@ -185,6 +185,23 @@ class BrowserNetworkEvidence(unittest.TestCase):
         body = route_source.split("pub(crate) enum ClientRouteConnectError {", 1)[1].split("}", 1)[0]
         self.assertEqual(set(re.findall(r"^\s*([A-Za-z]+),", body, re.M)), CHECK["ROUTE_ERRORS"])
 
+    def test_preselection_diagnostic_retains_only_the_exact_inner_enum(self):
+        source = (HERE.parents[1] / "crates/volparossa-agent/src/discovery.rs").read_text()
+        body = source.split("pub(crate) enum ClientPreselectionError {", 1)[1].split("}", 1)[0]
+        variants = set(re.findall(r"^\s*([A-Za-z]+),", body, re.M))
+        self.assertEqual(variants, CHECK["PRESELECTION_ERRORS"])
+        def event(code):
+            return json.dumps(dict(target="volparossa_agent::browser_gateway::connect", fields=dict(
+                message="browser_gateway_observation", stage="preselection", code=code,
+                private_field="private-canary"))) + "\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "private.log"
+            path.write_text("".join(event(code) for code in sorted(variants)) + event("private-canary"))
+            result = CHECK["gateway_diagnostic"](path)
+            self.assertEqual(result["events"], [dict(stage="preselection", code=code) for code in sorted(variants)])
+            self.assertTrue(result["unknown_event"])
+            self.assertNotIn("private", json.dumps(result))
+
     def test_attachment_substage_and_nsresult_are_closed_original_facts(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
