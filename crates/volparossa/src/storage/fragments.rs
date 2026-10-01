@@ -6,6 +6,8 @@ mod drain;
 mod operations;
 #[path = "fragments_placement.rs"]
 mod placement;
+#[path = "fragments_repair.rs"]
+mod repair;
 #[path = "fragments_state.rs"]
 mod retained;
 
@@ -46,6 +48,8 @@ pub(crate) enum Command {
     Replace(Box<Replace>),
     /// Move this archive's copies away from one provider in a bounded owner-driven pass.
     Drain(Box<Drain>),
+    /// Repair selected provider copies without letting unconfirmed retirement block other fragments.
+    Repair(Box<Drain>),
 }
 
 #[derive(Debug, Args)]
@@ -199,33 +203,8 @@ pub(in crate::storage) async fn run(command: Command, socket: &Path) -> Result<(
             )
             .await?
         }
-        Command::Drain(args) => {
-            ensure!(
-                (1..=8).contains(&args.provider_key.len())
-                    && args.provider_key.len() == args.grant.len(),
-                "specify 1..8 replacement provider keys and corresponding grants"
-            );
-            let signer = args.existing.unlock.signer()?;
-            let mut set = LockedFragments::open(&args.existing.state)?;
-            let mut grants = Vec::with_capacity(args.grant.len());
-            for (provider, path) in args.provider_key.iter().zip(&args.grant) {
-                let encoded = state::read_private(path, MAX_GRANT_BYTES as u64)?;
-                grants.push(
-                    SignedStorageGrant::decode(&encoded)?
-                        .verify(provider, crate::storage::now()?)?,
-                );
-            }
-            drain::drain(
-                &mut set,
-                socket,
-                &signer,
-                args.from_provider_key,
-                &grants,
-                args.lifetime_seconds,
-                usize::from(args.max_fragments),
-            )
-            .await?
-        }
+        Command::Drain(args) => handoff_pass(&args, socket, false).await?,
+        Command::Repair(args) => handoff_pass(&args, socket, true).await?,
     };
     let complete = report["operation_complete"].as_bool().unwrap_or(true);
     crate::storage::print(&report)?;
@@ -234,6 +213,44 @@ pub(in crate::storage) async fn run(command: Command, socket: &Path) -> Result<(
         "fragment operation incomplete; original identities and charged copies retained"
     );
     Ok(())
+}
+
+async fn handoff_pass(args: &Drain, socket: &Path, repairing: bool) -> Result<serde_json::Value> {
+    ensure!(
+        (1..=8).contains(&args.provider_key.len()) && args.provider_key.len() == args.grant.len(),
+        "specify 1..8 replacement provider keys and corresponding grants"
+    );
+    let signer = args.existing.unlock.signer()?;
+    let mut set = LockedFragments::open(&args.existing.state)?;
+    let mut grants = Vec::with_capacity(args.grant.len());
+    for (provider, path) in args.provider_key.iter().zip(&args.grant) {
+        let encoded = state::read_private(path, MAX_GRANT_BYTES as u64)?;
+        grants
+            .push(SignedStorageGrant::decode(&encoded)?.verify(provider, crate::storage::now()?)?);
+    }
+    if repairing {
+        repair::repair(
+            &mut set,
+            socket,
+            &signer,
+            args.from_provider_key,
+            &grants,
+            args.lifetime_seconds,
+            usize::from(args.max_fragments),
+        )
+        .await
+    } else {
+        drain::drain(
+            &mut set,
+            socket,
+            &signer,
+            args.from_provider_key,
+            &grants,
+            args.lifetime_seconds,
+            usize::from(args.max_fragments),
+        )
+        .await
+    }
 }
 
 fn parse_copy_target(value: &str) -> Result<usize, String> {

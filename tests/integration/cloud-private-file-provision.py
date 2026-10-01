@@ -25,11 +25,15 @@ HERE = Path(__file__).resolve().parent
 PINS = HERE / "cloud-private-file-pins.json"
 SOURCE = Path("/opt/volparossa-cloud")
 RUNTIME = Path("/opt/volparossa-node")
-REVISION = "541cc826fe14ce69cf89a82ecb600ad14dd534c6"
+REVISION = "a67b91fbed42ecd23ba215eb21ef54397fc9f06a"
 FILES = frozenset(("scripts/cloud-file.mjs", "scripts/private_file.py", "src/private-file.mjs",
     "src/opencloud-dav.mjs", "vendor/volparossa-image/immich_snapshot.py",
     "vendor/volparossa-image/core-storage.mjs", "vendor/volparossa-image/LICENSE",
-    "third_party/volparossa-image-source.json", "LICENSE"))
+    "third_party/volparossa-image-source.json", "LICENSE", "scripts/cloud-catalog.mjs",
+    "scripts/cloud-serve.mjs", "scripts/private_catalog.py", "scripts/stage_web_sdk.py",
+    "src/private-catalog.mjs", "src/private-dav-server.mjs", "third_party/opencloud-web-sdk.json",
+    "THIRD_PARTY_LICENSES.md"))
+SDK_SHA = "8954d9ad90e44a6f62d0e32d3280ca92fd7b0ce30042fe07cdde5c653e0739b3"
 TOOLS = {"gpg": "gpg", "gpg-agent": "gpg-agent", "gpgconf": "gpgconf", "tar": "tar"}
 
 
@@ -109,6 +113,30 @@ def expose(root):
     root.chmod(0o555)
 
 
+def verify_sdk(source):
+    """Verify every published SDK file; this is provenance, not a SDK read proof."""
+    sdk = source / "build/web-sdk"
+    receipt_path = sdk / "receipt.json"
+    require(receipt_path.is_file() and not receipt_path.is_symlink()
+            and receipt_path.stat().st_size <= 65536)
+    receipt = json.loads(receipt_path.read_text())
+    pins_sha = digest(source / "third_party/opencloud-web-sdk.json")
+    require(receipt["version"] == 1 and receipt["kind"] == "opencloud-web-sdk-trial"
+            and receipt["pins_sha256"] == pins_sha and receipt["archive_sha256"] == SDK_SHA
+            and all(receipt[k] is False for k in ("package_scripts_run", "source_build_claimed", "global_installation"))
+            and len(receipt["files"]) == 109
+            and sum(r["bytes"] for r in receipt["files"].values()) == 1109076)
+    for name in receipt["files"]:
+        require(name.startswith("package/") and "\\" not in name
+                and all(p not in ("", ".", "..") for p in name.split("/")))
+    require({str(p.relative_to(sdk)) for p in sdk.rglob("*") if p.is_file()}
+            == set(receipt["files"]) | {"receipt.json"})
+    verify_files(sdk, receipt["files"])
+    require("package/LICENSE" in receipt["files"] and "package/dist/web-client/webdav.js" in receipt["files"])
+    return dict(pins_sha256=pins_sha, archive_sha256=SDK_SHA, receipt_sha256=digest(receipt_path),
+                files_verified=True, files=109, source_build_claimed=False, sdk_reads_proven=False)
+
+
 def provision():
     pins = load_pins()
     guard()
@@ -128,10 +156,14 @@ def provision():
             runtime_stage["extract_runtime"](bundle, RUNTIME, pins["runtime"]["files"])
     verify_files(SOURCE, pins["files"])
     verify_files(RUNTIME, pins["runtime"]["files"])
+    subprocess.run(["python3", "-B", str(SOURCE / "scripts/stage_web_sdk.py"), "--download", "--yes",
+                    "--output", str(SOURCE / "build/web-sdk")], check=True, timeout=180,
+                   env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+    sdk = verify_sdk(SOURCE)
     require(subprocess.check_output([str(RUNTIME / "bin/node"), "--version"],
             text=True, timeout=10, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}).strip() == "v24.19.0")
     report = dict(version=1, kind="cloud-private-file-runtime-provision", success=True,
-                  pins=pins, pins_sha256=digest(PINS), tools=tools,
+                  pins=pins, pins_sha256=digest(PINS), tools=tools, sdk=sdk,
                   guest_only=True, source_files_verified=True, runtime_files_verified=True,
                   original_licenses_retained=True, private_file_created=False,
                   peer_storage_proven=False, opencloud_server_started=False)
