@@ -630,6 +630,11 @@ cleanup() {
         install -m 0600 "$RUN_DIRECTORY/console.log" "$output_directory/vm-console.log" \
             2>/dev/null || true
     fi
+    if [ -f "$RUN_DIRECTORY/qemu.stderr" ]; then
+        # Preserve startup failures too: there may not be a serial console yet.
+        tail -c 131072 "$RUN_DIRECTORY/qemu.stderr" >"$output_directory/qemu.stderr" \
+            2>/dev/null || status=1
+    fi
     if [ -f "$RUN_DIRECTORY/qemu-outer-uplink.json" ]; then
         # Keep runner-owned provenance even when guest retrieval fails or a
         # guest archive happens to contain the same basename.
@@ -1485,11 +1490,17 @@ case $scenario in dns-cache|reciprocity-private-dns)
     qemu_usernet=$qemu_usernet,$qemu_outer_ipv6
     ;;
 esac
+qemu_vga_device=VGA,id=video0,bus=pcie.0,addr=0x1
+if [ -n "$host_tools_directory" ]; then
+    # Debian keeps this ROM in a separate package directory. The extracted
+    # tools receipt verified its exact bytes; never look for a host ROM.
+    qemu_vga_device=$qemu_vga_device,romfile=$host_tools_directory/root/usr/share/seabios/vgabios-stdvga.bin
+fi
 qemu-system-x86_64 \
     -name volparossa-alpha-topology \
     -no-user-config -nodefaults \
     -machine q35,accel=kvm -cpu host -smp 4 -m "$guest_memory_mib" \
-    -device VGA,id=video0,bus=pcie.0,addr=0x1 \
+    -device "$qemu_vga_device" \
     -drive "if=virtio,format=qcow2,file=$OVERLAY" \
     -drive "if=virtio,format=raw,readonly=on,file=$SEED" \
     -device virtio-rng-pci \
@@ -1497,7 +1508,7 @@ qemu-system-x86_64 \
     -netdev "$qemu_usernet" \
     -display none -monitor none -serial "file:$CONSOLE" "$@" \
     -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny \
-    </dev/null >/dev/null 2>&1 &
+    </dev/null >/dev/null 2>"$RUN_DIRECTORY/qemu.stderr" &
 QEMU_PID=$!
 
 ssh_bounded() {
