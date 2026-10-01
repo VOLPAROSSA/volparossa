@@ -53,7 +53,7 @@ fn required_rights(grant: &VerifiedStorageGrant) -> bool {
     grant.limits().rights.bits() & rights.bits() == rights.bits()
 }
 
-fn select<'a>(
+pub(super) fn select<'a>(
     set: &LockedFragments,
     index: usize,
     from: &VerifyingKey,

@@ -11,15 +11,16 @@ cloud_private_file_run() {
     storage_owner_parent=$WORK/u
     storage_owner_directory=$storage_owner_parent/i
     storage_fixture_driver=cloud-private-file-smoke.py
+    storage_restore_flows=32
     if [ -e "$storage_owner_parent" ] || [ -L "$storage_owner_parent" ]; then
         fail CLOUD_OWNER_PARENT_NOT_NEW
     fi
-    longest_cloud_socket=$storage_owner_directory/g-xxxxxxxx/S.gpg-agent
+    longest_cloud_socket=$storage_owner_directory/w/catalog-read-xxxxxx/g-xxxxxxxx/S.gpg-agent
     [ "${#longest_cloud_socket}" -lt 104 ] || fail CLOUD_SOCKET_PATH_TOO_LONG
     install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$storage_owner_parent"
     [ "$CLOUD_SOURCE" = /opt/volparossa-cloud ] || fail CLOUD_SOURCE_INVALID
     [ "$CLOUD_NODE" = /opt/volparossa-node/bin/node ] || fail CLOUD_NODE_INVALID
-    [ "$CLOUD_REVISION" = 541cc826fe14ce69cf89a82ecb600ad14dd534c6 ] || fail CLOUD_REVISION_INVALID
+    [ "$CLOUD_REVISION" = a67b91fbed42ecd23ba215eb21ef54397fc9f06a ] || fail CLOUD_REVISION_INVALID
     if [ ! -f "$CLOUD_SOURCE/provision.json" ] || [ -L "$CLOUD_SOURCE/provision.json" ]; then
         fail CLOUD_PROVISION_MISSING
     fi
@@ -37,12 +38,12 @@ cloud_private_file_finalize_report() {
         --argjson status "$cloud_status" --slurpfile evidence "$WORK/handoff-report-evidence.part" \
         --slurpfile host "$WORK/handoff-report-host.part" --argjson complete "$CLEANUP_COMPLETE" \
         --argjson remaining "$REMAINING_OWNED_OBJECTS" '
-      {schema_version:1,report_kind:"volparossa-cloud-private-file",source_revision:$revision,run_id:$run,
+      {schema_version:2,report_kind:"volparossa-cloud-private-file",source_revision:$revision,run_id:$run,
        phase:$phase,runner_exit_status:$status,cloud:$evidence[0],
        success:($status == 0 and $evidence[0].success == true and $complete and $remaining == 0 and $host[0].unchanged == true),
        observed_blocker:(if $blocker == "NONE" then null else $blocker end),
        cleanup:{complete:$complete,remaining_owned_objects:$remaining},host_state:($host[0] | del(.acceptance_id)),
-       scope:"Pinned Cloud authenticated synthetic DAV import, source stopped, real GPG and actual Node/core storage CLI through three protected providers; A offline, two decrypted/hash-verified B/C restores, all-copy deletion and cleanup. No running OpenCloud server, web client or serverless availability proof."}' \
+       scope:"Pinned Cloud synthetic DAV import; source stopped, local ciphertext removed, A offline. Four real protected B/C file reconstructions: direct restore, encrypted catalog creation, actual published Web8 SDK full GET and range GET through the real owner-private Cloud read CLI. Authentication, metadata listing, ETag, nonconsuming reads, all-copy deletion and cleanup. No full web UI, OpenCloud account server or general serverless availability proof."}' \
         >"$WORK/cloud-private-file-smoke.json" || return 1
     cloud_exports=$(python3 -B "$source_directory/tests/integration/cloud-private-file-smoke.py" export-names) || return 1
     for cloud_name in $cloud_exports; do

@@ -68,7 +68,8 @@ objects and unchanged host state. Its original report passes exact-revision repl
 This trial uses pinned Image `e177afeb`, not a newer adapter, and does not establish a
 running Immich database, mobile synchronization or general serverless Immich availability.
 
-The new `cloud-private-file` scenario is **not yet live-verified**. It reuses the
+The `cloud-private-file` scenario has **passed its one-file protected-peer trial**.
+It reuses the
 same protected topology with Cloud `541cc826fe14ce69cf89a82ecb600ad14dd534c6`:
 an actual authenticated synthetic DAV endpoint feeds the pinned Cloud importer,
 which encrypts the file and source metadata locally. The endpoint is stopped and
@@ -76,10 +77,29 @@ joined before create/deposit, its credentials are removed, and the local encrypt
 file is removed before two provider-loss restores. The actual Cloud CLI must fetch
 through core fragment storage and complete authenticated GPG/manifest verification
 before new plaintext directories appear. Owner keys never go to peers or exported
-reports. Success also requires retained physical charges, explicit lease deletion,
-private cleanup and unchanged host state; static/parser checks alone are not that
-evidence. No actual OpenCloud server, web client, directory browsing or serverless
-availability is claimed. Preview with
+reports. Retained physical charges, explicit lease deletion, private cleanup and
+unchanged host state passed in [run36909989038](https://github.com/VOLPAROSSA/volparossa/actions/runs/36909989038)
+on core `41e404a40312f039827f761dea7b90be48d0c21f`; the original exact-source
+report also passed replay. This source-bound result does not establish a newer
+Cloud read service or an actual OpenCloud server/web UI.
+
+The subsequent catalog/SDK integration uses Cloud
+`a67b91fbed42ecd23ba215eb21ef54397fc9f06a`: an encrypted immutable owner selection,
+private restoration through the core and authenticated loopback DAV listing and
+reads. Its real GPG/OpenCloud SDK local integration test passes with an explicitly
+injected storage adapter. The new protected-peer client proof now independently
+passes in [run36916040042](https://github.com/VOLPAROSSA/volparossa/actions/runs/36916040042)
+on core `5d9d347fc52e4cc13498ed3b6790d1f00de370c3`. The original source and local
+ciphertext are absent and provider A is offline before direct recovery, catalog
+creation and actual SDK full/range reads reconstruct from B/C. All 32 required
+MPTCP/TLS exchanges complete; authentication/ETag denial, private cleanup, retained
+physical charges and final zero leases pass. Exact-source replay of the 44
+original artifacts reproduces the aggregate; ZIP SHA-256
+`f59a2c2baf693b5087c0827c0971589da23bf15610f96c885db6f2bbe0abdaef`.
+Range requests still reconstruct and verify the complete encrypted file before
+selecting plaintext bytes. This is not the full web UI. Accounts, shared permissions,
+writes, peer-distributed catalogs and second-device recovery are not completed.
+Preview with
 `sh tests/integration/run-alpha-topology-vm.sh --preview --scenario cloud-private-file`;
 execution belongs only in the explicitly approved disposable KVM workflow.
 
@@ -733,6 +753,50 @@ network-wide contribution resizing or a promise that an offline provider's uncer
 charge can be removed. Local signed-service tests exercise lost replies, restart, exact
 retry identity, a bounded partial pass, least-charged placement, restore without the local
 source and final zero-lease cleanup; they are not a new protected-overlay proof.
+
+### Bounded owner-driven repair pass
+
+`storage fragments repair` uses the same explicit owner authority, candidate grants,
+least-charged selection and real replacement/readback operations as `drain`, but separates
+repair progress from an unreachable source's outstanding deletion:
+
+```sh
+volparossa storage fragments repair --state /absolute/fragment-set \
+  --from-provider-key UNAVAILABLE_PROVIDER_KEY_HEX \
+  --provider-key CANDIDATE_KEY_HEX --grant /absolute/candidate.grant \
+  --max-fragments 16 --lifetime-seconds 604800 --identity /absolute/owner.identity
+```
+
+Copying intents resume first with their exact signed provider, archive identity, grant and
+expiry, including when that provider is absent from the fresh candidate list. New repairs
+come next; already pending retirements come last so repeated small passes can repair the
+other fragments while the original provider remains offline. Every fragment is attempted
+at most once per pass and the same total 1–256 attempt bound applies. A fragment with a
+pending handoff never receives another replacement intent.
+
+An incomplete handoff permits continuation **only** when that invocation verified the
+survivor and fully read back the exact replacement, with only `source_delete_unconfirmed`
+remaining. A failed upload, readback or survivor check still stops the pass. A persisted
+`DeletePending` phase is not counted as new verification; a retirement retry performs the
+existing real handoff checks again before it can delete anything. The original provider's
+uncertain bytes remain fully charged even when the replacement is usable.
+
+The JSON report distinguishes `freshly_verified_replacements` and per-fragment
+`replacement_verified_this_pass` from `pending_retirements` and
+`remaining_provider_fragments` (the original copies not yet confirmed deleted).
+`repair_stage: retirement_pending` and nonzero exit status remain visible until all source
+copies are confirmed deleted. `pass_limit`, `pending_handoff`, `pending_grant_unavailable`
+and `no_eligible_candidate` also remain incomplete. `repair_pending` means another pass is
+needed after a fragment's earlier handoff for a different source provider was completed;
+the pass does not schedule two handoffs for that fragment. Repeating the command after provider
+or owner restart retains the same identities and charges. `drain` keeps its stricter
+stop-on-unconfirmed-deletion behavior.
+
+This is a bounded owner-online controller, not background availability detection, automatic
+contribution resizing, a new redundancy policy or proof of independent device availability.
+The original signed reconstruction root and the existing v2 consumer boundary are unchanged.
+Its functional probe uses actual signed local provider services and SQLite stores, not a
+new protected-overlay run.
 
 ### Disposable protected-fragment proof
 
