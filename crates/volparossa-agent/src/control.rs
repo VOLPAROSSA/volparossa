@@ -205,6 +205,7 @@ async fn process_connection(
                 | control_request::Operation::ContentLocalFetchName(_)
                 | control_request::Operation::MailboxRemote(_)
                 | control_request::Operation::PrivateStorageRemote(_)
+                | control_request::Operation::PrivateStorageMaintenance(_)
                 | control_request::Operation::ContentCustody(_)
                 | control_request::Operation::ComputeRemote(_)
         )
@@ -254,6 +255,16 @@ async fn process_connection(
             Some(control_request::Operation::PrivateStorageRemote(remote)) => {
                 Box::pin(context.content.private_storage_remote(
                     remote.clone(),
+                    &context,
+                    &mut stream,
+                    &request.request_id,
+                    &mut ready_sent,
+                ))
+                .await
+            }
+            Some(control_request::Operation::PrivateStorageMaintenance(maintenance)) => {
+                Box::pin(context.content.private_storage_maintenance(
+                    maintenance,
                     &context,
                     &mut stream,
                     &request.request_id,
@@ -362,6 +373,7 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
         | control_request::Operation::ContentLocalFetchName(_)
         | control_request::Operation::MailboxRemote(_)
         | control_request::Operation::PrivateStorageRemote(_)
+        | control_request::Operation::PrivateStorageMaintenance(_)
         | control_request::Operation::ContentCustody(_)
         | control_request::Operation::ContentCustodyDiscover(_)
         | control_request::Operation::ComputeRemote(_)

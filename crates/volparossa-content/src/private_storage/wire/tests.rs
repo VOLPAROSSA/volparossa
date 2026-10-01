@@ -1,6 +1,11 @@
 //! Real framed duplex streams and `SQLite` custody, not a network/privacy acceptance proof.
 
 use ed25519_dalek::Signer as _;
+use std::{
+    pin::Pin,
+    sync::atomic::{AtomicU64, Ordering},
+    task::{Context, Poll},
+};
 use tokio::{io::DuplexStream, task::JoinHandle};
 
 use super::*;
@@ -14,6 +19,45 @@ use crate::{
 };
 
 type Server = JoinHandle<Result<TransferProgress, crate::provider::ProviderError>>;
+
+/// Count writes after the genuine provider's grant/challenge exchange has completed.
+struct ObservedRemote {
+    stream: DuplexStream,
+    written: Arc<AtomicU64>,
+}
+
+impl AsyncRead for ObservedRemote {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().stream).poll_read(cx, buffer)
+    }
+}
+
+impl AsyncWrite for ObservedRemote {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.stream).poll_write(cx, buffer);
+        if let Poll::Ready(Ok(bytes)) = result {
+            this.written.fetch_add(bytes as u64, Ordering::SeqCst);
+        }
+        result
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().stream).poll_shutdown(cx)
+    }
+}
 
 struct Fixture {
     temporary: tempfile::TempDir,
@@ -173,6 +217,67 @@ impl Fixture {
             .unwrap();
         received
     }
+
+    async fn admitted<A, F>(
+        &self,
+        target: StorageTarget,
+        operation: StorageOperation,
+        payload: &[u8],
+        admit: A,
+    ) -> (Result<StorageTransfer, WireError>, u64)
+    where
+        A: FnOnce(u64) -> F,
+        F: Future<Output = bool>,
+    {
+        let (stream, server, challenge) = self.session().await;
+        let written = Arc::new(AtomicU64::new(0));
+        let mut remote = ObservedRemote {
+            stream,
+            written: Arc::clone(&written),
+        };
+        let observed = &written;
+        let (mut owner, mut agent) = tokio::io::duplex(4096);
+        let signed = self.request(&challenge, target, operation);
+        let (received, forwarded) = tokio::join!(
+            finish(&mut owner, &self.grant, &challenge, &signed, payload),
+            async {
+                let result = bridge_admitted(
+                    &mut agent,
+                    &mut remote,
+                    &self.grant,
+                    &challenge,
+                    |bytes| async move {
+                        assert_eq!(observed.load(Ordering::SeqCst), 0);
+                        let accepted = admit(bytes).await;
+                        assert_eq!(observed.load(Ordering::SeqCst), 0);
+                        accepted
+                    },
+                )
+                .await;
+                drop(agent);
+                result
+            },
+        );
+        drop(remote);
+        let outcome = timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.is_ok(), forwarded.is_ok());
+        let result = match forwarded {
+            Ok(forwarded) => {
+                let received = received.unwrap();
+                assert_eq!(forwarded.receipt.encode(), received.receipt.encode());
+                assert_eq!(forwarded.ciphertext_bytes, received.ciphertext.len() as u64);
+                Ok(received)
+            }
+            Err(error) => {
+                assert!(received.is_err());
+                Err(error)
+            }
+        };
+        (result, written.load(Ordering::SeqCst))
+    }
 }
 
 fn hash(bytes: &[u8]) -> [u8; 32] {
@@ -302,6 +407,229 @@ async fn bridge_rejects_an_owner_request_from_another_connection_before_custody(
     drop(remote);
     denied(server).await;
     assert_eq!(fixture.usage().leases, 0);
+}
+
+#[tokio::test]
+async fn admitted_bridge_charges_exact_signed_payload_demand_before_real_provider_io() {
+    let fixture = Fixture::new();
+    let bytes = vec![0xb7; CHUNK_BYTES + 57];
+    let original = target(&bytes);
+    let mut charges = Vec::new();
+    let reserved = fixture
+        .admitted(
+            original,
+            StorageOperation::Reserve {
+                expires_at: unix_now().unwrap() + 600,
+            },
+            &[],
+            |bytes| {
+                charges.push(bytes);
+                async { true }
+            },
+        )
+        .await
+        .0
+        .unwrap();
+    let owned = StorageTarget {
+        lease_id: Some(reserved.receipt.result().lease_id),
+        ..original
+    };
+    for (ordinal, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
+        fixture
+            .admitted(
+                owned,
+                append((ordinal * CHUNK_BYTES) as u64, chunk),
+                chunk,
+                |bytes| {
+                    charges.push(bytes);
+                    async { true }
+                },
+            )
+            .await
+            .0
+            .unwrap();
+    }
+    for operation in [
+        StorageOperation::Finalize,
+        StorageOperation::ReadRange {
+            offset: 0,
+            length: original.ciphertext_bytes,
+        },
+        StorageOperation::Renew {
+            expires_at: unix_now().unwrap() + 900,
+        },
+        StorageOperation::Delete,
+    ] {
+        let (result, written) = fixture
+            .admitted(owned, operation, &[], |bytes| {
+                charges.push(bytes);
+                async { true }
+            })
+            .await;
+        assert!(written > 0);
+        let transfer = result.unwrap();
+        if matches!(operation, StorageOperation::ReadRange { .. }) {
+            assert_eq!(transfer.ciphertext, bytes);
+        }
+    }
+    assert_eq!(
+        charges,
+        [
+            8192,
+            CHUNK_BYTES as u64 + 8192,
+            57 + 8192,
+            8192,
+            original.ciphertext_bytes + 8192,
+            8192,
+            8192
+        ]
+    );
+    assert_eq!(
+        fixture.usage(),
+        StorageUsage {
+            reserved_bytes: 0,
+            committed_bytes: 0,
+            leases: 0
+        }
+    );
+}
+
+#[tokio::test]
+async fn admitted_bridge_busy_writes_nothing_and_preserves_real_custody() {
+    let fixture = Fixture::new();
+    let bytes = b"already encrypted private storage";
+    let original = target(bytes);
+    let reserve = StorageOperation::Reserve {
+        expires_at: unix_now().unwrap() + 600,
+    };
+    let empty = fixture.usage();
+    let (result, written) = fixture
+        .admitted(original, reserve, &[], |charged| async move {
+            assert_eq!(charged, 8192);
+            tokio::task::yield_now().await;
+            false
+        })
+        .await;
+    assert!(matches!(result, Err(WireError::Busy)));
+    assert_eq!(written, 0);
+    assert_eq!(fixture.usage(), empty);
+
+    let reserved = fixture.exchange(original, reserve, &[]).await.unwrap();
+    let owned = StorageTarget {
+        lease_id: Some(reserved.receipt.result().lease_id),
+        ..original
+    };
+    for (operation, payload, charged) in [
+        (
+            append(0, bytes),
+            bytes.as_slice(),
+            bytes.len() as u64 + 8192,
+        ),
+        (StorageOperation::Delete, &[][..], 8192),
+    ] {
+        let before = fixture.usage();
+        let (result, written) = fixture
+            .admitted(owned, operation, payload, |demand| async move {
+                assert_eq!(demand, charged);
+                false
+            })
+            .await;
+        assert!(matches!(result, Err(WireError::Busy)));
+        assert_eq!(written, 0);
+        assert_eq!(fixture.usage(), before);
+    }
+    let progress = fixture
+        .exchange(owned, StorageOperation::Progress, &[])
+        .await
+        .unwrap();
+    assert_eq!(progress.receipt.result().stored_bytes, 0);
+    fixture
+        .exchange(owned, append(0, bytes), bytes)
+        .await
+        .unwrap();
+    fixture
+        .exchange(owned, StorageOperation::Finalize, &[])
+        .await
+        .unwrap();
+    let committed = fixture.usage();
+    let (result, written) = fixture
+        .admitted(
+            owned,
+            StorageOperation::ReadRange {
+                offset: 0,
+                length: bytes.len() as u64,
+            },
+            &[],
+            |charged| async move {
+                assert_eq!(charged, bytes.len() as u64 + 8192);
+                false
+            },
+        )
+        .await;
+    assert!(matches!(result, Err(WireError::Busy)));
+    assert_eq!(written, 0);
+    assert_eq!(fixture.usage(), committed);
+}
+
+#[tokio::test]
+async fn admitted_bridge_rejects_invalid_signature_and_append_hash_before_budget_or_io() {
+    let fixture = Fixture::new();
+    let bytes = b"opaque signed append";
+    let original = target(bytes);
+    let reserved = fixture
+        .exchange(
+            original,
+            StorageOperation::Reserve {
+                expires_at: unix_now().unwrap() + 600,
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+    let owned = StorageTarget {
+        lease_id: Some(reserved.receipt.result().lease_id),
+        ..original
+    };
+    let before = fixture.usage();
+    for changed_signature in [true, false] {
+        let (stream, server, challenge) = fixture.session().await;
+        let signed = fixture.request(&challenge, owned, append(0, bytes));
+        let mut encoded = signed.encode();
+        if changed_signature {
+            let mut hostile = RawEnvelope::decode(encoded.as_slice()).unwrap();
+            hostile.signature[0] ^= 1;
+            encoded = hostile.encode_to_vec();
+        }
+        let (mut sender, mut agent) = tokio::io::duplex(4096);
+        write_frame(&mut sender, &encoded).await.unwrap();
+        let mut payload = bytes.to_vec();
+        if !changed_signature {
+            payload[0] ^= 1;
+        }
+        write_frame(&mut sender, &payload).await.unwrap();
+        let written = Arc::new(AtomicU64::new(0));
+        let mut remote = ObservedRemote {
+            stream,
+            written: Arc::clone(&written),
+        };
+        let result = bridge_admitted(
+            &mut agent,
+            &mut remote,
+            &fixture.grant,
+            &challenge,
+            |_| async { panic!("invalid input must not acquire a resource budget") },
+        )
+        .await;
+        if changed_signature {
+            assert!(matches!(result, Err(WireError::Protocol(_))));
+        } else {
+            assert!(matches!(result, Err(WireError::Invalid)));
+        }
+        assert_eq!(written.load(Ordering::SeqCst), 0);
+        drop(remote);
+        denied(server).await;
+        assert_eq!(fixture.usage(), before);
+    }
 }
 
 #[tokio::test]

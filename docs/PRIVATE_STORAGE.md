@@ -23,6 +23,69 @@ policy is not automatic repair, independent-device availability or adaptive capa
 
 ## Separate lifecycles
 
+### Explicit owner-private background maintenance
+
+`storage fragments maintenance` enrolls one existing owner archive for finite,
+core-coordinated maintenance. It is a separate unlocked owner process, not another
+network node: the shared daemon receives only a public owner key, opaque enrollment
+ID and bounded resource request. Owner keys, archive paths, grants and the signed
+enrollment stay in its private workspace. The existing operator control socket is
+still an administrative boundary, not a completed per-application capability API.
+
+```sh
+volparossa storage fragments maintenance enroll \
+  --enrollment /absolute/private-maintenance --state /absolute/private-fragments \
+  --from-provider-key PROVIDER_A_KEY_HEX \
+  --provider-key PROVIDER_D_KEY_HEX --grant /absolute/provider-d.grant \
+  --authorization-seconds 604800 --lifetime-seconds 86400 \
+  --renew-before-seconds 43200 --maximum-charged-bytes 4294967296 \
+  --identity /absolute/owner.identity
+volparossa storage fragments maintenance serve \
+  --enrollment /absolute/private-maintenance --identity /absolute/owner.identity
+volparossa storage fragments maintenance status --enrollment /absolute/private-maintenance
+```
+
+The worker has no independent maintenance timer. The existing core maintenance tick
+may issue one live, owner/UID-bound turn when its foreground and shared resource
+conditions permit. Both existing upload/download sharing budgets must be explicitly
+configured. Each actual signed request is checked before its requested ciphertext
+bytes plus framing allowance consume the turn budget and shared quiet-link cooldown.
+Background reads use 256 KiB credits; ordinary foreground range reads are unchanged.
+Only one storage exchange can occupy the turn's RAM/descriptor reservation at a time.
+Foreground activity, owner disconnect, daemon shutdown, exhausted bytes or the one-hour
+turn ceiling revoke work; enrollment expiry also stops the owner process. A finite
+`--maximum-turns` is available for supervised trials. Quiet sampling and conservative
+limits are not a guarantee that a transfer can never affect interactive throughput.
+
+Each turn rotates through **one fragment** for lease reconciliation or renewal and
+attempts at most **one replacement** from the explicitly signed candidate grants.
+The durable checkpoint preserves this scan position across restart; the original
+signed reconstruction manifest and custody journals remain the only placement,
+lease and charge authority. Copying intents resume without a second replacement;
+verified pending retirement does not prevent repairing another fragment. A complete
+survivor and replacement readback still precede source deletion. An unavailable or
+unconfirmed original remains fully charged, including after process restart.
+
+The byte ceiling defaults to 128 MiB per turn, including metadata allowance. Enrollment
+rejects fragments whose successful replacement would already exceed that ceiling;
+explicit foreground repair remains available. Busy links, short remaining grants,
+insufficient capacity or insufficient uninterrupted time can leave work pending.
+`owner_locked`, `grant_refresh_required`, `charge_limit`, `retry_pending` and revoked
+turns are visible states, not completion. Provider grants are never silently extended.
+This is one explicit owner enrollment, not automatic archive discovery, device-offline
+authority, contribution resizing, an autonomous grant issuer or a guaranteed SLA.
+
+The targeted local maintenance checks pass: real signed SQLite provider operations
+preserve a longer existing lease, genuinely renew a shorter one, repair A's fragments
+one per pass while A is offline, retain charges across restart, restore the removed
+source twice from C/D and finally confirm A's deletion when it returns. Separate core
+tests cover owner/UID/token binding, shared leases, byte exhaustion, refusal of an
+ineligible loopback link and foreground/EOF revocation. The wire tests separately
+prove real signed transfer admission and refusal before provider mutation. Strict
+CLI/agent Clippy and formatting pass. A combined running-daemon/protected-overlay
+maintenance trial remains required; earlier fragment and Image proofs do not prove
+this new worker, and the local checks do not establish positive live-link admission.
+
 Message delivery can acknowledge and consume an inbox item. A backup restore must not
 consume its storage lease. Backup retention, renewal, expiry and owner deletion are
 separate operations with separate authorization. They may share protected network

@@ -8,6 +8,19 @@ Last updated: 2026-10-01
 
 ### Additional application and autonomous-maintenance scope
 
+- [ ] Owner-private storage-maintenance candidate: explicit signed enrollment of one
+  retained fragment archive, existing core-idle turns rather than a separate timer,
+  one rotating fragment renewal/reconciliation plus at most one repair per turn.
+  The agent gets no owner private key or archive path. Actual signed-request byte
+  admission, shared foreground/resource cancellation, retained retry identities and
+  conservative charges are wired; no independent ledger, automatic grant renewal,
+  archive discovery or contribution resizing is introduced. Combined daemon/overlay
+  execution is not yet proven. Twelve targeted maintenance checks pass (five new,
+  seven existing), including actual signed SQLite provider renew/repair/restart and
+  repeated source-free C/D restore; four focused bridge tests and strict CLI/agent
+  Clippy also pass. Positive live-link idle admission still needs the combined trial.
+  See [private storage maintenance](PRIVATE_STORAGE.md#explicit-owner-private-background-maintenance).
+
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
   authenticated source import, private fragment storage and source-off file access,
   followed by the account/metadata/sharing/synchronization functions needed for
