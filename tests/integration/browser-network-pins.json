@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "repository": "https://github.com/VOLPAROSSA/volparossa-browser",
+  "revision": "198e288183b06d8a4ff584210ade449f124bc737",
+  "files": {
+    "scripts/smoke_network_core.py": {
+      "bytes": 27305,
+      "sha256": "08ae87fd29ddddd30dd64be780867490bb465ab959cf9931e3ee150b816b86db"
+    },
+    "scripts/smoke_network.py": {
+      "bytes": 24680,
+      "sha256": "4e0cc28d9d0dfad4541666b876637ec20d4eb72bc3c555f178d292ee9f3d573f"
+    },
+    "scripts/smoke_browser_startup.py": {
+      "bytes": 11504,
+      "sha256": "5193fe4b95bd49416c5a2cb1e0a19db9ebef0d3cf63467ad11a31646a5a930e3"
+    },
+    "scripts/smoke_compute_model.py": {
+      "bytes": 29389,
+      "sha256": "70b8a944ba6322d46690eafa74247526ac3fc13e92ae9870717e8ed7c63f5c1b"
+    },
+    "scripts/smoke_privacy.py": {
+      "bytes": 15728,
+      "sha256": "917d66faaeb6f80890c557ae3904bfee96b5fabc94e428776d83d1dc08fba283"
+    },
+    "scripts/stage_firefox.py": {
+      "bytes": 9281,
+      "sha256": "5d54e0e35662fae6b19d5f497d68469b0757fe754601c3e016f6fda773375203"
+    },
+    "integration/VolparossaNetwork.sys.mjs": {
+      "bytes": 20764,
+      "sha256": "f18a4a5b5d9ffab4a15980911df56ee6a08dd56b48add0e040f93a808704867f"
+    },
+    "integration/VolparossaBrowserNetwork.sys.mjs": {
+      "bytes": 8829,
+      "sha256": "d2b0a5507b7fcc2b212d68ab344f4c7ae9364bd1fe146bf2963c91d4263d57cf"
+    },
+    "defaults/privacy.json": {
+      "bytes": 987,
+      "sha256": "f6594ebca20585479635522e562f2da26a6422774b9628a0a906b320311076a7"
+    }
+  },
+  "runtime": {
+    "version": "140.16.0",
+    "source_stamp": "d864999404b3032f682d74ccc60d1ce38c9ce609",
+    "url": "https://security.debian.org/debian-security/pool/updates/main/f/firefox-esr/firefox-esr_140.16.0esr-1~deb13u1_amd64.deb",
+    "bytes": 71994716,
+    "sha256": "e32aeabcab2e74fe112332fad10f7d9630e14cd6f4564a596a71073018d24508",
+    "files": {
+      "firefox-esr": "22bb2d84f2289622e65fbcde266a30952e6ac64d27a2a1af75cea7229f2e6b14",
+      "libxul.so": "62cc326204668a2dae453c9e89d9c200e513c9e3ad0772b164091bf1e5333fb4",
+      "omni.ja": "c0d453127f9c1310dad39cc3f6971acfe59cdf561fec6918b129ee0c780c6e70",
+      "browser/omni.ja": "757f1f47bfbde5603e08cdb7ddc83bd27e9b26695bf843d640df7984842fffd7"
+    }
+  }
+}
