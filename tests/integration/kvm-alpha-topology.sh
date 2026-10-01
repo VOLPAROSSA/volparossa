@@ -3238,12 +3238,6 @@ write_config() {
             printf 'download_sharing:\n  enabled: true\n  interface: ar2\n'
             printf '  total_download_mbps: 100\n  contribution_download_ceiling_mbps: 1\n'
         fi
-        if [ "$private_storage_maintenance" = yes ] && [ "$node" = client ]; then
-            printf 'sharing:\n  enabled: true\n  interface: cr0\n'
-            printf '  total_upload_mbps: 100\n  contribution_upload_ceiling_mbps: 10\n'
-            printf 'download_sharing:\n  enabled: true\n  interface: cr0\n'
-            printf '  total_download_mbps: 100\n  contribution_download_ceiling_mbps: 10\n'
-        fi
         [ "$wifi_link" != yes ] || wifi_link_config
         if [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then content_custody_config; fi
         [ "$scenario" != content-repair ] || content_repair_config

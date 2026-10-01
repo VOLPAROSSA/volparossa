@@ -87,7 +87,7 @@ maintenance trial remains required; earlier fragment and Image proofs do not pro
 this new worker, and the local checks do not establish positive live-link admission.
 
 The new disposable `private-storage-maintenance` scenario is wired but **not yet
-executed**. It reuses the three protected fragment providers and explicitly enables
+passing**. It reuses the three protected fragment providers and explicitly enables
 both sharing budgets on the client's existing guest `cr0` veth; there is no loopback
 exception or host network change. Its proposed passing receipt requires actual
 core-issued renewal, cursor retention after owner-process EOF, revocation by a separate
@@ -99,6 +99,19 @@ Five pure receipt/cleanup tests and four dispatch/export tests pass; these check
 fixture contract, not the missing live-daemon/protected-overlay result. No reciprocal
 credit, capacity resizing, physical failure diversity or owner-device-offline claim is
 made by this scenario.
+
+Its first [VM attempt on `53cccdde`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36927623039)
+failed at `agent-readiness` with `AGENT_OR_DESTINATION_NOT_READY`, **before any
+maintenance operation** (`maintenance: null`). The generated client YAML contained
+duplicate `sharing` and `download_sharing` sections: the new scenario emitter and the
+existing custody emitter both wrote them. The correction consolidates these settings
+in the existing custody function; a targeted test executes the full client emitter
+and checks it with the actual Rust configuration parser, including duplicate rejection.
+The original failed run remains failed. Its cleanup completed with zero owned objects,
+and both host-state snapshots have SHA-256
+`9ad34bb217725c3860b1b4ef57bb127a6ad1e0f29f7c2aad632fd05808834ac8`.
+The original seven-file artifact ZIP has SHA-256
+`7734d310d1c079fc1e86c77c62b6ad9ded11a81b841e1a7a3609e730ba78b141`.
 
 Message delivery can acknowledge and consume an inbox item. A backup restore must not
 consume its storage lease. Backup retention, renewal, expiry and owner deletion are

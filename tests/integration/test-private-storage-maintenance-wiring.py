@@ -72,13 +72,18 @@ class PrivateStorageMaintenanceWiring(unittest.TestCase):
 
     def test_owner_admission_and_enclosing_timeout_remain_scoped(self):
         guest = (HERE / "kvm-alpha-topology.sh").read_text()
-        start = guest.index('        if [ "$private_storage_maintenance" = yes ] && [ "$node" = client ]; then')
-        end = guest.index("\n        fi", start) + len("\n        fi")
-        config = guest[start:end]
-        self.assertIn(r"sharing:\n  enabled: true\n  interface: cr0\n", config)
-        self.assertIn(r"download_sharing:\n  enabled: true\n  interface: cr0\n", config)
-        self.assertIn(r"total_upload_mbps: 100\n  contribution_upload_ceiling_mbps: 10", config)
-        self.assertIn(r"total_download_mbps: 100\n  contribution_download_ceiling_mbps: 10", config)
+        self.assertNotIn('        if [ "$private_storage_maintenance" = yes ] && [ "$node" = client ]; then', guest)
+        # Execute the canonical emitter, rather than matching another duplicate
+        # config block. The config-crate test additionally parses the full client
+        # output using the same strict Rust parser as the real agent.
+        result = subprocess.run(['sh', '-eu', '-c',
+            '. "$1"; scenario=content-custody; node=client; private_storage_maintenance=yes; content_custody_config',
+            'maintenance-config-test', str(HERE / 'content-custody-smoke.sh')],
+            capture_output=True, text=True, timeout=5, check=True)
+        self.assertEqual(result.stdout, 'sharing:\n  enabled: true\n  interface: cr0\n'
+            '  total_upload_mbps: 100\n  contribution_upload_ceiling_mbps: 10\n'
+            'download_sharing:\n  enabled: true\n  interface: cr0\n'
+            '  total_download_mbps: 100\n  contribution_download_ceiling_mbps: 10\n')
         driver = (HERE / "run-alpha-topology-vm.sh").read_text()
         self.assertIn('[ "$scenario" != private-storage-maintenance ] || driver_time_bound=3600s', driver)
         self.assertIn('driver_time_bound=2400s', driver)

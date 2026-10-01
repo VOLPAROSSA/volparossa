@@ -22,8 +22,12 @@ Last updated: 2026-10-01
   A disposable `private-storage-maintenance` scenario now wires explicit guest `cr0`
   idle budgets, actual CLI enrollment/core turns, renewal, EOF/foreground cancellation,
   A-offline B/C repair and repeated source-free restore, conservative charges and full
-  cleanup. Its five pure receipt/cleanup and four wiring/export checks pass; the new
-  VM scenario has **not been run**, so combined execution remains unchecked.
+  cleanup. Its five pure receipt/cleanup and four wiring/export checks pass. The first
+  [VM run36927623039 on `53cccdde`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36927623039)
+  failed at agent readiness, before maintenance executed: duplicate sharing sections
+  were emitted in client YAML. The emitter is consolidated and a full-client real
+  configuration-parser regression added. Original cleanup/unchanged-host evidence
+  passes, but combined maintenance execution remains unchecked pending a fresh trial.
   See [private storage maintenance](PRIVATE_STORAGE.md#explicit-owner-private-background-maintenance).
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
