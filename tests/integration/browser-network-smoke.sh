@@ -44,11 +44,15 @@ browser_network_run() {
     bn_driver=smoke_network_core.py
     bn_stage=firefox-esr
     bn_origin_action=origin
+    bn_seed_action=seed
+    bn_hash_action=hash
     if [ -f "$bn_runtime/native-bundle.json" ]; then
         bn_provision=$bn_runtime/native-bundle.json
         bn_driver=browser_native_core.py
         bn_stage=firefox-native
         bn_origin_action=origin-native
+        bn_seed_action=seed-native
+        bn_hash_action=hash-native
     fi
     if [ ! -f "$bn_provision" ] || [ -e "$bn_output" ]; then fail BROWSER_NETWORK_RUNTIME_UNAVAILABLE; fi
     # Debian cloud home modes differ. Add only search permission on this exact
@@ -77,10 +81,10 @@ browser_network_run() {
     done
     setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- \
-        python3 -B "$WORK/browser-network-tools/browser-network-smoke.py" seed "$bn_origin" "$RUN_ID" \
+        python3 -B "$WORK/browser-network-tools/browser-network-smoke.py" "$bn_seed_action" "$bn_origin" "$RUN_ID" \
         >/dev/null 2>"$WORK/browser-network-seed.err" || fail BROWSER_NETWORK_ORIGIN_SEED_FAILED
     install -o "$WORKER_UID" -g "$WORKER_GID" -m 0400 "$bn_origin/ca.pem" "$bn_user/test-ca.pem"
-    bn_hash=$(browser_network_check hash "$RUN_ID") || fail BROWSER_NETWORK_HASH_FAILED
+    bn_hash=$(browser_network_check "$bn_hash_action" "$RUN_ID") || fail BROWSER_NETWORK_HASH_FAILED
     ip netns exec "$DEST" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
         --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- \
         python3 -B "$WORK/browser-network-tools/browser-network-smoke.py" "$bn_origin_action" \
@@ -183,6 +187,18 @@ browser_network_cleanup() {
     # Capture only bounded sanitized results, including failures; never grant/profile/log bytes.
     bn_cleanup_status=0
     bn_report=/home/vpci/browser-network-runtime/build/proofs/session/report.json
+    # Services are still live here. Project only static codes/counts before private cleanup;
+    # raw CLI rings/statuses remain covered by the topology's original private-file removal.
+    for bn_node in client relay0 relay1 relay2 relay3 relay4 relay5 exit exit2; do
+        bn_socket=$WORK/runtime-$bn_node/control/agent.sock
+        [ -S "$bn_socket" ] || continue
+        timeout 3s "$binary_directory/volparossa" --control-socket "$bn_socket" \
+            logs --limit 400 >"$WORK/logs-$bn_node.txt" 2>/dev/null || true
+        timeout 3s "$binary_directory/volparossa" --control-socket "$bn_socket" \
+            status >"$WORK/status-$bn_node.txt" 2>/dev/null || true
+    done
+    browser_network_check readiness-diagnostic "$WORK" "$WORK/browser-network-readiness.json" \
+        || bn_cleanup_status=1
     browser_network_check driver-diagnostic \
         /home/vpci/browser-network-runtime/build/proofs/session/driver-status.json \
         "$WORK/browser-network-driver.err" "$WORK/browser-network-driver.json" \

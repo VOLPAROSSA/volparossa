@@ -175,6 +175,9 @@ for(const stage of ["stream-data","stream-stop","window-stop","body-integrity"])
             **{k: provision[k] for k in ("browser_revision", "original_build_receipt_sha256",
                                        "native_bundle_sha256", "javascript_overlay")})
         browser["result"].update(native_ech_abi=True, builtin_modules=True, ordinary_tabs=True)
+        browser["expected_sha256"] = OLD["CHECK"]["body_hash"](evidence["origin"]["run_id"], native_tabs=True)
+        for request in evidence["origin"]["requests"]:
+            request["sha256"] = browser["expected_sha256"]
         evidence["provision"] = provision
         return evidence
 
@@ -184,7 +187,8 @@ for(const stage of ["stream-data","stream-stop","window-stop","body-integrity"])
             EVIDENCE["validate_browser"](evidence)
             for fields in (dict(runtime_version="140.16.0"), dict(profile_ech_grease_disabled=True),
                            dict(native_ech_wire_proven=True), dict(ordinary_tab_bodies_verified=0),
-                           dict(original_build_receipt_sha256="b" * 64)):
+                           dict(original_build_receipt_sha256="b" * 64),
+                           dict(expected_sha256=OLD["CHECK"]["body_hash"](evidence["origin"]["run_id"]))):
                 changed = copy.deepcopy(evidence)
                 changed["browser"].update(fields)
                 with self.assertRaises(ValueError):

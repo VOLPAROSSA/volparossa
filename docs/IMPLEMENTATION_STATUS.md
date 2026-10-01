@@ -32,6 +32,12 @@ Its original kernel baseline contains two MPTCP subflows over distinct WireGuard
 relays, but the first transfer fails before the required payload progress/full
 hashes. Cleanup and unchanged host state pass. A closed four-site navigation
 diagnostic is prepared; neither the transfer cause nor a preselection fix is proved.
+Actual `browser-native-vm-06` fails earlier at attachment A: 34 inner `Unavailable`
+events, no origin connection and no navigation callback. Firefox startup and all
+cleanup/host-state checks pass. The candidate now retains existing bounded actor
+event codes/counts before cleanup and fixes native-only binary-as-text fixture
+content to genuine ASCII, keeping 32 MiB and full path/hash gates. Neither change
+is evidence of a successful native transfer or a fix for the preselection failure.
 Successful native ordinary-tab/core integration remains pending. This is not a full
 browser kill-switch, HTTP/3 or native ECH wire-proof claim. Workspace-only
 pinned QEMU tools are explicit local test inputs, not a host installation or

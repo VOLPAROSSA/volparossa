@@ -92,6 +92,56 @@ def fixture(root):
 
 
 class BrowserNetworkEvidence(unittest.TestCase):
+    def test_native_text_payload_keeps_size_full_hash_and_historical_binary_contract(self):
+        # This ID guarantees control bytes in the historical binary body, rather than relying
+        # on random luck. The native body is printable UTF-8 for genuine ordinary-tab rendering.
+        run_id = "000102030405060708090a0b0c0d0e0f"
+        old_seed = b"volparossa-browser-network:" + bytes.fromhex(run_id)
+        self.assertEqual(CHECK["block"](run_id), (old_seed * (65536 // len(old_seed) + 1))[:65536])
+        native = CHECK["block"](run_id, native_tabs=True)
+        self.assertEqual(len(native), 65536)
+        self.assertTrue(all(byte == 10 or 32 <= byte <= 126 for byte in native))
+        self.assertTrue(native.decode("utf-8").startswith("volparossa-browser-network:"))
+        body = native * 512
+        self.assertEqual(len(body), 33554432)
+        self.assertEqual(hashlib.sha256(body).hexdigest(), CHECK["body_hash"](run_id, native_tabs=True))
+        self.assertNotEqual(CHECK["body_hash"](run_id), CHECK["body_hash"](run_id, native_tabs=True))
+        shell = (HERE / "browser-network-smoke.sh").read_text()
+        for action in ("bn_seed_action=seed-native", "bn_hash_action=hash-native", "bn_origin_action=origin-native"):
+            self.assertIn(action, shell)
+
+    def test_readiness_exports_only_existing_ring_codes_counts_and_status_before_cleanup(self):
+        source = (HERE.parents[1] / "crates/volparossa-agent/src/discovery.rs").read_text()
+        for code in CHECK["READINESS_CODES"]:
+            self.assertIn('"' + code + '"', source)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            def row(code):
+                return f"1790882077582\tlevel=1\tevent={code}\tsession=abcdef\tpath=123\n"
+            log = root / "logs-client.txt"
+            log.write_text(row("PRESELECTION_SAMPLE_INVALID_SNAPSHOT") * 2
+                + row("ADVERTISEMENT_STORE_REJECTED") + row("PRESELECTION_PRIVATE_CANARY") + "private-canary raw line\n")
+            (root / "status-client.txt").write_text("connected: false\nactive peers: 6\ncandidate pool: 8\n"
+                "active contexts: 0\nMPTCP subflows: 0\nMPQUIC paths: 0\nprivate-canary hostname\n")
+            value = CHECK["readiness_diagnostic"](root)
+            client = value["nodes"]["client"]
+            self.assertEqual(client["counts"], dict(PRESELECTION_SAMPLE_INVALID_SNAPSHOT=2, ADVERTISEMENT_STORE_REJECTED=1))
+            self.assertTrue(client["unknown_event"])
+            self.assertFalse(client["events_truncated"])
+            self.assertEqual(client["status"], dict(active_peers=6, candidate_pool=8, active_contexts=0, mptcp_subflows=0, mpquic_paths=0))
+            self.assertFalse(value["nodes"]["exit"]["events_available"])
+            for secret in ("1790882077582", "abcdef", "123", "CANARY", "private-canary", "hostname"):
+                self.assertNotIn(secret, json.dumps(value))
+            log.write_text(row("PRESELECTION_OWNER_BUSY") * 500)
+            value = CHECK["readiness_diagnostic"](root)["nodes"]["client"]
+            self.assertTrue(value["events_truncated"])
+            self.assertEqual(value["counts"], dict(PRESELECTION_OWNER_BUSY=400))
+            (root / "logs-exit.txt").symlink_to(log)
+            self.assertFalse(CHECK["readiness_diagnostic"](root)["nodes"]["exit"]["events_available"])
+        shell = (HERE / "browser-network-smoke.sh").read_text().split("browser_network_cleanup() {", 1)[1]
+        self.assertLess(shell.index("logs --limit 400"), shell.index("readiness-diagnostic"))
+        self.assertLess(shell.index("readiness-diagnostic"), shell.index('browser_network_check cleanup "$WORK"'))
+
     def test_exit_export_has_only_allowlisted_egress_codes_not_raw_errors(self):
         def event(code, **extra):
             return json.dumps(dict(target="volparossa_agent::mptcp_flow_runtime", fields=dict(
@@ -319,7 +369,7 @@ class BrowserNetworkEvidence(unittest.TestCase):
 
     def test_fixture_pin_and_closed_names_do_not_allow_secret_files(self):
         names = CHECK["EXPORT_NAMES"]
-        self.assertEqual(len(set(names)), 23)
+        self.assertEqual(len(set(names)), 24)
         self.assertTrue(all(name.startswith("browser-network-") and name.endswith(".json") for name in names))
         self.assertFalse(any(word in name for name in names for word in ("grant", "key", "profile", ".log")))
         with tempfile.TemporaryDirectory() as temporary:

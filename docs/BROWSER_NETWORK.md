@@ -96,6 +96,29 @@ A15/private/profile cleanup passes with matching guest-state hash
 the VM is removed and host DNS/routes remain unchanged. All earlier failures
 remain retained; no native ECH wire or complete browser-payload claim is made.
 
+Local `build/browser-native-vm-06` on
+`f1596e3b6eebea8c2d90460835cf5fa830d89af3`, with driver bundle05
+`90cf1655f9c084bd5b7b135f4fd64ec017c481115117a395ad8e4fb51cfc9191`,
+starts Firefox normally but fails attachment A after 34 `Unavailable` preselection
+results and terminal `PreselectionUnavailable`. No origin connection or navigation
+callback occurs. Original browser/driver receipt hashes are
+`8296515dffb591973b5518e94b568ac13cb7ac7e1653644a7dec327d2b982ede` and
+`e9219f612f9a0a5be257baf0a87f00c7235bf5a538e8fff19fd3f26b86d48e5c`.
+A15/private/profile cleanup passes, guest-state hash
+`28e3787d6cedcb54f171950bd186a098222f3bab448a90e41cbef79c38e3ae8c`
+is unchanged, and the VM/scratch are removed with unchanged host DNS/routes.
+
+The candidate now exports only existing actor ring codes/counts and aggregate
+status before private cleanup, not raw logs or a route-readiness assertion.
+Independently, its native origin now generates printable ASCII for its `text/plain`
+ordinary-tab response: the old random binary bytes could trigger the pinned
+Firefox misconfigured-text sniffer (`nsHttpChannel::ShouldSniffMisconfiguredType`
+and `nsUnknownDecoder::SniffBinary`). This is a fixture correction, **not a proven
+cause or fix of trials05/06**. Historical ESR binary content is unchanged; native
+responses still require exactly 32 MiB, independently recomputed full hashes and
+the same two carrying-path/cleanup proofs. No browser preference, product code,
+native binary, route deadline or retry has changed.
+
 ## One daemon, independent application connections
 
 An explicitly authorized application can obtain its own short-lived TCP gateway from the

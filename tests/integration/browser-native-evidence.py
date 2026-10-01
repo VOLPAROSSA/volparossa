@@ -53,7 +53,9 @@ def validate_browser(evidence):
         and browser["full_browser_killswitch"] is False and browser["overlay_kernel_proof_external"] is True
         and browser["expected_bytes"] == 33554432 and browser["ordinary_tab_bodies_verified"] == 2
         and browser["cleanup"] == dict(browser_exited=True, profile_removed=True))
-    seed = b"volparossa-browser-network:" + bytes.fromhex(evidence["origin"]["run_id"])
+    run_id = evidence["origin"]["run_id"]
+    require(re.fullmatch(r"[a-f0-9]{32}", run_id))
+    seed = b"volparossa-browser-network:" + run_id.encode("ascii") + b"\n"
     block = (seed * (65536 // len(seed) + 1))[:65536]
     require(browser["expected_sha256"] == hashlib.sha256(block * 512).hexdigest())
     result = browser["result"]

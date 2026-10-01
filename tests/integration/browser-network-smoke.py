@@ -30,7 +30,7 @@ PHASES = ("first", "second")
 EXPORT_NAMES = (
     f"{PREFIX}-smoke.json", f"{PREFIX}-evidence.json", f"{PREFIX}-provision.json",
     f"{PREFIX}-browser.json", f"{PREFIX}-origin.json", f"{PREFIX}-isolation.json",
-    f"{PREFIX}-driver.json",
+    f"{PREFIX}-driver.json", f"{PREFIX}-readiness.json",
     f"{PREFIX}-detach.json", f"{PREFIX}-private-cleanup.json",
     *(f"{PREFIX}-{phase}-{part}.json" for phase in PHASES for part in ("baseline", "progress")),
     *(f"{PREFIX}-{phase}-privacy-{role}.json" for phase in PHASES for role in ROLES),
@@ -71,6 +71,70 @@ ORIGIN_PHASES = frozenset(("setup", "accept-first", "accept-second", "tls-handsh
     "wait-release", "transfer", "wait-continue", "complete"))
 ORIGIN_ERRORS = frozenset(("timeout", "tls", "io", "request_rejected", "other"))
 ORIGIN_INITIAL_ACCEPT_SECONDS = 270  # 40s browser launch + two 90s route admissions + fixture margin.
+READINESS_ROLES = ("client", *(f"relay{i}" for i in range(6)), "exit", "exit2")
+READINESS_CODES = frozenset((
+    "PRESELECTION_OWNER_BUSY", "PRESELECTION_SNAPSHOT_INVALID_LIMIT", "PRESELECTION_SNAPSHOT_UNAVAILABLE",
+    "PRESELECTION_SAMPLE_INVALID_POLICY", "PRESELECTION_SAMPLE_INVALID_SNAPSHOT", "PRESELECTION_SAMPLE_NO_EXIT",
+    "PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS", "PRESELECTION_SAMPLE_ENTROPY", "PRESELECTION_GATE_BEGIN_FAILED",
+    "PRESELECTION_INITIAL_DISPATCH_FAILED", "PRESELECTION_RESPONSE_REJECTED", "PRESELECTION_CLOCK_UNAVAILABLE",
+    "PRESELECTION_REDISPATCH_FAILED", "PRESELECTION_ATTEMPT_TERMINATED", "PRESELECTION_FINISH_FAILED",
+    "PRESELECTION_EXACT_SET_JOIN_FAILED", "PRESELECTION_FRESH_EVIDENCE_REJECTED",
+    "PRESELECTION_OUTBOUND_DIAL_FAILED", "PRESELECTION_OUTBOUND_TIMED_OUT", "PRESELECTION_OUTBOUND_CONNECTION_CLOSED",
+    "ADVERTISEMENT_PUBLISH_FAILED", "ADVERTISEMENT_PROVIDER_FAILED", "ADVERTISEMENT_PROVENANCE_MISMATCH",
+    "ADVERTISEMENT_PEER_MISMATCH", "ADVERTISEMENT_SIGNATURE_VERIFY_FAILED", "ADVERTISEMENT_CORE_REJECTED",
+    "ADVERTISEMENT_STORE_REJECTED", "ADVERTISEMENT_FORWARDED_REPLAY_REJECTED", "ADVERTISEMENT_DIRECT_REPLAY_REJECTED",
+    "ADVERTISEMENT_PROVENANCE_CAPACITY", "PEERSTORE_PRUNE_FAILED", "DISCOVERY_CONNECTION_FAILED",
+    "EXIT_FORWARD_CLIENT_RESPONSE_INVALID", "EXIT_FORWARD_CLIENT_INGEST_REJECTED", "EXIT_FORWARD_CLIENT_COMPLETED",
+    "EXIT_FORWARD_RELAY_FRAME_REJECTED", "EXIT_FORWARD_RELAY_LOCAL_ADVERTISEMENT_UNAVAILABLE",
+    "EXIT_FORWARD_RELAY_SCOPE_REJECTED", "EXIT_FORWARD_RELAY_PROVIDER_UNAVAILABLE",
+    "EXIT_FORWARD_RELAY_EXIT_AUTHORITY_UNAVAILABLE", "EXIT_FORWARD_RELAY_RETRY_CONFLICT",
+    "EXIT_FORWARD_RELAY_RETRY_EXHAUSTED", "EXIT_FORWARD_RELAY_CONTROL_AUTHORITY_UNAVAILABLE",
+    "EXIT_FORWARD_RELAY_CAPACITY", "EXIT_FORWARD_RELAY_RETIREMENT_SCOPE_REJECTED",
+    "EXIT_FORWARD_RELAY_TRANSPORT_UNAVAILABLE", "EXIT_FORWARD_RELAY_DISPATCHED",
+    "EXIT_FORWARD_RELAY_RESPONSE_INVALID", "EXIT_FORWARD_RELAY_COMPLETED",
+    "EXIT_FORWARD_EXIT_FRAME_REJECTED", "EXIT_FORWARD_EXIT_RETIRED_CONTEXT", "EXIT_FORWARD_EXIT_SCOPE_REJECTED",
+    "EXIT_FORWARD_EXIT_RESPONDED", "EXIT_FORWARD_EXIT_RESPONSE_UNAVAILABLE",
+))
+
+
+def readiness_diagnostic(root):
+    """Project existing bounded CLI rings/statuses; never export timestamps, IDs or raw lines."""
+    result = dict(version=1, scope="actor-status-and-last-400-events-not-route-readiness-proof", nodes={})
+    fields = {"active peers": "active_peers", "candidate pool": "candidate_pool",
+              "active contexts": "active_contexts", "MPTCP subflows": "mptcp_subflows", "MPQUIC paths": "mpquic_paths"}
+    for role in READINESS_ROLES:
+        node = dict(events_available=False, events_truncated=False, unknown_event=False, counts={}, status=None)
+        log = root / f"logs-{role}.txt"
+        if log.is_file() and not log.is_symlink():
+            with log.open("rb") as source:
+                raw = source.read(65537)
+            rows = raw[:65536].splitlines()
+            node.update(events_available=True, events_truncated=len(raw) > 65536 or len(rows) >= 400)
+            for row in rows[:400]:
+                match = re.fullmatch(rb"[0-9]{1,20}\tlevel=[0-9]{1,2}\tevent=([A-Z0-9_]{1,100})\tsession=[a-f0-9]*\tpath=(?:-|[0-9]+)", row)
+                if not match:
+                    node["unknown_event"] = True
+                    continue
+                code = match[1].decode("ascii")
+                if code in READINESS_CODES:
+                    node["counts"][code] = node["counts"].get(code, 0) + 1
+                elif code.startswith(("PRESELECTION_", "ADVERTISEMENT_", "EXIT_FORWARD_")):
+                    node["unknown_event"] = True
+        status = root / f"status-{role}.txt"
+        if status.is_file() and not status.is_symlink():
+            with status.open("rb") as source:
+                rows = source.read(1025)
+            if len(rows) <= 1024:
+                values = {}
+                for row in rows.splitlines():
+                    for label, key in fields.items():
+                        match = re.fullmatch(re.escape(label.encode()) + rb": ([0-9]{1,10})", row)
+                        if match and key not in values:
+                            values[key] = int(match[1])
+                if set(values) == set(fields.values()):
+                    node["status"] = values
+        result["nodes"][role] = node
+    return result
 
 
 def validate_request(value):
@@ -262,14 +326,16 @@ def driver_diagnostic(status, stderr, home=None, work=None, gateway_log=None, ex
     return result
 
 
-def block(run_id):
+def block(run_id, *, native_tabs=False):
     require(re.fullmatch(r"[a-f0-9]{32}", run_id), "invalid synthetic run identity")
-    seed = b"volparossa-browser-network:" + bytes.fromhex(run_id)
+    # Ordinary tabs need genuine text. Random decoded bytes may contain NUL/control bytes;
+    # Firefox correctly sniffs those as binary even when mislabeled text/plain.
+    seed = b"volparossa-browser-network:" + (run_id.encode("ascii") + b"\n" if native_tabs else bytes.fromhex(run_id))
     return (seed * (65536 // len(seed) + 1))[:65536]
 
 
-def body_hash(run_id):
-    return hashlib.sha256(block(run_id) * (BODY_BYTES // 65536)).hexdigest()
+def body_hash(run_id, *, native_tabs=False):
+    return hashlib.sha256(block(run_id, native_tabs=native_tabs) * (BODY_BYTES // 65536)).hexdigest()
 
 
 def wait_file(path, seconds=60):
@@ -281,7 +347,7 @@ def wait_file(path, seconds=60):
             "invalid fixture gate")
 
 
-def seed(root, run_id):
+def seed(root, run_id, *, native_tabs=False):
     require(not root.exists() and not root.is_symlink(), "fixture origin already exists")
     root.mkdir(mode=0o700)
     # Test trust exists only in the disposable browser profile; never disable TLS verification.
@@ -297,7 +363,7 @@ def seed(root, run_id):
     subprocess.run(["openssl", "x509", "-req", "-in", str(root / "origin.csr"), "-CA", str(root / "ca.pem"),
         "-CAkey", str(root / "ca.key"), "-CAcreateserial", "-days", "1", "-extfile", str(root / "extensions"),
         "-out", str(root / "origin.pem")], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
-    write(root / "object.json", dict(bytes=BODY_BYTES, sha256=body_hash(run_id), run_id=run_id))
+    write(root / "object.json", dict(bytes=BODY_BYTES, sha256=body_hash(run_id, native_tabs=native_tabs), run_id=run_id))
 
 
 def origin(root, gates, run_id, report, *, native_tabs=False):
@@ -369,7 +435,7 @@ def origin_transfer(root, gates, run_id, report, status, observe, *, native_tabs
                 content_type = "text/plain; charset=utf-8" if native_tabs else "application/octet-stream"
                 stream.sendall((f"HTTP/1.1 200 OK\r\nContent-Length: {BODY_BYTES}\r\n"
                     f"Content-Type: {content_type}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n").encode())
-                data = block(run_id)
+                data = block(run_id, native_tabs=native_tabs)
                 for index in range(BODY_BYTES // len(data)):
                     stream.sendall(data)
                     if index + 1 == BODY_BYTES // len(data) // 2:
@@ -377,7 +443,7 @@ def origin_transfer(root, gates, run_id, report, status, observe, *, native_tabs
                         observe("wait-continue")
                         wait_file(gates / f"{phase}.continue")
                         observe("transfer")
-                requests.append(dict(phase=phase, bytes=BODY_BYTES, sha256=body_hash(run_id),
+                requests.append(dict(phase=phase, bytes=BODY_BYTES, sha256=body_hash(run_id, native_tabs=native_tabs),
                     peer_is_exit=True, proxy_credentials_absent=True, tls_version=stream.version(),
                     alpn=stream.selected_alpn_protocol()))
                 write(report, dict(version=1, run_id=run_id, complete=len(requests) == 2, requests=requests))
@@ -660,7 +726,8 @@ def validate_report(path, revision):
         "two real TLS origin transfers missing")
     for request in rebuilt["origin"]["requests"]:
         require(request["bytes"] == BODY_BYTES and request["peer_is_exit"] is True
-            and request["sha256"] == body_hash(rebuilt["origin"]["run_id"])
+            and request["sha256"] == body_hash(rebuilt["origin"]["run_id"],
+                native_tabs=rebuilt["browser"]["kind"] == "native-firefox-core-ordinary-tabs")
             and request["proxy_credentials_absent"] is True and request["tls_version"] == "TLSv1.3"
             and request["alpn"] == "http/1.1", "origin TLS or secret boundary failed")
     require([row["phase"] for row in rebuilt["origin"]["requests"]] == list(PHASES), "origin phase ordering differs")
@@ -673,10 +740,10 @@ def main():
     action = sys.argv[1]
     if action == "export-names":
         print("\n".join(EXPORT_NAMES))
-    elif action == "hash":
-        print(body_hash(sys.argv[2]))
-    elif action == "seed":
-        seed(Path(sys.argv[2]), sys.argv[3])
+    elif action in ("hash", "hash-native"):
+        print(body_hash(sys.argv[2], native_tabs=action == "hash-native"))
+    elif action in ("seed", "seed-native"):
+        seed(Path(sys.argv[2]), sys.argv[3], native_tabs=action == "seed-native")
     elif action in ("origin", "origin-native"):
         origin(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4], Path(sys.argv[5]), native_tabs=action == "origin-native")
     elif action == "native-provision":
@@ -699,6 +766,8 @@ def main():
         require(len(sys.argv) in (5, 7, 8, 10), "driver diagnostic arguments differ")
         locations = list(map(Path, sys.argv[5:]))
         write(Path(sys.argv[4]), driver_diagnostic(Path(sys.argv[2]), Path(sys.argv[3]), *locations))
+    elif action == "readiness-diagnostic":
+        write(Path(sys.argv[3]), readiness_diagnostic(Path(sys.argv[2])))
     elif action == "evidence":
         write(Path(sys.argv[3]), evidence(Path(sys.argv[2])))
     elif action == "report":
