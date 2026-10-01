@@ -27,6 +27,11 @@ pub(super) const fn limits(profile: ModelProfile) -> Limits {
             observed_rss: 5 * GIB,
             admission_headroom: Some(5 * GIB + RESERVE),
         },
+        ModelProfile::Qwen600 => Limits {
+            address_space: 10 * GIB,
+            observed_rss: 4 * GIB,
+            admission_headroom: Some(4 * GIB + RESERVE),
+        },
     }
 }
 
@@ -71,5 +76,15 @@ mod tests {
         assert!(admits(profile, Some(required)));
         assert_eq!(limits(profile).observed_rss, 5 * GIB);
         assert_eq!(limits(profile).address_space, 10 * GIB);
+    }
+
+    #[test]
+    fn qwen_budget_requires_headroom_and_does_not_claim_hard_cgroup_proof() {
+        let profile = ModelProfile::Qwen600;
+        assert_eq!(limits(profile).observed_rss, 4 * GIB);
+        assert_eq!(limits(profile).address_space, 10 * GIB);
+        assert!(!admits(profile, None));
+        assert!(!admits(profile, Some(4 * GIB + RESERVE - 1)));
+        assert!(admits(profile, Some(4 * GIB + RESERVE)));
     }
 }

@@ -2,9 +2,119 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-30
+Last updated: 2026-10-01
 
 ## Current integration and active work
+
+### Native private conversation candidate
+
+Qwen native private-conversation source candidate (2026-09-30): explicit
+`qwen3-0.6b-v1` pins Qwen3-0.6B at `c1899de289a04d12100db370d81485cdf75e47ca`
+and nine original model assets, retaining the existing runtime lock. Native
+`tools=` chat-template encoding, nonthinking generation, ordered role/tool-result
+mapping and strict assistant/function/custom/incomplete decoding are wired into
+the existing same-owner, no-network worker lifecycle. Qwen admits only private
+conversation, not public jobs, Q&A, training or adapters. Its 65,536-byte instruction
+gate accommodates ordinary Codex instruction text, but the whole prompt must still
+tokenize to at most 12,288 tokens with 1,024 output reserve; no truncation or claim
+that all histories/tools fit. BF16/SDPA are required without silent fallback.
+Only conversation submission gets a 524,288-byte request frame; old operations
+retain their original bounds. Twenty focused Rust private protocol/lifecycle tests
+pass; offline worker tests use explicit backend doubles, **not model evidence**.
+The exact disposable [trial 36771139938](https://github.com/VOLPAROSSA/volparossa/actions/runs/36771139938)
+on `866db5b8e036c8ebfd093564f7adb651ef8f708e` provisioned the pinned runtime/model and
+observed the actual isolated Python worker, but failed at `turn-1-result` with
+`cleanup_unconfirmed` before any model-selected tool result was proved. The 5-GiB,
+no-swap service reported no OOM events; all fixture process/service cleanup and
+unchanged-host checks passed. These facts do not identify the original execution
+or lifetime-observation error. A follow-up source candidate adds opt-in, closed
+execution/capture/refresh/lifetime/reap/storage/task diagnostics before the existing
+cleanup error masks that cause. Only fixed operation/error categories, errno classes
+and bounded startup exit/signal metadata may be exported; its private local log is
+removed with the fixture. Quarantine, cleanup conditions and all deadlines remain
+unchanged; these diagnostics are **not a demonstrated cleanup fix**. Focused checks passed: 23 existing
+and new supervisor tests, the additional actual tracing-formatter-to-fixture-parser
+bridge, and 12 offline Python fixture checks; none executes model inference.
+
+The subsequent exact [trial 36774164207](https://github.com/VOLPAROSSA/volparossa/actions/runs/36774164207)
+on `c5781c476c3779b91dcea68427de75506e1ec6b8` completed its actual first model turn
+and confirmed worker/input cleanup (279 prompt tokens, 19 generated tokens), but
+returned an `assistant` response rather than the required `read_file` proposal.
+The client consequently failed `tool-check`; the second model turn never started.
+The closed service diagnostic recorded `execution/result_observed`, not a cleanup
+error. No OOM occurred and all fixture cleanup/unchanged-host checks passed. This
+does not explain or resolve the earlier intermittent cleanup failure, nor does it
+prove tool execution or a correct answer; raw response text was not exported.
+
+A bounded follow-up candidate corrects Qwen's generation options to the exact
+[pinned upstream nonthinking recommendation](https://huggingface.co/Qwen/Qwen3-0.6B/blob/c1899de289a04d12100db370d81485cdf75e47ca/README.md):
+sampling with temperature 0.7, top-p 0.8, top-k 20 and min-p 0. The existing seed 7,
+single attempt, original prompt, strict native tool parser, owner checkpoints,
+token/memory/deadline limits and cleanup requirements remain unchanged. Legacy
+Smol profiles retain greedy generation. This is a generation-profile correction,
+**not a proved cause or fix for the missing tool proposal**. Eight focused offline
+generation/bridge checks pass with explicit backend doubles, not inference evidence.
+The exact follow-up [trial 36776441427](https://github.com/VOLPAROSSA/volparossa/actions/runs/36776441427)
+on `db4be2b6fae370cc41c2218fd9fe7adc83f660c6` again returned an actual `assistant`
+first turn (279 prompt / 19 generated tokens), rather than a tool proposal. It
+failed the unchanged client `tool-check`; no second turn or authorized file read
+was proved. Actual isolation, cleanup, no-OOM and unchanged-host checks passed.
+The response text was not exported, so neither refusal, bare tool-intent JSON nor
+another answer can be distinguished from these original artifacts.
+
+The next diagnostic candidate leaves the production worker, generation settings,
+seed, prompt, aliases and strict success checks unchanged. Its disposable scenario
+explicitly opts in to exporting at most 4,096 UTF-8 bytes of the **actual first
+assistant response**, only after the entire first input matches a fixed SHA-256
+of the published synthetic fixture. That input contains neither the file nor its
+generated canary. Such an artifact truthfully sets `raw_model_output_exported`
+and `synthetic_only`; it is untrusted model text, not tool-use proof. No second
+response, tool-result/file contents, general worker log or private-user input is
+exported. If the first turn is a tool proposal, no response text is exported.
+The normal non-opted-in fixture path retains the closed-only export behavior.
+Fifteen offline fixture-contract tests and six existing Qwen bridge tests pass;
+these use synthetic validator inputs/backend doubles, not new model inference.
+The three strict-Clippy findings from the same head's Quality run are corrected
+without changing diagnostic or cleanup semantics; targeted package/all-targets/
+all-features strict Clippy passes locally.
+The exact diagnostic [trial 36892800286](https://github.com/VOLPAROSSA/volparossa/actions/runs/36892800286)
+on `b333fbfc45d07dcd46514f9cf890b73f4f1bd5b6` failed the unchanged tool check but
+now identifies its actual first output: the complete 53-byte JSON object
+`{"name": "vp_0", "arguments": {"path": "fixture.js"}}`, **without native tool
+tags**. Generation completed at EOS (279 prompt / 19 generated tokens); worker
+cleanup, no-OOM and unchanged-host checks passed. The original artifact ZIP is
+`2fd80d7cdec9138cf958b5e524e6a4b40c8a04535a01c7469dfcaf7d5885ebb3`.
+This trial remains failed; it proves neither an authorized file read nor a
+correlated second turn, and cannot retroactively classify older unexported answers.
+
+The next production candidate accepts that exact standalone JSON proposal as a
+documented second encoding alongside native tagged proposals. Python and Rust
+independently apply strict JSON/duplicate-key checks and the same offered-alias,
+payload, EOS and owner-call-ID rules. It does not scrape JSON from prose, repair
+invalid JSON, choose a tool for the model or execute tools in the worker. The
+caller remains responsible for argument validation and execution permissions.
+Model weights, prompt, sampling, seed, limits and the two-turn success check are
+unchanged. Eight focused Rust conversation tests and seven offline Qwen bridge
+tests pass. These decoder checks are not new model evidence; an actual fresh
+two-turn run is still required.
+
+Actual completed tool use,
+a hard-4GiB-bounded long-context run and an end-to-end editing loop remain
+**unproved/incomplete**. See the [exact wire contract](../crates/volparossa/src/compute/private_conversation/WIRE.md).
+
+Private conversation source candidate (2026-09-30): additive
+[`conversation_capabilities` / `submit_conversation`](../crates/volparossa/src/compute/private_conversation/WIRE.md)
+operations retain the existing same-owner private Q&A interface and execution slot.
+Typed instructions, ordered history, offered function/custom tools and correlated
+tool results reach the actual chat-template/generation backend; outputs are validated
+assistant text, tool proposals or explicit incomplete turns. The worker never executes
+tools. Existing SmolLM2 model budgets remain 192/64 or 1024/256 prompt/output tokens,
+with whole-prompt token admission and no truncation; the Qwen profile above expands
+the conversation budget without changing those legacy profiles.
+Sixteen focused Rust protocol/lifecycle/report tests and eleven offline Python
+conversation/private-worker tests pass. Backend doubles in those tests are not model
+inference evidence. Real tool-use quality, a connected Responses provider and an
+actual Codex editing loop remain **unproved/incomplete**.
 
 ### Scoped browser TCP: live component proof passed
 
@@ -17,6 +127,14 @@ absence of proxy credentials at the origin, wrong-scope rejection and independen
 retirement while B remains active are verified. All 30 original artifacts revalidate
 against the source; privacy captures, private-file/topology cleanup and unchanged
 guest-root host state pass. See [the exact evidence and boundaries](BROWSER_NETWORK.md).
+
+After incorporating the merged storage-flow lifetime fix, the exact follow-up
+[trial 36893366706](https://github.com/VOLPAROSSA/volparossa/actions/runs/36893366706)
+also passes on `f0f54fc7c0e30918ef2405aca30bc69e4382ccc1`. Its 30 original
+artifacts revalidate with the unchanged checker; original ZIP SHA-256 is
+`b7089d466a2275f2a4e3457c2334e8ca0060c5ee8608d97c7ca983317ab36475`.
+The component is integrated by normal PR #176 merge `5376d882`; fresh Quality,
+all CodeQL analyses and the aggregate passed before merging.
 
 This establishes the scoped TCP component, not the complete browser integration.
 Ordinary tab navigation over the actual overlay, live availability fallback, full
@@ -56,7 +174,8 @@ quotas and ciphertext hashes do not classify encrypted files, and uploader self-
 does not defeat malicious clients. The content-admission/review mechanism remains open; see
 [storage privacy and abuse boundaries](PRIVATE_STORAGE.md#storage-immune-system-and-private-content-limits).
 Different-chunk placement is implemented in the signed fragment CLI with local-service
-evidence below; its real overlay/provider-loss trial remains pending. The earlier
+evidence below; the actual overlay/provider-loss trial 36773683946 passes and is
+integrated through PR #183. Automatic placement/repair remains incomplete. The earlier
 replica/handoff proofs retain a complete encrypted archive at each selected provider.
 
 ### Mailbox import confirmation

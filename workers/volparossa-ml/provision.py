@@ -29,11 +29,15 @@ REVISION = "83212e1e2b3cfd6958f3707877bb878945dea8ee"
 DEFAULT_MODEL_PROFILE = "smollm2-135m-v1"
 LARGE_MODEL_PROFILE = "smollm2-360m-v1"
 REASONING_MODEL_PROFILE = "smollm2-1.7b-v1"
+QWEN_MODEL_PROFILE = "qwen3-0.6b-v1"
 PROFILES = {DEFAULT_MODEL_PROFILE: (MODEL_ID, REVISION),
             LARGE_MODEL_PROFILE: ("HuggingFaceTB/SmolLM2-360M-Instruct", "a10cc1512eabd3dde888204e902eca88bddb4951"),
-            REASONING_MODEL_PROFILE: ("HuggingFaceTB/SmolLM2-1.7B-Instruct", "31b70e2e869a7173562077fd711b654946d38674")}
+            REASONING_MODEL_PROFILE: ("HuggingFaceTB/SmolLM2-1.7B-Instruct", "31b70e2e869a7173562077fd711b654946d38674"),
+            QWEN_MODEL_PROFILE: ("Qwen/Qwen3-0.6B", "c1899de289a04d12100db370d81485cdf75e47ca")}
 PROFILE_PINS = {LARGE_MODEL_PROFILE: "model-pins-360m.json", REASONING_MODEL_PROFILE: "model-pins-1.7b.json"}
 PROFILE_WEIGHT_BYTES = {LARGE_MODEL_PROFILE: 723674912, REASONING_MODEL_PROFILE: 3422777952}
+PROFILE_PINS[QWEN_MODEL_PROFILE] = "model-pins-qwen3-0.6b.json"
+PROFILE_WEIGHT_BYTES[QWEN_MODEL_PROFILE] = 1503300328
 GRAPH_DECODER = {"implementation": "lm-format-enforcer", "version": "0.11.3",
                  "adapter_version": 1, "schema_version": 3,
                  "dependencies": {"interegular": "0.3.3", "pydantic": "1.10.24"}}
@@ -82,7 +86,7 @@ def load_pins(model_profile=DEFAULT_MODEL_PROFILE, task_graph_decoder=False):
             and pins["platform"] == "cpython-3.13-linux-x86_64"
             and pins["model_id"] == model_id and pins["revision"] == revision,
             "unsupported provisioning pin format/model")
-    require(len(pins["files"]) == 8 and len(pins["wheels"]) == 38,
+    require(len(pins["files"]) == (9 if model_profile == QWEN_MODEL_PROFILE else 8) and len(pins["wheels"]) == 38,
             "unexpected artifact set")
     for group in (pins["files"], pins["wheels"]):
         names = set()
@@ -101,7 +105,7 @@ def load_pins(model_profile=DEFAULT_MODEL_PROFILE, task_graph_decoder=False):
                     .endswith("/" + name), "artifact URL/filename mismatch")
     for item in pins["files"]:
         expected_url = f"https://huggingface.co/{model_id}/resolve/{revision}/{item['path']}"
-        if model_profile in PROFILE_PINS and item["path"] == "LICENSE":
+        if model_profile in (LARGE_MODEL_PROFILE, REASONING_MODEL_PROFILE) and item["path"] == "LICENSE":
             expected_url = f"https://huggingface.co/{MODEL_ID}/resolve/{REVISION}/LICENSE"
             require(item["bytes"] == 10172 and item["sha256"] == "59899c6091b540582ed617e8eeaac4919dc985ccfc35459ee9752b699be5205b"
                     and pins.get("license_provenance"), "separate Apache license provenance missing")
