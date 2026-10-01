@@ -6,6 +6,22 @@ Last updated: 2026-10-01
 
 ## Current integration and active work
 
+### Additional application and autonomous-maintenance scope
+
+- [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
+  authenticated source import, private fragment storage and source-off file access,
+  followed by the account/metadata/sharing/synchronization functions needed for
+  normal use without the original server. Distributed blobs alone are not a
+  server-independent OpenCloud service.
+- [ ] Cooperative maintenance of current/future VOLPAROSSA organization repositories:
+  actual coding jobs, independent immune review and exact-revision scoped GitHub
+  publication. [Agreed scope](REPOSITORY_MAINTENANCE.md); no autonomous publisher,
+  independent code-review quorum or automatic client updater is implemented.
+- [ ] Automatically distribute and install independently authorized releases on
+  VOLPAROSSA clients (explicit user approval 2026-10-01), with client-side update
+  verification, staged rollout, permission boundaries, data-preserving activation
+  and recovery. No development-host installer or update channel has been enabled.
+
 ### Native private conversation candidate
 
 Qwen native private-conversation source candidate (2026-09-30): explicit
@@ -95,12 +111,22 @@ invalid JSON, choose a tool for the model or execute tools in the worker. The
 caller remains responsible for argument validation and execution permissions.
 Model weights, prompt, sampling, seed, limits and the two-turn success check are
 unchanged. Eight focused Rust conversation tests and seven offline Qwen bridge
-tests pass. These decoder checks are not new model evidence; an actual fresh
-two-turn run is still required.
+tests pass. These decoder checks alone are not model evidence.
 
-Actual completed tool use,
-a hard-4GiB-bounded long-context run and an end-to-end editing loop remain
-**unproved/incomplete**. See the [exact wire contract](../crates/volparossa/src/compute/private_conversation/WIRE.md).
+The fresh exact [trial 36896857071](https://github.com/VOLPAROSSA/volparossa/actions/runs/36896857071)
+on `d681567924b439a78a7a12d531f2dbd67849f462` now passes the unchanged two-turn
+checker against all eight original artifacts. The actual pinned Qwen model
+requests the offered `read_file` tool, the owner executes one authorized synthetic
+file read, and a correlated second actual inference returns the previously unseen
+file canary. Original inputs, worker isolation, complete cleanup and unchanged
+guest host state pass. The artifact ZIP SHA-256 is
+`50ed85e0afbc49b677e59a0d981399ccf7290037e716c880f57a6c57bc08517f`.
+This source is merged through PR #184. Earlier failed trials remain failed.
+
+This proves the scoped two-turn file-read interaction, not general tool-use or
+coding quality, a hard-4GiB-bounded long-context run, remote private execution or
+a native Codex editing/test loop. Those remain **unproved/incomplete**. See the
+[exact wire contract](../crates/volparossa/src/compute/private_conversation/WIRE.md).
 
 Private conversation source candidate (2026-09-30): additive
 [`conversation_capabilities` / `submit_conversation`](../crates/volparossa/src/compute/private_conversation/WIRE.md)
@@ -113,7 +139,7 @@ with whole-prompt token admission and no truncation; the Qwen profile above expa
 the conversation budget without changing those legacy profiles.
 Sixteen focused Rust protocol/lifecycle/report tests and eleven offline Python
 conversation/private-worker tests pass. Backend doubles in those tests are not model
-inference evidence. Real tool-use quality, a connected Responses provider and an
+inference evidence. General tool-use quality, a connected Responses provider and an
 actual Codex editing loop remain **unproved/incomplete**.
 
 ### Scoped browser TCP: live component proof passed
@@ -163,6 +189,19 @@ owner/isolation checks, post-result cleanup and unchanged guest host state pass.
 All 18 original evidence files are retained locally; their archive SHA256 is
 `3d47971aa397ed43b076863912a67251efe69875babf02f1d538b196bd2063eb`.
 This is not yet editor execution, Codex tool use, general coding ability or private peer offload.
+
+### Uniform storage redundancy candidate
+
+New fragment and complete-replica archive creation use the same core-owned two-copy
+target. Applications cannot request another target; hidden `--copies 2` compatibility
+preserves existing pinned callers. Existing higher-copy archives keep their original
+metadata, restore/renew/delete paths and every physical charge. No existing copy is
+automatically removed, and temporary replacement overhead is not a separate redundancy
+tier. This change does not implement automatic repair or application-wide migration; see
+[the policy and legacy boundary](PRIVATE_STORAGE.md#one-core-owned-redundancy-policy).
+Two targeted tests pass: fixed-target CLI handling and a real four-provider signed-service
+lifecycle for legacy three-copy fragments and complete replicas, including source removal,
+provider-loss restore, renewal and deletion to zero leases. Package Clippy also passes.
 
 ### Storage layer and privacy boundaries
 
@@ -232,6 +271,25 @@ It preserves all identity, plaintext, network, accounting and cleanup checks. Th
 is local reproduction/revalidation, not a new green CI run or a retroactive change
 to the failed job. The live source remains pinned Image `e177afeb`, not a newer
 Image adapter, and still does not prove running Immich or general serverless use.
+
+### Explicit fragment-copy repair candidate
+
+`storage fragments replace` adds an owner-authorized replacement for one fragment copy.
+A signed parent placement extension is durable before the child handoff can be installed
+or recovered. The existing transfer and accounting path then restores a survivor, deposits
+the exact replacement, reads every byte back and checks retention before deleting the old
+copy. Lost confirmations stay charged and resumable across restart. Ordinary progress,
+restore, renew and delete retain the full authorized copy history. The original signed
+reconstruction manifest and unreplaced-archive report shape are unchanged.
+
+Targeted local signed-service/SQLite probes cover crash ordering, unsigned-child rejection,
+lost Reserve/readback/Delete replies, restart, restoration without the original, pending
+retirement renewal and final zero-lease cleanup. This is a manual repair primitive, not
+automatic maintenance, adaptive provider-capacity drain or a new protected-overlay proof.
+Post-replacement reports use additive version 2 and include temporary/historical physical
+charges. The pinned Image v1 parser needs a coordinated update before it can consume these
+archives; no Image compatibility is claimed for repaired archives yet. See
+[the command, accounting contract and remaining limits](PRIVATE_STORAGE.md#explicit-fragment-copy-replacement).
 
 ### Mailbox import confirmation
 

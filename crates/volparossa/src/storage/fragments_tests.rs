@@ -20,7 +20,9 @@ use super::{
     transfer,
 };
 
-fn keys_and_grants(max_leases: u32) -> (SigningKey, Vec<SigningKey>, Vec<VerifiedStorageGrant>) {
+pub(super) fn keys_and_grants(
+    max_leases: u32,
+) -> (SigningKey, Vec<SigningKey>, Vec<VerifiedStorageGrant>) {
     let owner = SigningKey::from_bytes(&[21; 32]);
     let providers: Vec<_> = [11, 33, 44]
         .into_iter()
@@ -52,7 +54,7 @@ fn keys_and_grants(max_leases: u32) -> (SigningKey, Vec<SigningKey>, Vec<Verifie
     (owner, providers, grants)
 }
 
-fn plan(bytes: &[u8]) -> Plan {
+pub(super) fn plan(bytes: &[u8]) -> Plan {
     Plan {
         ciphertext_bytes: bytes.len() as u64,
         sha256: Sha256::digest(bytes).into(),
@@ -103,6 +105,19 @@ fn fragments_cli_requires_encrypted_ack_and_explicit_provider_pairs() {
             "600",
         ],
         vec!["delete", "--state", "/fragments"],
+        vec![
+            "replace",
+            "--state",
+            "/fragments",
+            "--fragment-index",
+            "0",
+            "--from-provider-key",
+            &keys[0],
+            "--provider-key",
+            &keys[2],
+            "--grant",
+            "/grant",
+        ],
     ] {
         assert!(crate::Cli::try_parse_from(prefix.into_iter().chain(args)).is_ok());
     }
