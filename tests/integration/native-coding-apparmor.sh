@@ -79,7 +79,10 @@ owned=1
 # Add, never replace: pre-existing profile definitions are not ours to modify.
 attempted=1
 sudo -n "$parser" --add --skip-cache "$staged"
-probe=$(mktemp -d "${RUNNER_TEMP:?}/volparossa-bwrap.XXXXXXXX")
+# RUNNER_TEMP lives beneath /home on hosted runners. Binding a probe there
+# repopulates the deliberately hidden home tree; actual build state is /opt.
+# Keep only this exact temporary probe outside homes, without sudo or a home exception.
+probe=$(mktemp -d /tmp/volparossa-bwrap.XXXXXXXX)
 mkdir -m 0700 "$probe/source"
 resolver=$(realpath -e -- /etc/resolv.conf)
 test -f "$resolver" && test "$(stat -c %s -- "$resolver")" -le 65536

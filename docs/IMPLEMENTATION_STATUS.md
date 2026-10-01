@@ -68,6 +68,18 @@ and unrelated runtime files remaining hidden. That probe makes no DNS requests.
 Actual CI dependency fetch, source compilation and the native coding loop remain
 unproved pending the next exact-source run.
 
+The following [attempt 36909914170](https://github.com/VOLPAROSSA/volparossa/actions/runs/36909914170)
+on `6da46505` stops in the preflight's empty-home assertion: its probe was placed
+under the runner's `/home/runner/work/_temp` and intentionally bound back into
+that hidden tree. AppArmor cleanup succeeds; dependency fetch was not reached.
+Original log SHA-256: `316b67ea55ad824adafca2fd29ff884d124cc6e7bbaf7550efd31ab0437203bc`.
+The correction places only the exact temporary probe under `/tmp`, outside private
+homes like the actual `/opt` build state, without weakening the empty-home check.
+A real local disposable bwrap test reproduces the old synthetic-home mismatch and
+passes the corrected online/offline layout with hidden private homes, read-only
+source and the existing fetch-only resolver exposure. It makes no DNS requests
+and loads no AppArmor policy. Actual CI source build/native coding remain pending.
+
 ### Additional application and autonomous-maintenance scope
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):

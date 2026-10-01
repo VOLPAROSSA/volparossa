@@ -126,6 +126,9 @@ class WiringTests(unittest.TestCase):
         self.assertIn('int(s["CapEff"], 16) == int(s["CapPrm"], 16) == 0', wrapper)
         self.assertIn('int(s["NoNewPrivs"]) == 1', wrapper)
         self.assertIn('for network in online offline', wrapper)
+        self.assertIn('probe=$(mktemp -d /tmp/volparossa-bwrap.XXXXXXXX)', wrapper)
+        self.assertNotIn('"${RUNNER_TEMP:?}/volparossa-bwrap.', wrapper)
+        self.assertIn('not list(Path("/root").iterdir()) and not list(Path("/home").iterdir())', wrapper)
         self.assertIn('isolation=(--ro-bind "$resolver" "$resolver")', wrapper)
         self.assertIn('if test "$network" = offline; then isolation=(--unshare-net); fi', wrapper)
         self.assertIn('set(Path("/run").rglob("*")) == allowed', wrapper)
@@ -142,6 +145,64 @@ class WiringTests(unittest.TestCase):
                                   capture_output=True, text=True)
         self.assertNotEqual(rejected.returncode, 0)
         self.assertEqual(rejected.stdout, '')
+
+    @unittest.skipUnless(os.environ.get('VOLPAROSSA_TEST_LOCAL_BWRAP') == '1',
+                         'explicit local disposable namespaces; no DNS requests or policy loading')
+    def test_real_probe_outside_synthetic_home_preserves_hidden_home(self):
+        with tempfile.TemporaryDirectory(prefix='volparossa-bwrap-layout-', dir='/tmp') as name:
+            root = Path(name)
+            fake_home = root / 'home'
+            old = fake_home / 'runner/work/_temp/volparossa-bwrap.synthetic'
+            (old / 'source').mkdir(parents=True)
+            private = fake_home / 'runner/private-secret'
+            private.write_text('synthetic-only-never-real-home')
+            fixed = root / 'volparossa-bwrap.fixed'
+            (fixed / 'source').mkdir(parents=True)
+            (root / 'etc').mkdir()
+            (root / 'etc/resolv.conf').symlink_to('/run/synthetic-resolver/resolv.conf')
+            (root / 'resolver').write_text('nameserver 192.0.2.53\n')
+            probe = '''
+import errno,json,os,sys
+from pathlib import Path
+assert not list(Path('/root').iterdir())
+assert not Path('/home/runner/private-secret').exists()
+if sys.argv[1] == 'online':
+    assert Path('/etc/resolv.conf').read_text() == 'nameserver 192.0.2.53\\n'
+    assert set(str(p) for p in Path('/run').rglob('*')) == {
+        '/run/synthetic-resolver', '/run/synthetic-resolver/resolv.conf'}
+else:
+    assert not list(Path('/run').iterdir())
+    assert os.readlink('/proc/self/ns/net') != sys.argv[2]
+try:
+    Path('forbidden-write').write_text('x')
+except OSError as error:
+    assert error.errno == errno.EROFS
+else:
+    raise AssertionError('source writable')
+print(json.dumps({'home_empty': not list(Path('/home').iterdir())}))
+'''
+            driver = '''
+import json,os,subprocess,sys
+from pathlib import Path
+for state, expected in [('/home/runner/work/_temp/volparossa-bwrap.synthetic', False), (sys.argv[1], True)]:
+    for network in ('online', 'offline'):
+        args=['/usr/bin/bwrap','--die-with-parent','--ro-bind','/','/',
+            '--tmpfs','/home','--tmpfs','/root','--tmpfs','/run','--tmpfs','/tmp',
+            '--bind',state,state,'--ro-bind',state+'/source',state+'/source',
+            '--proc','/proc','--dev','/dev','--chdir',state+'/source']
+        args += ['--ro-bind','/run/synthetic-resolver/resolv.conf','/run/synthetic-resolver/resolv.conf'] if network == 'online' else ['--unshare-net']
+        result=subprocess.run(args+['--','/usr/bin/python3','-I','-c',sys.argv[2],network,os.readlink('/proc/self/ns/net')],
+            capture_output=True,text=True,check=True,timeout=15,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
+        assert json.loads(result.stdout) == {'home_empty': expected}
+'''
+            subprocess.run(['/usr/bin/bwrap', '--die-with-parent', '--unshare-net', '--ro-bind', '/', '/',
+                '--ro-bind', str(fake_home), '/home', '--tmpfs', '/root', '--tmpfs', '/run',
+                '--ro-bind', str(root / 'etc'), '/etc',
+                '--ro-bind', str(root / 'resolver'), '/run/synthetic-resolver/resolv.conf',
+                '--proc', '/proc', '--dev', '/dev', '--', '/usr/bin/python3', '-I', '-c', driver, str(fixed), probe],
+                env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}, check=True, timeout=60)
+            self.assertEqual(private.read_text(), 'synthetic-only-never-real-home')
+            self.assertEqual((root / 'resolver').read_text(), 'nameserver 192.0.2.53\n')
 
     def test_failure_diagnostic_reads_only_bounded_public_build_logs(self):
         with tempfile.TemporaryDirectory(prefix='volparossa-build-log-contract-') as temporary:
