@@ -456,6 +456,9 @@ def validate_network(phase, peers, layout, name):
     # fully drained dedicated capture is valid, never unexpected control traffic.
     NET["validate_drained"](control, allow_empty=True)
     gates = phase["gates"]
+    if "exit_log_sampling_version" in gates:
+        sampler = runpy.run_path(str(Path(__file__).with_name("private-storage-log-sampler.py")))
+        sampler["validate_summary"](gates, gates["event_baseline_unix_ms"], PHASES[name])
     require(gates["event_baseline_unix_ms"] > 0 and gates["exit_log_limit"] == 1000
             and 0 < gates["exit_log_records"] <= 1000 and gates["exit_log_window_covers_baseline"] is True
             and 0 < gates["exit_log_oldest_unix_ms"] <= gates["event_baseline_unix_ms"] < gates["exit_log_newest_unix_ms"]

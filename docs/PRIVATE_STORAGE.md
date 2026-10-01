@@ -113,6 +113,21 @@ and both host-state snapshots have SHA-256
 The original seven-file artifact ZIP has SHA-256
 `7734d310d1c079fc1e86c77c62b6ad9ded11a81b841e1a7a3609e730ba78b141`.
 
+The later [run36933314111 on `23891274`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36933314111)
+passes its owner renewal/restart/foreground-revocation upload operations but stops
+before provider withdrawal: the final 1,000-record Exit window no longer covers the
+phase baseline. Cleanup and unchanged host state pass; the run remains failed.
+The candidate replaces that late-only observation with a joined, five-second sampler
+of the same bounded ring. Exact overlapping timestamp/event records, including
+same-millisecond multiplicity, must establish continuous coverage; a gap or ambiguous
+saturated window fails closed. Only closed cumulative counters are persisted, with
+the existing flow minima and at most five seconds to drain late completion events.
+The disposable fixture exposes only the existing Exit control-group access and parent
+traversal to the owner observer, never agent state, credentials or native sockets.
+This corrects evidence collection, not production maintenance or a proven passing
+overlay result. Original artifact hashes and partial evidence remain in
+[implementation status](IMPLEMENTATION_STATUS.md#additional-application-and-autonomous-maintenance-scope).
+
 Message delivery can acknowledge and consume an inbox item. A backup restore must not
 consume its storage lease. Backup retention, renewal, expiry and owner deletion are
 separate operations with separate authorization. They may share protected network

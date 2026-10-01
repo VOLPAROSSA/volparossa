@@ -956,7 +956,7 @@ if [ "$private_storage_fragments" = yes ]; then
     done
 fi
 if [ "$private_storage_maintenance" = yes ]; then
-    for storage_fixture in private-storage-maintenance-smoke.sh private-storage-maintenance-smoke.py; do
+    for storage_fixture in private-storage-maintenance-smoke.sh private-storage-maintenance-smoke.py private-storage-log-sampler.py; do
         [ -f "$source_directory/tests/integration/$storage_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
     done
@@ -2674,6 +2674,8 @@ fi
 if [ "$private_storage_maintenance" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/private-storage-maintenance-smoke.py" \
         "$WORK/bin/private-storage-maintenance-smoke.py"
+    install -o root -g root -m 0555 "$source_directory/tests/integration/private-storage-log-sampler.py" \
+        "$WORK/bin/private-storage-log-sampler.py"
 fi
 if [ "$image_snapshot" = yes ] || [ "$cloud_private_file" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/image-snapshot-smoke.py" \
@@ -3006,9 +3008,13 @@ for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 rela
     if { { [ "$scenario" = content-message ] || [ "$scenario" = content-provider ] || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; } \
         && { [ "$node" = client ] \
             || [ "$node" = relay3 ] || [ "$node" = relay4 ] || [ "$node" = relay5 ]; }; } \
+        || { [ "$private_storage_maintenance" = yes ] && [ "$node" = exit ]; } \
         || { { [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ]; } \
             && { [ "$node" = client ] || [ "$node" = relay4 ]; }; }; then
         # Match package access without adding the operator to the private service group.
+        # Maintenance alone also observes bounded Exit logs as the owner UID.
+        # Only this control directory and parent traversal are shared; native,
+        # state and credentials below remain private to the service identity.
         chgrp volparossa-users "$WORK/runtime-$node/control"
         printf 'a+ %s - - - - group:volparossa-users:--x,mask::r-x\n' "$WORK/runtime-$node" \
             | systemd-tmpfiles --create - || fail CONTENT_CONTROL_TRAVERSAL_FAILED

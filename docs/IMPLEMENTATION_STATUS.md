@@ -40,6 +40,25 @@ Last updated: 2026-10-01
   `94776714aa211d2df2b6e8c06a1486414a5e17fd6f44511f3392de44ec02b93d`;
   original job-log SHA-256:
   `4081f8be0933b6f871fcd6ae1ba99bc4202720839204010348e1c79984368bf5`.
+  The next original [run36933314111 on `23891274`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36933314111)
+  confirms upload, real core renewal, owner EOF/restart and independent foreground
+  revocation, but fails before provider withdrawal: the late Exit snapshot contains
+  exactly 1,000 records, starting 5,449 ms after the phase baseline
+  (`FRAGMENTS_EXIT_LOG_WINDOW_TRUNCATED`). Its 72 completed flows are only a partial
+  window, not accepted full-phase evidence. Cleanup has zero remaining owned objects
+  and host state is unchanged. Original 19-file ZIP SHA-256:
+  `19a993b2c93ff6a71d9d12eb90d050f4a953f359ec3405470e5132be215d3163`;
+  original job-log SHA-256:
+  `359e1e027bb5eafd0e6f69f3ece6bb0db817fce2bcc213da20c519e013310eb8`.
+  The fixture-only correction samples the unchanged 1,000-record ring every five
+  seconds, verifies exact overlapping event identities and timestamp groups, fails
+  on gaps/ambiguity and joins the observer before producing closed counters. Only
+  this maintenance fixture gives its owner the existing package-style Exit control
+  group/traversal; service state, credentials and native sockets remain private.
+  The original five-second final completion drain and flow minima remain. Seven
+  focused sampler checks include 2,401 events, duplicate timestamps, rejected missing
+  overlap and late/missing completion. No raw logs are newly persisted or exported;
+  no product log limit changes. This candidate still requires a fresh real trial.
   See [private storage maintenance](PRIVATE_STORAGE.md#explicit-owner-private-background-maintenance).
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):

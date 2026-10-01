@@ -144,6 +144,7 @@ class MaintenanceEvidence(unittest.TestCase):
             for name in ('identity.key', 'passphrase', 'foreground-grant.bin',
                          'fragment-set/fragments.json', 'fragment-set/placement-authorizations.json',
                          'maintenance/enrollment.json', 'maintenance/checkpoint.json', 'foreground/archive.json',
+                         'flow-upload.json', 'flow-restore.json', 'flow-finish.json',
                          'fragment-set/fragment-0000/copy-2/archive.json',
                          'fragment-set/fragment-0000/.handoff-journal-X1/copy/archive.json',
                          'fragment-set/fragment-0000/.handoff-transfer-X2/survivor-1',
