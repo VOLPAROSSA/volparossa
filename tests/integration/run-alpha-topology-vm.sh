@@ -599,14 +599,17 @@ if ss -H -ltn 2>/dev/null | awk '$4 ~ /:22223$/ { found=1 } END { exit !found }'
 fi
 
 RUN_DIRECTORY_PARENT=/tmp
+RUN_DIRECTORY_PREFIX=volparossa-alpha-kvm
 if [ -n "$browser_native_bundle" ]; then
     # Local native trials may run on a host whose /tmp is RAM-backed. Keep the
-    # disposable VM disk beside its explicitly selected SSD evidence directory.
+    # disposable VM disk beside, never inside, the SSD evidence directory:
+    # temporary SSH keys must not enter the evidence privacy scan or archive.
     [ "$(readlink -f -- "$output_directory")" = "$output_directory" ] || exit 64
-    RUN_DIRECTORY_PARENT=$output_directory
+    RUN_DIRECTORY_PARENT=$(dirname -- "$output_directory")
+    RUN_DIRECTORY_PREFIX=browser-native-kvm
 fi
-RUN_DIRECTORY=$(mktemp -d "$RUN_DIRECTORY_PARENT/volparossa-alpha-kvm.XXXXXX")
-case $RUN_DIRECTORY in "$RUN_DIRECTORY_PARENT"/volparossa-alpha-kvm.??????) ;; *) exit 69 ;; esac
+RUN_DIRECTORY=$(mktemp -d "$RUN_DIRECTORY_PARENT/$RUN_DIRECTORY_PREFIX.XXXXXX")
+case $RUN_DIRECTORY in "$RUN_DIRECTORY_PARENT"/"$RUN_DIRECTORY_PREFIX".??????) ;; *) exit 69 ;; esac
 chmod 0700 "$RUN_DIRECTORY"
 QEMU_PID=
 FINISHED=no
@@ -642,7 +645,7 @@ cleanup() {
             2>/dev/null || status=1
     fi
     case $RUN_DIRECTORY in
-        "$RUN_DIRECTORY_PARENT"/volparossa-alpha-kvm.??????)
+        "$RUN_DIRECTORY_PARENT"/"$RUN_DIRECTORY_PREFIX".??????)
             rm -rf --one-file-system -- "$RUN_DIRECTORY" ;;
         *) status=69 ;;
     esac
