@@ -4,6 +4,25 @@ Original VOLPAROSSA source in this repository is licensed under GPL-3.0-only. De
 vendored components retain their own licenses. This file is a provenance record, not a substitute
 for the license text shipped by each upstream project.
 
+## Explicit OpenCloud client integration trial
+
+The disposable `cloud-private-file` scenario stages VOLPAROSSA Cloud at
+`a67b91fbed42ecd23ba215eb21ef54397fc9f06a`, with each used source file's exact
+length and SHA-256 in `tests/integration/cloud-private-file-pins.json`. Original
+GPL-3.0-only Cloud integration and its pinned vendor notices remain unchanged.
+
+Its explicit guest-only SDK stage uses the original published
+[`@opencloud-eu/web-client` 8.0.0 package](https://registry.npmjs.org/@opencloud-eu/web-client/8.0.0),
+under AGPL-3.0. The Cloud source pin retains the exact archive URL and SHA-512
+integrity; archive SHA-256 is
+`8954d9ad90e44a6f62d0e32d3280ca92fd7b0ce30042fe07cdde5c653e0739b3`.
+All 109 original files (1,109,076 unpacked bytes), including LICENSE and bundled
+notices, are retained and rechecked before importing the WebDAV SDK. No package
+installer or lifecycle script runs. This is a pinned published artifact, not a
+claim of reproducible SDK source compilation or a bundled core dependency.
+The provision receipt separately binds package inventory and source provenance;
+successful staging alone is not evidence of actual SDK or protected-peer reads.
+
 ## Explicit development ML inputs
 
 The optional, guest-only `workers/volparossa-ml/provision.py` installer is not an automatic

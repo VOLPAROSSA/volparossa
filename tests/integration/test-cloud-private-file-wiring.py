@@ -34,9 +34,14 @@ class CloudSnapshotWiring(unittest.TestCase):
         # Exact topology prefix, 32-character run ID, mktemp suffix and pinned
         # Cloud tempfile prefix/suffix. No longer client-fixtures component.
         work = '/opt/va.' + 'a' * 32 + '.abcdef'
-        socket = work + '/u/i/g-abcdefgh/S.gpg-agent'
-        self.assertEqual(len(socket.encode()), 74)
+        socket = work + '/u/i/w/catalog-read-abcdef/g-abcdefgh/S.gpg-agent'
+        self.assertEqual(len(socket.encode()), 96)
         self.assertLess(len(socket.encode()), 104)
+        self.assertIn('storage_restore_flows=32', source)
+        fragments = (HERE / "private-storage-fragments-smoke.sh").read_text()
+        self.assertIn('private_storage_fragments_phase_finish "${storage_restore_flows:-16}"', fragments)
+        topology = (HERE / "kvm-alpha-topology.sh").read_text()
+        self.assertIn('"$WORK/bin/cloud-private-file-sdk.mjs"', topology)
 
     def test_runner_preview_and_repeated_selection(self):
         for first, last in ((SCENARIO, "private-storage-fragments"), ("private-storage-fragments", SCENARIO)):
@@ -56,7 +61,7 @@ class CloudSnapshotWiring(unittest.TestCase):
         self.assertIn("sudo -n python3 -B tests/integration/cloud-private-file-provision.py provision --download", guest)
         self.assertIn("--no-install-recommends gpg gpg-agent gpgconf tar", guest)
         for value in ("CLOUD_SOURCE=/opt/volparossa-cloud", "CLOUD_NODE=/opt/volparossa-node/bin/node",
-                      "CLOUD_REVISION=541cc826fe14ce69cf89a82ecb600ad14dd534c6"):
+                      "CLOUD_REVISION=a67b91fbed42ecd23ba215eb21ef54397fc9f06a"):
             self.assertIn(value, guest)
         self.assertIn('sudo -n -- env "$@" ./tests/integration/kvm-alpha-topology.sh', guest)
         self.assertIn('"tests/integration/$scenario-smoke.py" export-names', guest)
