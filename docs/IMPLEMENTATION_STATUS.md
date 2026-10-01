@@ -6,6 +6,31 @@ Last updated: 2026-10-01
 
 ## Current integration and active work
 
+### Native Firefox ordinary-tab integration candidate
+
+The optional `browser-network` native variant now carries the actual local
+Firefox 157.0.1 build receipt, unchanged native binaries and the separately
+hashed browser controller from `volparossa-browser@c3311eb`. It navigates two
+ordinary tabs, observes their original streams without replacing navigation,
+and requires independent real WireGuard/MPTCP routes, byte hashes, route-A
+retirement while B survives, privacy captures and disposable cleanup. The
+historical ESR proof is unchanged. Narrow provenance/evidence tests pass, but
+the actual joined VM trials `browser-native-vm-02` and `browser-native-vm-03`
+failed before attachment/origin traffic. The latter proves Firefox startup and
+a Marionette session, then records two initial tabs where the driver required
+one; Firefox was alive before deliberate cleanup. The candidate now accepts a
+nonempty, bounded initial set while retaining exactly two new tabs and full
+body checks. Both failed receipts, successful A15/private cleanup and unchanged
+host state are retained in [the native trial record](BROWSER_NETWORK.md#native-ordinary-tab-integration-actual-trials-remain-failed).
+The next actual trial `browser-native-vm-04` passes startup and reaches attachment A,
+but fails at core `PreselectionUnavailable` before origin traffic. Its cleanup and
+unchanged host-state checks pass. A closed inner-enum diagnostic is prepared; the
+original evidence does not identify policy, readiness, family or lineage as the cause.
+Successful native ordinary-tab/core integration remains pending. This is not a full
+browser kill-switch, HTTP/3 or native ECH wire-proof claim. Workspace-only
+pinned QEMU tools are explicit local test inputs, not a host installation or
+redistributable browser package.
+
 ### Additional application and autonomous-maintenance scope
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
@@ -190,10 +215,12 @@ all CodeQL analyses and the aggregate passed before merging.
 
 This establishes the scoped TCP component, not the complete browser integration.
 Ordinary tab navigation over the actual overlay, live availability fallback, full
-browser kill switch, HTTP/3 and the native Firefox 157 build remain open. The actual
-ESR fixture explicitly disables ECH-GREASE; product-scoped ECH compatibility is still
-being built. The earlier failed-trial history below is retained, but its pending
-live-TCP-proof statements are superseded by this exact successful run.
+browser kill switch and HTTP/3 remain open. The native Firefox 157 build now exists
+with a separate exact receipt, but its joined ordinary-tab/core trials remain failed
+as described above. The actual ESR fixture explicitly disables ECH-GREASE; it does
+not prove product-scoped native ECH compatibility. The earlier failed-trial history
+below is retained, but its pending live-TCP-proof statements are superseded by this
+exact successful run.
 
 ### Editor-to-core private execution candidate
 

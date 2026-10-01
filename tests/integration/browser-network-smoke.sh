@@ -40,18 +40,33 @@ browser_network_run() {
     bn_output=$bn_runtime/build/proofs/session
     bn_control_gid=$(stat -Lc '%g' "$WORK/runtime-client/control")
     bn_parent_netns=$(readlink /proc/self/ns/net)
-    if [ ! -f "$bn_runtime/provision.json" ] || [ -e "$bn_output" ]; then fail BROWSER_NETWORK_RUNTIME_UNAVAILABLE; fi
+    bn_provision=$bn_runtime/provision.json
+    bn_driver=smoke_network_core.py
+    bn_stage=firefox-esr
+    bn_origin_action=origin
+    if [ -f "$bn_runtime/native-bundle.json" ]; then
+        bn_provision=$bn_runtime/native-bundle.json
+        bn_driver=browser_native_core.py
+        bn_stage=firefox-native
+        bn_origin_action=origin-native
+    fi
+    if [ ! -f "$bn_provision" ] || [ -e "$bn_output" ]; then fail BROWSER_NETWORK_RUNTIME_UNAVAILABLE; fi
     # Debian cloud home modes differ. Add only search permission on this exact
     # disposable guest directory when needed, and restore the original mode on every cleanup.
     if ! setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --clear-groups \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- \
-        test -r "$bn_runtime/provision.json"; then
+        test -r "$bn_provision"; then
         [ ! -L /home/vpci ] || fail BROWSER_NETWORK_RUNTIME_PARENT_INVALID
         [ "$(stat -Lc '%u' /home/vpci)" = "$(id -u vpci)" ] || fail BROWSER_NETWORK_RUNTIME_PARENT_INVALID
         BROWSER_PARENT_HOME_MODE=$(stat -Lc '%a' /home/vpci)
         chmod o+x /home/vpci
     fi
-    install -o root -g root -m 0600 "$bn_runtime/provision.json" "$WORK/browser-network-provision.json"
+    if [ "$bn_stage" = firefox-native ]; then
+        browser_network_check native-provision "$bn_runtime" "$WORK/browser-network-provision.json" \
+            || fail BROWSER_NETWORK_NATIVE_PROVENANCE_INVALID
+    else
+        install -o root -g root -m 0600 "$bn_provision" "$WORK/browser-network-provision.json"
+    fi
     install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$bn_user" "$bn_runtime/build/proofs"
     install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$bn_user/home"
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$bn_gates"
@@ -68,7 +83,7 @@ browser_network_run() {
     bn_hash=$(browser_network_check hash "$RUN_ID") || fail BROWSER_NETWORK_HASH_FAILED
     ip netns exec "$DEST" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
         --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- \
-        python3 -B "$WORK/browser-network-tools/browser-network-smoke.py" origin \
+        python3 -B "$WORK/browser-network-tools/browser-network-smoke.py" "$bn_origin_action" \
         "$bn_origin" "$bn_gates" "$RUN_ID" "$bn_gates/origin.json" \
         >/dev/null 2>"$WORK/browser-network-origin.err" &
     TLS_POLICY_SERVER_PID=$!
@@ -95,7 +110,7 @@ EOF
     start_privacy_observers browser-network-first-privacy || fail BROWSER_NETWORK_CAPTURE_UNAVAILABLE
     ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
         --groups="$bn_control_gid" --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- \
-        env HOME="$bn_user/home" python3 -B "$bn_runtime/scripts/smoke_network_core.py" --stage "$bn_runtime/build/firefox-esr" \
+        env HOME="$bn_user/home" python3 -B "$bn_runtime/scripts/$bn_driver" --stage "$bn_runtime/build/$bn_stage" \
         --grant-a "$bn_user/grant-a.json" --grant-b "$bn_user/grant-b.json" --test-ca "$bn_user/test-ca.pem" \
         --control-directory "$WORK/runtime-client/control" \
         --expected-sha256 "$bn_hash" --expected-bytes 33554432 --core-revision "$expected_commit" \
@@ -200,7 +215,9 @@ browser_network_finalize_report() {
        success:($status == 0 and $network != null and $complete and $remaining == 0 and $host.unchanged == true),
        cleanup:{complete:$complete,remaining_owned_objects:$remaining},host_state:($host|del(.acceptance_id)),
        full_browser_killswitch_claimed:false,http3_claimed:false,direct_fallback:false,
-       scope:"two explicit privileged Gecko HTTPS channels through app-scoped real MPTCP; not general browsing interception"}
+       scope:(if $network.browser.kind == "native-firefox-core-ordinary-tabs"
+         then "two native Firefox ordinary tabs through separate real WireGuard/MPTCP routes; local reviewed native build with explicit product-JS revision"
+         else "two explicit privileged Gecko HTTPS channels through app-scoped real MPTCP; not general browsing interception" end)}
     ' >"$WORK/browser-network-smoke.json" || return 1
     for bn_name in $(browser_network_check export-names); do
         [ ! -f "$WORK/$bn_name" ] || [ -L "$WORK/$bn_name" ] || \

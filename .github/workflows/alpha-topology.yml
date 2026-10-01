@@ -171,6 +171,7 @@ jobs:
           python3 -B tests/integration/agent-private-task-browser.py self-test
           sh -n tests/integration/browser-network-smoke.sh
           python3 -B tests/integration/test-browser-network-smoke.py
+          python3 -B tests/integration/test-browser-native.py
           python3 -B tests/integration/agent-private-task-code.py self-test
           sh -n tests/integration/agent-private-conversation.sh
           python3 -B tests/integration/test-agent-private-conversation.py

@@ -3627,6 +3627,14 @@ fn client_native_path_requirement(
 }
 
 fn map_preselection_error(error: ClientPreselectionError) -> ClientRouteConnectError {
+    // Opt-in browser fixture diagnostics retain only the closed inner enum before
+    // mapping it. No peer, scope, address, policy material or error text is logged.
+    tracing::debug!(
+        target: "volparossa_agent::browser_gateway::connect",
+        stage = "preselection",
+        code = ?error,
+        "browser_gateway_observation"
+    );
     match error {
         ClientPreselectionError::NoEligiblePaths => ClientRouteConnectError::NoEligiblePaths,
         _ => ClientRouteConnectError::PreselectionUnavailable,

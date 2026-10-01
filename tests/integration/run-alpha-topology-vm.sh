@@ -17,6 +17,8 @@ package_path=
 output_directory=
 expected_commit=
 scenario=alpha
+host_tools_directory=
+browser_native_bundle=
 
 guest_memory_for_scenario() {
     # These fixtures co-locate two 360M providers in one guest. Production
@@ -35,6 +37,7 @@ usage() {
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
         '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment]' \
         '       --package is required only for alpha; --mpquic is unnecessary for standalone Wi-Fi/model/private-browser proofs.'
+    printf '%s\n' '       browser-network optionally accepts --host-tools-directory PATH --browser-native-bundle PATH'
 }
 
 print_plan() {
@@ -439,6 +442,16 @@ while [ "$#" -gt 0 ]; do
             image_path=$2
             shift
             ;;
+        --host-tools-directory)
+            [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+            host_tools_directory=$2
+            shift
+            ;;
+        --browser-native-bundle)
+            [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+            browser_native_bundle=$2
+            shift
+            ;;
         --mpquic)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             mpquic_path=$2
@@ -473,7 +486,7 @@ done
 
 if [ "$mode" = preview ]; then
     if [ "$approval" != no ] \
-        || [ -n "$image_path$mpquic_path$package_path$output_directory$expected_commit" ]; then
+        || [ -n "$image_path$mpquic_path$package_path$output_directory$expected_commit$host_tools_directory$browser_native_bundle" ]; then
         usage >&2
         exit 64
     fi
@@ -498,6 +511,23 @@ case $package_path in ''|/*) ;; *) exit 64 ;; esac
 case $expected_commit in ''|*[!0-9a-f]*) exit 64 ;; esac
 case ${#expected_commit} in 40|64) ;; *) exit 64 ;; esac
 [ "$(id -u)" -ne 0 ] || { printf '%s\n' 'VM runner must remain unprivileged' >&2; exit 77; }
+
+if [ -n "$host_tools_directory" ]; then
+    [ "$scenario" = browser-network ] || exit 64
+    case $host_tools_directory in /*) ;; *) exit 64 ;; esac
+    python3 -B "$(dirname -- "$0")/browser-native-tools.py" --verify --output "$host_tools_directory"
+    PATH=$host_tools_directory/bin:$PATH
+    export PATH
+fi
+BROWSER_NATIVE_SHA256=none
+if [ -n "$browser_native_bundle" ]; then
+    [ "$scenario" = browser-network ] || exit 64
+    case $browser_native_bundle in /*) ;; *) exit 64 ;; esac
+    [ "$(readlink -f -- "$browser_native_bundle")" = "$browser_native_bundle" ] || exit 64
+    [ -f "$browser_native_bundle" ] && [ ! -L "$browser_native_bundle" ] || exit 64
+    [ "$(stat -Lc '%s' "$browser_native_bundle")" -le 1073741824 ] || exit 64
+    BROWSER_NATIVE_SHA256=$(sha256sum "$browser_native_bundle" | awk '{print $1}')
+fi
 
 for command_name in awk cat chmod cloud-localds cmp cut dpkg-deb find git grep gzip install \
     jq kill mktemp qemu-img qemu-system-x86_64 readlink rm scp sed sha256sum \
@@ -568,8 +598,18 @@ if ss -H -ltn 2>/dev/null | awk '$4 ~ /:22223$/ { found=1 } END { exit !found }'
     exit 77
 fi
 
-RUN_DIRECTORY=$(mktemp -d /tmp/volparossa-alpha-kvm.XXXXXX)
-case $RUN_DIRECTORY in /tmp/volparossa-alpha-kvm.??????) ;; *) exit 69 ;; esac
+RUN_DIRECTORY_PARENT=/tmp
+RUN_DIRECTORY_PREFIX=volparossa-alpha-kvm
+if [ -n "$browser_native_bundle" ]; then
+    # Local native trials may run on a host whose /tmp is RAM-backed. Keep the
+    # disposable VM disk beside, never inside, the SSD evidence directory:
+    # temporary SSH keys must not enter the evidence privacy scan or archive.
+    [ "$(readlink -f -- "$output_directory")" = "$output_directory" ] || exit 64
+    RUN_DIRECTORY_PARENT=$(dirname -- "$output_directory")
+    RUN_DIRECTORY_PREFIX=browser-native-kvm
+fi
+RUN_DIRECTORY=$(mktemp -d "$RUN_DIRECTORY_PARENT/$RUN_DIRECTORY_PREFIX.XXXXXX")
+case $RUN_DIRECTORY in "$RUN_DIRECTORY_PARENT"/"$RUN_DIRECTORY_PREFIX".??????) ;; *) exit 69 ;; esac
 chmod 0700 "$RUN_DIRECTORY"
 QEMU_PID=
 FINISHED=no
@@ -593,13 +633,22 @@ cleanup() {
         install -m 0600 "$RUN_DIRECTORY/console.log" "$output_directory/vm-console.log" \
             2>/dev/null || true
     fi
+    if [ -f "$RUN_DIRECTORY/qemu.stderr" ]; then
+        # Preserve startup failures too: there may not be a serial console yet.
+        tail -c 131072 "$RUN_DIRECTORY/qemu.stderr" >"$output_directory/qemu.stderr" \
+            2>/dev/null || status=1
+    fi
     if [ -f "$RUN_DIRECTORY/qemu-outer-uplink.json" ]; then
         # Keep runner-owned provenance even when guest retrieval fails or a
         # guest archive happens to contain the same basename.
         install -m 0600 "$RUN_DIRECTORY/qemu-outer-uplink.json" "$output_directory/qemu-outer-uplink.json" \
             2>/dev/null || status=1
     fi
-    rm -rf --one-file-system -- "$RUN_DIRECTORY"
+    case $RUN_DIRECTORY in
+        "$RUN_DIRECTORY_PARENT"/"$RUN_DIRECTORY_PREFIX".??????)
+            rm -rf --one-file-system -- "$RUN_DIRECTORY" ;;
+        *) status=69 ;;
+    esac
     exit "$status"
 }
 trap cleanup EXIT
@@ -1129,6 +1178,7 @@ source_sha256=$2
 mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
+browser_native_sha256=${6:-none}
 case $scenario in alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
@@ -1254,8 +1304,13 @@ elif [ "$scenario" = cloud-private-file ]; then
     sudo -n python3 -B tests/integration/cloud-private-file-provision.py provision --download
 elif [ "$scenario" = browser-network ]; then
     guest_phase browser-network-provision
-    sudo -n runuser -u vpci -- python3 -B tests/integration/browser-network-provision.py \
-        provision /home/vpci/browser-network-runtime
+    if [ "$browser_native_sha256" = none ]; then
+        sudo -n runuser -u vpci -- python3 -B tests/integration/browser-network-provision.py \
+            provision /home/vpci/browser-network-runtime
+    else
+        sudo -n runuser -u vpci -- python3 -B tests/integration/browser-native-runtime.py \
+            provision /home/vpci/browser-native-runtime.tar.gz "$browser_native_sha256"
+    fi
 fi
 guest_phase build
 # The 4-GiB guest cannot compile three large Rust crates concurrently. This bounds
@@ -1438,11 +1493,17 @@ case $scenario in dns-cache|reciprocity-private-dns)
     qemu_usernet=$qemu_usernet,$qemu_outer_ipv6
     ;;
 esac
+qemu_vga_device=VGA,id=video0,bus=pcie.0,addr=0x1
+if [ -n "$host_tools_directory" ]; then
+    # Debian keeps this ROM in a separate package directory. The extracted
+    # tools receipt verified its exact bytes; never look for a host ROM.
+    qemu_vga_device=$qemu_vga_device,romfile=$host_tools_directory/root/usr/share/seabios/vgabios-stdvga.bin
+fi
 qemu-system-x86_64 \
     -name volparossa-alpha-topology \
     -no-user-config -nodefaults \
     -machine q35,accel=kvm -cpu host -smp 4 -m "$guest_memory_mib" \
-    -device VGA,id=video0,bus=pcie.0,addr=0x1 \
+    -device "$qemu_vga_device" \
     -drive "if=virtio,format=qcow2,file=$OVERLAY" \
     -drive "if=virtio,format=raw,readonly=on,file=$SEED" \
     -device virtio-rng-pci \
@@ -1450,7 +1511,7 @@ qemu-system-x86_64 \
     -netdev "$qemu_usernet" \
     -display none -monitor none -serial "file:$CONSOLE" "$@" \
     -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny \
-    </dev/null >/dev/null 2>&1 &
+    </dev/null >/dev/null 2>"$RUN_DIRECTORY/qemu.stderr" &
 QEMU_PID=$!
 
 ssh_bounded() {
@@ -1534,6 +1595,7 @@ ssh_base sudo -n cloud-init status --wait >/dev/null
 scp_to "$SOURCE_ARCHIVE" /home/vpci/source.tar.gz
 if [ -n "$mpquic_path" ]; then scp_to "$mpquic_path" /home/vpci/volparossa-mpquic; fi
 if [ -n "$package_path" ]; then scp_to "$package_path" /home/vpci/volparossa.deb; fi
+if [ -n "$browser_native_bundle" ]; then scp_to "$browser_native_bundle" /home/vpci/browser-native-runtime.tar.gz; fi
 scp_to "$GUEST_DRIVER" /home/vpci/guest-driver.sh
 scp_to "$GUEST_DIAGNOSTICS" /home/vpci/guest-diagnostics.py
 ssh_base chmod 0700 /home/vpci/guest-driver.sh
@@ -1562,7 +1624,7 @@ driver_time_bound=2400s
 [ "$scenario" != agent-reasoning ] || driver_time_bound=4200s
 [ "$scenario" != agent-policy-assessment ] || driver_time_bound=3600s
 ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
-    "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario"
+    "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" "$BROWSER_NATIVE_SHA256"
 GUEST_STATUS=$?
 set -e
 if { [ "$scenario" = wifi-mesh ] || [ "$scenario" = wifi-link ]; } && [ "$GUEST_STATUS" -eq 194 ]; then
@@ -1581,7 +1643,7 @@ if { [ "$scenario" = wifi-mesh ] || [ "$scenario" = wifi-link ]; } && [ "$GUEST_
     [ "$(ssh_base uname -r)" = 6.12.107+deb13-amd64 ] || exit 1
     set +e
     ssh_base /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
-        "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario"
+        "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" "$BROWSER_NATIVE_SHA256"
     GUEST_STATUS=$?
     set -e
 fi

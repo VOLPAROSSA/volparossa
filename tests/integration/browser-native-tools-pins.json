@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "purpose": "Workspace-only Debian amd64 QEMU tools for the disposable native browser trial; never a host installation",
+  "origin": "https://deb.debian.org/debian/",
+  "keyring": "/usr/share/keyrings/debian-archive-keyring.gpg",
+  "keyring_sha256": "506b815cbb32d9b6066b4a2aa524071e071761e7e7f68c3ac74f3061ba852017",
+  "metadata": {
+    "inrelease_path": "dists/trixie/InRelease",
+    "inrelease_sha256": "0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675",
+    "index_path": "main/binary-amd64/Packages.xz",
+    "index_size": 9678380,
+    "index_sha256": "7778d3e3f303b7ddb8ce0fe7c8d57473a076c6bf2e8f241f75421d2396352498"
+  },
+  "package_download_bytes": 18211228,
+  "packages": [
+    {"name":"qemu-system-x86","version":"1:10.0.13+ds-0+deb13u1","arch":"amd64","path":"pool/main/q/qemu/qemu-system-x86_10.0.13+ds-0+deb13u1_amd64.deb","size":10278596,"sha256":"5e841d0723a657fd8bc2e9e1a085d24f47fcb3e4a0f94762e6c38b429f22fbb1"},
+    {"name":"qemu-utils","version":"1:10.0.13+ds-0+deb13u1","arch":"amd64","path":"pool/main/q/qemu/qemu-utils_10.0.13+ds-0+deb13u1_amd64.deb","size":2024216,"sha256":"6d31339b1630153fe7c5f8a51426b8fa6ce35731aeb015a84f2d333c4e4dca30"},
+    {"name":"qemu-system-common","version":"1:10.0.13+ds-0+deb13u1","arch":"amd64","path":"pool/main/q/qemu/qemu-system-common_10.0.13+ds-0+deb13u1_amd64.deb","size":1000628,"sha256":"3a99dc23c42c66bb7e96dc1f2ba12b1797d154a472fbdb1cfcd822d9fb69e85b"},
+    {"name":"qemu-system-data","version":"1:10.0.13+ds-0+deb13u1","arch":"all","path":"pool/main/q/qemu/qemu-system-data_10.0.13+ds-0+deb13u1_all.deb","size":2144176,"sha256":"a0e03c526cc09d4c2ab20aa19a8c12e916cdc49a170acb16a6563c28f70eafd3"},
+    {"name":"seabios","version":"1.16.3-2","arch":"all","path":"pool/main/s/seabios/seabios_1.16.3-2_all.deb","size":163272,"sha256":"2b590534250b940f43222eeab9a8f57f337a9d9a73fc412a43ab8cd07a7e56f6"},
+    {"name":"ipxe-qemu","version":"1.21.1+git20250501.dad20602+dfsg-1","arch":"all","path":"pool/main/i/ipxe/ipxe-qemu_1.21.1+git20250501.dad20602+dfsg-1_all.deb","size":1225404,"sha256":"b3b799d90b87ef2d6defa925cd48cf1691a19806f08041733a4f884d4a218b17"},
+    {"name":"cloud-image-utils","version":"0.33-1","arch":"all","path":"pool/main/c/cloud-utils/cloud-image-utils_0.33-1_all.deb","size":27960,"sha256":"d67cfd0a74f9ef6bfd3b386a957a22fa7aa29e589ff0714e31ddd2df28a97254"},
+    {"name":"liburing2","version":"2.9-1","arch":"amd64","path":"pool/main/libu/liburing/liburing2_2.9-1_amd64.deb","size":26448,"sha256":"4b589c00c7a51172aace2cb2fb3d3ff32daf86c644023126dcfcaa840cc941ea"},
+    {"name":"libcacard0","version":"1:2.8.0-3+b2","arch":"amd64","path":"pool/main/libc/libcacard/libcacard0_2.8.0-3+b2_amd64.deb","size":90904,"sha256":"1d6a8d17b893e54dfea8fe78df16c9a8ab4a6e626f9312881784592d480d9317"},
+    {"name":"libcapstone5","version":"5.0.7-1~deb13u1","arch":"amd64","path":"pool/main/c/capstone/libcapstone5_5.0.7-1~deb13u1_amd64.deb","size":778216,"sha256":"775187a7be26bb0b076d1979a02163b943dbc13eb4adb0efc503223a03c75422"},
+    {"name":"libdaxctl1","version":"81-1","arch":"amd64","path":"pool/main/n/ndctl/libdaxctl1_81-1_amd64.deb","size":22188,"sha256":"6296eb5c976743ba0defb7a061ef081238ca072cf569c6bb96fd3f9095c58a30"},
+    {"name":"libexecs1","version":"1.4-2+b2","arch":"amd64","path":"pool/main/libe/libexecs/libexecs1_1.4-2+b2_amd64.deb","size":7820,"sha256":"05b578fead365a81141fe834c3b3b6df89d17a050784a237f736489fbd426105"},
+    {"name":"libfdt1","version":"1.7.2-2+b1","arch":"amd64","path":"pool/main/d/device-tree-compiler/libfdt1_1.7.2-2+b1_amd64.deb","size":19996,"sha256":"8e37034d7864807ae2063efcc82fc79aad59069546212e6e0908ed67f9f7e107"},
+    {"name":"libibverbs1","version":"56.1-1","arch":"amd64","path":"pool/main/r/rdma-core/libibverbs1_56.1-1_amd64.deb","size":62428,"sha256":"4c3b889607586e6328964a5f98e01ef01daa415be24334d743d6654aab4c47a4"},
+    {"name":"libndctl6","version":"81-1","arch":"amd64","path":"pool/main/n/ndctl/libndctl6_81-1_amd64.deb","size":62312,"sha256":"fe60a05d42e61cb9f49a90b872aa5ca569363b13459ee0d405243c37a7de7c93"},
+    {"name":"libpmem1","version":"1.13.1-1.1+b1","arch":"amd64","path":"pool/main/p/pmdk/libpmem1_1.13.1-1.1+b1_amd64.deb","size":91708,"sha256":"7d972d6958e915ce602e4b90debc6b4b91a01dfea1fe003d0b013756e7d9d863"},
+    {"name":"librdmacm1t64","version":"56.1-1","arch":"amd64","path":"pool/main/r/rdma-core/librdmacm1t64_56.1-1_amd64.deb","size":70396,"sha256":"5b56911725905b8e2a8389c99416ca078395c4ca8ce0d516bc758d5be0134687"},
+    {"name":"libslirp0","version":"4.8.0-1+deb13u1","arch":"amd64","path":"pool/main/libs/libslirp/libslirp0_4.8.0-1+deb13u1_amd64.deb","size":66544,"sha256":"6125698173f8be0d0de01ff897a0df3c5e50fb09f70238b26dd6574aaa0934e1"},
+    {"name":"libusbredirparser1t64","version":"0.15.0-1","arch":"amd64","path":"pool/main/u/usbredir/libusbredirparser1t64_0.15.0-1_amd64.deb","size":19560,"sha256":"4b039802dac140bae5a6f3fb6341eeeb9ea8c3e4d7b95ad36a07a8c28572f177"},
+    {"name":"libvdeplug2t64","version":"4.0.1-5.1+b1","arch":"amd64","path":"pool/main/v/vdeplug4/libvdeplug2t64_4.0.1-5.1+b1_amd64.deb","size":28456,"sha256":"01291e2c8e28e91eac6b59c983a3a44e29ad0ddb8622699fbb84cbd5f26334a4"}
+  ]
+}
