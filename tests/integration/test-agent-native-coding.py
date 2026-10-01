@@ -214,6 +214,9 @@ class ContractTests(unittest.TestCase):
     def test_pins_are_exact_and_closed_exports_exclude_private_runtime(self):
         pins = FIX['pins']()
         self.assertEqual(pins['revision'], '2f7014b0014b90e488b15364d6e596d7d1a30782')
+        runtime = runpy.run_path(str(HERE / 'native-coding-runtime.py'))
+        self.assertEqual(pins['revision'], runtime['CODE_REVISION'])
+        self.assertEqual(FIX['CODE_TREE'], runtime['CODE_TREE'])
         self.assertEqual(set(pins['files']), FIX['SOURCE_NAMES'])
         self.assertEqual(FIX['EXPORT_NAMES'], {'agent-native-coding-smoke.json', 'host-state-before.json',
             'host-state-after.json', 'current-phase', 'guest-exit-status', 'runner.stdout', 'runner.stderr'})
