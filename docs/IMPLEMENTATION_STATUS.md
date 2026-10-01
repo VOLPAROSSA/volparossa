@@ -28,8 +28,8 @@ preflight also admitted the real app-server's 32,626-byte first request through
 the Qwen adapter, including the complete prompt and actual native tool schemas;
 runtime exit and unchanged host routes/DNS were checked. This is transport
 compatibility, **not proof of the actual native model-driven coding loop**. The live
-trial remains pending; general coding quality, complete editor integration and
-private distributed inference are not proved by this candidate.
+trial now reaches real model execution but fails as recorded below; general coding
+quality, complete editor integration and private distributed inference remain unproved.
 
 The first exact CI attempt, [36904824814](https://github.com/VOLPAROSSA/volparossa/actions/runs/36904824814)
 on `347a510c620c1df41723f824cf2a9686e7f74e3b`, had over 85 GiB free but stopped
@@ -79,6 +79,43 @@ A real local disposable bwrap test reproduces the old synthetic-home mismatch an
 passes the corrected online/offline layout with hidden private homes, read-only
 source and the existing fetch-only resolver exposure. It makes no DNS requests
 and loads no AppArmor policy. Actual CI source build/native coding remain pending.
+
+The original [attempt 36912197160](https://github.com/VOLPAROSSA/volparossa/actions/runs/36912197160)
+on `caae14565e92d574ace0241ce35c3f10c6b3cb10` stops before compilation: the
+resolved read-only resolver file returns EACCES rather than EROFS to the write
+probe. The correction independently verifies `ST_RDONLY` before accepting either
+denial, so ordinary file permissions cannot stand in for a read-only mount.
+
+The exact [attempt 36913897403](https://github.com/VOLPAROSSA/volparossa/actions/runs/36913897403)
+on `527e8ac35d9a0c0e461f76fac17e97ed10a93db9` **successfully source-builds and
+executes the native app-server** with Code `7e35ba8d` and the real private Qwen
+worker. The coding task still fails: one command approval is declined, none is
+accepted, and neither reading, editing nor testing completes. Two real model
+requests return one completed and one incomplete response, both cleanup-confirmed.
+The closed original receipt does not retain the rejected command or rejection
+reason; do not infer a model or approval-policy cause from the counters alone.
+No OOM occurs (service peak 1,949,880,320 bytes), runtime exit is graceful, all
+private/service cleanup checks pass and host state is unchanged. The original
+eight-file artifact SHA-256 is
+`0389a4754bd08470e815b2e452089ee933010711ca4bd3ddb02c1a6dbae002b4`;
+original job-log SHA-256 is
+`9a1f1c26355abc66277eee8bb81f3cf982d2679c540f207d2c969fa79d7e4519`.
+This is actual runtime/model integration, **not a working native coding loop**.
+
+A subsequent actual native protocol probe isolates one real incompatibility:
+the pinned app-server includes an optional execpolicy proposal on the canonical
+read request, which the old fixture rejected. Code `eb48696eb37afb9cda59bffc350845309b963dbb`
+now distinguishes that proposal from the one-shot approval: command, cwd,
+thread/turn, action and extra-permission checks stay unchanged; responses remain
+only `accept`/`decline`, never a persistent-rule or session grant. The corrected
+policy accepts the actual observed shape in a second native probe, while the
+probe itself still declines all commands. Both are synthetic-protocol evidence,
+not a reconstructed CI payload or model-directed execution proof. Their report
+hashes are `e58ea8b86b803821a1d7930e44a920c20ac2ccb2f12009c9da5ad252734af2dd`
+and `1ba245d00f749c66ba1dd4af5500420d9be05c078d21f2db8fb8c57ba0d7abe6`.
+The next exact-source trial requires native receipt v2 with closed denial counts,
+not command text, so any further rejection can be distinguished. Twenty-one
+focused Code checks pass; a complete actual read/edit/test loop remains required.
 
 ### Additional application and autonomous-maintenance scope
 

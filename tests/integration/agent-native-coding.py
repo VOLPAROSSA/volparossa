@@ -32,9 +32,11 @@ PRIVATE.ROOT, PRIVATE.UNIT = ROOT, UNIT
 PRIVATE.CGROUP = Path('/sys/fs/cgroup/system.slice') / UNIT
 GIB, MEMORY_MAX, PROFILE = PRIVATE.GIB, PRIVATE.MEMORY_MAX, PRIVATE.PROFILE
 UPSTREAM = '67727e7cf114cf3e1b71db368d74b24e32f6cb12'
-CODE_TREE = '23cbaf7602f7db84b70be8264b30fa22d627a2d2'
+CODE_TREE = '60ddc9be734aa17bc95464cda8d81dc50e39cb6a'
 TOOLCHAIN_SHA = 'f994b853cae209236bd522735903f66a4a01f5cc8c04632d36aa45449ca367ac'
 PROMPT_SHA = 'ac8ae107a0d72fe3476b430afb161ea4e67da2e446d778aefc44828160559807'
+APPROVAL_DENIALS = {'lineage', 'kind', 'item', 'cwd', 'command', 'network',
+                   'permissions', 'network_policy', 'order', 'budget'}
 SCOPE = ('actual pinned native Codex app-server, full upstream prompt and private Qwen3-0.6B '
          'performing an owner-authorized synthetic read/edit/test loop; not general coding '
          'quality, editor integration, private peer execution or a hard-4GiB proof')
@@ -145,8 +147,8 @@ def native_receipt(value):
         'general_coding_quality_claimed', 'forced_stop'}
     require(isinstance(value, dict) and set(value) == booleans | {'version', 'kind', 'phase', 'model',
         'full_native_prompt_sha256', 'before_sha256', 'after_sha256', 'accepted_commands',
-        'declined_commands', 'responses', 'runtime_exit', 'diagnostic'}, 'native receipt keys')
-    require(value['version'] == 1 and value['kind'] == 'native-codex-core-coding'
+        'declined_commands', 'approval_denials', 'responses', 'runtime_exit', 'diagnostic'}, 'native receipt keys')
+    require(type(value['version']) is int and value['version'] == 2 and value['kind'] == 'native-codex-core-coding'
         and value['model'] == PROFILE and value['phase'] in ('capabilities', 'launch', 'initialize',
         'thread-start', 'native-turn', 'independent-check', 'unsubscribe', 'complete')
         and value['diagnostic'] in (None, 'stderr_bound', 'turn_deadline', 'native_coding_incomplete',
@@ -157,6 +159,10 @@ def native_receipt(value):
         and not value['private_peer_execution_claimed'] and not value['general_coding_quality_claimed'], 'native scope')
     for key in ('accepted_commands', 'declined_commands'):
         require(type(value[key]) is int and 0 <= value[key] <= 16, 'native command count')
+    denials = value['approval_denials']
+    require(isinstance(denials, dict) and set(denials) == APPROVAL_DENIALS
+        and all(type(count) is int and 0 <= count <= 16 for count in denials.values())
+        and sum(denials.values()) == value['declined_commands'], 'native approval denial counts')
     require(value['runtime_exit'] is None or type(value['runtime_exit']) is int
             and -255 <= value['runtime_exit'] <= 255, 'runtime exit')
     counters = value['responses']

@@ -13,12 +13,13 @@ FIX = runpy.run_path(str(HERE / 'agent-native-coding.py'))
 
 
 def synthetic_receipt():
-    return dict(version=1, kind='native-codex-core-coding', success=True, phase='complete',
+    return dict(version=2, kind='native-codex-core-coding', success=True, phase='complete',
         model='qwen3-0.6b-v1', full_native_prompt_sha256=FIX['PROMPT_SHA'],
         before_sha256=hashlib.sha256(b'def add(a, b):\n    return a - b\n').hexdigest(),
         after_sha256=hashlib.sha256(b'def add(a, b):\n    return a + b\n').hexdigest(),
         native_turn_completed=True, read=True, edit=True, test=True, independent_test_passed=True,
         accepted_commands=3, declined_commands=0, unexpected_command=False,
+        approval_denials=dict.fromkeys(FIX['APPROVAL_DENIALS'], 0),
         thread_unsubscribed=True, private_peer_execution_claimed=False,
         general_coding_quality_claimed=False, runtime_exit=0, forced_stop=False, diagnostic=None,
         responses=dict(submitted=4, completed=4, incomplete=0, cleanup_confirmed=4))
@@ -116,6 +117,24 @@ class ContractTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 FIX['native_receipt'](value)
 
+    def test_denial_counts_are_closed_bounded_and_account_for_each_decline(self):
+        value = synthetic_receipt()
+        denials = dict(value['approval_denials'], command=1)
+        value.update(approval_denials=denials, declined_commands=1)
+        self.assertEqual(FIX['native_receipt'](value), value)
+        for change in ({'version': 1}, {'version': True}, {'version': 3},
+                       {'declined_commands': 0}, {'approval_denials': {}},
+                       {'approval_denials': dict(denials, private_command='PRIVATE_CANARY')},
+                       {'approval_denials': dict(denials, command=True)},
+                       {'approval_denials': dict(denials, command=-1)},
+                       {'approval_denials': dict(denials, command=17)},
+                       {'approval_denials': dict(denials, command='PRIVATE_CANARY')}):
+            with self.assertRaises(ValueError):
+                FIX['native_receipt'](dict(value, **change))
+        del value['approval_denials']
+        with self.assertRaises(ValueError):
+            FIX['native_receipt'](value)
+
     def test_declines_raw_text_and_unsupported_quality_claims(self):
         for changed in (dict(synthetic_receipt(), prompt='PRIVATE_CANARY'),
                         dict(synthetic_receipt(), general_coding_quality_claimed=True),
@@ -136,7 +155,7 @@ class ContractTests(unittest.TestCase):
 
     def test_pins_are_exact_and_closed_exports_exclude_private_runtime(self):
         pins = FIX['pins']()
-        self.assertEqual(pins['revision'], '7e35ba8d56df8ec43715119ceb0a1ae3f02f1f63')
+        self.assertEqual(pins['revision'], 'eb48696eb37afb9cda59bffc350845309b963dbb')
         self.assertEqual(set(pins['files']), FIX['SOURCE_NAMES'])
         self.assertEqual(FIX['EXPORT_NAMES'], {'agent-native-coding-smoke.json', 'host-state-before.json',
             'host-state-after.json', 'current-phase', 'guest-exit-status', 'runner.stdout', 'runner.stderr'})
