@@ -190,6 +190,19 @@ All 18 original evidence files are retained locally; their archive SHA256 is
 `3d47971aa397ed43b076863912a67251efe69875babf02f1d538b196bd2063eb`.
 This is not yet editor execution, Codex tool use, general coding ability or private peer offload.
 
+### Uniform storage redundancy candidate
+
+New fragment and complete-replica archive creation use the same core-owned two-copy
+target. Applications cannot request another target; hidden `--copies 2` compatibility
+preserves existing pinned callers. Existing higher-copy archives keep their original
+metadata, restore/renew/delete paths and every physical charge. No existing copy is
+automatically removed, and temporary replacement overhead is not a separate redundancy
+tier. This change does not implement automatic repair or application-wide migration; see
+[the policy and legacy boundary](PRIVATE_STORAGE.md#one-core-owned-redundancy-policy).
+Two targeted tests pass: fixed-target CLI handling and a real four-provider signed-service
+lifecycle for legacy three-copy fragments and complete replicas, including source removal,
+provider-loss restore, renewal and deletion to zero leases. Package Clippy also passes.
+
 ### Storage layer and privacy boundaries
 
 **Private storage is now documented as a separate fourth layer**, with actual replicated-byte
@@ -203,6 +216,25 @@ Different-chunk placement is implemented in the signed fragment CLI with local-s
 evidence below; the actual overlay/provider-loss trial 36773683946 passes and is
 integrated through PR #183. Automatic placement/repair remains incomplete. The earlier
 replica/handoff proofs retain a complete encrypted archive at each selected provider.
+
+### Explicit fragment-copy repair candidate
+
+`storage fragments replace` adds an owner-authorized replacement for one fragment copy.
+A signed parent placement extension is durable before the child handoff can be installed
+or recovered. The existing transfer and accounting path then restores a survivor, deposits
+the exact replacement, reads every byte back and checks retention before deleting the old
+copy. Lost confirmations stay charged and resumable across restart. Ordinary progress,
+restore, renew and delete retain the full authorized copy history. The original signed
+reconstruction manifest and unreplaced-archive report shape are unchanged.
+
+Targeted local signed-service/SQLite probes cover crash ordering, unsigned-child rejection,
+lost Reserve/readback/Delete replies, restart, restoration without the original, pending
+retirement renewal and final zero-lease cleanup. This is a manual repair primitive, not
+automatic maintenance, adaptive provider-capacity drain or a new protected-overlay proof.
+Post-replacement reports use additive version 2 and include temporary/historical physical
+charges. The pinned Image v1 parser needs a coordinated update before it can consume these
+archives; no Image compatibility is claimed for repaired archives yet. See
+[the command, accounting contract and remaining limits](PRIVATE_STORAGE.md#explicit-fragment-copy-replacement).
 
 ### Mailbox import confirmation
 

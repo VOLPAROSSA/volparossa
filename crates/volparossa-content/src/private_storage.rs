@@ -34,6 +34,10 @@ pub const MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 pub const MAX_CAPACITY_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 /// Maximum new lease interval. Renewal changes the lease, never immutable archive identity.
 pub const MAX_LEASE_SECONDS: u64 = 31 * 24 * 60 * 60;
+/// One core-owned redundancy target for NEW logical storage archives, never an app setting.
+/// Existing archives retain their original copies and charges; replacement may temporarily
+/// retain additional copies. A provider lease alone does not establish this redundancy.
+pub const ARCHIVE_COPY_TARGET: usize = 2;
 const MAX_LEASES: u64 = 256;
 const VERSION: i64 = 2;
 const APPLICATION_ID: i64 = 0x5650_5331;
