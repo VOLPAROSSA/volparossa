@@ -598,8 +598,15 @@ if ss -H -ltn 2>/dev/null | awk '$4 ~ /:22223$/ { found=1 } END { exit !found }'
     exit 77
 fi
 
-RUN_DIRECTORY=$(mktemp -d /tmp/volparossa-alpha-kvm.XXXXXX)
-case $RUN_DIRECTORY in /tmp/volparossa-alpha-kvm.??????) ;; *) exit 69 ;; esac
+RUN_DIRECTORY_PARENT=/tmp
+if [ -n "$browser_native_bundle" ]; then
+    # Local native trials may run on a host whose /tmp is RAM-backed. Keep the
+    # disposable VM disk beside its explicitly selected SSD evidence directory.
+    [ "$(readlink -f -- "$output_directory")" = "$output_directory" ] || exit 64
+    RUN_DIRECTORY_PARENT=$output_directory
+fi
+RUN_DIRECTORY=$(mktemp -d "$RUN_DIRECTORY_PARENT/volparossa-alpha-kvm.XXXXXX")
+case $RUN_DIRECTORY in "$RUN_DIRECTORY_PARENT"/volparossa-alpha-kvm.??????) ;; *) exit 69 ;; esac
 chmod 0700 "$RUN_DIRECTORY"
 QEMU_PID=
 FINISHED=no
@@ -629,7 +636,11 @@ cleanup() {
         install -m 0600 "$RUN_DIRECTORY/qemu-outer-uplink.json" "$output_directory/qemu-outer-uplink.json" \
             2>/dev/null || status=1
     fi
-    rm -rf --one-file-system -- "$RUN_DIRECTORY"
+    case $RUN_DIRECTORY in
+        "$RUN_DIRECTORY_PARENT"/volparossa-alpha-kvm.??????)
+            rm -rf --one-file-system -- "$RUN_DIRECTORY" ;;
+        *) status=69 ;;
+    esac
     exit "$status"
 }
 trap cleanup EXIT
