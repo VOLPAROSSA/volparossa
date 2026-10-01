@@ -31,6 +31,13 @@ compatibility, **not proof of the actual native model-driven coding loop**. The 
 trial remains pending; general coding quality, complete editor integration and
 private distributed inference are not proved by this candidate.
 
+The first exact CI attempt, [36904824814](https://github.com/VOLPAROSSA/volparossa/actions/runs/36904824814)
+on `347a510c620c1df41723f824cf2a9686e7f74e3b`, had over 85 GiB free but stopped
+in the pinned builder's dependency-fetch step, before compilation or model execution.
+The original job log reports the failure without the underlying build-step log.
+The next candidate exports only bounded public source-build log tails on failure;
+this diagnostic does not change source pins, sandbox settings or success criteria.
+
 ### Additional application and autonomous-maintenance scope
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):

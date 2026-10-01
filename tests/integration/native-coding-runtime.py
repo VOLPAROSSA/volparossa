@@ -71,6 +71,27 @@ def checked_command(argv, *, cwd=None, seconds=120):
     return subprocess.check_output(argv, cwd=cwd, env=env, timeout=seconds)
 
 
+def build_failure_diagnostic(state):
+    # This stage contains only public pinned sources/dependencies. It has never
+    # loaded a model, owner workspace or credentials. Never inspect guest logs.
+    logs = []
+    for path in sorted(state.glob('*.log')):
+        if not re.fullmatch(r'(fetch|metadata|compile)-[0-9]+\.log', path.name):
+            continue
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 64 * 1024 ** 2:
+            continue
+        with path.open('rb') as stream:
+            stream.seek(max(0, info.st_size - 8192))
+            tail = stream.read(8192)
+        logs.append(dict(name=path.name, bytes=info.st_size, tail_bytes=len(tail),
+                         truncated=info.st_size > len(tail), text=tail.decode('utf-8', errors='replace')))
+        if len(logs) == 6:
+            break
+    return dict(kind='native-public-source-build-failure', model_executed=False,
+                private_input_loaded=False, logs=logs)
+
+
 def checkout(path, repository, revision, tree=None):
     path.mkdir(mode=0o700)
     checked_command(['/usr/bin/git', 'init', '--quiet', str(path)])
@@ -130,9 +151,13 @@ def build(revision):
     compiler = mail_toolchain(BUILD_ROOT / 'mail-toolchain')
     # This unmodified builder validates Git blobs, Cargo.lock, the one recorded
     # source patch and every compiler file; compilation itself is offline in bwrap.
-    checked_command(['/usr/bin/python3', '-B', str(code / 'scripts/build_codex_runtime.py'),
-                     '--build', '--fetch', '--source', str(upstream), '--toolchain', str(compiler)], seconds=5100)
     state = code / 'build/codex-runtime'
+    try:
+        checked_command(['/usr/bin/python3', '-B', str(code / 'scripts/build_codex_runtime.py'),
+                         '--build', '--fetch', '--source', str(upstream), '--toolchain', str(compiler)], seconds=5100)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        print(json.dumps(build_failure_diagnostic(state)), flush=True)
+        raise
     build_report = json.loads((state / 'BUILD_REPORT.json').read_text())
     binary = state / 'runtime/codex-app-server'
     require(build_report['app_server_built'] is True and build_report['app_server_executed'] is False

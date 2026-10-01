@@ -108,6 +108,23 @@ class BundleTests(unittest.TestCase):
 
 
 class WiringTests(unittest.TestCase):
+    def test_failure_diagnostic_reads_only_bounded_public_build_logs(self):
+        with tempfile.TemporaryDirectory(prefix='volparossa-build-log-contract-') as temporary:
+            root = Path(temporary)
+            (root / 'fetch-1.log').write_text('x' * 10000 + '\nsynthetic fetch failure')
+            (root / 'private.log').write_text('not a build step')
+            (root / 'metadata-2.log').symlink_to(root / 'private.log')
+            result = runtime.build_failure_diagnostic(root)
+            self.assertFalse(result['model_executed'])
+            self.assertFalse(result['private_input_loaded'])
+            self.assertEqual(len(result['logs']), 1)
+            log = result['logs'][0]
+            self.assertEqual(log['name'], 'fetch-1.log')
+            self.assertEqual(log['tail_bytes'], 8192)
+            self.assertTrue(log['truncated'])
+            self.assertTrue(log['text'].endswith('synthetic fetch failure'))
+            self.assertNotIn('not a build step', json.dumps(result))
+
     def test_build_cannot_run_on_development_host(self):
         with patch.dict(os.environ, {'GITHUB_ACTIONS': 'false'}), patch.object(runtime, 'checkout') as checkout:
             with self.assertRaisesRegex(ValueError, 'CI runner'):
