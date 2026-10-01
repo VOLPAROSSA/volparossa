@@ -13,6 +13,16 @@ Last updated: 2026-10-01
   followed by the account/metadata/sharing/synchronization functions needed for
   normal use without the original server. Distributed blobs alone are not a
   server-independent OpenCloud service.
+  Cloud `541cc826fe14ce69cf89a82ecb600ad14dd534c6` implements one-file
+  authenticated DAV import, owner-side GPG encryption and a core-storage bridge.
+  Its local synthetic-DAV/actual-GPG tests pass; its injected storage contract
+  test is not peer evidence. The new `cloud-private-file` disposable scenario
+  pins that exact source and reuses the protected fragment topology: stop the
+  DAV source, deposit, remove local ciphertext, stop provider A, restore/decrypt
+  twice from B/C, then delete every lease and require private/topology cleanup
+  plus unchanged host state. Provision, parser and wiring checks pass; this
+  Cloud network scenario has not yet run. No live OpenCloud server, client
+  browsing or general server-independent service is claimed.
 - [ ] Cooperative maintenance of current/future VOLPAROSSA organization repositories:
   actual coding jobs, independent immune review and exact-revision scoped GitHub
   publication. [Agreed scope](REPOSITORY_MAINTENANCE.md); no autonomous publisher,
@@ -222,7 +232,7 @@ This proves fragment transport, not application encryption, automatic placement/
 reciprocal quotas, and is integrated through PR #183. The earlier replica/handoff
 proofs retain a complete encrypted archive at each selected provider.
 
-The new `image-snapshot` cross-repository candidate pins Image
+The `image-snapshot` cross-repository slice pins Image
 `e177afebabd99ac0773de2a73d60275346a5de52`. Its actual Python GPG creator and Node storage
 CLI must encrypt synthetic quiesced database/assets, deposit/renew their fragments through
 the real core, remove the local ciphertext, restore twice through B/C after A stops, decrypt
@@ -236,11 +246,11 @@ Its original phase receipts record real encryption, eight deposited fragment cop
 two independently hash-verified GPG decryptions through B/C after A stops, and deletion
 of all copies with zero final provider usage. Host-state hashes match, but the worker
 cannot remove its short `$WORK/i` directory from root-owned mode-0755 `$WORK`.
-The pending correction uses worker-owned mode-0700 `$WORK/u` as its short parent;
-the same strict cleanup still has to remove `i`, after which root removes empty `u`.
+The correction uses worker-owned mode-0700 `$WORK/u` as its short parent;
+the same strict cleanup removes `i`, after which root removes empty `u`.
 The original 42-file artifact ZIP SHA256 is
 `4867ad268bdfd7bef43d3d2966cd38dd2146245080c1e65a033c030bbe86041a`.
-A passing complete rerun remains required. The follow-up
+A passing complete rerun was still required at that point. The follow-up
 [run `36897550023`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36897550023)
 on `4f63bfdf4aa062b5533a70b7767571b922265769` fails earlier, during initial route
 selection (`FRAGMENTS_ROUTE_UNAVAILABLE`), before Image preparation or transfers.
@@ -271,6 +281,20 @@ It preserves all identity, plaintext, network, accounting and cleanup checks. Th
 is local reproduction/revalidation, not a new green CI run or a retroactive change
 to the failed job. The live source remains pinned Image `e177afeb`, not a newer
 Image adapter, and still does not prove running Immich or general serverless use.
+
+The subsequent [run `36905847039`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36905847039)
+**passes the complete Image workflow** on exact core
+`cf4de524ce885af95d0f75fcb53d80254486c27f`, still using Image
+`e177afebabd99ac0773de2a73d60275346a5de52`. Its 44 original artifacts record
+799,146 encrypted bytes, eight fragment copies, two actual GPG plaintext restores
+through B/C with A stopped, all-copy deletion, zero remaining owned objects and
+complete cleanup. Before/after guest host-state SHA256 is
+`0f4ce7287ccff8ea286b7701173323440528775111cb54082726a700383dd3cd`;
+artifact ZIP SHA256 is
+`266821ff889304831a771c57cf34bd01c866b3b358c25824a16b4b8579cf0169`.
+The original report also passes local exact-revision replay. Earlier failed
+runs remain failed. This proves this pinned synthetic snapshot/storage slice,
+not a newer Image adapter, running Immich recovery or serverless availability.
 
 ### Explicit fragment-copy repair candidate
 

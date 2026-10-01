@@ -52,7 +52,7 @@ archive in this trial. Automatic placement, independent replica repair and recov
 the private reconstruction metadata remain unfinished. Complete-copy proofs are still
 not interchangeable with distributed-fragment evidence.
 
-The `image-snapshot` scenario is a cross-repository **candidate**: it uses pinned
+The `image-snapshot` scenario is a verified cross-repository slice: it uses pinned
 VOLPAROSSA Image code to encrypt a synthetic quiesced database/assets snapshot with GPG,
 passes only that ciphertext through the actual Image Node storage CLI, and requires two
 independently hash-verified plaintext restorations after provider A stops. The owner keeps
@@ -60,9 +60,28 @@ the recovery key private. In [trial 36901573120](https://github.com/VOLPAROSSA/v
 the actual guest report confirms those operations and complete cleanup, but the overall
 workflow fails its runner-side report check because runtime-generated synthetic gzip
 headers differ between Python versions. Fixed synthetic bytes preserve the exact guest
-identity and remove that cross-version dependency; a new green CI run remains pending.
+identity and remove that cross-version dependency. The subsequent complete
+[run 36905847039](https://github.com/VOLPAROSSA/volparossa/actions/runs/36905847039)
+passes on core `cf4de524ce885af95d0f75fcb53d80254486c27f`: real GPG, actual Node/core
+fragment storage, A offline, two B/C decryptions, all-copy deletion, zero owned
+objects and unchanged host state. Its original report passes exact-revision replay.
 This trial uses pinned Image `e177afeb`, not a newer adapter, and does not establish a
 running Immich database, mobile synchronization or general serverless Immich availability.
+
+The new `cloud-private-file` scenario is **not yet live-verified**. It reuses the
+same protected topology with Cloud `541cc826fe14ce69cf89a82ecb600ad14dd534c6`:
+an actual authenticated synthetic DAV endpoint feeds the pinned Cloud importer,
+which encrypts the file and source metadata locally. The endpoint is stopped and
+joined before create/deposit, its credentials are removed, and the local encrypted
+file is removed before two provider-loss restores. The actual Cloud CLI must fetch
+through core fragment storage and complete authenticated GPG/manifest verification
+before new plaintext directories appear. Owner keys never go to peers or exported
+reports. Success also requires retained physical charges, explicit lease deletion,
+private cleanup and unchanged host state; static/parser checks alone are not that
+evidence. No actual OpenCloud server, web client, directory browsing or serverless
+availability is claimed. Preview with
+`sh tests/integration/run-alpha-topology-vm.sh --preview --scenario cloud-private-file`;
+execution belongs only in the explicitly approved disposable KVM workflow.
 
 ## Reciprocal contribution
 
