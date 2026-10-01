@@ -27,6 +27,24 @@ runtime/service cleanup and unchanged host networking. Bundle/source checks
 and UI admission alone are not that result. The joined editor/model test and
 general-purpose coding ability remain unproved.
 
+The first actual joined local trial, `build/native-editor-vm-01` on exact core
+`fbd07c40c17f5deee506909d8e295a3accf4de62`, fails before the first task is
+submitted. Runtime, Node and model provisioning pass; the real isolated editor
+starts and its CDP page is reachable. After the first F1 input, the UI driver does
+not observe a command-palette input within the existing 15-second window. The
+closed receipt remains at `editor-connect/deadline`, with no Start consent,
+command approval or model-directed read/edit/test. A workbench-startup race is a
+candidate explanation, not established by the retained DOM-free receipt.
+The editor exits normally through Ctrl-Q (exit 0, no forced stop); the driver,
+services and descendants are joined, private state and VM scratch are removed,
+and the guest network-state hashes both equal
+`0039b886f89fa265c6ee85e8d1392c70b6cda2dbbd9fa701d2e85fdb01f59d97`.
+Original report SHA-256:
+`03f42f6580261700ac55a176383fa0b5e8c31adfb76c8d2f18769410cc10e81b`.
+This remains a failed integration trial, not a completed coding task. The next
+UI correction must observe actual workbench/palette readiness without weakening
+consent, command approval, isolation or the task's success criteria.
+
 ### Native Codex read/edit/test integration candidate
 
 The separate [Code candidate](https://github.com/VOLPAROSSA/volparossa-code/pull/3)
