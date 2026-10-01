@@ -24,6 +24,7 @@ mod replication;
 mod replication_budget;
 #[cfg(test)]
 mod resume_tests;
+mod storage_maintenance;
 mod tls;
 mod worker_budget;
 
@@ -110,6 +111,7 @@ pub(crate) struct ContentRuntime {
     retrieval: Arc<Mutex<()>>,
     foreground: Arc<Foreground>,
     background_custody: Arc<background_custody::BackgroundCustody>,
+    storage_maintenance: Arc<storage_maintenance::Coordinator>,
     recent: Arc<Mutex<recent::RecentProviders>>,
     source_costs: Arc<Mutex<https::sources::SourceCosts>>,
     worker_budget: worker_budget::WorkerBudget,
@@ -164,6 +166,7 @@ impl ContentRuntime {
             retrieval: Arc::new(Mutex::new(())),
             foreground: Arc::new(Foreground::default()),
             background_custody: Arc::new(background_custody::BackgroundCustody::default()),
+            storage_maintenance: Arc::new(storage_maintenance::Coordinator::default()),
             recent: Arc::new(Mutex::new(recent::RecentProviders::default())),
             source_costs: Arc::new(Mutex::new(https::sources::SourceCosts::default())),
             worker_budget: worker_budget::WorkerBudget::default(),

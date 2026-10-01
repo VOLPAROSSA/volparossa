@@ -9,9 +9,8 @@ use std::{fs::File, path::Path};
 use anyhow::{Result, ensure};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use sha2::{Digest as _, Sha256};
-use volparossa_content::private_storage::{
-    MAX_RANGE_BYTES,
-    protocol::{ReceiptState, StorageOperation, StorageRights, VerifiedStorageGrant},
+use volparossa_content::private_storage::protocol::{
+    ReceiptState, StorageOperation, StorageRights, VerifiedStorageGrant,
 };
 
 use super::{
@@ -196,7 +195,7 @@ async fn verify_copy(
     let mut offset = 0;
     let total = copy.journal.ciphertext_bytes;
     while offset < total {
-        let length = (total - offset).min(MAX_RANGE_BYTES);
+        let length = (total - offset).min(transfer::range_bytes());
         let reply = transfer::remote(
             socket,
             grant,

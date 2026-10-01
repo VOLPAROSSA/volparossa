@@ -112,6 +112,29 @@ pub(super) async fn refresh_selected(
     renewal: Option<u64>,
     retiring: &BTreeSet<usize>,
 ) -> Result<serde_json::Value> {
+    refresh_selected_inner(set, socket, signer, renewal, retiring, false).await
+}
+
+/// Autonomous renewal first observes current retention, including an earlier lost reply.
+/// It never turns a healthy longer-lived copy into an uncertain shorter-renewal attempt.
+pub(super) async fn refresh_maintenance(
+    set: &mut LockedSet,
+    socket: &Path,
+    signer: &SigningKey,
+    renewal: Option<u64>,
+    retiring: &BTreeSet<usize>,
+) -> Result<serde_json::Value> {
+    refresh_selected_inner(set, socket, signer, renewal, retiring, true).await
+}
+
+async fn refresh_selected_inner(
+    set: &mut LockedSet,
+    socket: &Path,
+    signer: &SigningKey,
+    renewal: Option<u64>,
+    retiring: &BTreeSet<usize>,
+    only_extend: bool,
+) -> Result<serde_json::Value> {
     set.check_owner(signer)?;
     let mut outcomes = Vec::new();
     let mut complete = true;
@@ -134,12 +157,38 @@ pub(super) async fn refresh_selected(
             outcomes.push("unknown_reservation_use_deposit_retry");
             continue;
         }
+        if only_extend && renewal.is_some() {
+            set.begin(index)?;
+            if transfer::operate_retained(
+                socket,
+                &grant,
+                signer,
+                &mut retained,
+                StorageOperation::Progress,
+            )
+            .await
+            .is_err()
+            {
+                complete = false;
+                outcomes.push("unconfirmed_retained");
+                continue;
+            }
+            set.confirm(index, &retained.journal)?;
+            if set.data.copies[index].charge == Charge::Deleted {
+                outcomes.push("explicitly_deleted");
+                continue;
+            }
+        }
         let operation = if let Some(lifetime) = renewal {
             let Ok(expires_at) = transfer::requested_expiry(&grant, lifetime) else {
                 complete = false;
                 outcomes.push("renewal_outside_original_grant");
                 continue;
             };
+            if only_extend && expires_at <= retained.journal.last_expiry {
+                outcomes.push("existing_retention_sufficient");
+                continue;
+            }
             StorageOperation::Renew { expires_at }
         } else {
             StorageOperation::Progress

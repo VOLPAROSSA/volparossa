@@ -174,6 +174,14 @@ impl LockedJournal {
 }
 
 pub(super) fn directory(path: &Path) -> Result<File> {
+    let file = directory_readonly(path)?;
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+        .context("private archive state is already in use")?;
+    Ok(file)
+}
+
+/// Pin the owner-private directory for read-only status while its worker holds the write lock.
+pub(super) fn directory_readonly(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -185,8 +193,6 @@ pub(super) fn directory(path: &Path) -> Result<File> {
             && metadata.uid() == rustix::process::geteuid().as_raw(),
         "archive state directory must be owned by this user with mode 0700"
     );
-    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-        .context("private archive state is already in use")?;
     Ok(file)
 }
 

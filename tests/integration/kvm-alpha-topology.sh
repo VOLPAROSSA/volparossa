@@ -17,6 +17,7 @@ private_storage_peer=no
 private_storage_replicas=no
 private_storage_handoff=no
 private_storage_fragments=no
+private_storage_maintenance=no
 image_snapshot=no
 cloud_private_file=no
 agent_jobs_loss=no
@@ -56,10 +57,20 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|private-storage-handoff|private-storage-fragments|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|private-storage-handoff|private-storage-fragments|private-storage-maintenance|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
 }
 
 print_plan() {
+    if [ "$private_storage_maintenance" = yes ]; then
+        printf '%s\n' \
+            'VOLPAROSSA private-storage-maintenance protected network smoke plan:' \
+            '  reuse three pinned fragment providers and two actual relay-only MPTCP paths;' \
+            '  enroll explicit owner-private maintenance, renew and repair within real sharing credit;' \
+            '  remove owner source, stop provider A, retain pending charges and verify complete restores;' \
+            '  stop maintenance, delete owned copies and prove private cleanup and unchanged host state;' \
+            '  no global discovery, unlimited contribution or encrypted archive claim.'
+        return
+    fi
     if [ "$cloud_private_file" = yes ]; then
         printf '%s\n' \
             'VOLPAROSSA Cloud private-file protected network smoke plan:' \
@@ -684,6 +695,7 @@ while [ "$#" -gt 0 ]; do
             private_storage_replicas=no
             private_storage_handoff=no
             private_storage_fragments=no
+            private_storage_maintenance=no
             image_snapshot=no
             cloud_private_file=no
             download_sharing=no
@@ -714,6 +726,7 @@ while [ "$#" -gt 0 ]; do
                 private-storage-replicas) scenario=content-custody; private_storage_replicas=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-handoff) scenario=content-custody; private_storage_handoff=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-fragments) scenario=content-custody; private_storage_fragments=yes; wifi_link=no; uplink_link=no ;;
+                private-storage-maintenance) scenario=content-custody; private_storage_fragments=yes; private_storage_maintenance=yes; wifi_link=no; uplink_link=no ;;
                 image-snapshot) scenario=content-custody; private_storage_fragments=yes; image_snapshot=yes; wifi_link=no; uplink_link=no ;;
                 cloud-private-file) scenario=content-custody; private_storage_fragments=yes; cloud_private_file=yes; wifi_link=no; uplink_link=no ;;
                 agent-artifact-quarantine) scenario=agent-artifact; agent_train_loop=yes; agent_artifact_quarantine=yes; wifi_link=no; uplink_link=no ;;
@@ -938,6 +951,12 @@ fi
 if [ "$private_storage_fragments" = yes ]; then
     for storage_fixture in private-storage-fragments-smoke.sh private-storage-fragments-smoke.py \
         private-storage-replicas-smoke.sh private-storage-replicas-smoke.py private-storage-peer-smoke.py; do
+        [ -f "$source_directory/tests/integration/$storage_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
+    done
+fi
+if [ "$private_storage_maintenance" = yes ]; then
+    for storage_fixture in private-storage-maintenance-smoke.sh private-storage-maintenance-smoke.py; do
         [ -f "$source_directory/tests/integration/$storage_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
     done
@@ -2271,6 +2290,8 @@ cleanup() {
         cloud_private_file_finalize_report "$original_status" || original_status=1
     elif [ "$image_snapshot" = yes ]; then
         image_snapshot_finalize_report "$original_status" || original_status=1
+    elif [ "$private_storage_maintenance" = yes ]; then
+        private_storage_maintenance_finalize_report "$original_status" || original_status=1
     elif [ "$private_storage_fragments" = yes ]; then
         private_storage_fragments_finalize_report "$original_status" || original_status=1
     elif [ "$private_storage_handoff" = yes ]; then
@@ -2444,6 +2465,10 @@ fi
 if [ "$private_storage_fragments" = yes ]; then
     # shellcheck source=tests/integration/private-storage-fragments-smoke.sh
     . "$source_directory/tests/integration/private-storage-fragments-smoke.sh"
+fi
+if [ "$private_storage_maintenance" = yes ]; then
+    # shellcheck source=tests/integration/private-storage-maintenance-smoke.sh
+    . "$source_directory/tests/integration/private-storage-maintenance-smoke.sh"
 fi
 if [ "$image_snapshot" = yes ]; then
     # shellcheck source=tests/integration/image-snapshot-smoke.sh
@@ -2645,6 +2670,10 @@ fi
 if [ "$private_storage_fragments" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/private-storage-fragments-smoke.py" \
         "$WORK/bin/private-storage-fragments-smoke.py"
+fi
+if [ "$private_storage_maintenance" = yes ]; then
+    install -o root -g root -m 0555 "$source_directory/tests/integration/private-storage-maintenance-smoke.py" \
+        "$WORK/bin/private-storage-maintenance-smoke.py"
 fi
 if [ "$image_snapshot" = yes ] || [ "$cloud_private_file" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/image-snapshot-smoke.py" \
@@ -6603,6 +6632,10 @@ if [ "$cloud_private_file" = yes ]; then
 fi
 if [ "$image_snapshot" = yes ]; then
     image_snapshot_run
+    exit 0
+fi
+if [ "$private_storage_maintenance" = yes ]; then
+    private_storage_maintenance_run
     exit 0
 fi
 if [ "$private_storage_fragments" = yes ]; then
