@@ -9,7 +9,7 @@ Last updated: 2026-10-01
 ### Native Codex read/edit/test integration candidate
 
 The separate [Code candidate](https://github.com/VOLPAROSSA/volparossa-code/pull/3)
-at `91265808c6349ced83448b5bf9921c12673c8e88` connects the pinned source-built
+at `7e35ba8d56df8ec43715119ceb0a1ae3f02f1f63` connects the pinned source-built
 Codex app-server to the VOLPAROSSA Responses adapter and private Qwen conversation
 service. It retains the complete 20,903-byte upstream prompt. The owner approves
 only synthetic-project read, model-chosen arithmetic edit and actual test commands;
@@ -49,10 +49,24 @@ and requires actual online/offline sandbox preflights with zero child capabiliti
 no-new-privileges and read-only source mounts. Exit traps remove only the added
 profiles and report cleanup separately from build status. No global sysctl,
 setuid bit, model/source pin, build sandbox or developer-host policy is changed.
-Ten local bundle/static checks, shell syntax and ShellCheck pass; profile loading,
-the actual source build and native model-driven loop remain pending disposable CI.
+Ten local bundle/static checks, shell syntax and ShellCheck pass.
 The outer wrapper does not independently prove all nested build children joined
 after forced termination; the pinned builder retains its own process lifecycle.
+
+The next exact [attempt 36908029526](https://github.com/VOLPAROSSA/volparossa/actions/runs/36908029526)
+on `03b80484` passes both actual sandbox preflights and AppArmor cleanup. Dependency
+fetch then fails with `Could not resolve host: github.com`; compilation and the
+model-driven loop have not started. The original log SHA-256 is
+`627ff9b24e8a4f7309c07a450985b1c53c4e808ade30a3074a8b8d1fec5367dc`.
+The next Code builder candidate read-only binds only the resolved `/etc/resolv.conf`
+file during network-enabled dependency fetch, including when that file is beneath
+the otherwise hidden `/run`. Offline compilation retains its separate network
+namespace and hidden `/run`; source pins, credentials isolation and AppArmor policy
+are unchanged. Seven targeted builder checks pass, including real nested disposable
+bwrap namespaces with a synthetic `/etc` to `/run` resolver symlink, read-only checks
+and unrelated runtime files remaining hidden. That probe makes no DNS requests.
+Actual CI dependency fetch, source compilation and the native coding loop remain
+unproved pending the next exact-source run.
 
 ### Additional application and autonomous-maintenance scope
 

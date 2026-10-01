@@ -81,16 +81,20 @@ attempted=1
 sudo -n "$parser" --add --skip-cache "$staged"
 probe=$(mktemp -d "${RUNNER_TEMP:?}/volparossa-bwrap.XXXXXXXX")
 mkdir -m 0700 "$probe/source"
+resolver=$(realpath -e -- /etc/resolv.conf)
+test -f "$resolver" && test "$(stat -c %s -- "$resolver")" -le 65536
+resolver_sha=$(sha256sum -- "$resolver" | cut -d ' ' -f 1)
 for network in online offline; do
-  isolation=()
+  isolation=(--ro-bind "$resolver" "$resolver")
   if test "$network" = offline; then isolation=(--unshare-net); fi
-  # Same mount/namespace layout as the unchanged pinned build_codex_runtime.py.
+  # Same layout as build_codex_runtime.py: online exposes only the resolved DNS
+  # file read-only; offline compilation still hides the entire /run tree.
   timeout 20s env -i PATH=/usr/bin:/bin LANG=C.UTF-8 /usr/bin/bwrap \
     --die-with-parent --ro-bind / / --tmpfs /home --tmpfs /root --tmpfs /run --tmpfs /tmp \
     --bind "$probe" "$probe" --ro-bind "$probe/source" "$probe/source" \
     --proc /proc --dev /dev --chdir "$probe/source" "${isolation[@]}" -- \
     /usr/bin/python3 -I -c '
-import errno, json, os
+import errno, hashlib, json, os
 from pathlib import Path
 import sys
 s = dict(line.split(":", 1) for line in Path("/proc/self/status").read_text().splitlines() if ":" in line)
@@ -98,7 +102,22 @@ assert os.getuid() == int(sys.argv[1]) != 0
 assert int(s["CapEff"], 16) == int(s["CapPrm"], 16) == 0
 assert int(s["NoNewPrivs"]) == 1
 assert "volparossa_ci_native_child" in Path("/proc/self/attr/current").read_text()
-assert not list(Path("/root").iterdir()) and not list(Path("/run").iterdir())
+assert not list(Path("/root").iterdir()) and not list(Path("/home").iterdir())
+if sys.argv[2] == "online":
+    resolver = Path(sys.argv[4])
+    assert Path("/etc/resolv.conf").resolve(strict=True) == resolver
+    assert hashlib.sha256(resolver.read_bytes()).hexdigest() == sys.argv[5]
+    allowed = {p for p in (resolver, *resolver.parents) if p.is_relative_to("/run") and p != Path("/run")}
+    assert set(Path("/run").rglob("*")) == allowed
+    try:
+        fd = os.open(resolver, os.O_WRONLY)
+    except OSError as error:
+        assert error.errno == errno.EROFS
+    else:
+        os.close(fd)
+        raise AssertionError("resolver mount unexpectedly writable")
+else:
+    assert not list(Path("/run").iterdir())
 try:
     os.open("forbidden-write", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
 except OSError as error:
@@ -107,8 +126,9 @@ else:
     raise AssertionError("source mount unexpectedly writable")
 if sys.argv[2] == "offline":
     assert os.readlink("/proc/self/ns/net") != sys.argv[3]
-print(json.dumps({"ci_bwrap_preflight": True, "mode": sys.argv[2], "capabilities": 0, "no_new_privs": True}))
-' "$(id -u)" "$network" "$(readlink /proc/self/ns/net)"
+print(json.dumps({"ci_bwrap_preflight": True, "mode": sys.argv[2], "capabilities": 0,
+                  "no_new_privs": True, "resolver_file_read_only": sys.argv[2] == "online"}))
+' "$(id -u)" "$network" "$(readlink /proc/self/ns/net)" "$resolver" "$resolver_sha"
 done
 setsid python3 -B "$here/native-coding-runtime.py" build --yes --expected-commit "$1" &
 build_pid=$!
