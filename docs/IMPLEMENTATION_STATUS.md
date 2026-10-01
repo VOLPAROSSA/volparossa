@@ -159,6 +159,24 @@ tokens, completion reason and elapsed time through confirmed cleanup). Offline
 event-controller/protocol and closed-parser checks cover this candidate; no new
 actual coding-loop success is claimed and no broader model or permission is selected.
 
+The exact [run 36932657647](https://github.com/VOLPAROSSA/volparossa/actions/runs/36932657647)
+on core `c3fb587f6cdcdc9fd1e0a1dd31a9a0bb6001706c` / Code `2f7014b0`
+fails the actual coding task. It performs one native read, finishes its first turn,
+and starts the neutral continuation. The next actual tool proposal is declined in
+the fixed `command` category; no edit or test is completed. Three real model
+responses finish with confirmed worker cleanup: function call (6,890 prompt / 51
+output tokens), assistant (7,101 / 60), function call (7,215 / 57). This proves the
+continuation reaches another native tool request, not that the rejected command
+was a safe or correct edit; command text was deliberately not retained.
+Runtime exit is zero without a forced stop, all private/service cleanup checks
+pass, and host snapshots both hash to
+`22a57aea1f6ba27fb9531e2e3e50d0ae1232b9553d099524b7ade82301db2150`.
+Original eight-file ZIP SHA-256:
+`ebdbdaa112a72320c6c80945867e0156c14c0ae72da6b6b089e0f8dc51ff2954`;
+original job110605509953 log SHA-256:
+`51264f989c440ef970b4e8a76f52327dc0f145dc93401f2dfafc3d12837b133e`.
+The model-driven read/edit/test and native editor milestones remain unchecked.
+
 ### Additional application and autonomous-maintenance scope
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
