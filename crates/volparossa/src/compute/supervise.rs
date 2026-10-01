@@ -317,9 +317,11 @@ async fn reap_failed_child(
         .await
         .context("compute_reap_deadline")
         .and_then(|result| result.context("compute_reap"));
-    if mode.is_private() && reaped.is_err() {
-        diagnostic::failure("reap", reaped.as_ref().unwrap_err());
-        return Err(super::private_task::CleanupUnconfirmed.into());
+    if mode.is_private() {
+        if let Err(error) = &reaped {
+            diagnostic::failure("reap", error);
+            return Err(super::private_task::CleanupUnconfirmed.into());
+        }
     }
     reaped?;
     Ok(())

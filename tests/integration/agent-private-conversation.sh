@@ -19,7 +19,9 @@ plan() {
         '  submit two genuine model turns: one tool proposal and one correlated tool-result continuation;' \
         '  let only the fixture authorize the exact read of synthetic fixture.js, never model commands;' \
         '  observe actual worker namespaces, exact read-only inputs, cleanup and bounded cgroup usage;' \
-        '  export only closed proof and host-state snapshots, never source prompts or raw model answers;' \
+        '  export closed proof and host-state snapshots, plus the explicit synthetic-first-answer diagnostic;' \
+        '  that diagnostic exports at most 4096B actual first assistant text only for the exact published input;' \
+        '  never export private-user inputs, source prompts, tool-result contents or the second answer;' \
         '  stop the exact transient service, join child groups, remove only the newly owned fixture root;' \
         '  compare guest routes, DNS and firewall before and after.' \
         'No host model/install, cloud fallback, training, public sharing or full Codex/edit/test/quality claim.'
@@ -84,6 +86,6 @@ CARGO_TARGET_DIR=/home/vpci/target CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 
     }
 phase=private-conversation
 printf '%s\n' "$phase" >"$output/current-phase"
-python3 -B "$fixture" execute "$output" "$revision" --yes \
+python3 -B "$fixture" execute "$output" "$revision" --yes --export-synthetic-first-answer \
     >"$output/runner.stdout" 2>"$output/runner.stderr"
 python3 -B "$fixture" report "$output/agent-private-conversation-smoke.json" "$revision"

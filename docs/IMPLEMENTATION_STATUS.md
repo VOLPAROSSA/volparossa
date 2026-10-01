@@ -52,9 +52,32 @@ sampling with temperature 0.7, top-p 0.8, top-k 20 and min-p 0. The existing see
 single attempt, original prompt, strict native tool parser, owner checkpoints,
 token/memory/deadline limits and cleanup requirements remain unchanged. Legacy
 Smol profiles retain greedy generation. This is a generation-profile correction,
-**not a proved cause or fix for the missing tool proposal**; a fresh real trial is
-required. Eight focused offline generation/bridge checks pass with explicit backend
-doubles, not new inference evidence. Actual native tool use,
+**not a proved cause or fix for the missing tool proposal**. Eight focused offline
+generation/bridge checks pass with explicit backend doubles, not inference evidence.
+The exact follow-up [trial 36776441427](https://github.com/VOLPAROSSA/volparossa/actions/runs/36776441427)
+on `db4be2b6fae370cc41c2218fd9fe7adc83f660c6` again returned an actual `assistant`
+first turn (279 prompt / 19 generated tokens), rather than a tool proposal. It
+failed the unchanged client `tool-check`; no second turn or authorized file read
+was proved. Actual isolation, cleanup, no-OOM and unchanged-host checks passed.
+The response text was not exported, so neither refusal, bare tool-intent JSON nor
+another answer can be distinguished from these original artifacts.
+
+The next diagnostic candidate leaves the production worker, generation settings,
+seed, prompt, aliases and strict success checks unchanged. Its disposable scenario
+explicitly opts in to exporting at most 4,096 UTF-8 bytes of the **actual first
+assistant response**, only after the entire first input matches a fixed SHA-256
+of the published synthetic fixture. That input contains neither the file nor its
+generated canary. Such an artifact truthfully sets `raw_model_output_exported`
+and `synthetic_only`; it is untrusted model text, not tool-use proof. No second
+response, tool-result/file contents, general worker log or private-user input is
+exported. If the first turn is a tool proposal, no response text is exported.
+The normal non-opted-in fixture path retains the closed-only export behavior.
+Fifteen offline fixture-contract tests and six existing Qwen bridge tests pass;
+these use synthetic validator inputs/backend doubles, not new model inference.
+The three strict-Clippy findings from the same head's Quality run are corrected
+without changing diagnostic or cleanup semantics; targeted package/all-targets/
+all-features strict Clippy passes locally.
+Actual native tool use,
 a hard-4GiB-bounded long-context run and an end-to-end editing loop remain
 **unproved/incomplete**. See the [exact wire contract](../crates/volparossa/src/compute/private_conversation/WIRE.md).
 

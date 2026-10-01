@@ -118,13 +118,13 @@ pub(super) fn describe(error: &Error) -> Detail {
 }
 
 pub(in crate::compute) fn failure(phase: &'static str, error: &Error) {
-    emit(phase, describe(error));
+    emit(phase, &describe(error));
 }
 
 pub(in crate::compute) fn event(phase: &'static str, code: &'static str) {
     emit(
         phase,
-        Detail {
+        &Detail {
             code,
             io_kind: "none",
             exit_code: None,
@@ -134,7 +134,7 @@ pub(in crate::compute) fn event(phase: &'static str, code: &'static str) {
     );
 }
 
-fn emit(phase: &'static str, detail: Detail) {
+fn emit(phase: &'static str, detail: &Detail) {
     // A dedicated target is off by default. Its fixture log is private and removed;
     // only a second independently closed parser can populate exported diagnostics.
     let record = serde_json::json!({"version": 1, "phase": phase, "detail": detail});
@@ -191,7 +191,7 @@ mod tests {
             .args([
                 "-B",
                 "-c",
-                r#"
+                r"
 import runpy, sys
 from pathlib import Path
 fixture = runpy.run_path(sys.argv[1])
@@ -199,7 +199,7 @@ result = fixture['service_diagnostic'](Path(sys.argv[2]))
 assert result == dict(version=1, truncated=False, unrecognized_record=False, events=[dict(
     version=1, phase='refresh', detail=dict(code='compute_private_process_children',
     io_kind='permission_denied', exit_code=None, signal=None, stderr_class=None))])
-"#,
+",
             ])
             .arg(fixture)
             .arg(log.path())

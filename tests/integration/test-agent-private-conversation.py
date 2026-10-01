@@ -18,6 +18,28 @@ FIX = runpy.run_path(str(HERE / 'agent-private-conversation.py'))
 REVISION = 'a' * 40
 
 
+def synthetic_first_input():
+    """Exact public CJS first input; no synthetic file content or canary."""
+    return dict(version=1, visibility='private_local',
+        instructions='Use the offered read_file tool to read fixture.js before answering. '
+            'After receiving its result, answer with only the literal string returned by testIdentifier. '
+            'Do not guess the string and do not propose another tool call after reading the file.',
+        history=[dict(type='message', role='user', text='Read fixture.js. What string does testIdentifier return?')],
+        tools=[dict(type='function', name='read_file', namespace='fixture',
+            description='Read the synthetic fixture.js source file. The only allowed path is fixture.js.',
+            parameters=dict(type='object', properties=dict(path=dict(type='string', enum=['fixture.js'])),
+                            required=['path'], additionalProperties=False))])
+
+
+def assistant_response(text):
+    """Fabricated protocol-test input only, not model evidence."""
+    return dict(version=1, operation='compute_private_conversation', model_profile=FIX['PROFILE'],
+        execution_complete=True, turn_complete=True, local_only=True, private_data_supported=True,
+        tool_execution=False, model_answer_correctness_proven=False, distributed_execution_claimed=False,
+        private_training_claimed=False, cleanup=dict(complete=True, retained_input=False, retained_report=False),
+        prompt_tokens=279, generated_tokens=19, output=dict(type='assistant', text=text))
+
+
 def example_receipt():
     """Deliberately fabricated validator input, never exported as runtime proof."""
     provisioner = runpy.run_path(str(FIX['ML'] / 'provision.py'))
@@ -61,6 +83,55 @@ def example_receipt():
 
 
 class FixtureTests(unittest.TestCase):
+    def test_synthetic_diagnostic_requires_opt_in_exact_first_input_and_complete_cleanup(self):
+        source, response = synthetic_first_input(), assistant_response('Synthetic test answer, not inference.')
+        export = FIX['synthetic_first_answer']
+        self.assertIsNone(export(source, response, 1))
+        self.assertIsNone(export({'private': 'PRIVATE_CANARY'}, response, 2, enabled=True))
+        result = export(source, response, 1, enabled=True)
+        self.assertTrue(result['synthetic_only'])
+        self.assertTrue(result['raw_model_output_exported'])
+        self.assertEqual(result['turn'], 1)
+        self.assertEqual(result['input_sha256'], FIX['SYNTHETIC_FIRST_INPUT_SHA256'])
+        self.assertEqual(result['text'], response['output']['text'])
+        self.assertEqual(result['utf8_bytes'], len(result['text'].encode('utf-8')))
+        for changed in (dict(source, instructions='PRIVATE_CANARY'),
+                        dict(source, history=source['history'] + [dict(type='tool_result', output='PRIVATE_CANARY')]),
+                        dict(source, tools=[])):
+            with self.assertRaisesRegex(ValueError, 'synthetic first input identity'):
+                export(changed, response, 1, enabled=True)
+        response['cleanup']['complete'] = False
+        with self.assertRaises(ValueError):
+            export(source, response, 1, enabled=True)
+
+    def test_synthetic_diagnostic_bounds_actual_text_without_rewriting_it(self):
+        export, source = FIX['synthetic_first_answer'], synthetic_first_input()
+        # Even bare JSON is retained as assistant text, never promoted into a tool.
+        text = '{"name":"vp_0","arguments":{"path":"fixture.js"}}'
+        result = export(source, assistant_response(text), 1, enabled=True)
+        self.assertEqual(result['text'], text)
+        self.assertEqual(result['output_type'], 'assistant')
+        self.assertEqual(export(source, assistant_response('é' * 2048), 1, enabled=True)['utf8_bytes'], 4096)
+        for bad in ('é' * 2049, '', '\0PRIVATE_CANARY', ['PRIVATE_CANARY']):
+            with self.assertRaises(ValueError):
+                export(source, assistant_response(bad), 1, enabled=True)
+        for output in (dict(type='function_call', name='read_file', arguments={'path': 'fixture.js'}),
+                       dict(type='incomplete', reason='invalid_output')):
+            response = assistant_response('not exposed')
+            response.update(output=output, turn_complete=output['type'] != 'incomplete')
+            self.assertIsNone(export(source, response, 1, enabled=True))
+
+    def test_synthetic_diagnostic_has_explicit_scenario_flag_and_no_production_hook(self):
+        script = (HERE / 'agent-private-conversation.sh').read_text()
+        self.assertIn('--yes --export-synthetic-first-answer', script)
+        fixture = (HERE / 'agent-private-conversation.py').read_text()
+        self.assertIn("['--yes', '--export-synthetic-first-answer']", fixture)
+        self.assertIn('if export_synthetic_first_answer and turn == 1:', fixture)
+        for name in ('worker.py', 'conversation.py', 'qwen_conversation.py'):
+            self.assertNotIn('export-synthetic-first-answer', (FIX['ML'] / name).read_text())
+        self.assertNotIn('result-1.json', FIX['EXPORT_NAMES'])
+        self.assertNotIn('result-2.json', FIX['EXPORT_NAMES'])
+
     def test_service_diagnostic_preserves_fixed_stages_without_private_fields(self):
         event = dict(version=1, phase='refresh', detail=dict(code='compute_private_process_children',
             io_kind='permission_denied', exit_code=None, signal=None, stderr_class=None))
@@ -233,7 +304,7 @@ class FixtureTests(unittest.TestCase):
         self.assertIn('python3 -B tests/integration/test-agent-private-conversation.py', workflow)
         self.assertEqual(workflow.count("env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-conversation'"), 4)
         self.assertIn('test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-private-conversation &&', workflow)
-        upload = workflow.split('      - name: Upload only closed private conversation evidence\n', 1)[1].split('\n      - name:', 1)[0]
+        upload = workflow.split('      - name: Upload bounded private conversation fixture evidence\n', 1)[1].split('\n      - name:', 1)[0]
         paths = [line.strip().split(' }}/', 1)[1] for line in upload.splitlines() if '${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/' in line]
         expected = FIX['EXPORT_NAMES'] | {f'published/{name}' for name in FIX['EXPORT_NAMES']} | {
             'vm-console.log', 'vm-incomplete.json', 'vm-diagnostics.log', 'vm-diagnostics.stderr',

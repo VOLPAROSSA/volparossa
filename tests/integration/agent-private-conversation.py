@@ -29,6 +29,10 @@ CGROUP = Path('/sys/fs/cgroup/system.slice') / UNIT
 PROFILE = 'qwen3-0.6b-v1'
 GIB = 1024**3
 MEMORY_MAX = 5 * GIB
+# Canonical JSON of the exact published first conversation in the adjacent CJS.
+# It contains neither the generated file nor its canary; changing any input
+# disables this narrowly authorized diagnostic until the source pin is reviewed.
+SYNTHETIC_FIRST_INPUT_SHA256 = 'de16db2f5b500fd6612c751c516546e337e98a6fbf40595f2b7e4b5b8a8de8d5'
 SCOPE = ('two actual Qwen3-0.6B private conversation turns through the pinned Code Node client: '
          'a model-selected read_file proposal, one authorized synthetic fixture read, and a correlated '
          'tool-result continuation containing its canary; not Codex app-server, editing/tests, '
@@ -232,6 +236,33 @@ def result_summary(value):
                 prompt_tokens=prompt, generated_tokens=generated, cleanup_confirmed=True)
 
 
+def synthetic_first_answer(input_value, response, turn, *, enabled=False):
+    """Opt-in fixture evidence only; never general worker or private-user logging.
+
+    The returned text is untrusted actual model output, not a selected answer or
+    inferred tool call. Turn two can contain file contents and is never exported.
+    """
+    if enabled is not True or turn != 1:
+        return None
+    raw_input = json.dumps(input_value, sort_keys=True, ensure_ascii=False,
+                           allow_nan=False, separators=(',', ':')).encode('utf-8')
+    require(len(raw_input) <= 4096 and hashlib.sha256(raw_input).hexdigest() ==
+            SYNTHETIC_FIRST_INPUT_SHA256, 'synthetic first input identity')
+    summary = result_summary(response)
+    if summary['output_type'] != 'assistant':
+        return None
+    output = response['output']
+    require(set(output) == {'type', 'text'} and type(output['text']) is str,
+            'synthetic assistant shape')
+    size = len(output['text'].encode('utf-8'))
+    require(0 < size <= 4096 and '\0' not in output['text'], 'synthetic assistant bound')
+    return dict(version=1, synthetic_only=True, turn=1,
+        input_sha256=SYNTHETIC_FIRST_INPUT_SHA256,
+        input_scope='published-first-input-before-any-tool-result',
+        raw_model_output_exported=True, output_type='assistant',
+        text=output['text'], utf8_bytes=size)
+
+
 def stop_client(process, privileged=False):
     """Join only a new-session process group created by this fixture, including its children."""
     if process is None:
@@ -396,7 +427,7 @@ def early_failure(output, revision, phase):
         failure_code='guest_phase_incomplete', codex_app_server_proven=False, code_edit_test_loop_proven=False))
 
 
-def execute(output, revision):
+def execute(output, revision, *, export_synthetic_first_answer=False):
     guard()
     require(output == OUTPUT and re.fullmatch('[0-9a-f]{40}', revision), 'exact invocation')
     require(not ROOT.exists() and not ROOT.is_symlink() and properties()['LoadState'] == 'not-found', 'existing fixture')
@@ -408,6 +439,7 @@ def execute(output, revision):
     result = dict(report_kind='volparossa-agent-private-conversation', proof_version=1,
                   source_revision=revision, scope=SCOPE, success=False, phase='guard',
                   code_provision=value, raw_input_exported=False, raw_model_output_exported=False,
+                  synthetic_first_answer_export_enabled=export_synthetic_first_answer,
                   codex_app_server_proven=False, code_edit_test_loop_proven=False,
                   hard_4gib_proven=False, general_coding_quality_proven=False)
     ROOT.mkdir(mode=0o700)
@@ -501,6 +533,12 @@ def execute(output, revision):
                 require(not list((ROOT / 'work').iterdir()) and
                     not any(TRAIN['alive'](member) for member in isolation['owned_processes'] if member != isolation['cli']),
                     'actual result cleanup')
+                if export_synthetic_first_answer and turn == 1:
+                    answer = synthetic_first_answer(read(ROOT / 'input-1.json', 4096), response, turn,
+                                                    enabled=export_synthetic_first_answer)
+                    if answer is not None:
+                        result['synthetic_first_answer'] = answer
+                        result['raw_model_output_exported'] = True
                 result[f'memory_after_{turn}'] = memory()
                 write(ROOT / f'continue-{turn}.json', dict(cleanup_observed=True))
             require(process.wait(timeout=20) == 0, 'client proof failed')
@@ -526,7 +564,8 @@ def execute(output, revision):
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         result['failure_code'] = 'phase_failed'
     finally:
-        # Closed error/status metadata only; no prompts, paths, archive or exception text.
+        # Error/status metadata stays closed. The sole text exception above is
+        # explicitly opted-in and bound to the published synthetic first input.
         try:
             result['client_diagnostic'] = diagnostic()
             result['client_launcher'] = closed_log(ROOT / 'client.log')
@@ -580,6 +619,9 @@ def execute(output, revision):
 def main():
     if len(sys.argv) == 5 and sys.argv[1] == 'execute' and sys.argv[4] == '--yes':
         return execute(Path(sys.argv[2]), sys.argv[3])
+    if (len(sys.argv) == 6 and sys.argv[1] == 'execute' and sys.argv[4:] ==
+            ['--yes', '--export-synthetic-first-answer']):
+        return execute(Path(sys.argv[2]), sys.argv[3], export_synthetic_first_answer=True)
     if len(sys.argv) == 4 and sys.argv[1] == 'observe':
         observe(int(sys.argv[2]), int(sys.argv[3]))
         return 0

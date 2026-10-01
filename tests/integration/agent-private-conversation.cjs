@@ -28,7 +28,8 @@ async function submit(input, turn) {
   save(`submitted-${turn}.json`, {version:1, turn});
   phase = `turn-${turn}-result`;
   const result = await pending;
-  // Original answers live only in this disposable private root, never the artifact export.
+  // Original answers stay in this disposable root. The outer fixture may explicitly
+  // export ONLY a bounded first assistant answer after matching its public input hash.
   save(`result-${turn}.json`, result);
   save(`settled-${turn}.json`, {version:1, turn});
   await boundary(turn);
