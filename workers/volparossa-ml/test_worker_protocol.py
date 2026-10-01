@@ -384,7 +384,7 @@ class WorkerProtocolTests(unittest.TestCase):
 
     def test_private_input_is_exact_local_only_and_rejected_by_all_public_modes(self):
         source = dict(version=1, visibility="private_local", question="Where is my café note?", context="In my desk.")
-        for profile in WORKER.MODEL_PROFILES:
+        for profile in (WORKER.DEFAULT_MODEL_PROFILE, WORKER.LARGE_MODEL_PROFILE, WORKER.REASONING_MODEL_PROFILE):
             with self.subTest(profile=profile):
                 value = WORKER.validate_request(dict(request(), mode="private_infer", model_profile=profile))
                 self.assertEqual(value["mode"], "private_infer")
@@ -438,7 +438,7 @@ class WorkerProtocolTests(unittest.TestCase):
         original = copy.deepcopy(source)
         tokenizer, backend = mock.Mock(), mock.Mock()
         backend.tensor.side_effect = lambda value, **_kwargs: value
-        for profile_name in WORKER.MODEL_PROFILES:
+        for profile_name in (WORKER.DEFAULT_MODEL_PROFILE, WORKER.LARGE_MODEL_PROFILE, WORKER.REASONING_MODEL_PROFILE):
             limit = WORKER.model_profile(profile_name)["prompt_tokens"]
             tokenizer.reset_mock()
             tokenizer.apply_chat_template.return_value = [11] * limit
@@ -462,7 +462,7 @@ class WorkerProtocolTests(unittest.TestCase):
         source = dict(version=1, visibility="private_local", question="Where is my café note?", context="In my desk.")
         raw = json.dumps(source).encode()
         identity = dict(sha256=hashlib.sha256(raw).hexdigest(), bytes=len(raw), visibility="private_local")
-        for profile_name in WORKER.MODEL_PROFILES:
+        for profile_name in (WORKER.DEFAULT_MODEL_PROFILE, WORKER.LARGE_MODEL_PROFILE, WORKER.REASONING_MODEL_PROFILE):
             profile = WORKER.model_profile(profile_name)
             files = {name: dict(bytes=size, sha256=profile["hashes"][name]) for name, size in profile["files"].items()}
             for stop, truncate in (("eos", False), ("token_limit", False), ("eos", True)):
@@ -1737,14 +1737,14 @@ class WorkerProtocolTests(unittest.TestCase):
         self.assertEqual(calls[4].args[0], WORKER.prompt_messages(source["inference"][0], public_answer=True))
         self.assertEqual(source, original)
 
-    def test_public_answer_prompt_and_planning_match_for_every_model_profile(self):
+    def test_public_answer_prompt_and_planning_match_for_every_public_model_profile(self):
         # Exact messages and shared limits only; this is not real tokenizer/model evidence.
         class Tokenizer:
             def apply_chat_template(self, messages, **_options):
                 self.last = copy.deepcopy(messages)
                 return [1] * (8 + sum(len(row["content"].encode()) for row in messages) // 4)
 
-        for profile in WORKER.MODEL_PROFILES:
+        for profile in (WORKER.DEFAULT_MODEL_PROFILE, WORKER.LARGE_MODEL_PROFILE, WORKER.REASONING_MODEL_PROFILE):
             source = dict(version=1, visibility="public", license="CC0-1.0",
                           document="Public café source.\n", question="What is supported and missing?")
             tokenizer, backend = Tokenizer(), mock.Mock()

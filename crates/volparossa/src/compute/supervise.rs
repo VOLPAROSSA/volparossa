@@ -1,5 +1,6 @@
 //! Owner-controlled lifecycle and bounded observations, outside the model worker.
 
+pub(super) mod diagnostic;
 mod lifetime;
 
 use std::{
@@ -133,8 +134,13 @@ pub(super) async fn run(
     mut owner_idle: watch::Receiver<bool>,
 ) -> Result<Value> {
     let pid = child.id().context("compute_child_id")?;
-    let mut private_lifetimes =
-        (options.mode == Mode::PrivateInfer).then(|| lifetime::OwnedLifetimes::capture(pid));
+    let mut private_lifetimes = options
+        .mode
+        .is_private()
+        .then(|| lifetime::OwnedLifetimes::capture(pid));
+    if let Some(Err(error)) = &private_lifetimes {
+        diagnostic::failure("capture", error);
+    }
     let mut stdin = child.stdin.take().context("compute_child_stdin")?;
     let stdout = child.stdout.take().context("compute_child_stdout")?;
     let stderr = child.stderr.take().context("compute_child_stderr")?;
@@ -217,9 +223,14 @@ pub(super) async fn run(
     result["supervisor"] = supervisor_report(options, peak_rss, controls.as_ref(), &budget);
     if options.mode == Mode::PlanTasks {
         check_task_plan_result(&result, options)?;
-    } else if options.mode == Mode::PrivateInfer {
+    } else if options.mode.is_private() {
         let input = super::read_file(&options.dataset, super::MAX_DATASET_BYTES)?;
-        super::private_task::validate_report(&result, &input, options.model_profile)?;
+        super::private_task::validate_mode_report(
+            &result,
+            &input,
+            options.model_profile,
+            options.mode,
+        )?;
     }
     Ok(result)
 }
@@ -256,6 +267,12 @@ async fn confirm_cleanup(
     result: Result<Value>,
     mut private_lifetimes: Option<Result<lifetime::OwnedLifetimes>>,
 ) -> Result<Value> {
+    if mode.is_private() {
+        match &result {
+            Ok(_) => diagnostic::event("execution", "result_observed"),
+            Err(error) => diagnostic::failure("execution", error),
+        }
+    }
     // Retain exact sandbox descendant lifetimes before killing its launcher. Waiting only
     // for the launcher does not prove that dying/reparented namespace children have gone.
     let cleanup_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
@@ -267,8 +284,17 @@ async fn confirm_cleanup(
     }
     if let Some(lifetimes) = private_lifetimes {
         let confirmed = match lifetimes {
-            Ok(lifetimes) => lifetimes.wait_closed(cleanup_deadline).await.is_ok(),
-            Err(_) => false,
+            Ok(lifetimes) => match lifetimes.wait_closed(cleanup_deadline).await {
+                Ok(()) => true,
+                Err(error) => {
+                    diagnostic::failure("lifetime", &error);
+                    false
+                }
+            },
+            Err(error) => {
+                diagnostic::failure("capture", &error);
+                false
+            }
         };
         if !confirmed {
             return Err(super::private_task::CleanupUnconfirmed.into());
@@ -291,8 +317,11 @@ async fn reap_failed_child(
         .await
         .context("compute_reap_deadline")
         .and_then(|result| result.context("compute_reap"));
-    if mode == Mode::PrivateInfer && reaped.is_err() {
-        return Err(super::private_task::CleanupUnconfirmed.into());
+    if mode.is_private() {
+        if let Err(error) = &reaped {
+            diagnostic::failure("reap", error);
+            return Err(super::private_task::CleanupUnconfirmed.into());
+        }
     }
     reaped?;
     Ok(())
@@ -346,6 +375,29 @@ fn check_public_contract(value: &Value, options: &Options) -> Result<()> {
     Ok(())
 }
 
+fn check_model_backend(value: &Value, request: &WorkerRequest) -> Result<()> {
+    if matches!(
+        request.model_profile,
+        super::ModelProfile::Smol1700 | super::ModelProfile::Qwen600
+    ) {
+        ensure!(
+            if request.mode == Mode::PlanDocument {
+                value.get("model_parameter_dtype") == Some(&Value::Null)
+            } else {
+                value["model_parameter_dtype"] == "bfloat16"
+            },
+            "compute_result_model_precision"
+        );
+    }
+    if request.model_profile == super::ModelProfile::Qwen600 {
+        ensure!(
+            request.mode == Mode::PrivateConversation && value["model_attention_backend"] == "sdpa",
+            "compute_result_model_attention"
+        );
+    }
+    Ok(())
+}
+
 fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> Result<()> {
     if value.get("status").and_then(Value::as_str) == Some("error") {
         return Err(worker_failure(value, &request.id, status));
@@ -362,20 +414,12 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
         value.get("device").and_then(Value::as_str) == Some("cpu"),
         "compute_result_device"
     );
-    if request.model_profile == super::ModelProfile::Smol1700 {
-        ensure!(
-            if request.mode == Mode::PlanDocument {
-                value.get("model_parameter_dtype") == Some(&Value::Null)
-            } else {
-                value["model_parameter_dtype"] == "bfloat16"
-            },
-            "compute_result_model_precision"
-        );
-    }
+    check_model_backend(value, request)?;
     let updates = value.get("updates_completed").and_then(Value::as_u64);
     match request.mode {
         Mode::Infer
         | Mode::PrivateInfer
+        | Mode::PrivateConversation
         | Mode::PlanDocument
         | Mode::PlanTasks
         | Mode::AggregateAdapter => {
@@ -409,7 +453,7 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
             "compute_aggregation_result_scope"
         );
     }
-    if request.mode == Mode::PrivateInfer {
+    if request.mode.is_private() {
         ensure!(
             value["private_data_supported"] == true
                 && value["distributed_execution_claimed"] == false
@@ -421,7 +465,10 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
             "compute_private_result_scope"
         );
     }
-    if matches!(request.mode, Mode::Infer | Mode::PrivateInfer | Mode::Train) {
+    if matches!(
+        request.mode,
+        Mode::Infer | Mode::PrivateInfer | Mode::PrivateConversation | Mode::Train
+    ) {
         let outputs = value["outputs"]
             .as_array()
             .context("compute_result_outputs")?;
@@ -482,7 +529,10 @@ fn check_artifacts(value: &Value, mode: Mode, output: &Path) -> Result<()> {
         .get("artifacts")
         .and_then(Value::as_array)
         .context("compute_artifacts")?;
-    if matches!(mode, Mode::Infer | Mode::PrivateInfer) {
+    if matches!(
+        mode,
+        Mode::Infer | Mode::PrivateInfer | Mode::PrivateConversation
+    ) {
         ensure!(artifacts.is_empty(), "compute_inference_artifacts");
         return Ok(());
     }

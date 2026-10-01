@@ -204,6 +204,10 @@ pub(super) async fn run(options: Serve) -> Result<()> {
 
 fn validate_roots(options: &Serve) -> Result<()> {
     ensure!(
+        options.model_profile != ModelProfile::Qwen600,
+        "compute_profile_private_conversation_only"
+    );
+    ensure!(
         !options.principle_inference_v4 || options.model_profile.supports_rich_inference(),
         "compute_principle_model_profile"
     );
