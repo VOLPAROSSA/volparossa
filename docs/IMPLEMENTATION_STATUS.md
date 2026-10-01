@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-10-01
+Last updated: 2026-10-02
 
 ## Current integration and active work
 
@@ -176,6 +176,27 @@ Original eight-file ZIP SHA-256:
 original job110605509953 log SHA-256:
 `51264f989c440ef970b4e8a76f52327dc0f145dc93401f2dfafc3d12837b133e`.
 The model-driven read/edit/test and native editor milestones remain unchecked.
+
+The local Responses/conversation bridge has now been integrated into Code `main`
+through [PR3](https://github.com/VOLPAROSSA/volparossa-code/pull/3), merge
+`d6dd81486be0ffe506ca682d8dc617591850512e`, after all five checks on exact head
+`2f7014b0014b90e488b15364d6e596d7d1a30782` passed. This integration preserves
+the failed task evidence above: real model transport and a native read are not
+a complete coding agent. The core's exact Code trial pins remain unchanged.
+
+The separate [native editor command in Draft PR4](https://github.com/VOLPAROSSA/volparossa-code/pull/4)
+at `3de649e190984fd6d458b8e9af30d2b76457fbc7` connects an explicitly selected,
+writable project to the prepared app-server and core, with actual interactive
+one-shot command approvals, cancellation and owned shutdown. Opening a workspace
+starts nothing; private input has no public-peer or hosted-model fallback. Across
+the focused runs, 37 protocol/controller/extension/launcher checks passed. An
+actual source-built app-server probe through the production launcher initialized,
+opened an ephemeral thread, unsubscribed and closed cleanly, with unchanged host
+network state and removal of its temporary project/runtime staging. That probe
+used a **synthetic capability-only core socket**: no inference, tools or native
+editor UI executed. The real editor/model read-edit-test trial, general coding
+quality, durable multi-turn sessions and eligible cooperative delegation remain
+unfinished; none is inferred from the protocol or controller checks.
 
 ### Additional application and autonomous-maintenance scope
 
