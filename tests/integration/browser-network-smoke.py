@@ -297,7 +297,7 @@ def seed(root, run_id):
     write(root / "object.json", dict(bytes=BODY_BYTES, sha256=body_hash(run_id), run_id=run_id))
 
 
-def origin(root, gates, run_id, report):
+def origin(root, gates, run_id, report, *, native_tabs=False):
     status = dict(version=1, kind="browser-network-origin-diagnostic", phase="setup", status="running", error=None,
         accepted_connections=0, tls_completed=0, requests_ready=0, initial_accept_seconds=ORIGIN_INITIAL_ACCEPT_SECONDS)
     diagnostic = report.with_name("origin-diagnostic.json")
@@ -307,7 +307,7 @@ def origin(root, gates, run_id, report):
         write(diagnostic, status)
     observe("setup")
     try:
-        origin_transfer(root, gates, run_id, report, status, observe)
+        origin_transfer(root, gates, run_id, report, status, observe, native_tabs=native_tabs)
         status.update(status="complete", phase="complete")
     except Exception as error:
         code = ("timeout" if isinstance(error, TimeoutError) else "tls" if isinstance(error, ssl.SSLError)
@@ -319,7 +319,7 @@ def origin(root, gates, run_id, report):
         write(diagnostic, status)
 
 
-def origin_transfer(root, gates, run_id, report, status, observe):
+def origin_transfer(root, gates, run_id, report, status, observe, *, native_tabs=False):
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.minimum_version = ssl.TLSVersion.TLSv1_3
     tls.load_cert_chain(root / "origin.pem", root / "origin.key")
@@ -363,8 +363,9 @@ def origin_transfer(root, gates, run_id, report, status, observe):
                 observe("wait-release")
                 wait_file(gates / f"{phase}.release")
                 observe("transfer")
+                content_type = "text/plain; charset=utf-8" if native_tabs else "application/octet-stream"
                 stream.sendall((f"HTTP/1.1 200 OK\r\nContent-Length: {BODY_BYTES}\r\n"
-                    "Content-Type: application/octet-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n").encode())
+                    f"Content-Type: {content_type}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n").encode())
                 data = block(run_id)
                 for index in range(BODY_BYTES // len(data)):
                     stream.sendall(data)
@@ -539,6 +540,9 @@ def evidence(root):
 
 
 def validate_browser(evidence):
+    if evidence["browser"].get("kind") == "native-firefox-core-ordinary-tabs":
+        runpy.run_path(str(HERE / "browser-native-evidence.py"))["validate_browser"](evidence)
+        return
     provision = runpy.run_path(str(HERE / "browser-network-provision.py"))["pins"]()
     require(evidence["provision"] == provision, "browser source provenance differs")
     browser = evidence["browser"]
@@ -670,8 +674,11 @@ def main():
         print(body_hash(sys.argv[2]))
     elif action == "seed":
         seed(Path(sys.argv[2]), sys.argv[3])
-    elif action == "origin":
-        origin(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4], Path(sys.argv[5]))
+    elif action in ("origin", "origin-native"):
+        origin(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4], Path(sys.argv[5]), native_tabs=action == "origin-native")
+    elif action == "native-provision":
+        value = runpy.run_path(str(HERE / "browser-native-evidence.py"))["provision_summary"](Path(sys.argv[2]))
+        write(Path(sys.argv[3]), value)
     elif action == "sample":
         output = Path(sys.argv[2])
         write(output, sample(output))

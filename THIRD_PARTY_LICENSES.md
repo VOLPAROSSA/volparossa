@@ -4,6 +4,53 @@ Original VOLPAROSSA source in this repository is licensed under GPL-3.0-only. De
 vendored components retain their own licenses. This file is a provenance record, not a substitute
 for the license text shipped by each upstream project.
 
+## Local native Firefox integration trial
+
+`tests/integration/browser-native-pins.json` pins the integration sources to
+`VOLPAROSSA/volparossa-browser` commit
+`c3311ebedcc02dc45ff9c9822cee62f091609f86`, including its source, build-tool and
+ECH-patch manifests. The actual workspace-built Firefox 157.0.1 comes from
+[Mozilla's exact source revision](https://github.com/mozilla-firefox/firefox/tree/47c5f402c8d3a5369f1fb1b6cd61b0bb92725af1)
+`47c5f402c8d3a5369f1fb1b6cd61b0bb92725af1`. Its original build receipt has SHA-256
+`4be952653fe30d9516dde25c4ccd1cf870a6ab87514f8ba6a0961a7f4d62485d`;
+the local native patch `patches/0002-channel-ech.patch` has SHA-256
+`6d87eb3a00275caad042f10e8ebfe14c579a45bb40dab6f4461822cf5e5dffc1`.
+The export retains that receipt, exact patched-source overlay, original Firefox
+`LICENSE`, built-in `about:license` texts and browser provenance. The separately
+recorded JavaScript controller update is not represented as an unchanged original
+build. Firefox is primarily MPL-2.0 with component-specific licenses; modified
+upstream files retain their notices. Original VOLPAROSSA modules remain
+GPL-3.0-only. Mozilla trademarks are not licensed by this record.
+
+`browser-native-runtime.py` exports only an explicitly selected, receipt-verified
+local build for a disposable local VM trial; it neither downloads a substitute
+browser nor publishes this bundle. The original seven Mozilla Taskcluster build
+archives, toolchain/sysroot notices and pinned Rust notices remain in the browser
+workspace. This record and the trial are not redistribution clearance or a claim
+that release packaging and its complete notice/source obligations are finished.
+
+## Workspace-only Debian VM tools
+
+`tests/integration/browser-native-tools-pins.json` records exact versions, sizes
+and SHA-256 hashes for 20 Debian Trixie packages from
+`https://deb.debian.org/debian/`, together with the archive keyring, signed
+`InRelease` and authenticated package-index hashes. The tools include QEMU
+`1:10.0.13+ds-0+deb13u1`, SeaBIOS `1.16.3-2`, iPXE
+`1.21.1+git20250501.dad20602+dfsg-1`, cloud-image-utils `0.33-1` and libslirp
+`4.8.0-1+deb13u1`; the same pin file lists every supporting library. QEMU's
+original Debian notice describes GPL-2 for the whole program and separately
+licensed components; cloud-utils is GPL-3, SeaBIOS has LGPL/GPL components,
+iPXE has GPL and other per-file licenses, and libslirp has BSD/Expat components.
+The complete package notices, not these summaries, govern each component.
+
+`browser-native-tools.py` verifies and extracts these packages only into the
+explicit workspace output, preserving the archives and original
+`root/usr/share/doc/*/copyright` notices. It installs no host packages and applies
+no third-party source patch. Workspace launch wrappers and relocated internal
+symlinks are recorded in its receipt; the existing host loader, libraries and
+`genisoimage` are read-only, hashed inputs, not redistributed dependencies. These
+tools are for the disposable local KVM trial, not a published binary distribution.
+
 ## Explicit development ML inputs
 
 The optional, guest-only `workers/volparossa-ml/provision.py` installer is not an automatic

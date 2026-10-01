@@ -110,7 +110,7 @@ class BrowserNetworkEvidence(unittest.TestCase):
 
     def test_origin_failure_retains_closed_stage_and_longer_initial_accept_budget(self):
         # No sockets/traffic: the fixture's exception-to-closed-metadata contract only.
-        def failing_transfer(root, gates, run_id, report, status, observe):
+        def failing_transfer(root, gates, run_id, report, status, observe, *, native_tabs=False):
             status["accepted_connections"] = 1
             observe("tls-handshake")
             raise TimeoutError("private origin address and request must not escape")

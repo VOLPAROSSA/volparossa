@@ -6,6 +6,20 @@ Last updated: 2026-10-01
 
 ## Current integration and active work
 
+### Native Firefox ordinary-tab integration candidate
+
+The optional `browser-network` native variant now carries the actual local
+Firefox 157.0.1 build receipt, unchanged native binaries and the separately
+hashed browser controller from `volparossa-browser@c3311eb`. It navigates two
+ordinary tabs, observes their original streams without replacing navigation,
+and requires independent real WireGuard/MPTCP routes, byte hashes, route-A
+retirement while B survives, privacy captures and disposable cleanup. The
+historical ESR proof is unchanged. Narrow provenance/evidence tests pass;
+the joined native-browser/core VM result is still pending. This is not a full
+browser kill-switch, HTTP/3 or native ECH wire-proof claim. Workspace-only
+pinned QEMU tools are explicit local test inputs, not a host installation or
+redistributable browser package.
+
 ### Additional application and autonomous-maintenance scope
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
