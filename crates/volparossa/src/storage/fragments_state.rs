@@ -24,6 +24,7 @@ use super::super::{
     super::{state, transfer},
     retained::{Charge, LockedSet},
 };
+use super::placement::{self, Placement};
 
 pub(super) const MAX_FRAGMENT_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_FRAGMENTS: usize = 256;
@@ -41,16 +42,16 @@ pub(super) struct Plan {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Provider {
-    key: [u8; 32],
-    grant_sha256: [u8; 32],
+pub(super) struct Provider {
+    pub(super) key: [u8; 32],
+    pub(super) grant_sha256: [u8; 32],
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CopyBinding {
-    provider: usize,
-    archive_id: [u8; 32],
+    pub(super) provider: usize,
+    pub(super) archive_id: [u8; 32],
 }
 
 #[derive(Serialize, Deserialize)]
@@ -59,19 +60,19 @@ pub(super) struct Fragment {
     pub(super) offset: u64,
     pub(super) length: u64,
     pub(super) sha256: [u8; 32],
-    copies: Vec<CopyBinding>,
+    pub(super) copies: Vec<CopyBinding>,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Manifest {
     version: u32,
-    owner_key: [u8; 32],
+    pub(super) owner_key: [u8; 32],
     pub(super) ciphertext_bytes: u64,
     pub(super) sha256: [u8; 32],
     fragment_bytes: u64,
-    copies_per_fragment: usize,
-    providers: Vec<Provider>,
+    pub(super) copies_per_fragment: usize,
+    pub(super) providers: Vec<Provider>,
     pub(super) fragments: Vec<Fragment>,
 }
 
@@ -83,8 +84,10 @@ struct SignedManifest {
 }
 
 pub(super) struct LockedFragments {
-    directory: File,
+    pub(super) directory: File,
     pub(super) data: Manifest,
+    pub(super) root_sha256: [u8; 32],
+    pub(super) placements: Vec<Placement>,
 }
 
 fn signing_bytes(data: &Manifest) -> Result<Vec<u8>> {
@@ -198,6 +201,8 @@ impl LockedFragments {
         fs::set_permissions(staging.path(), fs::Permissions::from_mode(0o700))?;
         let mut set = Self {
             directory: state::directory(staging.path())?,
+            root_sha256: [0; 32],
+            placements: Vec::new(),
             data: Manifest {
                 version: 1,
                 owner_key: owner.to_bytes(),
@@ -299,7 +304,15 @@ impl LockedFragments {
                 "duplicate fragment provider"
             );
         }
-        let set = Self { directory, data };
+        let root_sha256 = Sha256::digest(&bytes).into();
+        let placements = placement::load(&directory, root_sha256, &owner)?;
+        let set = Self {
+            directory,
+            data,
+            root_sha256,
+            placements,
+        };
+        placement::validate(&set)?;
         let mut offset = 0_u64;
         let mut archives = BTreeSet::new();
         for (index, fragment) in set.data.fragments.iter().enumerate() {
@@ -338,14 +351,14 @@ impl LockedFragments {
 
     pub(super) fn fragment(&self, index: usize) -> Result<LockedSet> {
         let fragment = self.data.fragments.get(index).context("unknown fragment")?;
-        let copies = LockedSet::open(&self.fragment_path(index))?;
+        // No unsigned child recovery may occur before its signed parent authorization.
+        let mut copies = LockedSet::open_without_recovery(&self.fragment_path(index))?;
         ensure!(
             copies.data.ciphertext_bytes == fragment.length
-                && copies.data.sha256 == fragment.sha256
-                && copies.data.copies.len() == fragment.copies.len()
-                && copies.data.handoff.is_none(),
+                && copies.data.sha256 == fragment.sha256,
             "fragment set differs from signed reconstruction root"
         );
+        placement::authorize_child(self, index, &mut copies)?;
         for (copy, binding) in fragment.copies.iter().enumerate() {
             let provider = self
                 .data
@@ -387,10 +400,18 @@ impl LockedFragments {
         let mut recoverable = 0;
         let mut redundant = 0;
         let mut fragments = Vec::with_capacity(self.data.fragments.len());
-        let mut provider_bytes = vec![0_u64; self.data.providers.len()];
+        let providers = placement::providers(self);
+        let mut provider_bytes = vec![0_u64; providers.len()];
+        let mut retained_copies = 0;
+        let mut pending_retirements = 0;
         let now = crate::storage::now()?;
         for (index, fragment) in self.data.fragments.iter().enumerate() {
             let copies = self.fragment(index)?;
+            retained_copies += copies.data.copies.len();
+            pending_retirements +=
+                usize::from(copies.data.handoff.as_ref().is_some_and(|intent| {
+                    intent.phase != super::super::retained::HandoffPhase::Complete
+                }));
             let mut confirmed = 0;
             for (copy, record) in copies.data.copies.iter().enumerate() {
                 let retained = copies.copy(copy)?;
@@ -408,22 +429,26 @@ impl LockedFragments {
                     Charge::Unattempted | Charge::Deleted => {}
                 }
                 if !matches!(record.charge, Charge::Unattempted | Charge::Deleted) {
-                    provider_bytes[fragment.copies[copy].provider] += fragment.length;
+                    let provider = providers
+                        .iter()
+                        .position(|key| key == &record.provider_key)
+                        .context("authorized copy provider missing from accounting")?;
+                    provider_bytes[provider] += fragment.length;
                 }
             }
             recoverable += usize::from(confirmed > 0);
-            redundant += usize::from(confirmed == self.data.copies_per_fragment);
+            redundant += usize::from(confirmed >= self.data.copies_per_fragment);
             fragments.push(
                 serde_json::json!({"index": index, "offset": fragment.offset,
                 "ciphertext_bytes": fragment.length, "confirmed_unexpired_copies": confirmed,
                 "copies": copies.report("status")?["copies"]}),
             );
         }
-        Ok(serde_json::json!({
+        let mut report = serde_json::json!({
             "operation": format!("private_storage_fragments_{operation}"),
             "logical_ciphertext_bytes": self.data.ciphertext_bytes, "fragment_count": self.data.fragments.len(),
             "copies_per_fragment": self.data.copies_per_fragment,
-            "distinct_provider_identities": self.data.providers.len(),
+            "distinct_provider_identities": providers.len(),
             "reserved_payload_bytes": reserved, "committed_payload_bytes": committed,
             "uncertain_payload_bytes": uncertain, "physical_payload_charge_upper_bound": reserved + committed + uncertain,
             "metadata_overhead_measured": false, "expired_copies_remain_charged": true,
@@ -432,10 +457,19 @@ impl LockedFragments {
             "current_remote_availability_proven": false, "independent_failure_domains_proven": false,
             "network_contribution_credit": false, "automatic_repair": false, "automatic_handoff": false,
             "read_consumes_archive": false, "erasure_coding": false, "owner_signature_verified": true,
-            "providers": self.data.providers.iter().zip(provider_bytes).map(|(provider, charge)|
-                serde_json::json!({"provider_key": hex::encode(provider.key),
+            "providers": providers.iter().zip(provider_bytes).map(|(provider, charge)|
+                serde_json::json!({"provider_key": hex::encode(provider),
                     "physical_payload_charge_upper_bound": charge})).collect::<Vec<_>>(),
             "fragments": fragments,
-        }))
+        });
+        if !self.placements.is_empty() {
+            report["report_version"] = 2.into();
+            report["placement_authorizations"] = self.placements.len().into();
+            report["retained_copy_records"] = retained_copies.into();
+            report["pending_retirements"] = pending_retirements.into();
+            report["desired_copies_per_fragment"] = self.data.copies_per_fragment.into();
+            report["replacement_overhead_included"] = true.into();
+        }
+        Ok(report)
     }
 }

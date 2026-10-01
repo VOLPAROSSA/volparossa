@@ -578,8 +578,67 @@ source removal, two non-consuming restores with one provider unavailable, refusa
 holders of a fragment are unavailable, renewal and interrupted deletion/retry to zero leases.
 Tampering with the signed root or consistently rewriting both unsigned nested archive-ID
 records is rejected. This is **local transfer/lifecycle evidence**, not a new protected-overlay
-or independent-device proof. Automatic repair, fragment handoff/drain, measured metadata
-overhead and network-wide reciprocal contribution credit remain unfinished.
+or independent-device proof. The explicit fragment-copy replacement primitive below extends
+this lifecycle; automatic repair/drain, measured metadata overhead and network-wide
+reciprocal contribution credit remain unfinished.
+
+### Explicit fragment-copy replacement
+
+`storage fragments replace` repairs or moves **one copy of one fragment**, not a complete
+backup. It reuses the existing replica transfer, readback, deletion and accounting path:
+
+```sh
+volparossa storage fragments replace --state /absolute/fragment-set \
+  --fragment-index 0 --from-provider-key OLD_PROVIDER_KEY_HEX \
+  --provider-key NEW_PROVIDER_KEY_HEX --grant /absolute/replacement.grant \
+  --lifetime-seconds 604800 --identity /absolute/owner.identity
+```
+
+The owner supplies a new independently trusted provider for that fragment. The same provider
+may already hold other fragments, but cannot be another current or historical holder of the
+selected fragment. A surviving copy is required; this command cannot recreate missing bytes
+when every copy has disappeared. The owner stays online and signs the operations. It is a
+repair **primitive**, not an automatic placement or maintenance service.
+
+Before changing the child replica set, the owner durably signs a placement extension bound
+to the exact original reconstruction root, fragment, retiring copy, new provider, grant,
+archive identity and initial expiry. The immutable `fragments.json` stays unchanged. Keep
+`placement-authorizations.json` with the rest of the private recovery state. Reopening
+authenticates the parent extension before recovering any child journal; an interrupted
+installation resumes the exact allocated identity, never a fresh reservation.
+
+The source is restored from a surviving provider, uploaded to the replacement, then read
+back completely and hash-verified. Only after verification and survivor reconciliation may
+the original copy be deleted. Retention must still cover the original obligation at deletion
+time. A lost delete confirmation leaves retirement pending and the original fully charged.
+Repeat the exact command to retry. Progress, non-consuming restore, renewal and all-copy
+deletion remain available; renewal keeps the old obligation while copying and excludes it
+only after verified replacement advances to pending deletion. Historical copies are never
+silently forgotten. The existing bound of eight retained copy identities per fragment also
+limits repeated replacements; journal compaction is not implemented.
+
+The existing copy journals remain the **only charge ledger**. During replacement the charge
+may exceed `logical_ciphertext_bytes * copies_per_fragment`; all reserved, committed,
+uncertain and expired copies count at their actual fragment length until confirmed deletion.
+Only archives with a placement extension emit the additive `report_version: 2`, with
+`desired_copies_per_fragment`, `placement_authorizations`, `retained_copy_records`,
+`pending_retirements` and `replacement_overhead_included`. Desired redundancy is not the
+length of a historical `fragments[].copies` array. Providers include newly authorized
+identities; each provider's charge still sums its retained records. Unmodified archives
+retain their old manifest and report shape.
+
+**Consumer boundary:** the pinned Image v1 adapter currently rejects this extended history
+and temporary overhead. Before Image initiates replacement, its report parser must accept
+the explicit v2 shape, keep the original desired copy count, validate up to eight historical
+records per fragment and sum actual per-copy/per-provider charges rather than cap them at
+the original target. Until that coordinated update, Image should use unreplaced archives;
+this core change does not claim repaired-archive Image compatibility.
+
+Targeted local tests use real signed storage services and SQLite stores: parent/child crash
+windows, rejected unsigned recovery, lost reservation/readback/deletion confirmations,
+same-identity restart, survivor reconstruction without the local source, renewal during
+pending retirement and all-copy deletion. These are not new overlay or independent-device
+availability proofs, automatic repair, safe provider-capacity drain or network-wide credit.
 
 ### Disposable protected-fragment proof
 

@@ -40,6 +40,25 @@ Different-chunk placement is implemented in the signed fragment CLI with local-s
 evidence below; its real overlay/provider-loss trial remains pending. The earlier
 replica/handoff proofs retain a complete encrypted archive at each selected provider.
 
+### Explicit fragment-copy repair candidate
+
+`storage fragments replace` adds an owner-authorized replacement for one fragment copy.
+A signed parent placement extension is durable before the child handoff can be installed
+or recovered. The existing transfer and accounting path then restores a survivor, deposits
+the exact replacement, reads every byte back and checks retention before deleting the old
+copy. Lost confirmations stay charged and resumable across restart. Ordinary progress,
+restore, renew and delete retain the full authorized copy history. The original signed
+reconstruction manifest and unreplaced-archive report shape are unchanged.
+
+Targeted local signed-service/SQLite probes cover crash ordering, unsigned-child rejection,
+lost Reserve/readback/Delete replies, restart, restoration without the original, pending
+retirement renewal and final zero-lease cleanup. This is a manual repair primitive, not
+automatic maintenance, adaptive provider-capacity drain or a new protected-overlay proof.
+Post-replacement reports use additive version 2 and include temporary/historical physical
+charges. The pinned Image v1 parser needs a coordinated update before it can consume these
+archives; no Image compatibility is claimed for repaired archives yet. See
+[the command, accounting contract and remaining limits](PRIVATE_STORAGE.md#explicit-fragment-copy-replacement).
+
 ### Mailbox import confirmation
 
 The [mailbox import-confirmation candidate](MAILBOX_IMPORT_CONFIRMATION.md) adds a

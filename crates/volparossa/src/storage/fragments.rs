@@ -2,6 +2,8 @@
 
 #[path = "fragments_transfer.rs"]
 mod operations;
+#[path = "fragments_placement.rs"]
+mod placement;
 #[path = "fragments_state.rs"]
 mod retained;
 
@@ -38,6 +40,8 @@ pub(crate) enum Command {
     Renew(Renew),
     /// Explicitly delete every owned fragment copy; incomplete confirmations remain charged.
     Delete(Existing),
+    /// Replace one fragment copy; verify replacement bytes before retiring its original.
+    Replace(Box<Replace>),
 }
 
 #[derive(Debug, Args)]
@@ -100,6 +104,22 @@ pub(crate) struct Renew {
     existing: Existing,
 }
 
+#[derive(Debug, Args)]
+pub(crate) struct Replace {
+    #[arg(long, value_parser = clap::value_parser!(u16).range(0..256))]
+    fragment_index: u16,
+    #[arg(long, value_parser = parse_publisher_key)]
+    from_provider_key: VerifyingKey,
+    #[arg(long, value_parser = parse_publisher_key)]
+    provider_key: VerifyingKey,
+    #[arg(long)]
+    grant: PathBuf,
+    #[arg(long, default_value_t = 604_800, value_parser = clap::value_parser!(u64).range(1..=MAX_LEASE_SECONDS))]
+    lifetime_seconds: u64,
+    #[command(flatten)]
+    existing: Existing,
+}
+
 pub(in crate::storage) async fn run(command: Command, socket: &Path) -> Result<()> {
     let report = match command {
         Command::Create(args) => create(&args)?,
@@ -139,6 +159,23 @@ pub(in crate::storage) async fn run(command: Command, socket: &Path) -> Result<(
             let signer = args.unlock.signer()?;
             let set = LockedFragments::open(&args.state)?;
             operations::delete(&set, socket, &signer).await?
+        }
+        Command::Replace(args) => {
+            let signer = args.existing.unlock.signer()?;
+            let mut set = LockedFragments::open(&args.existing.state)?;
+            let encoded = state::read_private(&args.grant, MAX_GRANT_BYTES as u64)?;
+            let grant = SignedStorageGrant::decode(&encoded)?
+                .verify(&args.provider_key, crate::storage::now()?)?;
+            placement::replace(
+                &mut set,
+                socket,
+                &signer,
+                usize::from(args.fragment_index),
+                args.from_provider_key,
+                &grant,
+                args.lifetime_seconds,
+            )
+            .await?
         }
     };
     let complete = report["operation_complete"].as_bool().unwrap_or(true);

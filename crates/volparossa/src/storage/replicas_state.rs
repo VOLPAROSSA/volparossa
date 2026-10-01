@@ -40,8 +40,8 @@ pub(super) enum Charge {
 #[serde(deny_unknown_fields)]
 pub(super) struct CopyRecord {
     pub(super) provider_key: [u8; 32],
-    archive_id: [u8; 32],
-    grant_sha256: [u8; 32],
+    pub(super) archive_id: [u8; 32],
+    pub(super) grant_sha256: [u8; 32],
     pub(super) charge: Charge,
 }
 
@@ -65,14 +65,22 @@ pub(super) enum HandoffPhase {
     Complete,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Handoff {
     pub(super) from: usize,
     pub(super) to: usize,
     pub(super) phase: HandoffPhase,
     /// Durable intent precedes creation of the per-copy journal and all remote operations.
-    initial_journal: Journal,
+    pub(super) initial_journal: Journal,
+}
+
+impl Handoff {
+    pub(super) fn same_identity(&self, other: &Self) -> bool {
+        self.from == other.from
+            && self.to == other.to
+            && self.initial_journal == other.initial_journal
+    }
 }
 
 pub(super) struct LockedSet {
@@ -158,6 +166,16 @@ impl LockedSet {
     }
 
     pub(super) fn open(path: &Path) -> Result<Self> {
+        let retained = Self::open_without_recovery(path)?;
+        retained.recover_handoff_copy()?;
+        for index in 0..retained.data.copies.len() {
+            retained.copy(index)?;
+        }
+        Ok(retained)
+    }
+
+    /// Fragment parents authenticate every child binding before permitting journal recovery.
+    pub(super) fn open_without_recovery(path: &Path) -> Result<Self> {
         crate::storage::require_absolute(path)?;
         let directory = state::directory(path)?;
         let bytes = state::read_private(
@@ -180,12 +198,7 @@ impl LockedSet {
                 "duplicate replica provider"
             );
         }
-        let retained = Self { directory, data };
-        retained.recover_handoff_copy()?;
-        for index in 0..retained.data.copies.len() {
-            retained.copy(index)?;
-        }
-        Ok(retained)
+        Ok(Self { directory, data })
     }
 
     pub(super) fn save(&self) -> Result<()> {
@@ -220,6 +233,18 @@ impl LockedSet {
         grant: &VerifiedStorageGrant,
         lifetime: u64,
     ) -> Result<(usize, usize)> {
+        let planned = self.plan_handoff(from, grant, lifetime)?;
+        self.apply_handoff(&planned)?;
+        Ok((planned.from, planned.to))
+    }
+
+    /// Allocate the exact intent without writing it or making a remote request.
+    pub(super) fn plan_handoff(
+        &self,
+        from: &VerifyingKey,
+        grant: &VerifiedStorageGrant,
+        lifetime: u64,
+    ) -> Result<Handoff> {
         grant.current(crate::storage::now()?)?;
         ensure!(
             grant.owner_key().as_bytes() == &self.data.owner_key,
@@ -230,8 +255,7 @@ impl LockedSet {
                 && self.data.copies[pending.to].provider_key == grant.provider_key().to_bytes()
                 && pending.initial_journal.grant_hex == hex::encode(grant.signed().encode());
             if matches {
-                self.recover_handoff_copy()?;
-                return Ok((pending.from, pending.to));
+                return Ok(pending.clone());
             }
             ensure!(
                 pending.phase == HandoffPhase::Complete,
@@ -278,25 +302,70 @@ impl LockedSet {
         );
         let journal = Journal::new(grant, self.data.ciphertext_bytes, self.data.sha256, expires)?;
         let to_index = self.data.copies.len();
+        Ok(Handoff {
+            from: from_index,
+            to: to_index,
+            phase: HandoffPhase::Copying,
+            initial_journal: journal,
+        })
+    }
+
+    /// Install only this preallocated identity; signed fragment authority is persisted first.
+    pub(super) fn apply_handoff(&mut self, planned: &Handoff) -> Result<()> {
+        if planned.to < self.data.copies.len() {
+            let current = self
+                .data
+                .handoff
+                .as_ref()
+                .context("missing retained handoff")?;
+            ensure!(
+                current.same_identity(planned),
+                "handoff retry changed original identity"
+            );
+            self.recover_handoff_copy()?;
+            return Ok(());
+        }
+        let journal = &planned.initial_journal;
+        ensure!(
+            planned.phase == HandoffPhase::Copying
+                && planned.from < planned.to
+                && planned.to == self.data.copies.len()
+                && planned.to < MAX_COPIES
+                && self
+                    .data
+                    .handoff
+                    .as_ref()
+                    .is_none_or(|old| old.phase == HandoffPhase::Complete)
+                && journal.owner_key == self.data.owner_key
+                && journal.ciphertext_bytes == self.data.ciphertext_bytes
+                && journal.sha256 == self.data.sha256
+                && journal.archive_id != [0; 32]
+                && journal.provider_key != self.data.owner_key
+                && !self
+                    .data
+                    .copies
+                    .iter()
+                    .any(|copy| copy.provider_key == journal.provider_key)
+                && journal.lease.is_none()
+                && journal.last_state.is_none()
+                && journal.last_stored_bytes == 0
+                && journal.last_expiry == 0,
+            "invalid exact handoff installation"
+        );
         self.data.copies.push(CopyRecord {
             provider_key: journal.provider_key,
             archive_id: journal.archive_id,
             grant_sha256: Sha256::digest(hex::decode(&journal.grant_hex)?).into(),
             charge: Charge::Unattempted,
         });
-        self.data.handoff = Some(Handoff {
-            from: from_index,
-            to: to_index,
-            phase: HandoffPhase::Copying,
-            initial_journal: journal,
-        });
+        self.data.handoff = Some(planned.clone());
         self.data.version = 2;
         self.save()?;
         self.recover_handoff_copy()?;
-        Ok((from_index, to_index))
+        Ok(())
     }
 
-    fn recover_handoff_copy(&self) -> Result<()> {
+    pub(super) fn recover_handoff_copy(&self) -> Result<()> {
         let Some(handoff) = &self.data.handoff else {
             return Ok(());
         };
@@ -367,6 +436,14 @@ impl LockedSet {
 
     fn copy_path(&self, index: usize) -> PathBuf {
         state::anchored(&self.directory).join(format!("copy-{index}"))
+    }
+
+    pub(super) fn copy_present(&self, index: usize) -> Result<bool> {
+        match fs::symlink_metadata(self.copy_path(index)) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub(super) fn copy(&self, index: usize) -> Result<LockedJournal> {
