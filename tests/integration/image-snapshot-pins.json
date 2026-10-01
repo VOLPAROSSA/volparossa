@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "repository": "https://github.com/VOLPAROSSA/volparossa-image",
+  "revision": "e177afebabd99ac0773de2a73d60275346a5de52",
+  "files": {
+    "scripts/immich_snapshot.py": {"bytes": 24955, "sha256": "23528a0737cd0a51e88b58a7f61079b3c6aa0f19b96a1f55757a9da49718256f"},
+    "scripts/snapshot-storage.mjs": {"bytes": 12043, "sha256": "21a2cfe3527a958151be3ea0d7223f366a45d2fe18b09599dae217b83fcc8d4c"},
+    "src/core-storage.mjs": {"bytes": 18488, "sha256": "5444e9b6e9926f63360ca9ade26bbc0484b5150ba9eb3ea453fc436f5a44d41b"},
+    "LICENSE": {"bytes": 35149, "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"}
+  },
+  "runtime": {
+    "version": "24.19.0",
+    "url": "https://nodejs.org/dist/v24.19.0/node-v24.19.0-linux-x64.tar.xz",
+    "bytes": 31633904,
+    "sha256": "14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647",
+    "files": {
+      "bin/node": {"bytes": 125989464, "sha256": "bc17c508ffeed0ec622934f9b7fa72f8e78da65350e63c3eceb56fa688aa5e12"},
+      "LICENSE": {"bytes": 157606, "sha256": "148eacf7863ef4329224a29398623077200a27194aa075569faf4a0a85566ca5"}
+    }
+  }
+}

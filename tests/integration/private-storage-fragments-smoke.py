@@ -64,6 +64,20 @@ RESTORE_FAILURES = {
 }
 
 
+def configure_payload_geometry(ciphertext_bytes):
+    """Reuse physical-path checks for a real application's four-fragment archive.
+
+    This changes only fixture geometry, never an encryption/success claim.
+    The Image checker supplies its independently measured OpenPGP byte length.
+    """
+    global BYTES, LENGTHS, PROVIDER_BYTES
+    require(type(ciphertext_bytes) is int and 3 * CHUNK < ciphertext_bytes <= 4 * CHUNK,
+            "application ciphertext must occupy four bounded fragments")
+    BYTES = ciphertext_bytes
+    LENGTHS = (CHUNK, CHUNK, CHUNK, BYTES - 3 * CHUNK)
+    PROVIDER_BYTES = (2 * CHUNK + LENGTHS[-1], 2 * CHUNK + LENGTHS[-1], 2 * CHUNK)
+
+
 def restore_failure(error):
     # A closed structural record replaces an empty failed-phase artifact. Never
     # export arbitrary exception text, commands, paths, receipts or private stderr.
@@ -425,7 +439,7 @@ def validate_network(phase, peers, layout, name):
         else:
             require(app[node]["response_payload_bytes"] == 0, "stopped or untouched provider returned payload")
     if name == "restore":
-        for node, minimum in ((NODES[1], 2 * (2 * CHUNK + 73)), (NODES[2], 2 * CHUNK)):
+        for node, minimum in ((NODES[1], 2 * (2 * CHUNK + LENGTHS[-1])), (NODES[2], 2 * CHUNK)):
             require(app[node]["response_payload_bytes"] >= minimum, "actual survivor fragment payload absent")
     control = phase["control_privacy"]
     control_node = next(node for node in ROLES[1:4] if peers[node] == layout["control_relay_peer_id"])
