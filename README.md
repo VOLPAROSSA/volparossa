@@ -482,6 +482,14 @@ answer quality. [Usage and limits →](docs/DECENTRALIZED_AGENTS.md#local-only-p
 
 [Agent architecture, training and remaining milestones →](docs/DECENTRALIZED_AGENTS.md)
 
+The intended cooperative brain will also help maintain Project VOLPAROSSA itself:
+agents develop improvements across the organization's repositories, review one
+another's work and publish approved changes through narrowly authorized
+capabilities. Automatic installation of verified releases on participants'
+devices is also planned, with staged rollout and data-preserving recovery.
+Both autonomous maintenance and the client updater remain under development.
+[Repository maintenance and immune review →](docs/REPOSITORY_MAINTENANCE.md)
+
 ---
 
 <a id="seven-virtues-seven-sins"></a>

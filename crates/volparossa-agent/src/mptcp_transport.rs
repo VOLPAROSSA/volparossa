@@ -1,5 +1,7 @@
 //! Production adoption of helper-owned MPTCP transport capabilities.
 
+pub(crate) mod retirement;
+
 use std::{collections::BTreeSet, io, net::SocketAddr, os::fd::AsRawFd, time::Duration};
 
 use nix::{
@@ -30,6 +32,8 @@ const CLIENT_SUBFLOW_READY_POLL_INTERVAL: Duration = Duration::from_millis(20);
 pub struct ClientMptcpTransport {
     initial_stream: Option<MptcpStream>,
     initial_flow_handle: Vec<u8>,
+    initial_retirement: Option<retirement::Guard>,
+    retirements: retirement::Retirements,
     signal: Option<ExitMptcpListenerSignal>,
     route_context_id: Vec<u8>,
     context_handle: Vec<u8>,
@@ -56,6 +60,7 @@ pub(crate) struct ClientMptcpFlowPaths {
     handle: Vec<u8>,
     flow: [u8; 32],
     initial: Vec<u32>,
+    retirement: retirement::Guard,
 }
 
 impl ClientMptcpFlowPaths {
@@ -84,6 +89,10 @@ impl ClientMptcpFlowPaths {
 
     pub(crate) const fn flow_handle(&self) -> [u8; 32] {
         self.flow
+    }
+
+    pub(crate) fn into_retirement(self) -> retirement::Guard {
+        self.retirement
     }
 }
 
@@ -306,10 +315,21 @@ impl ClientMptcpTransport {
         if initial_flow_handle.len() != 32 || initial_flow_handle.iter().all(|byte| *byte == 0) {
             return Err(MptcpTransportError::InvalidMetadata);
         }
+        let retirements = retirement::Retirements::new();
+        let initial_retirement = retirements.reserve()?.bind(
+            volparossa_routing::RetireMptcpFlow {
+                route_context_id: route_context_id.clone(),
+                context_handle: context_handle.clone(),
+                mptcp_flow_handle: initial_flow_handle.clone(),
+            },
+            acquired.descriptor().try_clone_to_owned()?,
+        );
         let stream = adopt_client_stream(acquired)?;
         Ok(Self {
             initial_stream: Some(stream),
             initial_flow_handle,
+            initial_retirement: Some(initial_retirement),
+            retirements,
             signal: None,
             route_context_id,
             context_handle,
@@ -338,6 +358,7 @@ impl ClientMptcpTransport {
         helper: &HelperClient,
         local_port: u16,
     ) -> Result<ClientMptcpFlowTransport, MptcpTransportError> {
+        self.retirements.drain(helper).await?;
         let certificate_der = self
             .certificate_der
             .clone()
@@ -355,17 +376,42 @@ impl ClientMptcpTransport {
             .initial_stream
             .take()
             .filter(|stream| pending_stream_usable(stream.as_tcp_stream()));
-        let (stream, flow) = if let Some(stream) = initial {
-            (stream, std::mem::take(&mut self.initial_flow_handle))
+        let (stream, flow, retirement) = if let Some(stream) = initial {
+            (
+                stream,
+                std::mem::take(&mut self.initial_flow_handle),
+                self.initial_retirement
+                    .take()
+                    .ok_or(MptcpTransportError::InvalidMetadata)?,
+            )
         } else {
+            // An expired initial socket also owned one issued capability.
+            drop(self.initial_retirement.take());
+            self.retirements.drain(helper).await?;
+            let mut slot = self.retirements.reserve()?;
             let signal = self
                 .signal
                 .as_ref()
                 .ok_or(MptcpTransportError::InvalidMetadata)?;
             let request = client_acquire_request(signal, self.context_handle.clone(), local_port)?;
-            let acquired = helper.acquire_transport_socket(request).await?;
+            slot.begin_acquire();
+            let acquired = helper
+                .acquire_transport_socket(request)
+                .await
+                .map_err(|_| MptcpTransportError::AcquireUnconfirmed)?;
             let flow = acquired.metadata().mptcp_flow_handle.clone();
-            (adopt_client_stream(acquired)?, flow)
+            let retirement = slot.bind(
+                volparossa_routing::RetireMptcpFlow {
+                    route_context_id: self.route_context_id.clone(),
+                    context_handle: self.context_handle.clone(),
+                    mptcp_flow_handle: flow.clone(),
+                },
+                acquired
+                    .descriptor()
+                    .try_clone_to_owned()
+                    .map_err(|_| MptcpTransportError::AcquireUnconfirmed)?,
+            );
+            (adopt_client_stream(acquired)?, flow, retirement)
         };
         let signal = self
             .signal
@@ -379,6 +425,7 @@ impl ClientMptcpTransport {
                 .try_into()
                 .map_err(|_| MptcpTransportError::InvalidMetadata)?,
             initial: signal.initial_active_path_ids.clone(),
+            retirement,
         };
         Ok(ClientMptcpFlowTransport {
             stream,
@@ -396,14 +443,18 @@ impl ClientMptcpTransport {
     /// # Errors
     ///
     /// Returns an error when the helper cannot remove an exact owned endpoint.
-    pub async fn shutdown(self, helper: &HelperClient) -> Result<(), MptcpTransportError> {
+    pub async fn shutdown(mut self, helper: &HelperClient) -> Result<(), MptcpTransportError> {
+        drop(self.initial_stream.take());
+        drop(self.initial_retirement.take());
+        let retired = self.retirements.drain(helper).await;
         remove_paths(
             helper,
             &self.route_context_id,
             &self.context_handle,
             &self.active_paths,
         )
-        .await
+        .await?;
+        retired
     }
 }
 
@@ -887,6 +938,9 @@ fn additional_path_ids(paths: &[u32]) -> impl Iterator<Item = u32> + '_ {
 /// Failure to adopt or configure a helper-owned MPTCP capability.
 #[derive(Debug, Error)]
 pub enum MptcpTransportError {
+    /// An acquire may have issued an unknown capability; destroy this exact route before reuse.
+    #[error("MPTCP socket acquisition is unconfirmed; route retirement required")]
+    AcquireUnconfirmed,
     /// The helper descriptor metadata did not describe the required exact capability.
     #[error("helper MPTCP metadata is invalid")]
     InvalidMetadata,

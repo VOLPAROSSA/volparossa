@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "repository": "https://github.com/VOLPAROSSA/volparossa-cloud",
+  "revision": "a67b91fbed42ecd23ba215eb21ef54397fc9f06a",
+  "files": {
+    "scripts/cloud-file.mjs": {
+      "bytes": 2474,
+      "sha256": "933fb1dffd39d8c89c73769d665c5e5b3419be999827569f8102f2a77af4e4e9"
+    },
+    "scripts/private_file.py": {
+      "bytes": 11720,
+      "sha256": "7276e699c315eb4d206ece4982c8cdd5e587f8e1142b4da802d107e70c4698ee"
+    },
+    "src/private-file.mjs": {
+      "bytes": 10291,
+      "sha256": "639176f4606b5f037ff92458d51279d1e39efa7bed1226b6afe096e4369e2d1a"
+    },
+    "src/opencloud-dav.mjs": {
+      "bytes": 9820,
+      "sha256": "43e10509e2af910cb1899f40860200eb6c7a359b9108fdd7ba2f32320cfc61d9"
+    },
+    "vendor/volparossa-image/immich_snapshot.py": {
+      "bytes": 24955,
+      "sha256": "23528a0737cd0a51e88b58a7f61079b3c6aa0f19b96a1f55757a9da49718256f"
+    },
+    "vendor/volparossa-image/core-storage.mjs": {
+      "bytes": 20915,
+      "sha256": "d274c294a4f7c500aac552629997487c79e67faaa89dddd1383309d7e58273b0"
+    },
+    "vendor/volparossa-image/LICENSE": {
+      "bytes": 35149,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    "third_party/volparossa-image-source.json": {
+      "bytes": 1131,
+      "sha256": "680fbba7c44254c802a47183aac919ba618687122959f387291157ec0e3e7f30"
+    },
+    "LICENSE": {
+      "bytes": 35149,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    "scripts/cloud-catalog.mjs": {
+      "bytes": 3137,
+      "sha256": "5c15631c8add400d361e1851263115c5d72b5ce89d280a5e1f4b001b830d73f9"
+    },
+    "scripts/cloud-serve.mjs": {
+      "bytes": 6172,
+      "sha256": "6be4c8bb736aba48dd59065bdd82cb679dfc51cb638cf24dd450d986760a71a3"
+    },
+    "scripts/private_catalog.py": {
+      "bytes": 5249,
+      "sha256": "d5896b994e07d39b85d517b34690e360ed7b4a3210de0dfde223e4da9d684c06"
+    },
+    "scripts/stage_web_sdk.py": {
+      "bytes": 5255,
+      "sha256": "7b496a31c957093d3697ff0893f80e05066e13cf40c6b8d927cbe3c63a9a64b4"
+    },
+    "src/private-catalog.mjs": {
+      "bytes": 18854,
+      "sha256": "d26037a4ebf708c348d0bb1dde23afbece30759c7aa40abcc26750e363befb7f"
+    },
+    "src/private-dav-server.mjs": {
+      "bytes": 19486,
+      "sha256": "d14156325eb66381eaa372d316c0b92425b507648a9e4b7e376494ad4431a052"
+    },
+    "third_party/opencloud-web-sdk.json": {
+      "bytes": 837,
+      "sha256": "014ebcb6d372b5d9205d53697bde1bba3193c48c82ac31d11b6955890e084de0"
+    },
+    "THIRD_PARTY_LICENSES.md": {
+      "bytes": 3542,
+      "sha256": "7b7f44eee2aefe4707bfee1b864e133a2df47ed374424aa6c10a953d0f032352"
+    }
+  },
+  "runtime": {
+    "version": "24.19.0",
+    "url": "https://nodejs.org/dist/v24.19.0/node-v24.19.0-linux-x64.tar.xz",
+    "bytes": 31633904,
+    "sha256": "14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647",
+    "files": {
+      "bin/node": {
+        "bytes": 125989464,
+        "sha256": "bc17c508ffeed0ec622934f9b7fa72f8e78da65350e63c3eceb56fa688aa5e12"
+      },
+      "LICENSE": {
+        "bytes": 157606,
+        "sha256": "148eacf7863ef4329224a29398623077200a27194aa075569faf4a0a85566ca5"
+      }
+    }
+  }
+}

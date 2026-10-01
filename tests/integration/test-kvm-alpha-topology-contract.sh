@@ -44,6 +44,7 @@ for script in "$GUEST" "$HOST"; do
     "$script" --preview --scenario private-storage-peer | grep -Fi 'private-storage-peer' >/dev/null
     "$script" --preview --scenario private-storage-replicas | grep -Fi 'private-storage-replicas' >/dev/null
     "$script" --preview --scenario private-storage-handoff | grep -Fi 'private-storage-handoff' >/dev/null
+    "$script" --preview --scenario private-storage-fragments | grep -Fi 'private-storage-fragments' >/dev/null
     "$script" --preview --scenario content-replication | grep -Fi 'content-replication' >/dev/null
     "$script" --preview --scenario dns-cache | grep -Fi 'DNS-cache' >/dev/null
     "$script" --preview --scenario agent-artifact-quarantine | grep -Fi 'quarantine' >/dev/null
@@ -277,6 +278,8 @@ grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'private-storage-hando
 grep -F 'python3 -B tests/integration/private-storage-handoff-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/test-private-storage-handoff-smoke.py' "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/test-private-storage-handoff-wiring.py' "$WORKFLOW" >/dev/null
+grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'private-storage-fragments'" "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/private-storage-fragments-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
 grep -F 'agent-public-collection) scenario=agent-jobs; agent_public_collection=yes; wifi_link=no; uplink_link=no ;;' "$GUEST" >/dev/null
 grep -F '. "$source_directory/tests/integration/agent-public-collection-smoke.sh"' "$GUEST" >/dev/null
 grep -F 'agent-public-collection-smoke.py agent-public-document-smoke.py agent-document-synthesis.py' "$GUEST" >/dev/null
@@ -496,6 +499,7 @@ grep -F 'agent_autonomous_aggregation_finalize_report "$jobs_status"' "$HERE/age
 "$HOST" --preview --scenario agent-autonomous-aggregation | grep -F 'Guest resources: 4 vCPUs, 4096 MiB RAM;' >/dev/null
 python3 -B - "$HERE" <<'PYTHON_AUTONOMOUS_AGGREGATION'
 from pathlib import Path
+import re
 import sys
 
 root = Path(sys.argv[1])
@@ -503,7 +507,12 @@ guest = (root / "kvm-alpha-topology.sh").read_text()
 jobs = (root / "agent-jobs-smoke.sh").read_text()
 workflow = (root / "../../.github/workflows/alpha-topology.yml").resolve().read_text()
 assert guest.count("agent_autonomous_aggregation=no") == 2
-assert "timeout-minutes: ${{ inputs.scenario == 'agent-autonomous-aggregation' && 180 || inputs.scenario == 'signal-backup' && 150 || 120 }}" in workflow
+timeout_line = next(line.strip() for line in workflow.splitlines() if line.strip().startswith('timeout-minutes:'))
+overrides = dict(re.findall(r"inputs.scenario == '([^']+)' && ([0-9]+)", timeout_line))
+assert overrides.get('agent-autonomous-aggregation') == '180' and timeout_line.endswith('|| 120 }}')
+# The independent native Signal build may require its existing 150-minute window.
+assert all((name, bound) in {('agent-autonomous-aggregation', '180'), ('signal-backup', '150')}
+           for name, bound in overrides.items())
 host = (root / "run-alpha-topology-vm.sh").read_text()
 assert 'if scenario == "agent-autonomous-aggregation":\n        file_count_limit = 192' in host
 assert 'if scenario in ("agent-adapter-aggregation", "agent-autonomous-aggregation"):' in host

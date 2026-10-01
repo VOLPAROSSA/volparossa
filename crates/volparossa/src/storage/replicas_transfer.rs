@@ -1,6 +1,7 @@
 //! Sequential copies and restore failover; no automatic deletion, provider discovery or new trust.
 
 use std::{
+    collections::BTreeSet,
     fs::{self, File},
     path::Path,
 };
@@ -46,11 +47,25 @@ pub(super) async fn deposit(
     signer: &SigningKey,
     input: &mut File,
 ) -> Result<serde_json::Value> {
+    deposit_selected(set, socket, signer, input, &BTreeSet::new()).await
+}
+
+pub(super) async fn deposit_selected(
+    set: &mut LockedSet,
+    socket: &Path,
+    signer: &SigningKey,
+    input: &mut File,
+    retiring: &BTreeSet<usize>,
+) -> Result<serde_json::Value> {
     set.check_owner(signer)?;
     let mut outcomes = Vec::new();
     let mut completed = 0;
     let mut eligible = 0;
     for index in 0..set.data.copies.len() {
+        if retiring.contains(&index) {
+            outcomes.push("retiring_not_deposited");
+            continue;
+        }
         if set.data.copies[index].charge == Charge::Deleted {
             outcomes.push("explicitly_deleted");
             continue;
@@ -87,10 +102,24 @@ pub(super) async fn refresh(
     signer: &SigningKey,
     renewal: Option<u64>,
 ) -> Result<serde_json::Value> {
+    refresh_selected(set, socket, signer, renewal, &BTreeSet::new()).await
+}
+
+pub(super) async fn refresh_selected(
+    set: &mut LockedSet,
+    socket: &Path,
+    signer: &SigningKey,
+    renewal: Option<u64>,
+    retiring: &BTreeSet<usize>,
+) -> Result<serde_json::Value> {
     set.check_owner(signer)?;
     let mut outcomes = Vec::new();
     let mut complete = true;
     for index in 0..set.data.copies.len() {
+        if renewal.is_some() && retiring.contains(&index) {
+            outcomes.push("retiring_not_renewed");
+            continue;
+        }
         if set.data.copies[index].charge == Charge::Deleted {
             outcomes.push("explicitly_deleted");
             continue;

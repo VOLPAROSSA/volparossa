@@ -8,6 +8,48 @@ const FIRST: &str = "01010101010101010101010101010101";
 const SECOND: &str = "02020202020202020202020202020202";
 const THIRD: &str = "03030303030303030303030303030303";
 
+#[tokio::test]
+async fn qwen_larger_frames_are_only_for_explicit_conversation_submission() {
+    let conversation = request(
+        FIRST,
+        json!({"type":"submit_conversation","conversation":{
+        "version":1,"visibility":"private_local","instructions":"i".repeat(40_000),"tools":[],
+        "history":[{"type":"message","role":"user","text":"Synthetic input."}]}}),
+    );
+    let mut oversized_cancel =
+        serde_json::to_vec(&request(SECOND, json!({"type":"cancel","task_id":FIRST}))).unwrap();
+    oversized_cancel.extend(vec![b' '; wire::MAX_REQUEST_BYTES]);
+    for (raw, profile, accepted) in [
+        (
+            serde_json::to_vec(&conversation).unwrap(),
+            ModelProfile::Qwen600,
+            true,
+        ),
+        (
+            serde_json::to_vec(&conversation).unwrap(),
+            ModelProfile::Smol360,
+            false,
+        ),
+        (oversized_cancel, ModelProfile::Qwen600, false),
+        (
+            serde_json::to_vec(&request(FIRST, json!({"type":"capabilities"}))).unwrap(),
+            ModelProfile::Qwen600,
+            false,
+        ),
+    ] {
+        let (mut writer, mut reader) = tokio::io::duplex(raw.len() + 4);
+        writer
+            .write_all(&u32::try_from(raw.len()).unwrap().to_be_bytes())
+            .await
+            .unwrap();
+        writer.write_all(&raw).await.unwrap();
+        assert_eq!(
+            wire::read_request(&mut reader, profile).await.is_ok(),
+            accepted
+        );
+    }
+}
+
 fn request(id: &str, operation: Value) -> Value {
     let mut request = json!({"version":1,"id":id});
     request["operation"] = operation;
@@ -242,6 +284,69 @@ fn private_serve_unconfirmed_cleanup_or_dropped_execution_quarantines_admission(
 }
 
 #[tokio::test]
+async fn conversation_handshake_is_separate_but_shares_the_private_execution_slot() {
+    let root = tempfile::tempdir().unwrap();
+    let gate = Arc::new(Semaphore::new(1));
+    let mut occupied = ExecutionSlot::admit(&gate).unwrap();
+    let (server, mut client) = UnixStream::pair().unwrap();
+    let (stop, shutdown) = watch::channel(false);
+    let serving = tokio::spawn(connection(
+        server,
+        Arc::new(config(root.path())),
+        gate.clone(),
+        shutdown,
+    ));
+    let submit = json!({"type":"submit_conversation","conversation":{
+        "version":1,"visibility":"private_local","instructions":"Review synthetic code.",
+        "history":[{"type":"message","role":"user","text":"Explain 1+1."}],"tools":[]}});
+    for (index, operation, expected) in [
+        (1, json!({"type":"capabilities"}), "capabilities"),
+        (2, submit.clone(), "handshake_required"),
+        (
+            3,
+            json!({"type":"conversation_capabilities"}),
+            "conversation_capabilities",
+        ),
+        (4, submit.clone(), "busy"),
+    ] {
+        wire::write(&mut client, &request(&format!("{index:032x}"), operation))
+            .await
+            .unwrap();
+        let reply: Value = wire::read(&mut client, wire::MAX_RESPONSE_BYTES)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reply[if reply["event"] == "error" {
+                "code"
+            } else {
+                "event"
+            }],
+            expected
+        );
+        if expected == "capabilities" {
+            assert!(reply["capabilities"].get("max_prompt_tokens").is_none());
+        }
+        if expected == "conversation_capabilities" {
+            assert_eq!(reply["capabilities"]["max_prompt_tokens"], 1024);
+            assert_eq!(reply["capabilities"]["tool_execution"], false);
+        }
+    }
+    gate.close();
+    wire::write(&mut client, &request(&format!("{:032x}", 5), submit))
+        .await
+        .unwrap();
+    let reply: Value = wire::read(&mut client, wire::MAX_RESPONSE_BYTES)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply["code"], "cleanup_unconfirmed");
+    stop.send(true).unwrap();
+    serving.await.unwrap();
+    occupied.finish(&Err(anyhow::anyhow!("no model invoked")));
+}
+
+#[tokio::test]
 async fn private_serve_uses_real_private_staging_and_cleans_it_on_backend_validation_failure() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
@@ -259,9 +364,22 @@ async fn private_serve_uses_real_private_staging_and_cleans_it_on_backend_valida
         "Private canary, never a public dataset.",
     )
     .unwrap();
-    let result = private_task::execute_bytes(&config, input, activity).await;
+    let result = private_task::execute_bytes(&config, input, activity.clone()).await;
     // No runtime/model was provisioned: this exercises the real validation and
     // staging cleanup path, not an inference-success or sandbox-reaping claim.
+    assert!(result.is_err());
+    assert_eq!(fs::read_dir(&config.work_parent).unwrap().count(), 0);
+    assert!(fs::read_dir(&config.runtime_root).unwrap().next().is_none());
+    let input = serde_json::to_vec(&json!({"version":1,"visibility":"private_local",
+        "instructions":"Review synthetic code.","history":[{"type":"message","role":"user","text":"Explain 1+1."}],
+        "tools":[]})).unwrap();
+    let result = private_task::execute_mode(
+        &config,
+        input,
+        activity,
+        super::super::Mode::PrivateConversation,
+    )
+    .await;
     assert!(result.is_err());
     assert_eq!(fs::read_dir(&config.work_parent).unwrap().count(), 0);
     assert!(fs::read_dir(&config.runtime_root).unwrap().next().is_none());

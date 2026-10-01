@@ -10,6 +10,7 @@ use std::{
 };
 
 use prost::Message;
+use subtle::ConstantTimeEq;
 pub(crate) mod mptcp_subflow;
 pub(crate) mod path_extension;
 use thiserror::Error;
@@ -34,7 +35,7 @@ pub(crate) struct InternalWorkerRequest {
     pub(crate) request_id: Vec<u8>,
     #[prost(
         oneof = "internal_worker_request::Operation",
-        tags = "10, 11, 12, 13, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28"
+        tags = "10, 11, 12, 13, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29"
     )]
     pub(crate) operation: Option<internal_worker_request::Operation>,
 }
@@ -72,6 +73,8 @@ pub(crate) mod internal_worker_request {
 
     #[derive(Clone, PartialEq, Oneof)]
     pub(crate) enum Operation {
+        #[prost(message, tag = "29")]
+        RetireMptcpFlow(super::mptcp_subflow::RetireMptcpFlow),
         #[prost(message, tag = "28")]
         UpdateMptcpSubflow(super::mptcp_subflow::UpdateMptcpSubflow),
         #[prost(message, tag = "27")]
@@ -487,7 +490,7 @@ pub(crate) struct InternalWorkerResponse {
     pub(crate) activation_failure: Option<ActivationFailureDiagnostic>,
     #[prost(
         oneof = "internal_worker_response::Outcome",
-        tags = "10, 11, 12, 13, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26"
+        tags = "10, 11, 12, 13, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27"
     )]
     pub(crate) outcome: Option<internal_worker_response::Outcome>,
 }
@@ -504,6 +507,8 @@ pub(crate) mod internal_worker_response {
 
     #[derive(Clone, PartialEq, Oneof)]
     pub(crate) enum Outcome {
+        #[prost(message, tag = "27")]
+        MptcpFlowRetired(super::mptcp_subflow::MptcpFlowRetired),
         #[prost(message, tag = "26")]
         DownlinkBudgetApplied(super::WorkerDownlinkBudgetApplied),
         #[prost(message, tag = "10")]
@@ -745,6 +750,9 @@ fn response_matches_operation(
         (Operation::UpdateMptcpSubflow(request), Outcome::MptcpEndpointRemoved(response)) => {
             request.action == mptcp_subflow::Action::Retire as i32
                 && request.path_id == response.path_id
+        }
+        (Operation::RetireMptcpFlow(request), Outcome::MptcpFlowRetired(response)) => {
+            request.flow_handle.ct_eq(&response.flow_handle).unwrap_u8() == 1
         }
         (Operation::DestroyContext(_), Outcome::Destroyed(_)) => true,
         (Operation::ApplyDownlinkBudget(request), Outcome::DownlinkBudgetApplied(response)) => {
@@ -1221,6 +1229,7 @@ fn validate_request(value: &InternalWorkerRequest) -> Result<(), InternalProtoco
             path(operation.path_id)
         }
         Operation::UpdateMptcpSubflow(operation) => operation.validate(),
+        Operation::RetireMptcpFlow(operation) => operation.validate(),
         Operation::AcquireTransportSocket(operation) => {
             route_id(&operation.route_context_id)?;
             path_role(operation.path_id, operation.role)?;
@@ -1357,6 +1366,9 @@ fn validate_response(value: &InternalWorkerResponse) -> Result<(), InternalProto
             Outcome::DownlinkBudgetApplied(value) => validate_applied_downlink(value),
             Outcome::MptcpEndpointAdded(outcome) => path(outcome.path_id),
             Outcome::MptcpEndpointRemoved(outcome) => path(outcome.path_id),
+            Outcome::MptcpFlowRetired(outcome) => {
+                mptcp_subflow::validate_flow_handle(&outcome.flow_handle)
+            }
             Outcome::TransportSocketReady(outcome) => {
                 path_role(outcome.path_id, outcome.role)?;
                 validate_transport_tuple(

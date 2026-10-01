@@ -4,6 +4,25 @@ Original VOLPAROSSA source in this repository is licensed under GPL-3.0-only. De
 vendored components retain their own licenses. This file is a provenance record, not a substitute
 for the license text shipped by each upstream project.
 
+## Explicit OpenCloud client integration trial
+
+The disposable `cloud-private-file` scenario stages VOLPAROSSA Cloud at
+`a67b91fbed42ecd23ba215eb21ef54397fc9f06a`, with each used source file's exact
+length and SHA-256 in `tests/integration/cloud-private-file-pins.json`. Original
+GPL-3.0-only Cloud integration and its pinned vendor notices remain unchanged.
+
+Its explicit guest-only SDK stage uses the original published
+[`@opencloud-eu/web-client` 8.0.0 package](https://registry.npmjs.org/@opencloud-eu/web-client/8.0.0),
+under AGPL-3.0. The Cloud source pin retains the exact archive URL and SHA-512
+integrity; archive SHA-256 is
+`8954d9ad90e44a6f62d0e32d3280ca92fd7b0ce30042fe07cdde5c653e0739b3`.
+All 109 original files (1,109,076 unpacked bytes), including LICENSE and bundled
+notices, are retained and rechecked before importing the WebDAV SDK. No package
+installer or lifecycle script runs. This is a pinned published artifact, not a
+claim of reproducible SDK source compilation or a bundled core dependency.
+The provision receipt separately binds package inventory and source provenance;
+successful staging alone is not evidence of actual SDK or protected-peer reads.
+
 ## Explicit development ML inputs
 
 The optional, guest-only `workers/volparossa-ml/provision.py` installer is not an automatic
@@ -19,6 +38,7 @@ current Debian package; a later distributable ML package still needs complete no
 | SmolLM2-135M-Instruct | [HuggingFaceTB model](https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/tree/83212e1e2b3cfd6958f3707877bb878945dea8ee), `83212e1e2b3cfd6958f3707877bb878945dea8ee` | Apache-2.0; unchanged model LICENSE SHA-256 `59899c6091b540582ed617e8eeaac4919dc985ccfc35459ee9752b699be5205b` |
 | Opt-in SmolLM2-360M-Instruct | [HuggingFaceTB model](https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct/tree/a10cc1512eabd3dde888204e902eca88bddb4951), `a10cc1512eabd3dde888204e902eca88bddb4951` | Apache-2.0 declared by the original model card; this revision has no `LICENSE` file. The explicitly pinned, unchanged Apache-2.0 text from the 135M row is retained separately, not described as a file from the 360M repository. |
 | Opt-in SmolLM2-1.7B-Instruct | [HuggingFaceTB model](https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct/tree/31b70e2e869a7173562077fd711b654946d38674), `31b70e2e869a7173562077fd711b654946d38674` | Apache-2.0 declared by the original model card; this revision has no `LICENSE` file. The unchanged Apache-2.0 text from the pinned 135M repository is retained with separate provenance, not attributed to the 1.7B repository. |
+| Opt-in Qwen3-0.6B private native-tool profile | [Qwen model](https://huggingface.co/Qwen/Qwen3-0.6B/tree/c1899de289a04d12100db370d81485cdf75e47ca), `c1899de289a04d12100db370d81485cdf75e47ca` | Apache-2.0; same-revision original LICENSE, 11,343 bytes, SHA-256 `832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e`. Explicit provisioning retains it unchanged together with the original model card. |
 | PyTorch CPU `2.14.0+cpu` | [pytorch/pytorch](https://github.com/pytorch/pytorch/tree/2b3ec34829036a65cd9d1398ea72a0167dc37470), `2b3ec34829036a65cd9d1398ea72a0167dc37470` | Original official CPU wheel; retain its own and bundled dependency notices |
 | Transformers `5.16.1` | [huggingface/transformers](https://github.com/huggingface/transformers/tree/93c8b7b485963a10800c91f55304db6be211c2bd), `93c8b7b485963a10800c91f55304db6be211c2bd` | Apache-2.0; original wheel notices retained |
 | PEFT `0.20.0` | [huggingface/peft](https://github.com/huggingface/peft/tree/a5526d27a9d47d1e8264d5e1b1f96c0fdc79464e), `a5526d27a9d47d1e8264d5e1b1f96c0fdc79464e` | Apache-2.0; original wheel notices retained |
@@ -29,6 +49,15 @@ This is slightly larger than the current native content-object ceiling; the ceil
 been silently raised. The initial trained rank-4 adapter fits a normal content object, while
 full-model distribution needs explicit compatible sharding/parts integration. No trained
 adapter or actual backend execution is claimed until the isolated guest smoke succeeds.
+
+The opt-in `qwen3-0.6b-v1` profile adds nine same-revision assets in
+`workers/volparossa-ml/model-pins-qwen3-0.6b.json`, reusing the unchanged 38-wheel runtime.
+Original weights are 1,503,300,328 bytes, SHA-256
+`f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b`.
+The worker uses the original pinned native chat template, with an original GPL-3.0-only
+adapter for ordered roles, offered-tool aliases and strictly parsed proposals; the
+upstream template/model files are not patched. Metadata verification and offline
+bridge tests do not claim downloaded weights, real model execution or tool-use quality.
 
 The optional `smollm2-360m-v1` inference/planning profile adds seven original model assets
 in `workers/volparossa-ml/model-pins-360m.json` and the separately attributed license text;

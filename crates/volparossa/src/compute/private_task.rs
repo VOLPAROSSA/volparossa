@@ -109,6 +109,24 @@ pub(super) fn validate_input(raw: &[u8]) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn validate_mode_input(mode: Mode, raw: &[u8]) -> Result<()> {
+    validate_profile_input(mode, raw, ModelProfile::Smol360)
+}
+
+pub(super) fn validate_profile_input(mode: Mode, raw: &[u8], profile: ModelProfile) -> Result<()> {
+    ensure!(
+        profile != ModelProfile::Qwen600 || mode == Mode::PrivateConversation,
+        "compute_profile_conversation_only"
+    );
+    match mode {
+        Mode::PrivateInfer => validate_input(raw),
+        Mode::PrivateConversation => {
+            super::private_conversation::Input::decode_profile(raw, profile).map(|_| ())
+        }
+        _ => anyhow::bail!("compute_private_mode"),
+    }
+}
+
 fn read_input(path: &Path) -> Result<Vec<u8>> {
     ensure!(
         path.is_absolute() && fs::canonicalize(path)? == path,
@@ -157,7 +175,12 @@ impl Staged {
         Self::from_config(&ExecutionConfig::from(args), input)
     }
 
+    #[cfg(test)]
     fn from_config(args: &ExecutionConfig, input: &[u8]) -> Result<Self> {
+        Self::from_mode(args, input, Mode::PrivateInfer)
+    }
+
+    fn from_mode(args: &ExecutionConfig, input: &[u8], mode: Mode) -> Result<Self> {
         super::private_directory(&args.work_parent)?;
         let directory = tempfile::Builder::new()
             .prefix("private-task-")
@@ -173,7 +196,7 @@ impl Staged {
         file.write_all(input)?;
         file.sync_all()?;
         let options = super::Options {
-            mode: Mode::PrivateInfer,
+            mode,
             runtime_root: args.runtime_root.clone(),
             model_root: args.model_root.clone(),
             model_profile: args.model_profile,
@@ -216,11 +239,21 @@ fn preview(args: &Options) -> Value {
 }
 
 /// Exact local input/model binding after ordinary sandbox cleanup, never a public receipt.
+#[cfg(test)]
 pub(super) fn validate_report(report: &Value, raw: &[u8], profile: ModelProfile) -> Result<()> {
-    validate_input(raw)?;
+    validate_mode_report(report, raw, profile, Mode::PrivateInfer)
+}
+
+pub(super) fn validate_mode_report(
+    report: &Value,
+    raw: &[u8],
+    profile: ModelProfile,
+    mode: Mode,
+) -> Result<()> {
+    validate_profile_input(mode, raw, profile)?;
     let spec = profile.spec();
     ensure!(
-        report["mode"] == "private_infer"
+        report["mode"] == serde_json::to_value(mode)?
             && report["status"] == "ok"
             && report["updates_completed"] == 0
             && report["private_data_supported"] == true
@@ -261,6 +294,9 @@ pub(super) fn validate_report(report: &Value, raw: &[u8], profile: ModelProfile)
                 .is_some_and(|generation| generation.model_profile == profile),
         "compute_private_result_output"
     );
+    if mode == Mode::PrivateConversation {
+        super::private_conversation::validate_report(report, raw, profile)?;
+    }
     Ok(())
 }
 
@@ -336,15 +372,31 @@ pub(super) async fn execute_bytes(
     input: Vec<u8>,
     activity: watch::Receiver<bool>,
 ) -> Result<Value> {
-    validate_input(&input)?;
+    execute_mode(config, input, activity, Mode::PrivateInfer).await
+}
+
+pub(super) async fn execute_mode(
+    config: &ExecutionConfig,
+    input: Vec<u8>,
+    activity: watch::Receiver<bool>,
+    mode: Mode,
+) -> Result<Value> {
+    validate_profile_input(mode, &input, config.model_profile)?;
     config.validate()?;
     ensure!(*activity.borrow(), "compute_owner_busy");
-    let staged = Staged::from_config(config, &input)?;
+    let staged = Staged::from_mode(config, &input, mode)?;
     let result = async {
         staged.options.validate()?;
         let report = super::execute(&staged.options, activity).await?;
-        validate_report(&report, &input, config.model_profile)?;
-        summary(&report, config.model_profile)
+        validate_mode_report(&report, &input, config.model_profile, mode)?;
+        if mode == Mode::PrivateConversation {
+            Ok(super::private_conversation::summary(
+                &report,
+                config.model_profile,
+            ))
+        } else {
+            summary(&report, config.model_profile)
+        }
     }
     .await;
     staged.finish(result)

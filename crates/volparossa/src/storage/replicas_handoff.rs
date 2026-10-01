@@ -104,6 +104,18 @@ pub(super) async fn replace(
     if target_expires <= crate::storage::now()? || grant.current(crate::storage::now()?).is_err() {
         return report(set, "replacement_verification_pending");
     }
+    // Another owner operation may have renewed the old copy since this intent was
+    // planned. A retry must not retire that longer obligation onto a shorter lease.
+    let original_expiry = {
+        let original = set.copy(from_index)?;
+        original
+            .journal
+            .last_expiry
+            .max(original.journal.requested_expiry)
+    };
+    if target_expires < original_expiry {
+        return report(set, "replacement_retention_insufficient");
+    }
     set.handoff_phase(HandoffPhase::DeletePending)?;
     let Ok((mut original, original_grant)) = copy_for_owner(set, from_index, signer) else {
         return report(set, "source_delete_unconfirmed");

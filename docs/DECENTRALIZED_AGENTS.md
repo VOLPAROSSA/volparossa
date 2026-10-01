@@ -14,6 +14,16 @@ Participation remains capability-based: an idle device can contribute useful wor
 every device training a large model or retaining every model. No permanent central compute,
 training, task-dispatch or decision authority is part of the target.
 
+The user extended this scope on 2026-10-01 to autonomous maintenance of the core
+and all current/future VOLPAROSSA organization repositories. Agents should share
+implementation and independent review work under immune-system oversight, then
+publish through narrowly authorized repository capabilities. This is not yet
+implemented and does not distribute GitHub credentials to compute peers. The
+user additionally approved automatic installation of authenticated releases on
+VOLPAROSSA clients; this requires a separate verified update/activation facility,
+not execution of arbitrary peer programs. See the separate
+[repository-maintenance scope and publication boundaries](REPOSITORY_MAINTENANCE.md).
+
 The requested positive principles are **Humilitas, Humanitas, Mansuetudo, Diligentia,
 Liberalitas, Temperantia and Castitas**. The negative principles are **Superbia, Invidia,
 Ira, Acedia, Avaritia, Gula and Luxuria**. These are the primary basis for agents' reasoning in
@@ -139,7 +149,9 @@ external-dataset ingestion are still required work, not implemented by the initi
   artifact must not activate it. A signature proves provenance, not model correctness.
 - Separate a model's data from its runtime and tools. Use an explicitly supported, versioned
   model/operator format in an isolated worker; do not execute downloaded scripts, plugins,
-  pickle objects or native libraries. No automatic executable-code update channel is implied.
+  pickle objects or native libraries. Model/artifact distribution does not grant
+  executable-update authority. The separately approved client updater must verify
+  release authority and exact artifacts before activation.
 - Discover short-lived compute capabilities through the existing peer model, not a central
   worker catalogue. Input/output sizes, task lifetime, hardware needs and privacy requirements
   are part of the job contract; public indexes contain neither prompts nor private documents.

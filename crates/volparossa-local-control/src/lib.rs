@@ -7,7 +7,9 @@
 
 #![forbid(unsafe_code)]
 
+mod browser_gateway;
 pub mod compute;
+pub use browser_gateway::{BrowserGatewayGrantRequest, BrowserGatewayGranted};
 mod compute_control;
 mod content;
 pub use compute_control::{
@@ -62,7 +64,7 @@ pub struct ControlRequest {
     /// One allowlisted operation.
     #[prost(
         oneof = "control_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42"
     )]
     pub operation: Option<control_request::Operation>,
 }
@@ -72,9 +74,9 @@ pub mod control_request {
     use prost::Oneof;
 
     use super::{
-        ComputeAttachRequest, ComputeDiscoverRequest, ComputeRemoteRequest, ConnectRequest,
-        ContentCustodyDiscoverRequest, ContentCustodyRequest, ContentExportRequest,
-        ContentFetchNameRequest, ContentFetchRequest, ContentImportRequest,
+        BrowserGatewayGrantRequest, ComputeAttachRequest, ComputeDiscoverRequest,
+        ComputeRemoteRequest, ConnectRequest, ContentCustodyDiscoverRequest, ContentCustodyRequest,
+        ContentExportRequest, ContentFetchNameRequest, ContentFetchRequest, ContentImportRequest,
         ContentLocalFetchNameRequest, ContentPolicyApplyRequest, ContentServeRequest, Empty,
         HttpsContentFetchRequest, LogQuery, MailboxRemoteRequest, MailboxServeRequest,
         PrivateStorageAdmissionRequest, PrivateStorageGrantRequest, PrivateStorageRemoteRequest,
@@ -180,6 +182,9 @@ pub mod control_request {
         /// Inspect or explicitly change only the attached local provider's admission target.
         #[prost(message, tag = "41")]
         PrivateStorageAdmission(PrivateStorageAdmissionRequest),
+        /// Delegate only one finite app-scoped TCP gateway, never admin socket authority.
+        #[prost(message, tag = "42")]
+        BrowserGatewayGrant(BrowserGatewayGrantRequest),
     }
 }
 
@@ -265,7 +270,7 @@ pub struct ControlResponse {
     /// Typed response body.
     #[prost(
         oneof = "control_response::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32"
     )]
     pub payload: Option<control_response::Payload>,
 }
@@ -275,11 +280,11 @@ pub mod control_response {
     use prost::Oneof;
 
     use super::{
-        ComputeDiscovered, ComputeReady, ComputeTranscript, ContentCustodyDiscovered,
-        ContentCustodyReady, ContentPolicyReceipt, ContentReceipt, ContentTransferReady, Empty,
-        HttpsContentTransferReady, LogList, MailboxReady, NamedContentTransferReady, PathList,
-        PeerList, PolicySnapshot, PrivateStorageAdmission, PrivateStorageGrant,
-        PrivateStorageReady, RoleSnapshot, SessionList, StatusSnapshot,
+        BrowserGatewayGranted, ComputeDiscovered, ComputeReady, ComputeTranscript,
+        ContentCustodyDiscovered, ContentCustodyReady, ContentPolicyReceipt, ContentReceipt,
+        ContentTransferReady, Empty, HttpsContentTransferReady, LogList, MailboxReady,
+        NamedContentTransferReady, PathList, PeerList, PolicySnapshot, PrivateStorageAdmission,
+        PrivateStorageGrant, PrivateStorageReady, RoleSnapshot, SessionList, StatusSnapshot,
     };
 
     /// Exactly one response body.
@@ -351,6 +356,9 @@ pub mod control_response {
         /// Exact local retained payload and pending drain, not remote contribution credit.
         #[prost(message, tag = "31")]
         PrivateStorageAdmission(PrivateStorageAdmission),
+        /// Secret single-use delegation, delivered only to the existing operator boundary.
+        #[prost(message, tag = "32")]
+        BrowserGatewayGranted(BrowserGatewayGranted),
     }
 }
 
@@ -768,6 +776,7 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
         control_request::Operation::PrivateStorageServe(request) => request.validate()?,
         control_request::Operation::PrivateStorageGrant(request) => request.validate()?,
         control_request::Operation::PrivateStorageRemote(request) => request.validate()?,
+        control_request::Operation::BrowserGatewayGrant(request) => request.validate()?,
         control_request::Operation::PrivateStorageAdmission(request) => request.validate()?,
         control_request::Operation::ContentCustody(request) => request.validate()?,
         control_request::Operation::ContentCustodyDiscover(request) => request.validate()?,
@@ -871,6 +880,7 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
         control_response::Payload::MailboxReady(ready) => ready.validate()?,
         control_response::Payload::PrivateStorageReady(ready) => ready.validate()?,
         control_response::Payload::PrivateStorageGrant(grant) => grant.validate()?,
+        control_response::Payload::BrowserGatewayGranted(grant) => grant.validate()?,
         control_response::Payload::PrivateStorageAdmission(status) => status.validate()?,
         control_response::Payload::ContentCustodyReady(ready) => ready.validate()?,
         control_response::Payload::ContentCustodyDiscovered(discovered) => discovered.validate()?,
