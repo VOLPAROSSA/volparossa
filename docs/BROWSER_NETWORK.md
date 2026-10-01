@@ -76,6 +76,26 @@ A15/private/profile cleanup passes; guest-state hash
 `5c78a1aa3fe989c5e031e05593e551c05aac0885fe893f9adeed2983b8bfb93b`
 matches before/after, the VM is removed and host DNS/routes remain unchanged.
 
+Local `build/browser-native-vm-05` on
+`923d61a571cde9bbd95deddefd01c9312f27614c` observes transient `Unavailable`
+and then `Busy` preselection results, but **both attachments eventually become
+ready** using the existing retry behavior. This does not prove the diagnostic
+change fixed preselection. The ordinary first tab's CONNECT is accepted and the
+origin verifies one GET after TLS completion. The original kernel baseline has
+two genuine MPTCP subflows on distinct WireGuard relay paths. The trial then
+fails at `request-a` / `BROWSER_NETWORK_PAYLOAD_UNAVAILABLE`: no progress sample,
+full body hash, second response or independent detach proof was completed.
+The candidate retains fixed navigation failure stages, numeric statuses, byte
+counts and state booleans to distinguish the four currently collapsed callback
+failures; it changes no browser module, native binary, route or timeout.
+Original browser/driver receipt SHA-256 values are
+`188c6f6d4bb80d7db52f2f8facbd3f2d6ea2854eee89f8d8597d955ceb1344c6` and
+`064787125056906a3d7a314e7d077f55c13a383ceb724fed9925594f33a6dee1`.
+A15/private/profile cleanup passes with matching guest-state hash
+`bf53a77017aa24b464027065df7dfeb17c069a0a1b03a84634b62e5bacf65cb4`;
+the VM is removed and host DNS/routes remain unchanged. All earlier failures
+remain retained; no native ECH wire or complete browser-payload claim is made.
+
 ## One daemon, independent application connections
 
 An explicitly authorized application can obtain its own short-lived TCP gateway from the

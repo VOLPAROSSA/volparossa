@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import runpy
 import selectors
+import shutil
+import subprocess
 import tempfile
 import threading
 from types import SimpleNamespace
@@ -21,6 +23,63 @@ OLD = runpy.run_path(str(HERE / "test-browser-network-smoke.py"))
 
 
 class NativeBrowserTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node is needed for the native navigation callback harness")
+    def test_navigation_failures_export_only_closed_state_from_all_four_callbacks(self):
+        tree = ast.parse((HERE / "browser-native-core.py").read_text())
+        script = next(node.value.value for node in tree.body if isinstance(node, ast.Assign)
+                      and any(isinstance(t, ast.Name) and t.id == "SCRIPT" for t in node.targets))
+        navigate = "const navigate=" + script.split("const navigate=", 1)[1].split("  try{\n    await checkpoint", 1)[0]
+        harness = r'''
+const vm=require("node:vm"), assert=require("node:assert/strict");
+const navigate=JSON.parse(require("node:fs").readFileSync(0,"utf8"));
+(async()=>{
+for(const stage of ["stream-data","stream-stop","window-stop","body-integrity"]){
+  let listener,progress;
+  const url="https://private-canary.invalid/private-canary";
+  const owner={_select:()=>null,status:{state:"overlay"}};
+  const previous={onStartRequest(){},onDataAvailable(){},onStopRequest(){}};
+  const request={URI:{spec:url},cancel(){},QueryInterface(){return {
+    setNewListener(value){listener=value;return previous;}}}};
+  const browser={currentURI:{spec:url},removeProgressListener(){},
+    addProgressListener(value){progress=value;},loadURI(){
+      owner._select(request);
+      if(stage==="stream-data") listener.onDataAvailable(request,null,0,11);
+      else if(stage==="stream-stop") listener.onStopRequest(request,0x80004004);
+      else if(stage==="window-stop"){
+        browser.currentURI.spec="about:blank";
+        progress.onStateChange(null,request,3,0);
+      }else{
+        listener.onStopRequest(request,0);
+        progress.onStateChange(null,request,3,0);
+      }
+    }};
+  const context=vm.createContext({owner,browser,url,
+    Cc:{"@mozilla.org/security/hash;1":{createInstance:()=>({init(){},finish:()=>""})}},
+    Ci:{nsICryptoHash:{SHA256:1},nsIWebProgressListener:{STATE_STOP:1,STATE_IS_WINDOW:2},
+      nsIWebProgress:{NOTIFY_STATE_WINDOW:3}},
+    ChromeUtils:{generateQI:()=>()=>{}},Cr:{NS_ERROR_ABORT:0x80004004},
+    Components:{isSuccessCode:status=>status===0},Services:{io:{newURI:()=>({})}},
+    principal:{},expectedSha:"not-a-body-hash",expectedBytes:10});
+  await assert.rejects(vm.runInContext("let navigationFailure=null;"+navigate+
+    ";navigate(owner,browser,url)",context), /ordinary_navigation_failed/);
+  const value=JSON.parse(vm.runInContext("JSON.stringify(navigationFailure)",context));
+  assert.deepEqual(Object.keys(value).sort(),["stage","nsresult","received_bytes","chunk_bytes",
+    "selected","stream_done","window_done","current_uri_matches","owner_overlay"].sort());
+  assert.equal(value.stage,stage);assert.equal(value.received_bytes,0);
+  assert.equal(value.selected,true);assert.equal(value.owner_overlay,true);
+  assert.equal(value.nsresult,stage==="stream-stop"?0x80004004:stage==="window-stop"?0:null);
+  assert.equal(value.chunk_bytes,stage==="stream-data"?11:0);
+  assert.equal(value.current_uri_matches,stage!=="window-stop");
+  assert.equal(value.stream_done,stage==="body-integrity");
+  assert.equal(value.window_done,stage==="body-integrity");
+  assert.equal(JSON.stringify(value).includes("private-canary"),false);
+}
+})().catch(error=>{console.error(error);process.exitCode=1;});
+'''
+        result = subprocess.run([shutil.which("node"), "-e", harness], input=json.dumps(navigate),
+                                text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_pinned_marionette_window_handles_are_a_direct_array(self):
         tree = ast.parse((HERE / "browser-native-core.py").read_text())
         helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef)

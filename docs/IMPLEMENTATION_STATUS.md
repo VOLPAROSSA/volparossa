@@ -26,6 +26,12 @@ The next actual trial `browser-native-vm-04` passes startup and reaches attachme
 but fails at core `PreselectionUnavailable` before origin traffic. Its cleanup and
 unchanged host-state checks pass. A closed inner-enum diagnostic is prepared; the
 original evidence does not identify policy, readiness, family or lineage as the cause.
+Actual follow-up `browser-native-vm-05` records transient `Unavailable`/`Busy`,
+then two ready attachments, an accepted ordinary-tab CONNECT and one origin TLS/GET.
+Its original kernel baseline contains two MPTCP subflows over distinct WireGuard
+relays, but the first transfer fails before the required payload progress/full
+hashes. Cleanup and unchanged host state pass. A closed four-site navigation
+diagnostic is prepared; neither the transfer cause nor a preselection fix is proved.
 Successful native ordinary-tab/core integration remains pending. This is not a full
 browser kill-switch, HTTP/3 or native ECH wire-proof claim. Workspace-only
 pinned QEMU tools are explicit local test inputs, not a host installation or

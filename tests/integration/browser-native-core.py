@@ -81,6 +81,7 @@ class StartupStderr:
 SCRIPT = r"""
 const [grants, urls, expectedSha, expectedBytes, certificate, output, done] = arguments;
 let phase="import";
+let navigationFailure=null;
 const checkpoint = async (next, errorCode=null, attachment=null, request=null) => {
   phase=next;
   await IOUtils.writeJSON(output+"/driver-status.json", {version:1,
@@ -110,16 +111,25 @@ const marker=async(name,value)=> {
   // one bounded buffer per onDataAvailable is immediately forwarded unchanged
   // to the original product/Gecko listener. There is no openChannel/asyncOpen.
   const navigate=(owner,browser,url)=>new Promise((resolve,reject)=>{
-    let bytes=0, selected=false, streamDone=false, windowDone=false, failed=false, previous=null;
+    let bytes=0, chunkBytes=0, selected=false, streamDone=false, windowDone=false, failed=false, previous=null;
     const hash=Cc["@mozilla.org/security/hash;1"].createInstance(Ci.nsICryptoHash);
     hash.init(Ci.nsICryptoHash.SHA256);
     const original=owner._select;
     const cleanup=()=>{ owner._select=original; browser.removeProgressListener(progress); };
-    const fail=()=>{ if(!failed){ failed=true; cleanup(); reject(new Error("ordinary_navigation_failed")); } };
+    const fail=(stage,status=null)=>{
+      if(!failed){
+        navigationFailure={stage,
+          nsresult:Number.isInteger(status)&&status>=-2147483648&&status<=4294967295?status>>>0:null,
+          received_bytes:bytes, chunk_bytes:chunkBytes, selected,
+          stream_done:streamDone, window_done:windowDone,
+          current_uri_matches:browser.currentURI.spec===url, owner_overlay:owner.status.state==="overlay"};
+        failed=true; cleanup(); reject(new Error("ordinary_navigation_failed"));
+      }
+    };
     const finish=()=>{
       if(failed || !streamDone || !windowDone) return;
       const sha=Array.from(hash.finish(false),c=>c.charCodeAt(0).toString(16).padStart(2,"0")).join("");
-      if(bytes !== expectedBytes || sha !== expectedSha || owner.status.state !== "overlay") { fail(); return; }
+      if(bytes !== expectedBytes || sha !== expectedSha || owner.status.state !== "overlay") { fail("body-integrity"); return; }
       cleanup();
       resolve({bytes,sha256_verified:true});
     };
@@ -128,6 +138,7 @@ const marker=async(name,value)=> {
       onStartRequest(request){ previous.onStartRequest(request); },
       onDataAvailable(request,input,offset,count){
         try {
+          chunkBytes=Number.isInteger(count)&&count>=0&&count<=4294967295?count:null;
           if(count>1048576 || bytes+count>expectedBytes) throw new Error("body_bound");
           const reader=Cc["@mozilla.org/binaryinputstream;1"].createInstance(Ci.nsIBinaryInputStream);
           reader.setInputStream(input);
@@ -135,18 +146,18 @@ const marker=async(name,value)=> {
           const copy=Cc["@mozilla.org/io/arraybuffer-input-stream;1"].createInstance(Ci.nsIArrayBufferInputStream);
           const array=Uint8Array.from(body); copy.setData(array.buffer,0,count);
           previous.onDataAvailable(request,copy,offset,count);
-        } catch { request.cancel(Cr.NS_ERROR_ABORT); fail(); }
+        } catch(error) { request.cancel(Cr.NS_ERROR_ABORT); fail("stream-data",error?.result); }
       },
       onStopRequest(request,status){
         try { previous.onStopRequest(request,status); }
-        finally { if(!Components.isSuccessCode(status)) fail(); else {streamDone=true;finish();} }
+        finally { if(!Components.isSuccessCode(status)) fail("stream-stop",status); else {streamDone=true;finish();} }
       },
     };
     const progress={
       QueryInterface:ChromeUtils.generateQI(["nsIWebProgressListener","nsISupportsWeakReference"]),
       onStateChange(_progress,_request,flags,status){
         if((flags&Ci.nsIWebProgressListener.STATE_STOP)&&(flags&Ci.nsIWebProgressListener.STATE_IS_WINDOW)){
-          if(!Components.isSuccessCode(status)||browser.currentURI.spec!==url) fail();
+          if(!Components.isSuccessCode(status)||browser.currentURI.spec!==url) fail("window-stop",status);
           else {windowDone=true;finish();}
         }
       },
@@ -198,7 +209,7 @@ const marker=async(name,value)=> {
   const code=allowed.includes(error?.code)?error.code:"SCRIPT_FAILED";
   const attachment=error?.diagnostic??null;
   try{await checkpoint(phase,code,attachment,null);}catch{}
-  done({fatal:"native_network_core_driver_failed",phase,code,attachment});
+  done({fatal:"native_network_core_driver_failed",phase,code,attachment,navigation:navigationFailure});
 });
 """
 
