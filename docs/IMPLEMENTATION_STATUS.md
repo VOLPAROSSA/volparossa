@@ -1168,6 +1168,25 @@ provider withdrawal between completed deposition and native restore. The old
 `signal-backup` source cohort and historical replica proof are retained unchanged.
 **No native fragment acceptance PASS is claimed yet.** This does not complete
 Signal messaging/calling, mobile clients, recovery UX or the full alpha.
+Core candidate `57eb59e18f2cf1e58cd5671169a4e8d961914d2e` was exercised in
+[run37056433170](https://github.com/VOLPAROSSA/volparossa/actions/runs/37056433170).
+The run is terminal failed during `signal-backup-provision`, before native
+compilation, app execution or the network topology. All 17 pinned Chat files
+were verified, but source staging returned `INSTALL_COMMAND_FAILED` after
+0.256 seconds without an exported error subtype. No specific HTTP/network
+cause, guest cleanup or unchanged host state is proved by the incomplete report.
+The six original artifacts remain retained, ZIP SHA-256
+`3534ddfdfea1902ad3f9f63120f3892fdf6b1b0be8eef88c4895df43c9bc8ae4`.
+
+The next fragment-only source cohort pins Chat `78d3cb43`: source staging now
+reconstructs the unchanged pinned Git tree from the unchanged SHA-256-pinned
+archive, removing its separate Tree API dependency. Ten focused source tests
+(including reconstruction of the real 4,570-file local checkout), four Node and
+four pnpm tests pass; this is not a fresh upstream download or native launch.
+The provisioner retains only a closed phase/category/type/HTTP-status diagnostic
+after a failed, joined source process. Eleven provisioner and four fragment
+fixture checks pass. No historical failure is reclassified and native fragment
+restore remains unproved pending the next exact-source trial.
 
 ## Earlier milestone evidence
 

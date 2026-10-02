@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "chat_revision": "76bab5ba546206f1fa402e9b1120ffcab081f95b",
+  "chat_revision": "78d3cb43ba10ce46cb60ea0a4ec18d962e64d190",
   "signal_revision": "ef3872cb0249ec939d8aff857568a0e87a6b5075",
   "files": {
     "LICENSE": {
@@ -12,8 +12,8 @@
       "sha256": "1993b0dafb24a107d3702de4d5d144d765aba65123e9f680900fbf6f9200c385"
     },
     "scripts/stage_signal_source.py": {
-      "bytes": 8116,
-      "sha256": "557954d2a9b7e6b6b24f2b51ccec15cda829c22a9e70fd22420a7c0d36168f11"
+      "bytes": 14906,
+      "sha256": "7013b41dc57c9274fdbe5ddb4af69fac2141d949a5ce6757e4af95fae7f4cc05"
     },
     "scripts/stage_node.py": {
       "bytes": 8939,

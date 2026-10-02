@@ -145,6 +145,55 @@ def read_json(path):
     return json.loads(path.read_bytes())
 
 
+def source_error_projection(root):
+    """Optional closed diagnostic from the joined, failed source child only.
+
+    Historical source pins produce no such receipt. Missing/invalid diagnostics
+    never change step failure, imply success, or fall back to reading raw logs.
+    This is schema/ownership validation, not a signed authorship assertion.
+    """
+    fields = {"version", "kind", "phase", "category", "error_type", "http_status"}
+    phases = {"configuration", "archive_fetch", "archive_verification", "source_extraction",
+              "existing_verification"}
+    pairs = {("http", "http_error"), ("tls", "tls_error"), ("timeout", "timeout_error"),
+             ("network", "dns_error"), ("network", "url_error"), ("validation", "invalid_source"),
+             ("io", "os_error"), ("unknown", "unknown_error")}
+
+    def unique_object(items):
+        value = {}
+        for key, item in items:
+            require(key not in value, "duplicate source diagnostic field")
+            value[key] = item
+        return value
+
+    path = root / "build/signal-source-error.json"
+    try:
+        require(path.parent.resolve(strict=True) == path.parent, "source diagnostic parent")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as source:
+            before = os.fstat(source.fileno())
+            require(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid()
+                    and stat.S_IMODE(before.st_mode) == 0o600 and before.st_nlink == 1
+                    and 0 < before.st_size <= 512, "source diagnostic file")
+            encoded = source.read(513)
+            after = os.fstat(source.fileno())
+            require(len(encoded) == before.st_size == after.st_size
+                    and before.st_mtime_ns == after.st_mtime_ns
+                    and before.st_ctime_ns == after.st_ctime_ns, "source diagnostic changed")
+        value = json.loads(encoded, object_pairs_hook=unique_object)
+        require(type(value) is dict and set(value) == fields
+                and type(value["version"]) is int and value["version"] == 1
+                and value["kind"] == "signal-source-staging-failure"
+                and value["phase"] in phases
+                and (value["category"], value["error_type"]) in pairs, "source diagnostic schema")
+        status = value["http_status"]
+        require(status is None or (value["category"] == "http" and type(status) is int
+                                  and 100 <= status <= 599), "source diagnostic HTTP status")
+        return {key: value[key] for key in sorted(fields)}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def compile_receipt(root):
     receipts = list((root / "build/signal-candidate-build").glob("attempt-*.json"))
     require(len(receipts) == 1, "one fresh compilation receipt required")
@@ -227,6 +276,10 @@ def provision(root):
         command = [sys.executable, "-B", str(root / "scripts" / script), *arguments]
         result = supervisor.run_bounded(command, root, environment, logs / (phase + ".log"), [root], timeout=timeout)
         report["steps"].append(dict(name=phase, **result))
+        if phase == "source" and result["result"] != "INSTALLED" and result["process_group_joined"] is True:
+            diagnostic = source_error_projection(root)
+            if diagnostic is not None:
+                report["source_error"] = diagnostic
         write_report(root, report)
         require(result["result"] == "INSTALLED" and result["process_group_joined"] is True,
                 "pinned Signal provisioning step failed")
