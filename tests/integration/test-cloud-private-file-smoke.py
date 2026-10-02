@@ -24,7 +24,7 @@ def fixture():
         private_import_staging_removed=True, owner_distinct_from_all_providers=True, owner_secrets_exported=False)
     geometry = CHECK["configure"](prepare)
     prepare.update(grant_payload_bytes=list(geometry["PROVIDER_BYTES"]), grant_max_leases=list(geometry["PROVIDER_LEASES"]))
-    value.update(prepare=prepare, archive_encryption_proven=True, web_sdk_read_proven=True,
+    value.update(prepare=prepare, archive_encryption_proven=True, web_sdk_read_proven=True, original_files_ui_read_proven=True,
         **dict.fromkeys(CHECK["FALSE_CLAIMS"], False))
     value["upload"] = CHECK["upload_report"](size)
     value["restore"] = CHECK["restore_report"](size, CHECK["sdk_report"]("e" * 64))
@@ -46,11 +46,19 @@ def fixture():
         private_file_created=False, peer_storage_proven=False, opencloud_server_started=False,
         sdk=dict(pins_sha256=CHECK["SOURCE_HASHES"]["third_party/opencloud-web-sdk.json"],
             archive_sha256=CHECK["SDK_SHA"], receipt_sha256="e" * 64, files_verified=True, files=109,
-            source_build_claimed=False, sdk_reads_proven=False))
-    value["network"]["restore"]["gates"]["exit_mptcp_tls_completed"] = 32
+            source_build_claimed=False, sdk_reads_proven=False),
+        ui=dict(source_revision="11e699ac82fda4dd113ac3ceb2ecb2dd74574045",
+            source_tree="4f13ceee9b21450659266df69a4fac57f25c3bc9",
+            pins_sha256=CHECK["SOURCE_HASHES"]["third_party/opencloud-web-ui.json"],
+            patch_sha256=CHECK["SOURCE_HASHES"]["patches/opencloud-web-owner-recovery.patch"],
+            build_report_sha256="d" * 64, source_built=True, files_verified=True, ui_execution_proven=False),
+        browser=dict(version="140.16.0", source_stamp="d864999404b3032f682d74ccc60d1ce38c9ce609",
+            archive_sha256="e32aeabcab2e74fe112332fad10f7d9630e14cd6f4564a596a71073018d24508",
+            files_verified=True, browser_execution_proven=False))
+    value["network"]["restore"]["gates"]["exit_mptcp_tls_completed"] = 48
     for phase in value["network"].values():
         for node in ("relay5", "relay3"):
-            phase["privacy"]["exit"]["provider_application"][node]["response_payload_bytes"] = 4 * size
+            phase["privacy"]["exit"]["provider_application"][node]["response_payload_bytes"] = 6 * size
     return value
 
 
@@ -58,7 +66,7 @@ class CloudEvidence(unittest.TestCase):
     def test_closed_fixture_validates_but_does_not_execute_or_prove_the_scenario(self):
         value = fixture()
         CHECK["validate_evidence"](value)
-        report = dict(schema_version=2, report_kind="volparossa-cloud-private-file", source_revision="b" * 40,
+        report = dict(schema_version=3, report_kind="volparossa-cloud-private-file", source_revision="b" * 40,
             success=True, runner_exit_status=0, phase="cloud-private-file-complete", observed_blocker=None,
             cleanup=dict(complete=True, remaining_owned_objects=0), host_state=dict(unchanged=True), cloud=value)
         CHECK["validate_report"](report, "b" * 40)
@@ -75,6 +83,7 @@ class CloudEvidence(unittest.TestCase):
             lambda v: v.update(serverless_opencloud_proven=True),
             lambda v: v.update(web_client_proven=True),
             lambda v: v.update(web_sdk_read_proven=False),
+            lambda v: v.update(original_files_ui_read_proven=False),
             lambda v: v.update(public_cache_used=True),
             lambda v: v["prepare"].update(cloud_revision="a" * 40),
             lambda v: v["prepare"].update(authenticated_dav_ranges=0),
@@ -96,6 +105,9 @@ class CloudEvidence(unittest.TestCase):
             lambda v: v["restore"]["sdk"].update(local_ciphertext_fallback=True),
             lambda v: v["restore"]["sdk"].update(sdk_receipt_sha256="b" * 64),
             lambda v: v["restore"]["sdk"].update(range_get_sha256="b" * 64),
+            lambda v: v["restore"]["sdk"]["ui"].update(synthetic_backend=True),
+            lambda v: v["restore"]["sdk"]["ui"].update(file_downloads_verified=1),
+            lambda v: v["restore"]["sdk"]["ui"].update(private_profile_removed=False),
             lambda v: v["withdrawal"].update(first_provider_stopped_before_restore=False),
             lambda v: v["private_cleanup"].update(recovery_keys_removed=False),
             lambda v: v["deleted_usage"][0].update(committed_bytes=1),
@@ -105,6 +117,9 @@ class CloudEvidence(unittest.TestCase):
             lambda v: v["provision"]["tools"].pop("gpg"),
             lambda v: v["provision"]["sdk"].update(archive_sha256="f" * 64),
             lambda v: v["provision"]["sdk"].update(source_build_claimed=True),
+            lambda v: v["provision"]["ui"].update(source_built=False),
+            lambda v: v["provision"]["browser"].update(files_verified=False),
+            lambda v: v["network"]["restore"]["gates"].update(exit_mptcp_tls_completed=32),
             lambda v: v["network"]["restore"]["gates"].update(exit_mptcp_tls_completed=16),
             lambda v: v["network"]["restore"]["privacy"]["client"].update(direct_client_exit_packets=1),
             lambda v: v["network"]["restore"]["privacy"]["exit"]["provider_application"]["relay4"].update(response_payload_bytes=1),
@@ -136,7 +151,7 @@ class CloudEvidence(unittest.TestCase):
             self.assertIn(required, text)
         for forbidden in ('storageFactory', 'openCatalog:', 'startServer:', 'restore-local'):
             self.assertNotIn(forbidden, text)
-        self.assertIn('response_payload_bytes"] >= 4 *', (HERE / "cloud-private-file-smoke.py").read_text())
+        self.assertIn('response_payload_bytes"] >= 6 *', (HERE / "cloud-private-file-smoke.py").read_text())
 
     def test_dav_shutdown_and_local_cipher_removal_are_required_before_restore(self):
         text = (HERE / "cloud-private-file-smoke.py").read_text()

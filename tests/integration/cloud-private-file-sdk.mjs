@@ -5,7 +5,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { lstat, readFile, realpath, mkdir, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const SOURCE = '/opt/volparossa-cloud';
@@ -17,7 +17,27 @@ const children = new Set();
 const cancel = new AbortController();
 let cleanupFailed = false;
 let stage = 'not_started';
+let uiFailure = null;
 const insist = value => assert.ok(value, 'Cloud SDK boundary or operation failed');
+
+// Only fixed phase names and process termination metadata cross this boundary.
+// Browser text, URLs, bearer input and stderr never become diagnostics.
+export function closedUIFailure(stdout, status) {
+  const stages = new Set(['input', 'browser_start', 'locked_ui', 'wrong_token', 'unlock',
+    'original_download_1', 'original_download_2', 'logout']);
+  const signals = new Set(['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGHUP', 'SIGABRT',
+    'SIGSEGV', 'SIGBUS', 'SIGILL', 'SIGPIPE']);
+  let childStage = 'unreported';
+  try {
+    const record = JSON.parse(stdout);
+    if (record && Object.keys(record).sort().join(',') === 'kind,stage,success'
+      && record.success === false && record.kind === 'cloud-private-file-ui-failure'
+      && stages.has(record.stage)) childStage = record.stage;
+  } catch { /* No extraction, repair or raw output on malformed child reports. */ }
+  return { stage: childStage,
+    exit_status: Number.isInteger(status?.code) && status.code >= 0 && status.code <= 255 ? status.code : null,
+    signal: status?.signal === null ? null : signals.has(status?.signal) ? status.signal : 'UNREPORTED' };
+}
 
 async function privateDirectory(directory) {
   const info = await lstat(directory);
@@ -62,10 +82,10 @@ async function sdkProvenance() {
   return { receiptSha: digest(bytes), pinsSha: receipt.pins_sha256 };
 }
 
-function launch(script, args) {
+function launchProcess(executable, args, input) {
   insist(!cancel.signal.aborted);
-  const child = spawn(NODE, [`${SOURCE}/scripts/${script}`, ...args], {
-    stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: '/usr/bin:/bin', LC_ALL: 'C' },
+  const child = spawn(executable, args, {
+    stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'], env: { PATH: '/usr/bin:/bin', LC_ALL: 'C' },
   });
   const state = { child, stdout: '', stderr: '', exited: false, overflow: false };
   children.add(state);
@@ -79,7 +99,14 @@ function launch(script, args) {
     if (state[stream].length + chunk.length > 65536) { state.overflow = true; child.kill('SIGTERM'); }
     else state[stream] += chunk.toString('utf8');
   });
+  if (input !== undefined) {
+    child.stdin.on('error', () => {}); // Child status remains authoritative; never export private input.
+    child.stdin.end(input);
+  }
   return state;
+}
+function launch(script, args) {
+  return launchProcess(NODE, [`${SOURCE}/scripts/${script}`, ...args]);
 }
 async function stop(state) {
   if (!state) return;
@@ -113,6 +140,30 @@ async function startService(config) {
   } catch (error) { await stop(service); throw error; }
 }
 
+async function originalUI(root, origin, bearerToken, content) {
+  const script = path.join(path.dirname(fileURLToPath(import.meta.url)), 'cloud-private-file-ui.py');
+  const input = JSON.stringify({ origin, bearerToken, expectedBytes: content.length, expectedSha256: digest(content) });
+  insist(Buffer.byteLength(input) < 4096);
+  const state = launchProcess('/usr/bin/python3', ['-B', script, root], input);
+  const timer = setTimeout(() => state.child.kill('SIGTERM'), 1900000);
+  let status;
+  try {
+    status = await state.finished;
+    insist(status.code === 0 && status.signal === null && !state.overflow && !state.stderr);
+    const result = JSON.parse(state.stdout.trim());
+    assert.deepEqual(result, { version: 1, kind: 'cloud-private-file-original-ui', success: true,
+      original_files_ui: true, actual_owner_service: true, synthetic_backend: false,
+      file_downloads_verified: 2, download_bytes: content.length, download_sha256: digest(content),
+      wrong_token_denied: true, logout_relocks: true, token_absent_from_url_and_web_storage: true,
+      private_profile_removed: true, browser_stopped_and_joined: true,
+      browser_version: '140.16.0', owner_secrets_exported: false });
+    return result;
+  } catch (error) {
+    uiFailure = closedUIFailure(state.stdout, status);
+    throw error;
+  } finally { clearTimeout(timer); await stop(state); }
+}
+
 async function main(root) {
   insist(process.argv.length === 3 && path.isAbsolute(root) && process.execPath === NODE);
   await privateDirectory(root);
@@ -140,10 +191,10 @@ async function main(root) {
   const token = randomBytes(32).toString('base64url');
   await privateJSON(`${root}/service.json`, { version: 1, catalog: `${root}/catalog`, workDirectory: `${root}/w`,
     bearerToken: token, port: 0, allowedOrigins: [], maxOpenBytes: 4 * 1024 ** 2,
-    maxConcurrent: 2, requestTimeoutMs: 900000, maxRangeBytes: 262144 });
+    maxConcurrent: 2, requestTimeoutMs: 900000, maxRangeBytes: 262144, webDist: `${SOURCE}/build/web-ui` });
   stage = 'service_start';
   const { service, origin } = await startService(`${root}/service.json`);
-  let rangeHash;
+  let rangeHash, ui;
   try {
     const { webdav } = await import(pathToFileURL(`${SDK}/package/dist/web-client/webdav.js`));
     const client = webdav(origin, () => ({ Authorization: `Bearer ${token}` }));
@@ -170,6 +221,8 @@ async function main(root) {
     await assert.rejects(client.getFileContents(space, { path: 'private-file.bin' }, {
       responseType: 'arraybuffer', headers: { 'If-Match': '"stale-selection"' },
     }), error => error.statusCode === 412);
+    stage = 'original_files_ui';
+    ui = await originalUI(root, origin, token, content);
   } finally {
     try {
       const status = await stop(service);
@@ -186,23 +239,25 @@ async function main(root) {
     sdk_archive_sha256: ARCHIVE_SHA, sdk_pins_sha256: provenance.pinsSha, sdk_receipt_sha256: provenance.receiptSha,
     catalog_verified_full_restore: true, catalog_encrypted: true, metadata_list_verified: true,
     full_get_bytes: content.length, full_get_sha256: digest(content), range_get_bytes: 12, range_get_sha256: rangeHash,
-    actual_cloud_cli_service: true, actual_published_sdk: true, file_reconstructions: 3,
+    actual_cloud_cli_service: true, actual_published_sdk: true, file_reconstructions: 5, ui,
     wrong_token_rejected: true, stale_etag_rejected: true, read_service_stopped_and_joined: true,
     temporary_plaintext_removed: true, original_source_fallback: false, local_ciphertext_fallback: false,
-    full_web_ui_proven: false, owner_secrets_exported: false };
+    original_files_ui_reads_proven: true, full_web_ui_proven: false, owner_secrets_exported: false };
 }
 
-const interrupted = () => { cancel.abort(); for (const state of children) state.child.kill('SIGTERM'); };
-for (const kind of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(kind, interrupted);
-const deadline = setTimeout(interrupted, 1200000);
-try { console.log(JSON.stringify(await main(process.argv[2]))); }
-catch {
-  console.log(JSON.stringify({ success: false, kind: 'cloud-private-file-sdk-failure', stage }));
-  process.exitCode = 1;
-} finally {
-  clearTimeout(deadline);
-  try { await Promise.all([...children].map(stop)); }
-  catch { cleanupFailed = true; process.exitCode = 1; }
-  for (const kind of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.removeListener(kind, interrupted);
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+  const interrupted = () => { cancel.abort(); for (const state of children) state.child.kill('SIGTERM'); };
+  for (const kind of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(kind, interrupted);
+  const deadline = setTimeout(interrupted, 2300000);
+  try { console.log(JSON.stringify(await main(process.argv[2]))); }
+  catch {
+    console.log(JSON.stringify({ success: false, kind: 'cloud-private-file-sdk-failure', stage, ui: uiFailure }));
+    process.exitCode = 1;
+  } finally {
+    clearTimeout(deadline);
+    try { await Promise.all([...children].map(stop)); }
+    catch { cleanupFailed = true; process.exitCode = 1; }
+    for (const kind of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.removeListener(kind, interrupted);
+  }
+  if (cleanupFailed) console.error('Cloud SDK child cleanup unconfirmed; private diagnostics withheld');
 }
-if (cleanupFailed) console.error('Cloud SDK child cleanup unconfirmed; private diagnostics withheld');

@@ -6,7 +6,7 @@
 private_storage_fragments_private() {
     # One phase may perform two restores, each trying stopped A twice. This
     # fixture-only bound does not widen core exchange deadlines or leases.
-    timeout --signal=TERM --kill-after=5s 1500s setpriv \
+    timeout --signal=TERM --kill-after=5s "${storage_phase_timeout_seconds:-1500}s" setpriv \
         --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$custody_control_gid" \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- python3 -B "$WORK/bin/${storage_fixture_driver:-private-storage-fragments-smoke.py}" "$@"

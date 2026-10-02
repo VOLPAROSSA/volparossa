@@ -39,6 +39,98 @@ Last updated: 2026-10-01
   Accounts, sharing, writable synchronization and second-device owner-state
   recovery remain open, as does the full web UI and general server-independent
   OpenCloud service. Range reads currently reconstruct the whole encrypted file.
+  Cloud `c81980dd71297b257f1df6aa382c28a18f9c2f57` now includes the original
+  source-built OpenCloud Web8 Files interface for explicit owner-local recovery.
+  Its two real browser downloads pass against an explicitly synthetic backend;
+  that result is not a peer-storage proof. The next joined candidate stages those
+  exact assets and Firefox ESR140.16 in the disposable guest, attaches the UI to
+  the same actual Cloud/core read service used by the SDK, and requires six real
+  protected B/C reconstructions including two original Download actions with the
+  source and A still offline. It retains authentication, logout, resource bounds,
+  complete private cleanup and unchanged host-state checks. This new combined
+  UI/peer scenario remains unchecked. Its first actual
+  [run36930150960](https://github.com/VOLPAROSSA/volparossa/actions/runs/36930150960)
+  on `2156abb84c384e7f07667b2870e041563a728ea0` failed after provisioning,
+  authenticated import, eight committed copies, renewal, source shutdown and the
+  first successful peer restore/decryption. The last retained child phase is
+  `cloud_catalog_sdk_and_original_ui_reads`; the parent discarded the nested
+  SDK/UI failure record, so the original reports do not establish which subsequent
+  operation failed. The next candidate preserves only allowlisted child phases,
+  exit status and signals. It changes no timeout, product behavior or success gate;
+  a real Node-to-Python synthetic failure test confirms propagation without private
+  output, not a fixed UI datapath. The original run remains failed. Cleanup removed
+  every owned object and host hashes match
+  `52287c2c8b5a1751e5b679b14d95ab81b0b04937b9b6a910a6640f4e5b3e0bef`.
+  Its original 29-file ZIP SHA-256 is
+  `275539662385106e8a6570be9f5a9fd294135638a02402078540ac742913dc08`;
+  original job110597144662 log SHA-256 is
+  `0f0f1981975520b714d99d7fd9d4caec0b4819e903d6c582d1e50fef38f2ee55`.
+  The next exact [run36933015558 on `5a96bb50`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36933015558)
+  also failed, but earlier: `FRAGMENTS_ROUTE_UNAVAILABLE` before any Cloud import
+  or SDK/UI operation. Its route receipt records a rejected connect, exit 1,
+  17 attempts and 16 retries; `last_connect_reason` is `UNRECOGNIZED`. Neither its
+  original console nor job log retains a more specific control error, and no agent
+  log was exported. The observer previously recognized only the seven transient
+  codes, so terminal refusals could not be distinguished. The diagnostic candidate
+  now recognizes all 22 fixed Connect refusal/result pairs from the existing agent
+  dispatch; unknown text is still withheld. Two focused shell-execution tests verify
+  all pairs and unchanged terminal-versus-transient selection behavior. Retry policy,
+  limits and product behavior are unchanged; no route or UI fix is claimed.
+  Cleanup completed with zero objects and matching host SHA-256
+  `282fccb543cc5ae75596506ab61913f9d1acbd6080f0a848780d21c6f771a930`.
+  Original nine-file ZIP SHA-256:
+  `ff0398ee220793304c8c1726bdf31acc3b20ce00fcd18661961b4184b2dd9162`;
+  original job110606672586 log SHA-256:
+  `6bb00a1aa0bb6363caa14adcd469f9c5a53ebcaf63f4aa0715bd2845a7c8f7e2`.
+  The next [run36935715873 on `a7d244a7`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36935715873)
+  passed provisioning, import, eight committed copies, renewal and source shutdown,
+  then failed at the preserved `original_files_ui` / `unlock` child stage. The actual
+  driver reaches that stage only after direct recovery, encrypted catalog creation
+  and SDK full/range/auth checks; no original UI Download or complete restore-flow
+  aggregate passed. The original 29-file ZIP SHA-256 is
+  `7257947c7cff32fec326ef093c120c0a7aacba6b7922b405cc40aee7daa53901`;
+  job110615376820 log SHA-256 is
+  `8f40b126986a6b7833709738367b0a4d9dc48cb26aeb1fd77e30a494b738ac28`.
+  Private/topology cleanup completed and host SHA-256 remained
+  `0144da43747c66e2c7b519abfb374f20331e9b876d8043fe78b021791ac0b842`.
+  A separate local original-Web8/Firefox diagnostic reproduced the same unlock
+  failure with synthetic metadata: the default two-request service allowed only
+  six transport connections; six browser sockets occupied that cap and both login
+  requests failed before the HTTP handler. Eight transport slots passed (peak seven,
+  zero drops), without increasing private request/restoration concurrency. Cloud
+  `63bba5d1163a69e1ee6b4218c9e7462d941f22f7` applies that minimum only in explicit
+  recovery-web mode; ordinary DAV, auth, timers and the content budget are unchanged.
+  The regression fails on the old source with `ECONNRESET`; three focused real-HTTP
+  tests pass on the correction. The original UI also passes unlock and selected-file
+  navigation against that candidate in the isolated synthetic diagnostic, with no
+  private files opened and fresh-profile cleanup.
+  The subsequent joined [run36940326270 on `d7403106`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36940326270)
+  **passes** with exact Cloud `63bba5d1163a69e1ee6b4218c9e7462d941f22f7`, original
+  source-built Web8 `11e699ac82fda4dd113ac3ceb2ecb2dd74574045` and pinned Firefox
+  ESR140.16.0. The actual original Files UI authenticates against the real owner
+  read service, lists/navigates the selected file and completes two Download actions
+  of 786,433 bytes, independently checked against SHA-256
+  `5cb6c6ae54a29c1769e7189e1e6d4457e65afdbf78c48c89beb5780f86593f5c`.
+  Source-off/local-ciphertext-absent/provider-A-offline conditions remain in force
+  through six real protected B/C reconstructions and GPG decryptions: direct restore,
+  encrypted catalog creation, SDK full/range reads and both UI downloads. Restore
+  has 48 completed MPTCP/TLS exchanges with zero failed flows; upload/finish have
+  56/16. All phase baselines are covered, all 18 captures are drained with no drops
+  or direct client/exit traffic, and A sends no restore payload. Wrong-token/ETag
+  denial, in-memory-only browser token, logout/relock and nonconsuming reads pass.
+  Eight fragment copies retain their 1,598,292-byte charge until deletion; all three
+  reopened provider stores then report zero reservations, committed bytes and leases.
+  The read service/browser are joined, private plaintext/ciphertext/keys/journals and
+  browser profile are removed, and host SHA-256 remains
+  `7d5e0ab24417617ae5361f08517d3fd48c638fc8b7903385a64298a548b7ea26`.
+  Exact-source replay of all 44 original artifacts reconstructs both stored
+  aggregates unchanged. ZIP SHA-256:
+  `9815e1ee6435f39a03c9b566008068e471aa4ac2ad405006df530044b65ffbab`;
+  job110630073052 log SHA-256:
+  `5fe9eac6ea7723287f545ec03e51275b18a9a566d6fdeb2c04cd2d849735c3f5`.
+  This proves selected owner-local read-only recovery through the original UI, not
+  ordinary OpenCloud account/ACL recovery, writes, sharing, synchronization or
+  general server-independent OpenCloud availability.
 - [ ] Cooperative maintenance of current/future VOLPAROSSA organization repositories:
   actual coding jobs, independent immune review and exact-revision scoped GitHub
   publication. [Agreed scope](REPOSITORY_MAINTENANCE.md); no autonomous publisher,

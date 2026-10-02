@@ -155,6 +155,7 @@ jobs:
           python3 -B tests/integration/test-image-snapshot-smoke.py
           python3 -B tests/integration/test-cloud-private-file-provision.py
           python3 -B tests/integration/test-cloud-private-file-smoke.py
+          python3 -B tests/integration/test-cloud-private-file-ui.py
           python3 -B tests/integration/test-cloud-private-file-wiring.py
           sh -n tests/integration/cloud-private-file-smoke.sh
           python3 -B tests/integration/test-content-retain-smoke.py

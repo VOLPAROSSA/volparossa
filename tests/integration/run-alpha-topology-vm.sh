@@ -24,7 +24,7 @@ guest_memory_for_scenario() {
     case $scenario in
         agent-reasoning|agent-private-conversation) printf '8192\n' ;;
         signal-backup) printf '6144\n' ;;
-        agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-policy-assessment) printf '6144\n' ;;
+        agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-policy-assessment|cloud-private-file) printf '6144\n' ;;
         *) printf '4096\n' ;;
     esac
 }
@@ -1248,7 +1248,8 @@ if [ "$scenario" = agent-public-network-sources ]; then
 fi
 if [ "$scenario" = image-snapshot ] || [ "$scenario" = cloud-private-file ]; then
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends gpg gpg-agent gpgconf tar
-elif [ "$scenario" = browser-network ]; then
+fi
+if [ "$scenario" = browser-network ] || [ "$scenario" = cloud-private-file ]; then
     # Exact pinned ESR is extracted separately, not installed; these are its
     # ordinary Debian dependencies plus the isolated browser/HTTPS fixture tools.
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
@@ -1392,7 +1393,7 @@ if [ "$scenario" = image-snapshot ]; then
         IMAGE_REVISION=e177afebabd99ac0773de2a73d60275346a5de52
 elif [ "$scenario" = cloud-private-file ]; then
     set -- CLOUD_SOURCE=/opt/volparossa-cloud CLOUD_NODE=/opt/volparossa-node/bin/node \
-        CLOUD_REVISION=a67b91fbed42ecd23ba215eb21ef54397fc9f06a
+        CLOUD_REVISION=63bba5d1163a69e1ee6b4218c9e7462d941f22f7
 fi
 set +e
 sudo -n -- env "$@" ./tests/integration/kvm-alpha-topology.sh \
@@ -1591,6 +1592,9 @@ ssh_base chmod 0700 /home/vpci/guest-driver.sh
 
 set +e
 driver_time_bound=2400s
+# Includes source-building the original UI and two extra real peer-backed downloads.
+# Application exchange/lease bounds remain unchanged.
+[ "$scenario" != cloud-private-file ] || driver_time_bound=3600s
 # This scenario has a 1800s owner bound plus actual isolated guest provisioning/build.
 # Only the enclosing VM-driver window changes, never worker or source authorization.
 [ "$scenario" != agent-jobs-peer-recovery ] || driver_time_bound=3600s

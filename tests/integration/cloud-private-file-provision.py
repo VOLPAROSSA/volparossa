@@ -25,14 +25,16 @@ HERE = Path(__file__).resolve().parent
 PINS = HERE / "cloud-private-file-pins.json"
 SOURCE = Path("/opt/volparossa-cloud")
 RUNTIME = Path("/opt/volparossa-node")
-REVISION = "a67b91fbed42ecd23ba215eb21ef54397fc9f06a"
+REVISION = "63bba5d1163a69e1ee6b4218c9e7462d941f22f7"
 FILES = frozenset(("scripts/cloud-file.mjs", "scripts/private_file.py", "src/private-file.mjs",
     "src/opencloud-dav.mjs", "vendor/volparossa-image/immich_snapshot.py",
     "vendor/volparossa-image/core-storage.mjs", "vendor/volparossa-image/LICENSE",
     "third_party/volparossa-image-source.json", "LICENSE", "scripts/cloud-catalog.mjs",
     "scripts/cloud-serve.mjs", "scripts/private_catalog.py", "scripts/stage_web_sdk.py",
     "src/private-catalog.mjs", "src/private-dav-server.mjs", "third_party/opencloud-web-sdk.json",
-    "THIRD_PARTY_LICENSES.md"))
+    "THIRD_PARTY_LICENSES.md", "src/private-resource-id.mjs", "src/recovery-web-metadata.mjs",
+    "scripts/recovery-web-assets.mjs", "scripts/build_web_ui.py", "scripts/smoke_web_ui.py",
+    "third_party/opencloud-web-ui.json", "patches/opencloud-web-owner-recovery.patch"))
 SDK_SHA = "8954d9ad90e44a6f62d0e32d3280ca92fd7b0ce30042fe07cdde5c653e0739b3"
 TOOLS = {"gpg": "gpg", "gpg-agent": "gpg-agent", "gpgconf": "gpgconf", "tar": "tar"}
 
@@ -75,7 +77,7 @@ def guard():
             and release.get("VERSION_ID", "").strip('"') == "13")
     for root in (SOURCE, RUNTIME):
         require(root.resolve() == root and not root.exists() and not root.is_symlink())
-    require(shutil.disk_usage(SOURCE.parent).free >= 512 * 1024**2)
+    require(shutil.disk_usage(SOURCE.parent).free >= 10 * 1024**3)
 
 
 def tool_receipts():
@@ -109,7 +111,9 @@ def expose(root):
             path = Path(directory) / name
             info = path.lstat()
             require(info.st_uid == 0 and (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)))
-            path.chmod(0o555 if path == RUNTIME / "bin/node" or stat.S_ISDIR(info.st_mode) else 0o444)
+            browser_executable = path.is_relative_to(SOURCE / "build/firefox-esr") and info.st_mode & 0o111
+            path.chmod(0o555 if path == RUNTIME / "bin/node" or browser_executable
+                       or stat.S_ISDIR(info.st_mode) else 0o444)
     root.chmod(0o555)
 
 
@@ -156,21 +160,26 @@ def provision():
             runtime_stage["extract_runtime"](bundle, RUNTIME, pins["runtime"]["files"])
     verify_files(SOURCE, pins["files"])
     verify_files(RUNTIME, pins["runtime"]["files"])
+    # The source-built UI runs as vpci, not root; only its verified public Node
+    # binary is exposed before the guarded builder creates the final assets.
+    expose(RUNTIME)
     subprocess.run(["python3", "-B", str(SOURCE / "scripts/stage_web_sdk.py"), "--download", "--yes",
                     "--output", str(SOURCE / "build/web-sdk")], check=True, timeout=180,
                    env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
     sdk = verify_sdk(SOURCE)
     require(subprocess.check_output([str(RUNTIME / "bin/node"), "--version"],
             text=True, timeout=10, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}).strip() == "v24.19.0")
+    ui_stage = runpy.run_path(str(HERE / "cloud-private-file-ui-provision.py"))
+    ui = ui_stage["provision_ui"](SOURCE, RUNTIME)
+    browser = ui_stage["provision_browser"](SOURCE)
     report = dict(version=1, kind="cloud-private-file-runtime-provision", success=True,
-                  pins=pins, pins_sha256=digest(PINS), tools=tools, sdk=sdk,
+                  pins=pins, pins_sha256=digest(PINS), tools=tools, sdk=sdk, ui=ui, browser=browser,
                   guest_only=True, source_files_verified=True, runtime_files_verified=True,
                   original_licenses_retained=True, private_file_created=False,
                   peer_storage_proven=False, opencloud_server_started=False)
     with (SOURCE / "provision.json").open("x") as output:
         output.write(json.dumps(report, sort_keys=True, indent=2) + "\n")
     expose(SOURCE)
-    expose(RUNTIME)
     return report
 
 
@@ -178,12 +187,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("provision",))
     parser.add_argument("--download", action="store_true", required=True,
-                        help="explicit guest-only pinned Cloud source and Node runtime download")
+                        help="explicit guest-only Cloud/Node, frozen Web8 UI build and pinned Firefox downloads")
     parser.parse_args()
     print(json.dumps(dict(plan="guest-only-pinned-cloud-runtime", cloud_revision=REVISION,
+                          source_built_web_ui=True, browser_version="140.16.0",
+                          ui_execution_proven=False, browser_execution_proven=False,
                           private_file_created=False, peer_storage_proven=False)), flush=True)
     provision()
-    print("Pinned Cloud source and Node runtime verified; no private file or network storage tested")
+    print("Pinned Cloud/Node, source-built Web8 and Firefox verified; no UI execution or peer storage tested")
 
 
 if __name__ == "__main__":
