@@ -22,7 +22,7 @@ fails startup for an enabled Exit if the companion or root-anchor files are abse
 Roles-off installation remains inert; no DNS service or participation is automatically
 started. `dns_cache.enabled: false` disables cooperative caching, not private resolution.
 The optional OS resolver requires explicit `fallback.mode: system`; see
-[private Unbound readiness](../docs/UNBOUND_FALLBACK.md).
+[private Unbound readiness](../docs/network/UNBOUND_FALLBACK.md).
 
 The disposable DNS guest also supports `build-deb.sh --stage-built BIN_DIR NATIVE_FILE`,
 with an explicit `VOLPAROSSA_PACKAGE_SOURCE_REVISION`. This development-only staging mode
@@ -98,7 +98,7 @@ only its `fdstore`, binds every mutation to that run's nonzero systemd v257 `Inv
 only a zero count or not-found unit, and resets/collects with bounded waiting. Failed one-shots are
 reset inactive before cleaning. Its one-shot, numeric-group, account-overlay,
 private-network/private-`/run`, bounded-output
-and no-restart deviations from the shipped helper unit are enumerated in `docs/HELPER_V3.md`. No
+and no-restart deviations from the shipped helper unit are enumerated in `docs/architecture/HELPER_V3.md`. No
 required disposable-VM result has been recorded yet, so this remains a reviewed driver rather than
 earned package, shipped-service, restart-recovery, datapath, A14 or A15 evidence.
 
@@ -110,7 +110,7 @@ exact marker and a nonzero current ID. Remaining ambiguity causes no unit mutati
 and the disposable VM must be discarded.
 
 Package removal stops services but preserves `/var/lib/volparossa`, including the encrypted identity.
-See `docs/OPERATIONS.md` for scoped cleanup and explicit irreversible data removal.
+See `docs/development/OPERATIONS.md` for scoped cleanup and explicit irreversible data removal.
 
 The development package includes a native launcher that reads `roles.client` and `roles.exit`
 from the packaged configuration. A combined node starts two copies of the same fixed native

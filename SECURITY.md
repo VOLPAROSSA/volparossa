@@ -45,4 +45,4 @@ Reports are especially important when they show any of the following:
 - secret keys or browsing destinations persisted or logged contrary to policy;
 - crash cleanup affecting unrelated host state or leaving a leak route.
 
-The full adversary analysis is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+The full adversary analysis is in [docs/privacy/THREAT_MODEL.md](docs/privacy/THREAT_MODEL.md).

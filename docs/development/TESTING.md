@@ -58,7 +58,7 @@ probe producer.
 
 The integrated production route/helper/transport sequence passed all A01--A15 on unchanged
 `482e33d0`, including real MPTCP/MPQUIC, privacy captures and crash cleanup. See
-[implementation status](IMPLEMENTATION_STATUS.md) for the retained run and artifact, and the
+[implementation status](../IMPLEMENTATION_STATUS.md) for the retained run and artifact, and the
 separate results/failures of newer extensions. Unit coverage of signed authority, complete-pair
 prepare/activate/commit, descriptor custody and destruction is supporting evidence, not a
 replacement for that live run. Network-backed tests remain confined to disposable namespaces;
@@ -83,7 +83,7 @@ offline website availability. Focused tests cover integrity, independently trust
 expiry, missing pieces, bounded storage and output publication. There is no automatic browsing
 capture, browser integration or DNS sharing. The separate cooperative-origin HTTPS slice is
 described below; it is not generic existing-site compatibility. The
-[content proposal](CONTENT_NETWORK_PROPOSAL.md) separates verified C01 from incomplete C02--C08.
+[content proposal](../services/CONTENT_NETWORK_PROPOSAL.md) separates verified C01 from incomplete C02--C08.
 
 The normal CLI's offline publish/assemble integration can be checked narrowly with
 `cargo test --locked -p volparossa content::tests --bin volparossa`. Its two tests exercise

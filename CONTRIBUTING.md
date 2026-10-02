@@ -3,7 +3,7 @@
 VOLPAROSSA welcomes documentation improvements, reproducible bug reports and complete,
 reviewable feature slices. The current priority is a functional development alpha, not
 release polish. Start with the [documentation guide](docs/README.md), then read
-[AGENTS.md](AGENTS.md), the [architecture](docs/ARCHITECTURE.md) and the relevant section of
+[AGENTS.md](AGENTS.md), the [architecture](docs/architecture/ARCHITECTURE.md) and the relevant section of
 [implementation status](docs/IMPLEMENTATION_STATUS.md) before changing code.
 
 For a first contribution, improve an unclear guide, reproduce an existing bounded example,
@@ -23,7 +23,7 @@ follow [SECURITY.md](SECURITY.md) for vulnerabilities.
   The explicit authorized-update design is separate: only independently authorized releases,
   verified against established trust and without expanded installation privileges, may become
   client updates. Peer content and model output are not update authority. See
-  [repository maintenance](docs/REPOSITORY_MAINTENANCE.md); this is not permission to install
+  [repository maintenance](docs/services/REPOSITORY_MAINTENANCE.md); this is not permission to install
   anything on a contributor's host.
 - Do not add production logging or persistence of URLs, DNS history, payloads, full browsing
   hostnames, destination-IP history, or durable node-to-browsing links.
@@ -59,6 +59,18 @@ follow [SECURITY.md](SECURITY.md) for vulnerabilities.
 
 Do not weaken a fail-closed default to make a test pass. If a kernel or Debian limitation is real,
 capture its exact version and reproducible evidence, then document the bounded alternative.
+
+## Documentation placement
+
+Put topic guides in the matching folder under [docs/](docs/README.md): architecture,
+network, services, applications, privacy or development. Keep the top level for the
+documentation index, FAQ and `IMPLEMENTATION_STATUS.md`. Link new guides from the index
+and use relative links to related topics and source files.
+
+When moving a document, update code includes, packaging inputs and fixture source paths
+as well as Markdown links. Preserve installed documentation filenames and historical
+evidence URLs tied to exact commits. A changed README or guide can change the input to a
+future model trial; it does not rewrite the results of an earlier source-bound trial.
 
 ## Native code and dependencies
 

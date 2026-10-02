@@ -271,7 +271,7 @@ feature branches are not implied to be integrated into `main`.
   general server-independent OpenCloud availability.
 - [ ] Cooperative maintenance of current/future VOLPAROSSA organization repositories:
   actual coding jobs, independent immune review and exact-revision scoped GitHub
-  publication. [Agreed scope](REPOSITORY_MAINTENANCE.md); no autonomous publisher,
+  publication. [Agreed scope](services/REPOSITORY_MAINTENANCE.md); no autonomous publisher,
   independent code-review quorum or automatic client updater is implemented.
 - [ ] Automatically distribute and install independently authorized releases on
   VOLPAROSSA clients (explicit user approval 2026-10-01), with client-side update
@@ -408,7 +408,7 @@ MPTCP subflows through distinct WireGuard relays per transfer. End-to-origin TLS
 absence of proxy credentials at the origin, wrong-scope rejection and independent A
 retirement while B remains active are verified. All 30 original artifacts revalidate
 against the source; privacy captures, private-file/topology cleanup and unchanged
-guest-root host state pass. See [the exact evidence and boundaries](BROWSER_NETWORK.md).
+guest-root host state pass. See [the exact evidence and boundaries](applications/BROWSER_NETWORK.md).
 
 After incorporating the merged storage-flow lifetime fix, the exact follow-up
 [trial 36893366706](https://github.com/VOLPAROSSA/volparossa/actions/runs/36893366706)
@@ -454,7 +454,7 @@ preserves existing pinned callers. Existing higher-copy archives keep their orig
 metadata, restore/renew/delete paths and every physical charge. No existing copy is
 automatically removed, and temporary replacement overhead is not a separate redundancy
 tier. This change does not implement automatic repair or application-wide migration; see
-[the policy and legacy boundary](PRIVATE_STORAGE.md#one-core-owned-redundancy-policy).
+[the policy and legacy boundary](services/PRIVATE_STORAGE.md#one-core-owned-redundancy-policy).
 Two targeted tests pass: fixed-target CLI handling and a real four-provider signed-service
 lifecycle for legacy three-copy fragments and complete replicas, including source removal,
 provider-loss restore, renewal and deletion to zero leases. Package Clippy also passes.
@@ -467,7 +467,7 @@ immune system must address prohibited-content admission and abuse without disclo
 backups. This is a requirement clarification, not new runtime enforcement: signed grants,
 quotas and ciphertext hashes do not classify encrypted files, and uploader self-attestation
 does not defeat malicious clients. The content-admission/review mechanism remains open; see
-[storage privacy and abuse boundaries](PRIVATE_STORAGE.md#storage-immune-system-and-private-content-limits).
+[storage privacy and abuse boundaries](services/PRIVATE_STORAGE.md#storage-immune-system-and-private-content-limits).
 Different-chunk placement now has a passing real overlay/provider-loss trial:
 [36773683946](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773683946)
 on `64c4f18cadb839ad6024c21166d6154e6665733f` restores the removed 786,505-byte
@@ -559,7 +559,7 @@ automatic maintenance, adaptive provider-capacity drain or a new protected-overl
 Post-replacement reports use additive version 2 and include temporary/historical physical
 charges. The pinned Image v1 parser needs a coordinated update before it can consume these
 archives; no Image compatibility is claimed for repaired archives yet. See
-[the command, accounting contract and remaining limits](PRIVATE_STORAGE.md#explicit-fragment-copy-replacement).
+[the command, accounting contract and remaining limits](services/PRIVATE_STORAGE.md#explicit-fragment-copy-replacement).
 
 ### Owner-driven archive drain candidate
 
@@ -574,7 +574,7 @@ delete replies, provider restart, source-free restore, bounded partial completio
 placement and final zero-lease cleanup. CLI bounds and ineligible candidate handling are covered.
 This is not yet a background capacity-shrink service, discovery-based repair, network-wide
 storage credit or a new overlay proof. See
-[bounded drain and its scope](PRIVATE_STORAGE.md#bounded-owner-driven-archive-drain).
+[bounded drain and its scope](services/PRIVATE_STORAGE.md#bounded-owner-driven-archive-drain).
 
 ### Bounded owner repair without blocking on an offline source
 
@@ -594,11 +594,11 @@ unavailable, then A's return and confirmed retirement. Retry identities, unchang
 signed reconstruction root, conservative charges and final zero-lease cleanup are checked.
 This is an explicit owner-online operation, not background peer discovery, automatic
 contribution resizing, a new redundancy policy or new protected-overlay evidence. See
-[repair progress versus outstanding retirement](PRIVATE_STORAGE.md#bounded-owner-driven-repair-pass).
+[repair progress versus outstanding retirement](services/PRIVATE_STORAGE.md#bounded-owner-driven-repair-pass).
 
 ### Mailbox import confirmation
 
-The [mailbox import-confirmation candidate](MAILBOX_IMPORT_CONFIRMATION.md) adds a
+The [mailbox import-confirmation candidate](services/MAILBOX_IMPORT_CONFIRMATION.md) adds a
 reusable split handoff: `content mailbox fetch` retains provider custody while writing
 bounded private payload/token/owner-signed pending receipts; `confirm-import` validates
 the exact owner, original grant/message, token and imported-byte digest before authenticating
@@ -628,7 +628,7 @@ zero-context final status, owned qdisc removal, zero leftover objects and unchan
 state pass. This closes the same-flow fourth-path/normal-cleanup boundary, not broader
 alpha acceptance, unlimited connections or a speed-improvement claim. The eight-issued-
 path-identity lifetime bound and 64-issued-flow-handle bound remain. See
-[the exact source, hashes and limitations](MPTCP_REFILL.md#current-result-complete-same-flow-refill-proof).
+[the exact source, hashes and limitations](network/MPTCP_REFILL.md#current-result-complete-same-flow-refill-proof).
 Earlier failures and pending statements below retain their historical source scope.
 
 The live-relay-refill candidate adds signed +1 path extensions to an existing Client/Exit
@@ -687,7 +687,7 @@ discarded, so a precise cause is not proved. Fixed, non-private transport-failur
 are now logged at that existing failure boundary; one focused mapping test passes.
 Retry, retirement and cleanup behavior are unchanged by that diagnostic addition.
 
-[Refill acceptance version 3](MPTCP_REFILL.md) now keeps exact anchored closing residues
+[Refill acceptance version 3](network/MPTCP_REFILL.md) now keeps exact anchored closing residues
 separate from established subflows and independently observes Exit endpoint withdrawal.
 It requires a sustained ten-second withdrawal interval, no useful progress on surviving
 old warm residues and fresh progress on the unchanged healthy original path before exposing
@@ -729,7 +729,7 @@ verifier incorrectly required that retained path 4 equal the fresh two-path samp
 and complete fresh native batch; original-route ordinal, privacy, timing and payload/hash
 requirements remain intact. No passing live refill is claimed. Fixture cleanup/A15 pass,
 but the separate Client `SHUTDOWN_CLEANUP_FAILED` diagnostic remains unresolved in this
-artifact. See [the scoped evidence notes](MPTCP_REFILL.md).
+artifact. See [the scoped evidence notes](network/MPTCP_REFILL.md).
 
 The [run on `82fe0f39`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36601313163)
 remains **failed**, earlier at `MPTCP_REFILL_WARM_NEVER_APPEARED`. Both original paths
@@ -755,7 +755,7 @@ An exact owned Client userspace-PM seam is now implemented, without replacing ke
 scheduling/retransmission; it has a 64-issued-flow/context-generation bound. Later partial
 fourth-path data evidence is recorded below; normal retirement is not yet accepted.
 Disposable teardown and host-state checks pass for the original run; separate agent
-shutdown/retirement failures remain visible. See [the exact evidence and limitations](MPTCP_REFILL.md).
+shutdown/retirement failures remain visible. See [the exact evidence and limitations](network/MPTCP_REFILL.md).
 
 The first userspace-PM run (`01fcabe7`, `36614116209`) fails earlier: its first owned
 subflow update is rejected and the application connection resets. Source review identifies
@@ -796,7 +796,7 @@ The original artifact did not retain failed dial endpoints, so this is a reprodu
 defect and candidate explanation, not proof of that exact remote failure. Scoped fixed-class
 dial diagnostics are added; a new live cleanup proof remains required. The original 169
 files retain failed normal cleanup, successful disposable teardown and unchanged host state;
-see [the exact evidence and remaining limitation](MPTCP_REFILL.md).
+see [the exact evidence and remaining limitation](network/MPTCP_REFILL.md).
 
 The first [Firefox integration PR](https://github.com/VOLPAROSSA/volparossa-browser/pull/1)
 is merged (`bab677ba`): isolated ESR 140.16 privacy defaults and native Strict tracking
@@ -813,7 +813,7 @@ selector. Daemon network attachment, browser-scoped kill switch (requested off b
 and cache integration remain unfinished. Core defaults for other consumers are not weakened
 by the requested browser availability fallback.
 
-The [scoped TCP gateway candidate](BROWSER_NETWORK.md) now connects operator-delegated
+The [scoped TCP gateway candidate](applications/BROWSER_NETWORK.md) now connects operator-delegated
 application scopes to the existing MPTCP route API. A separate UID/capability-authenticated
 Unix attachment owns its own loopback CONNECT endpoint and route controller; EOF/expiry
 does not disconnect other apps or the main/DNS controllers. Three CLI, one protocol and
@@ -901,7 +901,7 @@ shell syntax pass; all six focused Rust preparation checks now pass, including a
 capability never polling route admission and expiry/shutdown winning during the final
 ready poll. Actual browser payload
 on two protected MPTCP paths, ordinary browsing interception and a full browser kill switch
-remain unproven. See [the scoped evidence and boundaries](BROWSER_NETWORK.md).
+remain unproven. See [the scoped evidence and boundaries](applications/BROWSER_NETWORK.md).
 
 The next exact [run 36773190344](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773190344)
 at `d58e5514759d421a1ee3a629d5569b4c67c06639` now prepares both routes before Ready,
@@ -921,7 +921,7 @@ working modified client. Ordinary Signal compatibility, authenticated direct cip
 delivery, linked-device synchronization and native encrypted snapshot restore need actual
 implementation and proof. Existing core private messages are not Signal interoperability.
 
-The [private-storage local/library milestone](PRIVATE_STORAGE.md) combines the non-evicting
+The [private-storage local/library milestone](services/PRIVATE_STORAGE.md) combines the non-evicting
 local ciphertext store with resumable uploads, provider-issued bounded grants, owner-signed
 fresh-challenge operations and durable provider/owner/archive/lease bindings. Lease creation
 and ownership registration are atomic; deletion retains a durable tombstone so retries cannot
@@ -968,7 +968,7 @@ Progress/Finalize, two non-consuming reads and Renew/Delete. Three agent grant/a
 and two local-control checks also pass. These are separate from the baseline evidence
 above and **not a real-overlay acceptance result**. The current administrative socket is
 also not a finished per-application authority boundary;
-see [shared-core application lifecycle](APPLICATION_LIFECYCLE.md). Signal encryption,
+see [shared-core application lifecycle](architecture/APPLICATION_LIFECYCLE.md). Signal encryption,
 snapshot export/import and application integration are not supplied by opaque file storage.
 
 The agreed contribution rule matches **actual remote physical usage**, including every replica
@@ -989,7 +989,7 @@ with their original quota as the initial target; older binaries reject schema 2.
 change deletes another owner's archive or claims freed disk, measured overhead, automatic
 migration or completed 1:1 reciprocity. Five new backend checks, two actual CLI/IPC checks,
 two protocol checks and strict four-crate Clippy pass; no network resize proof is claimed.
-See [commands and scope](PRIVATE_STORAGE.md#local-admission-target-and-pending-drain).
+See [commands and scope](services/PRIVATE_STORAGE.md#local-admission-target-and-pending-drain).
 
 The [live peer-storage run on `434ed112`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36589770066)
 **passes**. The exact-source report checker accepts the original 93-file artifact bundle
@@ -1017,7 +1017,7 @@ overhead or prove reciprocity, independent failure domains, automatic repair or 
 
 All **three targeted replica tests pass** (7.36 seconds), including two real SQLite providers
 over local Unix/framed streams with lost confirmations, durable reopen, resume, failover
-and surviving-copy retention. [Operator usage and reconciliation](PRIVATE_STORAGE.md#replica-set-candidate-explicit-copies-and-restore-failover)
+and surviving-copy retention. [Operator usage and reconciliation](services/PRIVATE_STORAGE.md#replica-set-candidate-explicit-copies-and-restore-failover)
 describe the explicit workflow; placement, adaptive contribution and acknowledged drain remain
 separate unfinished work.
 
@@ -1063,7 +1063,7 @@ ranges/hashes, provider/grant pairs and original copy identities; mutable lease 
 must match that root. It reuses the existing authenticated protected-transfer entrypoints,
 stages one fragment at a time and publishes restored output only after the full signed
 archive identity verifies. Conservative charges include every reserved/committed/uncertain
-fragment copy, including expired or unavailable ones. [Bounds and operator workflow](PRIVATE_STORAGE.md#fragment-placement-candidate-redundant-pieces-not-whole-archives-per-provider)
+fragment copy, including expired or unavailable ones. [Bounds and operator workflow](services/PRIVATE_STORAGE.md#fragment-placement-candidate-redundant-pieces-not-whole-archives-per-provider)
 are explicit; this is not erasure coding or whole-archive replication at every provider.
 
 All **three focused fragment tests pass**, including real three-store SQLite/signed-frame
@@ -2309,7 +2309,7 @@ It uses all fourteen Latin principles as its reasoning framework, not the histor
 as a classifier. Nine focused Rust checks and a compiled-CLI inert-preview smoke pass. A real
 four-job disposable test is wired but not yet passed. No threshold signing, network-policy
 activation, legal correctness, independent model judgment or full B06 completion is claimed.
-See [scope and usage](DECENTRALIZED_AGENTS.md#public-principle-assessments-and-cross-review).
+See [scope and usage](services/DECENTRALIZED_AGENTS.md#public-principle-assessments-and-cross-review).
 
 Latest real-model results remain failures, not completed agent cooperation. The
 [model-selected graph run on `7de9448a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35656629758)
@@ -2344,7 +2344,7 @@ snapshot/model mounts, owner acknowledgements and cleanup at the first stdout re
 requires the public executor to reject that private input before acquiring the runtime. Pure
 fixture and static workflow checks pass. Only selected proof and
 the explicitly synthetic test answer may be exported, never a user's private input or internal
-worker report. See [usage](DECENTRALIZED_AGENTS.md#local-only-private-questions).
+worker report. See [usage](services/DECENTRALIZED_AGENTS.md#local-only-private-questions).
 The [first private run on `75dcc9ad`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35660153750)
 executes the actual 360M worker, returns the generated synthetic identifier with EOS after
 12 tokens, and records cleanup and unchanged host state. Its overall check nevertheless fails:
@@ -2413,7 +2413,7 @@ host-state bytes pass. The original artifact ZIP has SHA-256
 The two earlier failed IPC runs remain failed and immutable. The original `9d870440` direct-CLI
 proof above remains evidence only for that historical source and stdout boundary; it is not
 relabeled as IPC evidence. B04, confidential offload and browser-UI integration remain open.
-See [service usage](DECENTRALIZED_AGENTS.md#application-local-private-compute-ipc) and the
+See [service usage](services/DECENTRALIZED_AGENTS.md#application-local-private-compute-ipc) and the
 [local wire contract](../crates/volparossa/src/compute/private_serve/WIRE.md).
 
 Original combined browser proof candidate (2026-09-29): the explicit `agent-private-browser` VM scenario
@@ -2828,7 +2828,7 @@ all-target CLI/agent/local-control Clippy pass; the actual trained-model/protect
 transition now has the source-exact VM proof below. This is not a B03/B05 completion or evidence
 of general model improvement. The 360M inference-only profile rejects a successor-serving
 directory and does not activate the incompatible 135M adapters.
-See [usage and limits](DECENTRALIZED_AGENTS.md#using-approved-successors-for-new-peer-jobs).
+See [usage and limits](services/DECENTRALIZED_AGENTS.md#using-approved-successors-for-new-peer-jobs).
 
 The [first learning-to-serving run on
 `98ce45bf`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35636907319) fails before
@@ -2974,7 +2974,7 @@ input files and the source plan are removed before zero-round offline resume wit
 receipts. Captures retain 70,144 frames with zero drops or direct client-to-exit packets;
 private/network cleanup and unchanged host state pass. This verifies local-source collection
 execution, not semantic answer quality, network-source retrieval or completion of B03.
-See [source-plan format and usage](DECENTRALIZED_AGENTS.md#working-with-several-public-sources).
+See [source-plan format and usage](services/DECENTRALIZED_AGENTS.md#working-with-several-public-sources).
 
 Verified single-package ready queue: new `compute peer workflow`, `task` and `document` enrollments
 use `ready_rows_v1`. Within one signed source package, a free compatible peer receives the
@@ -3074,7 +3074,7 @@ new-third-peer disposable proof is recorded above. This is not general planning,
 a capacity reservation or quality-based model selection. The 123 focused CLI compute tests,
 three local-control discovery tests, six agent discovery tests, formatting and strict Clippy
 for all targets of those three packages pass. No local model execution was used.
-See [automatic executor selection](DECENTRALIZED_AGENTS.md#automatic-executor-selection).
+See [automatic executor selection](services/DECENTRALIZED_AGENTS.md#automatic-executor-selection).
 
 The follow-up recovery slice preserves previously checked terminal failure/cancellation receipts
 even after their broker disappears. The owning workflow passes the exact retained handle/status
@@ -3186,7 +3186,7 @@ cleanup leaves zero owned objects and unchanged guest-host state. Canonical raw-
 `d4968cbbf0f4d13e363dfc87a5c3d2d69069001a5a3883659a7ead6f8dd701ca`.
 This proves the inference chain, not answer quality. The original `342b8a80` run stays failed.
 General task planning, private offload and B03 remain incomplete.
-See [public answer synthesis](DECENTRALIZED_AGENTS.md#synthesizing-one-public-answer).
+See [public answer synthesis](services/DECENTRALIZED_AGENTS.md#synthesizing-one-public-answer).
 
 Current publication-retry correction: a finite training loop no longer stops immediately
 after the first handoff once its cycle budget is exhausted. It drains already approved
@@ -3241,7 +3241,7 @@ row 0 to a new worker. The replacement appeared 18.821 seconds after loss. Six c
 28 interfaces show no direct client-to-exit or forbidden traffic; all owned objects were removed
 and the guest-host state stayed unchanged. No general planning, private offload, answer synthesis
 or completed B03 is established by that run.
-See [automatic continuation](DECENTRALIZED_AGENTS.md#automatic-continuation-of-enrolled-work).
+See [automatic continuation](services/DECENTRALIZED_AGENTS.md#automatic-continuation-of-enrolled-work).
 
 Current cooperative-learning slice: `compute train-loop --peer-updates` follows explicitly
 enrolled signed adapter channels, resolves their exact datasets only against independently
@@ -3257,7 +3257,7 @@ new local publication remained `publish_pending` after the one-cycle invocation 
 original catalog's later independent Client import was not reached, so its earlier failure is
 not claimed fixed by that run. Cleanup completed with unchanged guest-host state. The later
 `998b79ed` run above supplies the completed cross-node learning and republication proof.
-See [peer update enrollment and scope](DECENTRALIZED_AGENTS.md#learning-from-peer-updates).
+See [peer update enrollment and scope](services/DECENTRALIZED_AGENTS.md#learning-from-peer-updates).
 
 The preceding version-2 `compute train-loop` enrollment now follows
 explicitly selected, signed public source catalogs. The runtime refreshes catalog metadata,
@@ -3271,7 +3271,7 @@ the new dataset, validation source and both published updates independently pass
 verification. Cleanup completed with unchanged guest-host state. The new combined proof retains
 this original gate and adds fixed, non-sensitive provider failure categories to distinguish the
 next failure; cache/registry contention is a hypothesis, not an established cause. See
-[catalog usage and bounds](DECENTRALIZED_AGENTS.md#signed-public-source-catalogs).
+[catalog usage and bounds](services/DECENTRALIZED_AGENTS.md#signed-public-source-catalogs).
 
 The prior [second-source run on `57fa30f7`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34899111394)
 completed two eight-update training cycles, four isolated zero-update inference jobs, both
@@ -3320,9 +3320,9 @@ verify; six captures / 28 interfaces / 45,450 frames contain no forbidden/direct
 drops. Cleanup leaves zero owned objects and unchanged guest-host state. PR #125 is merged;
 this is public document execution, not private distributed inference or general reasoning.
 
-New user-requested scope: [distributed content caching, publishing and offline delivery](CONTENT_NETWORK_PROPOSAL.md).
+New user-requested scope: [distributed content caching, publishing and offline delivery](services/CONTENT_NETWORK_PROPOSAL.md).
 Additional scope requested on 2026-09-14: [cooperative trained agents and fully automatic
-whitelist/blacklist governance](DECENTRALIZED_AGENTS.md). Its first local CPU-worker candidate
+whitelist/blacklist governance](services/DECENTRALIZED_AGENTS.md). Its first local CPU-worker candidate
 now includes pinned explicit provisioning, inference/LoRA training, saved-adapter reload and
 a Rust-supervised mandatory sandbox. Five narrow Rust supervisor tests and the Python
 protocol/provisioning tests pass. The first model-runtime attempt on
@@ -3473,7 +3473,7 @@ stops earlier at `JOBS_BROKER_UNAVAILABLE` for R4, before attach/tokenizer execu
 logs are empty and the original artifact lacks unit exit-state details, so it does not identify
 or disprove the earlier worker-startup cause. Cleanup is complete with unchanged guest state.
 This is not confidential offload, source-cache discovery, automatic network replication,
-neural answer synthesis or completed B03. See [usage](DECENTRALIZED_AGENTS.md#public-document-tasks).
+neural answer synthesis or completed B03. See [usage](services/DECENTRALIZED_AGENTS.md#public-document-tasks).
 Eight focused peer/workflow tests and strict CLI Clippy pass, including early cancellation
 before new submission and reusing full validated local receipt fixtures after restart.
 Synthetic receipt fixtures prove coordinator/storage behavior, not remote model execution.
@@ -3650,7 +3650,7 @@ Exact-source Quality and all CodeQL checks also pass. PR #123 merged normally in
 `main` at `b3e2f08c1a1b9984e6ff536eb609798c24aa312c`, with the exact candidate tree.
 These two cycles on an explicitly repeated source are not
 fresh-corpus discovery, quality improvement, aggregation, private training or completed B05.
-See [usage and limitations](DECENTRALIZED_AGENTS.md#continuous-public-training-candidate).
+See [usage and limitations](services/DECENTRALIZED_AGENTS.md#continuous-public-training-candidate).
 Concrete prohibited/contextual/allowed content examples are now recorded in that design;
 the selected legal baseline is Netherlands/EU plus local exit restrictions, while its enforcement
 and contextual decision thresholds remain unimplemented. Existing byte-integrity
@@ -3888,7 +3888,7 @@ power-off of a whole provider machine. Its HTTPS reference again shows no latenc
 7.567 seconds peer-assisted versus 1.848 seconds origin-only (descriptive ratio 0.244212).
 Run the opt-in browser proof with `sh tests/integration/site-browser-smoke.sh`, supplying
 the built named-download test executable and a new empty `0700` evidence directory; it installs
-nothing and does not disable Firefox's sandbox. See [site commands](OPERATIONS.md#native-static-websites).
+nothing and does not disable Firefox's sandbox. See [site commands](development/OPERATIONS.md#native-static-websites).
 
 ### Measured source selection under development
 
@@ -4690,8 +4690,8 @@ retrieval/local decryption and acknowledgement. Original invitations bind indepe
 contact/provider keys, quotas and expiry. The provider uses its existing signed identity and
 protected content endpoint, not a new central service; application keys stay with the local CLI.
 Every operation binds a fresh provider-signed connection challenge to its exact invitation and
-object. See the [commands and limits](OPERATIONS.md#known-contact-mailboxes) and
-[wire contract](PROTOCOL.md#known-contact-mailbox-operations-development-v1).
+object. See the [commands and limits](development/OPERATIONS.md#known-contact-mailboxes) and
+[wire contract](architecture/PROTOCOL.md#known-contact-mailbox-operations-development-v1).
 
 Three actual disk-store tests pass, including reopen/HPKE delivery, quota refusal, expiry,
 acknowledgement tombstones and corrupt/foreign cache rejection. Two authenticated-stream tests
@@ -4770,7 +4770,7 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   Cleanup leaves zero owned objects and unchanged host state. This is not a release-build,
   full installed-agent DNS-query or full-alpha proof. The combined revision with the newly
   merged MPTCP-refill milestone still needs its integration check; historical failures below
-  are not relabelled. See [scope and receipts](UNBOUND_FALLBACK.md#complete-development-package-and-cache-pass).
+  are not relabelled. See [scope and receipts](network/UNBOUND_FALLBACK.md#complete-development-package-and-cache-pass).
 
 - [ ] Protected deployed Unbound fallback and measured source selection: an explicit
   Exit-side TCP backend/configuration is implemented, with targeted parser and isolated TCP
@@ -4796,7 +4796,7 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   There is no persistent libunbound cache, adaptive racing, host package installation/DNS change
   or default switch. A separate optional Debian 13 companion builder declares the private worker
   and dependencies; existing core package construction/dependencies remain unchanged.
-  See [Unbound fallback scope and readiness](UNBOUND_FALLBACK.md).
+  See [Unbound fallback scope and readiness](network/UNBOUND_FALLBACK.md).
   The [first native guest run on `9aa777fd`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36594857358)
   **fails overall**: real signed and unsigned recursion returns the correct native secure flags
   despite the OS-positive sentinel, but the bogus case emits no result with a retained typed
@@ -4860,7 +4860,7 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   warm 819-ms and local 25-ms answers, post-DNS echoes, and natural retirement with 404 status
   reads/no timeouts. It still fails on one exact gateway-to-TAP ARP reply's capture shape;
   seven other captures and final cleanup/host-state pass. No historical packet bytes or full
-  PASS are invented. See [the retained evidence](UNBOUND_FALLBACK.md).
+  PASS are invented. See [the retained evidence](network/UNBOUND_FALLBACK.md).
   A separate packaged-default candidate now selects private Unbound even when caching is off,
   while disabling all proof retention and peer sharing in that mode. Inactive nodes need no
   worker; effective Exits reject missing assets. Four config, three resolver and three startup
@@ -4872,7 +4872,7 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   Its 170 originals are retained. The separate package/C05 run `36621100178` remains failed:
   C05 and all five native cases pass, as do source binding and installed-agent startup guards,
   but the shipped-sandbox probe fails and upgrade/removal acceptance is not established.
-  No missing probe diagnostics are invented. See [exact results and hashes](UNBOUND_FALLBACK.md).
+  No missing probe diagnostics are invented. See [exact results and hashes](network/UNBOUND_FALLBACK.md).
   The diagnostic repeat `36624654504` on `d4791119` again passes C05/native/startup checks,
   but records systemd `203/EXEC` before the probe or worker runs; no underlying exec errno
   or historical mount flags were retained. The fixture now stages the source-exact probe
@@ -4902,7 +4902,7 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   plus the unchanged helper lifetime. Success and failure paths have stateful regression
   coverage; all twelve pure package-proof checks pass. New live package acceptance is
   pending. The 270 originals, complete topology cleanup and equal host hashes are retained
-  in [the exact evidence history](UNBOUND_FALLBACK.md).
+  in [the exact evidence history](network/UNBOUND_FALLBACK.md).
 
 The positive DNSSEC cache is now composed into the normal agent: the same bounded RAM resolver
 serves protected DNS, TCP resolution, general UDP and browser-QUIC destination pinning. Its peer
@@ -4910,7 +4910,7 @@ backend uses signed, bounded cache-only RPC and a generic provider capability, n
 the DHT. Complete control/data-relay exclusions come from the verified reservation and survive
 detached TCP ownership; ambiguous provenance disables peer requests. No roles, root anchors or
 host resolver settings are changed automatically. The
-[configuration and fallback rules](OPERATIONS.md#shared-positive-dns-cache) are documented.
+[configuration and fallback rules](development/OPERATIONS.md#shared-positive-dns-cache) are documented.
 
 The existing exact Hickory version now enables its ring DNSSEC backend, with the recorded NSEC3
 backport and unchanged vendor/license verification. A real cryptographic root/DS/child/A+AAAA
@@ -5608,7 +5608,7 @@ service stop cancel uptake. A full-budget cooldown bounds the declared average t
 not instantaneous owner/radio contention. Agent/UAPI compilation and strict Clippy pass; three
 focused cache/owner-generation/idle-accounting tests and the UAPI counter test pass. Independent-node C03 uptake/re-serving,
 durable registration/retention and complete C04 owner isolation remain unproven and unchecked.
-See the [bounded redistribution scope](CONTENT_NETWORK_PROPOSAL.md#bounded-post-download-redistribution).
+See the [bounded redistribution scope](services/CONTENT_NETWORK_PROPOSAL.md#bounded-post-download-redistribution).
 
 The next local owner-priority slice uses explicit replication v3, with one receiver credit per
 chunk and a fresh configured-interface quiet sample before each credit. Busy ends the exchange
@@ -6885,7 +6885,7 @@ zero interfaces/radios/owned objects with hwsim unloaded and identical guest-sta
 The native delivered-byte metadata remained zero; application and packet measurements provide
 the actual traffic evidence. This proves simulated mesh plus Ethernet, not physical radios,
 Wi-Fi-only operation, MPQUIC aggregation, mobile support or added bandwidth.
-See [local-link scope](LOCAL_LINK_NETWORK.md).
+See [local-link scope](network/LOCAL_LINK_NETWORK.md).
 
 ## Fixed alpha v1 scorecard
 

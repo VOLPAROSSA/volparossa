@@ -2875,7 +2875,7 @@ mod tests {
     #[test]
     fn raw_retired_operation_tags_are_reserved_and_rejected() {
         // Former operation tags 10, 11, 12, 14 and 24 are deliberately absent from the oneof.
-        // Their historical names and layouts remain recorded in docs/PROTOCOL.md.
+        // Their historical names and layouts remain recorded in docs/architecture/PROTOCOL.md.
         for version in [1_u8, 2, 3, 4] {
             for key in [
                 vec![0x52],

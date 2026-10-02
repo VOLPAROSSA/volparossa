@@ -60,7 +60,7 @@ at 6.512 Mbps WAN-only versus 8.174 Mbps LAN+WAN (1.25517x), with data on both a
 complete captures and unchanged guest state. Earlier attempts failed, and this margin is narrow:
 one configured passing topology does not establish repeatable gain or a general speed guarantee.
 The diagnostic-only change does not prove a causal scheduler repair; detailed source-scoped
-results are centralized in [implementation status](IMPLEMENTATION_STATUS.md).
+results are centralized in [implementation status](../IMPLEMENTATION_STATUS.md).
 ULA classification and kernel route parsing have focused coverage, not live IPv6 transfer
 evidence. Automatic radio selection/address allocation also remains unfinished; no hidden
 public-IP fallback is used.
@@ -129,9 +129,9 @@ proof retains the same protected UDP context and both WireGuard legs: contribute
 traffic stops during owner demand and resumes afterward, while owner goodput matches its
 owner-only baseline. Refresh expiry closes contribution after a bounded tail; complete captures,
 both receive-accounting owners' removal and unchanged guest state are retained. Exact rates and
-artifact identity are centralized in [implementation status](IMPLEMENTATION_STATUS.md). This
+artifact identity are centralized in [implementation status](../IMPLEMENTATION_STATUS.md). This
 fixed-bottleneck UDP proof is not an HTTPS-file transfer, lossless delivery guarantee, arbitrary
-ISP-capacity detector or radio-airtime scheduler. The planned [content layer](CONTENT_NETWORK_PROPOSAL.md)
+ISP-capacity detector or radio-airtime scheduler. The planned [content layer](../services/CONTENT_NETWORK_PROPOSAL.md)
 must use these owner-priority boundaries; its cache traffic is not integrated yet.
 
 ## Explicit Debian Wi-Fi mesh runtime
@@ -144,7 +144,7 @@ this mode does not implement SAE or add protection for other services exposed by
 Configuration supplies an existing wireless parent, common mesh ID, explicit 20-MHz frequency
 and nonconflicting private host address/prefix. `maximum_peers: 0` removes the optional operator
 ceiling; actual new-peer admission follows resources, channel observations and peer progress,
-within the current 512-station observation bound. See [adaptive mesh admission](OPERATIONS.md#adaptive-mesh-admission).
+within the current 512-station observation bound. See [adaptive mesh admission](../development/OPERATIONS.md#adaptive-mesh-admission).
 The helper verifies actual
 hardware, regulatory and active-interface coexistence before creating the separate interface;
 it does not retune an existing connection or change rfkill. Only the new interface receives the

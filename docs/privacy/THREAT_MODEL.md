@@ -153,7 +153,7 @@ help against accidents and lesser local users, not a hostile root.
 
 ### Malicious content, naming and storage peers (planned extension)
 
-The [content-network proposal](CONTENT_NETWORK_PROPOSAL.md) adds untrusted chunk holders,
+The [content-network proposal](../services/CONTENT_NETWORK_PROPOSAL.md) adds untrusted chunk holders,
 manifests, publication names and replicated encrypted messages. Attackers may substitute bytes,
 replay old versions, forge availability or publisher claims, poison DNS, withhold replicas, or
 exhaust bandwidth/storage. Chunk hashes detect substitution only against an authenticated
@@ -189,6 +189,6 @@ client's public address, and A13 must combine client capture and routing evidenc
 client-exit control or dataplane path exists. The unchanged `482e33d0` build passed all A01--A15,
 including that real probe/helper/agent/ingress chain, complete privacy captures and crash cleanup
 with zero owned objects and unchanged guest state. The exact revision, artifact and subsequent
-failures are recorded in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md). These are scoped
+failures are recorded in [IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md). These are scoped
 functional results, not a release-security audit, proof against every adversary above, or a pass
 for the newer sharing/content extensions.

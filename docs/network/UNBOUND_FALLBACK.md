@@ -69,8 +69,8 @@ pinning and route expiry remain enforced. Each resolution has a fresh process; i
 context lives only across that lookup's bounded evidence exchanges. A persistent native
 cache or a guarantee of the fastest source for every question is not claimed.
 
-See [the native boundary and versioned pipe protocol](../native/volparossa-dns-worker/README.md)
-and [opt-in configuration](../config/examples/unbound-private-exit.yaml).
+See [the native boundary and versioned pipe protocol](../../native/volparossa-dns-worker/README.md)
+and [opt-in configuration](../../config/examples/unbound-private-exit.yaml).
 Native compilation against the hash-checked Debian library passes. Nine focused
 version-2 protocol, independent-proof, source-choice and owned inert-process checks
 pass. They include seeded proof collection without a repeated address lookup, rejection
@@ -106,7 +106,7 @@ dns_cache:
 
 The endpoint must be loopback, above port 1024, in the agent's network namespace. A separate
 `upstream` is rejected in this mode. The example is also available as
-[`config/examples/unbound-exit.yaml`](../config/examples/unbound-exit.yaml).
+[`config/examples/unbound-exit.yaml`](../../config/examples/unbound-exit.yaml).
 Configuration validation does not prove that a listener exists or that it is Unbound. This is
 an explicitly operator-trusted service, not an authenticated remote resolver discovery mechanism.
 

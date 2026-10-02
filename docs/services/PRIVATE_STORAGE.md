@@ -204,7 +204,7 @@ legal risk. No decryption escrow, blanket client-file scanning, or specific conf
 hardware scheme is selected or authorized by this design note.
 
 See [principle-led governance](DECENTRALIZED_AGENTS.md#principles-guide-rules-not-the-other-way-around)
-and the [four-layer overview](../README.md#storage-layer-private-cloud-storage).
+and the [four-layer overview](../../README.md#storage-layer-private-cloud-storage).
 
 ### Adaptive contribution and safe handoff
 
@@ -406,7 +406,7 @@ provider-signed grant, a fresh provider challenge and the exact owner-signed ope
 never the owner's signing key or passphrase. A successful command requires both the
 request-bound provider receipt and the final correlated response on the same agent
 connection. Grant issuance authorizes limits; it does not reserve disk or establish a
-replica. See [shared-core and application lifetimes](APPLICATION_LIFECYCLE.md) for the
+replica. See [shared-core and application lifetimes](../architecture/APPLICATION_LIFECYCLE.md) for the
 remaining enrollment, per-application authority and lifecycle work.
 
 ### Explicit usage
@@ -864,7 +864,7 @@ pass. The genuine local three-store lifecycle passes the actual fixture's restor
 A closed failure record now distinguishes CLI, accounting, survivor-receipt, output,
 identity and cleanup stages, preserving only fixed incomplete-report categories/counters
 before rejecting a nonzero CLI exit, without exporting raw private diagnostics. See
-[implementation status](IMPLEMENTATION_STATUS.md) for the original failure evidence.
+[implementation status](../IMPLEMENTATION_STATUS.md) for the original failure evidence.
 
 The subsequent exact [trial 36773683946](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773683946)
 at `64c4f18cadb839ad6024c21166d6154e6665733f` **passes the complete protected-fragment
@@ -962,6 +962,6 @@ Its local upstream mock server still handles registration/relink, its Electron t
 does not establish Chromium sandboxing, and the provider namespaces are not independent
 hardware failure domains. Production account recovery UX, least-authority app enrollment,
 automatic repair/contribution accounting and decentralized Signal messages/calls remain open.
-The [implementation status](IMPLEMENTATION_STATUS.md) retains the exact artifact hashes and
+The [implementation status](../IMPLEMENTATION_STATUS.md) retains the exact artifact hashes and
 earlier failed trials. Other applications can use the same core storage interface without
 reimplementing custody or acquiring Signal's private recovery keys.

@@ -1,9 +1,9 @@
 # VOLPAROSSA v1 architecture
 
-[Documentation guide](README.md) · [Project introduction](../README.md) · [Application scope](APPLICATIONS.md)
+[Documentation guide](../README.md) · [Project introduction](../../README.md) · [Application scope](../applications/APPLICATIONS.md)
 
 This document distinguishes the **required v1 design** from verified implementation. It does not
-claim that a diagram is working code. Consult [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)
+claim that a diagram is working code. Consult [IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md)
 for test-backed completion evidence.
 
 The original v1 sequence A01--A15 passed together on unchanged `482e33d0` in the disposable
@@ -28,18 +28,18 @@ process roles remain immutable and isolated even when both workers run on the sa
 The implementation status must separately record combined-role runtime and topology verification;
 these requirements are not a claim that those checks have passed.
 
-The [direct-link extension](LOCAL_LINK_NETWORK.md) adds local Ethernet/Wi-Fi underlays to the
+The [direct-link extension](../network/LOCAL_LINK_NETWORK.md) adds local Ethernet/Wi-Fi underlays to the
 same route model. Local links do not authorize a direct Client--Exit datapath. Independence
 and spare capacity must be measured: two relays sharing one uplink or radio channel do not
 automatically provide additive throughput.
 
 ## Content-network extension (in development)
 
-The [content-network proposal](CONTENT_NETWORK_PROPOSAL.md) is the design reference for
+The [content-network proposal](../services/CONTENT_NETWORK_PROPOSAL.md) is the design reference for
 contributed chunk storage, multi-peer retrieval and spare-resource replication, validated
 DNS sharing, signed public publication and recipient-encrypted offline delivery. These
 functions have different authorization, retention and source-authenticity requirements.
-Scoped C01--C07 milestones are recorded in [implementation status](IMPLEMENTATION_STATUS.md);
+Scoped C01--C07 milestones are recorded in [implementation status](../IMPLEMENTATION_STATUS.md);
 general reachability, existing-web coverage, complete browser integration and automatic
 availability must not be inferred from an individual passing retrieval test.
 
@@ -65,7 +65,7 @@ to every frontend. Existing service files alone do not prove that integration is
 
 ## Trust and process boundaries
 
-The [cooperative AI extension](DECENTRALIZED_AGENTS.md) uses isolated training/task workers
+The [cooperative AI extension](../services/DECENTRALIZED_AGENTS.md) uses isolated training/task workers
 and exchanged model artifacts, with automatic reviewed decisions as the intended governance
 direction. Actual training and public peer-task milestones exist; confidential remote
 execution, dependable reasoning and complete governance remain unfinished. None of these
@@ -209,7 +209,7 @@ and advertised service in the disposable v1 topology; these participate in the u
 `482e33d0` A01--A15 pass. Missing or expired service authority must still withdraw usable capacity
 and fail closed, never fabricate a probe, endpoint, listen port or activation receipt. Combined
 roles, local-only operation and newer sharing scenarios retain separately scoped evidence in
-[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+[IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md).
 Target lifecycle states are cold, reachable, warm, active, backup, degraded, and dead.
 
 ## WireGuard route construction
@@ -374,5 +374,5 @@ runtime. Acceptance test A15 compares host routes, DNS, and firewall byte-for-by
 | Destination | exit address and application traffic it normally receives | client or relay address |
 | Local root | effectively all local state | no protection is promised |
 
-End-to-end timing and volume remain correlatable. See [THREAT_MODEL.md](THREAT_MODEL.md) and
-[PRIVACY.md](PRIVACY.md).
+End-to-end timing and volume remain correlatable. See [THREAT_MODEL.md](../privacy/THREAT_MODEL.md) and
+[PRIVACY.md](../privacy/PRIVACY.md).

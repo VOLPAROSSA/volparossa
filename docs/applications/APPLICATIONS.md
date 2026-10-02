@@ -1,6 +1,6 @@
 # VOLPAROSSA applications
 
-[Documentation](README.md) · [Project overview](../README.md)
+[Documentation](../README.md) · [Project overview](../../README.md)
 
 The core is a reusable background service. These eight repositories connect familiar
 applications to its network, cache, private storage and compute capabilities. They are
@@ -10,7 +10,7 @@ own current implementation and evidence; this page explains the scope and major 
 Applications should share one compatible core rather than create competing peer planners
 or storage ledgers. Closing one frontend must not stop another application's work. Access
 is scoped by user and application; system-wide operation requires an explicit choice.
-See the [shared-service contract](APPLICATION_LIFECYCLE.md).
+See the [shared-service contract](../architecture/APPLICATION_LIFECYCLE.md).
 
 ## Browser
 
@@ -113,5 +113,5 @@ Search, previews and AI must preserve the privacy of both files and derived info
 - Application-specific successes do not establish that all platforms, other applications
   or the complete expanded alpha work.
 
-[Core implementation evidence](IMPLEMENTATION_STATUS.md) · [Private storage](PRIVATE_STORAGE.md) ·
-[Cooperative agents](DECENTRALIZED_AGENTS.md) · [Privacy](PRIVACY.md)
+[Core implementation evidence](../IMPLEMENTATION_STATUS.md) · [Private storage](../services/PRIVATE_STORAGE.md) ·
+[Cooperative agents](../services/DECENTRALIZED_AGENTS.md) · [Privacy](../privacy/PRIVACY.md)
