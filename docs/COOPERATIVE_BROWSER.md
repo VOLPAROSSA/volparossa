@@ -26,8 +26,29 @@ each new task; the browser still supplies no providers or model configuration.
 Selection stays within the operator's model profile and one mutually compatible
 fingerprint. The validated retained enrollment determines the reported selected cohort;
 actual executor keys remain separate. This does not yet implement automatic model
-choice or cross-job answer continuation. The current browser/Code live trials use
+choice or cross-job answer continuation. Completed browser/Code live trials used
 fixed peers, so they do not prove this new service discovery path.
+
+The separate `agent-cooperative-browser-discovered` candidate selects
+`--model-profile smollm2-360m-v1 --discover-peers`. It preserves the public README,
+question, browser revision and consent boundary, but selects a literal 4096-byte
+UTF-8-safe prefix rather than the original 3840-byte prefix. The existing pinned
+360M profile is used without enlarging its limits. Real tokenizer preflight found
+the original prefix fits in one 1002-token prompt at this profile, so it cannot
+demonstrate the required two-peer partition. No source padding or repetition is used.
+The actual 4096-byte preflight produces two parts: 3967 bytes at 1024 prompt tokens
+and 129 bytes at 131 prompt tokens. Its retained plan passes this trial's validator
+(receipt SHA-256 `58462a6e2f253c6821d82f5c15d6c6fa58bae2e75f114b5136c6c9dfd1c29594`).
+This is tokenizer-only evidence, not model execution or a quality/balancing claim.
+The reports explicitly identify the
+`discovered-360m` contract: complete byte coverage across at least two source
+parts, both actual discovered executors, at least one completed synthesis level,
+original model/receipt bindings and a complete displayed answer. The selected
+cohort and actual executors are verified separately; peer order is not prescribed.
+Live cancellation, protected transport and full owned-state cleanup remain required.
+This is a distinct trial, not a relaxed rerun of the original fixed-135M contract
+(at least five parts and two synthesis levels). Neither answer quality nor
+automatic model-profile choice is established by passing either contract.
 
 An independent root observer allows explicit UI submission only after proving prefill
 created neither a task nor a peer worker. A public, literal README prefix is partitioned
@@ -51,12 +72,15 @@ Preview without mutation:
 
 ```sh
 sh tests/integration/run-alpha-topology-vm.sh --preview --scenario agent-cooperative-browser
+sh tests/integration/run-alpha-topology-vm.sh --preview --scenario agent-cooperative-browser-discovered
 ```
 
 The GitHub alpha-topology workflow runs the real disposable scenario at its exact source
 revision. Acceptance invokes `agent-cooperative-browser.py report REPORT SOURCE_SHA`;
 missing consent, workers, native receipts, hierarchy, transport evidence or cleanup fail
 the gate rather than silently substituting a fake service or local-only inference.
+The discovered scenario uses the same checker with the explicit leading selector
+`--trial discovered-360m`; cross-contract evidence is rejected.
 
 ## First live attempt and bounded driver correction
 

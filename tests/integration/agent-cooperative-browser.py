@@ -21,6 +21,7 @@ read, write, require = JOBS["read"], JOBS["write"], JOBS["require"]
 PINS = HERE / "agent-cooperative-browser-pins.json"
 QUESTION = DOCUMENT["QUESTION"]
 NAME = "agent-cooperative-browser"
+TRIAL = None  # Omitted selector preserves the original fixed-135M proof contract.
 FILES = (
     "scripts/smoke_cooperative_compute.py", "scripts/smoke_compute_model.py", "scripts/smoke_privacy.py",
     "scripts/stage_firefox.py", "integration/VolparossaCooperativeCompute.sys.mjs",
@@ -97,6 +98,76 @@ SYNTHESIS_REASONS = frozenset(("worker_output_was_wire_truncated", "worker_produ
     "reduction_did_not_shrink_no_inputs_discarded", "hierarchy_budget_no_inputs_discarded"))
 ANSWER_STATUSES = ("eos", "json_boundary", "token_limit", "wire_truncated", "empty",
                    "legacy_unknown", "invalid_or_unknown")
+
+
+def select_trial(value):
+    global TRIAL
+    require(value == "discovered-360m" and TRIAL is None, "unknown or repeated cooperative trial")
+    TRIAL = value
+
+
+def trial_fields():
+    return {} if TRIAL is None else dict(trial_contract="discovered-360m",
+        scenario="agent-cooperative-browser-discovered", model_profile="smollm2-360m-v1",
+        provider_selection="protected_provider_eligibility_discovery")
+
+
+def check_trial(value):
+    fields = ("trial_contract", "scenario", "model_profile", "provider_selection")
+    require({key: value[key] for key in fields if key in value} == trial_fields(),
+            "cooperative trial provenance differs")
+
+
+def selected_model():
+    return JOBS["TRAIN"]["inference_profile"]("smollm2-360m-v1" if TRIAL else "smollm2-135m-v1")
+
+
+def source_excerpt(original):
+    """Literal public README prefix: legacy 3840B, explicit discovered trial 4096B."""
+    limit = 4096 if TRIAL else 3840
+    require(limit <= len(original) <= 1048576, "bounded public README missing")
+    context = original[:limit].decode("utf-8", errors="ignore")
+    require(original.startswith(context.encode()), "public README excerpt is not a literal UTF-8 prefix")
+    return context
+
+
+def check_discovered_provision(value):
+    model = selected_model()["model"]
+    pin_root = HERE / "ml" if (HERE / "ml").is_dir() else HERE.parent.parent / "workers/volparossa-ml"
+    selected = read(pin_root / "model-pins.json")
+    selected.update(read(pin_root / "model-pins-360m.json"))
+    weights = next(item for item in selected["files"] if item["path"] == "model.safetensors")
+    require(model["model_id"] == selected["model_id"] and model["model_revision"] == selected["revision"]
+            and model["base_weights"] == {key: weights[key] for key in ("bytes", "sha256")}
+            and value["success"] is True and value["installed_wheels"] == len(selected["wheels"]) == 38
+            and value["model_profile"] == "smollm2-360m-v1" and value["model_id"] == model["model_id"]
+            and value["revision"] == model["model_revision"]
+            and value["download_bytes"] == sum(item["bytes"] for item in selected["files"] + selected["wheels"]) == 977655758
+            and value["model_pins_sha256"] == sha((json.dumps(selected, indent=2) + "\n").encode())
+            and value["requirements_sha256"] == sha((pin_root / "requirements.lock").read_bytes())
+            and value["budget_bytes"] == 3 * 1024**3 and value["runtime_autofetch_enabled"] is False
+            and value["training_performed"] is False, "discovered trial model provision differs")
+
+
+def check_trial_plan(plan, source):
+    if TRIAL is None:
+        return DOCUMENT["check_plan"](plan, source)
+    profile = selected_model()
+    model, limit = profile["model"], profile["prompt_tokens"]
+    require(plan["version"] == 1 and plan["source_bytes"] == len(source) and plan["source_sha256"] == sha(source)
+            and plan["question_sha256"] == sha(QUESTION.encode()) and plan["model_id"] == model["model_id"]
+            and plan["model_revision"] == model["model_revision"] and plan["tokenizer_sha256"] == DOCUMENT["TOKENIZER"]
+            and plan["prompt_limit"] == limit and plan.get("synthesis", False) is False
+            and 2 <= len(plan["parts"]) <= 128, "discovered trial needs an exact multipart selected-model plan")
+    end = 0
+    for part in plan["parts"]:
+        require(type(part["start"]) is int and type(part["end"]) is int and part["start"] == end
+                and 0 < part["end"] - part["start"] <= 4096 and part["end"] <= len(source)
+                and type(part["prompt_tokens"]) is int and 1 <= part["prompt_tokens"] <= limit,
+                "discovered tokenizer omitted bytes or exceeded selected profile")
+        source[part["start"]:part["end"]].decode("utf-8")
+        end = part["end"]
+    require(end == len(source), "discovered tokenizer omitted original source tail")
 
 
 def sha(raw):
@@ -228,12 +299,14 @@ def provision(work):
     require(all(digest(root / "build/firefox-esr" / name) == expected
                 for name, expected in selected["runtime"]["files"].items()), "staged ESR runtime changed")
     original = (work / "bin/agent-jobs-README.md").read_bytes()
-    require(3840 <= len(original) <= 1048576, "bounded public README missing")
-    context = original[:3840].decode("utf-8", errors="ignore")
+    context = source_excerpt(original)
     write(root / "input.json", dict(question=QUESTION, context=context, license="GPL-3.0-only"))
     write(root / "provision.json", selected)
+    if TRIAL:
+        check_discovered_provision(read(work / "agent-jobs-user/provision/provision-report.json"))
     print(json.dumps(dict(context_bytes=len(context.encode()), context_sha256=sha(context.encode()),
-                         readme_sha256=sha(original), explicit_public_source=True, license="GPL-3.0-only")))
+                         readme_sha256=sha(original), explicit_public_source=True, license="GPL-3.0-only",
+                         **trial_fields())))
 
 
 def marker(path, event):
@@ -546,8 +619,15 @@ def retained_result(document, fixture, layout, observed):
     require(source == fixture["context"].encode(), "public coordinator source changed")
     enrollment, plan, result = (read(document / name, 8 * 1048576)
         for name in ("document.json", "document-plan.json", "result.json"))
-    DOCUMENT["check_plan"](plan, source)
+    check_trial_plan(plan, source)
     selected = [layout["provider_keys"][node] for node in layout["provider_nodes"]]
+    if TRIAL:
+        require(len(enrollment["provider_keys"]) == len(selected) == 2
+                and set(enrollment["provider_keys"]) == set(selected)
+                and enrollment["model_fingerprint"] == selected_model()["fingerprint"]
+                and enrollment.get("replace_peers", False) is False,
+                "discovered enrollment changed the selected cohort")
+        selected = enrollment["provider_keys"]
     require(enrollment["provider_keys"] == selected and enrollment["synthesize"] is True
             and result["joining"] == "hierarchical_peer_synthesis"
             and result["execution_complete"] is True and result["complete"] is True
@@ -558,7 +638,7 @@ def retained_result(document, fixture, layout, observed):
                                     enrollment, "document-source", "text/plain")
     require(source_id == result["source_manifest_id"], "source manifest not retained")
     levels = result["synthesis"]["levels"]
-    require(2 <= len(levels) <= 16 and all(level["complete"] is True for level in levels)
+    require((1 if TRIAL else 2) <= len(levels) <= 16 and all(level["complete"] is True for level in levels)
             and {entry["level"] for entry in observed.values() if entry["level"] is not None}
                 == {level["level"] for level in levels}, "actual worker missing at a reduction level")
     require({entry["node"] for entry in observed.values() if entry["level"] is None}
@@ -577,8 +657,25 @@ def retained_result(document, fixture, layout, observed):
                 and report["dataset"]["version"] in (2, 3)
                 and report["dataset"]["sha256"] == binding["dataset_sha256"]
                 and report["dataset"]["source_manifest_sha256"] == source_id
-                and report["model"]["files"]["model.safetensors"]["sha256"] == JOBS["TRAIN"]["WEIGHT_HASH"],
+                and report["model"]["files"]["model.safetensors"]["sha256"] == selected_model()["model"]["base_weights"]["sha256"],
                 "real pinned worker report changed")
+        if TRIAL:
+            profile = selected_model()
+            require(handle["capabilities"]["model"] == profile["model"]
+                    and handle["capabilities"]["max_rows"] == 1
+                    and handle["capabilities"]["max_job_seconds"] == 600
+                    and binding["model_fingerprint"] == handle["capabilities"]["model_fingerprint"] == profile["fingerprint"]
+                    and report["model"]["id"] == profile["model"]["model_id"]
+                    and report["model"]["revision"] == profile["model"]["model_revision"]
+                    and report["model"]["files"]["model.safetensors"] == profile["model"]["base_weights"]
+                    and report["supervisor"]["rss_limit_bytes"] == 3 * 1024**3
+                    and report["threads"] == 2 and len(report["outputs"]) == 1,
+                    "discovered worker profile/resource binding differs")
+            for output in report["outputs"]:
+                JOBS["TRAIN"]["check_generation"](output, require_eos=True, model_profile=profile["name"])
+                require(output["text_truncated"] is False and output["text"].strip()
+                        and len(json.dumps(output["text"], ensure_ascii=True).encode()) <= profile["wire_bytes"],
+                        "discovered worker answer incomplete")
         DOCUMENT["check_supervisor"](report)
         ids.add(binding["job_id"]); provider_keys.add(handle["provider_key"])
         reports[binding["job_id"]] = dict(provider_key=handle["provider_key"], report_sha256=status["report_sha256"],
@@ -591,7 +688,8 @@ def retained_result(document, fixture, layout, observed):
         total_parts=result["total_parts"], package_count=len(result["packages"]), synthesis_levels=len(levels),
         provider_keys=sorted(provider_keys), jobs=len(ids), output_sha256=sha(final["text"].encode()),
         execution_complete=True, answer_complete=result["answer_complete"],
-        semantic_completeness_proven=False, exact_native_receipts_verified=True)
+        semantic_completeness_proven=False, exact_native_receipts_verified=True,
+        **(dict(selected_provider_keys=selected, model_fingerprint=selected_model()["fingerprint"], **trial_fields()) if TRIAL else {}))
 
 
 def observe(work, pid):
@@ -705,6 +803,9 @@ def check_panel(panel, result, revision):
         and sorted(displayed["provider_keys"]) == result["provider_keys"]
         and displayed["execution_complete"] is True and displayed["joining"] == "hierarchical_peer_synthesis",
         "browser output does not join the exact native peer result")
+    if TRIAL:
+        require(displayed["selected_provider_keys"] == result["selected_provider_keys"],
+                "browser changed the discovered enrollment")
 
 
 def collect(work, revision):
@@ -717,6 +818,17 @@ def collect(work, revision):
 
 
 def check_evidence(value, revision, source_pins=None):
+    check_trial(value)
+    check_trial(value["input"])
+    check_trial(value["result"])
+    if TRIAL:
+        check_discovered_provision(value["model_provision"])
+        expected = [value["layout"]["provider_keys"][node] for node in value["layout"]["provider_nodes"]]
+        require(len(value["result"]["selected_provider_keys"]) == len(expected) == 2
+                and set(value["result"]["selected_provider_keys"]) == set(expected)
+                and set(value["result"]["provider_keys"]) == set(expected)
+                and value["result"]["model_fingerprint"] == selected_model()["fingerprint"],
+                "discovered evidence selection differs")
     require(value["source_revision"] == revision and value["success"] is True
             and all(value[field] is False for field in FALSE_SCOPE), "cooperative proof scope overstated")
     selected = pins() if source_pins is None else source_pins
@@ -733,8 +845,9 @@ def check_evidence(value, revision, source_pins=None):
     check_panel(value["panel"], result, revision)
     require(result["exact_native_receipts_verified"] is True and result["execution_complete"] is True
             and result["answer_complete"] is True and result["semantic_completeness_proven"] is False
-            and 2 <= result["synthesis_levels"] <= 16
-            and result["total_parts"] >= 5 and result["package_count"] >= 2 and result["jobs"] >= 4
+            and (1 if TRIAL else 2) <= result["synthesis_levels"] <= 16
+            and result["total_parts"] >= (2 if TRIAL else 5)
+            and result["package_count"] >= (1 if TRIAL else 2) and result["jobs"] >= (3 if TRIAL else 4)
             and len(result["provider_keys"]) == len(set(result["provider_keys"])) == 2
             and result["source_sha256"] == value["input"]["context_sha256"]
             and result["context_bytes"] == value["input"]["context_bytes"] <= 4096
@@ -748,7 +861,8 @@ def check_evidence(value, revision, source_pins=None):
             and observation["cancelled_workers"] and observation["completed_workers"],
             "actual multi-peer/cancellation observation missing")
     for entry in observation["completed_workers"] + observation["cancelled_workers"]:
-        require(entry["isolated_live_worker"] is True and entry["base_model_sha256"] == JOBS["TRAIN"]["WEIGHT_HASH"]
+        require(entry["isolated_live_worker"] is True
+                and entry["base_model_sha256"] == selected_model()["model"]["base_weights"]["sha256"]
                 and entry["provider_key"] in result["provider_keys"]
                 and re.fullmatch(r"[0-9a-f]{64}", entry["dataset_sha256"]), "observed worker provenance changed")
     require(value["private_cleanup"] == dict(observed_compute_processes_ended=True, model_runtime_removed=True,
@@ -786,6 +900,9 @@ def evidence(work, revision):
             privacy={role: read(work / f"content-custody-fetch-privacy-{role}.json") for role in JOBS["CUSTODY"]["ROLES"]},
             control_privacy=read(work / "content-provider-custody-fetch-control.json"),
             gates=read(work / "content-custody-fetch-gates.json")))
+    value.update(trial_fields())
+    if TRIAL:
+        value["model_provision"] = read(work / "agent-jobs-provision.json")
     check_evidence(value, revision)
     write(work / f"{NAME}-evidence.json", value)
 
@@ -799,10 +916,12 @@ def finalize(work, revision, status, complete, remaining, phase, blocker):
         source_revision=revision, runner_exit_status=status, phase=phase,
         observed_blocker=None if blocker == "NONE" else blocker, evidence=value, host_state=host,
         cleanup=dict(complete=complete, remaining_owned_objects=remaining),
-        success=status == 0 and complete and remaining == 0 and host.get("unchanged") is True and value is not None))
+        success=status == 0 and complete and remaining == 0 and host.get("unchanged") is True and value is not None,
+        **trial_fields()))
 
 
 def check_report(value, revision):
+    check_trial(value)
     require(re.fullmatch(r"[0-9a-f]{40}", revision) and value["source_revision"] == revision
             and value["report_kind"] == "volparossa-cooperative-browser" and value["schema_version"] == 1
             and value["success"] is True and value["runner_exit_status"] == 0
@@ -815,6 +934,10 @@ def check_report(value, revision):
 
 
 def main(args):
+    if args[:1] == ["--trial"]:
+        require(len(args) >= 3, "cooperative trial command missing")
+        select_trial(args[1])
+        args = args[2:]
     if len(args) == 2 and args[0] in ("account-home-prepare", "account-home-cleanup"):
         account_home(Path(args[1]), cleanup=args[0] == "account-home-cleanup")
         return

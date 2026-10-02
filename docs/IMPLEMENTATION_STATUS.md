@@ -104,6 +104,19 @@ strict CLI/test Clippy passes. Actual executors remain distinct from selected
 peers. Model choice stays operator-selected; this is not automatic model selection,
 cross-job continuation, protected private inference or a live discovered-peer PASS.
 
+A distinct `agent-cooperative-browser-discovered` candidate now joins that selection
+to the same browser/question/consent with the existing pinned 360M profile. It uses
+a literal 4096-byte prefix of the same public README: actual tokenizer preflight
+showed that the old 3840-byte prefix fits in one 1002-token prompt and therefore
+cannot prove two-peer partitioning at this profile. No source repetition is used.
+It requires two actual discovered providers, complete source partitioning and at
+least one complete synthesis level, original receipts, live cancellation and full
+cleanup. Fifteen focused browser checks and eight existing Code fixture checks
+pass, including actual inert launcher selection and closed export validation.
+The original fixed-135M contract and failed artifacts remain unchanged.
+The new combined live proof is pending; larger model capacity is not itself an
+answer-completion or quality claim.
+
 The new **cooperative browser candidate** connects a separate, explicitly public
 Firefox panel to the real `compute public-serve` service and existing signed document /
 peer-synthesis coordinator. Prefill does not submit; rights confirmation and explicit

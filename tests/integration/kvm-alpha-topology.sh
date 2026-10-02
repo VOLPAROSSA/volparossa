@@ -28,6 +28,7 @@ agent_jobs_package_queue=no
 agent_public_task=no
 agent_public_document=no
 agent_cooperative_browser=no
+agent_cooperative_browser_discovered=no
 agent_cooperative_code=no
 agent_public_collection=no
 agent_public_network_sources=no
@@ -82,6 +83,11 @@ print_plan() {
         return
     fi
     if [ "$agent_cooperative_browser" = yes ]; then
+        if [ "$agent_cooperative_browser_discovered" = yes ]; then
+            printf '%s\n' \
+                '  trial: discovered-360m; discover compatible real peers through core control IPC;' \
+                '  use the existing pinned 360M profile; require two actual peers and complete synthesis;'
+        fi
         printf '%s\n' \
             'VOLPAROSSA cooperative browser proof plan:' \
             '  stage exact-pinned Gecko UI and ESR runtime in the disposable guest;' \
@@ -739,6 +745,7 @@ while [ "$#" -gt 0 ]; do
             agent_public_task=no
             agent_public_document=no
             agent_cooperative_browser=no
+            agent_cooperative_browser_discovered=no
             agent_cooperative_code=no
             agent_public_collection=no
             agent_public_network_sources=no
@@ -757,6 +764,7 @@ while [ "$#" -gt 0 ]; do
             case $2 in
                 agent-cooperative-code) scenario=agent-jobs; agent_cooperative_code=yes; wifi_link=no; uplink_link=no ;;
                 agent-cooperative-browser) scenario=agent-jobs; agent_cooperative_browser=yes; wifi_link=no; uplink_link=no ;;
+                agent-cooperative-browser-discovered) scenario=agent-jobs; agent_cooperative_browser=yes; agent_cooperative_browser_discovered=yes; wifi_link=no; uplink_link=no ;;
                 signal-backup) scenario=content-custody; signal_backup=yes; wifi_link=no; uplink_link=no ;;
                 reciprocity-private-dns) scenario=reciprocity; reciprocal_private_dns=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-peer) scenario=content-custody; private_storage_peer=yes; wifi_link=no; uplink_link=no ;;
@@ -1079,7 +1087,7 @@ if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
     done
     command -v bwrap >/dev/null 2>&1 || exit 69
 fi
-if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agent_policy_assessment" = yes ]; then
+if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agent_policy_assessment" = yes ] || [ "$agent_cooperative_browser_discovered" = yes ]; then
     [ -f "$source_directory/workers/volparossa-ml/model-pins-360m.json" ] \
         && [ ! -L "$source_directory/workers/volparossa-ml/model-pins-360m.json" ] || exit 69
 fi
@@ -2803,7 +2811,7 @@ if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
     for artifact_pin in provision.py requirements.lock model-pins.json; do
         install -o root -g root -m 0444 "$source_directory/workers/volparossa-ml/$artifact_pin" "$WORK/bin/ml/$artifact_pin"
     done
-    if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agent_policy_assessment" = yes ]; then
+    if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agent_policy_assessment" = yes ] || [ "$agent_cooperative_browser_discovered" = yes ]; then
         install -o root -g root -m 0444 "$source_directory/workers/volparossa-ml/model-pins-360m.json" "$WORK/bin/ml/model-pins-360m.json"
     fi
     if [ "$agent_model_task_graph" = yes ] || [ "$agent_policy_assessment" = yes ]; then

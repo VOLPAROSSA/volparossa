@@ -28,7 +28,7 @@ agent_jobs_prepare() {
     jobs_batch_pid=
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$jobs_root"
     set -- "$jobs_root"
-    if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ]; then
+    if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ] || [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
         set -- "$@" smollm2-360m-v1
     fi
     if [ "${agent_model_task_graph:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ]; then
@@ -117,7 +117,7 @@ agent_jobs_broker() {
     jobs_attempt=0
     jobs_started=$(python3 -c 'import time; print(time.monotonic_ns())') || return 1
     set --
-    if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ]; then
+    if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ] || [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
         set -- --model-profile smollm2-360m-v1
     fi
     if [ "${agent_policy_assessment:-no}" = yes ]; then
