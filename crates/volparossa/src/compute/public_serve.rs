@@ -216,6 +216,10 @@ impl Active {
             )
             .await;
             slot.confirmed = result.cleanup_confirmed;
+            // Capture the whole guard, not just its Copy `confirmed` field.
+            // Otherwise disjoint async capture drops the guard at start() return
+            // and quarantines admission before the backend has even run.
+            drop(slot);
             result
         });
         Self {

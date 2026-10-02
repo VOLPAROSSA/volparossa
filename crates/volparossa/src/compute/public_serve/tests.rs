@@ -230,6 +230,74 @@ async fn public_serve_uncertain_cleanup_closes_admission_and_retains_marker() {
     assert!(root.path().join(".cleanup-unconfirmed").is_file());
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn public_serve_active_owns_slot_until_confirmed_pre_dispatch_cancellation() {
+    let root = tempfile::tempdir().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let gate = Arc::new(Semaphore::new(1));
+    let slot = ExecutionSlot {
+        _permit: gate.clone().acquire_owned().await.unwrap(),
+        gate: gate.clone(),
+        parent: root.path().to_owned(),
+        confirmed: false,
+    };
+    let task_root = new_task(root.path()).unwrap();
+    let mut active = Active::start(
+        FIRST.to_owned(),
+        Arc::new(config(root.path())),
+        task_root.clone(),
+        "Public question".to_owned(),
+        "Public source".to_owned(),
+        "CC0-1.0".to_owned(),
+        slot,
+    );
+    // On this current-thread runtime the spawned future cannot run before an
+    // await. Admission must remain held, not quarantined, at Active::start's return.
+    assert!(!gate.is_closed());
+    assert_eq!(gate.available_permits(), 0);
+    assert!(!root.path().join(".cleanup-unconfirmed").exists());
+    active.cancel();
+    let result = active.execution.take().unwrap().await.unwrap();
+    assert_eq!(
+        result.result.unwrap_err().to_string(),
+        "compute_document_cancelled_before_planning"
+    );
+    assert!(result.cleanup_confirmed);
+    assert!(!task_root.join("input.txt").exists());
+    assert!(!gate.is_closed());
+    assert_eq!(gate.available_permits(), 1);
+    assert!(!root.path().join(".cleanup-unconfirmed").exists());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn public_serve_active_abort_latches_unconfirmed_cleanup() {
+    let root = tempfile::tempdir().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let gate = Arc::new(Semaphore::new(1));
+    let slot = ExecutionSlot {
+        _permit: gate.clone().acquire_owned().await.unwrap(),
+        gate: gate.clone(),
+        parent: root.path().to_owned(),
+        confirmed: false,
+    };
+    let mut active = Active::start(
+        FIRST.to_owned(),
+        Arc::new(config(root.path())),
+        new_task(root.path()).unwrap(),
+        "Public question".to_owned(),
+        "Public source".to_owned(),
+        "CC0-1.0".to_owned(),
+        slot,
+    );
+    assert!(!gate.is_closed());
+    assert_eq!(gate.available_permits(), 0);
+    let execution = active.execution.take().unwrap();
+    execution.abort();
+    assert!(matches!(execution.await, Err(error) if error.is_cancelled()));
+    assert!(gate.is_closed());
+    assert!(root.path().join(".cleanup-unconfirmed").is_file());
+}
+
 #[test]
 fn public_serve_retained_task_bound_preserves_existing_data() {
     let root = tempfile::tempdir().unwrap();
