@@ -70,7 +70,31 @@ Last updated: 2026-10-02
 
 ### Cooperative browser execution
 
-The latest exact-source [run `37058432693`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37058432693)
+The later exact-source [run `37065757332`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37065757332)
+on `c2c7cb268db0a07c3638367324d838ef26f4a101` remains **failed before compute**:
+`JOBS_ROUTE_UNAVAILABLE`, 29 connect attempts and 28 retries, with final
+`NO_ELIGIBLE_PATHS`. The retained diagnostic does not contain the prior rejection
+codes or actor candidate slate, so it cannot identify which eligibility condition
+failed. No browser task, peer execution or completed answer is proved. Private
+cleanup passes, zero owned objects remain, and the guest-network snapshots match.
+Original artifact ZIP SHA-256:
+`a8dbafe25af410ddc908ffc0dd1869c38171810b23debf37a52898af9dd5b239`;
+route diagnostic SHA-256:
+`052e133e702e3fc6d778f61118262aba58aa7f25c84f1f1582a7178c04050ee8`.
+
+An independently reproduced selection defect is corrected in the current candidate:
+choosing an incompatible control before checking the requested transport could hide
+a compatible control for the same exact signed Exit. New route attempts now apply
+the existing transport/family/capacity/diversity predicate before that control draw.
+All signed-group ambiguity checks remain first; exact lineage and one fixed control
+remain bound throughout the attempt. Existing pinned routes cannot substitute a
+control, and wholly incompatible slates still reject before dispatch rather than
+becoming new retryable failures. A signed regression fails before this correction;
+targeted checks cover the suitable alternate and unchanged rejection boundaries.
+This does **not** establish the cause of run `37065757332`, prove a live datapath,
+or resolve the earlier incomplete model answers.
+
+The earlier exact-source [run `37058432693`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37058432693)
 on `b76b8a24` remains **failed**, now with four observed workers, four terminal receipts
 and confirmed normal task cleanup, without reconciliation. The original leaf answers
 are one EOS and one token-limited output; answer completion is false and synthesis is

@@ -2455,11 +2455,19 @@ impl DiscoveryRuntime {
         if reply.is_closed() {
             return;
         }
-        let snapshot = match self.build_route_candidate_snapshot(
+        let scope = PreselectionSamplingScope::new(
+            transport,
+            address_family,
+            minimum_capacity,
+            minimum_other_relays,
+            maximum_other_relays,
+        );
+        let snapshot = match self.build_route_candidate_snapshot_with_scope(
             requested_candidate_bound,
             captured_at_ms,
             &policy,
             restriction.as_ref(),
+            Some(scope),
         ) {
             Ok(snapshot) => snapshot,
             Err(RouteCandidateSnapshotError::InvalidLimit) => {
@@ -2487,13 +2495,6 @@ impl DiscoveryRuntime {
                 return;
             }
         };
-        let scope = PreselectionSamplingScope::new(
-            transport,
-            address_family,
-            minimum_capacity,
-            minimum_other_relays,
-            maximum_other_relays,
-        );
         let snapshot = match narrow_route_candidate_snapshot(snapshot, scope) {
             Ok(snapshot) => snapshot,
             Err(failure) => {
@@ -13453,6 +13454,23 @@ impl DiscoveryRuntime {
         active: &AgentPolicySnapshot,
         restriction: Option<&route_extension::PreselectionRestriction>,
     ) -> Result<RouteCandidateSnapshot, RouteCandidateSnapshotError> {
+        self.build_route_candidate_snapshot_with_scope(
+            requested_candidates,
+            captured_at_ms,
+            active,
+            restriction,
+            None,
+        )
+    }
+
+    fn build_route_candidate_snapshot_with_scope(
+        &self,
+        requested_candidates: usize,
+        captured_at_ms: u64,
+        active: &AgentPolicySnapshot,
+        restriction: Option<&route_extension::PreselectionRestriction>,
+        sampling_scope: Option<PreselectionSamplingScope>,
+    ) -> Result<RouteCandidateSnapshot, RouteCandidateSnapshotError> {
         #[cfg(test)]
         self.route_snapshot_build_attempts
             .set(self.route_snapshot_build_attempts.get().saturating_add(1));
@@ -13483,6 +13501,9 @@ impl DiscoveryRuntime {
             &mut direct_relays,
             &mut forwarded_exits,
             maximum_candidates,
+            // An existing route has already chosen its control. Keep that exact
+            // lineage and let the unchanged sampler reject it if now unsuitable.
+            sampling_scope.filter(|_| restriction.is_none()),
             |group| match restriction {
                 Some(restriction) => restriction.control_index(group),
                 None => Self::random_exit_control_index(group.len()),
@@ -13790,6 +13811,7 @@ impl DiscoveryRuntime {
         direct_relays: &mut [DirectRelayCandidateSnapshot],
         forwarded_exits: &mut Vec<ForwardedExitCandidateSnapshot>,
         maximum_candidates: usize,
+        sampling_scope: Option<PreselectionSamplingScope>,
         mut choose_control: impl FnMut(&[ForwardedExitCandidateSnapshot]) -> Option<usize>,
     ) {
         direct_relays.sort_by(|left, right| {
@@ -13835,8 +13857,31 @@ impl DiscoveryRuntime {
             {
                 continue;
             }
-            if let Some(index) = choose_control(group).filter(|index| *index < group.len()) {
-                selected.push(group[index].clone());
+            // Check the complete signed group for ambiguity above, then choose
+            // only among lineages usable for this request. Otherwise a random
+            // incompatible control can hide a compatible path to the same Exit.
+            // The exact selected lineage stays fixed for all subsequent phases;
+            // a restricted attempt cannot substitute another control here.
+            let eligible = group
+                .iter()
+                .filter(|candidate| {
+                    sampling_scope.is_none_or(|scope| {
+                        preselection_sampler::forwarded_control_is_scope_eligible(candidate, scope)
+                    })
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            // If none is compatible, preserve the valid snapshot shape so the
+            // normal sampler still returns terminal NoEligiblePaths, not a new
+            // retryable empty-snapshot error. Its unchanged filter rejects every
+            // such pair before an affine attempt or request can be created.
+            let choices = if eligible.is_empty() {
+                group
+            } else {
+                &eligible
+            };
+            if let Some(index) = choose_control(choices).filter(|index| *index < choices.len()) {
+                selected.push(choices[index].clone());
             }
         }
         selected.truncate(maximum_candidates.saturating_sub(direct_relays.len()));
@@ -25623,6 +25668,17 @@ mod tests {
     }
 
     async fn signed_alternative_exit_controls_fixture() -> (Box<RuntimeFixture>, u64) {
+        signed_alternative_exit_controls_fixture_with([
+            PreselectionTestCapabilities::all_on_network(40),
+            PreselectionTestCapabilities::all_on_network(41),
+            PreselectionTestCapabilities::all_on_network(42),
+        ])
+        .await
+    }
+
+    async fn signed_alternative_exit_controls_fixture_with(
+        controls: [PreselectionTestCapabilities; 3],
+    ) -> (Box<RuntimeFixture>, u64) {
         let mut fixture = Box::new(fixture(test_client_roles()));
         let now_ms = unix_millis();
         let exit = Identity::generate();
@@ -25647,7 +25703,7 @@ mod tests {
             &fixture.directory,
             PreselectionTestCapabilities::all_on_network(43),
         );
-        for discriminator in 40..43 {
+        for capabilities in controls {
             let identity = Identity::generate();
             assert!(
                 ingest_direct_snapshot_advertisement_with_capabilities(
@@ -25661,7 +25717,7 @@ mod tests {
                     1,
                     generate_nonce(),
                     now_ms,
-                    PreselectionTestCapabilities::all_on_network(discriminator),
+                    capabilities,
                 )
                 .await
                 .is_some()
@@ -25682,6 +25738,274 @@ mod tests {
         }
         assert_eq!(fixture.runtime.forwarded_exits.len(), 3);
         (fixture, now_ms)
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one signed fixture proves alternate eligibility, affine provenance, and pinned-control refusal"
+    )]
+    async fn route_snapshot_control_draw_keeps_a_transport_eligible_alternative() {
+        let mut unsuitable = PreselectionTestCapabilities::all_on_network(40);
+        unsuitable.transports.tcp_mptcp = false;
+        let (mut fixture, now_ms) = signed_alternative_exit_controls_fixture_with([
+            unsuitable,
+            PreselectionTestCapabilities::all_on_network(41),
+            PreselectionTestCapabilities::all_on_network(42),
+        ])
+        .await;
+        // A fourth independent relay leaves two genuine MPTCP candidates after
+        // selecting either compatible control. The unsupported node cannot count.
+        assert!(
+            ingest_direct_snapshot_advertisement_with_capabilities(
+                &mut fixture,
+                &Identity::generate(),
+                RolesConfig {
+                    client: false,
+                    relay: true,
+                    exit: false
+                },
+                1,
+                generate_nonce(),
+                now_ms,
+                PreselectionTestCapabilities::all_on_network(44),
+            )
+            .await
+            .is_some()
+        );
+        let active = fixture.state.read().await.policy_snapshot(now_ms);
+        let policy = DiscoveryRuntime::validated_route_candidate_policy(&active, now_ms).unwrap();
+        let revalidated = fixture
+            .runtime
+            .load_revalidated_route_candidates(10, now_ms, policy)
+            .expect("real signatures and actor bindings");
+        let scope = PreselectionSamplingScope::new(
+            Transport::TcpMptcp,
+            ObservationAddressFamily::Ipv4,
+            Bandwidth {
+                up_mbps: 10,
+                down_mbps: 10,
+            },
+            2,
+            2,
+        );
+        // First prove the same signed Exit really has a usable control and two
+        // other relays. Then reproduce a draw preferring the incompatible control.
+        for prefer_suitable in [true, false] {
+            let mut direct =
+                fixture
+                    .runtime
+                    .project_direct_route_candidates(&revalidated, now_ms, policy);
+            let mut exits = fixture.runtime.project_forwarded_route_candidates(
+                &revalidated,
+                &direct,
+                now_ms,
+                policy,
+            );
+            assert_eq!(exits.len(), 3);
+            let originals = exits.clone();
+            DiscoveryRuntime::finalize_route_candidate_projection(
+                &mut direct,
+                &mut exits,
+                10,
+                Some(scope),
+                |group| {
+                    group
+                        .iter()
+                        .position(|candidate| {
+                            candidate
+                                .control
+                                .advertisement
+                                .advertisement
+                                .capabilities
+                                .tcp_mptcp
+                                == prefer_suitable
+                        })
+                        .or(Some(0))
+                },
+            );
+            assert_eq!(exits.len(), 1);
+            assert!(
+                originals.contains(&exits[0]),
+                "exact forwarded lineage must be unchanged"
+            );
+            let selected_control = exits[0].capability.control_relay_peer_id;
+            let subjects = preselection_observation::PreselectionSubjectSet::from_snapshot(
+                &revalidated,
+                &direct,
+                &exits,
+            );
+            assert!(subjects.available);
+            let snapshot = RouteCandidateSnapshot {
+                captured_at_ms: now_ms,
+                policy,
+                direct_relays: direct,
+                forwarded_exits: exits,
+                preselection_subjects: subjects,
+            };
+            let narrowed =
+                narrow_route_candidate_snapshot(snapshot, scope).unwrap_or_else(|failure| {
+                    panic!(
+                        "eligible alternate lost (prefer_suitable={prefer_suitable}): {:?}",
+                        failure.error
+                    )
+                });
+            assert_eq!(narrowed.direct_relays.len(), 3);
+            assert_eq!(narrowed.forwarded_exits.len(), 1);
+            assert_eq!(
+                narrowed.forwarded_exits[0].capability.control_relay_peer_id,
+                selected_control
+            );
+            assert!(
+                PreselectionAttemptGate::new()
+                    .unwrap()
+                    .begin(
+                        narrowed,
+                        Transport::TcpMptcp,
+                        ObservationAddressFamily::Ipv4,
+                        Bandwidth {
+                            up_mbps: 10,
+                            down_mbps: 10
+                        },
+                        Bandwidth {
+                            up_mbps: 100,
+                            down_mbps: 100
+                        },
+                        Bandwidth {
+                            up_mbps: 80,
+                            down_mbps: 80
+                        },
+                    )
+                    .is_ok(),
+                "one unchanged control must own the complete affine attempt"
+            );
+        }
+        let snapshot = fixture
+            .runtime
+            .build_route_candidate_snapshot_with_scope(10, now_ms, &active, None, Some(scope))
+            .expect("the production builder uses the same scope filter");
+        assert!(
+            snapshot.forwarded_exits[0]
+                .control
+                .advertisement
+                .advertisement
+                .capabilities
+                .tcp_mptcp
+        );
+
+        let direct = fixture
+            .runtime
+            .project_direct_route_candidates(&revalidated, now_ms, policy);
+        let exits = fixture.runtime.project_forwarded_route_candidates(
+            &revalidated,
+            &direct,
+            now_ms,
+            policy,
+        );
+        let unsuitable = exits
+            .iter()
+            .find(|candidate| {
+                !candidate
+                    .control
+                    .advertisement
+                    .advertisement
+                    .capabilities
+                    .tcp_mptcp
+            })
+            .unwrap();
+        let pinned = &unsuitable.capability;
+        let restriction = route_extension::PreselectionRestriction {
+            exit_node: pinned.exit_node_id,
+            exit_peer: pinned.exit_peer_id,
+            control_node: pinned.control_relay_node_id,
+            control_peer: pinned.control_relay_peer_id,
+            data_relays: direct
+                .iter()
+                .map(|candidate| (candidate.capability.node_id, candidate.capability.peer_id))
+                .filter(|(node, _)| *node != pinned.control_relay_node_id)
+                .take(2)
+                .collect(),
+        };
+        let restricted = fixture
+            .runtime
+            .build_route_candidate_snapshot_with_scope(
+                10,
+                now_ms,
+                &active,
+                Some(&restriction),
+                Some(scope),
+            )
+            .unwrap();
+        assert_eq!(restricted.forwarded_exits.len(), 1);
+        assert_eq!(
+            restricted.forwarded_exits[0]
+                .capability
+                .control_relay_peer_id,
+            pinned.control_relay_peer_id,
+            "an existing attempt must not silently replace its pinned control"
+        );
+        let Err(failure) = narrow_route_candidate_snapshot(restricted, scope) else {
+            panic!("the pinned unsuitable control must be rejected before dispatch");
+        };
+        assert_eq!(
+            failure.error,
+            PreselectionSamplingError::NoEligibleForwardedExit,
+            "the pinned unsuitable control retains its terminal sampler rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn route_snapshot_all_incompatible_controls_still_reject_before_dispatch() {
+        let controls = [40, 41, 42].map(|network| {
+            let mut capabilities = PreselectionTestCapabilities::all_on_network(network);
+            capabilities.transports.tcp_mptcp = false;
+            capabilities
+        });
+        let (mut fixture, _) = signed_alternative_exit_controls_fixture_with(controls).await;
+        let (reply, response) = oneshot::channel();
+        fixture
+            .runtime
+            .begin_client_preselection(
+                ClientPreselectionParameters::new(
+                    Transport::TcpMptcp,
+                    ObservationAddressFamily::Ipv4,
+                    Bandwidth {
+                        up_mbps: 10,
+                        down_mbps: 10,
+                    },
+                    Bandwidth {
+                        up_mbps: 100,
+                        down_mbps: 100,
+                    },
+                    Bandwidth {
+                        up_mbps: 80,
+                        down_mbps: 80,
+                    },
+                    2,
+                    2,
+                    10,
+                ),
+                reply,
+                &fixture.state,
+            )
+            .await;
+        assert!(
+            matches!(
+                response.await.unwrap(),
+                Err(ClientPreselectionError::NoEligiblePaths)
+            ),
+            "scope filtering must not turn a terminal rejection into a retryable empty snapshot"
+        );
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Available(_)
+        ));
+        assert!(
+            !fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
     }
 
     #[tokio::test]
@@ -25711,6 +26035,7 @@ mod tests {
                 &mut direct,
                 &mut exits,
                 10,
+                None,
                 |group| {
                     assert_eq!(group.len(), 3);
                     Some(choice)
@@ -26014,6 +26339,7 @@ mod tests {
                 &mut direct,
                 &mut exits,
                 10,
+                None,
                 |group| match mutation {
                     7 => None,
                     8 => Some(group.len()),
