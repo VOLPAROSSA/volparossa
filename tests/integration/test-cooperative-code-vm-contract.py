@@ -20,7 +20,40 @@ exec(compile(COLLECTOR, str(RUNNER) + ":diagnostics", "exec"), MODULE)
 CODE = runpy.run_path(str(HERE / "agent-cooperative-code.py"))
 
 
+def selected_topology_argv(scenario):
+    """Run the actual selector with sudo intercepted, no VM or guest file writes."""
+    marker = "topology_scenario=alpha\n"
+    selector = marker + DRIVER.split(marker, 1)[1].split("\ntopology_status=$?\n", 1)[0]
+    for name in ("runner.stdout", "runner.stderr"):
+        original = "/home/vpci/alpha-output/" + name
+        if selector.count(original) != 1:
+            raise AssertionError("guest output redirection changed")
+        selector = selector.replace(original, "/dev/null")
+    script = "\n".join(("set -eu", 'scenario=$1', "expected_commit=" + "a" * 40,
+                        "code_manifest_sha256=" + "b" * 64, "exec 3>&1",
+                        "guest_phase() { :; }", "sudo() { printf '%s\\0' \"$@\" >&3; }", selector))
+    result = subprocess.run(["sh", "-c", script, "test", scenario], capture_output=True, timeout=5, check=True)
+    if not result.stdout.endswith(b"\0"):
+        raise AssertionError("selected command never reached mocked sudo")
+    return result.stdout[:-1].decode("utf-8").split("\0")
+
+
+def common_topology_args(scenario):
+    return ["--execute", "--yes", "--source", "/home/vpci/source", "--bin", "/home/vpci/target/debug",
+            "--mpquic", "/home/vpci/volparossa-mpquic", "--scenario", scenario,
+            "--output", "/home/vpci/alpha-output", "--expected-commit", "a" * 40]
+
+
 class CooperativeCodeVm(unittest.TestCase):
+    def test_guest_selector_preserves_exact_code_and_browser_commands(self):
+        self.assertEqual(selected_topology_argv("agent-cooperative-code"),
+            ["-n", "--", "./tests/integration/kvm-alpha-topology.sh",
+             "--code-bundle", "/home/vpci/cooperative-code-inputs", "--code-manifest-sha256", "b" * 64,
+             *common_topology_args("agent-cooperative-code")])
+        self.assertEqual(selected_topology_argv("agent-cooperative-browser"),
+            ["-n", "--", "env", "./tests/integration/kvm-alpha-topology.sh",
+             *common_topology_args("agent-cooperative-browser")])
+
     def test_preview_and_invalid_inputs_are_inert(self):
         preview = subprocess.run(["sh", str(RUNNER), "--preview", "--scenario", "agent-cooperative-code"],
                                  capture_output=True, text=True, timeout=5)
