@@ -526,16 +526,7 @@ fn scored_forwarded_exits(
             let exit_index = exit_subject.checked_sub(direct_count)?;
             let exit = snapshot.forwarded_exits.get(exit_index)?;
             let control = snapshot.direct_relays.get(control_index)?;
-            let exit_static = static_candidate(exit.advertisement(), ServiceRole::Exit, scope)?;
-            let control_static = static_candidate_with_local(
-                control.advertisement(),
-                ServiceRole::Relay,
-                scope,
-                control.authenticated_local_prefix(),
-            )?;
-            if !diversity_hints_are_distinct(&exit_static.diversity, &control_static.diversity) {
-                return None;
-            }
+            let (exit_static, control_static) = static_forwarded_pair(exit, control, scope)?;
             Some(ScoredForwardedExit {
                 exit_index,
                 control_index,
@@ -556,6 +547,34 @@ fn scored_forwarded_exits(
                 > sampled_at_ms
         })
         .collect()
+}
+
+/// Use the same static eligibility before the actor discards alternative controls.
+/// This is a selection filter only: signed lineage/expiry validation and affine
+/// authority construction remain in the actor and normal sampler boundaries.
+pub(super) fn forwarded_control_is_scope_eligible(
+    candidate: &ForwardedExitCandidateSnapshot,
+    scope: PreselectionSamplingScope,
+) -> bool {
+    scope
+        .validated()
+        .is_some_and(|scope| static_forwarded_pair(candidate, candidate.control(), scope).is_some())
+}
+
+fn static_forwarded_pair(
+    exit: &ForwardedExitCandidateSnapshot,
+    control: &DirectRelayCandidateSnapshot,
+    scope: ValidatedSamplingScope,
+) -> Option<(StaticCandidate, StaticCandidate)> {
+    let exit_static = static_candidate(exit.advertisement(), ServiceRole::Exit, scope)?;
+    let control_static = static_candidate_with_local(
+        control.advertisement(),
+        ServiceRole::Relay,
+        scope,
+        control.authenticated_local_prefix(),
+    )?;
+    diversity_hints_are_distinct(&exit_static.diversity, &control_static.diversity)
+        .then_some((exit_static, control_static))
 }
 
 fn scored_relays(
