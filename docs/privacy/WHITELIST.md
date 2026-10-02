@@ -4,11 +4,11 @@ VOLPAROSSA exits are policy-enforcing proxies, never open proxies. Every enabled
 client must validate the same canonical, versioned manifest and exact hash. Missing, expired,
 ambiguous, mismatched, or insufficiently signed policy fails closed.
 
-The user-requested [decentralized agents extension](DECENTRALIZED_AGENTS.md) adds **fully automatic**
+The user-requested [decentralized agents extension](../services/DECENTRALIZED_AGENTS.md) adds **fully automatic**
 content whitelist/blacklist governance. It is not implemented by this destination allowlist.
 Its assessment rules, independent decision membership, conflict resolution and signed-activation
 migration are separate work; current trust anchors and enforcement remain in force meanwhile.
-The agreed [content-policy examples](DECENTRALIZED_AGENTS.md#agreed-content-policy-examples)
+The agreed [content-policy examples](../services/DECENTRALIZED_AGENTS.md#agreed-content-policy-examples)
 distinguish prohibited illegal material/conduct, contextual assessment and allowed lawful use
 with optional advice. Destination authorization alone neither implements those judgments nor
 establishes the legality of every cached object or eliminates an exit operator's legal risk.
@@ -104,7 +104,7 @@ Inspect only public active metadata:
 volparossa policy status
 ```
 
-These commands are release requirements; consult [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)
+These commands are release requirements; consult [IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md)
 before assuming they exist or enforce traffic. Required denials include unlisted domains, raw IP,
 wrong port, SNI mismatch/missing SNI, ECH/unverifiable QUIC, rebinding, stale/rollback policy, and
 insufficient or development signatures.

@@ -1,14 +1,97 @@
 # Exit-side Unbound fallback
 
-The development default is now the bounded private Unbound worker. The source-exact
-protected DNS cache sequence, native fallback, installed resolver sandbox and complete
-install/upgrade/remove lifecycle pass on `138787d1`. The reciprocal-role route has a
-separate earlier passing proof. Integration with the subsequently merged MPTCP-refill
-milestone is being checked; this is not a release-build or full-alpha claim.
-The earlier failed runs below remain failures with their original scopes. No host DNS,
-routes, firewall, resolver service or trust anchors are changed automatically.
+When a permitted DNS answer is not available from a valid network cache, the selected
+**Exit** must still resolve the name. Unbound provides that fallback. It does not move
+DNS resolution back onto the client's ordinary Internet connection or turn cache peers
+into public recursive resolvers.
 
-## Private packaged worker candidate
+The development default in this source is **`unbound_private`**: a short-lived,
+Exit-owned worker with private pipes and no DNS listener. This is defined by
+[the configuration default](../../crates/volparossa-config/src/dns_cache.rs) and selected by
+[the agent's resolver setup](../../crates/volparossa-agent/src/dns_fallback.rs).
+Choosing a default does not enable participation. No host DNS, routes, firewall,
+resolver service or trust anchors are changed automatically.
+
+## Resolver choices
+
+| Mode | Where a cache miss is resolved | What the operator must know |
+| --- | --- | --- |
+| `unbound_private` — default | Packaged worker using libunbound, owned by the Exit agent | An enabled Exit requires the worker and trust-anchor assets. No DNS listener is opened. |
+| `unbound` — explicit choice | An operator-provisioned Unbound endpoint on a high loopback port | The endpoint needs real isolation; loopback alone is not access control. |
+| `system` — explicit opt-out | The existing operating-system resolver backend | This is a deliberate configuration choice, never an automatic fallback after Unbound fails. |
+
+Caching and fallback are separate choices. Setting `dns_cache.enabled: false` disables
+proof retention and peer sharing, **not** the selected resolver. Custom `upstream`
+configuration requires explicit `system` mode; it cannot silently replace private Unbound.
+
+## How resolution works
+
+1. The client sends a policy-authorized question through its protected relay/exit route.
+2. The Exit first reuses an unexpired, independently verified local proof if one exists.
+3. On a miss, it uses a bounded peer attempt or the selected fallback. Private mode
+   chooses their order from recent timings; it does not promise the fastest source for
+   every question.
+4. The answer is checked and tied to the permitted destination. Only independently
+   verified DNSSEC proof can enter the shared cache. A native “secure” verdict or an
+   endpoint's AD flag alone is not a transferable proof.
+5. Expired, invalid or unavailable results are not repaired by silently switching to the
+   OS resolver. Owned native workers must be stopped and reaped before cleanup succeeds.
+
+A peer serves only proof it already has: a peer-cache miss does not start recursion there.
+Unsigned answers may be usable under the selected trusted fallback, but they are not
+promoted into independently verified shared answers.
+
+## Evidence boundary
+
+Two retained results establish different parts of the implementation:
+
+- [Reciprocal private resolution and local reuse](#reciprocal-private-resolution-and-local-reuse-pass):
+  the scoped `c2e21c6c` trial exercises a real protected lookup while the four participating
+  agents retain their existing flows.
+- [Development-package and cache integration](#complete-development-package-and-cache-pass):
+  `138787d1` passes the protected cache sequence, five native Unbound cases, installed
+  resolver sandbox and package install/upgrade/remove lifecycle.
+
+Neither result proves a release build, every later combined revision, a full installed-agent
+DNS-query path or globally fastest source selection. Follow
+[the DNS integration checkpoint](../IMPLEMENTATION_STATUS.md#latest-dns-integration-checkpoint)
+for remaining integration work. Earlier failures stay failed in the
+[retained history](#retained-trials-and-development-history); their “still system” and
+“not yet in main” statements apply to the revisions described there, not this source.
+
+<details>
+<summary>Exact retained development-package and cache result</summary>
+
+### Complete development-package and cache pass
+
+[Run `36719475479`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36719475479)
+passes on `138787d148482ece6bc1f2c1f1060b7126a34d1e` (tree
+`03ba08afa61e4987b358f49c0c5b579cbfcd550b`). Its 277 original files are retained unchanged;
+artifact ZIP SHA-256 is `c3e7180d9ccfebe08f35a35fd969e45003bdfc66f99b0184a1d4e9ede21c68c9`.
+
+The real protected A/AAAA sequence exercises independently root-validated upstream,
+peer and local answers, plus the unsigned trusted fallback. All five native Unbound
+cases pass: signed (880 ms), unsigned (474 ms), bogus rejection, timeout and cancellation.
+The latter two explicitly stop and reap the owned worker; no OS-resolver fallback is used.
+
+The installed-agent startup proof rejects missing worker assets for an effective Exit,
+allows inert roles-off startup and restores both the temporary native dependency and
+original helper lifetime. The resolver probe in the installed sandbox observes and reaps
+the same-agent-UID worker, independently verifies its answer and reuses the local cache.
+It remains an explicit resolver example, not a full installed-agent DNS request.
+
+The complete package lifecycle now passes: services are not enabled by installation;
+helper and agent start and restart on upgrade; roles-off native MPQUIC stays inert;
+uninstall stops services and removes package files while preserving identity/configuration.
+This uses source-bound development-staged binaries, not release-build evidence.
+Topology cleanup leaves zero owned objects. Before/after host-state SHA-256 is unchanged:
+`bb473ef29464a9fca6dcedb2a9187be239956aa1ac8e1ac46ed5a8a1050b7853`.
+
+</details>
+
+<a id="private-packaged-worker-candidate"></a>
+
+## Private packaged worker
 
 The private mode removes the listener altogether:
 
@@ -44,16 +127,6 @@ The worker reads only the fixed Debian root hints and trust anchor; it does not
 load `resolv.conf`, `hosts`, arbitrary configuration, or private path arguments.
 Updating distribution trust anchors remains an operator/package responsibility.
 
-The new disposable package proof installs the source-built companion and stages the same
-guest development binaries through the normal Debian package layout. It checks actual
-roles-off startup, missing-worker rejection by the installed agent, and the ordinary
-install/upgrade/remove lifecycle. A separate resolver probe inherits the shipped agent
-sandbox and must perform real DNSSEC resolution; its explicit executable/one-shot fixture
-deviations do not prove a full agent DNS query or a release build. Both original package
-reports and the independent native resolver report are retained. The first package run
-passes source binding, inert startup and missing-worker rejection, but fails its sandbox
-probe before upgrade/removal proof. See the source-exact results below.
-
 Private lookups still use an unexpired, independently verified shared-proof RAM
 answer first. On a miss, [bounded sequential source selection](#private-worker-unbound_private)
 uses recent source timings to choose a peer attempt or private recursion within
@@ -69,16 +142,8 @@ pinning and route expiry remain enforced. Each resolution has a fresh process; i
 context lives only across that lookup's bounded evidence exchanges. A persistent native
 cache or a guarantee of the fastest source for every question is not claimed.
 
-See [the native boundary and versioned pipe protocol](../native/volparossa-dns-worker/README.md)
-and [opt-in configuration](../config/examples/unbound-private-exit.yaml).
-Native compilation against the hash-checked Debian library passes. Nine focused
-version-2 protocol, independent-proof, source-choice and owned inert-process checks
-pass. They include seeded proof collection without a repeated address lookup, rejection
-of forged signatures despite AD, and child cleanup after cancellation/timeout. These
-local checks do not prove the new native proof-cache path in a real deployment.
-All 19 focused DNS tests, strict UDP all-target/all-feature Clippy, formatting and
-four version-2 guest-report checks also pass.
-Those earlier local checks do not by themselves prove the new packaged default.
+See [the native boundary and versioned pipe protocol](../../native/volparossa-dns-worker/README.md)
+and [opt-in configuration](../../config/examples/unbound-private-exit.yaml).
 
 ### Cache selection and configuration migration
 
@@ -106,7 +171,7 @@ dns_cache:
 
 The endpoint must be loopback, above port 1024, in the agent's network namespace. A separate
 `upstream` is rejected in this mode. The example is also available as
-[`config/examples/unbound-exit.yaml`](../config/examples/unbound-exit.yaml).
+[`config/examples/unbound-exit.yaml`](../../config/examples/unbound-exit.yaml).
 Configuration validation does not prove that a listener exists or that it is Unbound. This is
 an explicitly operator-trusted service, not an authenticated remote resolver discovery mechanism.
 
@@ -175,6 +240,20 @@ cooldown, a later successful peer probe without a worker, and exclusion-scope
 enforcement. It is not recursive DNS or a live-network speed comparison; the
 separate guest preflight below retains its own evidence boundary.
 
+### Bounded protected DNS connection reuse
+
+The Client can now keep a successful UDP DNS association for subsequent questions about
+the **same canonical name**, from the same application source and original resolver tuple,
+under the same policy and selected Relay/Exit. For example, A and AAAA need not create two
+separate routes. Only one question is outstanding; responses must match its transaction ID
+and complete question. Name, application, resolver or policy changes require a new ordinary
+route. TCP DNS retains its one-shot behavior.
+
+Reuse never refreshes signed authorization: the original expiry, a 30-second idle bound and
+a maximum of 16 sequential questions all apply. The Client owns idle retirement even without
+another application request. The Exit also accepts only bounded questions for the original
+signed name, and invalid correlation or resolution fails closed. No browsing history is stored.
+
 ## Unbound operating requirements
 
 Choose explicitly between direct recursion and forwarding. With direct recursion, omit a root
@@ -198,12 +277,49 @@ and exposing a loopback listener could give local applications an unprotected DN
 This change adds neither exemption nor firewall bypass. An operator must supply the protected
 Exit-side service boundary before using this option on a reciprocal node.
 
-The intended packaged default requires the private worker above to pass a
-simultaneous Client+Exit datapath proof. Until then the default stays `system`.
+The configured development default is `unbound_private`, not the standalone loopback
+service described in this section. An effective Exit needs the packaged worker assets;
+roles-off and local-only startup do not require or start that worker.
 No `resolv.conf` replacement, systemd-resolved change, or automatic package/service activation is
 part of this feature.
 
-## Evidence boundary
+## Retained trials and development history
+
+<details>
+<summary>Original failures, intermediate fixes and scoped proofs</summary>
+
+These records are preserved in their original development context. Words such as “now”,
+“candidate”, “default stays system” and “not yet in main” refer to that stage. A later
+passing result does not change an earlier failure, its hashes or its missing evidence.
+
+### Early package and protocol checks
+
+The new disposable package proof installs the source-built companion and stages the same
+guest development binaries through the normal Debian package layout. It checks actual
+roles-off startup, missing-worker rejection by the installed agent, and the ordinary
+install/upgrade/remove lifecycle. A separate resolver probe inherits the shipped agent
+sandbox and must perform real DNSSEC resolution; its explicit executable/one-shot fixture
+deviations do not prove a full agent DNS query or a release build. Both original package
+reports and the independent native resolver report are retained. The first package run
+passes source binding, inert startup and missing-worker rejection, but fails its sandbox
+probe before upgrade/removal proof. See the source-exact results below.
+
+Native compilation against the hash-checked Debian library passes. Nine focused
+version-2 protocol, independent-proof, source-choice and owned inert-process checks
+pass. They include seeded proof collection without a repeated address lookup, rejection
+of forged signatures despite AD, and child cleanup after cancellation/timeout. These
+local checks do not prove the new native proof-cache path in a real deployment.
+All 19 focused DNS tests, strict UDP all-target/all-feature Clippy, formatting and
+four version-2 guest-report checks also pass.
+Those earlier local checks do not by themselves prove the new packaged default.
+
+The earlier rollout prerequisite was:
+
+> The intended packaged default requires the private worker above to pass a
+> simultaneous Client+Exit datapath proof. Until then the default stays `system`.
+
+That prerequisite is historical; the source default and retained scoped results are described
+above. The following original sequence explains how those results were reached.
 
 The existing `dns-cache` KVM scenario now also invokes a separate
 `private-unbound-proof` preflight. It source-builds the real worker inside the
@@ -505,44 +621,7 @@ All 270 original files remain retained, ZIP SHA-256
 Protected topology cleanup leaves zero owned objects; its host-state hashes both remain
 `bb473ef29464a9fca6dcedb2a9187be239956aa1ac8e1ac46ed5a8a1050b7853`.
 
-### Complete development-package and cache pass
-
-[Run `36719475479`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36719475479)
-passes on `138787d148482ece6bc1f2c1f1060b7126a34d1e` (tree
-`03ba08afa61e4987b358f49c0c5b579cbfcd550b`). Its 277 original files are retained unchanged;
-artifact ZIP SHA-256 is `c3e7180d9ccfebe08f35a35fd969e45003bdfc66f99b0184a1d4e9ede21c68c9`.
-
-The real protected A/AAAA sequence exercises independently root-validated upstream,
-peer and local answers, plus the unsigned trusted fallback. All five native Unbound
-cases pass: signed (880 ms), unsigned (474 ms), bogus rejection, timeout and cancellation.
-The latter two explicitly stop and reap the owned worker; no OS-resolver fallback is used.
-
-The installed-agent startup proof rejects missing worker assets for an effective Exit,
-allows inert roles-off startup and restores both the temporary native dependency and
-original helper lifetime. The resolver probe in the installed sandbox observes and reaps
-the same-agent-UID worker, independently verifies its answer and reuses the local cache.
-It remains an explicit resolver example, not a full installed-agent DNS request.
-
-The complete package lifecycle now passes: services are not enabled by installation;
-helper and agent start and restart on upgrade; roles-off native MPQUIC stays inert;
-uninstall stops services and removes package files while preserving identity/configuration.
-This uses source-bound development-staged binaries, not release-build evidence.
-Topology cleanup leaves zero owned objects. Before/after host-state SHA-256 is unchanged:
-`bb473ef29464a9fca6dcedb2a9187be239956aa1ac8e1ac46ed5a8a1050b7853`.
-
-### Bounded protected DNS connection reuse
-
-The Client can now keep a successful UDP DNS association for subsequent questions about
-the **same canonical name**, from the same application source and original resolver tuple,
-under the same policy and selected Relay/Exit. For example, A and AAAA need not create two
-separate routes. Only one question is outstanding; responses must match its transaction ID
-and complete question. Name, application, resolver or policy changes require a new ordinary
-route. TCP DNS retains its one-shot behavior.
-
-Reuse never refreshes signed authorization: the original expiry, a 30-second idle bound and
-a maximum of 16 sequential questions all apply. The Client owns idle retirement even without
-another application request. The Exit also accepts only bounded questions for the original
-signed name, and invalid correlation or resolution fails closed. No browsing history is stored.
+### Connection-reuse development record
 
 Three targeted Rust checks cover A/AAAA correlation, changed owners/policy and unextended
 expiry/request limits. The C05 fixture now keeps a real application socket open for each
@@ -591,3 +670,5 @@ C05 cache sequence and combined four-role private-Unbound route now have the sco
 evidence above. Complete package acceptance, remaining CNAME/NXDOMAIN/expiry cases and
 fastest-source selection still need their relevant evidence. The full fallback request
 remains incomplete; the development default has changed in this candidate, not yet in main.
+
+</details>

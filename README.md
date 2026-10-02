@@ -30,15 +30,16 @@ comes first.
 
 - **Decentralized:** participants run the same node software. Discovery contacts are
   replaceable peers, not central authorities.
-- **Intelligent:** agents are intended to share work, develop reusable models and improve
-  through measured results—not merely run a separate chatbot on every device.
+- **Intelligent:** the aim is for agents across participating devices to divide tasks,
+  combine their results and learn together. Measured outcomes guide improvements to
+  shared models and to the way agents coordinate their work.
 - **Cooperative:** participants give as well as take, according to available capabilities.
   Shared resources must respect foreground activity and resource budgets.
 
 One compatible background core should serve several applications without duplicating the
 network. Closing a frontend should not end the node's accepted responsibilities. Application
 access and explicitly chosen system-wide operation remain separate permissions.
-[Shared-service design](docs/APPLICATION_LIFECYCLE.md)
+[Shared-service design](docs/architecture/APPLICATION_LIFECYCLE.md)
 
 ## Development status
 
@@ -97,10 +98,10 @@ flowchart LR
     C -->|"Path 2 · existing Internet"| R2
     C -->|"Path 3 · local Ethernet"| R3
     C -.->|"Additional local or Internet paths"| RN
-    R1 -->|"WireGuard leg 2"| E
-    R2 -->|"WireGuard leg 2"| E
-    R3 -->|"WireGuard leg 2"| E
-    RN -.->|"WireGuard leg 2"| E
+    R1 -->|"WireGuard"| E
+    R2 -->|"WireGuard"| E
+    R3 -->|"WireGuard"| E
+    RN -.->|"WireGuard"| E
     E -->|"Independent uplink"| D
 
     classDef peer fill:#e8f4f2,stroke:#24766c,color:#143d37;
@@ -109,10 +110,15 @@ flowchart LR
     class E,D endpoint;
 ```
 
-Each client-to-relay arrow is **WireGuard leg 1**. Every path uses exactly one relay,
-and client-to-exit payloads stay encrypted across both legs. **Multipath** means several
-such paths—not a longer chain of overlay relays. Normal clients never use a direct
-client-to-exit dataplane connection.
+The diagram shows **several parallel routes**. Within each route, one WireGuard link
+connects your node to its relay, and a second connects that relay to the selected exit.
+These two links are sometimes called the route's **two legs**; that does not limit the
+network to two parallel routes. Wi-Fi, Ethernet and Internet describe how a link reaches
+the next peer, not a different number of legs.
+
+Every route uses exactly one overlay relay. The payload remains encrypted from client
+to exit across both links, and normal clients never connect directly to an exit's
+dataplane. **Multipath** describes parallel routes, not a longer chain of overlay relays.
 
 The relay knows the client and selected exit, but not the Internet destination. The exit
 knows the destination and incoming relay, but not the client's public address.
@@ -133,7 +139,7 @@ software, not permanent classes of servers. The design grows useful connections 
 available resources; shared bottlenecks mean more paths do not always mean more speed.
 Direct-link tests include simulated radios, not proof on arbitrary phones or physical Wi-Fi hardware.
 
-[Network architecture](docs/ARCHITECTURE.md) · [Local links and sharing](docs/LOCAL_LINK_NETWORK.md)
+[Network architecture](docs/architecture/ARCHITECTURE.md) · [Local links and sharing](docs/network/LOCAL_LINK_NETWORK.md)
 
 <a id="content-that-travels-with-the-network"></a>
 
@@ -170,9 +176,9 @@ fallback when content is missing, stale or better obtained there.
 - **Offline messages:** recipient-encrypted messages can wait at peers. Their delivery lifecycle
   is separate from retained backups; neither becomes public training content.
 
-[Cache and publication design](docs/CONTENT_NETWORK_PROPOSAL.md) ·
-[HTTPS usage](docs/OPERATIONS.md#https-checksum-file-downloads) ·
-[DNS fallback](docs/UNBOUND_FALLBACK.md)
+[Cache and publication design](docs/services/CONTENT_NETWORK_PROPOSAL.md) ·
+[HTTPS usage](docs/development/OPERATIONS.md#https-checksum-file-downloads) ·
+[DNS fallback](docs/network/UNBOUND_FALLBACK.md)
 
 <a id="private-cloud-storage-separate-from-the-cache"></a>
 
@@ -202,7 +208,7 @@ accounting, unattended repair, safe downscaling and full application synchroniza
 unfinished. The storage immune-system design must address abuse without exposing private
 files; encrypted bytes and signed receipts alone cannot prove that content is permitted.
 
-[Storage design, commands and limitations](docs/PRIVATE_STORAGE.md) ·
+[Storage design, commands and limitations](docs/services/PRIVATE_STORAGE.md) ·
 [Privacy questions](docs/FAQ.md#can-storage-peers-read-or-classify-my-files)
 
 <a id="a-cooperative-brain"></a>
@@ -233,8 +239,8 @@ The longer-term scope includes maintaining the project's repositories and distri
 authorized client updates, with independent review and controlled installation rights.
 These are not powers automatically granted to model output.
 
-[Training, peer tasks and model profiles](docs/DECENTRALIZED_AGENTS.md) ·
-[Software maintenance and updates](docs/REPOSITORY_MAINTENANCE.md)
+[Training, peer tasks and model profiles](docs/services/DECENTRALIZED_AGENTS.md) ·
+[Software maintenance and updates](docs/services/REPOSITORY_MAINTENANCE.md)
 
 ## One core, multiple applications
 
@@ -253,7 +259,7 @@ and compute coordination belongs in the core.
 | [Weather](https://github.com/VOLPAROSSA/volparossa-weather) | Direct public model data | Shared weather processing and measured forecast improvement. |
 | [Cloud](https://github.com/VOLPAROSSA/volparossa-cloud) | OpenCloud | Private files, synchronization and server-independent access. |
 
-[Application scope and current boundaries](docs/APPLICATIONS.md)
+[Application scope and current boundaries](docs/applications/APPLICATIONS.md)
 
 <a id="seven-virtues-seven-sins"></a>
 
@@ -318,8 +324,8 @@ It does not make encrypted HTTPS visible or certify private backups as lawful. T
 legal baseline is Netherlands/EU plus applicable local exit restrictions; filtering offers
 neither absolute safety nor immunity from legal risk.
 
-[Principles and agent governance](docs/DECENTRALIZED_AGENTS.md#principles-guide-rules-not-the-other-way-around) ·
-[Current policy enforcement](docs/WHITELIST.md)
+[Principles and agent governance](docs/services/DECENTRALIZED_AGENTS.md#principles-guide-rules-not-the-other-way-around) ·
+[Current policy enforcement](docs/privacy/WHITELIST.md)
 
 ## Developing VOLPAROSSA
 
@@ -340,7 +346,7 @@ cargo build --locked --workspace --all-features
 ```
 
 This compiles workspace code; it does not install, configure or join the network. Follow
-the [operations guide](docs/OPERATIONS.md) for the complete native/runtime and packaging
+the [operations guide](docs/development/OPERATIONS.md) for the complete native/runtime and packaging
 requirements. Enabling participation requires explicit configuration and accepting its
 contribution responsibilities.
 
@@ -356,7 +362,7 @@ Report sensitive vulnerabilities through [SECURITY.md](SECURITY.md), not a publi
 VOLPAROSSA is not an unrestricted proxy or an anonymity guarantee. A global observer may
 correlate low-latency traffic; colluding peers and local root remain important threats.
 More nodes do not automatically guarantee more speed, better AI or continuous availability.
-[Threat model](docs/THREAT_MODEL.md) · [Privacy](docs/PRIVACY.md) · [FAQ](docs/FAQ.md)
+[Threat model](docs/privacy/THREAT_MODEL.md) · [Privacy](docs/privacy/PRIVACY.md) · [FAQ](docs/FAQ.md)
 
 The core is headless. There is no payment system, token or blockchain. Public-content
 replication is distinct from transport-level packet duplication; the v1 transports do not

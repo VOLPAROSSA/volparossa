@@ -1009,9 +1009,9 @@ mod tests {
             .split_once("\n#[cfg(test)]\nmod tests {")
             .expect("sampler product/test boundary")
             .0;
-        let discovery = include_str!("../../../../docs/DISCOVERY.md");
+        let discovery = include_str!("../../../../docs/network/DISCOVERY.md");
         let status = include_str!("../../../../docs/IMPLEMENTATION_STATUS.md");
-        let protocol = include_str!("../../../../docs/PROTOCOL.md");
+        let protocol = include_str!("../../../../docs/architecture/PROTOCOL.md");
 
         assert!(
             sampler.contains("`DiscoveryRuntime` invokes this native-dataplane-agnostic stage")
