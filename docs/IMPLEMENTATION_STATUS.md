@@ -15,6 +15,16 @@ Last updated: 2026-10-02
 
 ## Current integration and active work
 
+### Eligible controls in route preselection
+
+New route attempts filter alternative controls for the same signed Exit using the
+existing transport, address-family, capacity and diversity predicates before drawing
+one control. An incompatible draw can no longer hide a compatible alternative.
+Signed-group ambiguity checks remain first; retained routes keep their exact pinned
+control, and wholly incompatible groups still reject before dispatch. Seven signed
+route tests and eighteen sampler tests pass. This is unit-level evidence, not
+a proved explanation or live fix for the Cloud/browser route-selection failures.
+
 ### Fixed public training source
 
 The `cloud-private-upload` [run37070505538](https://github.com/VOLPAROSSA/Volparossa/actions/runs/37070505538)
