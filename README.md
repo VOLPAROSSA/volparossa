@@ -53,21 +53,58 @@ Together, these are the project's direction—not a claim that every integration
 ### One core, multiple applications
 
 VOLPAROSSA is a reusable core/daemon, not a network stack tied to a single application.
-Versioned interfaces let separate clients share its connectivity, content, private storage
-and compute services:
+The architecture uses versioned interfaces so compatible applications can share one
+background service, even after an application closes. Application-scoped access and explicitly
+selected system-wide operation have different permissions; installing an app must not silently
+take over the whole device. Shared service management and platform integration remain in development.
+
+The application family now spans eight repositories. These are **integration targets with
+different completed milestones**, not eight finished products:
 
 - **[VOLPAROSSA Browser](https://github.com/VOLPAROSSA/volparossa-browser)** connects Firefox to
-  the core. Privacy defaults are the first verified slice; network/cache attachment and the
-  private AI sidebar are still being integrated. The requested browser-specific kill switch
-  starts off, allowing visible ordinary-Internet fallback when the overlay is unavailable;
-  this does not weaken other consumers' core defaults or permit policy-bypass fallback.
-- **[VOLPAROSSA Chat](https://github.com/VOLPAROSSA/volparossa-chat)** will retain Signal's
-  protocol, identities and encryption while adding decentralized delivery between compatible
-  devices and private backup storage. Direct, mixed and ordinary Signal delivery must be
-  distinguished across linked devices. Its current source baseline is not a working fork.
+  protected connectivity, eligible content caching and the shared AI service. Privacy defaults
+  include strict tracking protection, telemetry/accounts/sponsored links off, and the agreed
+  extensions. Privacy/sidebar and scoped protected-TCP milestones have real browser evidence;
+  complete network/cache and shared-AI integration remain open. The requested browser kill switch
+  starts **off**, permitting visible ordinary-Internet fallback when the overlay is unavailable;
+  it does not authorize bypassing a policy denial.
+- **[VOLPAROSSA Chat](https://github.com/VOLPAROSSA/volparossa-chat)** targets Signal messaging,
+  voice/video calls and backups. Messages must preserve the Signal Protocol, identities and
+  encryption, including linked devices. Distinguish decentralized, mixed and ordinary Signal
+  delivery; a native encrypted-backup round trip is a completed slice, not a complete chat fork.
+- **[VOLPAROSSA Mail](https://github.com/VOLPAROSSA/volparossa-mail)** connects Thunderbird's
+  existing accounts and addresses, preferring suitable decentralized delivery via the Signal
+  Protocol. It also targets shared AI assistance and Stalwart-based self-hosting. Ordinary
+  external mail still needs an Internet-facing mail service with an explicit trust boundary.
+  Connector/JMAP import is a working slice, not completed decentralized mail delivery.
+- **[VOLPAROSSA Code](https://github.com/VOLPAROSSA/volparossa-code)** is moving to **OpenCode**,
+  replacing the earlier Codex-based direction, with VOLPAROSSA organizing model access and agent cooperation.
+  The goal is real code reading, editing and checking across the network—not only a local chatbot.
+  The migration is still on its development branch; protected private-peer coding is unfinished.
+- **[VOLPAROSSA Image](https://github.com/VOLPAROSSA/volparossa-image)** targets Immich on
+  **Android, iPhone/iPad and browsers**, with encrypted photos, videos and recoverable library state.
+  Peer-backed snapshot recovery has a scoped proof; mobile synchronization and operation without
+  a permanently running personal Immich server are not yet complete.
+- **[VOLPAROSSA Map](https://github.com/VOLPAROSSA/volparossa-map)** connects Organic Maps while
+  preserving offline maps and navigation. Shared map distribution and current traffic information
+  are the targets, without exposing individual journeys or complete location histories.
+  Signed traffic-snapshot validation exists; mobile display and live aggregation remain open.
+- **[VOLPAROSSA Weather](https://github.com/VOLPAROSSA/volparossa-weather)** works toward a
+  platform-independent weather service using **direct public model data**, starting with ECMWF,
+  not Open-Meteo. Suitable additional models and observations can complement it; shared processing
+  and learning must demonstrate forecast improvements against observations. Direct field decoding
+  and a core-cache adapter exist; a learned forecasting model is not yet demonstrated.
+- **[VOLPAROSSA Cloud](https://github.com/VOLPAROSSA/volparossa-cloud)** connects OpenCloud to
+  private peer storage. The original Files web interface already has a scoped source-off recovery
+  proof. Accounts, sharing, writable synchronization and full service availability without the
+  original server remain unfinished.
 
 These applications have their own repositories and lifecycles. The reusable functionality
-belongs here, so future applications can use it without duplicating the network.
+belongs here, so future applications can use it without duplicating the network or introducing
+competing compute schedulers. Cross-application permissions, immune-system oversight and
+confidential network execution are core responsibilities—not optional app-specific substitutes.
+[Shared-service lifecycle →](docs/APPLICATION_LIFECYCLE.md) ·
+[Verified integration milestones →](docs/IMPLEMENTATION_STATUS.md)
 
 ---
 
@@ -209,8 +246,9 @@ the diagram does not imply that every source must be contacted.*
   receive ciphertext, not the recipient's decryption key.
 - **Shared DNS:** reuse independently validated positive DNSSEC evidence, preserving original
   authority and expiry rather than trusting an arbitrary peer's answer. A bounded private
-  [Unbound fallback](docs/UNBOUND_FALLBACK.md) handles misses at the Exit; packaged-default
-  integration is still undergoing its separate functional proof.
+  [Unbound fallback](docs/UNBOUND_FALLBACK.md) handles misses at the Exit and is the development
+  default, with scoped resolver, protected DNS and package-lifecycle evidence. This is not an
+  unrestricted arbitrary-DNS service or release-build qualification.
 - **Existing HTTPS:** supported cooperative-origin, origin-digest or
   [checksum-file](docs/OPERATIONS.md#https-checksum-file-downloads) modes authenticate the origin
   before using peer content. No interception CA, TLS bypass or automatic sharing of private
@@ -235,11 +273,15 @@ or permission to redistribute everything a user receives.
 
 **Keep your data private. Contribute the space you use.**
 
-The developing cloud-storage service is designed for **application-encrypted backups**, not public
+The developing cloud-storage service is designed for **application-encrypted files and backups**, not public
 content or training data. Storage peers hold opaque chunks; recovery keys stay with the owner.
-The intended placement spreads different encrypted chunks across participants, with recovery
-copies per chunk; no single holder needs to store the whole archive. That placement step is
-not yet implemented by the current full-archive replica sets described below.
+The fragment-storage path spreads different encrypted chunks across participants, with recovery
+copies per chunk; no single holder needs to store the whole archive. The older full-archive
+replica path remains separate and supported. New archives use **one core-owned redundancy
+policy: two copies of each fragment**, or two whole copies in the legacy format. Applications
+do not choose weaker or stronger storage tiers. Repair may temporarily retain extra copies;
+every retained copy still counts toward usage. Erasure coding remains a queued investigation,
+not an implemented storage format.
 Unlike an opportunistic cache, this layer has explicit retention, renewal and deletion:
 restoring a backup must not consume it. Message delivery has its own lifecycle, separate
 from both backup storage and the public cache.
@@ -306,13 +348,17 @@ Real disposable overlay trials now pass for a single provider and **two-provider
 failover**: both copies are charged, a survivor restores the complete archive after the
 original file is removed, and repeated restores leave its copy intact. Although transfers
 are chunked, this replica mode retains the complete encrypted archive at each provider.
-The separate fragment-placement CLI has local-service proof; its protected overlay trial
-remains pending. A separate scoped
+The separate fragment-placement path now also has a **protected-overlay proof**: no provider
+holds the whole archive, and B/C reconstruct it twice after A goes offline. Real encrypted
+Image snapshots and source-off OpenCloud Files downloads use this same fragment-storage path.
+A separate scoped
 proof also passes for **owner-directed A/B → B/C replacement**: build and fully read back C
 before releasing A. That is explicit handoff, not unattended repair or automatic downsizing.
 A **native Signal backup trial now passes** too: encrypted export, removal of the original
 archive, real-core retrieval and native import with message/attachment checks. Restoring
-leaves the retained copies intact. Least-authority application enrollment, automatic
+leaves the retained copies intact. Owner-directed fragment replacement, drain and bounded repair
+commands are available; unattended maintenance and reciprocal contribution are not thereby complete.
+Least-authority application enrollment, automatic
 placement/repair, adaptive contribution and safe capacity drain, and independent-device
 availability remain open. This is not yet a completed cloud-storage service.
 
@@ -326,12 +372,20 @@ availability remain open. This is not yet a completed cloud-storage service.
 
 ## Compute-layer: A cooperative brain
 
-**Learn locally. Cooperate across the network.**
+**Shared intelligence. Learn and work together.**
 
 Building on protected connectivity and reusable content, the AI layer is intended to make
-many cooperating agents usable as one decentralized service:
-divide suitable tasks among participants, reuse useful models and improve compatible agents
-without starting every training job from scratch.
+many cooperating agents usable as one decentralized service. **Network cooperation and shared
+learning are the standard architecture**, not an optional extra beside local AI. A modest device
+should be an access point and contributor, not the ceiling on the intelligence available to its
+owner. The core divides suitable tasks, combines results, reuses models and improves compatible
+agents without starting every training job from scratch.
+
+The design brings privacy into that cooperation, rather than treating local-only execution as
+the end goal. Task placement must consider quality, speed, memory, communication costs and data
+sensitivity together. Private network execution must protect data from the executing host as
+well as in transit; this required capability is **not yet implemented**. Local fallback remains
+a fallback, not a claim that distributed private assistance is complete.
 
 The development implementation already supports real local adapter training, protected sharing
 and reuse of compatible adapters, and scoped public tasks on separate peer workers. A growing
@@ -661,8 +715,15 @@ different revisions are not combined into a claim that the current build is full
 
 - **Content network**<br>
   Demonstrated: scoped C01–C07 results for verified chunks, peer retrieval, replication,
-  DNS sharing, static publication and encrypted delivery.<br>
-  **Next:** C08 existing-web coverage/benefit, automatic holder selection and ongoing availability.
+  DNS sharing, static publication, encrypted delivery and enrolled public-holder maintenance.<br>
+  **Next:** C08 existing-web coverage/benefit and broader automatic availability.
+
+- **Private storage and application recovery**<br>
+  Demonstrated: protected fragment placement, provider-loss recovery, native Signal backup
+  export/import, encrypted Image snapshots and original OpenCloud Files UI downloads with the
+  source offline.<br>
+  **Next:** automatic contribution/maintenance, second-device owner-state recovery, writable
+  application synchronization and full server-independent services.
 
 - **Cooperative AI**<br>
   Demonstrated: real adapter training/reuse, protected artifact exchange, public peer-job/recovery,
@@ -673,17 +734,21 @@ different revisions are not combined into a claim that the current build is full
 - **Automatic governance**<br>
   Demonstrated: signed destination-policy enforcement, rollback/conflict checks, and a scoped
   four-worker public assessment with cross-review, signed cache replay and quorum-backed
-  exact-object enforcement on two nodes across restart.<br>
-  **Next:** sound content judgments, automatic decision following, decentralized decision
+  exact-object enforcement on two nodes across restart. Selected policy channels can be followed
+  automatically under their enrolled authority.<br>
+  **Next:** sound content judgments, decentralized decision
   membership, conflict resolution and the broader agent immune system.
 
 The detailed chronology, failed runs, exact measurements and pending proofs live in
 [IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md), rather than being duplicated here.
 The original v1 pass is [recorded with its run and evidence](https://github.com/VOLPAROSSA/volparossa/actions/runs/34047766913).
 There is no release-readiness or universal speed/privacy guarantee.
-The completed integration milestone is now in `main` through [PR #150](https://github.com/VOLPAROSSA/volparossa/pull/150)
-(`322c45b9`), including the scoped provider and recovery proofs. The object-policy candidate
-described above is subsequent development, not part of that merged checkpoint.
+`main` includes subsequent scoped milestones as well, including
+[native Signal backup recovery](https://github.com/VOLPAROSSA/volparossa/pull/177) and
+[original OpenCloud Files UI peer recovery](https://github.com/VOLPAROSSA/volparossa/pull/195).
+Open development branches are not automatically part of `main`; in particular, the newer
+cooperative-browser work and OpenCode migration remain separate until integrated. These
+milestones do not complete the expanded alpha goal.
 
 ## Developing VOLPAROSSA
 
@@ -736,9 +801,10 @@ A global timing observer may correlate this low-latency traffic; colluding relay
 and local root remain important threats. Local diversity measures mitigate, not eliminate,
 Sybil attacks. Functional demonstrations do not establish release-grade security.
 
-There is no payment system, token, blockchain or GUI. The v1 transports introduce no cover
-traffic, artificial delay, packet duplication or FEC. Content replication is a separate
-application function, not transport-level packet duplication.
+The core is headless; its integrated applications provide their own interfaces. There is no
+payment system, token or blockchain. The v1 transports introduce no cover traffic, artificial
+delay, packet duplication or FEC. Content replication is a separate application function,
+not transport-level packet duplication.
 
 Original code is **GPL-3.0-only**; third-party components retain their own licenses and notices.
 See [LICENSE](LICENSE) and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
