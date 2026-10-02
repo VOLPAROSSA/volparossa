@@ -28,6 +28,10 @@ LARGE_MODEL_PROFILE = "smollm2-360m-v1"
 HASH = re.compile(r"[0-9a-f]{64}")
 SCOPE = "one isolated CPU LoRA worker on explicit public project data; not distributed training or improved answer quality"
 ARTIFACTS = {"adapter/adapter_config.json", "adapter/adapter_model.safetensors", "adapter/README.md"}
+PUBLIC_SOURCE_FILES = {
+    "agent-training-public-source.json": (709, "04e0cbef65193fc939cf3fa27ffeae3b2ac5d918d19e39be6258b5bbb4619fc4"),
+    "agent-training-public-source.txt": (20410, "18143fa41b91ebdec851b49f7c4be8369faff58ba37877a4236bd9c6fda644ac"),
+}
 
 
 def require(condition, message):
@@ -73,12 +77,32 @@ def file_hash(path, maximum):
     return {"bytes": info.st_size, "sha256": digest.hexdigest()}
 
 
+def public_source(directory=None):
+    """Verified historical public text, independent of current README/REPO overrides.
+
+    The sibling provenance record identifies the exact original Git blob. Both
+    files travel with this script into WORK/bin; document/browser trials still
+    use their separately staged current README. This snapshot is not model input:
+    only the existing explicit questions/answers/contexts below are published.
+    """
+    directory = HERE if directory is None else Path(directory)
+    for name, (size, digest) in PUBLIC_SOURCE_FILES.items():
+        path = directory / name
+        info = path.lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_size == size, "invalid fixed public source file")
+        raw = path.read_bytes()
+        require(len(raw) == size and hashlib.sha256(raw).hexdigest() == digest, "fixed public source hash mismatch")
+        if name.endswith(".txt"):
+            text = raw.decode("utf-8")
+    return text
+
+
 def public_dataset(revision):
     require(re.fullmatch(r"[0-9a-f]{40}", revision), "invalid source revision")
     context = "Every parallel path uses exactly one distinct relay between the same client and exit."
     context2 = "The normal client dataplane never connects directly to an exit."
-    # Contexts are literal, revision-bound public README statements, not private user data.
-    text = (REPO / "README.md").read_text().replace("\n", " ")
+    # Keep historical public context bytes, not mutable reader-facing documentation.
+    text = public_source().replace("\n", " ")
     require(context in text and context2.lower() in text.lower(), "public fixture source text changed")
     return {
         "version": 1, "visibility": "public", "license": "GPL-3.0-only", "source_revision": revision,

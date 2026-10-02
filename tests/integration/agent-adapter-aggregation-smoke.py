@@ -64,7 +64,7 @@ def owned_json(path, value):
 
 
 def setup(work, revision):
-    dataset = ART["dataset"](revision, (work / "bin/agent-jobs-README.md").read_text())
+    dataset = ART["dataset"](revision, TRAIN["public_source"](work / "bin"))
     validation = copy.deepcopy(dataset)
     validation["train"] = []
     validation["heldout"] = [dict(question="Does each permitted parallel route contain one intermediary relay?",

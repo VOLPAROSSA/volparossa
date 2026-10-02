@@ -1035,6 +1035,7 @@ fi
 if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
     for artifact_fixture in tests/integration/agent-artifact-smoke.sh tests/integration/agent-artifact-smoke.py \
         tests/integration/agent-training-smoke.py workers/volparossa-ml/provision.py \
+        tests/integration/agent-training-public-source.txt tests/integration/agent-training-public-source.json \
         workers/volparossa-ml/requirements.lock workers/volparossa-ml/model-pins.json README.md; do
         [ -f "$source_directory/$artifact_fixture" ] && [ ! -L "$source_directory/$artifact_fixture" ] \
             || { printf '%s\n' 'public agent-artifact fixture unavailable' >&2; exit 69; }
@@ -2767,6 +2768,9 @@ fi
 if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
     for artifact_script in agent-artifact-smoke.py agent-training-smoke.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$artifact_script" "$WORK/bin/$artifact_script"
+    done
+    for training_source in agent-training-public-source.txt agent-training-public-source.json; do
+        install -o root -g root -m 0444 "$source_directory/tests/integration/$training_source" "$WORK/bin/$training_source"
     done
     install -d -o root -g root -m 0555 "$WORK/bin/ml"
     for artifact_pin in provision.py requirements.lock model-pins.json; do

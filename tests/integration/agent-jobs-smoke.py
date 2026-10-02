@@ -168,7 +168,7 @@ def prepare(path, model_profile="smollm2-135m-v1", decoder=None):
 def source(path, revision):
     root = private(path, "compute-source")
     require(not list(root.iterdir()), "source root already populated")
-    write(root / "dataset.json", dataset(revision, (HERE / "agent-jobs-README.md").read_text()))
+    write(root / "dataset.json", dataset(revision, TRAIN["public_source"]()))
     with (root / "passphrase").open("xb") as stream:
         stream.write(base64.b64encode(os.urandom(48)) + b"\n")
     (root / "passphrase").chmod(0o600)
@@ -773,7 +773,7 @@ def check_report(report, revision):
 
 
 def self_test():
-    value = dataset("a" * 40, (HERE.parent.parent / "README.md").read_text())
+    value = dataset("a" * 40, TRAIN["public_source"]())
     a, b = (derive(value, [n]) for n in (0, 1))
     require(a != b and json.loads(a)["inference"] == value["inference"][:1]
             and json.loads(b)["inference"] == value["inference"][1:], "disjoint source derivation failed")

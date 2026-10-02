@@ -15,6 +15,18 @@ Last updated: 2026-10-02
 
 ## Current integration and active work
 
+### Fixed public training source
+
+The `cloud-private-upload` [run37070505538](https://github.com/VOLPAROSSA/Volparossa/actions/runs/37070505538)
+failed before VM startup: a fixed training preflight expected literal phrases in the
+rewritten reader-facing README. The training/artifact/jobs fixture family now reads
+the byte-identical public README at `59238a6f2c2ee8c4c79b136481cd53d5b9b908df`,
+with pinned Git-blob/SHA-256 provenance and read-only guest staging. Five focused
+checks preserve all five original serialized dataset variants, reject altered or
+missing source/provenance, and exercise the relocated loader without a README.
+Eleven related pure preflights pass. Current-README document/browser tasks remain
+unchanged; no model or VM was rerun, and the original failed run remains failed.
+
 ### OpenCode migration and network-first compute
 
 These development records preserve individual revisions and trial boundaries. The linked
