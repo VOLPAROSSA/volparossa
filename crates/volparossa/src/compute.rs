@@ -506,7 +506,8 @@ fn check_message(bytes: &[u8], id: &str) -> Result<Value> {
         !bytes.is_empty() && bytes.len() <= MAX_LINE_BYTES,
         "compute_worker_line_size"
     );
-    let value: Value = serde_json::from_slice(bytes).context("compute_worker_json")?;
+    let value =
+        private_conversation::decode_worker_message(bytes).context("compute_worker_json")?;
     ensure!(
         value.get("version") == Some(&Value::from(1))
             && value.get("id").and_then(Value::as_str) == Some(id),

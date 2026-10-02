@@ -26,13 +26,22 @@ pub(super) enum Operation {
         question: String,
         context: String,
     },
-    ConversationCapabilities {},
+    ConversationCapabilities {
+        #[serde(default, deserialize_with = "present_generation_policy_version")]
+        generation_policy_version: Option<u8>,
+    },
     SubmitConversation {
         conversation: super::super::private_conversation::Input,
     },
     Cancel {
         task_id: String,
     },
+}
+
+fn present_generation_policy_version<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<u8>, D::Error> {
+    u8::deserialize(deserializer).map(Some)
 }
 
 fn valid_id(id: &str) -> bool {
@@ -61,6 +70,15 @@ impl Request {
             self.version == VERSION && valid_id(&self.id),
             "private_ipc_invalid_request"
         );
+        if let Operation::ConversationCapabilities {
+            generation_policy_version,
+        } = &self.operation
+        {
+            ensure!(
+                generation_policy_version.is_none_or(|version| version == 1),
+                "private_ipc_generation_policy_version"
+            );
+        }
         if let Operation::Cancel { task_id } = &self.operation {
             ensure!(valid_id(task_id), "private_ipc_invalid_request");
         }

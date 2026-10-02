@@ -241,6 +241,7 @@ fn respond(
     active: &mut Option<Active>,
     handshake: &mut bool,
     conversation_handshake: &mut bool,
+    generation_policy_handshake: &mut bool,
 ) -> Value {
     match request.operation {
         wire::Operation::Capabilities {} => {
@@ -249,8 +250,11 @@ fn respond(
             response["capabilities"] = capabilities(config, gate);
             response
         }
-        wire::Operation::ConversationCapabilities {} => {
+        wire::Operation::ConversationCapabilities {
+            generation_policy_version,
+        } => {
             *conversation_handshake = true;
+            *generation_policy_handshake = generation_policy_version == Some(1);
             let mut response = wire::response(&request.id, "conversation_capabilities");
             response["capabilities"] =
                 super::private_conversation::capabilities(config.model_profile);
@@ -260,10 +264,22 @@ fn respond(
                 super::private_conversation::request_frame(config.model_profile).into();
             response["capabilities"]["max_response_bytes"] = wire::MAX_RESPONSE_BYTES.into();
             response["capabilities"]["quarantined"] = gate.is_closed().into();
+            if *generation_policy_handshake {
+                response["capabilities"]["generation_policy_version"] = 1.into();
+                response["capabilities"]["generation_policies"] =
+                    if config.model_profile == ModelProfile::Qwen600 {
+                        json!(["greedy_v1"])
+                    } else {
+                        json!([])
+                    };
+            }
             response
         }
         wire::Operation::SubmitConversation { conversation } => {
-            if !*conversation_handshake {
+            if !*conversation_handshake
+                || (conversation.requires_generation_policy_handshake()
+                    && !*generation_policy_handshake)
+            {
                 wire::error(Some(&request.id), "handshake_required")
             } else if gate.is_closed() {
                 wire::error(Some(&request.id), "cleanup_unconfirmed")
@@ -347,6 +363,7 @@ async fn connection(
     });
     let mut handshake = false;
     let mut conversation_handshake = false;
+    let mut generation_policy_handshake = false;
     let mut seen = BTreeSet::new();
     let mut active: Option<Active> = None;
     loop {
@@ -365,7 +382,7 @@ async fn connection(
                     break;
                 }
                 let response = respond(request, &config, &gate, &mut active, &mut handshake,
-                    &mut conversation_handshake);
+                    &mut conversation_handshake, &mut generation_policy_handshake);
                 if wire::write(&mut writer, &response).await.is_err() { break; }
             }
             result = async {

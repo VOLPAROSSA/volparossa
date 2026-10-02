@@ -22,6 +22,32 @@ pub(super) struct Input {
     instructions: String,
     history: Vec<Item>,
     tools: Vec<Tool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_generation_policy"
+    )]
+    generation_policy: Option<GenerationPolicy>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum GenerationPolicy {
+    GreedyV1,
+}
+
+fn present_generation_policy<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<GenerationPolicy>, D::Error> {
+    // Omission means legacy generation. Explicit null is not a policy selection.
+    GenerationPolicy::deserialize(deserializer).map(Some)
+}
+
+/// The supervisor must not bind a result after silently accepting duplicate keys.
+pub(super) fn decode_worker_message(raw: &[u8]) -> Result<Value> {
+    #[derive(Deserialize)]
+    struct Message(#[serde(deserialize_with = "strict_json::value")] Value);
+    Ok(serde_json::from_slice::<Message>(raw)?.0)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -154,6 +180,10 @@ impl Tool {
 }
 
 impl Input {
+    pub(super) fn requires_generation_policy_handshake(&self) -> bool {
+        self.generation_policy.is_some()
+    }
+
     #[cfg(test)]
     pub(super) fn decode(raw: &[u8]) -> Result<Self> {
         Self::decode_profile(raw, ModelProfile::Smol360)
@@ -187,6 +217,10 @@ impl Input {
 
     fn validate_profile(&self, profile: ModelProfile) -> Result<()> {
         let bounds = limits::for_profile(profile);
+        ensure!(
+            self.generation_policy.is_none() || profile == ModelProfile::Qwen600,
+            "conversation_generation_policy"
+        );
         ensure!(
             self.version == 1 && self.visibility == "private_local",
             "conversation_scope"
@@ -357,6 +391,11 @@ pub(super) fn turn(input: &Input, output: &Value) -> Result<Value> {
 
 pub(super) fn validate_report(report: &Value, raw: &[u8], profile: ModelProfile) -> Result<()> {
     let input = Input::decode_profile(raw, profile)?;
+    let expected_policy = input.generation_policy.map(|policy| json!(policy));
+    ensure!(
+        report.get("generation_policy") == expected_policy.as_ref(),
+        "conversation_generation_policy_binding"
+    );
     let expected = if profile == ModelProfile::Qwen600 {
         qwen::turn(
             &input,
@@ -378,14 +417,18 @@ pub(super) fn validate_report(report: &Value, raw: &[u8], profile: ModelProfile)
 }
 
 pub(super) fn summary(report: &Value, profile: ModelProfile) -> Value {
-    json!({"version":1,"operation":"compute_private_conversation","model_profile":profile,
+    let mut result = json!({"version":1,"operation":"compute_private_conversation","model_profile":profile,
         "execution_complete":true,"turn_complete":report["conversation"]["type"] != "incomplete",
         "output":report["conversation"],"prompt_tokens":report["prompt_tokens"],
         "generated_tokens":report["outputs"][0]["generated_tokens"],"limits":report["conversation_limits"],
         "local_only":true,"private_data_supported":true,"tool_execution":false,
         "distributed_execution_claimed":false,"private_training_claimed":false,
         "model_answer_correctness_proven":false,
-        "cleanup":{"complete":true,"retained_input":false,"retained_report":false}})
+        "cleanup":{"complete":true,"retained_input":false,"retained_report":false}});
+    if let Some(policy) = report.get("generation_policy") {
+        result["generation_policy"] = policy.clone();
+    }
+    result
 }
 
 #[cfg(test)]

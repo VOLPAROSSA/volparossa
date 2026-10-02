@@ -292,6 +292,17 @@ unfinished; none is inferred from the protocol or controller checks.
 
 ### Native private conversation candidate
 
+The current candidate adds explicit, same-connection generation-policy negotiation
+to the [private conversation wire contract](../crates/volparossa/src/compute/private_conversation/WIRE.md).
+Only Qwen may select `greedy_v1`: actual worker generation receives `do_sample:false`
+and `num_beams:1`, and the same selector is recorded in the worker report and
+checked against the request before a result is returned. Legacy requests/replies
+and omitted-policy sampling remain unchanged. Unknown/null/duplicate policies,
+unsupported versions/profiles and mismatched report claims fail closed.
+Focused protocol/report tests and offline backend-double checks cover that
+contract, not real model quality. No new model/VM run, completed coding task or
+explanation of earlier Code failures is claimed by this change.
+
 Qwen native private-conversation source candidate (2026-09-30): explicit
 `qwen3-0.6b-v1` pins Qwen3-0.6B at `c1899de289a04d12100db370d81485cdf75e47ca`
 and nine original model assets, retaining the existing runtime lock. Native

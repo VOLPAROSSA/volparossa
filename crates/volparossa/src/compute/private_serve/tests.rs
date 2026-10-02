@@ -8,6 +8,112 @@ const FIRST: &str = "01010101010101010101010101010101";
 const SECOND: &str = "02020202020202020202020202020202";
 const THIRD: &str = "03030303030303030303030303030303";
 
+#[test]
+fn generation_policy_negotiation_rejects_unknown_null_and_duplicate_versions() {
+    for version in [json!(1), json!(2), Value::Null, json!(true), json!("1")] {
+        let request = request(
+            FIRST,
+            json!({"type":"conversation_capabilities",
+            "generation_policy_version":version}),
+        );
+        let accepted = serde_json::from_value::<wire::Request>(request)
+            .is_ok_and(|request| request.validate_profile(ModelProfile::Qwen600).is_ok());
+        assert_eq!(accepted, version == json!(1));
+    }
+    let duplicate = format!(
+        r#"{{"version":1,"id":"{FIRST}","operation":{{"type":"conversation_capabilities","generation_policy_version":1,"generation_policy_version":1}}}}"#
+    );
+    assert!(serde_json::from_str::<wire::Request>(&duplicate).is_err());
+}
+
+#[tokio::test]
+async fn generation_policy_handshake_is_opt_in_and_same_connection() {
+    for profile in [ModelProfile::Smol360, ModelProfile::Qwen600] {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = config(root.path());
+        config.model_profile = profile;
+        let gate = Arc::new(Semaphore::new(1));
+        let mut occupied = ExecutionSlot::admit(&gate).unwrap();
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let (stop, shutdown) = watch::channel(false);
+        let serving = tokio::spawn(connection(server, Arc::new(config), gate, shutdown));
+        let mut legacy_capabilities = Value::Null;
+        let selected = json!({"type":"submit_conversation","conversation":{
+            "version":1,"visibility":"private_local","instructions":"Review.",
+            "history":[{"type":"message","role":"user","text":"Read first."}],"tools":[],
+            "generation_policy":"greedy_v1"}});
+        for (index, extended) in [(1, false), (3, true), (5, false)] {
+            let mut operation = json!({"type":"conversation_capabilities"});
+            if extended {
+                operation["generation_policy_version"] = 1.into();
+            }
+            wire::write(&mut client, &request(&format!("{index:032x}"), operation))
+                .await
+                .unwrap();
+            let reply: Value = wire::read(&mut client, wire::MAX_RESPONSE_BYTES)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(reply["event"], "conversation_capabilities");
+            let mut capabilities = reply["capabilities"].clone();
+            if extended {
+                assert_eq!(
+                    capabilities
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("generation_policy_version"),
+                    Some(json!(1))
+                );
+                assert_eq!(
+                    capabilities
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("generation_policies"),
+                    Some(if profile == ModelProfile::Qwen600 {
+                        json!(["greedy_v1"])
+                    } else {
+                        json!([])
+                    })
+                );
+            } else {
+                assert!(capabilities.get("generation_policy_version").is_none());
+                assert!(capabilities.get("generation_policies").is_none());
+            }
+            if index == 1 {
+                legacy_capabilities = capabilities;
+            } else {
+                assert_eq!(
+                    serde_json::to_vec(&capabilities).unwrap(),
+                    serde_json::to_vec(&legacy_capabilities).unwrap()
+                );
+            }
+            if profile == ModelProfile::Qwen600 {
+                wire::write(
+                    &mut client,
+                    &request(&format!("{:032x}", index + 1), selected.clone()),
+                )
+                .await
+                .unwrap();
+                let reply: Value = wire::read(&mut client, wire::MAX_RESPONSE_BYTES)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    reply["code"],
+                    if extended {
+                        "busy"
+                    } else {
+                        "handshake_required"
+                    }
+                );
+            }
+        }
+        stop.send(true).unwrap();
+        serving.await.unwrap();
+        occupied.finish(&Err(anyhow::anyhow!("no worker started")));
+    }
+}
+
 #[tokio::test]
 async fn qwen_larger_frames_are_only_for_explicit_conversation_submission() {
     let conversation = request(
