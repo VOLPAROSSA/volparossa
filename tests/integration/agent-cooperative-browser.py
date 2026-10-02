@@ -43,6 +43,35 @@ STATUS_ERRORS = frozenset(("CHECK_FAILED", "OS_ERROR", "SUBPROCESS_FAILED", "INT
     "busy", "invalid_request", "handshake_required", "no_such_task", "execution_failed",
     "cleanup_unconfirmed", "unavailable", "not_configured", "invalid_response", "invalid_question",
     "invalid_context", "public_consent_required", "invalid_license", "deadline_exceeded", "storage_bound"))
+OBSERVER_PHASES = frozenset(("setup", "owner_binding", "broker_binding", "awaiting_consent",
+    "consent_precheck", "consent_authorization", "task_scan", "worker_scan", "result_join",
+    "result_authorization", "cancel_worker_scan", "cancel_authorization", "completion_check",
+    "worker_cleanup_check", "observation_write", "complete"))
+OBSERVER_ERRORS = frozenset(("invariant_or_unknown", "io_not_found", "io_permission", "io_other",
+    "json_syntax", "subprocess", "interrupted"))
+OBSERVER_INVARIANT_REASONS = {
+    "unexpected public task state": "task_identity",
+    "unexpected browser task admission": "task_count",
+    "original task directory changed": "task_order",
+    "invalid retained job identity": "job_identity",
+    "unexpected task executor": "provider_binding",
+    "observed worker did not receive exact public fragment/derived input": "fragment_binding",
+    "unbounded observed worker set": "workers_bound",
+    "actual broker not running": "broker_not_running",
+    "broker changed during observation": "broker_identity",
+    "unexpected broker executable": "broker_executable",
+    "broker outside its actual node namespace": "broker_network",
+    "actual worker mounts not isolated": "worker_mounts",
+    "expected one actual node-owned job input": "dataset_count",
+    "worker input is not exact node-local file": "input_inode",
+    "worker shares node or guest network namespace": "worker_namespace",
+    "worker has external network": "worker_network",
+    "worker exposes host authority": "worker_authority",
+    "broker mount exposes other node state": "other_node_visibility",
+    "broker is not the unprivileged node owner": "broker_owner",
+    "runtime lock is aliased": "worker_runtime_lock",
+    "observed worker does not hold its runtime lease": "worker_runtime_lease",
+}
 EXECUTION_PHASES = frozenset(('input', 'validation', 'directory', 'source_selection', 'provider_selection',
     'source_retention', 'tokenization', 'publication', 'enrollment_save', 'peer_execution', 'synthesis',
     'collection_join', 'result_save', 'complete', 'compaction'))
@@ -288,6 +317,55 @@ def coordinator_diagnostic(state):
         return dict(state='invalid')
 
 
+def closed_observer(path):
+    try:
+        info = path.lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= 4096
+                and stat.S_IMODE(info.st_mode) == 0o600 and info.st_uid == path.parent.stat().st_uid,
+                "invalid observer diagnostic file")
+        value = read(path, 4096)
+        require(type(value) is dict and set(value) == {"version", "phase", "failure", "invariant_reason", "task_count",
+            "observed_workers", "cancel_workers", "counts_saturated", "driver_alive"}
+            and type(value["version"]) is int and value["version"] == 1
+            and value["phase"] in OBSERVER_PHASES
+            and (value["failure"] is None or value["failure"] in OBSERVER_ERRORS)
+            and (value["invariant_reason"] is None or
+                 (value["failure"] == "invariant_or_unknown"
+                  and value["invariant_reason"] in OBSERVER_INVARIANT_REASONS.values()))
+            and all(type(value[name]) is int and 0 <= value[name] <= maximum
+                    for name, maximum in (("task_count", 2), ("observed_workers", 128), ("cancel_workers", 128)))
+            and type(value["counts_saturated"]) is bool
+            and (value["driver_alive"] is None or type(value["driver_alive"]) is bool),
+            "invalid closed observer diagnostic")
+        return dict(state="valid", status=value)
+    except FileNotFoundError:
+        return dict(state="absent")
+    except (OSError, ValueError, KeyError, TypeError):
+        return dict(state="invalid")
+
+
+def observer_error(error):
+    # Never export exception text: invariant messages can contain private paths/data.
+    if isinstance(error, KeyboardInterrupt):
+        return "interrupted"
+    if isinstance(error, FileNotFoundError):
+        return "io_not_found"
+    if isinstance(error, PermissionError):
+        return "io_permission"
+    if isinstance(error, OSError):
+        return "io_other"
+    if isinstance(error, json.JSONDecodeError):
+        return "json_syntax"
+    if isinstance(error, subprocess.SubprocessError):
+        return "subprocess"
+    return "invariant_or_unknown"
+
+
+def observer_invariant_reason(error):
+    # Exact known literals select fixed codes; never copy or interpolate raw errors.
+    return OBSERVER_INVARIANT_REASONS.get(str(error)) if type(error) is ValueError else None
+
+
 def closed_rpc_events(path, baseline, query_code):
     require(type(baseline) is int and baseline > 0 and type(query_code) is int and 0 <= query_code <= 255,
             "invalid RPC event observation arguments")
@@ -321,8 +399,9 @@ def diagnostic(work, browser_code, observer_code, baseline, rpc_query_code):
     JOBS["guest_work"](work)
     require(0 <= browser_code <= 255 and 0 <= observer_code <= 255, "invalid process exit status")
     root, state = paths(work)
-    write(work / f"{NAME}-diagnostic.json", dict(version=2, browser_exit_status=browser_code,
+    write(work / f"{NAME}-diagnostic.json", dict(version=3, browser_exit_status=browser_code,
         observer_exit_status=observer_code, browser=closed_status(root / "build/cooperative-proof/browser-status.json"),
+        observer=closed_observer(work / f"{NAME}-observer-status.private"),
         coordinator=coordinator_diagnostic(state),
         rpc_events=closed_rpc_events(work / f"{NAME}-rpc-events.private", baseline, rpc_query_code)))
 
@@ -426,52 +505,98 @@ def retained_result(document, fixture, layout, observed):
 
 def observe(work, pid):
     JOBS["guest_work"](work)
+    progress = dict(version=1, phase="setup", failure=None, invariant_reason=None, task_count=0,
+                    observed_workers=0, cancel_workers=0, counts_saturated=False, driver_alive=None)
+    tracked = dict(owner=None, tasks=[], observed={}, cancelled={})
+    try:
+        observe_inner(work, pid, progress, tracked)
+    except (Exception, KeyboardInterrupt) as error:
+        progress["failure"] = observer_error(error)
+        progress["invariant_reason"] = observer_invariant_reason(error)
+        raise
+    finally:
+        if tracked["owner"] is not None:
+            try:
+                progress["driver_alive"] = JOBS["alive"](tracked["owner"])
+            except Exception:
+                progress["driver_alive"] = None
+        for name, key, bound in (("task_count", "tasks", 2), ("observed_workers", "observed", 128),
+                                 ("cancel_workers", "cancelled", 128)):
+            count = len(tracked[key])
+            progress[name] = min(count, bound)
+            progress["counts_saturated"] |= count > bound
+        try:
+            # Written before observe exits and the shell can interrupt its driver.
+            # This is diagnostic only; never replace the original failure or proof.
+            write(work / f"{NAME}-observer-status.private", progress)
+        except Exception:
+            pass
+
+
+def observe_inner(work, pid, progress, tracked):
     root, state = paths(work)
     output = root / "build/cooperative-proof"
+    progress["phase"] = "owner_binding"
     owner = JOBS["identity"](pid)
+    tracked["owner"] = owner
     layout = read(work / "agent-jobs-layout.json")
+    progress["phase"] = "broker_binding"
     brokers = {node: JOBS["identity"](JOBS["broker_pid"](node)) for node in layout["provider_nodes"]}
     deadline = time.monotonic() + 2400
     consent = False
-    observed, cancelled = {}, {}
+    observed, cancelled = tracked["observed"], tracked["cancelled"]
     first = None
     result = None
     while JOBS["alive"](owner) and time.monotonic() < deadline:
+        progress["phase"] = "awaiting_consent"
         if not consent and (output / "pre-consent.json").exists():
+            progress["phase"] = "consent_precheck"
             marker(output / "pre-consent.json", "prefill_without_dispatch")
             require(not task_roots(state)
                     and all(JOBS["worker_snapshot"](work, node, broker) is None for node, broker in brokers.items()),
                     "task executed before explicit public consent")
+            progress["phase"] = "consent_authorization"
             authorize(output / "authorize.json", "allow_explicit_public_submit")
             consent = True
+        progress["phase"] = "task_scan"
         tasks = task_roots(state)
+        tracked["tasks"] = tasks
         if tasks:
             require(consent, "task was admitted before consent")
             if first is None:
                 first = tasks[0]
             require(tasks[0] == first, "original task directory changed")
+            progress["phase"] = "worker_scan"
             scan_workers(work, first / "document", layout, brokers, observed)
         if first and result is None and (output / "result-received.json").exists():
+            progress["phase"] = "result_join"
             marker(output / "result-received.json", "public_result_received")
             result = retained_result(first / "document", read(root / "input.json"), layout, observed)
             write(work / f"{NAME}-result.json", result)
+            progress["phase"] = "result_authorization"
             authorize(output / "result-verified.json", "public_result_verified")
         if len(tasks) == 2:
+            progress["phase"] = "cancel_worker_scan"
             require(result is not None, "second task preceded retained first result")
             scan_workers(work, tasks[1] / "document", layout, brokers, cancelled)
             if cancelled and not (output / "cancel-authorize.json").exists():
+                progress["phase"] = "cancel_authorization"
                 marker(output / "cancel-admitted.json", "public_cancel_target_admitted")
                 authorize(output / "cancel-authorize.json", "allow_scoped_public_cancel")
         time.sleep(0.05)
+    progress["phase"] = "completion_check"
     require(not JOBS["alive"](owner) and consent and result is not None and cancelled,
             "browser did not complete both real public tasks within fixture bound")
+    progress["phase"] = "worker_cleanup_check"
     require(not any(JOBS["alive"](member) for entry in [*observed.values(), *cancelled.values()]
                     for member in entry["owned_processes"]), "observed task workers still alive")
+    progress["phase"] = "observation_write"
     write(work / f"{NAME}-observation.json", dict(no_dispatch_before_consent=True,
         real_fragment_peers=sorted({entry["node"] for entry in observed.values() if entry["level"] is None}),
         observed_synthesis_levels=sorted({entry["level"] for entry in observed.values() if entry["level"] is not None}),
         completed_workers=list(observed.values()), cancelled_workers=list(cancelled.values()),
         cancel_target_had_live_peer_worker=True, observed_workers_ended=True))
+    progress["phase"] = "complete"
 
 
 def check_panel(panel, result, revision):

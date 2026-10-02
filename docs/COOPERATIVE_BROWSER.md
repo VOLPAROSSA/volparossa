@@ -1,9 +1,9 @@
 # Cooperative browser: real public peer execution
 
-Status: implemented candidate; the latest combined live KVM attempt reaches the first
-authorized task but cannot confirm all original terminal receipts. A corrected attempt
-remains pending. Local pure fixture checks are not a browser, model or network execution
-claim.
+Status: implemented candidate; the latest combined live KVM attempt confirms all eleven
+original terminal receipts and coordinator cleanup, but still fails the joined browser
+result. Complete browser/peer acceptance remains pending. Local pure fixture checks are
+not a browser, model or network execution claim.
 
 The public browser integration has a separate socket and panel from private local
 compute. `ask(question, context)` prefills the panel only. Sending requires a supported
@@ -101,3 +101,23 @@ phase baseline, and exports only the allowlisted failure counts. Raw event recor
 session/path identifiers, model inputs, replies and service logs are not exported. A
 missing, invalid or incomplete observation cannot become a success claim. Seven focused
 fixture checks pass, including baseline filtering and rejection of private/unknown data.
+
+## Completed receipts, incomplete joined result
+
+[Run `37021201299`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37021201299)
+on `610866b8770b63719ec1f4b4ce6abb6a83a596ef` retains eleven original handles and eleven
+terminal receipts: document execution and local/remote cleanup are confirmed, without
+reconciliation. Its event ring covers the phase baseline with zero allowlisted RPC
+failures. The original artifact ZIP SHA-256 is
+`f4396c04deba99d81eac3e4d7d5769bd4ece01e31e6f235fe3d5088061c281f4`.
+
+The run nevertheless **fails**. Answer completion is false; Gecko reports
+`first-task / cleanup_unconfirmed`, and the observer exits with status 1. The original
+artifact has neither the observer's failure reason nor a retained wire reply. Its
+ordering therefore cannot establish whether browser termination caused unfinished
+work, or another failure caused the connection to close. The browser contract accepts
+an incomplete answer with confirmed cleanup; those fields alone do not explain the
+observed error. No completed display, synthesis/cancellation proof or improved model
+quality is claimed. Fixture cleanup succeeds with zero owned objects; before/after
+host snapshots both hash to
+`ec97a4e9bcf30dc3013bf5ba98d0abc1ed3ea1772107a3f99733e9ff976f081c`.

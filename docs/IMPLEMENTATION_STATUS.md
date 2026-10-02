@@ -26,8 +26,12 @@ Last updated: 2026-10-02
   results, original tool/core task IDs and cancellation/cleanup boundaries, without
   publishing private history. These trials still simulate model/public-core
   replies. The real IPC dependency is the separate cooperative-compute candidate
-  `a57fff5c96c9321df753e2118e3acc5b10c70a46` (PR #178), not current main. Actual
-  joined peer execution and integration of that dependency remain open.
+  `610866b8770b63719ec1f4b4ce6abb6a83a596ef` (PR #178), not current main. Code
+  `b3a4cfe` adds an explicit guest-only native-tool driver against an externally
+  supplied public core, with a synthetic private planner and no simulated public
+  result. Eight focused driver checks and four namespace checks pass; the new
+  driver has not yet completed a joined live-peer trial. Actual joined OpenCode
+  peer execution and integration of that dependency remain open.
 - [ ] Default network cooperation, shared improvement and protected private
   execution are required across integrations, not optional extras beside local
   AI. Local subagents/fallback do not fulfill this requirement. The existing
@@ -46,6 +50,16 @@ Rust checks pass (five public IPC, six public document/reconciliation, eight pri
 conversation); seven cooperative fixture checks, the static topology contract and
 package formatting also pass. These local checks do not resolve the outstanding
 live peer-completion evidence described below.
+
+The exact [run `37021201299`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37021201299)
+on `610866b8` now retains **all 11 original terminal receipts**, reports document
+execution and cleanup complete, and needs no reconciliation. Its covered event
+window contains no allowlisted compute-RPC failures. The joined trial still **fails**:
+answer completion is false and the browser reports `cleanup_unconfirmed` while waiting
+for its first task. The artifact does not retain the observer's original failure reason
+or final wire reply, so causal ordering is not established. Incomplete answers with
+confirmed cleanup are valid browser responses; incompleteness alone does not explain
+this error. Fixture cleanup leaves zero owned objects and identical host snapshots.
 
 The new **cooperative browser candidate** connects a separate, explicitly public
 Firefox panel to the real `compute public-serve` service and existing signed document /

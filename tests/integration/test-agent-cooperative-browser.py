@@ -11,6 +11,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).parent
 CHECK = runpy.run_path(str(HERE / "agent-cooperative-browser.py"))
@@ -58,6 +59,65 @@ def fixture():
 
 
 class CooperativeBrowserProof(unittest.TestCase):
+    def test_observer_failure_is_retained_before_driver_interrupt_without_private_details(self):
+        self.assertEqual(CHECK["observer_invariant_reason"](ValueError("actual worker mounts not isolated")),
+                         "worker_mounts")
+        self.assertIsNone(CHECK["observer_invariant_reason"](ValueError("PRIVATE_PROMPT /private/path")))
+        self.assertIsNone(CHECK["observer_invariant_reason"](OSError("actual worker mounts not isolated")))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "agent-jobs-user/browser/build/cooperative-proof"
+            output.mkdir(parents=True)
+            (output / "pre-consent.json").write_text("{}")
+            first = root / "synthetic-task"
+            original = ValueError("PRIVATE_PROMPT /private/code.py key=do-not-export")
+            def fail_scan(_work, _document, _layout, _brokers, observed):
+                observed["PRIVATE_JOB_ID"] = {"private_path": "/private/code.py"}
+                raise original
+            jobs = dict(CHECK["JOBS"], guest_work=lambda _work: None,
+                        identity=lambda pid: {"pid": pid}, broker_pid=lambda _node: 2,
+                        alive=lambda _owner: True, worker_snapshot=lambda *_args: None)
+            # Synthetic observer inputs only: no /proc, systemd, browser or worker is touched.
+            with mock.patch.dict(CHECK["observe"].__globals__, {
+                "JOBS": jobs, "read": lambda *_args: {"provider_nodes": ["peer-a"]},
+                "marker": lambda *_args: None, "authorize": lambda *_args: None,
+                "task_roots": mock.Mock(side_effect=[[], [first]]), "scan_workers": fail_scan,
+            }):
+                with self.assertRaises(ValueError) as raised:
+                    CHECK["observe"](root, 1)
+                self.assertIs(raised.exception, original)
+            status_path = root / "agent-cooperative-browser-observer-status.private"
+            expected = dict(version=1, phase="worker_scan", failure="invariant_or_unknown",
+                            invariant_reason=None,
+                            task_count=1, observed_workers=1, cancel_workers=0,
+                            counts_saturated=False, driver_alive=True)
+            self.assertEqual(CHECK["closed_observer"](status_path), dict(state="valid", status=expected))
+            self.assertFalse((root / "agent-cooperative-browser-observation.json").exists())
+            self.assertNotIn("PRIVATE", status_path.read_text())
+            self.assertNotIn("/private", status_path.read_text())
+            for mutation in (
+                lambda value: value.update(phase="PRIVATE_PROMPT"),
+                lambda value: value.update(failure="PRIVATE_PROMPT"),
+                lambda value: value.update(invariant_reason="PRIVATE_PROMPT"),
+                lambda value: value.update(private_path="/private/code.py"),
+                lambda value: value.update(observed_workers=129),
+                lambda value: value.update(task_count=True),
+            ):
+                invalid = dict(expected)
+                mutation(invalid)
+                status_path.write_text(json.dumps(invalid))
+                self.assertEqual(CHECK["closed_observer"](status_path), dict(state="invalid"))
+            # Failed diagnostic I/O must not replace the original observer failure.
+            with mock.patch.dict(CHECK["observe"].__globals__, {
+                "JOBS": jobs, "observe_inner": mock.Mock(side_effect=original),
+                "write": mock.Mock(side_effect=OSError("PRIVATE_DIAGNOSTIC_PATH")),
+            }):
+                with self.assertRaises(ValueError) as raised:
+                    CHECK["observe"](root, 1)
+                self.assertIs(raised.exception, original)
+        self.assertEqual(CHECK["closed_observer"](Path(temporary) / "absent"), dict(state="absent"))
+        self.assertNotIn("agent-cooperative-browser-observer-status.private", CHECK["EXPORT_NAMES"])
+
     def test_rpc_stage_counts_are_allowlisted_bounded_and_keep_ring_coverage_explicit(self):
         source = (HERE.parents[1] / 'crates/volparossa-agent/src/content/compute_remote.rs').read_text()
         self.assertEqual(CHECK['RPC_EVENT_CODES'], set(re.findall(r'COMPUTE_RPC_[A-Z_]+_FAILED', source)))
