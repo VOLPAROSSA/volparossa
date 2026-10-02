@@ -101,9 +101,9 @@ def validate_mocha(value):
             "exact native Signal backup test did not pass")
 
 
-def validate_provision(value):
+def validate_provision(value, expected_chat=CHAT):
     require(value["version"] == 1 and value["kind"] == "signal-backup-runtime-provision"
-            and value["chat_revision"] == CHAT and value["signal_revision"] == SIGNAL
+            and value["chat_revision"] == expected_chat and value["signal_revision"] == SIGNAL
             and value["candidate"] == "build/signal-backup-candidate"
             and value["node"] == "build/node-v24.19.0-linux-x64-with-npm/bin/node"
             and value["electron_version"] == "44.1.0" and value["success"] is True and value["phase"] == "complete"
@@ -345,11 +345,11 @@ def join_group(process):
     raise ValueError("native process group not joined")
 
 
-def run_native(root):
+def run_native(root, *, expected_chat=CHAT, withdrawal=False):
     global STAGE, NATIVE_EXIT, NATIVE_DIAGNOSTIC
     STAGE = "runtime-validation"
     provision = read(Path(__file__).with_name("signal-backup-runtime.json"))
-    validate_provision(provision)
+    validate_provision(provision, expected_chat)
     candidate, node = RUNTIME / provision["candidate"], RUNTIME / provision["node"]
     require(candidate.is_dir() and node.is_file() and os.geteuid() != 0, "unprivileged native app required")
     require(digest(node) == provision["node_sha256"] and len(provision["runtime_sha256"]) == 7
@@ -388,6 +388,8 @@ def run_native(root):
         VOLPAROSSA_BACKUP_STATUS=str(root / "native-status.json"),
         VOLPAROSSA_BACKUP_STARTUP=str(root / "startup-status.json"),
         PATH=f"{node.parent}:{candidate / 'node_modules/.bin'}:/usr/bin:/bin")
+    if withdrawal:
+        environment["VOLPAROSSA_BACKUP_WITHDRAWAL"] = "1"
     command = isolated_command(root, candidate, node, Path(__file__).with_name("signal-backup-reporter.cjs"))
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     resource.setrlimit(resource.RLIMIT_FSIZE, (128 * 1024 * 1024, 128 * 1024 * 1024))
@@ -414,7 +416,7 @@ def run_native(root):
     validate_mocha(read(root / "result.json"))
     require(not (root / "backup/archive.signal").exists()
             and not (root / "backup/restored/download.signal").exists(), "local archive was retained")
-    return dict(chat_revision=CHAT, signal_revision=SIGNAL, native_test=read(root / "result.json"),
+    return dict(chat_revision=expected_chat, signal_revision=SIGNAL, native_test=read(root / "result.json"),
                 compiled_runtime_sha256=provision["runtime_sha256"], node_sha256=provision["node_sha256"],
                 compile_receipt_sha256=provision["compile_receipt_sha256"],
                 native_encrypted_export_import=True, original_ciphertext_removed=True,

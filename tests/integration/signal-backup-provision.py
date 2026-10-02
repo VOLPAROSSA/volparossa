@@ -30,6 +30,7 @@ SIGNAL_REVISION = "ef3872cb0249ec939d8aff857568a0e87a6b5075"
 LOCK_SHA256 = "bc06486a375791ed118b10f10c33428b0fefa37ce22e6c2cf56c2bf37dd11040"
 CANDIDATE = "build/signal-backup-candidate"
 NODE = "build/node-v24.19.0-linux-x64-with-npm/bin/node"
+FRAGMENT_TRIAL = False
 FILES = {
     "LICENSE": (35149, "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"),
     "upstream-lock.json": (2100, "1993b0dafb24a107d3702de4d5d144d765aba65123e9f680900fbf6f9200c385"),
@@ -73,11 +74,35 @@ def digest(path):
 def check_pins():
     require(re.fullmatch(r"[0-9a-f]{40}", CHAT_REVISION or "")
             and CHAT_REVISION != "0" * 40, "reviewed chat revision is required")
-    require(len(FILES) == 14 and sum(size for size, _ in FILES.values()) <= 1024 * 1024)
+    require(len(FILES) == (17 if FRAGMENT_TRIAL else 14)
+            and sum(size for size, _ in FILES.values()) <= 1024 * 1024)
     for name, (size, sha) in FILES.items():
         path = Path(name)
         require(not path.is_absolute() and str(path) == name and ".." not in path.parts
                 and 0 < size <= 131072 and re.fullmatch(r"[0-9a-f]{64}", sha))
+
+
+def select_fragment_trial():
+    """Explicit separate source cohort; never change the historical replica pin."""
+    global CHAT_REVISION, FILES, FRAGMENT_TRIAL
+    path = Path(__file__).with_name("signal-backup-fragments-pins.json")
+    value = read_json(path)
+    require(set(value) == {"version", "chat_revision", "signal_revision", "files"}
+            and value["version"] == 1 and value["signal_revision"] == SIGNAL_REVISION,
+            "exact fragment trial pin required")
+    expected = set(FILES) | {
+        "overlay/ts/services/backups/volparossa/fragments.node.ts",
+        "overlay/ts/services/backups/volparossa/storage.node.ts",
+        "overlay/ts/test-mock/backups/volparossa-withdrawal.node.ts",
+    }
+    require(set(value["files"]) == expected, "fragment source inventory differs")
+    files = {}
+    for name, entry in value["files"].items():
+        require(set(entry) == {"bytes", "sha256"} and type(entry["bytes"]) is int,
+                "fragment source entry differs")
+        files[name] = (entry["bytes"], entry["sha256"])
+    CHAT_REVISION, FILES, FRAGMENT_TRIAL = value["chat_revision"], files, True
+    check_pins()
 
 
 def guard(root):
@@ -118,6 +143,55 @@ def write_report(root, report):
 def read_json(path):
     require(path.is_file() and not path.is_symlink() and path.stat().st_size <= 2 * 1024**2)
     return json.loads(path.read_bytes())
+
+
+def source_error_projection(root):
+    """Optional closed diagnostic from the joined, failed source child only.
+
+    Historical source pins produce no such receipt. Missing/invalid diagnostics
+    never change step failure, imply success, or fall back to reading raw logs.
+    This is schema/ownership validation, not a signed authorship assertion.
+    """
+    fields = {"version", "kind", "phase", "category", "error_type", "http_status"}
+    phases = {"configuration", "archive_fetch", "archive_verification", "source_extraction",
+              "existing_verification"}
+    pairs = {("http", "http_error"), ("tls", "tls_error"), ("timeout", "timeout_error"),
+             ("network", "dns_error"), ("network", "url_error"), ("validation", "invalid_source"),
+             ("io", "os_error"), ("unknown", "unknown_error")}
+
+    def unique_object(items):
+        value = {}
+        for key, item in items:
+            require(key not in value, "duplicate source diagnostic field")
+            value[key] = item
+        return value
+
+    path = root / "build/signal-source-error.json"
+    try:
+        require(path.parent.resolve(strict=True) == path.parent, "source diagnostic parent")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as source:
+            before = os.fstat(source.fileno())
+            require(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid()
+                    and stat.S_IMODE(before.st_mode) == 0o600 and before.st_nlink == 1
+                    and 0 < before.st_size <= 512, "source diagnostic file")
+            encoded = source.read(513)
+            after = os.fstat(source.fileno())
+            require(len(encoded) == before.st_size == after.st_size
+                    and before.st_mtime_ns == after.st_mtime_ns
+                    and before.st_ctime_ns == after.st_ctime_ns, "source diagnostic changed")
+        value = json.loads(encoded, object_pairs_hook=unique_object)
+        require(type(value) is dict and set(value) == fields
+                and type(value["version"]) is int and value["version"] == 1
+                and value["kind"] == "signal-source-staging-failure"
+                and value["phase"] in phases
+                and (value["category"], value["error_type"]) in pairs, "source diagnostic schema")
+        status = value["http_status"]
+        require(status is None or (value["category"] == "http" and type(status) is int
+                                  and 100 <= status <= 599), "source diagnostic HTTP status")
+        return {key: value[key] for key in sorted(fields)}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def compile_receipt(root):
@@ -202,6 +276,10 @@ def provision(root):
         command = [sys.executable, "-B", str(root / "scripts" / script), *arguments]
         result = supervisor.run_bounded(command, root, environment, logs / (phase + ".log"), [root], timeout=timeout)
         report["steps"].append(dict(name=phase, **result))
+        if phase == "source" and result["result"] != "INSTALLED" and result["process_group_joined"] is True:
+            diagnostic = source_error_projection(root)
+            if diagnostic is not None:
+                report["source_error"] = diagnostic
         write_report(root, report)
         require(result["result"] == "INSTALLED" and result["process_group_joined"] is True,
                 "pinned Signal provisioning step failed")
@@ -232,9 +310,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("provision",))
     parser.add_argument("root", type=Path)
+    parser.add_argument("--trial", choices=("replicas", "fragments"), default="replicas")
     parser.add_argument("--download", action="store_true", required=True,
                         help="explicit guest-only source/dependency/native downloads and offline compilation")
     args = parser.parse_args()
+    if args.trial == "fragments":
+        select_fragment_trial()
     print(json.dumps(dict(plan="pinned-signal-runtime-only", root=str(args.root),
                          steps=[step[0] for step in STEPS], native_app_started=False)), flush=True)
     provision(args.root)

@@ -17,6 +17,7 @@ private_storage_peer=no
 private_storage_replicas=no
 private_storage_handoff=no
 signal_backup=no
+signal_backup_fragments=no
 private_storage_fragments=no
 image_snapshot=no
 cloud_private_file=no
@@ -62,6 +63,13 @@ usage() {
 }
 
 print_plan() {
+    if [ "$signal_backup_fragments" = yes ]; then
+        printf '%s\n' 'VOLPAROSSA native Signal fragment backup trial:' \
+            '  three real 1MiB providers; two encrypted copies per fragment through protected routes;' \
+            '  remove source ciphertext, stop provider A, native restore/import, repeat core restore;' \
+            '  preserve exact physical quota, retire all copies and remove all owned private state.'
+        return
+    fi
     if [ "$signal_backup" = yes ]; then
         printf '%s\n' \
             'VOLPAROSSA Signal native backup protected network smoke plan:' \
@@ -697,6 +705,7 @@ while [ "$#" -gt 0 ]; do
             private_storage_replicas=no
             private_storage_handoff=no
             signal_backup=no
+            signal_backup_fragments=no
             private_storage_fragments=no
             image_snapshot=no
             cloud_private_file=no
@@ -724,6 +733,7 @@ while [ "$#" -gt 0 ]; do
             agent_artifact_quarantine=no
             case $2 in
                 signal-backup) scenario=content-custody; signal_backup=yes; wifi_link=no; uplink_link=no ;;
+                signal-backup-fragments) scenario=content-custody; signal_backup=yes; signal_backup_fragments=yes; private_storage_fragments=yes; wifi_link=no; uplink_link=no ;;
                 reciprocity-private-dns) scenario=reciprocity; reciprocal_private_dns=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-peer) scenario=content-custody; private_storage_peer=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-replicas) scenario=content-custody; private_storage_replicas=yes; wifi_link=no; uplink_link=no ;;
@@ -956,6 +966,12 @@ if [ "$signal_backup" = yes ]; then
             && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
     done
     for signal_tool in bwrap xvfb-run Xvfb; do command -v "$signal_tool" >/dev/null 2>&1 || exit 69; done
+fi
+if [ "$signal_backup_fragments" = yes ]; then
+    for storage_fixture in signal-backup-fragments-smoke.sh signal-backup-fragments-smoke.py signal-backup-fragments-pins.json; do
+        [ -f "$source_directory/tests/integration/$storage_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
+    done
 fi
 if [ "$private_storage_fragments" = yes ]; then
     for storage_fixture in private-storage-fragments-smoke.sh private-storage-fragments-smoke.py \
@@ -2009,7 +2025,8 @@ cleanup() {
     if [ "$signal_backup" = yes ] && command -v signal_backup_cleanup >/dev/null 2>&1; then
         signal_backup_cleanup || original_status=1
     fi
-    if [ "$private_storage_fragments" = yes ] && command -v private_storage_fragments_cleanup >/dev/null 2>&1; then
+    if [ "$private_storage_fragments" = yes ] && [ "$signal_backup_fragments" = no ] \
+        && command -v private_storage_fragments_cleanup >/dev/null 2>&1; then
         private_storage_fragments_cleanup || original_status=1
     elif [ "$private_storage_handoff" = yes ] && command -v private_storage_handoff_cleanup >/dev/null 2>&1; then
         private_storage_handoff_cleanup || original_status=1
@@ -2292,6 +2309,8 @@ cleanup() {
         content_repair_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-mailbox ]; then
         content_mailbox_finalize_report "$original_status" || original_status=1
+    elif [ "$signal_backup_fragments" = yes ]; then
+        signal_backup_fragments_finalize_report "$original_status" || original_status=1
     elif [ "$signal_backup" = yes ]; then
         signal_backup_finalize_report "$original_status" || original_status=1
     elif [ "$cloud_private_file" = yes ]; then
@@ -2475,6 +2494,10 @@ fi
 if [ "$private_storage_fragments" = yes ]; then
     # shellcheck source=tests/integration/private-storage-fragments-smoke.sh
     . "$source_directory/tests/integration/private-storage-fragments-smoke.sh"
+fi
+if [ "$signal_backup_fragments" = yes ]; then
+    # shellcheck source=tests/integration/signal-backup-fragments-smoke.sh
+    . "$source_directory/tests/integration/signal-backup-fragments-smoke.sh"
 fi
 if [ "$image_snapshot" = yes ]; then
     # shellcheck source=tests/integration/image-snapshot-smoke.sh
@@ -2677,6 +2700,12 @@ if [ "$signal_backup" = yes ]; then
     for storage_fixture in signal-backup-smoke.py signal-backup-reporter.cjs signal-backup-startup.cjs; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$storage_fixture" "$WORK/bin/$storage_fixture"
     done
+fi
+if [ "$signal_backup_fragments" = yes ]; then
+    install -o root -g root -m 0555 "$source_directory/tests/integration/signal-backup-fragments-smoke.py" \
+        "$WORK/bin/signal-backup-fragments-smoke.py"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/signal-backup-fragments-pins.json" \
+        "$WORK/bin/signal-backup-fragments-pins.json"
 fi
 if [ "$private_storage_fragments" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/private-storage-fragments-smoke.py" \
@@ -6635,6 +6664,10 @@ if [ "$agent_train_loop" = yes ]; then
 fi
 if [ "$scenario" = agent-artifact ]; then
     agent_artifact_run
+    exit 0
+fi
+if [ "$signal_backup_fragments" = yes ]; then
+    signal_backup_fragments_run
     exit 0
 fi
 if [ "$signal_backup" = yes ]; then
