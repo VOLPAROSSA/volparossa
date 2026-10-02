@@ -2,6 +2,8 @@
 
 mod collection;
 mod graph;
+pub(in crate::compute) mod public;
+mod refinement;
 mod storage;
 mod synthesis;
 #[cfg(test)]
@@ -32,6 +34,28 @@ const MAX_SAVED_BYTES: usize = 16 * 1024 * 1024;
 // including per-answer provenance. Metadata retains its smaller bound.
 const MAX_RESULT_BYTES: usize = 128 * 1024 * 1024;
 
+/// Closed progress labels for the public-service diagnostic; never input or error text.
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Phase {
+    Input,
+    Validation,
+    Directory,
+    SourceSelection,
+    ProviderSelection,
+    SourceRetention,
+    Tokenization,
+    Publication,
+    EnrollmentSave,
+    PeerExecution,
+    Refinement,
+    Synthesis,
+    CollectionJoin,
+    ResultSave,
+    Complete,
+    Compaction,
+}
+
 #[derive(Clone, Debug, Args)]
 #[allow(
     clippy::struct_excessive_bools,
@@ -49,6 +73,10 @@ pub(crate) struct Options {
     /// Combine all fragment answers through further peer inference; retains every intermediate receipt.
     #[arg(long, conflicts_with = "resume")]
     synthesize: bool,
+    /// Authorize one bounded pass of new, smaller source tasks for token-limited leaves.
+    /// Complete leaves and every original receipt are retained, not rerun or relabelled.
+    #[arg(long, requires = "synthesize", conflicts_with_all = ["resume", "batch_barrier", "replace_peers"])]
+    refine_incomplete: bool,
     /// Explicit public question/dependency graph over the selected sources; not an autonomous planner.
     #[arg(long, conflicts_with_all = ["resume", "public_question", "synthesize", "batch_barrier"])]
     task_plan: Option<PathBuf>,
@@ -172,6 +200,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             "input":args.input,"source_plan":args.source_plan,"source_cache":args.source_cache,
             "directory":args.directory,"resume":args.resume,
             "synthesize":args.synthesize,
+            "refine_incomplete":args.refine_incomplete,
             "task_plan":args.task_plan,"plan_tasks":args.plan_tasks,"plan_task_graph":args.plan_task_graph,"model_profile":args.model_profile,
             "plan_structure":args.plan_structure,
             "grounded_synthesis":args.grounded_synthesis,
@@ -184,6 +213,57 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         return Ok(());
     }
     let cancellation = Cancellation::new()?;
+    if args.task_plan.is_some()
+        || args.plan_tasks
+        || args.plan_task_graph
+        || (args.resume && args.directory.join("graph.json").try_exists()?)
+    {
+        ensure!(
+            args.directory.is_absolute(),
+            "compute_document_absolute_directory"
+        );
+        ensure!(
+            args.resume || args.public_content,
+            "compute_document_public_permission_required"
+        );
+        let _lock = task::open_directory(&args.directory, args.resume)?;
+        return graph::run(args, socket, &cancellation.activity).await;
+    }
+    let result = report_with_activity(args, socket, &cancellation.activity).await?;
+    println!("{}", serde_json::to_string(&result)?);
+    ensure!(
+        args.enroll_only || result["complete"] == true,
+        "compute_document_partial_results_retained"
+    );
+    Ok(())
+}
+
+/// The same document executor for the CLI and local public service. Cancellation is
+/// cooperative: never drop the running coordinator before its exact handles are joined.
+async fn report_with_activity(
+    args: &Options,
+    socket: &Path,
+    cancelled: &watch::Receiver<bool>,
+) -> Result<Value> {
+    report_with_phase(args, socket, cancelled, &mut Phase::Validation).await
+}
+
+async fn report_with_phase(
+    args: &Options,
+    socket: &Path,
+    cancelled: &watch::Receiver<bool>,
+    phase: &mut Phase,
+) -> Result<Value> {
+    *phase = Phase::Validation;
+    ensure!(
+        args.execute && args.task_plan.is_none() && !args.plan_tasks && !args.plan_task_graph,
+        "compute_document_report_mode"
+    );
+    ensure!(
+        !args.refine_incomplete
+            || (args.synthesize && !args.batch_barrier && !args.discovery.replace_peers),
+        "compute_document_refinement_mode"
+    );
     ensure!(
         args.directory.is_absolute(),
         "compute_document_absolute_directory"
@@ -192,32 +272,46 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         args.resume || args.public_content,
         "compute_document_public_permission_required"
     );
+    *phase = Phase::Directory;
     let _lock = task::open_directory(&args.directory, args.resume)?;
-    if args.task_plan.is_some()
-        || args.plan_tasks
-        || args.plan_task_graph
-        || (args.resume && args.directory.join("graph.json").try_exists()?)
-    {
-        return graph::run(args, socket, &cancellation.activity).await;
-    }
     if !args.resume {
-        prepare(args, socket, &cancellation.activity).await?;
+        prepare(args, socket, cancelled, phase).await?;
     }
     if args.enroll_only {
         let (enrollment, _, _) = storage::load(&args.directory)?;
-        println!(
-            "{}",
+        return Ok(
             json!({"operation":"compute_document_enrolled", "execution_started":false,
             "task_complete":false, "source_manifest_id":enrollment.source_manifest_id,
             "provider_keys":enrollment.provider_keys, "model_fingerprint":enrollment.model_fingerprint,
-            "package_count":enrollment.packages.len(), "private_data_supported":false})
+            "package_count":enrollment.packages.len(), "private_data_supported":false}),
         );
-        return Ok(());
     }
-    let mut result = advance(args, socket, &cancellation.activity).await?;
+    *phase = Phase::PeerExecution;
+    let mut result = advance(args, socket, cancelled).await?;
     if result["synthesis_requested"] == true {
-        if result["complete"] == true {
-            synthesis::advance(args, socket, &cancellation.activity, &mut result).await?;
+        let recovered = if result["execution_complete"] == true && result["complete"] != true {
+            *phase = Phase::Refinement;
+            refinement::advance(args, socket, cancelled, &mut result).await?
+        } else {
+            None
+        };
+        if let Some(frontier) = recovered {
+            let (enrollment, input, _) = storage::load(&args.directory)?;
+            *phase = Phase::Synthesis;
+            synthesis::advance_frontier(
+                args,
+                socket,
+                cancelled,
+                &mut result,
+                &enrollment,
+                &input,
+                frontier,
+                false,
+            )
+            .await?;
+        } else if result["complete"] == true {
+            *phase = Phase::Synthesis;
+            synthesis::advance(args, socket, cancelled, &mut result).await?;
         } else {
             result["joining"] = if result["execution_complete"] == true {
                 "incomplete_fragment_answers"
@@ -227,7 +321,9 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             .into();
         }
     }
+    *phase = Phase::CollectionJoin;
     attach_collection(&args.directory, &mut result)?;
+    *phase = Phase::ResultSave;
     if !output::preserve_legacy_result(
         &args.directory.join("result.json"),
         MAX_RESULT_BYTES as u64,
@@ -238,19 +334,20 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     )? {
         save(&args.directory, "result.json", &result, true)?;
     }
-    println!("{}", serde_json::to_string(&result)?);
-    ensure!(
-        result["complete"] == true,
-        "compute_document_partial_results_retained"
-    );
-    Ok(())
+    *phase = Phase::Complete;
+    Ok(result)
 }
 
 #[allow(
     clippy::too_many_lines,
     reason = "One enrollment boundary binds acquired sources, tokenizer results and original signed validity before dispatch"
 )]
-async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool>) -> Result<()> {
+async fn prepare(
+    args: &Options,
+    socket: &Path,
+    cancelled: &watch::Receiver<bool>,
+    phase: &mut Phase,
+) -> Result<()> {
     ensure!(
         args.model_profile.is_default() || !args.batch_barrier,
         "compute_profile_requires_ready_rows"
@@ -259,6 +356,7 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
         args.public_content,
         "compute_document_public_permission_required"
     );
+    *phase = Phase::SourceSelection;
     let (document, collection, network) = selected_input(args, socket, cancelled).await?;
     let input = Input {
         version: 1,
@@ -274,6 +372,7 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
             .context("compute_document_question")?,
     };
     input.validate()?;
+    *phase = Phase::ProviderSelection;
     let selected = if args.discovery.discover_peers {
         ensure!(
             args.provider_key.is_empty(),
@@ -312,13 +411,16 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
         !*cancelled.borrow(),
         "compute_document_cancelled_before_planning"
     );
+    *phase = Phase::SourceRetention;
     retain_selected_sources(
         &args.directory,
         &input,
         collection.as_ref(),
         network.as_ref(),
     )?;
+    *phase = Phase::Tokenization;
     let plan = tokenize(args, &args.directory, &input, cancelled).await?;
+    *phase = Phase::Publication;
     ensure!(
         !*cancelled.borrow(),
         "compute_document_cancelled_before_publication"
@@ -355,6 +457,7 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
     enrollment.model_fingerprint = Some(model_fingerprint);
     enrollment.replace_peers = args.discovery.replace_peers;
     enrollment.scheduling = workflow::Scheduling::from_batch_barrier(args.batch_barrier);
+    enrollment.refine_incomplete = args.refine_incomplete;
     enrollment.collection_sha256 = collection
         .as_ref()
         .map(collection::Ledger::sha256)
@@ -364,6 +467,7 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
         .map(collection::network::Proofs::sha256)
         .transpose()?;
     drop(signer); // No identity/private key is retained during any peer exchange.
+    *phase = Phase::EnrollmentSave;
     save(&args.directory, "document.json", &enrollment, false)
 }
 

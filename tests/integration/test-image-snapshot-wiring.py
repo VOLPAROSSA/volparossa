@@ -58,7 +58,11 @@ class ImageSnapshotWiring(unittest.TestCase):
         for value in ("IMAGE_SOURCE=/opt/volparossa-image", "IMAGE_NODE=/opt/volparossa-node/bin/node",
                       "IMAGE_REVISION=e177afebabd99ac0773de2a73d60275346a5de52"):
             self.assertIn(value, guest)
-        self.assertIn('sudo -n -- env "$@" ./tests/integration/kvm-alpha-topology.sh', guest)
+        selector = runpy.run_path(str(HERE / "test-cooperative-code-vm-contract.py"))
+        self.assertEqual(selector["selected_topology_argv"](SCENARIO),
+            ["-n", "--", "env", "IMAGE_SOURCE=/opt/volparossa-image", "IMAGE_NODE=/opt/volparossa-node/bin/node",
+             "IMAGE_REVISION=e177afebabd99ac0773de2a73d60275346a5de52", "./tests/integration/kvm-alpha-topology.sh",
+             *selector["common_topology_args"](SCENARIO)])
         self.assertIn('"tests/integration/$scenario-smoke.py" export-names', guest)
 
     def test_exact_export_list_and_timeout_exclude_private_owner_data(self):

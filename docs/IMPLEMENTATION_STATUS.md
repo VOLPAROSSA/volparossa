@@ -2,9 +2,257 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-10-01
+Last updated: 2026-10-02
 
 ## Current integration and active work
+
+### OpenCode migration and network-first compute
+
+- [ ] User-selected OpenCode foundation replaces Codex for `volparossa-code`.
+  [Code PR #5](https://github.com/VOLPAROSSA/volparossa-code/pull/5), source
+  `ed1209b` on `feature/opencode-integration`, wires the editor to pinned OpenCode
+  v1.18.34 (`aec0b9a6d8898f68f923aaf08b7306d931fd9d76`), HTTP/SSE sessions,
+  Chat Completions and the existing typed private-conversation service. Seventy-six
+  focused adapter/editor/cooperative/owner-lifecycle checks pass with synthetic OpenCode/model
+  responses. The actual pinned source build and a separate native runtime smoke
+  pass: the production launcher, HTTP/SSE client and Chat Completions adapter
+  perform one approved disposable-file change, correlated tool-result return
+  and session cleanup. Only core/model replies in that native smoke are simulated;
+  this is not model-driven coding or peer execution. Actual inference with an
+  edit/test task, native editor UI proof and platform rollout remain open.
+- [ ] OpenCode public cooperation is connected through an owner-enrolled snapshot
+  and a single-use proxy; the raw public-core socket stays outside the coding
+  namespace. Actual OpenCode custom-tool trials preserve complete/incomplete
+  results, original tool/core task IDs and cancellation/cleanup boundaries, without
+  publishing private history. Those earlier trials simulate model/public-core
+  replies. The real IPC dependency is the separate cooperative-compute candidate
+  `610866b8770b63719ec1f4b4ce6abb6a83a596ef` (PR #178), not current main. Code
+  `b3a4cfe` adds an explicit guest-only native-tool driver against an externally
+  supplied public core, with a synthetic private planner and no simulated public
+  result. Eight focused driver checks and four namespace checks pass. The first
+  joined live-peer trial now establishes original-result roundtrip, but fails
+  answer completeness as described below; dependency integration remains open.
+- [ ] The [OpenCode cooperative topology](COOPERATIVE_CODE.md) now connects that
+  exact `b3a4cfe` driver to the real public service and two model peers, with a
+  separately hash-bound source/runtime bundle. Actual capture/transfer of all 25
+  input files passes; eight fixture, three transfer and four VM-contract checks
+  pass. Actual VM01 on core `938c7f2b` returns the original tool result through
+  OpenCode: two providers, eleven observed workers and eleven confirmed terminal
+  receipts. Execution and cleanup complete, but `incomplete_fragment_answers`
+  produces no complete answer and zero synthesis levels; the trial remains failed.
+  Guest cleanup leaves zero objects and identical guest-network snapshots; QEMU,
+  scratch and SSH listener are removed. The outer raw IPv6-route hash later differs
+  for an unknown reason (no before-table contents retained), so outer-host unchanged
+  is **not** proved. IPv4 and DNS hashes still match. Code `0282ffe`
+  separately preserves primary model-task failures and closed provider counters;
+  the original Qwen VM03 trial failed without a completed coding turn or edit/test,
+  while its VM/private-state cleanup and unchanged host routes/DNS were confirmed.
+  Code `11a7063` prevents automatic regeneration of cleanup-confirmed invalid
+  model output and separates known terminal task failures from runtime cleanup.
+  Forty-one targeted checks and exact-source
+  [Code CI37045053283](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37045053283)
+  pass. Actual pinned OpenCode also passes invalid/truncated-output cases with
+  one coding submission each, zero retries/approvals/edits and confirmed cleanup.
+  These controlled core replies are synthetic, not model-driven edit/test or
+  private-peer execution evidence. The original VM03 remains failed. The single
+  subsequent real-Qwen VM04 on Code `11a7063` also fails: the first native request
+  returns `invalid_output`, with zero retries, approvals, edits or test commands.
+  Private/runtime cleanup, QEMU/scratch removal and checked host routes/DNS pass.
+  The exact malformed output subtype is not retained; coding remains unproved.
+- [ ] Default network cooperation, shared improvement and protected private
+  execution are required across integrations, not optional extras beside local
+  AI. Local subagents/fallback do not fulfill this requirement. The existing
+  public peer broker supports authorized public text tasks, not native Qwen
+  conversation/tool turns or confidential execution. Do not weaken `private_local`
+  or send private history as a public dataset. Core task placement, immune
+  supervision and real confidential execution must be joined and proved; TLS,
+  split tasks and signed RPC receipts do not protect against the executing host.
+
+### Cooperative browser execution
+
+The latest exact-source [run `37052601519`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37052601519)
+on `abb30f34` remains failed: initial protected routing succeeds and four workers are
+observed, but only two of four terminal receipts are retained. One original answer
+reaches EOS and one its token limit; refinement, synthesis and joined browser completion
+remain unproved. Retained-Poll reconciliation fails with `exchange_unconfirmed`; the
+limited client-agent ring records 48 discovery failures but not their underlying reason.
+Normal task cleanup is unconfirmed. Final fixture teardown leaves zero objects and
+identical host-state snapshots; that does not replace missing terminal receipts.
+The candidate retains existing closed discovery reasons and separate provider-lifecycle
+counts without changing TTL, lineage, retry budgets or proof gates. Nineteen focused
+Browser fixture checks pass; no live recovery success is claimed. Original failure
+details and hashes remain in [the scoped evidence record](COOPERATIVE_BROWSER.md).
+
+An independently reproduced listener-lifecycle fault is fixed in the candidate:
+temporary discovery-registration Busy/Timeout preserves the same listener and compute
+registry, retrying on its existing 60-second clock without extending advertisement
+authority. Fatal errors still close it. Two actual TCP/TLS/signed-framing regression
+tests and five relay/policy tests pass, together with formatter and strict agent
+Clippy. This does not establish the earlier run's cause or complete live peer recovery.
+
+The 2026-10-02 integration candidate reconciles this public service with main
+`b51cdb21820453289346f6c4fcc130f951ae4173`, retaining the private-conversation/Qwen
+restrictions and every newer application scenario. Package compilation and 19 focused
+Rust checks pass (five public IPC, six public document/reconciliation, eight private
+conversation); seven cooperative fixture checks, the static topology contract and
+package formatting also pass. These local checks do not resolve the outstanding
+live peer-completion evidence described below.
+
+The exact [run `37021201299`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37021201299)
+on `610866b8` now retains **all 11 original terminal receipts**, reports document
+execution and cleanup complete, and needs no reconciliation. Its covered event
+window contains no allowlisted compute-RPC failures. The joined trial still **fails**:
+answer completion is false and the browser reports `cleanup_unconfirmed` while waiting
+for its first task. The artifact does not retain the observer's original failure reason
+or final wire reply, so causal ordering is not established. Incomplete answers with
+confirmed cleanup are valid browser responses; incompleteness alone does not explain
+this error. Fixture cleanup leaves zero owned objects and identical host snapshots.
+
+The next original [run `37024673305`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37024673305)
+on `0f05c6ad` establishes that the browserdriver had already stopped before the
+observer's final completeness check. Again all eleven terminal receipts and
+cleanup are confirmed; there is no earlier observer scan failure. A concrete
+core defect is now reproduced and fixed in `9b984ad8`: disjoint async capture
+dropped the public execution guard before the backend ran, incorrectly closing
+admission. Two tests using actual `Active::start` failed before the fix; all seven
+public-service tests pass after retaining the complete guard through cleanup.
+This fixes the erroneous cleanup latch, not the separate incomplete-answer
+condition, and is not yet a passed end-to-end browser or Code trial.
+The next browser [run37037361187](https://github.com/VOLPAROSSA/volparossa/actions/runs/37037361187)
+on `c0362ba5` is terminal failed. Its closed diagnostics prove ten of eleven leaf
+answers reached the token limit and one reached EOS; no wire truncation, empty
+output or unknown termination was observed. All eleven receipts and guest cleanup
+are confirmed, but synthesis never starts. ZIP SHA-256:
+`7b17bde4d55293951c4baaacc8632e545a13c235171ae5959ec034cb5d9d7484`.
+The original failure remains unchanged; increasing observation time cannot finish
+already terminal generation. Its unrelated Quality integer-literal failure is
+corrected in `0706aaf6`, with targeted all-target CLI Clippy passing.
+
+The public service candidate now supports `--discover-peers`, reusing authenticated
+core selection before enrollment instead of requiring fixed keys. Twenty-one
+focused checks cover real framed control IPC, rejection/cancellation before any
+execution, retained selection binding and existing service/selector behavior;
+strict CLI/test Clippy passes. Actual executors remain distinct from selected
+peers. Model choice stays operator-selected; this is not automatic model selection,
+cross-job continuation, protected private inference or a live discovered-peer PASS.
+
+A distinct `agent-cooperative-browser-discovered` candidate now joins that selection
+to the same browser/question/consent with the existing pinned 360M profile. It uses
+a literal 4096-byte prefix of the same public README: actual tokenizer preflight
+showed that the old 3840-byte prefix fits in one 1002-token prompt and therefore
+cannot prove two-peer partitioning at this profile. No source repetition is used.
+It requires two actual discovered providers, complete source partitioning and at
+least one complete synthesis level, original receipts, live cancellation and full
+cleanup. Fifteen focused browser checks and eight existing Code fixture checks
+pass, including actual inert launcher selection and closed export validation.
+The original fixed-135M contract and failed artifacts remain unchanged.
+The exact [run37042900209](https://github.com/VOLPAROSSA/volparossa/actions/runs/37042900209)
+on `e04860bc` is terminal failed: two workers and two confirmed terminal receipts,
+one leaf at EOS and one at the generation limit. `incomplete_fragment_answers`
+prevents synthesis and a complete answer; cancellation was not reached. Guest
+private/network cleanup passes with zero remaining objects and identical guest
+network snapshots. Original 19-file artifact ZIP SHA-256:
+`2502bab058dc8a917040f1f7b7b0d8d6686e163d190a7f88bbe52a711fb99bf6`.
+Larger model capacity is not itself an answer-completion or quality claim.
+
+A new explicit `--refine-incomplete` candidate retains the completed original
+answers and repairs only token-limited leaves using two newly tokenized, signed
+source tasks per affected range. Up to sixteen leaves share the existing workflow
+budget, fixed model/cohort, original validity and cancellation. Original receipts
+are immutable; synthesis requires a full, EOS-complete effective frontier.
+Seventy-two targeted document tests pass, including real framed IPC with synthetic
+answers, interrupted child progress, cancellation and offline receipt replay.
+Eighteen browser fixture checks pass, including missing/changed receipt and source
+coverage rejection. The discovered-360M trial enables this candidate; the original
+fixed-135M contract is unchanged. Actual model recovery and the combined browser
+answer/cancellation proof remain unchecked pending a new source-bound live run.
+
+The new **cooperative browser candidate** connects a separate, explicitly public
+Firefox panel to the real `compute public-serve` service and existing signed document /
+peer-synthesis coordinator. Prefill does not submit; rights confirmation and explicit
+public consent are required. The private local compute service is unchanged.
+The `agent-cooperative-browser` disposable scenario pins browser source
+`326ce0f2de2b72ce2769e95ddb8b009d6266f2ae` and ESR 140.16.0. Its independent observer
+requires both real peer workers over the protected route, complete source partitioning,
+multiple synthesis levels, exact retained receipts joined to the displayed answer,
+and cancellation after a second task has a live worker. Only bounded structural evidence
+and hashes are exported. Targeted fixture checks pass; **the combined live KVM proof
+has not yet passed**. This is not private peer inference, correctness of the answer,
+a full Firefox build or complete alpha acceptance. See [the proof contract](COOPERATIVE_BROWSER.md).
+The original [run 36728657126](https://github.com/VOLPAROSSA/volparossa/actions/runs/36728657126)
+on core `7c82fc76` / browser `3c789416` failed in the browser driver before peer payload.
+Cleanup completed and original host-state files were byte-identical. The updated browser
+pin fixes creation of a previously absent consent marker and preserves the original
+failure phase across cleanup; five focused browser checks pass. A corrected source-bound
+live proof remains pending, not retroactively passed.
+
+The next [run `36732938863`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36732938863)
+on core `c8e5b0a2` reaches the first explicitly authorized browser task, then receives
+`cleanup_unconfirmed`. Both selected providers exchange application traffic, but the
+retained evidence does not establish a completed result or distinguish coordinator failure
+from uncertain terminal receipts. All 18 original artifacts remain failed (ZIP SHA-256
+`28b02fb7802d6c28f1752d59ebfb5ffe058fb830123538ec17442e7498bb0adc`); teardown leaves
+zero owned objects and identical host snapshots. A closed diagnostic now retains the
+document stage, typed error/RPC category, local cleanup and receipt-validation stage/counts.
+It exports no prompts, keys, paths or raw errors and does not weaken admission quarantine.
+Three scoped Rust and six fixture tests pass; the next source-exact trial remains pending.
+
+The exact [run `36740238962`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36740238962)
+on `755799dc08270a226044f034bf8ee420f54ad848` again reached the authorized first task.
+Its coordinator returned `Ok`, but retained **six original handles and only five terminal
+receipts**; admission correctly remained `cleanup_unconfirmed`. That diagnostic did not
+record `execution_complete`, so `execution_ok=true` is not proof of a completed answer.
+All 18 originals remain failed (ZIP SHA-256
+`646ea870a53cb759b7cc51814b4685bfefca7d1d5c4402e974a504bd5cf3e58d`); full fixture cleanup
+and identical host snapshots passed. Code inspection found the public backend only scanned
+saved receipts after return: it did not reconcile an abandoned/uncertain original attempt,
+even when a newer attempt had advanced the workflow.
+
+The recovery candidate now polls every exact retained handle lacking a terminal receipt,
+requests cancellation only for an actually running job, and waits for a terminal broker
+observation within one bounded 90-second cleanup budget. Actual correlated observations
+are persisted separately; original handles, workflow results and lease times remain unchanged.
+Missing jobs, unavailable peers, wrong bindings, uncertain final handoffs, Running replies
+and expiry alone never count as terminal evidence. The original all-handles gate still
+decides quarantine. Closed version-2 diagnostics distinguish document/answer completion
+from `Result::Ok` and record reconciliation counts/categories without identities or text.
+The original artifact cannot reveal why its sixth receipt was missing; this fixes the
+demonstrable absent recovery path, not an inferred historical transport cause. Compilation,
+six public-document checks (including three real local framed reconciliation tests), five
+public-service checks and six fixture checks pass. The corrected live trial remains pending.
+
+The following exact [run `36746682885`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36746682885)
+on `3f47bbef16bc78ebf45e5c6e98102e08e6463bb9` still fails the first task. It retains
+six original handles and four terminal receipts; reconciliation attempts both missing
+handles, but each Poll ends `exchange_unconfirmed`, without exhausting its cleanup
+deadline. Both document and answer completion are explicitly false. Full fixture cleanup
+and identical host snapshots pass. This evidence does not identify the failing RPC stage.
+
+Source inspection now establishes a concrete independent transport defect: the helper's
+64-flow ledger counted every flow issued during a route's lifetime, even after its socket
+closed. Its worker path manager already reaped closed flows, but the parent ledger never
+released a slot. The candidate adds descriptor-bound `RetireMptcpFlow`: verify the issued
+kernel socket and context/generation, shut down that exact socket, receive the worker's
+exact ownership-release ACK, then remove the parent's entry. The 64-live-flow limit stays;
+retired handles cannot authorize later subflow mutation. A context-local monotonic prefix
+and existing random capability bytes prevent handle reissue without accumulating retired
+tombstones. The separate 1,024-entry transport-acquire replay bound is unchanged.
+The agent owns pending cleanup and joins it before acquiring another flow or shutting down
+the route; cancellation does not detach a cleanup task. Targeted source tests cover ledger
+slot reuse beyond 64, its simultaneous limit, stale/cross-generation capabilities and
+worker identity binding. A lost retirement ACK remains recoverable after replay-cache
+expiry: an authenticated, absent capability returns only `NotFound`, with no socket or
+worker mutation and no payload-delivery claim. Cancellation or an unconfirmed response
+during socket acquisition marks the route unusable; the route owner destroys it on error
+or next use, while existing hard-expiry cleanup still owns abandoned contexts.
+The agent's four focused ownership/cancellation tests and five helper ledger/absence tests
+pass. A corrected live trial is still pending; the earlier artifacts alone do not prove
+that this defect caused those failures.
+
+The fixture also exports only counts from its allowlisted existing `COMPUTE_RPC_*_FAILED`
+events, with an explicit baseline/ring-coverage indication. Full event records remain
+private and are not collected. Seven focused pure fixture checks, including closed-export
+and invalid-data controls, pass; they do not establish real browser/peer completion.
 
 ### Additional application and autonomous-maintenance scope
 

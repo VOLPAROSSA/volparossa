@@ -1,14 +1,15 @@
 # Exit-side Unbound fallback
 
-The development default is now the bounded private Unbound worker. The source-exact
+The development default on `main` is now the bounded private Unbound worker. The source-exact
 protected DNS cache sequence, native fallback, installed resolver sandbox and complete
-install/upgrade/remove lifecycle pass on `138787d1`. The reciprocal-role route has a
-separate earlier passing proof. Integration with the subsequently merged MPTCP-refill
-milestone is being checked; this is not a release-build or full-alpha claim.
+install/upgrade/remove lifecycle pass again on `c5ac8331`, including the merged MPTCP-refill
+changes. [PR #169](https://github.com/VOLPAROSSA/volparossa/pull/169) is merged as
+`3d9b0d6fc6185c153fbf00d24e2b1ac446df7822`. The reciprocal-role route retains its
+separate earlier passing proof; this is not a release-build or full-alpha claim.
 The earlier failed runs below remain failures with their original scopes. No host DNS,
 routes, firewall, resolver service or trust anchors are changed automatically.
 
-## Private packaged worker candidate
+## Private packaged worker
 
 The private mode removes the listener altogether:
 
@@ -198,8 +199,8 @@ and exposing a loopback listener could give local applications an unprotected DN
 This change adds neither exemption nor firewall bypass. An operator must supply the protected
 Exit-side service boundary before using this option on a reciprocal node.
 
-The intended packaged default requires the private worker above to pass a
-simultaneous Client+Exit datapath proof. Until then the default stays `system`.
+The private packaged default now has the scoped simultaneous Client+Exit datapath
+and development-package proofs recorded below. Explicit `mode: system` remains an opt-out.
 No `resolv.conf` replacement, systemd-resolved change, or automatic package/service activation is
 part of this feature.
 
@@ -530,6 +531,22 @@ This uses source-bound development-staged binaries, not release-build evidence.
 Topology cleanup leaves zero owned objects. Before/after host-state SHA-256 is unchanged:
 `bb473ef29464a9fca6dcedb2a9187be239956aa1ac8e1ac46ed5a8a1050b7853`.
 
+### Integrated repeat after MPTCP refill
+
+[Run `36722534727`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36722534727)
+passes on `c5ac8331073aa48b1c3eb6ca6917eb6f1a7d153b`. All three exact-source checkers
+pass: protected C05 cache sequence, five native private-Unbound cases, and the installed
+resolver/startup proof with complete install/upgrade/remove lifecycle. This repeats the
+scoped DNS/package gates after integrating the MPTCP-refill changes; it is not another
+reciprocal-route test or evidence of a release build.
+
+All 285 original files are retained, ZIP SHA-256
+`2dc48f086c11c7531ea971b513c21df253cd06f1aa8a32ab808a21bc5827dfb8`.
+The guest exits successfully, cleanup leaves zero owned objects, and before/after host-state
+SHA-256 remains `bb473ef29464a9fca6dcedb2a9187be239956aa1ac8e1ac46ed5a8a1050b7853`.
+Earlier failed runs remain failed historical evidence. The separate native preflight,
+protected cache sequence and installed resolver example retain their distinct scopes.
+
 ### Bounded protected DNS connection reuse
 
 The Client can now keep a successful UDP DNS association for subsequent questions about
@@ -588,6 +605,8 @@ ownership, reciprocal-role routing, fastest-source choice, or the complete fallb
 
 The genuine-Unbound signed/unsigned/bogus and timeout/cancellation preflight plus protected
 C05 cache sequence and combined four-role private-Unbound route now have the scoped live
-evidence above. Complete package acceptance, remaining CNAME/NXDOMAIN/expiry cases and
-fastest-source selection still need their relevant evidence. The full fallback request
-remains incomplete; the development default has changed in this candidate, not yet in main.
+evidence above, as does the complete development-package lifecycle. The private-worker
+default is merged into `main`. Release-build acceptance, remaining CNAME/NXDOMAIN/expiry
+cases and live fastest-source comparisons still need their relevant evidence; neither
+the package/cache passes nor the separate reciprocal proof imply full fallback or alpha
+acceptance beyond their recorded scopes.
