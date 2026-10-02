@@ -98,21 +98,86 @@ benchmark_disconnect_route() {
     wait_disconnected
 }
 
+# Image and Cloud keep closed metadata-only archives. Preserve the selection failure
+# branch without exporting raw stderr, addresses, identities or owner data.
+# This observation must never change selection, its retry budget or its result.
+benchmark_image_route_diagnostic() {
+    [ "${image_snapshot:-no}" = yes ] || [ "${cloud_private_file:-no}" = yes ] || return 0
+    benchmark_diagnostic_prefix=image-snapshot
+    if [ "${cloud_private_file:-no}" = yes ]; then benchmark_diagnostic_prefix=cloud-private-file; fi
+    benchmark_diagnostic_retries=$((benchmark_connect_count - 1))
+    [ "$benchmark_diagnostic_retries" -ge 0 ] || benchmark_diagnostic_retries=0
+    if jq -cn --arg stage "$1" --arg reason "$2" \
+        --arg last_connect_reason "$benchmark_connect_reason" \
+        --argjson connect_exit_status "$benchmark_connect_exit" \
+        --argjson attempts "$benchmark_connect_count" --argjson retries "$benchmark_diagnostic_retries" \
+        --argjson redraws "$benchmark_draw" --argjson path_polls "$benchmark_poll" \
+        --argjson path_status "$benchmark_snapshot_status" \
+        '{schema_version:1,stage:$stage,reason:$reason,last_connect_reason:$last_connect_reason,
+          connect_exit_status:$connect_exit_status,attempts:$attempts,retries:$retries,
+          redraws:$redraws,path_polls:$path_polls,path_status:$path_status}' \
+        >"$WORK/$benchmark_diagnostic_prefix-route-diagnostic.part"; then
+        mv -- "$WORK/$benchmark_diagnostic_prefix-route-diagnostic.part" "$WORK/$benchmark_diagnostic_prefix-route-diagnostic.json" || true
+    fi
+    return 0
+}
+
+# Recognize the fixed Connect result codes, including terminal refusals. This is
+# observation only: the narrower transient retry allowlist above is unchanged.
+# Never copy a product error line; unrecognized text may contain private context.
+benchmark_image_connect_reason() {
+    benchmark_connect_reason=UNRECOGNIZED
+    for benchmark_reason in CLIENT_ROLE_DISABLED POLICY_UNAVAILABLE CLIENT_ROUTE_PROFILE_INVALID \
+        CONNECT_ALREADY_IN_PROGRESS PRESELECTION_UNAVAILABLE NO_ELIGIBLE_PATHS \
+        NATIVE_PERMIT_UNAVAILABLE NATIVE_RELAY_READY_UNAVAILABLE NATIVE_HELPER_PREPARE_UNAVAILABLE \
+        NATIVE_PROBE_AUTHORIZE_UNAVAILABLE NATIVE_HELPER_ACTIVATE_UNAVAILABLE \
+        NATIVE_PROBE_START_UNAVAILABLE NATIVE_HELPER_COMMIT_UNAVAILABLE NATIVE_PROBE_PROOF_UNAVAILABLE \
+        NATIVE_SAMPLER_RETIREMENT_UNAVAILABLE NATIVE_REMOTE_RETIREMENT_UNAVAILABLE \
+        NATIVE_TRANSPORT_IDENTITY_UNAVAILABLE ROUTE_ADMISSION_UNAVAILABLE \
+        MPTCP_EXIT_LISTENER_SIGNAL_UNAVAILABLE TRANSPORT_RUNTIME_UNAVAILABLE \
+        UDP_EXIT_SESSION_SIGNAL_UNAVAILABLE UDP_INGRESS_UNAVAILABLE; do
+        case $benchmark_reason in
+            CLIENT_ROLE_DISABLED|CONNECT_ALREADY_IN_PROGRESS) benchmark_result=InvalidState ;;
+            POLICY_UNAVAILABLE) benchmark_result=Policy ;;
+            CLIENT_ROUTE_PROFILE_INVALID) benchmark_result=InvalidRequest ;;
+            NATIVE_SAMPLER_RETIREMENT_UNAVAILABLE) benchmark_result=Helper ;;
+            *) benchmark_result=Unavailable ;;
+        esac
+        if grep -Fx "Error: agent rejected request: $benchmark_reason ($benchmark_result)" "$1" >/dev/null; then
+            benchmark_connect_reason=$benchmark_reason
+            break
+        fi
+    done
+}
+
 benchmark_select_route() {
     benchmark_label=$1
     benchmark_transport=$2
     benchmark_deadline=$(($(date +%s) + 600))
     benchmark_attempt=0
     benchmark_draw=0
+    benchmark_connect_count=0
+    benchmark_connect_exit=null
+    benchmark_connect_reason=NOT_STARTED
+    benchmark_snapshot_status=null
+    benchmark_poll=0
+    benchmark_image_route_diagnostic initialize STARTED
     while [ "$benchmark_attempt" -lt 360 ] && [ "$benchmark_draw" -lt 32 ]; do
         benchmark_remaining=$((benchmark_deadline - $(date +%s)))
-        [ "$benchmark_remaining" -gt 0 ] || return 1
+        if [ "$benchmark_remaining" -le 0 ]; then
+            benchmark_image_route_diagnostic budget DEADLINE_EXHAUSTED
+            return 1
+        fi
+        benchmark_connect_count=$((benchmark_connect_count + 1))
+        benchmark_snapshot_status=null
+        benchmark_poll=0
         if timeout --signal=TERM --kill-after=5s "${benchmark_remaining}s" \
             "$binary_directory/volparossa" \
             --control-socket "$WORK/runtime-${BENCHMARK_NODE:-client}/control/agent.sock" connect \
             --transport "$benchmark_transport" >"$WORK/$benchmark_label-connect.out" \
             2>"$WORK/$benchmark_label-connect.err"; then
-            benchmark_poll=0
+            benchmark_connect_exit=0
+            benchmark_connect_reason=CONNECTED
             while [ "$benchmark_poll" -lt 100 ]; do
                 benchmark_snapshot_status=0
                 benchmark_capture_paths "$benchmark_label" "$benchmark_transport" \
@@ -126,19 +191,49 @@ benchmark_select_route() {
                     jq -c --arg label "$benchmark_label" --argjson draw "$benchmark_draw" \
                         '. + {benchmark:$label,draw:$draw}' \
                         "$WORK/$benchmark_label-selection.json" \
-                        >>"$WORK/benchmark-selection-draws.jsonl" || return 1
+                        >>"$WORK/benchmark-selection-draws.jsonl" || {
+                            benchmark_image_route_diagnostic paths SELECTION_RECORD_FAILED
+                            return 1
+                        }
                     ;;
-                *) return 1 ;;
+                1)
+                    benchmark_image_route_diagnostic paths PATHS_EMPTY
+                    return 1 ;;
+                *)
+                    benchmark_image_route_diagnostic paths PATHS_INVALID_OR_QUERY_FAILED
+                    return 1 ;;
             esac
-            [ "$benchmark_snapshot_status" -ne 0 ] || return 0
+            if [ "$benchmark_snapshot_status" -eq 0 ]; then
+                benchmark_image_route_diagnostic complete SELECTED
+                return 0
+            fi
             # A valid different pair is not a product failure. No application exists yet.
-            benchmark_disconnect_route "$benchmark_label" || return 1
+            benchmark_disconnect_route "$benchmark_label" || {
+                benchmark_image_route_diagnostic disconnect DISCONNECT_FAILED
+                return 1
+            }
             benchmark_draw=$((benchmark_draw + 1))
         else
-            a01_transient_connect_unavailable "$WORK/$benchmark_label-connect.err" || return 1
+            benchmark_connect_exit=$?
+            if [ "${image_snapshot:-no}" = yes ] || [ "${cloud_private_file:-no}" = yes ]; then
+                benchmark_image_connect_reason "$WORK/$benchmark_label-connect.err"
+            fi
+            if ! a01_transient_connect_unavailable "$WORK/$benchmark_label-connect.err"; then
+                case $benchmark_connect_exit in
+                    124|137) benchmark_image_route_diagnostic connect CONNECT_TIMEOUT ;;
+                    *) benchmark_image_route_diagnostic connect CONNECT_REJECTED ;;
+                esac
+                return 1
+            fi
+            benchmark_image_route_diagnostic connect CONNECT_TRANSIENT
         fi
         benchmark_attempt=$((benchmark_attempt + 1))
         sleep 1
     done
+    if [ "$benchmark_draw" -ge 32 ]; then
+        benchmark_image_route_diagnostic budget DRAWS_EXHAUSTED
+    else
+        benchmark_image_route_diagnostic budget ATTEMPTS_EXHAUSTED
+    fi
     return 1
 }

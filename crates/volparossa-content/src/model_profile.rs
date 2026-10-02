@@ -4,7 +4,7 @@ use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
-/// Supported fixed model identities and their bounded public inference contracts.
+/// Supported fixed model identities; each execution mode separately admits profiles.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 pub enum ModelProfile {
     /// Historical 135M profile; omitted selectors retain its exact existing encoding.
@@ -17,6 +17,9 @@ pub enum ModelProfile {
     /// Explicit, inference-only 1.7B profile with CPU BF16 parameters; no 135M adapters.
     #[serde(rename = "smollm2-1.7b-v1")]
     Smol1700,
+    /// Owner-selected BF16/SDPA private tool conversation; no public training/adapter support.
+    #[serde(rename = "qwen3-0.6b-v1")]
+    Qwen600,
 }
 
 /// Immutable identity and bounds, not values supplied by a remote model provider.
@@ -84,20 +87,35 @@ impl ModelProfile {
                 max_output_bytes: 4096,
                 max_rows: 1,
             },
+            Self::Qwen600 => ModelSpec {
+                model_id: "Qwen/Qwen3-0.6B",
+                revision: "c1899de289a04d12100db370d81485cdf75e47ca",
+                weights_bytes: 1_503_300_328,
+                weights_sha256: "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b",
+                prompt_tokens: 12_288,
+                max_new_tokens: 1024,
+                max_output_bytes: 4096,
+                max_rows: 1,
+            },
         }
     }
 
     /// Recognize only a complete exact supported base identity, never a similar model name.
     pub fn from_identity(id: &str, revision: &str, bytes: u64, sha: &str) -> Option<Self> {
-        [Self::Default135, Self::Smol360, Self::Smol1700]
-            .into_iter()
-            .find(|profile| {
-                let spec = profile.spec();
-                id == spec.model_id
-                    && revision == spec.revision
-                    && bytes == spec.weights_bytes
-                    && sha == spec.weights_sha256
-            })
+        [
+            Self::Default135,
+            Self::Smol360,
+            Self::Smol1700,
+            Self::Qwen600,
+        ]
+        .into_iter()
+        .find(|profile| {
+            let spec = profile.spec();
+            id == spec.model_id
+                && revision == spec.revision
+                && bytes == spec.weights_bytes
+                && sha == spec.weights_sha256
+        })
     }
 }
 
@@ -107,6 +125,7 @@ impl fmt::Display for ModelProfile {
             Self::Default135 => "smollm2-135m-v1",
             Self::Smol360 => "smollm2-360m-v1",
             Self::Smol1700 => "smollm2-1.7b-v1",
+            Self::Qwen600 => "qwen3-0.6b-v1",
         })
     }
 }
@@ -119,6 +138,7 @@ impl FromStr for ModelProfile {
             "smollm2-135m-v1" => Ok(Self::Default135),
             "smollm2-360m-v1" => Ok(Self::Smol360),
             "smollm2-1.7b-v1" => Ok(Self::Smol1700),
+            "qwen3-0.6b-v1" => Ok(Self::Qwen600),
             _ => Err("unsupported model profile"),
         }
     }
@@ -135,6 +155,7 @@ mod tests {
             ModelProfile::Default135,
             ModelProfile::Smol360,
             ModelProfile::Smol1700,
+            ModelProfile::Qwen600,
         ] {
             let name = profile.to_string();
             assert_eq!(name.parse::<ModelProfile>().unwrap(), profile);
@@ -170,6 +191,7 @@ mod tests {
             ModelProfile::Default135,
             ModelProfile::Smol360,
             ModelProfile::Smol1700,
+            ModelProfile::Qwen600,
         ] {
             let spec = profile.spec();
             assert_eq!(

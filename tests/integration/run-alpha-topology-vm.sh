@@ -22,8 +22,9 @@ guest_memory_for_scenario() {
     # These fixtures co-locate two 360M providers in one guest. Production
     # per-worker limits and the owner's spare-memory reserve stay unchanged.
     case $scenario in
-        agent-reasoning) printf '8192\n' ;;
-        agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-policy-assessment|agent-cooperative-browser) printf '6144\n' ;;
+        agent-reasoning|agent-private-conversation) printf '8192\n' ;;
+        signal-backup) printf '6144\n' ;;
+        agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-policy-assessment|cloud-private-file|agent-cooperative-browser) printf '6144\n' ;;
         *) printf '4096\n' ;;
     esac
 }
@@ -33,7 +34,7 @@ usage() {
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|private-storage-handoff|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-browser|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment]' \
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment]' \
         '       --package is required only for alpha; --mpquic is unnecessary for standalone Wi-Fi/model/private-browser proofs.'
 }
 
@@ -67,6 +68,24 @@ print_plan() {
             'Cooperative-browser: real Gecko consent UI -> separate public IPC -> two actual 135M peers;' \
             '  real document fragments and hierarchical synthesis over protected MPTCP, scoped live-task cancellation;' \
             '  exact browser source/runtime pins, closed proof exports and full owned-state cleanup.'
+    elif [ "$scenario" = agent-private-conversation ]; then
+        printf '%s\n' \
+            'Private-conversation: exact Code client and pinned Qwen3-0.6B, two genuine model turns;' \
+            '  first a model-selected read_file, then its correlated synthetic-file result and canary answer;' \
+            '  private 5GiB service with swap disabled; unchanged worker/admission bounds and no forced reclaim;' \
+            '  exact isolated inputs, closed diagnostics and full cleanup; not Codex app-server or edit/test proof.'
+    elif [ "$scenario" = browser-network ]; then
+        printf '%s\n' \
+            'Browser-network: pinned Firefox ESR and privileged single-authority adapter, no model;' \
+            '  two explicit owner grants over distinct real scoped MPTCP routes, normal origin TLS;' \
+            '  exact streaming hashes, independent detach, per-path payload and privacy captures;' \
+            '  disposable browser-UID loopback containment, not a product browser kill switch.'
+    elif [ "$scenario" = agent-private-code ]; then
+        printf '%s\n' \
+            'Private-code: exact-commit Node PrivateCompute client to real private-serve and pinned 360M;' \
+            '  one model provision, tiny synthetic-code input and actual isolated model worker;' \
+            '  existing cancellation/owner controls, cleanup after client completion, no raw answer export;' \
+            '  no Codex app-server, editor, tool-calling or general coding-quality claim.'
     elif [ "$scenario" = agent-private-browser ]; then
         printf '%s\n' \
             'Private-browser: exact-commit browser modules, pinned ESR runtime and pinned 360M CPU model;' \
@@ -281,11 +300,35 @@ print_plan() {
             '  actual generic DHT/control-relay discovery and protected MPTCP reconstruction after publisher removal;' \
             '  exact policy-only DNS destinations, isolated Client files, both provider PeerIds and complete privacy/cleanup;' \
             '  cooperative-origin HTTPS same-object complete/missing-ranges cases; no general NAT/browser HTTPS/full-C02 claim.'
+    elif [ "$scenario" = cloud-private-file ]; then
+        printf '%s\n' \
+            'Cloud-private-file: pinned Cloud CLI, authenticated synthetic DAV import and real GPG;' \
+            '  stop the source, use actual protected fragment providers, remove local ciphertext;' \
+            '  stop provider A, restore and decrypt twice, delete every lease and prove cleanup;' \
+            '  no running OpenCloud server, web client or general serverless availability claim.'
+    elif [ "$scenario" = image-snapshot ]; then
+        printf '%s\n' \
+            'Image-snapshot: exact-commit Image CLI and pinned Node 24, with guest-only GnuPG;' \
+            '  encrypt synthetic quiesced snapshot, spread signed fragments across protected MPTCP providers;' \
+            '  lose one provider, restore twice, decrypt into new directories and verify original bytes;' \
+            '  owner keys never go to peers; no running Immich/database restore or mobile/web service claim.'
+    elif [ "$scenario" = private-storage-fragments ]; then
+        printf '%s\n' \
+            'Private-storage-fragments scenario: four signed fragments, two copies across three protected MPTCP providers;' \
+            '  source removal, provider A stopped, two complete B/C reconstructions and unchanged subset-only custody;' \
+            '  exact owned-store reopen, explicit all-copy deletion and original private/host cleanup.'
     elif [ "$scenario" = private-storage-handoff ]; then
         printf '%s\n' \
             'Private-storage-handoff scenario: three pinned providers over ordinary protected MPTCP/TLS;' \
             '  retain pending physical charge, resume A/B -> B/C with verified C restore before Delete(A);' \
             '  independently restore B/C after source removal, bounded six-phase captures and exact cleanup.'
+    elif [ "$scenario" = signal-backup ]; then
+        printf '%s\n' \
+            'Signal-backup: explicitly provision exact chat/Signal/Node/native inputs only inside the disposable guest;' \
+            '  compile offline, run one real Signal encrypted backup export/import under an app UID and Xvfb;' \
+            '  use two real storage peers through protected relay paths; no direct provider or Internet app traffic;' \
+            '  retain closed sanitized proof only, never raw native logs, grants, keys or backup content;' \
+            '  32 GiB disposable disk; no Signal account, independent-hardware or full-alpha claim.'
     elif [ "$scenario" = private-storage-replicas ]; then
         printf '%s\n' \
             'Private-storage-replicas scenario: two independently pinned stores over normal protected MPTCP/TLS;' \
@@ -401,7 +444,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|private-storage-handoff|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-browser|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --image)
@@ -462,7 +505,7 @@ case $image_path:$output_directory in
     *) exit 64 ;;
 esac
 if [ "$scenario" = alpha ] && [ -z "$package_path" ]; then usage >&2; exit 64; fi
-if [ "$scenario" != wifi-mesh ] && [ "$scenario" != agent-training ] && [ "$scenario" != agent-owner-priority ] && [ "$scenario" != agent-owner-cancel ] && [ "$scenario" != agent-private-task ] && [ "$scenario" != agent-private-browser ] && [ "$scenario" != agent-reasoning ] && [ -z "$mpquic_path" ]; then usage >&2; exit 64; fi
+if [ "$scenario" != wifi-mesh ] && [ "$scenario" != agent-training ] && [ "$scenario" != agent-owner-priority ] && [ "$scenario" != agent-owner-cancel ] && [ "$scenario" != agent-private-task ] && [ "$scenario" != agent-private-code ] && [ "$scenario" != agent-private-conversation ] && [ "$scenario" != agent-private-browser ] && [ "$scenario" != agent-reasoning ] && [ -z "$mpquic_path" ]; then usage >&2; exit 64; fi
 case $mpquic_path in ''|/*) ;; *) exit 64 ;; esac
 case $package_path in ''|/*) ;; *) exit 64 ;; esac
 case $expected_commit in ''|*[!0-9a-f]*) exit 64 ;; esac
@@ -595,7 +638,9 @@ GUEST_DRIVER=$RUN_DIRECTORY/guest-driver.sh
 GUEST_DIAGNOSTICS=$RUN_DIRECTORY/guest-diagnostics.py
 CONSOLE=$RUN_DIRECTORY/console.log
 
-qemu-img create -q -f qcow2 -F qcow2 -b "$image_path" "$OVERLAY" 16G
+guest_disk_size=16G
+[ "$scenario" != signal-backup ] || guest_disk_size=32G
+qemu-img create -q -f qcow2 -F qcow2 -b "$image_path" "$OVERLAY" "$guest_disk_size"
 ssh-keygen -q -t ed25519 -N '' -C volparossa-alpha-kvm-user -f "$SSH_KEY"
 ssh-keygen -q -t ed25519 -N '' -C volparossa-alpha-kvm-host -f "$HOST_KEY"
 GUEST_PUBLIC_KEY=$(cat "$SSH_KEY.pub")
@@ -765,6 +810,38 @@ HANDOFF_NAMES = {"a01-expected-peers.json"} | {
     *(f"private-storage-handoff-{phase}-privacy-{role}.json"
       for role in ("client", "relay0", "relay1", "relay2", "exit")),
 )}
+SIGNAL_NAMES = {"a01-expected-peers.json", "signal-backup-provision.json",
+                "host-state-before.json", "host-state-after.json", "guest-exit-status", "current-phase"} | {
+    f"signal-backup-{name}.json" for name in (
+        "smoke", "evidence", "prepare", "native", "finish", "deleted_usage", "private_cleanup",
+        "isolation", "layout", "guard", "native-live-selection", "native-gates")
+} | {"content-provider-signal-backup-native-control.json"} | {
+    f"signal-backup-native-privacy-{role}.json" for role in ("client", "relay0", "relay1", "relay2", "exit")
+}
+
+
+FRAGMENTS_NAMES = {"a01-expected-peers.json"} | {
+    f"private-storage-fragments-{name}.json" for name in (
+        "smoke", "evidence", "prepare", "upload", "restore", "finish", "withdrawal",
+        "isolation", "layout", "uploaded_usage", "restored_usage", "deleted_usage", "private_cleanup")
+} | {name for phase in ("upload", "restore", "finish") for name in (
+    f"private-storage-fragments-{phase}-live-selection.json",
+    f"private-storage-fragments-{phase}-gates.json",
+    f"content-provider-adaptive-private-storage-fragments-{phase}-control.json",
+    *(f"private-storage-fragments-{phase}-privacy-{role}.json"
+      for role in ("client", "relay0", "relay1", "relay2", "exit")),
+)}
+
+
+IMAGE_NAMES = (FRAGMENTS_NAMES - {"private-storage-fragments-smoke.json", "private-storage-fragments-evidence.json"}) | {
+    "image-snapshot-smoke.json", "image-snapshot-evidence.json", "image-snapshot-provision.json",
+    "image-snapshot-route-diagnostic.json",
+}
+
+CLOUD_NAMES = (FRAGMENTS_NAMES - {"private-storage-fragments-smoke.json", "private-storage-fragments-evidence.json"}) | {
+    "cloud-private-file-smoke.json", "cloud-private-file-evidence.json", "cloud-private-file-provision.json",
+    "cloud-private-file-route-diagnostic.json",
+}
 
 
 COOPERATIVE_BROWSER_NAMES = {f"agent-cooperative-browser-{name}.json" for name in (
@@ -831,10 +908,24 @@ def collect(home, opt, revision, scenario, guest_status,
     entries = []
     seen_sources = set()
     total = 0
+    browser_names = set()
+    if scenario == "browser-network":
+        # The exact source archive supplies a closed metadata-only export list;
+        # never fall back to the generic agent/content log globs for this scenario.
+        browser_names = {"browser-network-smoke.json"}
+        try:
+            result = subprocess.run(["/usr/bin/python3", "-B", str(home / "source/tests/integration/browser-network-smoke.py"),
+                                     "export-names"], capture_output=True, timeout=5, check=True)
+            names = result.stdout.decode("ascii").splitlines()
+            if (len(result.stdout) <= 4096 and 1 <= len(names) <= 32 and len(set(names)) == len(names)
+                    and all(re.fullmatch(r"browser-network-[a-z0-9-]+\.json", name) for name in names)):
+                browser_names.update(names)
+        except (OSError, UnicodeError, subprocess.SubprocessError):
+            pass
     file_count_limit = 128 if scenario in ("agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation", "agent-policy-assessment") else FILE_COUNT_LIMIT
     if scenario == "agent-autonomous-aggregation":
         file_count_limit = 192
-    if scenario in ("reciprocity-private-dns", "private-storage-handoff"):
+    if scenario in ("reciprocity-private-dns", "private-storage-handoff", "private-storage-fragments", "image-snapshot", "cloud-private-file"):
         # Bounded DNS and six-phase custody evidence exceed the default file count.
         file_count_limit = 128
     candidates = [(home / name, f"driver/{name}") for name in
@@ -842,6 +933,18 @@ def collect(home, opt, revision, scenario, guest_status,
                    "package-lifecycle.stdout", "package-lifecycle.stderr")]
     if scenario == "agent-cooperative-browser":
         candidates = [(home / "guest-phase.txt", "driver/guest-phase.txt")]
+    if scenario == "signal-backup":
+        # Never collect raw native/runner/build logs or arbitrary content-* files.
+        candidates = [(home / "guest-phase.txt", "driver/guest-phase.txt"),
+                      (home / "signal-backup-runtime/provision.json", "driver/signal-backup-provision.json")]
+    if scenario == "agent-private-conversation":
+        candidates = [(home / name, f"driver/{name}") for name in ("guest-phase.txt", "cargo-build.log")]
+    if scenario in ("private-storage-fragments", "image-snapshot", "cloud-private-file"):
+        candidates = [(home / "guest-phase.txt", "driver/guest-phase.txt")]
+        if scenario == "image-snapshot":
+            candidates.append((opt / "volparossa-image/provision.json", "driver/image-snapshot-provision.json"))
+        elif scenario == "cloud-private-file":
+            candidates.append((opt / "volparossa-cloud/provision.json", "driver/cloud-private-file-provision.json"))
     roots = [(home / "alpha-output", "published")]
     for path in sorted(opt.glob("va.*"))[:32]:
         if not path.is_symlink() and path.is_dir() and re.fullmatch(r"va\.[0-9a-f]{32}\.[A-Za-z0-9]{6}", path.name):
@@ -854,6 +957,27 @@ def collect(home, opt, revision, scenario, guest_status,
         if scenario == "agent-cooperative-browser":
             candidates.extend((root / name, f"{label}/{name}") for name in sorted(COOPERATIVE_BROWSER_NAMES))
             continue
+        if scenario == "signal-backup":
+            candidates.extend((root / name, f"{label}/{name}") for name in sorted(SIGNAL_NAMES))
+            continue
+        if scenario == "agent-private-conversation":
+            # The owned private root, prompts, raw model answers and client logs are never scanned.
+            if label == "published":
+                candidates.extend((root / name, f"{label}/{name}") for name in (
+                    "agent-private-conversation-smoke.json", "host-state-before.json", "host-state-after.json",
+                    "current-phase", "guest-exit-status", "runner.stdout", "runner.stderr"))
+            continue
+        if scenario == "browser-network":
+            selected = browser_names | {"current-phase", "guest-exit-status",
+                                        "host-state-before.json", "host-state-after.json"}
+            candidates.extend((root / name, f"{label}/{name}") for name in sorted(selected))
+            continue
+        if scenario in ("private-storage-fragments", "image-snapshot", "cloud-private-file"):
+            names = CLOUD_NAMES if scenario == "cloud-private-file" else IMAGE_NAMES if scenario == "image-snapshot" else FRAGMENTS_NAMES
+            candidates.extend((root / name, f"{label}/{name}") for name in sorted(names))
+            candidates.extend((root / name, f"{label}/{name}") for name in
+                              ("host-state-before.json", "host-state-after.json", "guest-exit-status"))
+            continue  # No raw logs, generic globs, private journals, grants or owner data.
         if scenario == "private-storage-handoff":
             candidates.extend((root / name, f"{label}/{name}") for name in sorted(HANDOFF_NAMES))
             candidates.extend((root / name, f"{label}/{name}") for name in sorted(HANDOFF_DIAGNOSTIC_NAMES))
@@ -941,6 +1065,14 @@ def collect(home, opt, revision, scenario, guest_status,
                 "agent-private-task-answer.json", "agent-private-task-owner_controls.json",
                 "agent-private-task-stdout_boundary.json", "agent-private-task-provision.log",
                 "agent-private-task-result_boundary.json", "agent-private-task-private_service.json"))
+        if scenario == "agent-private-code":
+            candidates.extend((root / name, f"{label}/{name}") for name in (
+                "agent-private-code-smoke.json", "agent-private-code-provision.json",
+                "agent-private-code-client.json", "agent-private-code-answer.json",
+                "agent-private-task-provision.json", "agent-private-task-provision.log",
+                "agent-private-task-isolation.json", "agent-private-task-snapshot.json",
+                "agent-private-task-owner_controls.json", "agent-private-task-result_boundary.json",
+                "agent-private-task-private_service.json"))
         if scenario == "agent-private-browser":
             # Only the separate empty-profile startup log is public diagnostic data.
             # Never export the combined private session's log/profile or raw answer.
@@ -969,10 +1101,14 @@ def collect(home, opt, revision, scenario, guest_status,
         if path in seen_sources:
             continue
         seen_sources.add(path)
-        observed = read_tail(path, min(FILE_LIMIT, TOTAL_LIMIT - total))
+        per_file = 1048576 if scenario == "browser-network" and path.name == "browser-network-evidence.json" else FILE_LIMIT
+        observed = read_tail(path, min(per_file, TOTAL_LIMIT - total))
         if observed is None:
             continue
         data, original_size = observed
+        if scenario == "browser-network" and path.name in browser_names and original_size > len(data):
+            # A truncated JSON tail is not reconstructible structured evidence.
+            continue
         # Retain only the explicitly allowlisted non-secret fixture outputs, never keys/configs.
         if re.search(br"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", data):
             continue
@@ -1010,7 +1146,7 @@ if __name__ == "__main__":
     if len(sys.argv) != 4 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sys.argv[1]):
         raise SystemExit(64)
     if sys.argv[2] not in ("alpha", "datapath", "reciprocity", "reciprocity-private-dns", "local-link", "mixed-link", "mpquic-growth", "mptcp-growth", "mptcp-refill",
-                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "private-storage-peer", "private-storage-replicas", "private-storage-handoff", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel", "agent-private-task", "agent-private-browser", "agent-reasoning", "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-artifact-quarantine", "agent-jobs", "agent-jobs-loss", "agent-jobs-follow", "agent-jobs-peer-recovery", "agent-jobs-ready-queue", "agent-jobs-package-queue", "agent-public-task", "agent-public-document", "agent-cooperative-browser", "agent-public-collection", "agent-public-network-sources", "agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation", "agent-policy-assessment"):
+                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "private-storage-peer", "private-storage-replicas", "signal-backup", "private-storage-handoff", "private-storage-fragments", "image-snapshot", "cloud-private-file", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel", "agent-private-task", "agent-private-code", "agent-private-conversation", "agent-private-browser", "browser-network", "agent-reasoning", "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-artifact-quarantine", "agent-jobs", "agent-jobs-loss", "agent-jobs-follow", "agent-jobs-peer-recovery", "agent-jobs-ready-queue", "agent-jobs-package-queue", "agent-public-task", "agent-public-document", "agent-cooperative-browser", "agent-public-collection", "agent-public-network-sources", "agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation", "agent-policy-assessment"):
         raise SystemExit(64)
     status_code = int(sys.argv[3])
     if not 0 <= status_code <= 255 or socket.gethostname() != "volparossa-alpha" or os.geteuid() != 0:
@@ -1037,7 +1173,7 @@ source_sha256=$2
 mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
-case $scenario in alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|private-storage-handoff|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-browser|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) exit 64 ;; esac
+case $scenario in alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
 guest_phase verify-source
@@ -1049,6 +1185,22 @@ if [ "$scenario" = agent-reasoning ]; then
     tar -xzf source.tar.gz
     cd source
     exec sh tests/integration/agent-reasoning-smoke.sh --execute --yes --expected-commit "$expected_commit"
+fi
+if [ "$scenario" = agent-private-conversation ]; then
+    guest_phase agent-private-conversation
+    test "$(hostname)" = volparossa-alpha
+    test "$(systemd-detect-virt)" = kvm
+    tar -xzf source.tar.gz
+    cd source
+    exec sh tests/integration/agent-private-conversation.sh --execute --yes --expected-commit "$expected_commit"
+fi
+if [ "$scenario" = agent-private-code ]; then
+    guest_phase agent-private-code
+    test "$(hostname)" = volparossa-alpha
+    test "$(systemd-detect-virt)" = kvm
+    tar -xzf source.tar.gz
+    cd source
+    exec sh tests/integration/agent-private-task-smoke.sh --execute --yes --expected-commit "$expected_commit" --code
 fi
 if [ "$scenario" = agent-private-browser ]; then
     guest_phase agent-private-browser
@@ -1100,15 +1252,27 @@ sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
     --yes --no-install-recommends \
     build-essential ca-certificates cargo cmake dbus git iproute2 iputils-ping jq \
     nftables pkg-config python3 rustc sudo util-linux wireguard-tools
+if [ "$scenario" = signal-backup ]; then
+    sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+        bubblewrap xvfb xauth libgtk-3-0t64 libnss3 libnspr4 libgbm1 libasound2t64 \
+        libpulse0 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libcups2t64 \
+        libx11-6 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libxcb1 \
+        libxkbcommon0 libdrm2 libxshmfence1 fonts-dejavu-core
+fi
 if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-train-cycle ] || [ "$scenario" = agent-train-loop ] || [ "$scenario" = agent-artifact-quarantine ] || [ "$scenario" = agent-jobs ] || [ "$scenario" = agent-jobs-loss ] || [ "$scenario" = agent-jobs-follow ] || [ "$scenario" = agent-jobs-peer-recovery ] || [ "$scenario" = agent-jobs-ready-queue ] || [ "$scenario" = agent-jobs-package-queue ] || [ "$scenario" = agent-public-task ] || [ "$scenario" = agent-public-document ] || [ "$scenario" = agent-cooperative-browser ] || [ "$scenario" = agent-public-collection ] || [ "$scenario" = agent-public-network-sources ] || [ "$scenario" = agent-task-graph ] || [ "$scenario" = agent-ready-dag ] || [ "$scenario" = agent-model-planning ] || [ "$scenario" = agent-model-task-graph ] || [ "$scenario" = agent-successor-serving ] || [ "$scenario" = agent-active-recovery ] || [ "$scenario" = agent-adapter-aggregation ] || [ "$scenario" = agent-autonomous-aggregation ] || [ "$scenario" = agent-policy-assessment ]; then
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends python3-venv bubblewrap
 fi
 if [ "$scenario" = agent-public-network-sources ]; then
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends openssl
 fi
-if [ "$scenario" = agent-cooperative-browser ]; then
+if [ "$scenario" = image-snapshot ] || [ "$scenario" = cloud-private-file ]; then
+    sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends gpg gpg-agent gpgconf tar
+fi
+if [ "$scenario" = agent-cooperative-browser ] || [ "$scenario" = browser-network ] || [ "$scenario" = cloud-private-file ]; then
+    # Exact pinned ESR is extracted separately, not installed; these are its
+    # ordinary Debian dependencies plus the isolated browser/HTTPS fixture tools.
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
-        libasound2t64 libatk1.0-0t64 libc6 libcairo-gobject2 libcairo2 libdbus-1-3 \
+        bubblewrap openssl libasound2t64 libatk1.0-0t64 libc6 libcairo-gobject2 libcairo2 libdbus-1-3 \
         libevent-2.1-7t64 libffi8 libfontconfig1 libfreetype6 libgcc-s1 libgdk-pixbuf-2.0-0 \
         libglib2.0-0t64 libgtk-3-0t64 libnspr4 libpango-1.0-0 libstdc++6 libvpx9 libx11-6 \
         libx11-xcb1 libxcb-shm0 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 \
@@ -1134,7 +1298,25 @@ tar -xzf source.tar.gz
 cd source
 test -x tests/integration/kvm-alpha-topology.sh
 test -x tests/packaging/debian13-package-lifecycle.sh
+if [ "$scenario" = signal-backup ]; then
+    guest_phase signal-backup-provision
+    python3 -B tests/integration/signal-backup-provision.py provision \
+        /home/vpci/signal-backup-runtime --download
+elif [ "$scenario" = image-snapshot ]; then
+    guest_phase image-runtime-provision
+    sudo -n python3 -B tests/integration/image-snapshot-provision.py provision --download
+elif [ "$scenario" = cloud-private-file ]; then
+    guest_phase cloud-runtime-provision
+    sudo -n python3 -B tests/integration/cloud-private-file-provision.py provision --download
+elif [ "$scenario" = browser-network ]; then
+    guest_phase browser-network-provision
+    sudo -n runuser -u vpci -- python3 -B tests/integration/browser-network-provision.py \
+        provision /home/vpci/browser-network-runtime
+fi
 guest_phase build
+# The 4-GiB guest cannot compile three large Rust crates concurrently. This bounds
+# build resources only; runtime limits and the storage acceptance checks are unchanged.
+export CARGO_BUILD_JOBS=2
 CARGO_TARGET_DIR=/home/vpci/target cargo build --locked \
     -p volparossa --bin volparossa \
     -p volparossa-agent --bin volparossa-agent \
@@ -1222,10 +1404,18 @@ printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-stat
 fi
 
 topology_scenario=alpha
-case $scenario in reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|private-storage-handoff|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-browser|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) topology_scenario=$scenario ;; esac
+case $scenario in reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) topology_scenario=$scenario ;; esac
 guest_phase topology
+set --
+if [ "$scenario" = image-snapshot ]; then
+    set -- IMAGE_SOURCE=/opt/volparossa-image IMAGE_NODE=/opt/volparossa-node/bin/node \
+        IMAGE_REVISION=e177afebabd99ac0773de2a73d60275346a5de52
+elif [ "$scenario" = cloud-private-file ]; then
+    set -- CLOUD_SOURCE=/opt/volparossa-cloud CLOUD_NODE=/opt/volparossa-node/bin/node \
+        CLOUD_REVISION=63bba5d1163a69e1ee6b4218c9e7462d941f22f7
+fi
 set +e
-sudo -n -- ./tests/integration/kvm-alpha-topology.sh \
+sudo -n -- env "$@" ./tests/integration/kvm-alpha-topology.sh \
     --execute --yes \
     --source /home/vpci/source \
     --bin /home/vpci/target/debug \
@@ -1238,6 +1428,11 @@ sudo -n -- ./tests/integration/kvm-alpha-topology.sh \
 topology_status=$?
 set -e
 guest_phase archive
+if [ "$scenario" = image-snapshot ]; then
+    sudo -n cp -- /opt/volparossa-image/provision.json /home/vpci/alpha-output/image-snapshot-provision.json
+elif [ "$scenario" = cloud-private-file ]; then
+    sudo -n cp -- /opt/volparossa-cloud/provision.json /home/vpci/alpha-output/cloud-private-file-provision.json
+fi
 if [ "$scenario" = dns-cache ] || [ "$scenario" = reciprocity-private-dns ]; then
     for retained in private-unbound-proof.json private-unbound-build.log \
         private-unbound-package.json private-unbound-package-lifecycle.json; do
@@ -1263,6 +1458,34 @@ if [ "$scenario" = agent-cooperative-browser ]; then
         fi
     done </home/vpci/cooperative-export.list
     tar -C /home/vpci/alpha-output -czf /home/vpci/alpha-output.tar.gz -T "$export_list"
+elif [ "$scenario" = signal-backup ]; then
+    # The exact closed receipt files are the entire artifact surface, on failure too.
+    cp -- /home/vpci/signal-backup-runtime/provision.json /home/vpci/alpha-output/signal-backup-provision.json
+    {
+        python3 -B tests/integration/signal-backup-smoke.py export-names
+        printf '%s\n' signal-backup-provision.json host-state-before.json host-state-after.json guest-exit-status current-phase
+    } | sort -u | while IFS= read -r name; do
+        case $name in ''|*[!a-z0-9_.-]*) exit 1 ;; esac
+        candidate=/home/vpci/alpha-output/$name
+        if [ -f "$candidate" ] && [ ! -L "$candidate" ]; then
+            [ "$(stat -Lc '%s' "$candidate")" -le 131072 ] || exit 1
+            printf '%s\n' "$name"
+        fi
+    done >/home/vpci/signal-backup-export.list
+    tar -C /home/vpci/alpha-output -czf /home/vpci/alpha-output.tar.gz -T /home/vpci/signal-backup-export.list
+elif [ "$scenario" = private-storage-fragments ] || [ "$scenario" = image-snapshot ] || [ "$scenario" = cloud-private-file ]; then
+    {
+        python3 -B "tests/integration/$scenario-smoke.py" export-names
+        printf '%s\n' host-state-before.json host-state-after.json guest-exit-status
+    } | while IFS= read -r retained; do
+        case $retained in */*|'') exit 1 ;; esac
+        retained_path=/home/vpci/alpha-output/$retained
+        if [ -f "$retained_path" ] && [ ! -L "$retained_path" ]; then
+            [ "$(wc -c <"$retained_path")" -le 1048576 ] || exit 1
+            printf '%s\n' "$retained"
+        fi
+    done >/home/vpci/fragment-export.list
+    tar -C /home/vpci/alpha-output -czf /home/vpci/alpha-output.tar.gz -T /home/vpci/fragment-export.list
 else
     tar -C /home/vpci/alpha-output -czf /home/vpci/alpha-output.tar.gz .
 fi
@@ -1282,7 +1505,7 @@ if [ "$guest_memory_mib" -gt 4096 ]; then
     runner_available_kib=$(awk '$1 == "MemAvailable:" && $3 == "kB" {print $2; found++} END {if (found != 1) exit 1}' /proc/meminfo)
     case $runner_available_kib in ''|*[!0-9]*) exit 69 ;; esac
     if [ "$runner_available_kib" -lt "$(((guest_memory_mib + 1024) * 1024))" ]; then
-        printf '%s\n' 'insufficient runner memory for two 360M fixture providers; worker protection remains enabled' >&2
+        printf '%s\n' 'insufficient runner memory for the selected isolated fixture plus host reserve' >&2
         exit 69
     fi
 fi
@@ -1401,6 +1624,9 @@ ssh_base chmod 0700 /home/vpci/guest-driver.sh
 
 set +e
 driver_time_bound=2400s
+# Includes source-building the original UI and two extra real peer-backed downloads.
+# Application exchange/lease bounds remain unchanged.
+[ "$scenario" != cloud-private-file ] || driver_time_bound=3600s
 # This scenario has a 1800s owner bound plus actual isolated guest provisioning/build.
 # Only the enclosing VM-driver window changes, never worker or source authorization.
 [ "$scenario" != agent-jobs-peer-recovery ] || driver_time_bound=3600s
@@ -1417,10 +1643,13 @@ driver_time_bound=2400s
 [ "$scenario" != agent-adapter-aggregation ] || driver_time_bound=3600s
 [ "$scenario" != agent-autonomous-aggregation ] || driver_time_bound=7200s
 [ "$scenario" != agent-private-task ] || driver_time_bound=3600s
+[ "$scenario" != agent-private-code ] || driver_time_bound=4200s
+[ "$scenario" != agent-private-conversation ] || driver_time_bound=3900s
 [ "$scenario" != agent-private-browser ] || driver_time_bound=4200s
 [ "$scenario" != agent-cooperative-browser ] || driver_time_bound=4800s
 [ "$scenario" != agent-reasoning ] || driver_time_bound=4200s
 [ "$scenario" != agent-policy-assessment ] || driver_time_bound=3600s
+[ "$scenario" != signal-backup ] || driver_time_bound=7200s
 ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
     "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario"
 GUEST_STATUS=$?
@@ -1458,7 +1687,9 @@ if grep -aERq -- '-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----' "$output_directory"
     printf '%s\n' 'refusing topology output containing private-key material' >&2
     exit 1
 fi
-install -m 0600 "$CONSOLE" "$output_directory/vm-console.log"
+if [ "$scenario" != signal-backup ]; then
+    install -m 0600 "$CONSOLE" "$output_directory/vm-console.log"
+fi
 ssh_base sudo -n systemctl poweroff >/dev/null 2>&1 || true
 wait "$QEMU_PID" || true
 QEMU_PID=

@@ -3,6 +3,7 @@
 import importlib.util
 import copy
 import json
+import re
 from pathlib import Path
 import socket
 import struct
@@ -260,6 +261,109 @@ printf '{"draws":%s,"disconnected":%s}\n' "$draws" "$disconnected"
                                       text=True, capture_output=True)
             self.assertEqual(exhausted.returncode, 1)
             self.assertEqual(len(Path(directory, "benchmark-selection-draws.jsonl").read_text().splitlines()), 34)
+
+    def test_image_route_diagnostic_is_typed_and_does_not_change_selection_results(self):
+        # Shell contract only, not evidence that a real route was established.
+        script = r'''
+set -eu
+. "$1/benchmark-selection.sh"
+WORK=$2; mode=$3; image_snapshot=$4
+binary_directory=/unused; source_directory=/unused
+date() { printf '0\n'; }
+sleep() { :; }
+timeout() {
+    case "$mode" in
+        unknown)
+            printf '%s\n' 'PRIVATE token=secret 192.0.2.99 prompt=private' >&2
+            return 9 ;;
+        deadline) return 124 ;;
+        terminal)
+            printf '%s\n' 'Error: agent rejected request: NO_ELIGIBLE_PATHS (Unavailable)' >&2
+            return 1 ;;
+        retry)
+            if [ "$benchmark_connect_count" -eq 1 ]; then
+                printf '%s\n' 'Error: agent rejected request: NATIVE_PERMIT_UNAVAILABLE (Unavailable)' >&2
+                return 1
+            fi ;;
+    esac
+    return 0
+}
+benchmark_capture_paths() {
+    case "$mode" in invalid) return 3 ;; empty) return 1 ;; esac
+    printf '{"synthetic_contract":true}\n' >"$WORK/$1-selection.json"
+    return 0
+}
+result=0
+benchmark_select_route private-storage-fragments mptcp || result=$?
+printf '%s\n' "$result"
+'''
+        cases = (("unknown", 1, "connect", "CONNECT_REJECTED", 9, 1),
+                 ("terminal", 1, "connect", "CONNECT_REJECTED", 1, 1),
+                 ("deadline", 1, "connect", "CONNECT_TIMEOUT", 124, 1),
+                 ("invalid", 1, "paths", "PATHS_INVALID_OR_QUERY_FAILED", 0, 1),
+                 ("empty", 1, "paths", "PATHS_EMPTY", 0, 1),
+                 ("retry", 0, "complete", "SELECTED", 0, 2),
+                 ("success", 0, "complete", "SELECTED", 0, 1))
+        fields = {"schema_version", "stage", "reason", "last_connect_reason", "connect_exit_status",
+                  "attempts", "retries", "redraws", "path_polls", "path_status"}
+        for mode, status, stage, reason, connect_exit, attempts in cases:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(
+                    prefix="image-route-diagnostic-", dir=HERE) as directory:
+                command = ["sh", "-c", script, "test", str(HERE), directory, mode]
+                outcome = subprocess.run([*command, "yes"], check=True, text=True,
+                    capture_output=True, timeout=10, env={"PATH": "/usr/bin:/bin"})
+                self.assertEqual(int(outcome.stdout), status)
+                path = Path(directory, "image-snapshot-route-diagnostic.json")
+                encoded = path.read_text()
+                record = json.loads(encoded)
+                self.assertEqual(set(record), fields)
+                self.assertEqual(record["stage"], stage)
+                self.assertEqual(record["reason"], reason)
+                self.assertEqual(record["connect_exit_status"], connect_exit)
+                self.assertEqual(record["attempts"], attempts)
+                self.assertEqual(record["retries"], attempts - 1)
+                if mode == "terminal":
+                    self.assertEqual(record["last_connect_reason"], "NO_ELIGIBLE_PATHS")
+                self.assertLess(len(encoded), 1024)
+                for private in ("PRIVATE", "token", "secret", "192.0.2.99", "prompt", directory):
+                    self.assertNotIn(private, encoded)
+                if mode == "empty":
+                    self.assertEqual(record["path_polls"], 100)
+                    self.assertEqual(record["path_status"], 1)
+                path.unlink()
+                ordinary = subprocess.run([*command, "no"], check=True, text=True,
+                    capture_output=True, timeout=10, env={"PATH": "/usr/bin:/bin"})
+                self.assertEqual(int(ordinary.stdout), status)
+                self.assertFalse(path.exists())
+
+    def test_image_connect_diagnostic_keeps_only_allowlisted_native_reason(self):
+        script = r'''
+set -eu
+. "$1/benchmark-selection.sh"
+benchmark_image_connect_reason "$2"
+printf '%s\n' "$benchmark_connect_reason"
+'''
+        with tempfile.TemporaryDirectory(prefix="image-route-reason-", dir=HERE) as directory:
+            source = Path(directory, "synthetic.err")
+            # Exercise every fixed refusal from the actual typed Connect dispatch,
+            # without pretending that synthetic error text proves a runtime cause.
+            control = (HERE.parents[1] / "crates/volparossa-agent/src/control.rs").read_text()
+            connect = control.split("async fn connect_response(", 1)[1].split(
+                "\nfn requested_connect_profile(", 1)[0]
+            codes = {(result, code) for result, code in re.findall(
+                r'ControlResult::(\w+),\s*"([A-Z_]+)"', connect) if result != "Ok"}
+            self.assertEqual(len(codes), 22)
+            cases = [(f"Error: agent rejected request: {code} ({result})\n", code)
+                     for result, code in sorted(codes)]
+            cases.extend(((
+                    "Error: agent rejected request: NO_ELIGIBLE_PATHS (Helper)\n", "UNRECOGNIZED"), (
+                    "Error: agent rejected request: PRIVATE_ADDRESS_TOKEN (Unavailable)\n", "UNRECOGNIZED"), (
+                    "NATIVE_PERMIT_UNAVAILABLE secret=private\n", "UNRECOGNIZED")))
+            for text, expected in cases:
+                source.write_text(text)
+                result = subprocess.run(["sh", "-c", script, "test", str(HERE), str(source)],
+                    check=True, text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.stdout.strip(), expected)
 
 
 class A07FreshRouteTests(unittest.TestCase):

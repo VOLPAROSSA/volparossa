@@ -2,11 +2,50 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-30
+Last updated: 2026-10-02
 
 ## Current integration and active work
 
+### OpenCode migration and network-first compute
+
+- [ ] User-selected OpenCode foundation replaces Codex for `volparossa-code`.
+  [Code PR #5](https://github.com/VOLPAROSSA/volparossa-code/pull/5), source
+  `ed1209b` on `feature/opencode-integration`, wires the editor to pinned OpenCode
+  v1.18.34 (`aec0b9a6d8898f68f923aaf08b7306d931fd9d76`), HTTP/SSE sessions,
+  Chat Completions and the existing typed private-conversation service. Seventy-six
+  focused adapter/editor/cooperative/owner-lifecycle checks pass with synthetic OpenCode/model
+  responses. The actual pinned source build and a separate native runtime smoke
+  pass: the production launcher, HTTP/SSE client and Chat Completions adapter
+  perform one approved disposable-file change, correlated tool-result return
+  and session cleanup. Only core/model replies in that native smoke are simulated;
+  this is not model-driven coding or peer execution. Actual inference with an
+  edit/test task, native editor UI proof and platform rollout remain open.
+- [ ] OpenCode public cooperation is connected through an owner-enrolled snapshot
+  and a single-use proxy; the raw public-core socket stays outside the coding
+  namespace. Actual OpenCode custom-tool trials preserve complete/incomplete
+  results, original tool/core task IDs and cancellation/cleanup boundaries, without
+  publishing private history. These trials still simulate model/public-core
+  replies. The real IPC dependency is the separate cooperative-compute candidate
+  `a57fff5c96c9321df753e2118e3acc5b10c70a46` (PR #178), not current main. Actual
+  joined peer execution and integration of that dependency remain open.
+- [ ] Default network cooperation, shared improvement and protected private
+  execution are required across integrations, not optional extras beside local
+  AI. Local subagents/fallback do not fulfill this requirement. The existing
+  public peer broker supports authorized public text tasks, not native Qwen
+  conversation/tool turns or confidential execution. Do not weaken `private_local`
+  or send private history as a public dataset. Core task placement, immune
+  supervision and real confidential execution must be joined and proved; TLS,
+  split tasks and signed RPC receipts do not protect against the executing host.
+
 ### Cooperative browser execution
+
+The 2026-10-02 integration candidate reconciles this public service with main
+`b51cdb21820453289346f6c4fcc130f951ae4173`, retaining the private-conversation/Qwen
+restrictions and every newer application scenario. Package compilation and 19 focused
+Rust checks pass (five public IPC, six public document/reconciliation, eight private
+conversation); seven cooperative fixture checks, the static topology contract and
+package formatting also pass. These local checks do not resolve the outstanding
+live peer-completion evidence described below.
 
 The new **cooperative browser candidate** connects a separate, explicitly public
 Firefox panel to the real `compute public-serve` service and existing signed document /
@@ -95,7 +134,322 @@ events, with an explicit baseline/ring-coverage indication. Full event records r
 private and are not collected. Seven focused pure fixture checks, including closed-export
 and invalid-data controls, pass; they do not establish real browser/peer completion.
 
-### Storage layer and mailbox import confirmation
+### Additional application and autonomous-maintenance scope
+
+- [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
+  authenticated source import, private fragment storage and source-off file access,
+  followed by the account/metadata/sharing/synchronization functions needed for
+  normal use without the original server. Distributed blobs alone are not a
+  server-independent OpenCloud service.
+  Cloud `541cc826fe14ce69cf89a82ecb600ad14dd534c6` implements one-file
+  authenticated DAV import, owner-side GPG encryption and a core-storage bridge.
+  Its local synthetic-DAV/actual-GPG tests pass; its injected storage contract
+  test is not peer evidence. The `cloud-private-file` disposable scenario
+  pins that exact source and reuses the protected fragment topology: stop the
+  DAV source, deposit, remove local ciphertext, stop provider A, restore/decrypt
+  twice from B/C, then delete every lease and require private/topology cleanup
+  plus unchanged host state. The original [run36909989038](https://github.com/VOLPAROSSA/volparossa/actions/runs/36909989038)
+  on core `41e404a40312f039827f761dea7b90be48d0c21f` passed, including exact-source
+  replay of its original 44-file artifact. Eight encrypted fragment copies on
+  three providers were charged until retirement; two complete restores survived
+  provider A loss. No live OpenCloud server or full application is claimed.
+  Cloud `a67b91fbed42ecd23ba215eb21ef54397fc9f06a` adds an encrypted owner catalog
+  and authenticated loopback DAV read service. Actual OpenCloud Web8 SDK listing,
+  full/range/repeated reads and cleanup pass locally with real GPG and only the
+  core storage boundary explicitly injected. The joined protected-peer proof now
+  passes in [run36916040042](https://github.com/VOLPAROSSA/volparossa/actions/runs/36916040042)
+  on core `5d9d347fc52e4cc13498ed3b6790d1f00de370c3`: source off, local ciphertext
+  absent and provider A offline before four genuine B/C reconstructions, including
+  SDK full/range reads. All 32 required MPTCP/TLS exchanges, private cleanup,
+  retained charges, final zero leases and unchanged host state pass. Exact-source
+  replay reconstructs the original aggregate from all 44 artifacts; ZIP SHA-256
+  `f59a2c2baf693b5087c0827c0971589da23bf15610f96c885db6f2bbe0abdaef`.
+  Accounts, sharing, writable synchronization and second-device owner-state
+  recovery remain open, as does the full web UI and general server-independent
+  OpenCloud service. Range reads currently reconstruct the whole encrypted file.
+  Cloud `c81980dd71297b257f1df6aa382c28a18f9c2f57` now includes the original
+  source-built OpenCloud Web8 Files interface for explicit owner-local recovery.
+  Its two real browser downloads pass against an explicitly synthetic backend;
+  that result is not a peer-storage proof. The next joined candidate stages those
+  exact assets and Firefox ESR140.16 in the disposable guest, attaches the UI to
+  the same actual Cloud/core read service used by the SDK, and requires six real
+  protected B/C reconstructions including two original Download actions with the
+  source and A still offline. It retains authentication, logout, resource bounds,
+  complete private cleanup and unchanged host-state checks. This new combined
+  UI/peer scenario remains unchecked. Its first actual
+  [run36930150960](https://github.com/VOLPAROSSA/volparossa/actions/runs/36930150960)
+  on `2156abb84c384e7f07667b2870e041563a728ea0` failed after provisioning,
+  authenticated import, eight committed copies, renewal, source shutdown and the
+  first successful peer restore/decryption. The last retained child phase is
+  `cloud_catalog_sdk_and_original_ui_reads`; the parent discarded the nested
+  SDK/UI failure record, so the original reports do not establish which subsequent
+  operation failed. The next candidate preserves only allowlisted child phases,
+  exit status and signals. It changes no timeout, product behavior or success gate;
+  a real Node-to-Python synthetic failure test confirms propagation without private
+  output, not a fixed UI datapath. The original run remains failed. Cleanup removed
+  every owned object and host hashes match
+  `52287c2c8b5a1751e5b679b14d95ab81b0b04937b9b6a910a6640f4e5b3e0bef`.
+  Its original 29-file ZIP SHA-256 is
+  `275539662385106e8a6570be9f5a9fd294135638a02402078540ac742913dc08`;
+  original job110597144662 log SHA-256 is
+  `0f0f1981975520b714d99d7fd9d4caec0b4819e903d6c582d1e50fef38f2ee55`.
+  The next exact [run36933015558 on `5a96bb50`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36933015558)
+  also failed, but earlier: `FRAGMENTS_ROUTE_UNAVAILABLE` before any Cloud import
+  or SDK/UI operation. Its route receipt records a rejected connect, exit 1,
+  17 attempts and 16 retries; `last_connect_reason` is `UNRECOGNIZED`. Neither its
+  original console nor job log retains a more specific control error, and no agent
+  log was exported. The observer previously recognized only the seven transient
+  codes, so terminal refusals could not be distinguished. The diagnostic candidate
+  now recognizes all 22 fixed Connect refusal/result pairs from the existing agent
+  dispatch; unknown text is still withheld. Two focused shell-execution tests verify
+  all pairs and unchanged terminal-versus-transient selection behavior. Retry policy,
+  limits and product behavior are unchanged; no route or UI fix is claimed.
+  Cleanup completed with zero objects and matching host SHA-256
+  `282fccb543cc5ae75596506ab61913f9d1acbd6080f0a848780d21c6f771a930`.
+  Original nine-file ZIP SHA-256:
+  `ff0398ee220793304c8c1726bdf31acc3b20ce00fcd18661961b4184b2dd9162`;
+  original job110606672586 log SHA-256:
+  `6bb00a1aa0bb6363caa14adcd469f9c5a53ebcaf63f4aa0715bd2845a7c8f7e2`.
+  The next [run36935715873 on `a7d244a7`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36935715873)
+  passed provisioning, import, eight committed copies, renewal and source shutdown,
+  then failed at the preserved `original_files_ui` / `unlock` child stage. The actual
+  driver reaches that stage only after direct recovery, encrypted catalog creation
+  and SDK full/range/auth checks; no original UI Download or complete restore-flow
+  aggregate passed. The original 29-file ZIP SHA-256 is
+  `7257947c7cff32fec326ef093c120c0a7aacba6b7922b405cc40aee7daa53901`;
+  job110615376820 log SHA-256 is
+  `8f40b126986a6b7833709738367b0a4d9dc48cb26aeb1fd77e30a494b738ac28`.
+  Private/topology cleanup completed and host SHA-256 remained
+  `0144da43747c66e2c7b519abfb374f20331e9b876d8043fe78b021791ac0b842`.
+  A separate local original-Web8/Firefox diagnostic reproduced the same unlock
+  failure with synthetic metadata: the default two-request service allowed only
+  six transport connections; six browser sockets occupied that cap and both login
+  requests failed before the HTTP handler. Eight transport slots passed (peak seven,
+  zero drops), without increasing private request/restoration concurrency. Cloud
+  `63bba5d1163a69e1ee6b4218c9e7462d941f22f7` applies that minimum only in explicit
+  recovery-web mode; ordinary DAV, auth, timers and the content budget are unchanged.
+  The regression fails on the old source with `ECONNRESET`; three focused real-HTTP
+  tests pass on the correction. The original UI also passes unlock and selected-file
+  navigation against that candidate in the isolated synthetic diagnostic, with no
+  private files opened and fresh-profile cleanup.
+  The subsequent joined [run36940326270 on `d7403106`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36940326270)
+  **passes** with exact Cloud `63bba5d1163a69e1ee6b4218c9e7462d941f22f7`, original
+  source-built Web8 `11e699ac82fda4dd113ac3ceb2ecb2dd74574045` and pinned Firefox
+  ESR140.16.0. The actual original Files UI authenticates against the real owner
+  read service, lists/navigates the selected file and completes two Download actions
+  of 786,433 bytes, independently checked against SHA-256
+  `5cb6c6ae54a29c1769e7189e1e6d4457e65afdbf78c48c89beb5780f86593f5c`.
+  Source-off/local-ciphertext-absent/provider-A-offline conditions remain in force
+  through six real protected B/C reconstructions and GPG decryptions: direct restore,
+  encrypted catalog creation, SDK full/range reads and both UI downloads. Restore
+  has 48 completed MPTCP/TLS exchanges with zero failed flows; upload/finish have
+  56/16. All phase baselines are covered, all 18 captures are drained with no drops
+  or direct client/exit traffic, and A sends no restore payload. Wrong-token/ETag
+  denial, in-memory-only browser token, logout/relock and nonconsuming reads pass.
+  Eight fragment copies retain their 1,598,292-byte charge until deletion; all three
+  reopened provider stores then report zero reservations, committed bytes and leases.
+  The read service/browser are joined, private plaintext/ciphertext/keys/journals and
+  browser profile are removed, and host SHA-256 remains
+  `7d5e0ab24417617ae5361f08517d3fd48c638fc8b7903385a64298a548b7ea26`.
+  Exact-source replay of all 44 original artifacts reconstructs both stored
+  aggregates unchanged. ZIP SHA-256:
+  `9815e1ee6435f39a03c9b566008068e471aa4ac2ad405006df530044b65ffbab`;
+  job110630073052 log SHA-256:
+  `5fe9eac6ea7723287f545ec03e51275b18a9a566d6fdeb2c04cd2d849735c3f5`.
+  This proves selected owner-local read-only recovery through the original UI, not
+  ordinary OpenCloud account/ACL recovery, writes, sharing, synchronization or
+  general server-independent OpenCloud availability.
+- [ ] Cooperative maintenance of current/future VOLPAROSSA organization repositories:
+  actual coding jobs, independent immune review and exact-revision scoped GitHub
+  publication. [Agreed scope](REPOSITORY_MAINTENANCE.md); no autonomous publisher,
+  independent code-review quorum or automatic client updater is implemented.
+- [ ] Automatically distribute and install independently authorized releases on
+  VOLPAROSSA clients (explicit user approval 2026-10-01), with client-side update
+  verification, staged rollout, permission boundaries, data-preserving activation
+  and recovery. No development-host installer or update channel has been enabled.
+
+### Native private conversation candidate
+
+Qwen native private-conversation source candidate (2026-09-30): explicit
+`qwen3-0.6b-v1` pins Qwen3-0.6B at `c1899de289a04d12100db370d81485cdf75e47ca`
+and nine original model assets, retaining the existing runtime lock. Native
+`tools=` chat-template encoding, nonthinking generation, ordered role/tool-result
+mapping and strict assistant/function/custom/incomplete decoding are wired into
+the existing same-owner, no-network worker lifecycle. Qwen admits only private
+conversation, not public jobs, Q&A, training or adapters. Its 65,536-byte instruction
+gate accommodates ordinary Codex instruction text, but the whole prompt must still
+tokenize to at most 12,288 tokens with 1,024 output reserve; no truncation or claim
+that all histories/tools fit. BF16/SDPA are required without silent fallback.
+Only conversation submission gets a 524,288-byte request frame; old operations
+retain their original bounds. Twenty focused Rust private protocol/lifecycle tests
+pass; offline worker tests use explicit backend doubles, **not model evidence**.
+The exact disposable [trial 36771139938](https://github.com/VOLPAROSSA/volparossa/actions/runs/36771139938)
+on `866db5b8e036c8ebfd093564f7adb651ef8f708e` provisioned the pinned runtime/model and
+observed the actual isolated Python worker, but failed at `turn-1-result` with
+`cleanup_unconfirmed` before any model-selected tool result was proved. The 5-GiB,
+no-swap service reported no OOM events; all fixture process/service cleanup and
+unchanged-host checks passed. These facts do not identify the original execution
+or lifetime-observation error. A follow-up source candidate adds opt-in, closed
+execution/capture/refresh/lifetime/reap/storage/task diagnostics before the existing
+cleanup error masks that cause. Only fixed operation/error categories, errno classes
+and bounded startup exit/signal metadata may be exported; its private local log is
+removed with the fixture. Quarantine, cleanup conditions and all deadlines remain
+unchanged; these diagnostics are **not a demonstrated cleanup fix**. Focused checks passed: 23 existing
+and new supervisor tests, the additional actual tracing-formatter-to-fixture-parser
+bridge, and 12 offline Python fixture checks; none executes model inference.
+
+The subsequent exact [trial 36774164207](https://github.com/VOLPAROSSA/volparossa/actions/runs/36774164207)
+on `c5781c476c3779b91dcea68427de75506e1ec6b8` completed its actual first model turn
+and confirmed worker/input cleanup (279 prompt tokens, 19 generated tokens), but
+returned an `assistant` response rather than the required `read_file` proposal.
+The client consequently failed `tool-check`; the second model turn never started.
+The closed service diagnostic recorded `execution/result_observed`, not a cleanup
+error. No OOM occurred and all fixture cleanup/unchanged-host checks passed. This
+does not explain or resolve the earlier intermittent cleanup failure, nor does it
+prove tool execution or a correct answer; raw response text was not exported.
+
+A bounded follow-up candidate corrects Qwen's generation options to the exact
+[pinned upstream nonthinking recommendation](https://huggingface.co/Qwen/Qwen3-0.6B/blob/c1899de289a04d12100db370d81485cdf75e47ca/README.md):
+sampling with temperature 0.7, top-p 0.8, top-k 20 and min-p 0. The existing seed 7,
+single attempt, original prompt, strict native tool parser, owner checkpoints,
+token/memory/deadline limits and cleanup requirements remain unchanged. Legacy
+Smol profiles retain greedy generation. This is a generation-profile correction,
+**not a proved cause or fix for the missing tool proposal**. Eight focused offline
+generation/bridge checks pass with explicit backend doubles, not inference evidence.
+The exact follow-up [trial 36776441427](https://github.com/VOLPAROSSA/volparossa/actions/runs/36776441427)
+on `db4be2b6fae370cc41c2218fd9fe7adc83f660c6` again returned an actual `assistant`
+first turn (279 prompt / 19 generated tokens), rather than a tool proposal. It
+failed the unchanged client `tool-check`; no second turn or authorized file read
+was proved. Actual isolation, cleanup, no-OOM and unchanged-host checks passed.
+The response text was not exported, so neither refusal, bare tool-intent JSON nor
+another answer can be distinguished from these original artifacts.
+
+The next diagnostic candidate leaves the production worker, generation settings,
+seed, prompt, aliases and strict success checks unchanged. Its disposable scenario
+explicitly opts in to exporting at most 4,096 UTF-8 bytes of the **actual first
+assistant response**, only after the entire first input matches a fixed SHA-256
+of the published synthetic fixture. That input contains neither the file nor its
+generated canary. Such an artifact truthfully sets `raw_model_output_exported`
+and `synthetic_only`; it is untrusted model text, not tool-use proof. No second
+response, tool-result/file contents, general worker log or private-user input is
+exported. If the first turn is a tool proposal, no response text is exported.
+The normal non-opted-in fixture path retains the closed-only export behavior.
+Fifteen offline fixture-contract tests and six existing Qwen bridge tests pass;
+these use synthetic validator inputs/backend doubles, not new model inference.
+The three strict-Clippy findings from the same head's Quality run are corrected
+without changing diagnostic or cleanup semantics; targeted package/all-targets/
+all-features strict Clippy passes locally.
+The exact diagnostic [trial 36892800286](https://github.com/VOLPAROSSA/volparossa/actions/runs/36892800286)
+on `b333fbfc45d07dcd46514f9cf890b73f4f1bd5b6` failed the unchanged tool check but
+now identifies its actual first output: the complete 53-byte JSON object
+`{"name": "vp_0", "arguments": {"path": "fixture.js"}}`, **without native tool
+tags**. Generation completed at EOS (279 prompt / 19 generated tokens); worker
+cleanup, no-OOM and unchanged-host checks passed. The original artifact ZIP is
+`2fd80d7cdec9138cf958b5e524e6a4b40c8a04535a01c7469dfcaf7d5885ebb3`.
+This trial remains failed; it proves neither an authorized file read nor a
+correlated second turn, and cannot retroactively classify older unexported answers.
+
+The next production candidate accepts that exact standalone JSON proposal as a
+documented second encoding alongside native tagged proposals. Python and Rust
+independently apply strict JSON/duplicate-key checks and the same offered-alias,
+payload, EOS and owner-call-ID rules. It does not scrape JSON from prose, repair
+invalid JSON, choose a tool for the model or execute tools in the worker. The
+caller remains responsible for argument validation and execution permissions.
+Model weights, prompt, sampling, seed, limits and the two-turn success check are
+unchanged. Eight focused Rust conversation tests and seven offline Qwen bridge
+tests pass. These decoder checks alone are not model evidence.
+
+The fresh exact [trial 36896857071](https://github.com/VOLPAROSSA/volparossa/actions/runs/36896857071)
+on `d681567924b439a78a7a12d531f2dbd67849f462` now passes the unchanged two-turn
+checker against all eight original artifacts. The actual pinned Qwen model
+requests the offered `read_file` tool, the owner executes one authorized synthetic
+file read, and a correlated second actual inference returns the previously unseen
+file canary. Original inputs, worker isolation, complete cleanup and unchanged
+guest host state pass. The artifact ZIP SHA-256 is
+`50ed85e0afbc49b677e59a0d981399ccf7290037e716c880f57a6c57bc08517f`.
+This source is merged through PR #184. Earlier failed trials remain failed.
+
+This proves the scoped two-turn file-read interaction, not general tool-use or
+coding quality, a hard-4GiB-bounded long-context run, remote private execution or
+a native Codex editing/test loop. Those remain **unproved/incomplete**. See the
+[exact wire contract](../crates/volparossa/src/compute/private_conversation/WIRE.md).
+
+Private conversation source candidate (2026-09-30): additive
+[`conversation_capabilities` / `submit_conversation`](../crates/volparossa/src/compute/private_conversation/WIRE.md)
+operations retain the existing same-owner private Q&A interface and execution slot.
+Typed instructions, ordered history, offered function/custom tools and correlated
+tool results reach the actual chat-template/generation backend; outputs are validated
+assistant text, tool proposals or explicit incomplete turns. The worker never executes
+tools. Existing SmolLM2 model budgets remain 192/64 or 1024/256 prompt/output tokens,
+with whole-prompt token admission and no truncation; the Qwen profile above expands
+the conversation budget without changing those legacy profiles.
+Sixteen focused Rust protocol/lifecycle/report tests and eleven offline Python
+conversation/private-worker tests pass. Backend doubles in those tests are not model
+inference evidence. General tool-use quality, a connected Responses provider and an
+actual Codex editing loop remain **unproved/incomplete**.
+
+### Scoped browser TCP: live component proof passed
+
+The exact [browser/core trial 36776940049](https://github.com/VOLPAROSSA/volparossa/actions/runs/36776940049)
+on core `b8a1dd6e52978c40ced4c92c006f8301a587c659` and browser
+`198e288183b06d8a4ff584210ade449f124bc737` passes. Two real Gecko HTTPS responses,
+each 32 MiB and fully hash-verified, cross the protected core with two carrying kernel
+MPTCP subflows through distinct WireGuard relays per transfer. End-to-origin TLS 1.3,
+absence of proxy credentials at the origin, wrong-scope rejection and independent A
+retirement while B remains active are verified. All 30 original artifacts revalidate
+against the source; privacy captures, private-file/topology cleanup and unchanged
+guest-root host state pass. See [the exact evidence and boundaries](BROWSER_NETWORK.md).
+
+After incorporating the merged storage-flow lifetime fix, the exact follow-up
+[trial 36893366706](https://github.com/VOLPAROSSA/volparossa/actions/runs/36893366706)
+also passes on `f0f54fc7c0e30918ef2405aca30bc69e4382ccc1`. Its 30 original
+artifacts revalidate with the unchanged checker; original ZIP SHA-256 is
+`b7089d466a2275f2a4e3457c2334e8ca0060c5ee8608d97c7ca983317ab36475`.
+The component is integrated by normal PR #176 merge `5376d882`; fresh Quality,
+all CodeQL analyses and the aggregate passed before merging.
+
+This establishes the scoped TCP component, not the complete browser integration.
+Ordinary tab navigation over the actual overlay, live availability fallback, full
+browser kill switch, HTTP/3 and the native Firefox 157 build remain open. The actual
+ESR fixture explicitly disables ECH-GREASE; product-scoped ECH compatibility is still
+being built. The earlier failed-trial history below is retained, but its pending
+live-TCP-proof statements are superseded by this exact successful run.
+
+### Editor-to-core private execution candidate
+
+The separate [VOLPAROSSA Code source milestone](https://github.com/VOLPAROSSA/volparossa-code/pull/1)
+is integrated in that repository. Its explicitly selected-code command uses the actual
+same-owner private compute protocol; the independent Codex app-server client is not yet
+wired into a complete edit/test agent. No proprietary extension source is included.
+
+The new `agent-private-code` disposable scenario pins the unmodified Node client at
+`d5802a024d665a47b42abdbe809bea2b9ee86bd8` and Node 24.19.0, retains both licenses, and
+reuses one pinned 360M provision. A network-isolated client submits a synthetic function
+to the real private service and must receive its generated identifier with EOS and
+confirmed cleanup. Existing owner controls, cancel/disconnect tests, model/input
+isolation and complete guest cleanup still apply. Only bounded facts are exported, not
+the source or raw answer. The [real VM trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/36738995292)
+**passes** on `7605c0ec6f56ea863333558b4c06fdec6a9cd630`: the actual 360M model
+returns the synthetic identifier in a 12-token EOS answer; cancellation/disconnect,
+owner/isolation checks, post-result cleanup and unchanged guest host state pass.
+All 18 original evidence files are retained locally; their archive SHA256 is
+`3d47971aa397ed43b076863912a67251efe69875babf02f1d538b196bd2063eb`.
+This is not yet editor execution, Codex tool use, general coding ability or private peer offload.
+
+### Uniform storage redundancy candidate
+
+New fragment and complete-replica archive creation use the same core-owned two-copy
+target. Applications cannot request another target; hidden `--copies 2` compatibility
+preserves existing pinned callers. Existing higher-copy archives keep their original
+metadata, restore/renew/delete paths and every physical charge. No existing copy is
+automatically removed, and temporary replacement overhead is not a separate redundancy
+tier. This change does not implement automatic repair or application-wide migration; see
+[the policy and legacy boundary](PRIVATE_STORAGE.md#one-core-owned-redundancy-policy).
+Two targeted tests pass: fixed-target CLI handling and a real four-provider signed-service
+lifecycle for legacy three-copy fragments and complete replicas, including source removal,
+provider-loss restore, renewal and deletion to zero leases. Package Clippy also passes.
+
+### Storage layer and privacy boundaries
 
 **Private storage is now documented as a separate fourth layer**, with actual replicated-byte
 reciprocity, adaptive contribution targets and safe pending drain. The requested storage
@@ -104,9 +458,135 @@ backups. This is a requirement clarification, not new runtime enforcement: signe
 quotas and ciphertext hashes do not classify encrypted files, and uploader self-attestation
 does not defeat malicious clients. The content-admission/review mechanism remains open; see
 [storage privacy and abuse boundaries](PRIVATE_STORAGE.md#storage-immune-system-and-private-content-limits).
-Different-chunk placement is implemented in the signed fragment CLI with local-service
-evidence below; its real overlay/provider-loss trial remains pending. The earlier
-replica/handoff proofs retain a complete encrypted archive at each selected provider.
+Different-chunk placement now has a passing real overlay/provider-loss trial:
+[36773683946](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773683946)
+on `64c4f18cadb839ad6024c21166d6154e6665733f` restores the removed 786,505-byte
+synthetic archive twice using B/C after A stops. Eight copies of four fragments charge
+1,573,010 payload bytes across three providers, with non-consuming restore and zero final
+usage after explicit deletion. Privacy captures and exact host/owned-object cleanup pass.
+This proves fragment transport, not application encryption, automatic placement/repair or
+reciprocal quotas, and is integrated through PR #183. The earlier replica/handoff
+proofs retain a complete encrypted archive at each selected provider.
+
+The `image-snapshot` cross-repository slice pins Image
+`e177afebabd99ac0773de2a73d60275346a5de52`. Its actual Python GPG creator and Node storage
+CLI must encrypt synthetic quiesced database/assets, deposit/renew their fragments through
+the real core, remove the local ciphertext, restore twice through B/C after A stops, decrypt
+and independently verify every original hash, then delete all remote copies. The owner key
+never goes to peers; the ordinary original source remains intact until disposable cleanup.
+Seven targeted fixture checks pass locally, including actual pinned GPG encryption and
+two independently verified decryptions; six provision and four wiring checks also pass.
+The [first live run `36894316849`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36894316849)
+on `f1d90f6494dde652940bdae4353b57f53b3c3d1d` **fails overall at private cleanup**.
+Its original phase receipts record real encryption, eight deposited fragment copies,
+two independently hash-verified GPG decryptions through B/C after A stops, and deletion
+of all copies with zero final provider usage. Host-state hashes match, but the worker
+cannot remove its short `$WORK/i` directory from root-owned mode-0755 `$WORK`.
+The correction uses worker-owned mode-0700 `$WORK/u` as its short parent;
+the same strict cleanup removes `i`, after which root removes empty `u`.
+The original 42-file artifact ZIP SHA256 is
+`4867ad268bdfd7bef43d3d2966cd38dd2146245080c1e65a033c030bbe86041a`.
+A passing complete rerun was still required at that point. The follow-up
+[run `36897550023`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36897550023)
+on `4f63bfdf4aa062b5533a70b7767571b922265769` fails earlier, during initial route
+selection (`FRAGMENTS_ROUTE_UNAVAILABLE`), before Image preparation or transfers.
+Its eight original artifacts prove private/topology cleanup and unchanged guest
+host state, but do not retain the underlying connect/path failure. The artifact
+ZIP SHA256 is `a8382df6d363c239e11ec9d8206f2881aa4a0c7055162defdb8fa5639983a7dd`.
+A closed Image-only diagnostic now records the exact selection stage, typed
+connect reason, exit status and bounded attempt/path counters without raw logs,
+addresses or owner data. Selection predicates and retry budgets are unchanged;
+15 selection and five Image wiring checks pass. This is diagnostic coverage, not
+an identified product fix or a passing rerun. Neither trial proves running
+Immich/PostgreSQL recovery, mobile/web integration or serverless availability.
+
+The next [run `36901573120`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36901573120)
+on `3906203088fe496eb42271876171babb32ae7212` completes the actual guest scenario:
+799,146 encrypted bytes, eight fragment copies charged at 1,598,292 bytes, two
+independently hash-verified decryptions after A stops, deletion with zero retained
+provider usage, complete private/topology cleanup and identical host-state hashes.
+The 44 original artifacts are retained; ZIP SHA256 is
+`1711a5704c8879416d4e072ba29c6bad296a308f722cb25d0f5feb3830fc2f28`.
+The **workflow still fails** at its runner-side report check: the fixture generated
+`database.sql.gz` with `gzip.compress(mtime=0)`, whose OS-header byte differs between
+Python 3.12 and 3.13. Reproducing the older compression behavior rejects that same
+original report as `synthetic snapshot identity differs`; the unchanged validator
+passes it under Python 3.13. The narrow correction fixes the synthetic gzip bytes
+to the exact guest-tested value instead of generating environment-dependent bytes.
+It preserves all identity, plaintext, network, accounting and cleanup checks. This
+is local reproduction/revalidation, not a new green CI run or a retroactive change
+to the failed job. The live source remains pinned Image `e177afeb`, not a newer
+Image adapter, and still does not prove running Immich or general serverless use.
+
+The subsequent [run `36905847039`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36905847039)
+**passes the complete Image workflow** on exact core
+`cf4de524ce885af95d0f75fcb53d80254486c27f`, still using Image
+`e177afebabd99ac0773de2a73d60275346a5de52`. Its 44 original artifacts record
+799,146 encrypted bytes, eight fragment copies, two actual GPG plaintext restores
+through B/C with A stopped, all-copy deletion, zero remaining owned objects and
+complete cleanup. Before/after guest host-state SHA256 is
+`0f4ce7287ccff8ea286b7701173323440528775111cb54082726a700383dd3cd`;
+artifact ZIP SHA256 is
+`266821ff889304831a771c57cf34bd01c866b3b358c25824a16b4b8579cf0169`.
+The original report also passes local exact-revision replay. Earlier failed
+runs remain failed. This proves this pinned synthetic snapshot/storage slice,
+not a newer Image adapter, running Immich recovery or serverless availability.
+
+### Explicit fragment-copy repair candidate
+
+`storage fragments replace` adds an owner-authorized replacement for one fragment copy.
+A signed parent placement extension is durable before the child handoff can be installed
+or recovered. The existing transfer and accounting path then restores a survivor, deposits
+the exact replacement, reads every byte back and checks retention before deleting the old
+copy. Lost confirmations stay charged and resumable across restart. Ordinary progress,
+restore, renew and delete retain the full authorized copy history. The original signed
+reconstruction manifest and unreplaced-archive report shape are unchanged.
+
+Targeted local signed-service/SQLite probes cover crash ordering, unsigned-child rejection,
+lost Reserve/readback/Delete replies, restart, restoration without the original, pending
+retirement renewal and final zero-lease cleanup. This is a manual repair primitive, not
+automatic maintenance, adaptive provider-capacity drain or a new protected-overlay proof.
+Post-replacement reports use additive version 2 and include temporary/historical physical
+charges. The pinned Image v1 parser needs a coordinated update before it can consume these
+archives; no Image compatibility is claimed for repaired archives yet. See
+[the command, accounting contract and remaining limits](PRIVATE_STORAGE.md#explicit-fragment-copy-replacement).
+
+### Owner-driven archive drain candidate
+
+`storage fragments drain` adds one bounded owner-driven pass across an archive. It resumes
+existing signed handoffs before allocating any new placement, then chooses the least-charged
+eligible provider from explicit verified grants. The original reconstruction root, uniform
+two-copy target, verified readback-before-retirement and conservative charge ledger remain
+unchanged. A pass limit, unavailable peer, insufficient candidate capacity or uncertain
+deletion leaves a visible incomplete result; repeating the command resumes exact identities.
+Three targeted local tests pass, including real signed provider stores, lost reserve/readback/
+delete replies, provider restart, source-free restore, bounded partial completion, least-charged
+placement and final zero-lease cleanup. CLI bounds and ineligible candidate handling are covered.
+This is not yet a background capacity-shrink service, discovery-based repair, network-wide
+storage credit or a new overlay proof. See
+[bounded drain and its scope](PRIVATE_STORAGE.md#bounded-owner-driven-archive-drain).
+
+### Bounded owner repair without blocking on an offline source
+
+`storage fragments repair` adds a separate bounded pass over one owner's archive.
+It first resumes exact signed copying intents, then repairs other selected-provider
+fragments, and finally retries pending retirements. It advances past an incomplete
+handoff only after that invocation verified the survivor and fully read back its exact
+replacement, with only the original provider's deletion unconfirmed. Old retirement
+records do not count as fresh proof; no pending fragment gets another replacement.
+All original and temporary charges remain until authenticated deletion, and the stricter
+`drain` behavior is unchanged.
+
+A targeted real signed-service/SQLite lifecycle exercises a lost reservation reply,
+owner/provider restart, max-one passes advancing across all three affected fragments,
+two full restores from only C/D after the original ciphertext is removed and A/B are
+unavailable, then A's return and confirmed retirement. Retry identities, unchanged
+signed reconstruction root, conservative charges and final zero-lease cleanup are checked.
+This is an explicit owner-online operation, not background peer discovery, automatic
+contribution resizing, a new redundancy policy or new protected-overlay evidence. See
+[repair progress versus outstanding retirement](PRIVATE_STORAGE.md#bounded-owner-driven-repair-pass).
+
+### Mailbox import confirmation
 
 The [mailbox import-confirmation candidate](MAILBOX_IMPORT_CONFIRMATION.md) adds a
 reusable split handoff: `content mailbox fetch` retains provider custody while writing
@@ -323,6 +803,108 @@ selector. Daemon network attachment, browser-scoped kill switch (requested off b
 and cache integration remain unfinished. Core defaults for other consumers are not weakened
 by the requested browser availability fallback.
 
+The [scoped TCP gateway candidate](BROWSER_NETWORK.md) now connects operator-delegated
+application scopes to the existing MPTCP route API. A separate UID/capability-authenticated
+Unix attachment owns its own loopback CONNECT endpoint and route controller; EOF/expiry
+does not disconnect other apps or the main/DNS controllers. Three CLI, one protocol and
+five agent checks plus strict CLI/local-control/agent Clippy pass. These establish executable
+wiring and local boundaries, not live Firefox payloads, two simultaneously carrying app
+routes, a browser-wide kill switch, or direct fallback. The disposable combined proof remains
+pending; other core security defaults are unchanged.
+The corresponding [browser adapter PR #4](https://github.com/VOLPAROSSA/volparossa-browser/pull/4)
+at `18a74235` passes a real ESR Unix-IPC/three-TLS-response smoke with a synthetic gateway,
+including no proxy credential at the origin and independent detach. The new pinned
+`browser-network` KVM fixture requires actual core MPTCP/WireGuard payloads, two separate
+32-MiB browser hashes, two carrying paths per response and A retirement while B stays active.
+Its disposable browser-UID egress guard is test containment, not a product kill switch.
+The [first combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36625896567)
+on `b4b2d62b` fails before HTTPS at `BROWSER_NETWORK_APP_BOUNDARY_INVALID`; cleanup is
+complete with unchanged host state. A deterministic checker mismatch is corrected:
+`nft -n -j` emits numeric `NFPROTO_IPV6 = 10`, not the symbolic `ipv6` the checker required.
+Eight pure checks pass and failed boundary stages are now retained as closed metadata;
+firewall/credential checks remain strict. The corrected live proof remains pending, and
+the original failure cannot exclude an additional launch issue. No full Firefox 157 build is claimed.
+The [second run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36714093009)
+on `fd2d7eb2` confirms the capless application/namespace/numeric-firewall boundary, then
+fails before the first HTTPS request without a browser report or WireGuard payload.
+Cleanup again preserves host state. Closed driver-stage/error diagnostics now cover the
+previous pre-browser reporting gap; nine pure fixture checks pass, but the live cause and
+combined payload proof remain pending. No core gateway behavior is changed speculatively.
+The [third run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36716815095)
+on `e53034f6` now locates the failure at bubblewrap launch with permission denied,
+before child runtime validation; isolation, cleanup and unchanged host state still pass.
+The candidate driver explicitly uses its owned work directory before/inside bubblewrap,
+avoiding the inherited private provisioning checkout. Eight browser driver and nine core
+fixture checks pass, but the corrected live proof remains pending. No browser overlay
+success, permissions relaxation or full-browser kill-switch claim is implied.
+The [fourth run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36719104806)
+on `9bb16c99` still fails at wrapper launch: the owned-cwd change did not resolve it.
+Permission denied is observed, but no child validation or exact failing operation is
+available. Isolation, private cleanup and unchanged host state pass. Closed diagnostics
+now distinguish fixed bwrap source/destination lookup, remount, exec and setup operations
+without exporting private paths or changing sandbox permissions. This is not a live fix;
+actual browser HTTPS/MPTCP payload proof remains pending.
+The [fifth run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36722045933)
+on `ff98dc8c` narrows the launch failure to bwrap directory creation. Its 17 retained
+original artifacts still prove no browser payload; private cleanup and unchanged host
+state pass. Exact closed destination categories are now recorded without raw paths;
+eleven focused checks pass. This remains diagnosis, not a verified permission fix.
+The [sixth run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36726326554)
+on `4808fe06` identifies the exact failing destination category as the browser work
+directory; it still fails before child validation or HTTPS. Cleanup and unchanged host
+state pass. A bounded bubblewrap-only reproduction distinguishes an unmapped, search-only
+parent from an owned parent. The candidate browser driver now places only the verified
+runtime beneath an anonymous, read-only provisioning-parent shell inside its mount
+namespace. It does not change parent permissions, grants, UID, capabilities or network
+access. Nine browser driver checks pass; the corrected combined live proof remains pending.
+
+The [seventh run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36732926403)
+on exact `cd3e630d243739e1d3188074907af0e8d5e03f81` launches actual Gecko and reaches
+`attach-a`, then fails with `unavailable` before Ready or overlay payload. All 18 originals
+are retained; browser/profile/private/topology cleanup and unchanged host state pass.
+Closed attachment substages and numeric `nsresult` now distinguish stream setup/write,
+EOF and timeout, with a same-sandbox Unix socket access probe that sends no capability.
+Eleven browser tests, twelve fixture tests and a real-ESR/synthetic-gateway smoke pass.
+This is improved diagnosis and preserved local functionality, not a successful real-core
+browser route; no speculative permission relaxation or core routing change is included.
+
+The [eighth run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36738800599)
+on `be2c6cd6` isolates `socket-path / ENOENT`: the grant's agent-namespace path was not
+published in the browser namespace. Private/topology cleanup and unchanged host state
+pass. The fixture candidate read-only maps only the original client control directory
+to that unchanged path, requiring matching parent/socket inodes and ownership. Twelve
+pure browser checks, a real unprivileged namespace/socket check and thirteen core
+evidence checks pass; the corrected real browser/MPTCP payload proof remains pending.
+
+The latest [browser-network run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36766377022)
+on exact `3f89c5ab5a43bfa1df19cca55b81ec2bdc1ea839` passes both real attachments but
+fails its first request with `NS_ERROR_NET_TIMEOUT`, CONNECT status 0 and no body.
+Closed core events prove the CONNECT header was accepted, not that route setup completed.
+All 18 originals retain complete cleanup and unchanged host state. Source inspection finds
+core published `Ready` before cold signed discovery/native route preparation; the candidate
+now prepares the independently owned route first, bounded by 90 seconds and the original
+grant expiry. EOF/shutdown/expiry still joins through existing retained route ownership.
+The companion browser waits at most 95 seconds for bootstrap without changing native TLS
+timeouts; serial fixture orchestration accounts for both preparations. This corrects the
+source ordering, not a proven historical 30-second timing cause. Fifteen Python checks and
+shell syntax pass; all six focused Rust preparation checks now pass, including an expired
+capability never polling route admission and expiry/shutdown winning during the final
+ready poll. Actual browser payload
+on two protected MPTCP paths, ordinary browsing interception and a full browser kill switch
+remain unproven. See [the scoped evidence and boundaries](BROWSER_NETWORK.md).
+
+The next exact [run 36773190344](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773190344)
+at `d58e5514759d421a1ee3a629d5569b4c67c06639` now prepares both routes before Ready,
+accepts CONNECT and reaches forwarding twice. Gecko then reports `NS_ERROR_NET_INTERRUPT`
+(`0x804b0047`), CONNECT status 200, no HTTP status/body. It is still a failure, not TLS or
+payload proof. All 18 original artifacts retain complete cleanup and unchanged host state.
+The next ordinary-channel candidate also adds an explicit scoped bootstrap failure
+contract: only confirmed-clean lack of eligible paths under a still-valid policy/grant
+can authorize a killswitch-off browser decision for at most five seconds. EOF, ambiguous
+failure, policy denial and expired authority cannot. Fourteen gateway checks plus one
+discovery diversity check pass; ordinary Firefox channel integration and actual payload
+evidence remain separate requirements.
+
 [Signal integration](https://github.com/VOLPAROSSA/volparossa-chat/pull/1) now has a pinned
 Desktop/libsignal source baseline and explicit device/session/backup contracts, not a
 working modified client. Ordinary Signal compatibility, authenticated direct ciphertext
@@ -482,6 +1064,72 @@ tampering and coordinated mutation of unsigned nested copy identities are reject
 protected-overlay fragment-placement run is still pending; these tests do not establish
 independent failure domains, automatic repair/handoff, measured overhead or reciprocal credit.
 
+The separate **`private-storage-fragments` protected-overlay smoke candidate** now wires
+the real fragment CLI into the disposable three-provider topology. Its four distinct
+fragments have two copies each; exact provider grants and stopped-service usage snapshots
+must show subset-only custody. After removing the owner source and stopping provider A,
+the fixture requires two full B/C reconstructions, unchanged physical charges, original
+store reopen and explicit deletion of all eight copies. Each transfer phase requires the
+same two-path protected MPTCP route, drained privacy captures and original host cleanup.
+The first exact protected-overlay trial **36741590268** at
+`3d8d24bc9ac19006af7798a727c2e67377576f6d` failed after successful upload, same-identity
+retry and renewal of all eight copies: its bounded completion counter observed 43 rather
+than the required 56 protected exchanges. The source was removed, but the trial stopped
+before provider withdrawal, survivor restores and store-accounting snapshots. Private
+cleanup and unchanged guest-host state passed; the original 19-file evidence bundle remains
+unchanged (ZIP SHA-256 `bf83447621179be27faff66eb315e3749d5fc209ee83711ab9e1d56ffc7caebe`).
+The fixture had read only the latest 400 event records, not the complete existing 1000-record
+agent ring, without checking whether that tail covered the phase baseline. The candidate
+now reads the full bounded Exit window and explicitly rejects truncated/clock-regressed
+evidence, retaining the original **56/16/16** completion thresholds and every data/privacy
+gate. Exported metadata includes window coverage and separate failed-flow counts, not raw
+logs. The original artifact lacks that window metadata, so it does not retrospectively
+prove all missing events were cropped.
+
+The next exact trial **36744395110** at
+`04b20481c575b269d7ea2ff5bfc7d82b063b41d7` confirms all **56/56** upload flows with zero
+failed flows and a 631-record window covering the original phase baseline. The real three
+store snapshots account for all eight copies (1,573,010 payload bytes); the source was
+removed before provider A was stopped. The trial then failed at survivor restore. Captures
+show 536,146 / 266,175 response bytes from B / C and zero from A, but the original empty
+restore report does **not** establish a complete reconstruction or identify the failing
+CLI/checker step. Two restores, non-consuming post-restore accounting and deletion remain
+unproven. Private cleanup and unchanged guest-host state pass; the original 27-file bundle
+is preserved (ZIP SHA-256 `191d0f2f95472a81c57c476d08abdea829b00d2dc47db9d177f506b9165aa37f`).
+The candidate retains closed restore-phase/number/error codes, CLI exit/timeout state and
+bounded incomplete-report counters/outcome categories on failure, without provider keys,
+private reports or stderr. An incomplete CLI report is inspected before its nonzero exit
+remains a failure. The genuine signed local three-store lifecycle also checks its actual
+restore reports with the same Python validator and passes (26.60 seconds); this finds no
+deterministic report-shape mismatch and is not evidence about the failed overlay run.
+Twelve focused Python receipt/export/wiring checks pass. The next protected-overlay result
+remains pending. This is not a fragment network acceptance PASS or Signal backup proof.
+
+The follow-up trial **36766638354** at
+`f60810373c38e078eabd7f174d6e63f59b020aac` failed earlier, during the VM build:
+the 4-GiB guest killed `rustc` while three large compiler processes ran concurrently.
+It produced no fragment runtime result. Its incomplete report does not verify cleanup
+or unchanged host state; that absence is not converted into a PASS. The build candidate
+limits Cargo to two jobs without changing runtime limits or acceptance checks.
+
+**The protected fragment lifecycle now passes:** exact
+[trial 36773683946](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773683946)
+at `64c4f18cadb839ad6024c21166d6154e6665733f` completes all three phases with the
+original 56/16/16 successful protected-flow thresholds. Four distinct fragments,
+eight copies and three separate provider namespaces account for 786,505 logical /
+1,573,010 retained physical payload bytes. After the source is removed and A stopped,
+two complete SHA-256-verified restores combine B/C fragments without consuming copies.
+All three original stores reopen before renewal/deletion; idempotent deletion reaches
+zero leases/reserved/committed payload on each. Exact route/privacy gates, private-file
+cleanup, zero leftover objects and unchanged guest-host state pass. The original
+42-file artifact is retained (ZIP SHA-256
+`74a8544f5461e434fc67f9eb723f95d9ae9e9a8a8625caa25e3a0683db727c8c`).
+The candidate includes confirmed MPTCP-flow retirement and the two-job guest build
+limit; this success does not retrospectively diagnose every earlier failure.
+The fixture uses synthetic opaque bytes, not actual encrypted app backups. It proves
+neither independent physical failure domains, automatic placement/repair/contribution
+resize, network reciprocal credit, erasure coding nor completed Immich/Signal integration.
+
 The next owner-coordinated candidate adds `storage replicas replace`: a durable,
 resumable A/B-to-B/C handoff through the same protected operations. It retrieves and hashes
 the surviving copy, retains the exact replacement identity across retries, and fully reads
@@ -524,6 +1172,108 @@ automatic contribution resizing or measured physical overhead.
 - [ ] Replica placement/repair and physical-usage contribution control, including safe
   2 GB-to-1 GB handoff and pending drain.
 - [ ] Native Signal encrypted snapshot export/import, including its attachments and recovery keys.
+
+The `signal-backup` disposable KVM scenario is now wired to the **actual native Signal
+backup regression**, with chat integration pinned to `c897667d76bea8140f0bc5f373404e43cbd54552`
+and upstream Signal Desktop `ef3872cb0249ec939d8aff857568a0e87a6b5075`. It explicitly provisions
+the locked Node/pnpm dependencies and audited Electron/RingRTC/native inputs in the guest,
+compiles the real candidate, and runs one exact test under Xvfb with `--forbid-pending`
+and `--fail-zero`. That test exports/encrypts a native snapshot, removes its original local
+ciphertext, restores it from two real VOLPAROSSA storage providers, relinks/imports it,
+and checks messages, attachment hashes and screenshots using Signal's own assertions.
+Two 64 MiB fixture stores are capacity bounds for this test, not product storage limits.
+
+The app runs as a capless UID separate from the agent in the Client namespace, with only
+IPv4/IPv6 loopback IP access; real storage operations use the protected daemon socket and
+selected two-leg MPTCP routes. Bubblewrap scopes writable profile/backup data, while the
+pinned Playwright Electron launcher itself disables Chromium sandboxing: no Electron
+sandbox claim is made. Only bounded structural receipts and drained packet counters may
+leave the guest; private profiles, recovery keys, plaintext snapshots and logs are removed.
+The upstream local mock server still provides registration/relink facilities. This is
+neither server-free Signal messaging nor independent-hardware/contribution-accounting proof.
+The exact-source native round trip now **passes**, as recorded below. This proves the
+bounded encrypted-backup integration, not completed messaging, calling or cloud storage.
+
+The first native trial on `6dd21b18`,
+[run `36722947365`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36722947365),
+failed with native exit status 1. All ten source/runtime/dependency/native-build
+provisioning stages passed, but the original bounded receipt cannot distinguish
+sandbox startup, Xvfb, module loading, global setup or the selected test as the cause.
+It does not prove native backup export/import. All 17 original artifact files are
+retained; private cleanup and unchanged host snapshots passed. The next candidate
+adds closed sandbox-stage/errno diagnostics, bounded log classifications and incremental
+Mocha status, without exporting private logs or weakening isolation. Seven focused
+receipt/reporter checks and three VM-wiring checks pass locally; a fresh native trial
+is still required, and the original failure is not relabelled.
+
+The second native trial on `e2d5abda`,
+[run `36728195128`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36728195128),
+also **fails**. All provisioning/compilation stages and the in-sandbox UID, capability,
+supplementary-group and positive control-socket checks pass through `xvfb-exec`.
+Mocha's reporter initializes, but the pinned global setup fails while starting Electron:
+the observed startup-retry and Electron-launch classifications are true, with zero tests
+started. There is no backup payload or native export/import proof. The closed evidence
+does not retain the underlying Electron exception, so no missing library, sandbox or
+application fix is inferred. All 17 originals are retained (ZIP SHA-256
+`4ca8a4ff161775b0dab458adc1f196829a5c5691a4c098b1274aa1048a97495d`); the native process group
+is joined, all private-data cleanup flags pass and both host snapshots hash to
+`8a3ba5819ee4d9eefdd81ea224a49e9bd383c8952aca67af4ee70ea06e4c19f4`.
+The candidate now observes only the pinned Bootstrap retry error, retaining allowlisted
+exception class/code, separate launcher exit and native Electron signal, debugger-endpoint
+milestones and fixed startup-cause categories. Unknown causes remain unknown; exception
+text, endpoints, process IDs, argv and configuration are never exported. It adds no retry,
+changes no Signal/Playwright behavior or security flag, and preserves the original failed
+phase through cleanup. Eight focused receipt/reporter/observer tests and three VM-wiring
+checks pass; the same exact native test with this observation is the next runtime proof.
+
+The third native trial on `82a767aa`,
+[run `36732954164`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36732954164),
+also fails before any test starts: the launcher exits 1 after native Electron receives
+`SIGTRAP`. The Node debugger opens, but the Chromium debugger does not. Provisioning,
+compilation and the isolated socket-access preflight pass; all previous closed cause
+categories are false, so the cause remains unknown. All 17 original artifacts are retained
+(ZIP SHA-256 `124c148728399a58d1f6ae13eee49d1f95cf361ffb322223bca6b2271c3cae43`).
+Private cleanup, process-group joining and unchanged host-state checks pass. No native
+backup export, restore or import is proved. The next diagnostic candidate records at most
+four Chromium/V8 fatal source locations and closed categories, never CHECK expressions,
+values, arbitrary filenames or error text. It changes no sandbox or launch flags. Nine
+focused tests and three VM-wiring checks pass; a new exact-source runtime trial is pending.
+
+The fourth native trial on `b9a579a5`,
+[run `36738793723`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36738793723),
+still fails before any test, but now identifies the exact Chromium fatal site:
+`process_singleton_posix.cc:335`. In Electron 44.1.0's pinned Chromium 152.0.7977.65,
+the two Electron singleton patches move `SetupSocket`'s socket-path-too-long fatal from
+upstream line 313 to line 335. The fixture's long `TMPDIR` plus the generated singleton
+directory/socket exceeds Linux's 108-byte Unix socket address. This is a fixture path
+failure, not evidence that Signal needs relaxed sandbox permissions. The candidate binds
+the same owned `tmp` directory at `/tmp/signal` inside its existing private `/tmp` mount,
+sets `TMPDIR` only for that sandbox child, and checks that the alias retains the original
+directory identity, owner and mode 0700. The existing cleanup still removes the underlying
+private profile/temp tree. No Signal source, launch security flags or host paths change.
+The 17 original artifacts remain retained (ZIP SHA-256
+`205ca2c6b3e14959428e1fe7766b716c159017c36e34b79326c23b560e5ef2ce`);
+process joining, private cleanup and unchanged host-state checks passed. That failed run
+does not prove native backup export/import.
+
+The corrected native trial on `90dbea789b57efcbc6cab941e54dfb6a5240511e`,
+[run `36742201942`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36742201942),
+**passes** the exact upstream encrypted-export/import test: one test, one pass, zero failed
+or pending tests. Signal creates the encrypted archive, the original ciphertext is removed,
+and a real protected-core restore reaches Signal's native importer. Upstream assertions
+verify messages, attachment plaintext hashes and screenshots. The archive is 198,352 bytes;
+both retained copies are charged (396,704 payload bytes) and survive import until explicit
+owner deletion, after which both stores report zero leases, reservations and committed bytes.
+Twelve Exit MPTCP/TLS exchanges complete. Both selected WireGuard relay paths carry data;
+the drained captures report no dropped packets, direct Client-to-Exit traffic or unexpected
+outer traffic. The app's non-loopback guard blocks 208 packets. Private profiles, recovery
+keys and grants are removed, the native process group joins, and no owned topology objects
+remain. Original guest-host snapshots are byte-identical (SHA-256
+`1c00c8ef8efc642f6f60728d3542700188ca7d8579e17d05364592eee4c1e7e5`). All 23 original artifacts
+remain retained, ZIP SHA-256 `8eb0cfa37d26f9864e28ca13c570c7c251736d9e196c97e0c1e000ecfc9df4f2`.
+The source-exact report checker also passes locally. Registration/relink still uses the
+upstream local mock server; this is not server-free Signal messaging, calling, independent
+hardware availability, automatic storage repair, reciprocal accounting or a full-alpha PASS.
 
 ## Earlier milestone evidence
 

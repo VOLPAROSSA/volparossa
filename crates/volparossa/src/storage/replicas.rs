@@ -15,7 +15,7 @@ use anyhow::{Result, ensure};
 use clap::{Args, Subcommand};
 use ed25519_dalek::VerifyingKey;
 use volparossa_content::private_storage::{
-    MAX_LEASE_SECONDS,
+    ARCHIVE_COPY_TARGET, MAX_LEASE_SECONDS,
     protocol::{MAX_GRANT_BYTES, SignedStorageGrant},
 };
 
@@ -25,7 +25,7 @@ use retained::LockedSet;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    /// Prepare a NEW private set with 2..8 explicit provider/grant pairs; no network writes.
+    /// Prepare a NEW private set with the core-owned two-copy target; no network writes.
     Create(Create),
     /// Upload or resume the same ciphertext on every remaining selected provider.
     Deposit(Deposit),
@@ -199,9 +199,9 @@ fn create(args: &Create) -> Result<serde_json::Value> {
         "already-encrypted acknowledgement is required"
     );
     ensure!(
-        (2..=retained::MAX_COPIES).contains(&args.provider_key.len())
+        args.provider_key.len() == ARCHIVE_COPY_TARGET
             && args.provider_key.len() == args.grant.len(),
-        "specify 2..8 distinct provider keys with one grant each, in the same order"
+        "specify exactly {ARCHIVE_COPY_TARGET} distinct providers with one grant each"
     );
     let signer = args.existing.unlock.signer()?;
     let expected = crate::storage::parse_hash(&args.sha256)?;

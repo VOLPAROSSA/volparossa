@@ -10,6 +10,7 @@ mode=preview
 approval=no
 revision=
 browser=no
+code=no
 plan() {
     printf '%s\n' \
         'VOLPAROSSA local-private Q/A plan:' \
@@ -38,6 +39,12 @@ plan() {
             '  observe cleanup at decoded-result-before-panel-render and again after browser completion;' \
             '  export no raw answer, browser profile or private-session log; remove the entire owned browser root;' \
             '  this is not a Firefox 157 source build or native provider-selector proof.'
+    elif [ "$code" = yes ]; then
+        printf '%s\n' \
+            '  code variant: stage exact source-hashed d5802a0 PrivateCompute and pinned Node24.19 within the guest;' \
+            '  use the same single 360M model provision with tiny synthetic code; no second model download;' \
+            '  execute the Node Unix client in a network-denied namespace and observe cleanup after completion;' \
+            '  export closed proof only, not source prompts/raw answer; no Codex, editor or tool-calling claim.'
     else
         printf '%s\n' '  v2 private-task retains its original first-result-frame-byte cleanup check and authorized synthetic answer.'
     fi
@@ -48,11 +55,13 @@ while [ "$#" -gt 0 ]; do
         --execute) mode=execute ;;
         --yes) approval=yes ;;
         --browser) browser=yes ;;
+        --code) code=yes ;;
         --expected-commit) [ "$#" -ge 2 ] || exit 64; revision=$2; shift ;;
         *) exit 64 ;;
     esac
     shift
 done
+[ "$browser:$code" != yes:yes ] || exit 64
 if [ "$mode" = preview ]; then
     [ "$approval" = no ] && [ -z "$revision" ] || exit 64
     plan
@@ -78,6 +87,11 @@ if [ "$browser" = yes ]; then
     report_name=agent-private-browser
     execute_action=execute-browser
     failure_action=failure-browser
+fi
+if [ "$code" = yes ]; then
+    report_name=agent-private-code
+    execute_action=execute-code
+    failure_action=failure-code
 fi
 phase=guest-packages
 finalize() {

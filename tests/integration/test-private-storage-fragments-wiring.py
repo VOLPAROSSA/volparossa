@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+"""Pure fragments dispatch/export contracts; never execute a VM or network operation."""
+
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import tarfile
+import tempfile
+import unittest
+
+
+HERE = Path(__file__).resolve().parent
+SCENARIO = "private-storage-fragments"
+
+
+def diagnostics():
+    driver = (HERE / "run-alpha-topology-vm.sh").read_text()
+    code = driver.split("<<'GUEST_DIAGNOSTICS_PYTHON'\n", 1)[1].split(
+        "\nGUEST_DIAGNOSTICS_PYTHON", 1
+    )[0]
+    namespace = {"__name__": "fragments_wiring_test"}
+    exec(compile(code, "bounded_guest_diagnostics", "exec"), namespace)
+    return namespace
+
+
+class PrivateStorageFragmentsWiring(unittest.TestCase):
+    def test_preview_and_repeated_scenario_selection_are_isolated(self):
+        for script in ("kvm-alpha-topology.sh", "run-alpha-topology-vm.sh"):
+            for first, last in ((SCENARIO, "private-storage-replicas"),
+                                ("private-storage-replicas", SCENARIO),
+                                (SCENARIO, "private-storage-peer")):
+                with self.subTest(script=script, first=first, last=last):
+                    result = subprocess.run(
+                        ["sh", str(HERE / script), "--preview", "--scenario", first,
+                         "--scenario", last],
+                        capture_output=True, text=True, timeout=10, check=True,
+                    )
+                    self.assertIn(last, result.stdout.lower())
+                    self.assertNotIn(first, result.stdout.lower())
+                    self.assertIn("PREVIEW ONLY", result.stdout)
+
+    def test_guest_stages_dependencies_and_uses_separate_lifecycle(self):
+        guest = (HERE / "kvm-alpha-topology.sh").read_text()
+        self.assertIn("private_storage_fragments=no", guest)
+        self.assertIn("private-storage-fragments) scenario=content-custody; private_storage_fragments=yes;", guest)
+        for dependency in ("private-storage-fragments-smoke.py", "private-storage-replicas-smoke.py",
+                           "private-storage-peer-smoke.py", "content-provider-https-smoke.py",
+                           "content-network-smoke.py"):
+            self.assertIn(dependency, guest)
+        for operation in ("run", "cleanup", "finalize_report"):
+            self.assertIn("private_storage_fragments_" + operation, guest)
+        self.assertLess(guest.index("    private_storage_fragments_run\n"),
+                        guest.index("    content_custody_run\n"))
+        for phase in ("upload", "restore", "finish"):
+            self.assertIn(f"private-storage-fragments-{phase}-privacy", guest)
+        workflow = (HERE.parents[1] / ".github/workflows/alpha-topology.yml").read_text()
+        self.assertIn("          - private-storage-fragments\n", workflow)
+        start = workflow.index("      - name: Require actual protected fragments")
+        end = workflow.index("\n      - name:", start + 1)
+        gate = workflow[start:end]
+        self.assertIn("if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'private-storage-fragments'", gate)
+        self.assertIn('test "$TOPOLOGY_EXIT_CODE" = 0', gate)
+        self.assertIn('private-storage-fragments-smoke.py report "$report" "$GITHUB_SHA"', gate)
+        self.assertIn("host-state-before.json", gate)
+        self.assertIn("host-state-after.json", gate)
+
+    def test_exact_export_allowlist_excludes_private_data_and_generic_globs(self):
+        checker = runpy.run_path(str(HERE / "private-storage-fragments-smoke.py"))
+        module = diagnostics()
+        names = set(checker["EXPORT_NAMES"])
+        self.assertEqual(names, module["FRAGMENTS_NAMES"])
+        self.assertEqual(len(names), len(checker["EXPORT_NAMES"]))
+        self.assertTrue(all(name.endswith(".json") and "/" not in name for name in names))
+        self.assertLess(len(names), 128)
+        with tempfile.TemporaryDirectory(prefix="volparossa-fragments-export-") as temporary:
+            base = Path(temporary)
+            home = base / "home"
+            published = home / "alpha-output"
+            published.mkdir(parents=True)
+            for name in names:
+                (published / name).write_text("{}\n")
+            forbidden = (
+                "private-storage-fragments-owner.json", "private-storage-fragments-journal.json",
+                "private-storage-fragments-grant.json", "private-storage-fragments-request.json",
+                "private-storage-fragments-result.log", "private-storage-fragments-input.bin",
+                "private-storage-fragments.key", "content-provider-adaptive-private-storage-fragments-upload-control.log",
+                "content-private-owner.json", "content-private-request.json",
+            )
+            for name in forbidden:
+                (published / name).write_text("PRIVATE_SENTINEL_DO_NOT_EXPORT\n")
+            archive = module["collect"](home, base / "missing-opt", "a" * 40, SCENARIO, 124,
+                                        cgroups=base / "missing-cgroups", proc=base / "missing-proc")
+            with tarfile.open(archive, "r:gz") as bundle:
+                actual = set(bundle.getnames())
+                self.assertEqual(actual, {f"published/{name}" for name in names} | {"vm-incomplete.json"})
+                for member in bundle.getmembers():
+                    with bundle.extractfile(member) as stream:
+                        self.assertNotIn(b"PRIVATE_SENTINEL_DO_NOT_EXPORT", stream.read())
+                with bundle.extractfile("vm-incomplete.json") as stream:
+                    report = json.load(stream)
+            self.assertFalse(report["success"])
+            self.assertFalse(report["cleanup"]["verified"])
+            self.assertIsNone(report["host_state"]["unchanged"])
+            self.assertLessEqual(report["diagnostics"]["captured_bytes"], module["TOTAL_LIMIT"])
+
+
+if __name__ == "__main__":
+    unittest.main()

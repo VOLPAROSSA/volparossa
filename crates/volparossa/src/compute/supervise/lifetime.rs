@@ -39,6 +39,13 @@ impl OwnedLifetimes {
 
     pub(super) fn refresh(&mut self) -> Result<()> {
         let result = self.refresh_inner();
+        if let Err(error) = &result {
+            // Preserve the first concrete operation/errno before cleanup later
+            // reports only the intentionally sticky observation failure.
+            if !self.observation_failed {
+                super::diagnostic::failure("refresh", error);
+            }
+        }
         self.observation_failed |= result.is_err();
         result
     }
@@ -54,7 +61,7 @@ impl OwnedLifetimes {
             let children = match process_children(&root) {
                 Ok(children) => children,
                 Err(_) if !same_lifetime(expected)? => continue,
-                Err(error) => return Err(error),
+                Err(error) => return Err(error.context("compute_private_process_children")),
             };
             if !same_lifetime(expected)? {
                 continue;
@@ -110,10 +117,14 @@ fn record(pid: u32) -> Result<Option<Record>> {
     let file = match File::open(Path::new("/proc").join(pid.to_string()).join("stat")) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
+        Err(error) => {
+            return Err(anyhow::Error::new(error).context("compute_private_process_stat_open"));
+        }
     };
     let mut raw = String::new();
-    file.take(8193).read_to_string(&mut raw)?;
+    file.take(8193)
+        .read_to_string(&mut raw)
+        .context("compute_private_process_stat_read")?;
     ensure!(raw.len() <= 8192, "compute_private_process_stat_bound");
     parse_record(pid, &raw).map(Some)
 }

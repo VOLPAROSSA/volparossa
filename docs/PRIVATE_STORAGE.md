@@ -4,6 +4,23 @@ Development scope: reusable core storage for encrypted application backups, incl
 the separately developed [Signal client](https://github.com/VOLPAROSSA/volparossa-chat).
 This is **not** the public cache, a training-data source or the message-delivery mailbox.
 
+## One core-owned redundancy policy
+
+Every **new logical storage archive** uses the same core-owned target: two independently
+pinned copies of each encrypted fragment, or two complete copies for the legacy replica
+format. Applications do not choose a redundancy tier. More providers can spread fragments
+more widely; that does not change the copy target. `ARCHIVE_COPY_TARGET` is the shared core
+constant. The hidden legacy `--copies 2` argument is only a compatibility assertion;
+other values are rejected before creating state or contacting peers.
+
+Previously created higher-copy archives remain fully readable, renewable and deletable.
+Their original target and all retained physical charges remain visible; no migration,
+silent pruning or relabeling to two copies occurs. Replacement may temporarily retain more
+than two copies and must continue counting every uncertain or retained copy until deletion
+is confirmed. Single-provider lease commands are underlying custody primitives, not a
+different application backup tier or proof of archive redundancy. This fixed creation
+policy is not automatic repair, independent-device availability or adaptive capacity drain.
+
 ## Separate lifecycles
 
 Message delivery can acknowledge and consume an inbox item. A backup restore must not
@@ -25,11 +42,103 @@ The owner restores by gathering and verifying the required chunks; no single pro
 needs a complete archive. Contribution accounting counts every actual retained chunk copy
 and charged overhead, regardless of how many holders share them.
 
-The current transport streams bounded chunks, but `storage replicas` deposits the **same
-complete encrypted archive at each selected provider**. Chunked transfer and full-archive
-replica failover do not prove distributed fragment placement. Per-chunk placement,
-independent replica repair and recovery of the private reconstruction metadata remain
-unfinished; the existing complete-copy proofs must not be presented as that end state.
+`storage replicas` deposits the **same complete encrypted archive at each selected
+provider**. The separate `storage fragments` path now distributes different encrypted
+fragments: its real protected-overlay trial
+[36773683946](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773683946)
+restores the removed synthetic archive twice after provider A stops, using B/C's subsets,
+then deletes all eight copies with exact zero final usage. No provider holds the whole
+archive in this trial. Automatic placement, independent replica repair and recovery of
+the private reconstruction metadata remain unfinished. Complete-copy proofs are still
+not interchangeable with distributed-fragment evidence.
+
+The `image-snapshot` scenario is a verified cross-repository slice: it uses pinned
+VOLPAROSSA Image code to encrypt a synthetic quiesced database/assets snapshot with GPG,
+passes only that ciphertext through the actual Image Node storage CLI, and requires two
+independently hash-verified plaintext restorations after provider A stops. The owner keeps
+the recovery key private. In [trial 36901573120](https://github.com/VOLPAROSSA/volparossa/actions/runs/36901573120),
+the actual guest report confirms those operations and complete cleanup, but the overall
+workflow fails its runner-side report check because runtime-generated synthetic gzip
+headers differ between Python versions. Fixed synthetic bytes preserve the exact guest
+identity and remove that cross-version dependency. The subsequent complete
+[run 36905847039](https://github.com/VOLPAROSSA/volparossa/actions/runs/36905847039)
+passes on core `cf4de524ce885af95d0f75fcb53d80254486c27f`: real GPG, actual Node/core
+fragment storage, A offline, two B/C decryptions, all-copy deletion, zero owned
+objects and unchanged host state. Its original report passes exact-revision replay.
+This trial uses pinned Image `e177afeb`, not a newer adapter, and does not establish a
+running Immich database, mobile synchronization or general serverless Immich availability.
+
+The `cloud-private-file` scenario has **passed its one-file protected-peer trial**.
+It reuses the
+same protected topology with Cloud `541cc826fe14ce69cf89a82ecb600ad14dd534c6`:
+an actual authenticated synthetic DAV endpoint feeds the pinned Cloud importer,
+which encrypts the file and source metadata locally. The endpoint is stopped and
+joined before create/deposit, its credentials are removed, and the local encrypted
+file is removed before two provider-loss restores. The actual Cloud CLI must fetch
+through core fragment storage and complete authenticated GPG/manifest verification
+before new plaintext directories appear. Owner keys never go to peers or exported
+reports. Retained physical charges, explicit lease deletion, private cleanup and
+unchanged host state passed in [run36909989038](https://github.com/VOLPAROSSA/volparossa/actions/runs/36909989038)
+on core `41e404a40312f039827f761dea7b90be48d0c21f`; the original exact-source
+report also passed replay. This source-bound result does not establish a newer
+Cloud read service or an actual OpenCloud server/web UI.
+
+The subsequent catalog/SDK integration uses Cloud
+`a67b91fbed42ecd23ba215eb21ef54397fc9f06a`: an encrypted immutable owner selection,
+private restoration through the core and authenticated loopback DAV listing and
+reads. Its real GPG/OpenCloud SDK local integration test passes with an explicitly
+injected storage adapter. The new protected-peer client proof now independently
+passes in [run36916040042](https://github.com/VOLPAROSSA/volparossa/actions/runs/36916040042)
+on core `5d9d347fc52e4cc13498ed3b6790d1f00de370c3`. The original source and local
+ciphertext are absent and provider A is offline before direct recovery, catalog
+creation and actual SDK full/range reads reconstruct from B/C. All 32 required
+MPTCP/TLS exchanges complete; authentication/ETag denial, private cleanup, retained
+physical charges and final zero leases pass. Exact-source replay of the 44
+original artifacts reproduces the aggregate; ZIP SHA-256
+`f59a2c2baf693b5087c0827c0971589da23bf15610f96c885db6f2bbe0abdaef`.
+Range requests still reconstruct and verify the complete encrypted file before
+selecting plaintext bytes. This is not the full web UI. Accounts, shared permissions,
+writes, peer-distributed catalogs and second-device recovery are not completed.
+The joined original-UI scenario pins Cloud `63bba5d1163a69e1ee6b4218c9e7462d941f22f7` and builds
+the original OpenCloud Web8 Files UI from its exact source in the disposable guest.
+It connects a fresh isolated Firefox profile to the same owner-private read service
+and requires two actual Download actions, in addition to the four preceding SDK/
+catalog/direct reconstructions. The source, local ciphertext and provider A remain
+unavailable. At least 48 completed protected exchanges and the corresponding B/C
+payloads are required; browser profiles, temporary plaintext and all leases must
+be cleaned up. The earlier Cloud-local UI test uses a synthetic backend and is
+not peer-storage evidence.
+The original joined run `36935715873` using Cloud `c81980dd` failed during UI
+unlock, after the preceding recovery/catalog/SDK operations; private cleanup and
+unchanged host state passed. A local original-Web8 synthetic diagnostic reproduced
+the same failure when six idle browser connections exhausted the service's socket
+limit. The new Cloud pin keeps at least eight transport slots only for web mode,
+while private request/restoration concurrency, authentication and all joined-proof
+gates stay unchanged. Focused HTTP and synthetic UI checks pass; a fresh joined
+original-UI/peer-storage result was still required at that stage.
+
+That combined result now **passes** in
+[run36940326270](https://github.com/VOLPAROSSA/volparossa/actions/runs/36940326270)
+on exact core `d7403106837962c66cd0af0e049236785d8053cb`. The original Files UI,
+using the real owner-local service rather than a synthetic backend, completes two
+786,433-byte Downloads with independently checked hash
+`5cb6c6ae54a29c1769e7189e1e6d4457e65afdbf78c48c89beb5780f86593f5c`.
+All six protected B/C reconstructions and actual GPG decryptions succeed with the
+source off, local ciphertext absent and A offline. All 48 restore exchanges finish;
+A contributes zero restore payload. Authentication/ETag checks, listing, logout,
+private browser/service cleanup and unchanged host state pass. Eight retained
+fragment copies keep their 1,598,292-byte charge through nonconsuming reads, then
+all three reopened provider stores reach zero reservations, committed bytes and
+leases after idempotent deletion. The 18 privacy captures have zero drops and no
+direct client/exit traffic. Exact-source replay reconstructs both aggregates from
+44 original files; ZIP SHA-256
+`9815e1ee6435f39a03c9b566008068e471aa4ac2ad405006df530044b65ffbab`.
+This is selected owner-local read-only recovery in the original Files application,
+not general account/permission recovery, writable synchronization, sharing or
+complete server-independent OpenCloud. Earlier failures remain failures.
+Preview with
+`sh tests/integration/run-alpha-topology-vm.sh --preview --scenario cloud-private-file`;
+execution belongs only in the explicitly approved disposable KVM workflow.
 
 ## Reciprocal contribution
 
@@ -126,6 +235,22 @@ handoff and the local admission-target control below are building blocks, not au
 migration or verified network-wide reciprocity. Reopening a provider with `--reuse-store`
 preserves its original capacity/free-space floor and its current admission target; it does
 not choose a new target. No replication factor or coding scheme is prescribed here.
+
+### Queued investigation: storage erasure coding
+
+Investigate erasure coding for private storage as an explicit extension beyond the
+original replication-only v1 scope. Compare it with fragment replication under
+intermittent peers and correlated failures: physical storage charge, parallel-read
+latency, repair bandwidth, owner-device CPU/memory cost and recovery availability.
+This is a queued design investigation, not an implemented format or a promised
+reduction in storage contribution. Select parameters against those tradeoffs;
+preserve encryption, authenticated reconstruction, actual-byte reciprocity and
+safe migration of existing replicas. Repair must not expose plaintext to storage
+peers. This does not authorize transport-layer FEC or change existing archives.
+
+First finish the current fragment/provider-loss recovery path. Automatic placement,
+repair and safe capacity drain remain required alongside this investigation, not
+features that coding alone replaces.
 
 ## First executable slice: local provider storage
 
@@ -399,7 +524,7 @@ follows from it.
 
 `volparossa storage replicas` adds **create, deposit, status, progress, restore, renew and
 delete** around the same authenticated peer transfers. It does not invent another transport,
-discover provider trust or manage placement automatically. Select two to eight distinct,
+discover provider trust or manage placement automatically. Select exactly two distinct,
 independently trusted provider identities and obtain an owner-bound grant from each. This
 is a bounded capacity of the current command, not a network-wide replication limit. Different
 keys do not prove different operators, devices or failure domains.
@@ -507,9 +632,9 @@ relabeling this earlier result.
 
 `storage fragments create/deposit/status/progress/restore/renew/delete` composes the
 existing authenticated replica lifecycle over **distinct ranges of an already-encrypted
-archive**. Select three to eight independently trusted provider/grant pairs and two to
-`providers - 1` copies per fragment. Deterministic rotating placement gives every fragment
-its requested copies while each provider retains only a subset of the archive. It adds no
+archive**. Select three to eight independently trusted provider/grant pairs; the core gives
+every fragment exactly two copies. Deterministic rotating placement spreads those copies
+while each provider retains only a subset of the archive. It adds no
 new transport, erasure coding, encryption scheme or automatically inferred provider trust.
 
 ```sh
@@ -518,7 +643,7 @@ volparossa storage fragments create --state /absolute/fragment-set \
   --provider-key PROVIDER_A_KEY_HEX --grant /absolute/provider-a.grant \
   --provider-key PROVIDER_B_KEY_HEX --grant /absolute/provider-b.grant \
   --provider-key PROVIDER_C_KEY_HEX --grant /absolute/provider-c.grant \
-  --copies 2 --fragment-bytes 16777216 --lifetime-seconds 604800 \
+  --fragment-bytes 16777216 --lifetime-seconds 604800 \
   --identity /absolute/owner.identity
 volparossa storage fragments deposit --state /absolute/fragment-set \
   --input /absolute/encrypted-archive --already-encrypted --identity /absolute/owner.identity
@@ -562,8 +687,194 @@ source removal, two non-consuming restores with one provider unavailable, refusa
 holders of a fragment are unavailable, renewal and interrupted deletion/retry to zero leases.
 Tampering with the signed root or consistently rewriting both unsigned nested archive-ID
 records is rejected. This is **local transfer/lifecycle evidence**, not a new protected-overlay
-or independent-device proof. Automatic repair, fragment handoff/drain, measured metadata
-overhead and network-wide reciprocal contribution credit remain unfinished.
+or independent-device proof. The explicit fragment-copy replacement primitive below extends
+this lifecycle; automatic repair/drain, measured metadata overhead and network-wide
+reciprocal contribution credit remain unfinished.
+
+### Explicit fragment-copy replacement
+
+`storage fragments replace` repairs or moves **one copy of one fragment**, not a complete
+backup. It reuses the existing replica transfer, readback, deletion and accounting path:
+
+```sh
+volparossa storage fragments replace --state /absolute/fragment-set \
+  --fragment-index 0 --from-provider-key OLD_PROVIDER_KEY_HEX \
+  --provider-key NEW_PROVIDER_KEY_HEX --grant /absolute/replacement.grant \
+  --lifetime-seconds 604800 --identity /absolute/owner.identity
+```
+
+The owner supplies a new independently trusted provider for that fragment. The same provider
+may already hold other fragments, but cannot be another current or historical holder of the
+selected fragment. A surviving copy is required; this command cannot recreate missing bytes
+when every copy has disappeared. The owner stays online and signs the operations. It is a
+repair **primitive**, not an automatic placement or maintenance service.
+
+Before changing the child replica set, the owner durably signs a placement extension bound
+to the exact original reconstruction root, fragment, retiring copy, new provider, grant,
+archive identity and initial expiry. The immutable `fragments.json` stays unchanged. Keep
+`placement-authorizations.json` with the rest of the private recovery state. Reopening
+authenticates the parent extension before recovering any child journal; an interrupted
+installation resumes the exact allocated identity, never a fresh reservation.
+
+The source is restored from a surviving provider, uploaded to the replacement, then read
+back completely and hash-verified. Only after verification and survivor reconciliation may
+the original copy be deleted. Retention must still cover the original obligation at deletion
+time. A lost delete confirmation leaves retirement pending and the original fully charged.
+Repeat the exact command to retry. Progress, non-consuming restore, renewal and all-copy
+deletion remain available; renewal keeps the old obligation while copying and excludes it
+only after verified replacement advances to pending deletion. Historical copies are never
+silently forgotten. The existing bound of eight retained copy identities per fragment also
+limits repeated replacements; journal compaction is not implemented.
+
+The existing copy journals remain the **only charge ledger**. During replacement the charge
+may exceed `logical_ciphertext_bytes * copies_per_fragment`; all reserved, committed,
+uncertain and expired copies count at their actual fragment length until confirmed deletion.
+Only archives with a placement extension emit the additive `report_version: 2`, with
+`desired_copies_per_fragment`, `placement_authorizations`, `retained_copy_records`,
+`pending_retirements` and `replacement_overhead_included`. Desired redundancy is not the
+length of a historical `fragments[].copies` array. Providers include newly authorized
+identities; each provider's charge still sums its retained records. Unmodified archives
+retain their old manifest and report shape.
+
+**Consumer boundary:** the pinned Image v1 adapter currently rejects this extended history
+and temporary overhead. Before Image initiates replacement, its report parser must accept
+the explicit v2 shape, keep the original desired copy count, validate up to eight historical
+records per fragment and sum actual per-copy/per-provider charges rather than cap them at
+the original target. Until that coordinated update, Image should use unreplaced archives;
+this core change does not claim repaired-archive Image compatibility.
+
+Targeted local tests use real signed storage services and SQLite stores: parent/child crash
+windows, rejected unsigned recovery, lost reservation/readback/deletion confirmations,
+same-identity restart, survivor reconstruction without the local source, renewal during
+pending retirement and all-copy deletion. These are not new overlay or independent-device
+availability proofs, automatic repair, safe provider-capacity drain or network-wide credit.
+
+### Bounded owner-driven archive drain
+
+`storage fragments drain` applies the same verified replacement lifecycle across one
+archive, without manually selecting a destination for each fragment:
+
+```sh
+volparossa storage fragments drain --state /absolute/fragment-set \
+  --from-provider-key RETIRING_PROVIDER_KEY_HEX \
+  --provider-key CANDIDATE_A_KEY_HEX --grant /absolute/candidate-a.grant \
+  --provider-key CANDIDATE_B_KEY_HEX --grant /absolute/candidate-b.grant \
+  --max-fragments 16 --lifetime-seconds 604800 --identity /absolute/owner.identity
+```
+
+The owner explicitly supplies 1–8 independently trusted candidate grants. For each new
+placement, the controller chooses the eligible provider with the lowest **this-archive
+retained charge**, using the provider key as a stable tie-break. It excludes current and
+historical holders of that fragment, insufficient rights/retention, exhausted history,
+and candidate quotas too small for the archive's retained allocations plus the new copy.
+Original unattempted allocations reserve planning room too. This local estimate is not a
+global capacity or uptime claim: the real provider still enforces its actual storage and
+grant quota, including other archives.
+
+Before creating **any** new placement, a pass resumes earlier signed handoffs using their
+exact retained provider, grant, archive identity and expiry—even when that provider is
+not in the new candidate list. A failed upload, readback, survivor check or deletion stops
+the pass visibly. The existing charge ledger retains all uncertain copies; no replacement
+is redirected to another provider and no source is retired before verified replacement.
+Expired pending authority remains incomplete rather than silently acquiring new authority.
+
+The default bound is 16 handoff attempts per invocation (maximum 256), including resumed
+intents. A partial pass returns nonzero with `operation_complete: false`, a closed
+`drain_stage`, per-fragment outcomes and `remaining_provider_fragments`. Repeat the command
+to continue after restart. Completion concerns **only this owner's archive**: it neither
+changes the uniform two-copy target nor frees unrelated users' leases. The original signed
+manifest is unchanged. The v2 consumer boundary above still applies.
+
+This is an owner-online, explicit bounded pass, not background repair, automatic discovery,
+network-wide contribution resizing or a promise that an offline provider's uncertain
+charge can be removed. Local signed-service tests exercise lost replies, restart, exact
+retry identity, a bounded partial pass, least-charged placement, restore without the local
+source and final zero-lease cleanup; they are not a new protected-overlay proof.
+
+### Bounded owner-driven repair pass
+
+`storage fragments repair` uses the same explicit owner authority, candidate grants,
+least-charged selection and real replacement/readback operations as `drain`, but separates
+repair progress from an unreachable source's outstanding deletion:
+
+```sh
+volparossa storage fragments repair --state /absolute/fragment-set \
+  --from-provider-key UNAVAILABLE_PROVIDER_KEY_HEX \
+  --provider-key CANDIDATE_KEY_HEX --grant /absolute/candidate.grant \
+  --max-fragments 16 --lifetime-seconds 604800 --identity /absolute/owner.identity
+```
+
+Copying intents resume first with their exact signed provider, archive identity, grant and
+expiry, including when that provider is absent from the fresh candidate list. New repairs
+come next; already pending retirements come last so repeated small passes can repair the
+other fragments while the original provider remains offline. Every fragment is attempted
+at most once per pass and the same total 1–256 attempt bound applies. A fragment with a
+pending handoff never receives another replacement intent.
+
+An incomplete handoff permits continuation **only** when that invocation verified the
+survivor and fully read back the exact replacement, with only `source_delete_unconfirmed`
+remaining. A failed upload, readback or survivor check still stops the pass. A persisted
+`DeletePending` phase is not counted as new verification; a retirement retry performs the
+existing real handoff checks again before it can delete anything. The original provider's
+uncertain bytes remain fully charged even when the replacement is usable.
+
+The JSON report distinguishes `freshly_verified_replacements` and per-fragment
+`replacement_verified_this_pass` from `pending_retirements` and
+`remaining_provider_fragments` (the original copies not yet confirmed deleted).
+`repair_stage: retirement_pending` and nonzero exit status remain visible until all source
+copies are confirmed deleted. `pass_limit`, `pending_handoff`, `pending_grant_unavailable`
+and `no_eligible_candidate` also remain incomplete. `repair_pending` means another pass is
+needed after a fragment's earlier handoff for a different source provider was completed;
+the pass does not schedule two handoffs for that fragment. Repeating the command after provider
+or owner restart retains the same identities and charges. `drain` keeps its stricter
+stop-on-unconfirmed-deletion behavior.
+
+This is a bounded owner-online controller, not background availability detection, automatic
+contribution resizing, a new redundancy policy or proof of independent device availability.
+The original signed reconstruction root and the existing v2 consumer boundary are unchanged.
+Its functional probe uses actual signed local provider services and SQLite stores, not a
+new protected-overlay run.
+
+### Disposable protected-fragment proof
+
+The `private-storage-fragments` scenario is separate from the older whole-archive
+`private-storage-replicas` and replacement `private-storage-handoff` proofs. Preview it with:
+
+```sh
+sh tests/integration/run-alpha-topology-vm.sh --preview --scenario private-storage-fragments
+```
+
+The executable fixture places four distinct ranges (three 256-KiB fragments and 73 bytes)
+with two copies each on three explicitly pinned providers. Exact per-provider grants and
+usage snapshots require 524,361 / 524,361 / 524,288 retained bytes and 3 / 3 / 2 leases,
+respectively, not a whole archive on each provider. With the original source removed and
+the first provider stopped, two complete restores must combine fragments from the other
+two stores. Unavailable copies remain charged; repeated reads must leave all three stores'
+usage unchanged. Reopening the same stores precedes deletion of all eight copies and
+confirmation of zero retained leases/payload. All store inspection happens after stopping
+the corresponding service, never by bypassing its live lock.
+
+The fixture retains two-path MPTCP, exactly one relay on each path, TLS, control/data-plane
+privacy captures and disposable-host cleanup gates. Only a closed list of sanitized reports
+is exported, never private owner keys, grants, journals or raw ciphertext. Twelve focused
+receipt/export/wiring tests pass. Exact trial `36744395110` verifies the full upload phase
+and subset accounting, then fails during survivor restore; returned B/C traffic
+alone is not proof of complete reconstruction. Its private cleanup and host-state checks
+pass. The genuine local three-store lifecycle passes the actual fixture's restore validator.
+A closed failure record now distinguishes CLI, accounting, survivor-receipt, output,
+identity and cleanup stages, preserving only fixed incomplete-report categories/counters
+before rejecting a nonzero CLI exit, without exporting raw private diagnostics. See
+[implementation status](IMPLEMENTATION_STATUS.md) for the original failure evidence.
+
+The subsequent exact [trial 36773683946](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773683946)
+at `64c4f18cadb839ad6024c21166d6154e6665733f` **passes the complete protected-fragment
+lifecycle**, including the unchanged 56/16/16 protected-flow thresholds, two complete
+survivor reconstructions, non-consuming accounting, reopening all original stores and
+idempotent all-copy deletion to zero leases/payload. Both WireGuard relay paths, all
+privacy captures, private artifact removal and unchanged disposable guest-host state
+pass. This is a three-provider namespace proof, not independent-device availability,
+automatic repair, contribution resizing or network-wide reciprocal credit.
+The public synthetic opaque fixture proves no archive encryption or native Signal integration.
 
 ## Next end-to-end proof
 
@@ -634,7 +945,23 @@ and acknowledged drain/handoff controller above. Demonstrate both a growing targ
 2 GB-to-1 GB target reduction without losing other participants' live data, including the
 pending-drain case when replacement capacity is insufficient.
 
-The Signal bridge must export a completed upstream encrypted snapshot, including its
-referenced encrypted attachments and private metadata, then reconstruct and validate that
-snapshot through Signal's importer. Merely restoring an opaque file is not Signal restore.
-The same core interface should serve other applications without reimplementing storage.
+### Native Signal backup round trip
+
+The [exact native Signal trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/36742201942)
+on core `90dbea789b57efcbc6cab941e54dfb6a5240511e` and chat
+`c897667d76bea8140f0bc5f373404e43cbd54552` passes. Signal exports and encrypts its real snapshot
+and referenced attachments; after the original ciphertext is removed, the connector restores
+through the real protected core and Signal's importer verifies messages, attachment hashes
+and screenshots. The 198,352-byte archive occupies two independently identified provider
+stores (396,704 charged payload bytes). Import consumes neither copy; explicit deletion then
+returns both stores to zero charged bytes and leases. Twelve protected MPTCP/TLS exchanges,
+two selected relay paths carrying data, privacy captures and full private/host cleanup pass.
+
+This is one actual native regression in a disposable guest, not merely opaque-file testing.
+Its local upstream mock server still handles registration/relink, its Electron test launcher
+does not establish Chromium sandboxing, and the provider namespaces are not independent
+hardware failure domains. Production account recovery UX, least-authority app enrollment,
+automatic repair/contribution accounting and decentralized Signal messages/calls remain open.
+The [implementation status](IMPLEMENTATION_STATUS.md) retains the exact artifact hashes and
+earlier failed trials. Other applications can use the same core storage interface without
+reimplementing custody or acquiring Signal's private recovery keys.

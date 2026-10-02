@@ -81,7 +81,7 @@ PROTOCOL_ERRORS = frozenset(("busy", "invalid_request", "handshake_required", "n
 PROCESS_STATES = {b"R": "running", b"S": "sleeping", b"D": "disk_sleep", b"Z": "zombie",
                   b"T": "stopped", b"t": "tracing_stop", b"X": "dead", b"x": "dead",
                   b"I": "idle", b"P": "parked", b"W": "waking"}
-LIFETIME_POINTS = frozenset(("first_result_frame_byte", "cancel_terminal_frame_byte", "disconnect_cleanup", "browser_completion"))
+LIFETIME_POINTS = frozenset(("first_result_frame_byte", "cancel_terminal_frame_byte", "disconnect_cleanup", "browser_completion", "code_completion"))
 
 
 def safe_failure(error):
@@ -411,7 +411,7 @@ def check_report(value, revision):
 
 
 def check_report_common(value, boundary_point):
-    require(boundary_point in ("first_result_frame_byte", "browser_completion"), "unknown result boundary")
+    require(boundary_point in ("first_result_frame_byte", "browser_completion", "code_completion"), "unknown result boundary")
     check_provision(value["provision"])
     TRAIN["check_isolation"](value["isolation"])
     check_snapshot(value["snapshot"])
@@ -446,7 +446,7 @@ def check_bundle(path, revision):
                 == value["host_state"][f"{when}_sha256"], "original guest state differs")
 
 
-def execute(output, revision, browser_proof=False):
+def execute(output, revision, browser_proof=False, code_proof=False):
     TRAIN["guest_guard"]()
     require(output == Path("/home/vpci/alpha-output") and re.fullmatch(r"[0-9a-f]{40}", revision), "wrong exact guest run")
     provision, jobs = Path("/home/vpci/private-ml-provision"), Path("/home/vpci/private-ml-jobs")
@@ -461,6 +461,7 @@ def execute(output, revision, browser_proof=False):
         exported_answer_is_authorized_synthetic_test_data=True, raw_private_input_exported=False,
         raw_worker_report_exported=False, phase="provision")
     browser_module, browser = None, None
+    code_module, code = None, None
     report_name = NAME
     if browser_proof:
         browser_module = runpy.run_path(str(HERE / "agent-private-task-browser.py"))
@@ -469,12 +470,22 @@ def execute(output, revision, browser_proof=False):
         result.update(report_kind="volparossa-agent-private-browser", proof_version=1,
                       scope=browser_module["SCOPE"], raw_model_answer_exported=False)
         del result["exported_answer_is_authorized_synthetic_test_data"]
+    if code_proof:
+        require(not browser_proof, "private fixture variants are mutually exclusive")
+        code_module = runpy.run_path(str(HERE / "agent-private-task-code.py"))
+        code = code_module["CodeFixture"](globals())
+        report_name = code_module["NAME"]
+        result.update(report_kind="volparossa-agent-private-code", proof_version=1,
+                      scope=code_module["SCOPE"], code_scope=code_module["NONCLAIMS"], raw_model_answer_exported=False)
+        del result["exported_answer_is_authorized_synthetic_test_data"]
     process, observer, members, fallback, clients = None, None, [], False, []
     try:
         if browser is not None:
             result["phase"] = "private-browser-provision"
             browser.provision(output, result)
             browser.preflight(output, result)
+        if code is not None:
+            code.provision(output, result)
         result["phase"] = "provision"
         with (output / f"{NAME}-provision.log").open("w") as log:
             subprocess.run([sys.executable, "-B", str(TRAIN["ML"] / "provision.py"), "--execute", "--yes",
@@ -489,6 +500,9 @@ def execute(output, revision, browser_proof=False):
         private_input = dict(version=1, visibility="private_local",
             question="What is the test identifier in the note? Answer with only the identifier.",
             context=f"Synthetic private test note: The test identifier is {canary}. This note contains no real secrets.")
+        if code is not None:
+            private_input.update(question="What string does testIdentifier return? Answer with only the string.",
+                                 context=f'function testIdentifier() {{ return "{canary}"; }}')
         # Match serde_json's canonical map ordering used by the service; the root
         # observer will compare the exact snapshot bytes/inode, not a loose semantic match.
         with original.open("xb") as stream:
@@ -612,6 +626,11 @@ def execute(output, revision, browser_proof=False):
                 # second core observation is explicitly later, not the v2 first-byte boundary.
                 result["result_boundary"] = at_result(work_parent, original, initial, result["isolation"],
                     "browser_completion", diagnostic=result.setdefault("lifetime_observations", {}))
+            elif code is not None:
+                code.infer(output, socket_path, original, observed, result)
+                # Deliberately after Node completion, not a claimed first-byte observation.
+                result["result_boundary"] = at_result(work_parent, original, initial, result["isolation"],
+                    "code_completion", diagnostic=result.setdefault("lifetime_observations", {}))
             else:
                 stream, caps = connect_service(socket_path, process)
                 clients.append(stream)
@@ -686,6 +705,11 @@ def execute(output, revision, browser_proof=False):
             result["browser_cleanup"] = browser.cleanup()
             remaining += result["browser_cleanup"]["remaining_owned_objects"]
             fallback |= result["browser_cleanup"]["fallback_signals_used"]
+        if code is not None:
+            result["code_diagnostics"] = code.diagnostic()
+            result["code_cleanup"] = code.cleanup()
+            remaining += result["code_cleanup"]["remaining_owned_objects"]
+            fallback |= result["code_cleanup"]["fallback_signals_used"]
         result["cleanup"] = dict(complete=remaining == 0, remaining_owned_objects=remaining,
             guest_model_and_job_roots_removed=not provision.exists() and not jobs.exists(),
             observed_worker_lifetimes_ended=not any(TRAIN["alive"](p) for p in members), fallback_signals_used=fallback)
@@ -699,6 +723,8 @@ def execute(output, revision, browser_proof=False):
             try:
                 if browser_module is not None:
                     browser_module["check_report"](result, revision, globals())
+                elif code_module is not None:
+                    code_module["check_report"](result, revision, globals())
                 else:
                     check_report(result, revision)
                 result["phase"] = "complete"
@@ -868,12 +894,12 @@ def main():
     if sys.argv[1:] == ["self-test"]:
         self_test()
         return 0
-    if len(sys.argv) == 4 and sys.argv[1] in ("execute", "execute-browser"):
+    if len(sys.argv) == 4 and sys.argv[1] in ("execute", "execute-browser", "execute-code"):
         def interrupted(_signal, _frame):
             raise InterruptedError("private fixture interrupted")
         signal.signal(signal.SIGTERM, interrupted)
         signal.signal(signal.SIGHUP, interrupted)
-        return execute(Path(sys.argv[2]), sys.argv[3], sys.argv[1] == "execute-browser")
+        return execute(Path(sys.argv[2]), sys.argv[3], sys.argv[1] == "execute-browser", sys.argv[1] == "execute-code")
     if len(sys.argv) == 7 and sys.argv[1] == "observe":
         return observe_diagnosed(int(sys.argv[2]), *(Path(x) for x in sys.argv[3:]))
     if len(sys.argv) == 4 and sys.argv[1] == "report":
@@ -885,6 +911,18 @@ def main():
         browser["check_bundle"](Path(sys.argv[2]), sys.argv[3], globals())
         print("combined actual ESR sidebar/private-service/pinned-model proof PASS; no Firefox 157 build claim")
         return 0
+    if len(sys.argv) == 4 and sys.argv[1] == "report-code":
+        code = runpy.run_path(str(HERE / "agent-private-task-code.py"))
+        code["check_bundle"](Path(sys.argv[2]), sys.argv[3], globals())
+        print("actual pinned Node client/private-service/model proof PASS; no Codex or editor claim")
+        return 0
+    if len(sys.argv) == 5 and sys.argv[1] == "failure-code":
+        code = runpy.run_path(str(HERE / "agent-private-task-code.py"))
+        write(Path(sys.argv[2]) / f"{code['NAME']}-smoke.json", dict(report_kind="volparossa-agent-private-code",
+            proof_version=1, source_revision=sys.argv[3], success=False, scope=code["SCOPE"], phase=sys.argv[4],
+            observed_blocker="GUEST_PHASE_INCOMPLETE", code_scope=code["NONCLAIMS"], full_b04_claimed=False,
+            confidential_remote_execution_claimed=False, raw_model_answer_exported=False))
+        return 1
     if len(sys.argv) == 5 and sys.argv[1] == "failure-browser":
         browser = runpy.run_path(str(HERE / "agent-private-task-browser.py"))
         write(Path(sys.argv[2]) / f"{browser['NAME']}-smoke.json", dict(report_kind="volparossa-agent-private-browser",

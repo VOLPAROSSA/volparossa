@@ -32,7 +32,11 @@ on:
           - content-custody
           - private-storage-peer
           - private-storage-replicas
+          - signal-backup
           - private-storage-handoff
+          - private-storage-fragments
+          - image-snapshot
+          - cloud-private-file
           - content-repair
           - content-replication
           - content-mailbox
@@ -41,7 +45,10 @@ on:
           - agent-owner-priority
           - agent-owner-cancel
           - agent-private-task
+          - agent-private-code
+          - agent-private-conversation
           - agent-private-browser
+          - browser-network
           - agent-reasoning
           - agent-artifact
           - agent-train-cycle
@@ -93,7 +100,7 @@ jobs:
       (github.event.pull_request.head.repo.full_name == github.repository &&
       github.head_ref == 'feature/alpha-vertical-runtime')
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ inputs.scenario == 'agent-autonomous-aggregation' && 180 || 120 }}
+    timeout-minutes: ${{ inputs.scenario == 'agent-autonomous-aggregation' && 180 || inputs.scenario == 'signal-backup' && 150 || 120 }}
 
     steps:
       - name: Check out selected revision
@@ -133,9 +140,25 @@ jobs:
           python3 -B tests/integration/test-private-storage-peer-smoke.py
           sh -n tests/integration/private-storage-replicas-smoke.sh
           python3 -B tests/integration/test-private-storage-replicas-smoke.py
+          sh -n tests/integration/signal-backup-smoke.sh
+          python3 -B tests/integration/test-signal-backup-provision.py
+          python3 -B tests/integration/test-signal-backup-vm-wiring.py
+          python3 -B tests/integration/test-signal-backup-smoke.py
           sh -n tests/integration/private-storage-handoff-smoke.sh
           python3 -B tests/integration/test-private-storage-handoff-smoke.py
           python3 -B tests/integration/test-private-storage-handoff-wiring.py
+          sh -n tests/integration/private-storage-fragments-smoke.sh
+          python3 -B tests/integration/test-private-storage-fragments-smoke.py
+          python3 -B tests/integration/test-private-storage-fragments-wiring.py
+          python3 -B tests/integration/test-image-snapshot-provision.py
+          python3 -B tests/integration/test-image-snapshot-wiring.py
+          sh -n tests/integration/image-snapshot-smoke.sh
+          python3 -B tests/integration/test-image-snapshot-smoke.py
+          python3 -B tests/integration/test-cloud-private-file-provision.py
+          python3 -B tests/integration/test-cloud-private-file-smoke.py
+          python3 -B tests/integration/test-cloud-private-file-ui.py
+          python3 -B tests/integration/test-cloud-private-file-wiring.py
+          sh -n tests/integration/cloud-private-file-smoke.sh
           python3 -B tests/integration/test-content-retain-smoke.py
           sh -n tests/integration/content-repair-smoke.sh
           python3 -B tests/integration/test-content-repair-smoke.py
@@ -153,6 +176,11 @@ jobs:
           sh -n tests/integration/agent-private-task-smoke.sh
           python3 -B tests/integration/agent-private-task-smoke.py self-test
           python3 -B tests/integration/agent-private-task-browser.py self-test
+          sh -n tests/integration/browser-network-smoke.sh
+          python3 -B tests/integration/test-browser-network-smoke.py
+          python3 -B tests/integration/agent-private-task-code.py self-test
+          sh -n tests/integration/agent-private-conversation.sh
+          python3 -B tests/integration/test-agent-private-conversation.py
           sh -n tests/integration/agent-reasoning-smoke.sh
           python3 -B tests/integration/agent-reasoning-smoke.py self-test
           sh -n tests/integration/agent-policy-assessment-smoke.sh
@@ -235,7 +263,7 @@ jobs:
           printf 'VOLPAROSSA_ALPHA_OUTPUT=%s\n' "$output" >>"$GITHUB_ENV"
 
       - name: Build exact pinned mqvpn/xquic runtime
-        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-training' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-owner-priority' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-owner-cancel' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-task' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-browser' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-reasoning'
+        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-training' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-owner-priority' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-owner-cancel' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-task' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-code' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-conversation' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-browser' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-reasoning'
         run: |
           set -euo pipefail
           native_binary="$(pwd -P)/native/volparossa-mpquic/build/volparossa-mpquic"
@@ -330,7 +358,7 @@ jobs:
           case "$runner_uid" in ''|0|0*|*[!0-9]*) exit 1 ;; esac
           package_args=()
           native_args=()
-          if test "$VOLPAROSSA_ALPHA_SCENARIO" != wifi-mesh && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-training && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-owner-priority && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-owner-cancel && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-private-task && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-private-browser && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-reasoning; then
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" != wifi-mesh && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-training && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-owner-priority && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-owner-cancel && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-private-task && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-private-code && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-private-conversation && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-private-browser && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-reasoning; then
             native_args=(--mpquic "$VOLPAROSSA_ALPHA_MPQUIC")
           fi
           if test "$VOLPAROSSA_ALPHA_SCENARIO" = alpha; then
@@ -376,9 +404,24 @@ jobs:
             test ! -f "$report" || jq '{report_kind,success,phase,observed_blocker,scope,cleanup,host_state}' "$report" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = browser-network; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/browser-network-smoke.json"
+            test ! -f "$report" || jq '{report_kind,source_revision,success,phase,observed_blocker,scope,cleanup,host_state}' "$report" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-private-browser; then
             report="$VOLPAROSSA_ALPHA_OUTPUT/agent-private-browser-smoke.json"
             test ! -f "$report" || jq '{report_kind,source_revision,browser_revision,success,phase,observed_blocker,scope,cleanup,browser_cleanup,host_state}' "$report" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-private-conversation; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/agent-private-conversation-smoke.json"
+            test ! -f "$report" || jq '{report_kind,source_revision,success,phase,failure_code,scope,client_diagnostic,client_launcher,observer_launcher,service_terminal,memory_before,memory_after_1,memory_after_2,memory_final,cleanup,host_state_unchanged}' "$report" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-private-code; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/agent-private-code-smoke.json"
+            test ! -f "$report" || jq '{report_kind,source_revision,success,phase,observed_blocker,scope,code_diagnostics,cleanup,code_cleanup,host_state}' "$report" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-private-task; then
@@ -422,6 +465,39 @@ jobs:
               printf '%s\n' 'The VM did not publish normal DNS-cache network evidence.' >>"$GITHUB_STEP_SUMMARY"
             fi
             exit 0
+          fi
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = signal-backup; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/signal-backup-smoke.json"
+            if test -f "$report"; then
+              jq '{report_kind,success,phase,observed_blocker,scope,cleanup,host_state}' \
+                "$report" >>"$GITHUB_STEP_SUMMARY"
+            else
+              printf '%s\n' 'The VM did not publish successful native Signal backup/import evidence.' >>"$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = cloud-private-file; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/cloud-private-file-smoke.json"
+            if test -f "$report"; then
+              jq '{report_kind,source_revision,cloud_revision,success,phase,observed_blocker,scope,cleanup,host_state}' \
+                "$report" >>"$GITHUB_STEP_SUMMARY"
+            else
+              printf '%s\n' 'No complete encrypted Cloud private-file protected storage proof was published.' >>"$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = image-snapshot; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/image-snapshot-smoke.json"
+            if test -f "$report"; then
+              jq '{report_kind,source_revision,image_revision,success,phase,observed_blocker,scope,cleanup,host_state}' \
+                "$report" >>"$GITHUB_STEP_SUMMARY"
+            else
+              printf '%s\n' 'No complete encrypted Image snapshot over protected storage proof was published.' >>"$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = private-storage-fragments; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/private-storage-fragments-smoke.json"
           fi
           if test "$VOLPAROSSA_ALPHA_SCENARIO" = private-storage-handoff; then
             report="$VOLPAROSSA_ALPHA_OUTPUT/private-storage-handoff-smoke.json"
@@ -792,7 +868,7 @@ jobs:
           fi
 
       - name: Validate normative acceptance report before upload
-        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity-private-dns' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mpquic-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mptcp-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mptcp-refill' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-message' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-https' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-provider' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-peer' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-replicas' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-handoff' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-custody' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-repair' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-replication' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-mailbox' && env.VOLPAROSSA_ALPHA_SCENARIO != 'dns-cache' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-training' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-owner-priority' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-owner-cancel' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-task' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-browser' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-reasoning' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-artifact' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-train-cycle' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-train-loop' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-artifact-quarantine' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-loss' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-follow' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-peer-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-ready-queue' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-package-queue' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-task' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-document' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-cooperative-browser' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-collection' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-network-sources' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-task-graph' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-ready-dag' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-model-planning' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-model-task-graph' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-successor-serving' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-active-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-adapter-aggregation' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-autonomous-aggregation' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-policy-assessment'
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity-private-dns' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mpquic-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mptcp-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mptcp-refill' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-message' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-https' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-provider' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-peer' && env.VOLPAROSSA_ALPHA_SCENARIO != 'signal-backup' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-replicas' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-handoff' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-fragments' && env.VOLPAROSSA_ALPHA_SCENARIO != 'image-snapshot' && env.VOLPAROSSA_ALPHA_SCENARIO != 'cloud-private-file' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-custody' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-repair' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-replication' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-mailbox' && env.VOLPAROSSA_ALPHA_SCENARIO != 'dns-cache' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-training' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-owner-priority' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-owner-cancel' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-task' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-code' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-conversation' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-browser' && env.VOLPAROSSA_ALPHA_SCENARIO != 'browser-network' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-reasoning' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-artifact' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-train-cycle' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-train-loop' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-artifact-quarantine' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-loss' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-follow' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-peer-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-ready-queue' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-package-queue' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-task' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-document' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-cooperative-browser' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-collection' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-network-sources' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-task-graph' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-ready-dag' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-model-planning' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-model-task-graph' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-successor-serving' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-active-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-adapter-aggregation' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-autonomous-aggregation' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-policy-assessment'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
@@ -868,6 +944,20 @@ jobs:
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.after_sha256' "$report")"
 
+      - name: Require real Firefox scoped HTTPS over genuine MPTCP and independent detach
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'browser-network'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          report="$VOLPAROSSA_ALPHA_OUTPUT/browser-network-smoke.json"
+          python3 -B tests/integration/browser-network-smoke.py report "$report" "$GITHUB_SHA"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.before_sha256' "$report")"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.after_sha256' "$report")"
+
       - name: Require actual native provider discovery and protected fetch
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'content-provider'
         env:
@@ -910,6 +1000,20 @@ jobs:
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.after_sha256' "$report")"
 
+      - name: Require real Signal encrypted backup export, replicated storage and native import
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'signal-backup'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          report="$VOLPAROSSA_ALPHA_OUTPUT/signal-backup-smoke.json"
+          python3 -B tests/integration/signal-backup-smoke.py report "$report" "$GITHUB_SHA"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.before_sha256' "$report")"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.after_sha256' "$report")"
+
       - name: Require verified private replica handoff, retained charge and independent restores
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'private-storage-handoff'
         env:
@@ -919,6 +1023,48 @@ jobs:
           test "$TOPOLOGY_EXIT_CODE" = 0
           report="$VOLPAROSSA_ALPHA_OUTPUT/private-storage-handoff-smoke.json"
           python3 -B tests/integration/private-storage-handoff-smoke.py report "$report" "$GITHUB_SHA"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.before_sha256' "$report")"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.after_sha256' "$report")"
+
+      - name: Require encrypted Cloud private file, source shutdown, peer restoration and cleanup
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'cloud-private-file'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          report="$VOLPAROSSA_ALPHA_OUTPUT/cloud-private-file-smoke.json"
+          python3 -B tests/integration/cloud-private-file-smoke.py report "$report" "$GITHUB_SHA"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.before_sha256' "$report")"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.after_sha256' "$report")"
+
+      - name: Require encrypted Image snapshot, real protected fragments, restoration and cleanup
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'image-snapshot'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          report="$VOLPAROSSA_ALPHA_OUTPUT/image-snapshot-smoke.json"
+          python3 -B tests/integration/image-snapshot-smoke.py report "$report" "$GITHUB_SHA"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.before_sha256' "$report")"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.after_sha256' "$report")"
+
+      - name: Require actual protected fragments, provider loss, reconstruction and cleanup
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'private-storage-fragments'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          report="$VOLPAROSSA_ALPHA_OUTPUT/private-storage-fragments-smoke.json"
+          python3 -B tests/integration/private-storage-fragments-smoke.py report "$report" "$GITHUB_SHA"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.before_sha256' "$report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
@@ -1285,6 +1431,26 @@ jobs:
             "$(jq -r '.host_state.before_sha256' "$report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.after_sha256' "$report")"
+
+      - name: Require genuine private Qwen tool call and correlated tool-result continuation
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-private-conversation'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          report="$VOLPAROSSA_ALPHA_OUTPUT/agent-private-conversation-smoke.json"
+          python3 -B tests/integration/agent-private-conversation.py report "$report" "$GITHUB_SHA"
+
+      - name: Require actual pinned Code Node client to private service and model
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-private-code'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          report="$VOLPAROSSA_ALPHA_OUTPUT/agent-private-code-smoke.json"
+          python3 -B tests/integration/agent-private-task-smoke.py report-code "$report" "$GITHUB_SHA"
 
       - name: Require real owner-local private inference and exact cleanup
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-private-task'
@@ -1785,7 +1951,7 @@ jobs:
           ' "$VOLPAROSSA_ALPHA_OUTPUT/wifi-link-smoke.json" >/dev/null
 
       - name: Upload bounded topology diagnostics
-        if: always()
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-conversation'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: alpha-production-helper-topology-${{ github.run_id }}
@@ -1793,8 +1959,37 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+      - name: Upload bounded private conversation fixture evidence
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-private-conversation'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: alpha-production-helper-topology-${{ github.run_id }}
+          path: |
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/agent-private-conversation-smoke.json
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/host-state-before.json
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/host-state-after.json
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/current-phase
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/guest-exit-status
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/runner.stdout
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/runner.stderr
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/vm-console.log
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/vm-incomplete.json
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/vm-diagnostics.log
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/vm-diagnostics.stderr
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/driver/guest-phase.txt
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/driver/cargo-build.log
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/published/agent-private-conversation-smoke.json
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/published/host-state-before.json
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/published/host-state-after.json
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/published/current-phase
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/published/guest-exit-status
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/published/runner.stdout
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/published/runner.stderr
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Require successful A01-A15 evidence
-        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity-private-dns' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mpquic-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mptcp-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mptcp-refill' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-message' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-https' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-provider' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-peer' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-replicas' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-handoff' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-custody' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-repair' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-replication' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-mailbox' && env.VOLPAROSSA_ALPHA_SCENARIO != 'dns-cache' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-training' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-owner-priority' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-owner-cancel' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-task' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-browser' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-reasoning' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-artifact' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-train-cycle' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-train-loop' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-artifact-quarantine' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-loss' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-follow' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-peer-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-ready-queue' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-package-queue' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-task' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-document' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-cooperative-browser' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-collection' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-network-sources' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-task-graph' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-ready-dag' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-model-planning' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-model-task-graph' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-successor-serving' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-active-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-adapter-aggregation' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-autonomous-aggregation' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-policy-assessment'
+        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity-private-dns' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mpquic-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mptcp-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mptcp-refill' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-message' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-https' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-provider' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-peer' && env.VOLPAROSSA_ALPHA_SCENARIO != 'signal-backup' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-replicas' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-handoff' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-fragments' && env.VOLPAROSSA_ALPHA_SCENARIO != 'image-snapshot' && env.VOLPAROSSA_ALPHA_SCENARIO != 'cloud-private-file' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-custody' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-repair' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-replication' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-mailbox' && env.VOLPAROSSA_ALPHA_SCENARIO != 'dns-cache' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-training' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-owner-priority' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-owner-cancel' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-task' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-code' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-conversation' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-browser' && env.VOLPAROSSA_ALPHA_SCENARIO != 'browser-network' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-reasoning' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-artifact' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-train-cycle' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-train-loop' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-artifact-quarantine' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-loss' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-follow' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-peer-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-ready-queue' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-package-queue' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-task' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-document' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-cooperative-browser' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-collection' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-network-sources' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-task-graph' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-ready-dag' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-model-planning' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-model-task-graph' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-successor-serving' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-active-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-adapter-aggregation' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-autonomous-aggregation' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-policy-assessment'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |

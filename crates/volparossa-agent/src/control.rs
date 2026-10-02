@@ -56,6 +56,8 @@ pub struct ControlContext {
     pub dns_routes: ClientRouteControl,
     /// Explicit unprivileged content publication/retrieval lifecycle.
     pub(crate) content: crate::content::ContentRuntime,
+    /// Separate least-authority application delegation and route ownership.
+    pub(crate) browser_gateway: crate::browser_gateway::BrowserGateway,
 }
 
 /// Listener plus an inode-bound cleanup guard.
@@ -327,6 +329,33 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
         );
     };
     match operation {
+        control_request::Operation::BrowserGatewayGrant(request) => {
+            match context.browser_gateway.grant(request, context).await {
+                Ok(grant) => response(
+                    request_id,
+                    ControlResult::Ok,
+                    "BROWSER_GATEWAY_GRANTED",
+                    control_response::Payload::BrowserGatewayGranted(grant),
+                ),
+                Err(error) => {
+                    use crate::browser_gateway::GatewayError;
+                    let result = match error {
+                        GatewayError::Invalid => ControlResult::InvalidRequest,
+                        GatewayError::Policy => ControlResult::Policy,
+                        GatewayError::Busy => ControlResult::InvalidState,
+                        GatewayError::Unavailable | GatewayError::NoEligiblePaths => {
+                            ControlResult::Unavailable
+                        }
+                    };
+                    response(
+                        request_id,
+                        result,
+                        error.code(),
+                        control_response::Payload::Ack(Empty {}),
+                    )
+                }
+            }
+        }
         control_request::Operation::ContentImport(_)
         | control_request::Operation::ContentExport(_)
         | control_request::Operation::ContentFetchName(_)
@@ -638,6 +667,12 @@ async fn connect_response(
             ControlResult::Unavailable,
             "PRESELECTION_UNAVAILABLE",
             "CONNECT_PRESELECTION_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::NoEligiblePaths) => (
+            ControlResult::Unavailable,
+            "NO_ELIGIBLE_PATHS",
+            "CONNECT_NO_ELIGIBLE_PATHS",
             LogLevel::Warn,
         ),
         Err(ClientRouteConnectError::NativePermitUnavailable) => (

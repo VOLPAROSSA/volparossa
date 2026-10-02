@@ -30,7 +30,7 @@ use super::{
 };
 
 #[path = "replicas_handoff_tests.rs"]
-mod handoff;
+pub(super) mod handoff;
 
 fn keys_and_grants() -> (SigningKey, Vec<SigningKey>, Vec<VerifiedStorageGrant>) {
     let owner = SigningKey::from_bytes(&[22; 32]);

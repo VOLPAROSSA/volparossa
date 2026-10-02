@@ -20,7 +20,9 @@ use super::{
     transfer,
 };
 
-fn keys_and_grants(max_leases: u32) -> (SigningKey, Vec<SigningKey>, Vec<VerifiedStorageGrant>) {
+pub(super) fn keys_and_grants(
+    max_leases: u32,
+) -> (SigningKey, Vec<SigningKey>, Vec<VerifiedStorageGrant>) {
     let owner = SigningKey::from_bytes(&[21; 32]);
     let providers: Vec<_> = [11, 33, 44]
         .into_iter()
@@ -52,7 +54,7 @@ fn keys_and_grants(max_leases: u32) -> (SigningKey, Vec<SigningKey>, Vec<Verifie
     (owner, providers, grants)
 }
 
-fn plan(bytes: &[u8]) -> Plan {
+pub(super) fn plan(bytes: &[u8]) -> Plan {
     Plan {
         ciphertext_bytes: bytes.len() as u64,
         sha256: Sha256::digest(bytes).into(),
@@ -103,6 +105,19 @@ fn fragments_cli_requires_encrypted_ack_and_explicit_provider_pairs() {
             "600",
         ],
         vec!["delete", "--state", "/fragments"],
+        vec![
+            "replace",
+            "--state",
+            "/fragments",
+            "--fragment-index",
+            "0",
+            "--from-provider-key",
+            &keys[0],
+            "--provider-key",
+            &keys[2],
+            "--grant",
+            "/grant",
+        ],
     ] {
         assert!(crate::Cli::try_parse_from(prefix.into_iter().chain(args)).is_ok());
     }
@@ -291,6 +306,33 @@ async fn three_real_stores_hold_only_subsets_resume_then_restore_without_origina
         assert_eq!(restored["operation_complete"], true);
         assert_eq!(restored["whole_archive_sha256_verified"], true);
         assert_eq!(restored["physical_payload_charge_upper_bound"], 2 * length);
+        // Exercise the overlay fixture's actual validator against a genuine signed
+        // three-store restore, not a separately invented JSON result shape.
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/integration/private-storage-fragments-smoke.py");
+        let mut checker = std::process::Command::new("python3")
+            .args(["-B", "-c", "import json,runpy,sys; value=json.load(sys.stdin); runpy.run_path(sys.argv[1])['validate_restore_result'](value, sys.argv[2:])"])
+            .arg(fixture)
+            .args(providers.iter().map(|key| hex::encode(key.verifying_key().as_bytes())))
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write as _;
+            checker
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(&serde_json::to_vec(&restored).unwrap())
+                .unwrap();
+        }
+        let validation_output = checker.wait_with_output().unwrap();
+        assert!(
+            validation_output.status.success(),
+            "fragment fixture checker rejected actual restore: {}",
+            String::from_utf8_lossy(&validation_output.stderr)
+        );
         assert_eq!(fs::read(&output).unwrap(), bytes);
         assert_eq!(fs::metadata(&output).unwrap().mode() & 0o777, 0o600);
         assert!(

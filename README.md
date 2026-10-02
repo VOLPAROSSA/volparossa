@@ -305,13 +305,16 @@ plaintext or turn private backups into public-cache or training material.
 Real disposable overlay trials now pass for a single provider and **two-provider replica
 failover**: both copies are charged, a survivor restores the complete archive after the
 original file is removed, and repeated restores leave its copy intact. Although transfers
-are chunked, each current provider retains the complete encrypted archive; this is not yet
-different-chunk placement across peers. A separate scoped
+are chunked, this replica mode retains the complete encrypted archive at each provider.
+The separate fragment-placement CLI has local-service proof; its protected overlay trial
+remains pending. A separate scoped
 proof also passes for **owner-directed A/B → B/C replacement**: build and fully read back C
 before releasing A. That is explicit handoff, not unattended repair or automatic downsizing.
-Least-authority application enrollment, automatic placement/repair,
-adaptive contribution and safe capacity drain, independent-device availability and native
-Signal backup restore remain open. This is not yet a completed cloud-storage service.
+A **native Signal backup trial now passes** too: encrypted export, removal of the original
+archive, real-core retrieval and native import with message/attachment checks. Restoring
+leaves the retained copies intact. Least-authority application enrollment, automatic
+placement/repair, adaptive contribution and safe capacity drain, and independent-device
+availability remain open. This is not yet a completed cloud-storage service.
 
 </details>
 
@@ -478,6 +481,14 @@ This is a local privacy fallback, not confidential distributed computation or a 
 answer quality. [Usage and limits →](docs/DECENTRALIZED_AGENTS.md#local-only-private-questions)
 
 [Agent architecture, training and remaining milestones →](docs/DECENTRALIZED_AGENTS.md)
+
+The intended cooperative brain will also help maintain Project VOLPAROSSA itself:
+agents develop improvements across the organization's repositories, review one
+another's work and publish approved changes through narrowly authorized
+capabilities. Automatic installation of verified releases on participants'
+devices is also planned, with staged rollout and data-preserving recovery.
+Both autonomous maintenance and the client updater remain under development.
+[Repository maintenance and immune review →](docs/REPOSITORY_MAINTENANCE.md)
 
 ---
 
