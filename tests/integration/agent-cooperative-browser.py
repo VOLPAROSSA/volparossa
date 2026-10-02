@@ -93,6 +93,7 @@ ANSWER_JOININGS = frozenset(("ordered_source_ranges_not_neural_synthesis", "sing
     "incomplete_fragment_answers", "awaiting_fragments_before_peer_synthesis"))
 SYNTHESIS_REASONS = frozenset(("worker_output_was_wire_truncated", "worker_produced_empty_answer",
     "legacy_generation_end_unknown", "worker_output_hit_token_limit", "cancelled", "peer_work_pending",
+    "invocation_round_budget",
     "reduction_did_not_shrink_no_inputs_discarded", "hierarchy_budget_no_inputs_discarded"))
 ANSWER_STATUSES = ("eos", "json_boundary", "token_limit", "wire_truncated", "empty",
                    "legacy_unknown", "invalid_or_unknown")

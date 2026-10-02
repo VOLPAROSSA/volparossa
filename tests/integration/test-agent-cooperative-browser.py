@@ -420,8 +420,10 @@ agent_jobs_cgroup_empty() { return 0; }
         source = (HERE / "run-alpha-topology-vm.sh").read_text()
         driver = source.split("<<'GUEST_DRIVER_SCRIPT'\n", 1)[1].split("\nGUEST_DRIVER_SCRIPT\n", 1)[0]
         subprocess.run(["sh", "-n"], input=driver, text=True, check=True)
-        self.assertIn('if [ "$scenario" = agent-cooperative-browser ] || [ "$scenario" = agent-cooperative-code ]; then', driver)
-        self.assertIn('"tests/integration/$scenario.py" export-names', driver)
+        gate = 'if [ "$scenario" = agent-cooperative-browser ] || [ "$scenario" = agent-cooperative-code ]; then'
+        self.assertIn(gate, driver)
+        selected_export = driver.split(gate, 1)[1].split("\nelif ", 1)[0]
+        self.assertIn('"tests/integration/$scenario.py" export-names', selected_export)
         self.assertIn("libgtk-3-0t64", driver)
 
 
