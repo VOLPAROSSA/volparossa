@@ -1147,6 +1147,28 @@ The source-exact report checker also passes locally. Registration/relink still u
 upstream local mock server; this is not server-free Signal messaging, calling, independent
 hardware availability, automatic storage repair, reciprocal accounting or a full-alpha PASS.
 
+### Signal fragment-backup integration candidate — 2026-10-02
+
+[Chat PR #3](https://github.com/VOLPAROSSA/volparossa-chat/pull/3), exact source
+`76bab5ba546206f1fa402e9b1120ffcab081f95b`, sends new native encrypted exports
+through the core's fragment lifecycle with three to eight authorized providers
+and the common two-copy target. The private v2 recovery descriptor binds the
+original provider order and reconstruction journal. Existing v1 full-archive
+backups retain their original resume/restore path; a failed fragment operation
+does not silently choose replicas. Signal encryption and native import remain
+unchanged. Fourteen focused Node checks and a targeted strict TypeScript check
+pass; the CLI/process responses in those checks are explicit test fixtures.
+
+The separate `signal-backup-fragments` acceptance candidate provisions that exact
+Chat source. It must prove native export/deposit, removal of local ciphertext,
+withdrawal of provider A, native Signal import from surviving fragment copies,
+a second non-consuming core restore, exact physical charges, all-copy retirement
+and complete private/network cleanup. An atomic test-only rendezvous places
+provider withdrawal between completed deposition and native restore. The old
+`signal-backup` source cohort and historical replica proof are retained unchanged.
+**No native fragment acceptance PASS is claimed yet.** This does not complete
+Signal messaging/calling, mobile clients, recovery UX or the full alpha.
+
 ## Earlier milestone evidence
 
 The completed development milestone is integrated into `main` by

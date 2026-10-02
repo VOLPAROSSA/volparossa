@@ -16,6 +16,27 @@ GLOBALS = MODULE["check_pins"].__globals__
 
 
 class SignalProvision(unittest.TestCase):
+    def test_fragment_trial_uses_its_exact_separate_source_inventory(self):
+        candidate = runpy.run_path(str(Path(__file__).with_name("signal-backup-provision.py")))
+        scope = candidate["select_fragment_trial"].__globals__
+        entries = {name: dict(bytes=size, sha256=sha) for name, (size, sha) in candidate["FILES"].items()}
+        for name in ("overlay/ts/services/backups/volparossa/fragments.node.ts",
+                     "overlay/ts/services/backups/volparossa/storage.node.ts",
+                     "overlay/ts/test-mock/backups/volparossa-withdrawal.node.ts"):
+            entries[name] = dict(bytes=1, sha256="a" * 64)
+        value = dict(version=1, chat_revision="a" * 40, signal_revision=candidate["SIGNAL_REVISION"], files=entries)
+        with patch.dict(scope, read_json=lambda _path: value):
+            candidate["select_fragment_trial"]()
+            self.assertEqual(scope["CHAT_REVISION"], "a" * 40)
+            self.assertTrue(scope["FRAGMENT_TRIAL"])
+            self.assertEqual(len(scope["FILES"]), 17)
+        self.assertEqual(MODULE["CHAT_REVISION"], "c897667d76bea8140f0bc5f373404e43cbd54552")
+        self.assertEqual(len(MODULE["FILES"]), 14)
+        candidate = runpy.run_path(str(Path(__file__).with_name("signal-backup-provision.py")))
+        value["signal_revision"] = "b" * 40
+        with patch.dict(candidate["select_fragment_trial"].__globals__, read_json=lambda _path: value), self.assertRaises(ValueError):
+            candidate["select_fragment_trial"]()
+
     def test_exact_revision_and_small_source_allowlist_required(self):
         MODULE["check_pins"]()
         for revision in ("", "main", "0" * 40, "f" * 41):

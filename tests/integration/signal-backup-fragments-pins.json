@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "chat_revision": "76bab5ba546206f1fa402e9b1120ffcab081f95b",
+  "signal_revision": "ef3872cb0249ec939d8aff857568a0e87a6b5075",
+  "files": {
+    "LICENSE": {
+      "bytes": 35149,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    "upstream-lock.json": {
+      "bytes": 2100,
+      "sha256": "1993b0dafb24a107d3702de4d5d144d765aba65123e9f680900fbf6f9200c385"
+    },
+    "scripts/stage_signal_source.py": {
+      "bytes": 8116,
+      "sha256": "557954d2a9b7e6b6b24f2b51ccec15cda829c22a9e70fd22420a7c0d36168f11"
+    },
+    "scripts/stage_node.py": {
+      "bytes": 8939,
+      "sha256": "83131d1745d072d73bd8fc4443a44b1405569716c3a26a1cd1cfefe5e470e812"
+    },
+    "scripts/stage_pnpm.py": {
+      "bytes": 5154,
+      "sha256": "a694c1c9203ea43870e994da74066bd59bbfce77e79e43dad04e579ba0c027b2"
+    },
+    "scripts/stage_signal_dependencies.py": {
+      "bytes": 17304,
+      "sha256": "ae3b7d99568010ef6caf69f0569947bedb0550993d8b3982115cc519e1131bb2"
+    },
+    "scripts/stage_signal_native.py": {
+      "bytes": 11796,
+      "sha256": "00999a8c288516f3c7cb7e509915e238dcf4dcbc38897b9a75f651ad039ccc32"
+    },
+    "scripts/install_signal_native.py": {
+      "bytes": 11235,
+      "sha256": "44a3396a1e486e5d6c2510fde84a85d549239c8c46a151fc8225ffebe65e8d1f"
+    },
+    "scripts/build_signal_candidate.py": {
+      "bytes": 9706,
+      "sha256": "f2fae84721aae441d50086b57e4daa0c4b984b31c9aee9e0d55eb14ebc2113d2"
+    },
+    "scripts/apply_signal_overlay.py": {
+      "bytes": 5582,
+      "sha256": "b24d5a9848d225e0b0273363a098780a4d5501f93fa968c686dd0a8885268cb5"
+    },
+    "patches/signal-backup-test.txt": {
+      "bytes": 2179,
+      "sha256": "0125d443d8995266365224022a603da001529ffece628d9ca26844a198805132"
+    },
+    "overlay/ts/services/backups/volparossa/archive.node.ts": {
+      "bytes": 8082,
+      "sha256": "a9b5a191727cb007f91ef0be21a7ad4aecd086f06de8f18f9fb2d7757319e1cf"
+    },
+    "overlay/ts/services/backups/volparossa/connector.preload.ts": {
+      "bytes": 7703,
+      "sha256": "f7a83c64edbc2dfa2b3a3729a76c4d351ec2592d8e96ed112501785df793f533"
+    },
+    "overlay/ts/services/backups/volparossa/replicas.node.ts": {
+      "bytes": 6059,
+      "sha256": "6d9f734f53112c729661c7a3692f67eb95909a02f7ce8384e0cf7a0f2e168adf"
+    },
+    "overlay/ts/services/backups/volparossa/fragments.node.ts": {
+      "bytes": 8907,
+      "sha256": "0550aa0f555d9d94800c0bf9d1596e1ddd78db0cfea0a549db39e3b5eb36b044"
+    },
+    "overlay/ts/services/backups/volparossa/storage.node.ts": {
+      "bytes": 3737,
+      "sha256": "badd9a7a399169559c88f6d687b39f4e30f9c8d612396e1bcb05b02d42d94ddb"
+    },
+    "overlay/ts/test-mock/backups/volparossa-withdrawal.node.ts": {
+      "bytes": 2955,
+      "sha256": "38df4e1c1de10ad9ffd5efc5646866fb3351343445690f77c1cad7a2274e7cc7"
+    }
+  }
+}

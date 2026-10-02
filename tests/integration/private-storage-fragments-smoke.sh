@@ -93,7 +93,7 @@ private_storage_fragments_stop() {
         || fail FRAGMENTS_PROVIDER_STILL_SERVING
 }
 
-private_storage_fragments_run() {
+private_storage_fragments_setup() {
     PHASE=private-storage-fragments-prepare
     custody_control_gid=$(getent group volparossa-users | cut -d: -f3)
     case $custody_control_gid in ''|*[!0-9]*) fail FRAGMENTS_CONTROL_GROUP_INVALID ;; esac
@@ -158,7 +158,10 @@ PY
         agent_cannot_read_user_state:true,client_cannot_read_any_provider_store:true,agent_mount_positive_control:true,
         all_provider_keys_match_independent_fixture_peers:true,three_provider_namespaces_distinct:true}' \
         >"$WORK/private-storage-fragments-isolation.json"
+}
 
+private_storage_fragments_run() {
+    private_storage_fragments_setup
     PHASE=private-storage-fragments-upload
     private_storage_fragments_phase_start upload
     private_storage_fragments_private upload "$storage_user" "$binary_directory/volparossa" \
