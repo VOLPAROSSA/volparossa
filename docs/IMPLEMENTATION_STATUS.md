@@ -304,6 +304,18 @@ feature branches are not implied to be integrated into `main`.
   exercise the unchanged actual builder guard: the canonical patch passes and
   an applicable noncanonical patch is rejected. This fixes source admission,
   not proof of the still-uncompleted upload/recovery trial.
+  The subsequent exact-source [run `37074744602`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37074744602)
+  on `0a47980d39b719c24cf702e9f32c0c924c4fce42` passed the original Web-UI
+  build/provisioning but stopped at `FRAGMENTS_ROUTE_UNAVAILABLE` before providers,
+  baseline import or native upload started. There were 24 connect attempts and 23
+  retries; only the last code, `NO_ELIGIBLE_PATHS`, was retained. Private cleanup
+  passed with zero owned objects and identical disposable guest-root network
+  snapshots; there is no separate outer-host proof. ZIP SHA-256:
+  `fd9dc5aef44052eca09c59e3f55caaa850ddf2eb6278c6dc3c3c90aa4e6a6dfa`;
+  original job-log SHA-256:
+  `c57ecadc947baf7e9eda0f2833cc60766d99d2a2dc0a129a31f4b41a39b5c4a5`.
+  The exact preselection rejection is not known; no new Cloud attempt is inferred
+  from this result.
   The candidate keeps the
   preceding read-only proof/pins unchanged and requires an original Files/Uppy
   upload of 262,145 synthetic bytes, actual owner GPG encryption, three 128-KiB
