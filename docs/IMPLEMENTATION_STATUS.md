@@ -2,9 +2,147 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-10-01
+[New to the project?](README.md) Start with the documentation guide or the
+[short development summary](../README.md#development-status). This document is the
+detailed evidence ledger, including historical failures—not an installation guide.
+
+[Current work](#current-integration-and-active-work) ·
+[Earlier milestones](#earlier-milestone-evidence) ·
+[Original v1 scorecard](#fixed-alpha-v1-scorecard) ·
+[Completion requirements](#definition-of-done)
+
+Last updated: 2026-10-02
 
 ## Current integration and active work
+
+### OpenCode migration and network-first compute
+
+These development records preserve individual revisions and trial boundaries. The linked
+feature branches are not implied to be integrated into `main`.
+
+- [ ] User-selected OpenCode foundation replaces Codex for `volparossa-code`.
+  [Code PR #5](https://github.com/VOLPAROSSA/volparossa-code/pull/5), source
+  `ed1209b` on `feature/opencode-integration`, wires the editor to pinned OpenCode
+  v1.18.34 (`aec0b9a6d8898f68f923aaf08b7306d931fd9d76`), HTTP/SSE sessions,
+  Chat Completions and the existing typed private-conversation service. Seventy-six
+  focused adapter/editor/cooperative/owner-lifecycle checks pass with synthetic OpenCode/model
+  responses. The actual pinned source build and a separate native runtime smoke
+  pass: the production launcher, HTTP/SSE client and Chat Completions adapter
+  perform one approved disposable-file change, correlated tool-result return
+  and session cleanup. Only core/model replies in that native smoke are simulated;
+  this is not model-driven coding or peer execution. Actual inference with an
+  edit/test task, native editor UI proof and platform rollout remain open.
+- [ ] OpenCode public cooperation is connected through an owner-enrolled snapshot
+  and a single-use proxy; the raw public-core socket stays outside the coding
+  namespace. Actual OpenCode custom-tool trials preserve complete/incomplete
+  results, original tool/core task IDs and cancellation/cleanup boundaries, without
+  publishing private history. Those earlier trials simulate model/public-core
+  replies. The real IPC dependency is the separate cooperative-compute candidate
+  `610866b8770b63719ec1f4b4ce6abb6a83a596ef` (PR #178), not current main. Code
+  `b3a4cfe` adds an explicit guest-only native-tool driver against an externally
+  supplied public core, with a synthetic private planner and no simulated public
+  result. Eight focused driver checks and four namespace checks pass. The first
+  joined live-peer trial now establishes original-result roundtrip, but fails
+  answer completeness as described below; dependency integration remains open.
+- [ ] Core candidate `938c7f2b` (PR #178) includes the actual OpenCode/two-peer
+  topology. VM01 returns the original tool result through OpenCode: two providers,
+  eleven observed workers and eleven confirmed terminal receipts. Execution and
+  cleanup complete, but `incomplete_fragment_answers` produces no complete answer
+  and zero synthesis levels; the trial remains failed. Guest cleanup leaves zero
+  objects and identical guest-network snapshots; QEMU, scratch and SSH listener
+  are removed. The outer raw IPv6-route hash later differs for an unknown reason
+  (no before-table contents retained), so outer-host unchanged is **not** proved.
+  IPv4 and DNS hashes still match.
+  The 25-file input bundle passes exact capture/transfer checks; eight fixture,
+  three transfer and four VM-contract checks pass. These are not live-peer success.
+  The admission-guard fix `9b984ad8` reproduces and corrects premature async guard
+  release: two tests fail before it, all seven public-service tests pass after it.
+  The separate browser [run37037361187](https://github.com/VOLPAROSSA/volparossa/actions/runs/37037361187)
+  on `c0362ba5` is terminal failed: ten of eleven leaf answers hit the token
+  limit, one ended at EOS, and no synthesis started. All eleven receipts and
+  guest cleanup were confirmed; the original artifact remains failed. ZIP SHA-256:
+  `7b17bde4d55293951c4baaacc8632e545a13c235171ae5959ec034cb5d9d7484`.
+  Candidate `43be09c3` adds core-authenticated public peer discovery with 21
+  focused checks and strict Clippy passing, not a live discovered-model proof.
+  Candidate `e04860bc` adds the separate discovered-360M browser scenario. Its
+  literal 4096-byte README prefix produces two parts with the actual tokenizer;
+  the original 3840-byte fixed-135M input/requirements remain unchanged. Fifteen
+  browser fixture and eight Code fixture checks pass. Exact-source
+  [run37042900209](https://github.com/VOLPAROSSA/volparossa/actions/runs/37042900209)
+  is terminal failed: two workers and two terminal receipts, one leaf at EOS and
+  one at the generation limit, so no synthesis or complete answer. Guest/private
+  cleanup passes with zero remaining objects and identical guest network state.
+  The original 19-file artifact ZIP SHA-256 is
+  `2502bab058dc8a917040f1f7b7b0d8d6686e163d190a7f88bbe52a711fb99bf6`.
+  Code `0282ffe` preserves first task failures separately from cleanup, and its
+  [source CI](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37028210288)
+  passes. Original real-Qwen VM03 failed to complete a coding turn/edit/test;
+  private-state cleanup, QEMU stop and unchanged host routes/DNS were confirmed.
+  Code `9fdca1e` distinguishes terminal peer responses from complete answers in
+  the editor; thirteen focused editor checks and its source CI pass.
+  Code `11a7063` prevents automatic regeneration of cleanup-confirmed invalid
+  model output and separates known terminal task failures from runtime cleanup.
+  Forty-one targeted checks pass; the actual pinned OpenCode runtime also passes
+  both invalid/truncated-output cases with one coding submission each, zero
+  retries/approvals/edits and confirmed cleanup. These controlled core replies
+  are synthetic, not model-driven edit/test or private-peer execution evidence;
+  the original VM03 cause and failed outcome remain unchanged. Exact-source
+  [Code CI37045053283](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37045053283)
+  passes. Hash-bound inference bundle06 contains the new source. After available
+  host memory exceeded the unchanged 8 GiB runner guard, a single VM04 trial
+  started and is now terminal failed: exact-core build and pinned Qwen provisioning
+  pass, but the first real native inference returns `invalid_output`. One coding
+  request, zero retries, zero approvals/edits/commands/tests; runtime and private
+  cleanup confirmed, QEMU/scratch removed, checked host routes/DNS unchanged.
+  The original malformed output was not retained, so its exact subtype is unknown.
+  This proves neither model-driven coding nor private peer execution.
+  Core `b6f054b4` (PR #178, not main) adds owner-enrolled source refinement:
+  retain complete original answers, split only token-limited source ranges into
+  two genuine child jobs, and require their full receipts before synthesis.
+  Seventy-two document tests, eighteen browser fixture checks and strict CLI/test
+  Clippy pass; local IPC tests use synthetic model answers. Exact-source
+  [run37048803131](https://github.com/VOLPAROSSA/volparossa/actions/runs/37048803131)
+  is terminal failed, attempt 1, before compute: `agent-jobs-source` reports
+  `JOBS_ROUTE_UNAVAILABLE`. Model provisioning passed, but route selection failed
+  before brokers, worker receipts, source refinement or synthesis. The original
+  artifact does not expose the underlying route reason; do not infer it. Cleanup
+  leaves zero owned objects and matching before/after network hashes. Actual
+  model recovery, joined browser completion and cancellation remain unproved;
+  original failed artifacts are unchanged.
+  Candidate `abb30f34` retains a closed route diagnostic; its exact-source
+  [run37052601519](https://github.com/VOLPAROSSA/volparossa/actions/runs/37052601519)
+  is terminal failed at `agent-cooperative-browser-panel`, not route setup.
+  Four workers and four handles are observed, but only two terminal receipts:
+  the original leaves contain one EOS and one token-limited answer, with no
+  synthesis. Reconciliation of the two remaining handles fails at Poll with
+  `exchange_unconfirmed`; the truncated diagnostic window counts 48
+  `COMPUTE_RPC_DISCOVERY_FAILED` events without their underlying subtype.
+  This does not prove complete refinement or joined answers. Final disposable
+  cleanup leaves zero objects and identical guest network hashes; the original
+  artifact ZIP is `fce562e1f8642dacf87f65d0a9b05378168d0923dec547722dafa95b39fc0461`.
+  Candidate `b76b8a24` fixes an independently reproduced permanent listener loss
+  after temporary provider-registration Busy/Timeout; the existing 60-second
+  refresh clock and all advertisement authority checks remain. Two actual local
+  TCP/TLS/signed-framing regressions, five relay/policy checks and strict agent
+  Clippy pass. Nineteen Browser and eight Code fixture checks also pass with
+  closed discovery subreasons. Source-bound
+  [run37058432693](https://github.com/VOLPAROSSA/volparossa/actions/runs/37058432693)
+  is terminal failed: four workers and four terminal receipts with normal task cleanup
+  confirmed, but the answer is incomplete and no synthesis occurs. Original leaves are
+  one EOS and one token-limited output; child generation metadata was not exported,
+  so the cause of incomplete refinement is unknown. The retained diagnostic window
+  does not span the phase baseline; zero matching failures is not a whole-run absence
+  claim. Final private cleanup passes, no owned objects remain and guest-root network
+  snapshots match. Original ZIP SHA-256:
+  `06f4789bc13aaa9d6f824797ca6fe90b729a81c4acde5c0ea2d2dd617bf883ac`.
+- [ ] Default network cooperation, shared improvement and protected private
+  execution are required across integrations, not optional extras beside local
+  AI. Local subagents/fallback do not fulfill this requirement. The existing
+  public peer broker supports authorized public text tasks, not native Qwen
+  conversation/tool turns or confidential execution. Do not weaken `private_local`
+  or send private history as a public dataset. Core task placement, immune
+  supervision and real confidential execution must be joined and proved; TLS,
+  split tasks and signed RPC receipts do not protect against the executing host.
 
 ### Additional application and autonomous-maintenance scope
 
@@ -1208,6 +1346,41 @@ original artifacts are retained, ZIP SHA-256
 This does not prove independent hardware, automatic repair, reciprocal contribution
 credit, erasure coding, server-free Signal registration/delivery/calling or Electron's
 Chromium sandbox. The failed first trial and older whole-archive proof stay unchanged.
+
+### Explicit hosted OpenCode coding trial candidate — 2026-10-02
+
+Code `e021e5ca` adds a manual GitHub-hosted profile for the same real
+OpenCode/core/Qwen edit-and-test guest, not a substitute model or synthetic reply.
+It preserves exact source binding, 8 GiB host admission, a 6 GiB/two-vCPU guest,
+7 GiB cgroup/no swap, scoped ephemeral CI changes and closed cleanup receipts.
+Twelve focused contracts and shell/syntax checks pass; original VM04 remains
+failed and no successful hosted coding or protected private peer execution is
+claimed. [Code PR #7](https://github.com/VOLPAROSSA/volparossa-code/pull/7)
+registered only the identical manual workflow on main via merge `8186b651`,
+after five checks passed, separately from the pending runtime migration. Its
+merged temporary branch was removed without deleting local work or history.
+The actual hosted coding trial, source-bound
+[run37059547905](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37059547905)
+on `e021e5ca`, is terminal **failed**, not a coding PASS. Hosted KVM/cgroup admission,
+pinned OpenCode source build, exact input packing and actual Qwen provisioning passed.
+Two real model outputs (one function call, one assistant response) completed the native
+turn with confirmed provider cleanup, but the fixture was not edited, no test command
+completed and the independent test failed. No raw model output was retained, so these
+counters do not identify why the model did not complete the requested change.
+
+Runtime/private state, QEMU, scratch and owned CI host changes were cleaned up. The guest's
+network checks passed. The outer host's IPv4/DNS hashes match, but its IPv6-route hash differs;
+unchanged outer-host networking is not proved and no cause is inferred. Original 11-file
+ZIP SHA-256: `20e768b6ee3535564b3d967a1e192402258087fb6b21cae315874f5d68c14314`.
+The original job-log SHA-256 is
+`ebf52ea810aa2bae88cb5a719d05fef44648a03e5f496d26c87aa8f65e9a976f`.
+
+PR #5's unrelated README merge conflict was resolved by `9435c84f`, which changes only
+README relative to `e021e5ca` and joins main ancestry. Later `8685bd0` fixes a
+Python-version-sensitive source-contract test by comparing the unchanged guest function's
+exact source instead of an AST printer hash; its five source/code-scanning checks pass.
+Neither change is relabelled as a new inference trial. Model-driven coding and protected
+private peer execution remain incomplete.
 
 ## Earlier milestone evidence
 

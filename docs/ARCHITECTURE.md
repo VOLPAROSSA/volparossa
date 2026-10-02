@@ -1,5 +1,7 @@
 # VOLPAROSSA v1 architecture
 
+[Documentation guide](README.md) · [Project introduction](../README.md) · [Application scope](APPLICATIONS.md)
+
 This document distinguishes the **required v1 design** from verified implementation. It does not
 claim that a diagram is working code. Consult [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)
 for test-backed completion evidence.
@@ -33,16 +35,13 @@ automatically provide additive throughput.
 
 ## Content-network extension (in development)
 
-The [content-network proposal](CONTENT_NETWORK_PROPOSAL.md) is the single design reference for
-bounded contributed chunk storage, multi-peer retrieval and spare-resource replication, validated
-DNS sharing, signed public publication and recipient-encrypted offline delivery. The local
-`volparossa-content` foundation has bounded persistent storage and protected-route retrieval
-evidence (C01). Recipient-encrypted messages reuse that storage/transfer layer, with caller-trusted
-keys and no implicit key store or mailbox. Explicit native/cooperative-origin retrieval through
-generic provider discovery now has an independent-node proof. Replica metadata can be restored
-from an owned cache on explicit service restart, not automatically on boot. General reachability,
-retention repair, browser integration and the remaining C02--C08 scope are unfinished; exact test
-revisions and the remote route-retirement gap are in the implementation status.
+The [content-network proposal](CONTENT_NETWORK_PROPOSAL.md) is the design reference for
+contributed chunk storage, multi-peer retrieval and spare-resource replication, validated
+DNS sharing, signed public publication and recipient-encrypted offline delivery. These
+functions have different authorization, retention and source-authenticity requirements.
+Scoped C01--C07 milestones are recorded in [implementation status](IMPLEMENTATION_STATUS.md);
+general reachability, existing-web coverage, complete browser integration and automatic
+availability must not be inferred from an individual passing retrieval test.
 
 This is an application layer, not an HTTPS-decrypting property of the VPN. Reconstructed bytes
 need authenticated origin/publisher authority as well as chunk integrity, and must retain
@@ -66,10 +65,12 @@ to every frontend. Existing service files alone do not prove that integration is
 
 ## Trust and process boundaries
 
-The requested [cooperative AI extension](DECENTRALIZED_AGENTS.md) adds isolated training/task
-workers, exchanged model artifacts and fully automatic policy decisions. It is additional
-unimplemented scope, not a new authority already held by `volparossa-agent`. Model caches do
-not grant execution privileges, and current destination-policy trust is unchanged.
+The [cooperative AI extension](DECENTRALIZED_AGENTS.md) uses isolated training/task workers
+and exchanged model artifacts, with automatic reviewed decisions as the intended governance
+direction. Actual training and public peer-task milestones exist; confidential remote
+execution, dependable reasoning and complete governance remain unfinished. None of these
+milestones grants new networking authority to `volparossa-agent`. Model caches do not grant
+execution privileges, and destination-policy trust remains separate.
 
 The permanent Ed25519 identity anchors the node's libp2p Peer ID and signed advertisements. A route
 attempt uses a fresh Ed25519 client-session identity and fresh WireGuard keys; no exit-facing v4
