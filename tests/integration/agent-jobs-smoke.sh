@@ -189,7 +189,7 @@ agent_jobs_cgroup_empty() {
 
 agent_jobs_stop_unit() {
     jobs_stop_unit=$1
-    case $jobs_stop_unit in volparossa-alpha-compute@relay[345].service|volparossa-alpha-policy-authority@relay[345].service|volparossa-alpha-aggregation.service|volparossa-alpha-public-browser.service|volparossa-alpha-cooperative-browser.service) ;; *) return 1 ;; esac
+    case $jobs_stop_unit in volparossa-alpha-compute@relay[345].service|volparossa-alpha-policy-authority@relay[345].service|volparossa-alpha-aggregation.service|volparossa-alpha-public-browser.service|volparossa-alpha-cooperative-browser.service|volparossa-alpha-public-code.service|volparossa-alpha-cooperative-code.service) ;; *) return 1 ;; esac
     jobs_load_state=$(systemctl show --property=LoadState --value "$jobs_stop_unit") || return 1
     case $jobs_load_state in
         loaded)
@@ -266,6 +266,9 @@ agent_jobs_stop() {
 
 agent_jobs_cleanup() {
     agent_jobs_stop || return 1
+    if [ "${agent_cooperative_code:-no}" = yes ]; then
+        agent_cooperative_code_account_home_cleanup || return 1
+    fi
     if [ "${agent_cooperative_browser:-no}" = yes ]; then
         python3 -B "$source_directory/tests/integration/agent-cooperative-browser.py" account-home-cleanup "$WORK" || return 1
     fi
@@ -346,6 +349,10 @@ agent_jobs_setup() {
 
 agent_jobs_run() {
     agent_jobs_setup
+    if [ "${agent_cooperative_code:-no}" = yes ]; then
+        agent_cooperative_code_run
+        return
+    fi
     if [ "${agent_cooperative_browser:-no}" = yes ]; then
         agent_cooperative_browser_run
         return
@@ -474,6 +481,10 @@ agent_jobs_resume_failed() {
 agent_jobs_finalize_report() {
     jobs_status=$1
     # This app integration publishes only its closed structural receipt set.
+    if [ "${agent_cooperative_code:-no}" = yes ]; then
+        agent_cooperative_code_finalize_report "$jobs_status"
+        return
+    fi
     if [ "${agent_cooperative_browser:-no}" = yes ]; then
         agent_cooperative_browser_finalize_report "$jobs_status"
         return

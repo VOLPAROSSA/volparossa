@@ -32,6 +32,14 @@ Last updated: 2026-10-02
   result. Eight focused driver checks and four namespace checks pass; the new
   driver has not yet completed a joined live-peer trial. Actual joined OpenCode
   peer execution and integration of that dependency remain open.
+- [ ] The [OpenCode cooperative topology](COOPERATIVE_CODE.md) now connects that
+  exact `b3a4cfe` driver to the real public service and two model peers, with a
+  separately hash-bound source/runtime bundle. Actual capture/transfer of all 25
+  input files passes; eight fixture, three transfer and four VM-contract checks
+  pass. These are preparation checks, not a passed live-peer trial. Code `0282ffe`
+  separately preserves primary model-task failures and closed provider counters;
+  the original Qwen VM03 trial failed without a completed coding turn or edit/test,
+  while its VM/private-state cleanup and unchanged host routes/DNS were confirmed.
 - [ ] Default network cooperation, shared improvement and protected private
   execution are required across integrations, not optional extras beside local
   AI. Local subagents/fallback do not fulfill this requirement. The existing
@@ -60,6 +68,17 @@ for its first task. The artifact does not retain the observer's original failure
 or final wire reply, so causal ordering is not established. Incomplete answers with
 confirmed cleanup are valid browser responses; incompleteness alone does not explain
 this error. Fixture cleanup leaves zero owned objects and identical host snapshots.
+
+The next original [run `37024673305`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37024673305)
+on `0f05c6ad` establishes that the browserdriver had already stopped before the
+observer's final completeness check. Again all eleven terminal receipts and
+cleanup are confirmed; there is no earlier observer scan failure. A concrete
+core defect is now reproduced and fixed in `9b984ad8`: disjoint async capture
+dropped the public execution guard before the backend ran, incorrectly closing
+admission. Two tests using actual `Active::start` failed before the fix; all seven
+public-service tests pass after retaining the complete guard through cleanup.
+This fixes the erroneous cleanup latch, not the separate incomplete-answer
+condition, and is not yet a passed end-to-end browser or Code trial.
 
 The new **cooperative browser candidate** connects a separate, explicitly public
 Firefox panel to the real `compute public-serve` service and existing signed document /

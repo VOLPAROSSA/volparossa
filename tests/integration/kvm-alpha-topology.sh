@@ -28,6 +28,7 @@ agent_jobs_package_queue=no
 agent_public_task=no
 agent_public_document=no
 agent_cooperative_browser=no
+agent_cooperative_code=no
 agent_public_collection=no
 agent_public_network_sources=no
 agent_task_graph=no
@@ -51,6 +52,11 @@ binary_directory=
 mpquic_binary=
 output_directory=
 expected_commit=
+code_bundle=
+code_manifest_sha256=
+# Only explicit scenario arguments may authorize the staged Code inputs.
+COOPERATIVE_CODE_BUNDLE=
+COOPERATIVE_CODE_MANIFEST_SHA256=
 
 usage() {
     printf '%s\n' 'Additional scenario: browser-network (two real app-scoped Firefox HTTPS/MPTCP transfers).'
@@ -59,10 +65,22 @@ usage() {
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
         '         --scenario signal-backup also runs the exact pinned native Signal backup test' \
+        '         --scenario agent-cooperative-code requires --code-bundle DIRECTORY --code-manifest-sha256 HEX' \
         '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
 }
 
 print_plan() {
+    if [ "$agent_cooperative_code" = yes ]; then
+        printf '%s\n' \
+            'VOLPAROSSA cooperative Code proof plan:' \
+            '  require an explicitly staged hash-bound source-built OpenCode/Node/Code bundle;' \
+            '  enroll one exact public README snapshot; synthesize only private planning replies;' \
+            '  use the real owner-only public core, two actual peers and protected MPTCP routes;' \
+            '  join the native tool result to observed workers and the unique retained source manifest;' \
+            '  export closed structural receipts; stop owned units and remove runtime, models and task state;' \
+            '  no private peer confidentiality, real model planning, live cancellation or coding-quality claim.'
+        return
+    fi
     if [ "$agent_cooperative_browser" = yes ]; then
         printf '%s\n' \
             'VOLPAROSSA cooperative browser proof plan:' \
@@ -721,6 +739,7 @@ while [ "$#" -gt 0 ]; do
             agent_public_task=no
             agent_public_document=no
             agent_cooperative_browser=no
+            agent_cooperative_code=no
             agent_public_collection=no
             agent_public_network_sources=no
             agent_task_graph=no
@@ -736,6 +755,7 @@ while [ "$#" -gt 0 ]; do
             agent_train_loop=no
             agent_artifact_quarantine=no
             case $2 in
+                agent-cooperative-code) scenario=agent-jobs; agent_cooperative_code=yes; wifi_link=no; uplink_link=no ;;
                 agent-cooperative-browser) scenario=agent-jobs; agent_cooperative_browser=yes; wifi_link=no; uplink_link=no ;;
                 signal-backup) scenario=content-custody; signal_backup=yes; wifi_link=no; uplink_link=no ;;
                 reciprocity-private-dns) scenario=reciprocity; reciprocal_private_dns=yes; wifi_link=no; uplink_link=no ;;
@@ -799,6 +819,18 @@ while [ "$#" -gt 0 ]; do
             expected_commit=$2
             shift
             ;;
+        --code-bundle)
+            if [ "$#" -lt 2 ] || [ -n "$code_bundle" ]; then usage >&2; exit 64; fi
+            code_bundle=$2
+            [ -n "$code_bundle" ] || { usage >&2; exit 64; }
+            shift
+            ;;
+        --code-manifest-sha256)
+            if [ "$#" -lt 2 ] || [ -n "$code_manifest_sha256" ]; then usage >&2; exit 64; fi
+            code_manifest_sha256=$2
+            [ -n "$code_manifest_sha256" ] || { usage >&2; exit 64; }
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -813,7 +845,7 @@ done
 
 if [ "$mode" = preview ]; then
     if [ "$approval" != no ] \
-        || [ -n "$source_directory$binary_directory$mpquic_binary$output_directory$expected_commit" ]; then
+        || [ -n "$source_directory$binary_directory$mpquic_binary$output_directory$expected_commit$code_bundle$code_manifest_sha256" ]; then
         usage >&2
         exit 64
     fi
@@ -839,6 +871,17 @@ case $expected_commit in
 esac
 case ${#expected_commit} in 40|64) ;; *) exit 64 ;; esac
 
+if [ "$agent_cooperative_code" = yes ]; then
+    case $code_bundle in /*) ;; *) usage >&2; exit 64 ;; esac
+    case $code_bundle in /|*/|*//*|*/../*|*/./*|*/..|*/.|*[[:cntrl:]]*) usage >&2; exit 64 ;; esac
+    [ "${#code_bundle}" -le 4096 ] || exit 64
+    case $code_manifest_sha256 in ''|*[!0-9a-f]*) usage >&2; exit 64 ;; esac
+    [ "${#code_manifest_sha256}" -eq 64 ] || exit 64
+elif [ -n "$code_bundle$code_manifest_sha256" ]; then
+    printf '%s\n' 'Code bundle arguments require the agent-cooperative-code scenario' >&2
+    exit 64
+fi
+
 [ "$(id -u)" -eq 0 ] || { printf '%s\n' 'execution requires root inside KVM' >&2; exit 77; }
 [ "$(sed -n '1{s/\..*$//;p;}' /etc/debian_version)" = 13 ] \
     || { printf '%s\n' 'execution requires Debian 13' >&2; exit 77; }
@@ -856,6 +899,19 @@ for command_name in awk busctl cat chmod chown cut date find getent grep install
     command -v "$command_name" >/dev/null 2>&1 \
         || { printf 'required guest tool unavailable: %s\n' "$command_name" >&2; exit 69; }
 done
+if [ "$agent_cooperative_code" = yes ]; then
+    if [ -d "$code_bundle" ] && [ ! -L "$code_bundle" ] \
+        && [ "$(readlink -e -- "$code_bundle")" = "$code_bundle" ] \
+        && [ -f "$code_bundle/INPUTS.json" ] && [ ! -L "$code_bundle/INPUTS.json" ] \
+        && [ "$(stat -Lc '%s' "$code_bundle/INPUTS.json")" -le 65536 ] \
+        && [ "$(sha256sum -- "$code_bundle/INPUTS.json" | awk '{ print $1 }')" = "$code_manifest_sha256" ]; then
+        COOPERATIVE_CODE_BUNDLE=$code_bundle
+        COOPERATIVE_CODE_MANIFEST_SHA256=$code_manifest_sha256
+    else
+        printf '%s\n' 'explicit Code bundle manifest unavailable or changed' >&2
+        exit 69
+    fi
+fi
 for executable in volparossa volparossa-agent volparossa-helper; do
     [ -x "$binary_directory/$executable" ] \
         || { printf 'required product executable unavailable: %s\n' "$executable" >&2; exit 69; }
@@ -1058,7 +1114,8 @@ if [ "$agent_jobs_ready_queue" = yes ]; then
         [ -f "$source_directory/tests/integration/$ready_fixture" ] && [ ! -L "$source_directory/tests/integration/$ready_fixture" ] || exit 69
     done
 fi
-if [ "$agent_public_document" = yes ] || [ "$agent_public_collection" = yes ] || [ "$agent_cooperative_browser" = yes ]; then
+if [ "$agent_public_document" = yes ] || [ "$agent_public_collection" = yes ] \
+    || [ "$agent_cooperative_browser" = yes ] || [ "$agent_cooperative_code" = yes ]; then
     for document_fixture in agent-public-document-smoke.sh agent-public-document-smoke.py agent-document-synthesis.py; do
         [ -f "$source_directory/tests/integration/$document_fixture" ] && [ ! -L "$source_directory/tests/integration/$document_fixture" ] || exit 69
     done
@@ -1068,6 +1125,13 @@ if [ "$agent_cooperative_browser" = yes ]; then
         agent-cooperative-browser-pins.json agent-private-task-browser-pins.json; do
         [ -f "$source_directory/tests/integration/$cooperative_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$cooperative_fixture" ] || exit 69
+    done
+fi
+if [ "$agent_cooperative_code" = yes ]; then
+    for code_fixture in agent-cooperative-code.py agent-cooperative-code.sh agent-cooperative-browser.py \
+        agent-private-conversation-pins.json; do
+        [ -f "$source_directory/tests/integration/$code_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$code_fixture" ] || exit 69
     done
 fi
 if [ "$agent_public_collection" = yes ]; then
@@ -2540,6 +2604,10 @@ fi
 if [ "$agent_cooperative_browser" = yes ]; then
     # shellcheck source=tests/integration/agent-cooperative-browser.sh
     . "$source_directory/tests/integration/agent-cooperative-browser.sh"
+fi
+if [ "$agent_cooperative_code" = yes ]; then
+    # shellcheck source=tests/integration/agent-cooperative-code.sh
+    . "$source_directory/tests/integration/agent-cooperative-code.sh"
 fi
 if [ "$agent_public_collection" = yes ]; then
     # shellcheck source=tests/integration/agent-public-collection-smoke.sh

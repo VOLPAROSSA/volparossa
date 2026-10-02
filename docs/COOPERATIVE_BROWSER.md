@@ -121,3 +121,18 @@ observed error. No completed display, synthesis/cancellation proof or improved m
 quality is claimed. Fixture cleanup succeeds with zero owned objects; before/after
 host snapshots both hash to
 `ec97a4e9bcf30dc3013bf5ba98d0abc1ed3ea1772107a3f99733e9ff976f081c`.
+
+The following [run `37024673305`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37024673305)
+on `0f05c6ad` preserves the observer's failure position: `completion_check`, with
+the browserdriver already stopped and eleven workers observed. It rules out an
+earlier observer scanning failure as the cause of this attempt's browser shutdown.
+The original ZIP SHA-256 is
+`f23308d804e324b679d50d27922a9eefabac1191a04f91f56e122e2d02324940`.
+
+Core `9b984ad8` fixes a reproduced guard-lifetime defect in `Active::start`:
+disjoint async capture retained only the boolean cleanup field and dropped the
+actual admission guard before backend execution. Explicit whole-guard ownership
+now extends through the backend result. Two real lifecycle tests fail before the
+fix and pass after it; all seven public-service checks pass. Aborting without
+confirmed cleanup still quarantines admission. This does not turn either original
+failed run into success or resolve its separate incomplete-answer condition.
