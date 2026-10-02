@@ -42,7 +42,8 @@ FIXTURE_NAMES = ('agent-native-editor.py', 'agent-native-editor.sh', 'agent-nati
                  'agent-private-conversation-pins.json', 'agent-training-smoke.py')
 UI_FAILURES = {'guest_required', 'arguments', 'project_scope', 'output_scope', 'editor_unavailable',
                'cdp_failed', 'ui_unrecognized', 'ui_bound', 'deadline', 'command_refused',
-               'editor_failed', 'fixture_failed', 'cleanup_unconfirmed'}
+               'editor_failed', 'fixture_failed', 'cleanup_unconfirmed', 'startup_not_ready',
+               'palette_unavailable', 'startup_dialog'}
 UI_PHASES = {'prepare', 'editor-connect', 'task-input', 'consent', 'native-turn',
              'independent-check', 'complete'}
 ORIGINAL_SHA = hashlib.sha256(b'def add(a, b):\n    return a - b\n').hexdigest()
@@ -109,12 +110,19 @@ def ui_receipt(value):
         'ui_result_shown', 'runtime_cleanup_confirmed_by_ui', 'cdp_closed', 'synthetic_model',
         'private_peer_execution_claimed', 'general_coding_quality_claimed', 'guest_cleanup_owned_by_parent'}
     require(type(value) is dict and set(value) == booleans | {'version', 'kind', 'phase', 'failure',
-        'approved_commands', 'declined_commands', 'native_commands_observed', 'before_sha256', 'after_sha256'},
+        'approved_commands', 'declined_commands', 'native_commands_observed', 'before_sha256', 'after_sha256',
+        'startup'},
         'UI report fields')
-    require(type(value['version']) is int and value['version'] == 1
+    require(type(value['version']) is int and value['version'] == 2
         and value['kind'] == 'native-editor-ui-smoke' and value['phase'] in UI_PHASES
         and value['failure'] in UI_FAILURES | {None}
         and all(type(value[key]) is bool for key in booleans), 'UI report values')
+    startup = value['startup']
+    startup_flags = {'document_ready', 'workbench_ready', 'dialog_seen', 'palette_seen'}
+    require(type(startup) is dict and set(startup) == startup_flags | {'palette_attempts'}
+        and all(type(startup[key]) is bool for key in startup_flags)
+        and type(startup['palette_attempts']) is int and 0 <= startup['palette_attempts'] <= 8,
+        'UI startup report')
     for key in ('approved_commands', 'declined_commands', 'native_commands_observed'):
         require(type(value[key]) is int and 0 <= value[key] <= 16, 'UI count')
     require(value['before_sha256'] == ORIGINAL_SHA
@@ -124,6 +132,8 @@ def ui_receipt(value):
         and value['guest_cleanup_owned_by_parent'], 'UI proof scope')
     if value['passed']:
         require(value['phase'] == 'complete' and value['failure'] is None
+            and all(startup[key] for key in ('document_ready', 'workbench_ready', 'palette_seen'))
+            and not startup['dialog_seen'] and startup['palette_attempts'] >= 1
             and all(value[key] for key in ('start_clicked', 'read', 'edit', 'test', 'independent_test_passed',
                 'ui_result_shown', 'runtime_cleanup_confirmed_by_ui', 'cdp_closed'))
             and 3 <= value['approved_commands'] == value['native_commands_observed'] <= 8

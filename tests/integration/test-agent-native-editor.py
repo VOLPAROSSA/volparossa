@@ -12,12 +12,14 @@ FIX = runpy.run_path(str(HERE / 'agent-native-editor.py'))
 
 
 def ui():
-    return dict(version=1, kind='native-editor-ui-smoke', passed=True, phase='complete', failure=None,
+    return dict(version=2, kind='native-editor-ui-smoke', passed=True, phase='complete', failure=None,
         start_clicked=True, approved_commands=3, declined_commands=0, native_commands_observed=3,
         read=True, edit=True, test=True, independent_test_passed=True, ui_result_shown=True,
         runtime_cleanup_confirmed_by_ui=True, cdp_closed=True, before_sha256=FIX['ORIGINAL_SHA'],
         after_sha256='b' * 64, synthetic_model=False, private_peer_execution_claimed=False,
-        general_coding_quality_claimed=False, guest_cleanup_owned_by_parent=True)
+        general_coding_quality_claimed=False, guest_cleanup_owned_by_parent=True,
+        startup=dict(document_ready=True, workbench_ready=True, dialog_seen=False,
+                     palette_attempts=1, palette_seen=True))
 
 
 def synthetic_report():
@@ -59,6 +61,27 @@ class NativeEditorContracts(unittest.TestCase):
         self.assertEqual(FIX['ui_receipt'](value), value)
         with self.assertRaises(ValueError):
             FIX['ui_receipt'](dict(value, native_commands_observed=True))
+
+    def test_startup_metadata_is_closed_and_readiness_is_not_task_success(self):
+        for change in ({'document_ready': False}, {'workbench_ready': False},
+                       {'dialog_seen': True}, {'palette_seen': False}, {'palette_attempts': 0},
+                       {'palette_attempts': True}, {'palette_attempts': 9},
+                       {'dialog_text': 'PRIVATE_SENTINEL'}):
+            value = ui()
+            value['startup'].update(change)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                FIX['ui_receipt'](value)
+        with self.assertRaises(ValueError):
+            FIX['ui_receipt'](dict(ui(), version=1))
+        for reason in ('startup_not_ready', 'palette_unavailable', 'startup_dialog'):
+            value = dict(ui(), passed=False, phase='editor-connect', failure=reason,
+                start_clicked=False, approved_commands=0, native_commands_observed=0,
+                read=False, edit=False, test=False, independent_test_passed=False,
+                ui_result_shown=False, runtime_cleanup_confirmed_by_ui=False)
+            value['startup'].update(document_ready=False, workbench_ready=False,
+                                    palette_seen=False, palette_attempts=0,
+                                    dialog_seen=reason == 'startup_dialog')
+            self.assertEqual(FIX['ui_receipt'](value), value)
 
     def test_report_requires_both_cgroups_real_ui_and_full_cleanup(self):
         value = synthetic_report()

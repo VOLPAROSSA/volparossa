@@ -56,9 +56,9 @@
       "sha256": "16b6669dcf0e3ba367b889f93f283442b8bf69af866b3738496e2b2d726895f5"
     },
     "scripts/smoke_editor_ui.cjs": {
-      "bytes": 20556,
+      "bytes": 22740,
       "mode": 292,
-      "sha256": "9eecccbf89185ba0a21d64dc4181d625be132d40adb2f51af24bb33779ca3a26"
+      "sha256": "2306ce1106b407e05f920941d2064906b81105eec381fb2f3f21e9beaadf4447"
     },
     "scripts/smoke_native_coding.cjs": {
       "bytes": 6943,
@@ -126,8 +126,8 @@
       "sha256": "60af27ad427e4d3927041abac16005a67f0f85ff1af6ea0f091eedfaa9d8665c"
     }
   },
-  "code_revision": "41a4320f0a819819adcfa9969ed4780506d6c747",
-  "code_tree": "c90497395f85633da66c2267c9943d90e0b5860b",
+  "code_revision": "4263b8ba4b28e6617d2a57de33db1efcda01a828",
+  "code_tree": "c13e1222be7db7a562394b207caefa8cbe359c3d",
   "editor": {
     "binary_sha256": "51ea8d7fb3795a03754b6518fb738d202fbb13185336de6719c4fd8b4ba984aa",
     "bytes": 709431141,

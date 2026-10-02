@@ -8,7 +8,7 @@ Last updated: 2026-10-02
 
 ### Native editor, core and model integration candidate
 
-The separate Code PR4 at `41a4320f0a819819adcfa9969ed4780506d6c747`
+The separate Code PR4 at `4263b8ba4b28e6617d2a57de33db1efcda01a828`
 provides an explicit native coding command, selected-workspace consent and
 one-shot tool approvals. A real isolated VSCodium admission probe reached the
 command, prompt and consent dialog, then cancelled; it did not execute a model
@@ -44,6 +44,17 @@ Original report SHA-256:
 This remains a failed integration trial, not a completed coding task. The next
 UI correction must observe actual workbench/palette readiness without weakening
 consent, command approval, isolation or the task's success criteria.
+
+Code `4263b8ba` now waits for visible workbench/editor DOM before opening the
+palette, and retries only an unobserved palette within the original 15 seconds;
+unknown dialogs are never approved. Seven focused driver checks and an actual
+isolated editor admission probe pass without the earlier fixed startup sleep:
+both palettes open after one F1, task/consent are reached, then Cancel ends the
+probe without model, tool or app-server execution. The guest requires UI receipt
+v2 with only closed readiness flags and a bounded attempt count; seven guest
+contract checks reject missing readiness, unknown fields and false task success.
+This does not retrospectively prove the cause of trial01 or complete the joined
+model-driven coding task. A new source-bound full trial remains necessary.
 
 ### Native Codex read/edit/test integration candidate
 
