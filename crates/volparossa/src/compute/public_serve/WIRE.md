@@ -2,8 +2,20 @@
 
 This separate same-UID Unix socket is not the private-local compute service and
 does not change that protocol. The operator fixes the agent control socket,
-publisher identity, provider keys, model/runtime and state directory at launch.
+publisher identity, peer-selection mode, model/runtime and state directory at launch.
 Requests never select commands, paths, keys, models, providers or Internet URLs.
+
+The operator can supply two to four fixed `--provider-key` values, or select
+`--discover-peers` instead. Discovery reuses the core's protected-route capability
+selection for each new task, requiring two to four distinct eligible providers
+in one exact model cohort before enrollment. `--model-profile` remains an
+operator choice; discovery may additionally pin `--model-fingerprint`. It does
+not automatically switch models, authorize private input, or replace an enrolled
+provider. Result `selected_provider_keys` comes from the validated original
+enrollment, while `provider_keys` still contains only actual answer providers.
+Unavailable peers or cancellation during capability selection do not quarantine
+an otherwise quiescent service: no worker has started in that phase, and the
+independent terminal-receipt cleanup check must still pass.
 
 Frames are a four-byte big-endian length followed by UTF-8 JSON: at most 32768
 request bytes and 65536 response bytes. Partial frames expire after five seconds;

@@ -87,10 +87,22 @@ public-service tests pass after retaining the complete guard through cleanup.
 This fixes the erroneous cleanup latch, not the separate incomplete-answer
 condition, and is not yet a passed end-to-end browser or Code trial.
 The next browser [run37037361187](https://github.com/VOLPAROSSA/volparossa/actions/runs/37037361187)
-on `c0362ba5` has passed source/tool provisioning and is executing its disposable
-topology; it is not yet success evidence. Its separate Quality run found one
-unseparated integer literal in the reconciliation test. Correcting the literal
-passes targeted all-target CLI Clippy without changing runtime behavior.
+on `c0362ba5` is terminal failed. Its closed diagnostics prove ten of eleven leaf
+answers reached the token limit and one reached EOS; no wire truncation, empty
+output or unknown termination was observed. All eleven receipts and guest cleanup
+are confirmed, but synthesis never starts. ZIP SHA-256:
+`7b17bde4d55293951c4baaacc8632e545a13c235171ae5959ec034cb5d9d7484`.
+The original failure remains unchanged; increasing observation time cannot finish
+already terminal generation. Its unrelated Quality integer-literal failure is
+corrected in `0706aaf6`, with targeted all-target CLI Clippy passing.
+
+The public service candidate now supports `--discover-peers`, reusing authenticated
+core selection before enrollment instead of requiring fixed keys. Twenty-one
+focused checks cover real framed control IPC, rejection/cancellation before any
+execution, retained selection binding and existing service/selector behavior;
+strict CLI/test Clippy passes. Actual executors remain distinct from selected
+peers. Model choice stays operator-selected; this is not automatic model selection,
+cross-job continuation, protected private inference or a live discovered-peer PASS.
 
 The new **cooperative browser candidate** connects a separate, explicitly public
 Firefox panel to the real `compute public-serve` service and existing signed document /

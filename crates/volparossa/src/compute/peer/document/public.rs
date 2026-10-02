@@ -34,9 +34,15 @@ pub(in crate::compute) struct Config {
     pub passphrase_file: PathBuf,
     #[arg(long, value_parser = parse_key)]
     pub publisher_key: VerifyingKey,
-    /// Two to four independently selected compatible workers trusting this publisher.
-    #[arg(long, required = true, value_parser = parse_key)]
+    /// Two to four fixed compatible workers; alternatively use authenticated discovery.
+    #[arg(long, required_unless_present = "discover_peers", conflicts_with = "discover_peers", value_parser = parse_key)]
     pub provider_key: Vec<VerifyingKey>,
+    /// Select two to four eligible peers in the operator-selected model cohort for each new task.
+    #[arg(long, conflicts_with = "provider_key")]
+    discover_peers: bool,
+    /// Optional exact base/adapter fingerprint within the selected discovery profile.
+    #[arg(long, requires = "discover_peers", conflicts_with = "provider_key", value_parser = super::discovery::parse_fingerprint)]
+    model_fingerprint: Option<String>,
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u16).range(1..=600))]
     pub max_seconds: u16,
     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u16).range(1..=2))]
@@ -46,20 +52,36 @@ pub(in crate::compute) struct Config {
 }
 
 impl Config {
-    pub fn validate(&self) -> Result<()> {
+    fn validate_selection(&self) -> Result<()> {
+        let fixed = (2..=4).contains(&self.provider_key.len())
+            && self
+                .provider_key
+                .iter()
+                .map(VerifyingKey::to_bytes)
+                .collect::<BTreeSet<_>>()
+                .len()
+                == self.provider_key.len();
         ensure!(
-            (2..=4).contains(&self.provider_key.len())
-                && self
-                    .provider_key
-                    .iter()
-                    .map(VerifyingKey::to_bytes)
-                    .collect::<BTreeSet<_>>()
-                    .len()
-                    == self.provider_key.len()
-                && (1..=600).contains(&self.max_seconds)
+            (if self.discover_peers {
+                self.provider_key.is_empty()
+            } else {
+                fixed && self.model_fingerprint.is_none()
+            }) && (1..=600).contains(&self.max_seconds)
                 && (1..=2).contains(&self.threads),
             "compute_public_fixed_configuration"
         );
+        ensure!(
+            self.model_profile != ModelProfile::Qwen600,
+            "compute_profile_private_conversation_only"
+        );
+        if let Some(fingerprint) = &self.model_fingerprint {
+            super::discovery::parse_fingerprint(fingerprint).map_err(anyhow::Error::msg)?;
+        }
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.validate_selection()?;
         private_directory(&self.runtime_root)?;
         private_directory(&self.model_root)?;
         ensure!(
@@ -83,6 +105,13 @@ impl Config {
     }
 
     fn options(&self, root: &Path, question: String, license: String) -> Options {
+        // Reuse the existing selector, without its CLI-only --resume conflicts.
+        // Replacement discovery stays disabled: this service reports one enrolled cohort.
+        let mut discovery = super::discovery::Options::default();
+        discovery.discover_peers = self.discover_peers;
+        discovery
+            .model_fingerprint
+            .clone_from(&self.model_fingerprint);
         Options {
             directory: root.join("document"),
             resume: false,
@@ -108,7 +137,7 @@ impl Config {
             passphrase_file: Some(self.passphrase_file.clone()),
             publisher_key: Some(self.publisher_key),
             provider_key: self.provider_key.clone(),
-            discovery: super::discovery::Options::default(),
+            discovery,
             lifetime_seconds: 86_400,
             max_batches: 32,
             follow: super::super::follow::Options::default(),
@@ -165,6 +194,9 @@ pub(in crate::compute) async fn execute(
     });
     receipts.confirmed = remote_cleanup;
     let local_cleanup = result.is_ok()
+        // This phase contains capability/discovery RPCs only. No tokenizer or peer
+        // job has started, and the separate exact-receipt check still gates cleanup.
+        || matches!(phase, Phase::ProviderSelection)
         || result.as_ref().is_err_and(|error| {
             matches!(
                 error.to_string().as_str(),
@@ -179,7 +211,8 @@ pub(in crate::compute) async fn execute(
     let cleanup_confirmed = local_cleanup && remote_cleanup;
     let result = result.and_then(|report| {
         phase = Phase::Compaction;
-        let compact = compact(&report, config, cleanup_confirmed)?;
+        let selected = selected_provider_keys(&root.join("document"), &report, config)?;
+        let compact = compact(&report, config, &selected, cleanup_confirmed)?;
         phase = Phase::Complete;
         Ok(compact)
     });
@@ -203,7 +236,39 @@ pub(in crate::compute) async fn execute(
     }
 }
 
-fn compact(report: &Value, config: &Config, cleanup: bool) -> Result<Value> {
+fn selected_provider_keys(root: &Path, report: &Value, config: &Config) -> Result<Vec<String>> {
+    let (enrollment, input, plan) = super::storage::load(root)?;
+    ensure!(
+        enrollment.synthesize
+            && !enrollment.replace_peers
+            && enrollment.publisher_key == hex::encode(config.publisher_key.as_bytes())
+            && input.model_profile == config.model_profile
+            && enrollment.model_fingerprint.is_some()
+            && config
+                .model_fingerprint
+                .as_ref()
+                .is_none_or(|expected| enrollment.model_fingerprint.as_ref() == Some(expected))
+            && report["source_manifest_id"] == enrollment.source_manifest_id
+            && report["source_sha256"] == plan.source_sha256
+            && report["source_bytes"] == plan.source_bytes
+            && report["public_question"] == input.question
+            && report["license"] == input.license,
+        "compute_public_retained_selection_binding"
+    );
+    ensure!(
+        config.discover_peers
+            || enrollment.provider_keys
+                == config
+                    .provider_key
+                    .iter()
+                    .map(|key| hex::encode(key.as_bytes()))
+                    .collect::<Vec<_>>(),
+        "compute_public_fixed_selection_changed"
+    );
+    Ok(enrollment.provider_keys)
+}
+
+fn compact(report: &Value, config: &Config, selected: &[String], cleanup: bool) -> Result<Value> {
     ensure!(
         report["operation"] == "compute_public_document"
             && report["complete"].is_boolean()
@@ -229,6 +294,10 @@ fn compact(report: &Value, config: &Config, cleanup: bool) -> Result<Value> {
             collect(&level["answers"])?;
         }
     }
+    ensure!(
+        providers.iter().all(|provider| selected.contains(provider)),
+        "compute_public_result_provider_not_selected"
+    );
     let text = report["synthesized_answer"]["text"].as_str().unwrap_or("");
     ensure!(
         text.len() <= config.model_profile.spec().max_output_bytes,
@@ -242,7 +311,7 @@ fn compact(report: &Value, config: &Config, cleanup: bool) -> Result<Value> {
     Ok(
         json!({"answer_complete":complete,"answer_status":if complete {"complete"} else {"incomplete"},
         "output":{"text":text},"provider_keys":providers,
-        "selected_provider_keys":config.provider_key.iter().map(|key|hex::encode(key.as_bytes())).collect::<Vec<_>>(),
+        "selected_provider_keys":selected,
         "joining":report["joining"],"execution_complete":report["execution_complete"],
         "package_count":report["packages"].as_array().context("compute_public_packages")?.len(),
         "total_parts":report["total_parts"],
@@ -371,7 +440,357 @@ fn scan_receipts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use std::os::unix::fs::PermissionsExt as _;
+
+    fn arguments(extra: &[&str]) -> std::result::Result<Config, clap::Error> {
+        #[derive(Parser)]
+        struct Command {
+            #[command(flatten)]
+            config: Config,
+        }
+        let key = hex::encode(
+            ed25519_dalek::SigningKey::from_bytes(&[1; 32])
+                .verifying_key()
+                .as_bytes(),
+        );
+        let mut words = vec![
+            "public-service",
+            "--runtime-root",
+            "/unused/runtime",
+            "--model-root",
+            "/unused/model",
+            "--identity",
+            "/unused/identity",
+            "--passphrase-file",
+            "/unused/passphrase",
+            "--publisher-key",
+            &key,
+        ];
+        words.extend_from_slice(extra);
+        Command::try_parse_from(words).map(|value| value.config)
+    }
+
+    #[test]
+    fn public_service_can_explicitly_select_authenticated_peers_without_fixed_keys() {
+        let discovered =
+            arguments(&["--discover-peers", "--model-fingerprint", &"a".repeat(64)]).unwrap();
+        discovered.validate_selection().unwrap();
+        let options = discovered.options(
+            Path::new("/unused/task"),
+            "Question?".into(),
+            "CC0-1.0".into(),
+        );
+        assert!(options.discovery.discover_peers);
+        assert!(!options.discovery.replace_peers);
+        assert_eq!(options.discovery.model_fingerprint, Some("a".repeat(64)));
+        assert_eq!(options.model_profile, ModelProfile::default());
+        assert!(options.provider_key.is_empty());
+        let first = hex::encode(
+            ed25519_dalek::SigningKey::from_bytes(&[2; 32])
+                .verifying_key()
+                .as_bytes(),
+        );
+        let second = hex::encode(
+            ed25519_dalek::SigningKey::from_bytes(&[3; 32])
+                .verifying_key()
+                .as_bytes(),
+        );
+        let fixed = arguments(&["--provider-key", &first, "--provider-key", &second]).unwrap();
+        fixed.validate_selection().unwrap();
+        assert!(!fixed.discover_peers);
+        for invalid in [
+            vec![],
+            vec!["--discover-peers", "--provider-key", &first],
+            vec![
+                "--provider-key",
+                &first,
+                "--model-fingerprint",
+                &"a".repeat(64),
+            ],
+            vec!["--discover-peers", "--model-fingerprint", "bad"],
+            vec!["--discover-peers", "--replace-peers"],
+            vec!["--discover-peers", "--resume"],
+        ] {
+            assert!(arguments(&invalid).is_err(), "accepted {invalid:?}");
+        }
+        for invalid in [
+            vec!["--provider-key", &first],
+            vec!["--provider-key", &first, "--provider-key", &first],
+            vec!["--discover-peers", "--model-profile", "qwen3-0.6b-v1"],
+        ] {
+            assert!(arguments(&invalid).unwrap().validate_selection().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_discovery_before_any_execution_does_not_quarantine_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let config = arguments(&["--discover-peers"]).unwrap();
+        let (_owner, cancelled) = watch::channel(false);
+        let result = execute(
+            &config,
+            root.path(),
+            &root.path().join("absent-agent.sock"),
+            "Public question?".into(),
+            "Public context.".into(),
+            "CC0-1.0".into(),
+            &cancelled,
+        )
+        .await;
+        assert!(result.result.is_err());
+        assert!(result.cleanup_confirmed);
+        let diagnostic: Value = serde_json::from_slice(
+            &fs::read(root.path().join("execution-diagnostic.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(diagnostic["phase"], "provider_selection");
+        assert_eq!(diagnostic["receipts"]["handles"], 0);
+        assert_eq!(diagnostic["receipts"]["confirmed"], true);
+        assert!(!root.path().join("document/document.json").exists());
+    }
+
+    fn discovery_fixture() -> (String, volparossa_local_control::ComputeDiscovered) {
+        use volparossa_local_control::{ComputeDiscovered, ComputeDiscoveredProvider};
+        let spec = ModelProfile::default().spec();
+        let model = rpc::ModelIdentity {
+            model_id: spec.model_id.into(),
+            model_revision: spec.revision.into(),
+            base_weights: rpc::FileIdentity {
+                bytes: spec.weights_bytes,
+                sha256: spec.weights_sha256.into(),
+            },
+            adapter_files: None,
+        };
+        let fingerprint = super::super::super::sha(&serde_json::to_vec(&model).unwrap());
+        let caps = rpc::Capabilities {
+            model,
+            model_fingerprint: fingerprint.clone(),
+            accepting_work: true,
+            public_inference_only: true,
+            runtime_slots: 1,
+            max_threads: 2,
+            max_job_seconds: 600,
+            max_dataset_bytes: 1_048_576,
+            max_rows: 4,
+            task_derivation_v1: true,
+            document_inference_v2: true,
+            derived_inference_v3: true,
+            principle_inference_v4: false,
+            successor_activation_v1: false,
+        };
+        let found = ComputeDiscovered {
+            providers: [2, 3]
+                .into_iter()
+                .map(|byte| ComputeDiscoveredProvider {
+                    provider_key: ed25519_dalek::SigningKey::from_bytes(&[byte; 32])
+                        .verifying_key()
+                        .as_bytes()
+                        .to_vec(),
+                    capabilities_json: serde_json::to_string(&caps).unwrap(),
+                })
+                .collect(),
+        };
+        (fingerprint, found)
+    }
+
+    #[tokio::test]
+    async fn public_execution_joins_existing_discovery_and_rejects_or_cancels_before_enrollment() {
+        use tokio::io::AsyncReadExt as _;
+        use volparossa_local_control::{
+            CONTROL_PROTOCOL_VERSION, ControlResponse, ControlResult, control_request::Operation,
+            control_response::Payload, read_request, write_response,
+        };
+        // Real public backend/framed IPC, controlled offers. No model or remote execution.
+        for outcome in ["eligible", "insufficient", "wrong_model", "cancel"] {
+            let root = tempfile::tempdir().unwrap();
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let sockets = tempfile::tempdir().unwrap();
+            let socket = sockets.path().join("agent.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let (fingerprint, mut found) = discovery_fixture();
+            let selected = if outcome == "wrong_model" {
+                "a".repeat(64)
+            } else {
+                fingerprint
+            };
+            let config =
+                arguments(&["--discover-peers", "--model-fingerprint", &selected]).unwrap();
+            let publisher = config.publisher_key.as_bytes().to_vec();
+            let (owner, cancelled) = watch::channel(false);
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = read_request(&mut stream).await.unwrap();
+                let Some(Operation::ComputeDiscover(query)) = request.operation else {
+                    panic!("only discovery is permitted before eligibility validation");
+                };
+                assert_eq!(
+                    query.model_profile,
+                    Some(ModelProfile::default().to_string())
+                );
+                assert_eq!(query.model_fingerprint, Some(selected));
+                assert_eq!(query.publisher_keys, vec![publisher]);
+                assert_eq!((query.maximum, query.effective_minimum()), (4, 2));
+                assert!(query.require_task_derivation_v1 && query.require_document_inference_v2);
+                assert!(
+                    query.require_derived_inference_v3 && !query.require_principle_inference_v4
+                );
+                if outcome == "cancel" {
+                    owner.send(true).unwrap();
+                    return;
+                }
+                if outcome == "insufficient" {
+                    found.providers.pop();
+                }
+                write_response(
+                    &mut stream,
+                    &ControlResponse {
+                        protocol_version: CONTROL_PROTOCOL_VERSION,
+                        request_id: request.request_id,
+                        result: ControlResult::Ok.into(),
+                        diagnostic_code: "COMPUTE_DISCOVERED".into(),
+                        payload: Some(Payload::ComputeDiscovered(found)),
+                    },
+                )
+                .await
+                .unwrap();
+                // Retain cancellation authority until the request consumer closes its stream.
+                let mut byte = [0];
+                assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+            });
+            let execution = execute(
+                &config,
+                root.path(),
+                &socket,
+                "Public question?".into(),
+                "Public context.".into(),
+                "CC0-1.0".into(),
+                &cancelled,
+            )
+            .await;
+            server.await.unwrap();
+            assert!(execution.result.is_err());
+            let diagnostic: Value = serde_json::from_slice(
+                &fs::read(root.path().join("execution-diagnostic.json")).unwrap(),
+            )
+            .unwrap();
+            if outcome == "eligible" {
+                // Valid offers reach tokenization, which intentionally lacks an installed runtime.
+                // This later failure is NOT included in the new pre-execution cleanup exception.
+                assert_eq!(diagnostic["phase"], "tokenization");
+                assert!(!execution.cleanup_confirmed);
+            } else {
+                assert_eq!(diagnostic["phase"], "provider_selection");
+                assert!(execution.cleanup_confirmed);
+                let expected = match outcome {
+                    "insufficient" => "compute_discovery_insufficient_peers",
+                    "wrong_model" => "compute_discovery_ineligible_profile",
+                    _ => "compute_discovery_cancelled",
+                };
+                assert_eq!(execution.result.unwrap_err().to_string(), expected);
+            }
+            assert_eq!(diagnostic["receipts"]["handles"], 0);
+            assert!(!root.path().join("document/document.json").exists());
+        }
+    }
+
+    fn retained_selection_fixture() -> (tempfile::TempDir, Config, Value) {
+        use crate::compute::document_plan::{Input, Plan};
+        use ed25519_dalek::SigningKey;
+        use sha2::{Digest as _, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let input: Input = serde_json::from_value(json!({"version":1,"visibility":"public",
+            "license":"CC0-1.0","document":"Public fixture.","question":"What is stated?"}))
+        .unwrap();
+        let hash = |bytes: &[u8]| hex::encode(Sha256::digest(bytes));
+        let profile = ModelProfile::default().spec();
+        // Synthetic tokenizer count; signatures/storage are real, model/peer execution is not.
+        let plan: Plan = serde_json::from_value(json!({"version":1,
+            "source_sha256":hash(input.document.as_bytes()),"source_bytes":input.document.len(),
+            "question_sha256":hash(input.question.as_bytes()),"model_id":profile.model_id,
+            "model_revision":profile.revision,"prompt_limit":profile.prompt_tokens,
+            "tokenizer_sha256":"9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c",
+            "parts":[{"start":0,"end":input.document.len(),"prompt_tokens":80}]}))
+        .unwrap();
+        task::write_bytes(
+            &root.path().join("source.txt"),
+            input.document.as_bytes(),
+            false,
+        )
+        .unwrap();
+        super::super::save(root.path(), "planner-input.json", &input, false).unwrap();
+        let providers = [
+            SigningKey::from_bytes(&[2; 32]).verifying_key(),
+            SigningKey::from_bytes(&[3; 32]).verifying_key(),
+        ];
+        let (_owner, cancelled) = watch::channel(false);
+        let mut enrollment = super::super::storage::publish(
+            root.path(),
+            &input,
+            &plan,
+            &SigningKey::from_bytes(&[1; 32]),
+            &providers,
+            super::super::now().unwrap(),
+            600,
+            &cancelled,
+            true,
+        )
+        .unwrap();
+        enrollment.model_fingerprint = Some("a".repeat(64));
+        super::super::save(root.path(), "document.json", &enrollment, false).unwrap();
+        let report = json!({"operation":"compute_public_document","complete":true,"answer_complete":true,
+            "execution_complete":true,"source_manifest_id":enrollment.source_manifest_id,
+            "source_sha256":plan.source_sha256,"source_bytes":plan.source_bytes,
+            "public_question":input.question,"license":input.license,
+            "answers":[{"provider_key":hex::encode(providers[0].as_bytes())}],
+            "packages":[{}],"total_parts":1,"synthesized_answer":{"text":"Public fixture."},
+            "joining":"single_source_answer"});
+        (root, arguments(&["--discover-peers"]).unwrap(), report)
+    }
+
+    #[test]
+    fn compact_discovery_uses_actual_retained_cohort_and_never_invents_execution() {
+        let (root, mut config, report) = retained_selection_fixture();
+        let selected = selected_provider_keys(root.path(), &report, &config).unwrap();
+        assert!(config.provider_key.is_empty());
+        assert_eq!(selected.len(), 2);
+        let value = compact(&report, &config, &selected, true).unwrap();
+        assert_eq!(value["selected_provider_keys"], json!(selected));
+        // A small task may use one of two eligible peers; selected does not mean executed.
+        assert_eq!(value["provider_keys"].as_array().unwrap().len(), 1);
+        assert_eq!(value["answer_complete"], true);
+        let mut foreign = report.clone();
+        foreign["answers"][0]["provider_key"] = hex::encode(
+            ed25519_dalek::SigningKey::from_bytes(&[4; 32])
+                .verifying_key()
+                .as_bytes(),
+        )
+        .into();
+        assert!(compact(&foreign, &config, &selected, true).is_err());
+        for name in [
+            "source_manifest_id",
+            "source_sha256",
+            "public_question",
+            "license",
+        ] {
+            let mut changed = report.clone();
+            changed[name] = "changed".into();
+            assert!(selected_provider_keys(root.path(), &changed, &config).is_err());
+        }
+        config.model_fingerprint = Some("b".repeat(64));
+        assert!(selected_provider_keys(root.path(), &report, &config).is_err());
+        config.model_fingerprint = None;
+        config.discover_peers = false;
+        config.provider_key = selected.iter().map(|key| parse_key(key).unwrap()).collect();
+        assert_eq!(
+            selected_provider_keys(root.path(), &report, &config).unwrap(),
+            selected
+        );
+        config.provider_key.reverse();
+        assert!(selected_provider_keys(root.path(), &report, &config).is_err());
+    }
 
     #[test]
     fn absent_jobs_are_quiescent_but_unknown_retained_objects_fail_closed() {

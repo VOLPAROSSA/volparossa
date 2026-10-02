@@ -20,6 +20,15 @@ The disposable `agent-cooperative-browser` scenario joins three actual component
 3. Two real compatible peer workers execute signed public fragments and hierarchical
    synthesis over the existing protected WireGuard/MPTCP topology.
 
+The service candidate also accepts operator-selected `--discover-peers` instead of
+fixed provider keys. It reuses core discovery and eligibility checks before enrolling
+each new task; the browser still supplies no providers or model configuration.
+Selection stays within the operator's model profile and one mutually compatible
+fingerprint. The validated retained enrollment determines the reported selected cohort;
+actual executor keys remain separate. This does not yet implement automatic model
+choice or cross-job answer continuation. The current browser/Code live trials use
+fixed peers, so they do not prove this new service discovery path.
+
 An independent root observer allows explicit UI submission only after proving prefill
 created neither a task nor a peer worker. A public, literal README prefix is partitioned
 using the pinned 135M tokenizer. The checker requires complete byte coverage, both peer
@@ -136,3 +145,15 @@ now extends through the backend result. Two real lifecycle tests fail before the
 fix and pass after it; all seven public-service checks pass. Aborting without
 confirmed cleanup still quarantines admission. This does not turn either original
 failed run into success or resolve its separate incomplete-answer condition.
+
+The source-bound [run `37037361187`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37037361187)
+on `c0362ba5` remains **failed** with an exact cause: ten leaf answers reached the
+135M token limit and one reached EOS. All eleven original worker receipts and
+cleanup are confirmed; no leaf wire truncation, empty answer or unknown ending
+was observed. No synthesis was started. Browser display/cancellation acceptance
+remains unproved. Guest cleanup leaves zero owned objects and equal network
+snapshots. Original ZIP SHA-256:
+`7b17bde4d55293951c4baaacc8632e545a13c235171ae5959ec034cb5d9d7484`.
+These completed partial jobs cannot be repaired by increasing observation time
+or relabelling them complete. A separate discovered-360M trial will use the already
+supported larger profile; it will not replace this historical 135M result.
