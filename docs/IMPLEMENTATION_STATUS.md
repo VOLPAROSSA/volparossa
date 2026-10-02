@@ -24,19 +24,26 @@ Last updated: 2026-10-02
   and a single-use proxy; the raw public-core socket stays outside the coding
   namespace. Actual OpenCode custom-tool trials preserve complete/incomplete
   results, original tool/core task IDs and cancellation/cleanup boundaries, without
-  publishing private history. These trials still simulate model/public-core
+  publishing private history. Those earlier trials simulate model/public-core
   replies. The real IPC dependency is the separate cooperative-compute candidate
   `610866b8770b63719ec1f4b4ce6abb6a83a596ef` (PR #178), not current main. Code
   `b3a4cfe` adds an explicit guest-only native-tool driver against an externally
   supplied public core, with a synthetic private planner and no simulated public
-  result. Eight focused driver checks and four namespace checks pass; the new
-  driver has not yet completed a joined live-peer trial. Actual joined OpenCode
-  peer execution and integration of that dependency remain open.
+  result. Eight focused driver checks and four namespace checks pass. The first
+  joined live-peer trial now establishes original-result roundtrip, but fails
+  answer completeness as described below; dependency integration remains open.
 - [ ] The [OpenCode cooperative topology](COOPERATIVE_CODE.md) now connects that
   exact `b3a4cfe` driver to the real public service and two model peers, with a
   separately hash-bound source/runtime bundle. Actual capture/transfer of all 25
   input files passes; eight fixture, three transfer and four VM-contract checks
-  pass. These are preparation checks, not a passed live-peer trial. Code `0282ffe`
+  pass. Actual VM01 on core `938c7f2b` returns the original tool result through
+  OpenCode: two providers, eleven observed workers and eleven confirmed terminal
+  receipts. Execution and cleanup complete, but `incomplete_fragment_answers`
+  produces no complete answer and zero synthesis levels; the trial remains failed.
+  Guest cleanup leaves zero objects and identical guest-network snapshots; QEMU,
+  scratch and SSH listener are removed. The outer raw IPv6-route hash later differs
+  for an unknown reason (no before-table contents retained), so outer-host unchanged
+  is **not** proved. IPv4 and DNS hashes still match. Code `0282ffe`
   separately preserves primary model-task failures and closed provider counters;
   the original Qwen VM03 trial failed without a completed coding turn or edit/test,
   while its VM/private-state cleanup and unchanged host routes/DNS were confirmed.
@@ -79,6 +86,11 @@ admission. Two tests using actual `Active::start` failed before the fix; all sev
 public-service tests pass after retaining the complete guard through cleanup.
 This fixes the erroneous cleanup latch, not the separate incomplete-answer
 condition, and is not yet a passed end-to-end browser or Code trial.
+The next browser [run37037361187](https://github.com/VOLPAROSSA/volparossa/actions/runs/37037361187)
+on `c0362ba5` has passed source/tool provisioning and is executing its disposable
+topology; it is not yet success evidence. Its separate Quality run found one
+unseparated integer literal in the reconciliation test. Correcting the literal
+passes targeted all-target CLI Clippy without changing runtime behavior.
 
 The new **cooperative browser candidate** connects a separate, explicitly public
 Firefox panel to the real `compute public-serve` service and existing signed document /

@@ -3,14 +3,32 @@
 This disposable integration connects the source-built OpenCode runtime in
 `volparossa-code` to the core's public cooperative service and two real model
 workers. It reuses the existing protected MPTCP topology, peer receipts and
-cleanup machinery. The scenario is implemented but has not yet passed a live
-end-to-end run.
+cleanup machinery. Its first live VM trial on core `938c7f2b` completed real peer
+execution but failed because the answer was incomplete; end-to-end acceptance
+remains open.
 
 The private planning turns are deliberately synthetic in this fixture. The
 public-core endpoint, peer workers, fragment execution and returned result must
 be real. This separates the network integration from the independent, currently
 unsuccessful Qwen coding trial; neither is evidence of confidential peer execution
 or general coding quality.
+
+## Current live result
+
+VM01 returned the original public tool result through actual OpenCode, without
+injecting public results. Two providers ran eleven observed workers; all eleven
+terminal receipts and their cleanup were confirmed. The core nevertheless
+returned `incomplete_fragment_answers`: eleven parts across three packages,
+zero synthesis levels and zero answer bytes. The driver correctly failed with
+`public_answer_incomplete`; the observer failed at its final retained-result
+completeness check, not an earlier worker scan. The original reports remain failed.
+
+Guest cleanup removed every owned object and guest-network snapshots matched.
+QEMU, its scratch directory and SSH listener were removed. The outer host's raw
+IPv6-route hash later differed, while IPv4 and DNS hashes matched. Without the
+original table contents its cause is unknown; this run does **not** prove the
+outer host unchanged. Original closed evidence is retained in
+`build/cooperative-code-vm-01/`; no private task logs or answers are exported.
 
 ## Explicit inputs
 

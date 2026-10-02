@@ -20,7 +20,7 @@ fn handle(id: u8) -> JobHandle {
         "capabilities":{"model":{"model_id":"protocol-only-fixture","model_revision":"6".repeat(40),
             "base_weights":{"bytes":1,"sha256":"7".repeat(64)},"adapter_files":null},
             "model_fingerprint":"5".repeat(64),"accepting_work":false,"public_inference_only":true,
-            "runtime_slots":1,"max_threads":2,"max_job_seconds":600,"max_dataset_bytes":1048576,
+            "runtime_slots":1,"max_threads":2,"max_job_seconds":600,"max_dataset_bytes":1_048_576,
             "max_rows":4,"task_derivation_v1":true,"document_inference_v2":true,
             "principle_inference_v4":false,"derived_inference_v3":true,"successor_activation_v1":false}
     })).unwrap()
