@@ -99,7 +99,7 @@ def new_source(path, revision):
     worker = observation["worker"]
     require(observation["node_lineage"]["node"] == "relay4" and TRAIN["alive"](worker),
             "late dataset was not created during the actual first R4 worker")
-    value = next_dataset(revision, (HERE / "agent-artifact-README.md").read_text())
+    value = next_dataset(revision, TRAIN["public_source"]())
     validation = root / "loop/validation-input/dataset.json"
     if validation.exists():
         selected = read(validation)
@@ -271,7 +271,7 @@ def self_test():
         except ValueError:
             continue
         raise AssertionError("invalid catalog profile accepted")
-    source = next_dataset("a" * 40, (HERE.parent.parent / "README.md").read_text())
+    source = next_dataset("a" * 40, TRAIN["public_source"]())
     assert len(source["train"]) == 2 and source["train"][0]["question"] != source["heldout"][0]["question"]
     with tempfile.TemporaryDirectory(prefix="catalog-cache-parser-") as temporary:
         cache = Path(temporary) / "state-relay4/agent-loop-cache"

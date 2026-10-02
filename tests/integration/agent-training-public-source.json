@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "kind": "volparossa-fixed-public-training-source",
+  "repository": "https://github.com/VOLPAROSSA/Volparossa",
+  "revision": "59238a6f2c2ee8c4c79b136481cd53d5b9b908df",
+  "path": "README.md",
+  "git_blob": "e73ce4055340a7625c123b01838129f487927a61",
+  "bytes": 20410,
+  "sha256": "18143fa41b91ebdec851b49f7c4be8369faff58ba37877a4236bd9c6fda644ac",
+  "license": "GPL-3.0-only",
+  "copy": "byte-identical full historical README; fixture only, not current product documentation",
+  "dataset_binding": "Existing questions, answers and context bytes remain unchanged; dataset source_revision still binds the executing fixture revision, while this record identifies the retained public text."
+}
