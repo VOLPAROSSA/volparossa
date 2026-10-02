@@ -613,6 +613,55 @@ class CooperativeBrowserProof(unittest.TestCase):
         self.assertEqual(CHECK["closed_observer"](Path(temporary) / "absent"), dict(state="absent"))
         self.assertNotIn("agent-cooperative-browser-observer-status.private", CHECK["EXPORT_NAMES"])
 
+    def test_preselection_capture_is_closed_bounded_and_never_promotes_a_failed_run(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / 'logs-client.txt'
+            parse = lambda: CHECK['closed_preselection_events'](path)
+            self.assertEqual(parse()['uncertainty'], 'absent')
+            def event(code):
+                return f'101\tlevel=1\tevent={code}\tsession={"a" * 64}\tpath=2\n'
+            no_exit, relays = CHECK['PRESELECTION_REASON_CODES']
+            path.write_text(event(no_exit) * 2 + event('UNRELATED_PRIVATE_SENTINEL'))
+            path.chmod(0o600)
+            value = parse()
+            self.assertEqual(set(value), {'version', 'state', 'observed_reason', 'uncertainty',
+                'scope', 'limit', 'records', 'counts', 'unrecognized_reason_records'})
+            self.assertEqual(value['state'], 'known')
+            self.assertEqual(value['observed_reason'], no_exit)
+            self.assertEqual(value['records'], 3)
+            self.assertEqual(value['counts'], {no_exit: 2, relays: 0})
+            self.assertEqual(value['scope'], 'retained_client_log_ring_not_last_attempt_proof')
+            self.assertNotIn('PRIVATE_SENTINEL', json.dumps(value))
+            self.assertNotIn('a' * 64, json.dumps(value))
+            for content, uncertainty in (
+                ('', 'no_signal'),
+                (event(no_exit) + event(relays), 'ambiguous'),
+                (event(no_exit) + event('PRESELECTION_SAMPLE_PRIVATE_SENTINEL'), 'unrecognized'),
+                (event(no_exit) * 400, 'ring_at_capacity'),
+                (event(no_exit) * 401, 'invalid'),
+                ('PRIVATE_RAW_URL_OR_KEY', 'invalid'),
+            ):
+                with self.subTest(uncertainty=uncertainty):
+                    path.write_text(content)
+                    value = parse()
+                    self.assertEqual(value['state'], 'unknown')
+                    self.assertEqual(value['observed_reason'], 'unknown')
+                    self.assertEqual(value['uncertainty'], uncertainty)
+                    self.assertNotIn('PRIVATE', json.dumps(value))
+            path.write_text(event(relays))
+            CHECK['finalize'](root, REVISION, 1, True, 0, 'agent-jobs-source', 'JOBS_ROUTE_UNAVAILABLE')
+            report = json.loads((root / 'agent-cooperative-browser-smoke.json').read_text())
+            self.assertEqual(report['preselection_diagnostic']['observed_reason'], relays)
+            self.assertFalse(report['success'])
+            self.assertEqual(report['observed_blocker'], 'JOBS_ROUTE_UNAVAILABLE')
+            with self.assertRaises(ValueError):
+                CHECK['check_report'](report, REVISION)
+        shell = (HERE / 'kvm-alpha-topology.sh').read_text()
+        self.assertLess(shell.index('logs --limit 400 >"$WORK/logs-$cleanup_node.txt"'),
+                        shell.index('agent_jobs_finalize_report "$original_status"'))
+        self.assertNotIn('logs-client.txt', CHECK['EXPORT_NAMES'])
+
     def test_rpc_stage_counts_are_allowlisted_bounded_and_keep_ring_coverage_explicit(self):
         source = (HERE.parents[1] / 'crates/volparossa-agent/src/content/compute_remote.rs').read_text()
         self.assertEqual(CHECK['RPC_EVENT_CODES'], set(re.findall(r'COMPUTE_RPC_[A-Z_]+_FAILED', source)))

@@ -82,6 +82,25 @@ unchanged; no model or VM was rerun, and the original failed run remains failed.
 
 ### Cooperative browser execution
 
+The newest exact-source [run `37072548276`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37072548276)
+on `e61a6f6a7b5a905258b3a44388b4f5942887cd9b` remains **failed before compute**.
+This was the original `agent-cooperative-browser` 135M scenario, not the discovered
+360M trial. Source-route setup ended at `JOBS_ROUTE_UNAVAILABLE`: 15 connect attempts,
+14 retries, and last code `NO_ELIGIBLE_PATHS`; the earlier attempt codes are not
+retained. Model provisioning completed, but no model inference, browser task,
+child result or synthesis was reached. Private cleanup completed with zero owned
+objects; disposable guest-root network snapshots match (not an outer-host claim).
+Original artifact ZIP SHA-256:
+`6a9cbb6951a8e26f412dfead984cf1a5c35f0878fc4c02b7d861f454317eabfa`;
+original job `111055118814` log SHA-256:
+`821d494fdd82e3b4de8dbafab53d3e0bf42faf115b04b1d99bed158eb797730a`.
+No retained preselection subtype identifies the product cause. The current candidate
+adds only optional, closed preselection counts from the already captured 400-event
+client log ring before private cleanup removes it. Missing, malformed, unrecognized,
+ambiguous or capacity-filled observations remain `unknown`; even a single observed
+reason is not last-attempt or whole-run proof. This does not reinterpret that run,
+change selection/retry limits, or relax the existing success gate.
+
 The later exact-source [run `37065757332`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37065757332)
 on `c2c7cb268db0a07c3638367324d838ef26f4a101` remains **failed before compute**:
 `JOBS_ROUTE_UNAVAILABLE`, 29 connect attempts and 28 retries, with final

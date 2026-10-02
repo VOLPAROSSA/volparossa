@@ -90,6 +90,9 @@ RPC_EVENT_CODES = frozenset(("COMPUTE_RPC_LOCAL_REQUEST_FAILED", "COMPUTE_RPC_LO
     "COMPUTE_RPC_CHALLENGE_FAILED", "COMPUTE_RPC_PREEXPORT_CHECK_FAILED", "COMPUTE_RPC_SIGNED_EXCHANGE_FAILED",
     "COMPUTE_RPC_REPLY_BINDING_FAILED", "COMPUTE_RPC_PROVIDER_CLOSE_FAILED", "COMPUTE_RPC_ROUTE_CLOSE_FAILED",
     "COMPUTE_RPC_FINAL_POLICY_FAILED"))
+PRESELECTION_REASON_CODES = (
+    "PRESELECTION_SAMPLE_NO_EXIT", "PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS",
+)
 # Preserve fixed discovery rejection reasons, not arbitrary event names or raw errors.
 # These are event counts, not distinct failed exchanges; one exchange may emit several.
 DISCOVERY_FAILURE_EVENT_CODES = frozenset((
@@ -667,6 +670,50 @@ def closed_rpc_events(path, baseline, query_code):
         return dict(state="absent")
     except (OSError, ValueError, UnicodeError):
         return dict(state="invalid")
+
+
+def closed_preselection_events(path):
+    # Metadata from the existing cleanup capture, not attribution to the final
+    # Connect attempt or proof that the retained ring covers the whole run.
+    value = dict(version=1, state="unknown", observed_reason="unknown", uncertainty="absent",
+        scope="retained_client_log_ring_not_last_attempt_proof", limit=400,
+        records=None, counts=None, unrecognized_reason_records=None)
+    try:
+        info = path.lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= 131072
+                and stat.S_IMODE(info.st_mode) == 0o600 and info.st_uid == os.geteuid(),
+                "invalid private preselection event file")
+        lines = path.read_text(encoding="ascii").splitlines()
+        require(len(lines) <= 400, "preselection event ring exceeded")
+        counts = dict.fromkeys(PRESELECTION_REASON_CODES, 0)
+        unrecognized, previous = 0, 0
+        for line in lines:
+            match = re.fullmatch(r"([0-9]{1,20})\tlevel=([0-9])\tevent=([A-Z0-9_]{1,96})\tsession=[0-9a-f]{0,64}\tpath=(?:-|[0-9]{1,10})", line)
+            require(match is not None, "invalid bounded preselection event record")
+            timestamp = int(match[1])
+            require(timestamp > 0 and timestamp >= previous, "preselection event clock regressed")
+            previous = timestamp
+            if match[3] in counts:
+                counts[match[3]] += 1
+            elif match[3].startswith("PRESELECTION_SAMPLE_"):
+                unrecognized += 1
+        value.update(records=len(lines), counts=counts, unrecognized_reason_records=unrecognized)
+        observed = [code for code, count in counts.items() if count]
+        if len(lines) == 400:
+            value["uncertainty"] = "ring_at_capacity"
+        elif unrecognized:
+            value["uncertainty"] = "unrecognized"
+        elif len(observed) > 1:
+            value["uncertainty"] = "ambiguous"
+        elif not observed:
+            value["uncertainty"] = "no_signal"
+        else:
+            value.update(state="known", observed_reason=observed[0], uncertainty=None)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, UnicodeError):
+        value["uncertainty"] = "invalid"
+    return value
 
 
 def diagnostic(work, browser_code, observer_code, baseline, rpc_query_code):
@@ -1404,6 +1451,7 @@ def finalize(work, revision, status, complete, remaining, phase, blocker):
     write(work / f"{NAME}-smoke.json", dict(report_kind="volparossa-cooperative-browser", schema_version=1,
         source_revision=revision, runner_exit_status=status, phase=phase,
         observed_blocker=None if blocker == "NONE" else blocker, evidence=value, host_state=host,
+        preselection_diagnostic=closed_preselection_events(work / "logs-client.txt"),
         cleanup=dict(complete=complete, remaining_owned_objects=remaining),
         success=status == 0 and complete and remaining == 0 and host.get("unchanged") is True and value is not None,
         **trial_fields()))
