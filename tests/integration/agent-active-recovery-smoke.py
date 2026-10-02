@@ -61,9 +61,9 @@ def owned_write(path, value, owner):
 
 
 def source_training_dataset(work, revision):
-    # kvm-alpha-topology stages the original README here, not alongside the
-    # source helper. Keep this identical to the existing agent-jobs provision.
-    return ART["dataset"](revision, (work / "bin/agent-jobs-README.md").read_text())
+    # kvm-alpha-topology stages the pinned public text/provenance here, not
+    # alongside this repository-launched helper; use the same source as jobs.
+    return ART["dataset"](revision, TRAIN["public_source"](work / "bin"))
 
 
 def sources(work, revision):
@@ -832,7 +832,7 @@ def report(value, revision):
 
 def self_test():
     # Inert structural controls, never presented as live ML/recovery evidence.
-    from unittest.mock import patch
+    from unittest.mock import Mock, patch
     from types import SimpleNamespace
     # Real native bundles exceed one chunk. Compare their entire ordered
     # encoding, not a duplicate-tolerant dict that could lose chunk references.
@@ -969,11 +969,10 @@ agent_active_recovery_observe_stop
         assert command[:12] == ["nsenter", "--target", "123", "--mount", "--net", "unshare",
                                 "--mount", "--propagation", "private", "--mount-proc=/proc", "setpriv",
                                 "--reuid=1000"]
-    public_source = ("Every parallel path uses exactly one distinct relay between the same client and exit.\n"
-                     "The normal client dataplane never connects directly to an exit.")
-    with patch.object(Path, "read_text", autospec=True, return_value=public_source) as staged:
+    public_source = TRAIN["public_source"]()
+    with patch.dict(TRAIN, public_source=Mock(return_value=public_source)):
         dataset = source_training_dataset(Path("/fixture"), "a" * 40)
-        staged.assert_called_once_with(Path("/fixture/bin/agent-jobs-README.md"))
+        TRAIN["public_source"].assert_called_once_with(Path("/fixture/bin"))
         assert dataset["train"] and dataset["heldout"]
     from tempfile import TemporaryDirectory
     with TemporaryDirectory() as temporary:
