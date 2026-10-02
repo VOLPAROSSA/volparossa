@@ -1,9 +1,9 @@
 # Cooperative browser: real public peer execution
 
-Status: implemented candidate; the latest combined live KVM attempt confirms all eleven
-original terminal receipts and coordinator cleanup, but still fails the joined browser
-result. Complete browser/peer acceptance remains pending. Local pure fixture checks are
-not a browser, model or network execution claim.
+Status: implemented candidate; the latest discovered-360M KVM attempt confirms both
+original terminal receipts and cleanup, but one answer reaches its generation limit.
+The joined browser result, synthesis and cancellation proof remain incomplete. Local
+fixture checks are not a browser, model or network execution claim.
 
 The public browser integration has a separate socket and panel from private local
 compute. `ask(question, context)` prefills the panel only. Sending requires a supported
@@ -29,8 +29,25 @@ actual executor keys remain separate. This does not yet implement automatic mode
 choice or cross-job answer continuation. Completed browser/Code live trials used
 fixed peers, so they do not prove this new service discovery path.
 
+An explicit operator `--refine-incomplete` setting now authorizes one recovery pass
+for token-limited public document leaves. It is retained with the original enrollment;
+the browser cannot enable it or select new peers. Complete original answers are reused,
+while each affected source range becomes two smaller, genuinely tokenized and signed
+jobs in the same model/cohort. Every original answer and receipt remains unchanged.
+The pass is bounded to sixteen affected leaves and thirty-two child jobs and shares
+the existing invocation round budget and cancellation. CLI `--follow` retains its
+existing window semantics but grants at most one shared recovery window, not a new
+window for every child.
+
+The effective answer set may feed synthesis only after both child receipts show EOS
+and cover the exact original range. A child that is still incomplete remains visible
+as incomplete; the mechanism does not repeat the same terminal job, enlarge the model
+limits or turn a partial answer into a complete one. Retained child jobs resume under
+the same source validity and receipt bindings. Actual end-to-end model recovery is
+still unproved; EOS alone is not proof of answer correctness.
+
 The separate `agent-cooperative-browser-discovered` candidate selects
-`--model-profile smollm2-360m-v1 --discover-peers`. It preserves the public README,
+`--model-profile smollm2-360m-v1 --discover-peers --refine-incomplete`. It preserves the public README,
 question, browser revision and consent boundary, but selects a literal 4096-byte
 UTF-8-safe prefix rather than the original 3840-byte prefix. The existing pinned
 360M profile is used without enlarging its limits. Real tokenizer preflight found
@@ -181,3 +198,13 @@ snapshots. Original ZIP SHA-256:
 These completed partial jobs cannot be repaired by increasing observation time
 or relabelling them complete. A separate discovered-360M trial will use the already
 supported larger profile; it will not replace this historical 135M result.
+
+The discovered-360M [run `37042900209`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37042900209)
+on `e04860bc` also **fails**: two original workers and terminal receipts, one EOS
+answer and one token-limited answer, no synthesis and no live cancellation proof.
+Cleanup leaves zero owned objects and equal guest network snapshots. Original ZIP
+SHA-256: `2502bab058dc8a917040f1f7b7b0d8d6686e163d190a7f88bbe52a711fb99bf6`.
+The bounded source-refinement implementation follows that failure; it cannot change
+the historical result. Tokenizer-only preflight of both possible original ranges
+finds child prompts of 599/532 and 120/118 tokens respectively, within the unchanged
+1024-token profile. This establishes input fit, not successful model recovery.

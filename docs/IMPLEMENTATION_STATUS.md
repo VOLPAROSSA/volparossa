@@ -47,6 +47,14 @@ Last updated: 2026-10-02
   separately preserves primary model-task failures and closed provider counters;
   the original Qwen VM03 trial failed without a completed coding turn or edit/test,
   while its VM/private-state cleanup and unchanged host routes/DNS were confirmed.
+  Code `11a7063` prevents automatic regeneration of cleanup-confirmed invalid
+  model output and separates known terminal task failures from runtime cleanup.
+  Forty-one targeted checks and exact-source
+  [Code CI37045053283](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37045053283)
+  pass. Actual pinned OpenCode also passes invalid/truncated-output cases with
+  one coding submission each, zero retries/approvals/edits and confirmed cleanup.
+  These controlled core replies are synthetic, not model-driven edit/test or
+  private-peer execution evidence. The original VM03 remains failed.
 - [ ] Default network cooperation, shared improvement and protected private
   execution are required across integrations, not optional extras beside local
   AI. Local subagents/fallback do not fulfill this requirement. The existing
@@ -114,8 +122,26 @@ least one complete synthesis level, original receipts, live cancellation and ful
 cleanup. Fifteen focused browser checks and eight existing Code fixture checks
 pass, including actual inert launcher selection and closed export validation.
 The original fixed-135M contract and failed artifacts remain unchanged.
-The new combined live proof is pending; larger model capacity is not itself an
-answer-completion or quality claim.
+The exact [run37042900209](https://github.com/VOLPAROSSA/volparossa/actions/runs/37042900209)
+on `e04860bc` is terminal failed: two workers and two confirmed terminal receipts,
+one leaf at EOS and one at the generation limit. `incomplete_fragment_answers`
+prevents synthesis and a complete answer; cancellation was not reached. Guest
+private/network cleanup passes with zero remaining objects and identical guest
+network snapshots. Original 19-file artifact ZIP SHA-256:
+`2502bab058dc8a917040f1f7b7b0d8d6686e163d190a7f88bbe52a711fb99bf6`.
+Larger model capacity is not itself an answer-completion or quality claim.
+
+A new explicit `--refine-incomplete` candidate retains the completed original
+answers and repairs only token-limited leaves using two newly tokenized, signed
+source tasks per affected range. Up to sixteen leaves share the existing workflow
+budget, fixed model/cohort, original validity and cancellation. Original receipts
+are immutable; synthesis requires a full, EOS-complete effective frontier.
+Seventy-two targeted document tests pass, including real framed IPC with synthetic
+answers, interrupted child progress, cancellation and offline receipt replay.
+Eighteen browser fixture checks pass, including missing/changed receipt and source
+coverage rejection. The discovered-360M trial enables this candidate; the original
+fixed-135M contract is unchanged. Actual model recovery and the combined browser
+answer/cancellation proof remain unchecked pending a new source-bound live run.
 
 The new **cooperative browser candidate** connects a separate, explicitly public
 Firefox panel to the real `compute public-serve` service and existing signed document /

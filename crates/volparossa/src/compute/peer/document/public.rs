@@ -43,6 +43,9 @@ pub(in crate::compute) struct Config {
     /// Optional exact base/adapter fingerprint within the selected discovery profile.
     #[arg(long, requires = "discover_peers", conflicts_with = "provider_key", value_parser = super::discovery::parse_fingerprint)]
     model_fingerprint: Option<String>,
+    /// Authorize a bounded pass of smaller source jobs when a leaf reaches its output limit.
+    #[arg(long)]
+    refine_incomplete: bool,
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u16).range(1..=600))]
     pub max_seconds: u16,
     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u16).range(1..=2))]
@@ -117,6 +120,7 @@ impl Config {
             resume: false,
             batch_barrier: false,
             synthesize: true,
+            refine_incomplete: self.refine_incomplete,
             task_plan: None,
             plan_tasks: false,
             plan_task_graph: false,
@@ -240,6 +244,7 @@ fn selected_provider_keys(root: &Path, report: &Value, config: &Config) -> Resul
     let (enrollment, input, plan) = super::storage::load(root)?;
     ensure!(
         enrollment.synthesize
+            && enrollment.refine_incomplete == config.refine_incomplete
             && !enrollment.replace_peers
             && enrollment.publisher_key == hex::encode(config.publisher_key.as_bytes())
             && input.model_profile == config.model_profile
@@ -289,6 +294,7 @@ fn compact(report: &Value, config: &Config, selected: &[String], cleanup: bool) 
         Ok(())
     };
     collect(&report["answers"])?;
+    collect(&report["refinement"]["answers"])?;
     if let Some(levels) = report["synthesis"]["levels"].as_array() {
         for level in levels {
             collect(&level["answers"])?;
@@ -486,6 +492,17 @@ mod tests {
         assert_eq!(options.discovery.model_fingerprint, Some("a".repeat(64)));
         assert_eq!(options.model_profile, ModelProfile::default());
         assert!(options.provider_key.is_empty());
+        assert!(!options.refine_incomplete);
+        let recovering = arguments(&["--discover-peers", "--refine-incomplete"]).unwrap();
+        recovering.validate_selection().unwrap();
+        let recovery_options = recovering.options(
+            Path::new("/unused/recovery"),
+            "Question?".into(),
+            "CC0-1.0".into(),
+        );
+        assert!(recovery_options.refine_incomplete && recovery_options.synthesize);
+        assert_eq!(recovery_options.max_batches, options.max_batches);
+        assert_eq!(recovery_options.max_seconds, options.max_seconds);
         let first = hex::encode(
             ed25519_dalek::SigningKey::from_bytes(&[2; 32])
                 .verifying_key()
@@ -761,6 +778,20 @@ mod tests {
         // A small task may use one of two eligible peers; selected does not mean executed.
         assert_eq!(value["provider_keys"].as_array().unwrap().len(), 1);
         assert_eq!(value["answer_complete"], true);
+        let mut recovered = report.clone();
+        recovered["refinement"] = json!({"answers":[{"provider_key":selected[1]}]});
+        assert_eq!(
+            compact(&recovered, &config, &selected, true).unwrap()["provider_keys"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        recovered["refinement"]["answers"][0]["provider_key"] = "f".repeat(64).into();
+        assert!(compact(&recovered, &config, &selected, true).is_err());
+        config.refine_incomplete = true;
+        assert!(selected_provider_keys(root.path(), &report, &config).is_err());
+        config.refine_incomplete = false;
         let mut foreign = report.clone();
         foreign["answers"][0]["provider_key"] = hex::encode(
             ed25519_dalek::SigningKey::from_bytes(&[4; 32])

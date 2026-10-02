@@ -74,7 +74,7 @@ OBSERVER_INVARIANT_REASONS = {
     "observed worker does not hold its runtime lease": "worker_runtime_lease",
 }
 EXECUTION_PHASES = frozenset(('input', 'validation', 'directory', 'source_selection', 'provider_selection',
-    'source_retention', 'tokenization', 'publication', 'enrollment_save', 'peer_execution', 'synthesis',
+    'source_retention', 'tokenization', 'publication', 'enrollment_save', 'peer_execution', 'refinement', 'synthesis',
     'collection_join', 'result_save', 'complete', 'compaction'))
 EXECUTION_ERRORS = frozenset(('none', 'io_not_found', 'io_permission', 'io_other', 'json_syntax',
     'json_data', 'json_eof', 'json_io', 'reaped_worker', 'peer_rpc', 'invariant_or_unknown'))
@@ -614,6 +614,291 @@ def scan_workers(work, document, layout, brokers, observed):
     require(len(observed) <= 128, "unbounded observed worker set")
 
 
+def exact_bytes(path, maximum=1048576):
+    JOBS["file_hash"](path, maximum)
+    return path.read_bytes()
+
+
+def encoded(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
+
+
+def checked_receipt_input(path, receipt, document, enrollment):
+    """Bind actual worker input to its retained signed source, not result flags."""
+    handle, binding = receipt["handle"], receipt["handle"]["binding"]
+    package, work = path.parents[1], path.parents[2]
+    raw = exact_bytes(package / "dataset.json")
+    manifest = exact_bytes(package / "manifest.bin", 65536)
+    data = json.loads(raw)
+    fields = JOBS["CUSTODY"]["fields"]
+    body = fields(fields(manifest, 65536)[1], 65536)
+    metadata = fields(body[8], 65536)
+    require(enrollment["selected_at_unix_seconds"] <= body[3] < enrollment["expires_at_unix_seconds"],
+            "worker publication escaped original lifetime")
+    authority = dict(enrollment, selected_at_unix_seconds=body[3])
+    manifest_id = DOCUMENT["manifest"](manifest, raw, authority, metadata[1].decode(), metadata[3].decode())
+    source = exact_bytes(document / "source.manifest", 65536)
+    require(manifest_id == binding["dataset_manifest_id"]
+            and data["visibility"] == "public" and data["license"] == enrollment["license"]
+            and data["source_manifest_hex"] == source.hex()
+            and enrollment["selected_at_unix_seconds"] < binding["expires_unix_seconds"] <= enrollment["expires_at_unix_seconds"]
+            and binding["task"] == dict(kind="answer_public_question_v1", question=enrollment["public_question"])
+            and handle["capabilities"]["public_inference_only"] is True,
+            "worker signed source/task/lifetime differs")
+    require(metadata[3].decode() == (DOCUMENT["PROFILE"] if data["version"] == 2 else DOCUMENT["SYNTHESIS"]["PROFILE"]),
+            "worker publication content type differs")
+    selected = binding["row_indices"]
+    require(selected and len(selected) == len(set(selected))
+            and all(type(index) is int and 0 <= index < len(data["inference"]) for index in selected),
+            "worker selected invalid input rows")
+    derived = dict(data, inference=[data["inference"][index] for index in selected])
+    require(sha(encoded(derived)) == binding["dataset_sha256"], "worker input lost exact signed rows")
+    workflow = read(work / "workflow.json")
+    require(workflow["provider_keys"] == enrollment["provider_keys"]
+            and workflow.get("model_fingerprint") == enrollment["model_fingerprint"],
+            "worker changed the frozen executor cohort")
+    handles = [read(item, 16384) for item in sorted(path.parent.glob("job-?.json"))]
+    require(sum(saved == handle for saved in handles) == 1
+            and path.name == f"receipt-{binding['job_id']}.json", "receipt has no exact retained job")
+    return data
+
+
+def checked_answer(answer, reports, complete=True):
+    record = reports[answer["job_id"]]
+    handle, status, report = record["handle"], record["status"], record["report"]
+    index = answer["output_index"]
+    require(type(index) is int and 0 <= index < len(report["outputs"]), "answer output identity missing")
+    output = report["outputs"][index]
+    require(output["sample_index"] == index and answer["provider_key"] == handle["provider_key"]
+            and answer["report_sha256"] == status["report_sha256"]
+            and answer["package_manifest_id"] == handle["binding"]["dataset_manifest_id"]
+            and answer["model_fingerprint"] == handle["binding"]["model_fingerprint"]
+            and all(answer[key] == output[key] for key in ("text", "generated_tokens", "generation", "text_truncated")),
+            "answer differs from its immutable native receipt")
+    JOBS["TRAIN"]["check_generation"](output, require_eos=complete, model_profile=selected_model()["name"])
+    require(output["text_truncated"] is False and output["text"].strip(), "incomplete answer cannot enter frontier")
+    return record
+
+
+def source_answer(answer, reports, source, complete=True):
+    record = checked_answer(answer, reports, complete)
+    data, binding = record["data"], record["handle"]["binding"]
+    row_index = binding["row_indices"][answer["output_index"]]
+    start, end = answer["source_start"], answer["source_end"]
+    require(type(start) is int and type(end) is int and 0 <= start < end <= len(source)
+            and data["version"] == 2 and data["inference"][row_index] == dict(
+                question=QUESTION, context=source[start:end].decode(), start=start, end=end),
+            "answer is not the exact original signed source range")
+    return record
+
+
+def answer_bytes(answer):
+    # Rust synthesis::Answer/Generation field order is part of this retained commitment.
+    fields = ("text", "provider_key", "job_id", "report_sha256", "package_manifest_id", "model_fingerprint",
+              "output_index", "source_start", "source_end", "generated_tokens", "text_truncated", "generation")
+    value = {key: answer[key] for key in fields}
+    value["generation"] = {key: answer["generation"][key] for key in
+                           ("version", "stop_reason", "max_new_tokens", "model_profile")}
+    return encoded(value)
+
+
+def checked_refinement_children(document, source, enrollment, parent, original, frontier, reports):
+    root = document / f"refinement/leaf-{parent['part_index']:04}"
+    intent_bytes = exact_bytes(root / "intent.json")
+    intent = json.loads(intent_bytes)
+    expected = dict(version=1, part_index=parent["part_index"], parent_sha256=sha(answer_bytes(original)),
+        parent_report_sha256=original["report_sha256"], parent_job_id=original["job_id"],
+        parent_source_start=original["source_start"], parent_source_end=original["source_end"],
+        source_manifest_id=enrollment["source_manifest_id"], source_sha256=sha(source), source_bytes=len(source),
+        model_profile=selected_model()["name"], model_fingerprint=original["model_fingerprint"],
+        publisher_key=enrollment["publisher_key"], provider_keys=enrollment["provider_keys"],
+        selected_at_unix_seconds=enrollment["selected_at_unix_seconds"],
+        expires_at_unix_seconds=enrollment["expires_at_unix_seconds"], license=enrollment["license"],
+        question_sha256=sha(QUESTION.encode()), children=[dict(start=child["start"], end=child["end"],
+            source_sha256=sha(source[child["start"]:child["end"]])) for child in parent["children"]])
+    require(intent == expected and sha(intent_bytes) == parent["intent_sha256"],
+            "refinement intent changed original authority or receipt")
+    previous_end, answers = original["source_start"], []
+    for index, child in enumerate(parent["children"]):
+        start, end = child["start"], child["end"]
+        require(type(start) is int and type(end) is int and start == previous_end < end <= original["source_end"]
+                and child["complete"] is True and child["answer_complete"] is True,
+                "refinement children omitted, overlapped or remain incomplete")
+        child_root = root / f"child-{index}"
+        text = source[start:end].decode()
+        require(text.strip(), "refinement child source is empty")
+        planner_bytes = exact_bytes(child_root / "planner-input.json")
+        require(json.loads(planner_bytes) == dict(version=1, model_profile=selected_model()["name"],
+            visibility="public", license=enrollment["license"], document=text, question=QUESTION),
+            "refinement tokenizer received another source")
+        plan = read(child_root / "document-plan.json")
+        profile = selected_model()
+        require(plan["version"] == 1 and plan["source_bytes"] == end - start
+                and plan["source_sha256"] == sha(text.encode()) and plan["question_sha256"] == sha(QUESTION.encode())
+                and plan["model_id"] == profile["model"]["model_id"]
+                and plan["model_revision"] == profile["model"]["model_revision"]
+                and plan["tokenizer_sha256"] == DOCUMENT["TOKENIZER"] and plan["prompt_limit"] == 1024
+                and plan.get("synthesis", False) is False and len(plan["parts"]) == 1
+                and plan["parts"][0]["start"] == 0 and plan["parts"][0]["end"] == end - start
+                and 0 < plan["parts"][0]["prompt_tokens"] <= 1024, "refinement lacks an exact measured child plan")
+        planner = read(child_root / "tokenizer-report.json")
+        artifacts = [path for path in child_root.glob("tokenizer*/document-plan.json")
+                     if read(path) == plan and planner["artifacts"] == [dict(relative_path="document-plan.json",
+                         bytes=path.stat().st_size, sha256=sha(exact_bytes(path)))]]
+        require(planner["mode"] == "plan_document" and planner["status"] == "ok" and planner["device"] == "cpu"
+                and planner["model_weights_loaded"] is False and planner["updates_completed"] == 0
+                and planner["dataset"]["sha256"] == sha(planner_bytes) and len(artifacts) == 1,
+                "refinement tokenizer has no actual retained artifact")
+        DOCUMENT["check_supervisor"](planner)
+        raw = exact_bytes(child_root / "dataset.json")
+        signed = exact_bytes(child_root / "dataset.manifest", 65536)
+        manifest_id = DOCUMENT["manifest"](signed, raw, enrollment,
+            f"refined-leaf-{parent['part_index']:04}-child-{index}", DOCUMENT["PROFILE"])
+        require(manifest_id == child["package_manifest_id"], "refinement child manifest changed")
+        found = [answer for answer in frontier if answer["package_manifest_id"] == manifest_id]
+        require(len(found) == 1, "refinement child has no unique effective answer")
+        answer = found[0]
+        record = source_answer(answer, reports, source)
+        require(answer["source_start"] == start and answer["source_end"] == end and answer["output_index"] == 0
+                and record["path"].is_relative_to(child_root / "work")
+                and record["data"] == json.loads(raw) and len(record["data"]["inference"]) == 1
+                and exact_bytes(child_root / "work/package-0000/dataset.json") == raw
+                and exact_bytes(child_root / "work/package-0000/manifest.bin", 65536) == signed,
+                "refinement answer is not the exact child execution")
+        answers.append(answer)
+        previous_end = end
+    require(previous_end == original["source_end"], "refinement lost original source tail")
+    return answers
+
+
+def check_synthesis_frontier(document, enrollment, result, reports, frontier):
+    """Verify that the REAL synthesis inputs use the checked effective frontier."""
+    synthesis = DOCUMENT["SYNTHESIS"]
+    for number, level in enumerate(result["synthesis"]["levels"], 1):
+        require(level["level"] == number and level["complete"] is True
+                and level["parents"] == len(frontier) and len(frontier) > 1
+                and len(level["groups"]) == (len(frontier) + 63) // 64,
+                "synthesis omitted the effective frontier")
+        expected_packages = {}
+        for group_index, group in enumerate(level["groups"]):
+            root = document / f"synthesis/level-{number:02}-group-{group_index:04}"
+            parents = frontier[group_index * 64:group_index * 64 + 64]
+            require(read(root / "parents.json") == parents,
+                    "synthesis consumed failed or changed parents")
+            group_record = read(root / "group.json")
+            require(group_record["parents_sha256"] == sha(exact_bytes(root / "parents.json"))
+                    and group_record["source_manifest_id"] == enrollment["source_manifest_id"]
+                    and group_record["parent_offset"] == group_index * 64 and group_record["level"] == number,
+                    "synthesis frontier commitment differs")
+            plan = read(root / "document-plan.json")
+            combined, rows = synthesis["expected_rows"](parents, plan["parts"], QUESTION, group_index * 64)
+            require(group["parts"] == len(rows) and group["input_sha256"] == sha(combined),
+                    "synthesis frontier input accounting differs")
+            previous_end = 0
+            for part in plan["parts"]:
+                require(part["start"] == previous_end < part["end"] <= len(combined),
+                        "synthesis input coverage differs")
+                previous_end = part["end"]
+            require(previous_end == len(combined), "synthesis omitted frontier bytes")
+            for index in range((len(rows) + 3) // 4):
+                package = root / f"package-{index:04}"
+                data = read(package / "dataset.json")
+                require(data == dict(version=3, visibility="public", license=enrollment["license"],
+                    source_manifest_hex=exact_bytes(document / "source.manifest", 65536).hex(), level=number,
+                    claim_scope=synthesis["CLAIM"], inference=rows[index * 4:index * 4 + 4]),
+                    "synthesis published different frontier rows")
+                expected_packages[sha(exact_bytes(package / "dataset.manifest", 65536))] = data
+        seen = set()
+        for answer in level["answers"]:
+            record = checked_answer(answer, reports)
+            manifest_id = answer["package_manifest_id"]
+            require(record["data"] == expected_packages[manifest_id], "synthesis receipt used another frontier")
+            row = record["handle"]["binding"]["row_indices"][answer["output_index"]]
+            require((manifest_id, row) not in seen, "synthesis duplicated a frontier result")
+            seen.add((manifest_id, row))
+            inputs = record["data"]["inference"][row]["inputs"]
+            require(answer["source_start"] == min(item["source_start"] for item in inputs)
+                    and answer["source_end"] == max(item["source_end"] for item in inputs),
+                    "synthesis output changed original source coverage")
+        require(seen == {(key, row) for key, data in expected_packages.items()
+                         for row in range(len(data["inference"]))}, "synthesis lacks a frontier result")
+        frontier = level["answers"]
+    require(len(frontier) == 1 and result["synthesized_answer"] == frontier[0],
+            "final answer is not the verified frontier reduction")
+
+
+def checked_frontier(document, source, enrollment, plan, result, reports):
+    require(enrollment.get("refine_incomplete") is True, "source refinement was not owner-enrolled")
+    originals = []
+    require(len(result["answers"]) == len(plan["parts"]), "original leaf answers disappeared")
+    require(len(enrollment["packages"]) == (len(plan["parts"]) + 3) // 4, "original package enrollment changed")
+    for index, (original, part) in enumerate(zip(result["answers"], plan["parts"])):
+        record = reports[original["job_id"]]
+        package = enrollment["packages"][index // 4]
+        require(original["source_part"] == index and original["start"] == part["start"]
+                and original["end"] == part["end"]
+                and original["context_sha256"] == sha(source[part["start"]:part["end"]])
+                and record["path"].relative_to(document).parts[0] == f"package-{index // 4:04}"
+                and package["manifest_id"] == original["package_manifest_id"]
+                and package["dataset_sha256"] == sha(exact_bytes(document / f"package-{index // 4:04}/dataset.json"))
+                and package["first_part"] == index // 4 * 4 and package["rows"] == min(4, len(plan["parts"]) - index // 4 * 4),
+                "original leaf identity or range changed")
+        output = record["report"]["outputs"][0]
+        answer = {key: original[key] for key in ("text", "provider_key", "job_id", "report_sha256",
+                  "package_manifest_id", "generated_tokens", "text_truncated", "generation")}
+        answer.update(model_fingerprint=record["handle"]["binding"]["model_fingerprint"], output_index=0,
+                      source_start=part["start"], source_end=part["end"])
+        source_answer(answer, reports, source, complete=False)
+        eos = output["generation"]["stop_reason"] == "eos"
+        require(original["answer_complete"] is eos and original["answer_status"] == output["generation"]["stop_reason"],
+                "original incomplete answer was relabelled complete")
+        originals.append(answer)
+    limited = {index for index, answer in enumerate(originals) if answer["generation"]["stop_reason"] == "token_limit"}
+    refinement = result.get("refinement")
+    if limited:
+        require(type(refinement) is dict and refinement["version"] == 1 and refinement["enabled"] is True
+                and refinement["complete"] is True and refinement["reason"] == "complete"
+                and refinement["maximum_refined_leaves"] == 16 and refinement["split_levels"] == 1
+                and 1 <= len(limited) <= 16 and refinement["eligible_leaves"] == refinement["refined_leaves"] == len(limited)
+                and refinement["original_parts"] == len(originals), "complete bounded refinement missing")
+        parents = refinement["parents"]
+        require(len(parents) == len(limited) and {parent["part_index"] for parent in parents} == limited,
+                "refinement omitted or duplicated an original failed leaf")
+        replacements = {}
+        for parent in parents:
+            index, original = parent["part_index"], originals[parent["part_index"]]
+            require(parent["parent_job_id"] == original["job_id"]
+                    and parent["parent_report_sha256"] == original["report_sha256"]
+                    and parent["parent_source_start"] == original["source_start"]
+                    and parent["parent_source_end"] == original["source_end"]
+                    and parent["complete"] is True and len(parent["children"]) == 2,
+                    "refinement did not retain exact failed parent")
+            replacements[index] = checked_refinement_children(document, source, enrollment, parent,
+                                                              original, refinement["answers"], reports)
+        frontier = [child for index, original in enumerate(originals) for child in replacements.get(index, [original])]
+        require(refinement["answers"] == frontier, "reported refinement is not the exact effective frontier")
+    else:
+        require(refinement is None, "refinement claimed without a failed original leaf")
+        frontier = originals
+    previous_end = 0
+    for answer in frontier:
+        source_answer(answer, reports, source)
+        require(answer["source_start"] == previous_end, "effective frontier overlaps or omits original bytes")
+        previous_end = answer["source_end"]
+    require(previous_end == len(source), "effective frontier omitted original tail")
+    incomplete_jobs = {key for key, record in reports.items()
+                       if any(output["generation"]["stop_reason"] != "eos" for output in record["report"]["outputs"])}
+    require(incomplete_jobs == {originals[index]["job_id"] for index in limited},
+            "an incomplete child or synthesis output was accepted")
+    used = {answer["job_id"] for answer in originals + frontier}
+    used.update(answer["job_id"] for level in result["synthesis"]["levels"] for answer in level["answers"])
+    require(used == set(reports), "a native receipt lies outside the original/refinement/synthesis frontier")
+    check_synthesis_frontier(document, enrollment, result, reports, frontier)
+    return dict(version=1, enabled=True, applied=bool(limited), original_parts=len(originals),
+        refined_leaves=len(limited), effective_parts=len(frontier), original_token_limited_outputs=len(limited),
+        exact_frontier_verified=True)
+
+
 def retained_result(document, fixture, layout, observed):
     source = (document / "source.txt").read_bytes()
     require(source == fixture["context"].encode(), "public coordinator source changed")
@@ -672,15 +957,19 @@ def retained_result(document, fixture, layout, observed):
                     and report["threads"] == 2 and len(report["outputs"]) == 1,
                     "discovered worker profile/resource binding differs")
             for output in report["outputs"]:
-                JOBS["TRAIN"]["check_generation"](output, require_eos=True, model_profile=profile["name"])
+                # Historical token-limit receipts stay unchanged; only an independently
+                # checked refinement may replace them in the effective frontier below.
+                JOBS["TRAIN"]["check_generation"](output, model_profile=profile["name"])
                 require(output["text_truncated"] is False and output["text"].strip()
                         and len(json.dumps(output["text"], ensure_ascii=True).encode()) <= profile["wire_bytes"],
                         "discovered worker answer incomplete")
         DOCUMENT["check_supervisor"](report)
         ids.add(binding["job_id"]); provider_keys.add(handle["provider_key"])
         reports[binding["job_id"]] = dict(provider_key=handle["provider_key"], report_sha256=status["report_sha256"],
-                                        texts=[item["text"] for item in report["outputs"]])
+            texts=[item["text"] for item in report["outputs"]], handle=handle, status=status, report=report,
+            path=path, data=checked_receipt_input(path, receipt, document, enrollment) if TRIAL else None)
     require(set(observed) <= ids and provider_keys == set(selected), "observed worker lacks terminal report")
+    refinement = checked_frontier(document, source, enrollment, plan, result, reports) if TRIAL else None
     final = result["synthesized_answer"]
     require(final["job_id"] in reports and final["provider_key"] == reports[final["job_id"]]["provider_key"]
             and final["text"] in reports[final["job_id"]]["texts"], "display answer is not a real final peer output")
@@ -689,7 +978,8 @@ def retained_result(document, fixture, layout, observed):
         provider_keys=sorted(provider_keys), jobs=len(ids), output_sha256=sha(final["text"].encode()),
         execution_complete=True, answer_complete=result["answer_complete"],
         semantic_completeness_proven=False, exact_native_receipts_verified=True,
-        **(dict(selected_provider_keys=selected, model_fingerprint=selected_model()["fingerprint"], **trial_fields()) if TRIAL else {}))
+        **(dict(selected_provider_keys=selected, model_fingerprint=selected_model()["fingerprint"],
+                refinement=refinement, **trial_fields()) if TRIAL else {}))
 
 
 def observe(work, pid):
@@ -829,6 +1119,17 @@ def check_evidence(value, revision, source_pins=None):
                 and set(value["result"]["provider_keys"]) == set(expected)
                 and value["result"]["model_fingerprint"] == selected_model()["fingerprint"],
                 "discovered evidence selection differs")
+        refinement = value["result"]["refinement"]
+        require(set(refinement) == {"version", "enabled", "applied", "original_parts", "refined_leaves",
+                    "effective_parts", "original_token_limited_outputs", "exact_frontier_verified"}
+                and refinement["version"] == 1 and refinement["enabled"] is True
+                and refinement["exact_frontier_verified"] is True
+                and type(refinement["refined_leaves"]) is int and 0 <= refinement["refined_leaves"] <= 16
+                and refinement["applied"] is (refinement["refined_leaves"] > 0)
+                and refinement["original_parts"] == value["result"]["total_parts"]
+                and refinement["effective_parts"] == refinement["original_parts"] + refinement["refined_leaves"]
+                and refinement["original_token_limited_outputs"] == refinement["refined_leaves"],
+                "discovered refinement evidence differs")
     require(value["source_revision"] == revision and value["success"] is True
             and all(value[field] is False for field in FALSE_SCOPE), "cooperative proof scope overstated")
     selected = pins() if source_pins is None else source_pins

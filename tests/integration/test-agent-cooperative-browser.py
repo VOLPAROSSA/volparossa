@@ -68,7 +68,9 @@ def discovered_fixture():
     for item in (value["input"], value["result"]):
         item["context_bytes"] = 4096
     value["result"].update(total_parts=2, package_count=1, synthesis_levels=1, jobs=3,
-        selected_provider_keys=list(reversed(value["result"]["provider_keys"])), model_fingerprint=profile["fingerprint"])
+        selected_provider_keys=list(reversed(value["result"]["provider_keys"])), model_fingerprint=profile["fingerprint"],
+        refinement=dict(version=1, enabled=True, applied=False, original_parts=2, refined_leaves=0,
+            effective_parts=2, original_token_limited_outputs=0, exact_frontier_verified=True))
     value["observation"]["observed_synthesis_levels"] = [1]
     for row in value["observation"]["completed_workers"] + value["observation"]["cancelled_workers"]:
         row["base_model_sha256"] = profile["model"]["base_weights"]["sha256"]
@@ -87,7 +89,239 @@ def discovered_fixture():
     return check, value
 
 
+def retained_refinement_fixture(root):
+    """Synthetic retained-tree/parser exercise only; no signature/model/peer proof."""
+    check, evidence = discovered_fixture()
+    wire = runpy.run_path(str(HERE / "test-content-custody-smoke.py"))["wire"]
+    encode, sha = check["encoded"], check["sha"]
+    profile, layout = check["selected_model"](), evidence["layout"]
+    keys = [layout["provider_keys"][node] for node in layout["provider_nodes"]]
+    source = b"Public left and right context.\n" * 8
+    split = len(source) // 2
+    enrollment = dict(provider_keys=keys, model_fingerprint=profile["fingerprint"], publisher_key="9" * 64,
+        selected_at_unix_seconds=1000, expires_at_unix_seconds=3000, synthesize=True, refine_incomplete=True,
+        license="GPL-3.0-only", public_question=check["QUESTION"], replace_peers=False, packages=[])
+    def save(path, value):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        raw = value if isinstance(value, bytes) else encode(value)
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        return raw
+    def signed(raw, name, mime):
+        digest = bytes.fromhex(sha(raw))
+        payload = wire({1: name.encode(), 2: 1, 3: mime.encode(), 4: len(raw),
+                        5: wire({1: digest, 2: len(raw)}), 6: digest})
+        body = wire({1: 1, 2: bytes.fromhex(enrollment["publisher_key"]), 3: 1000, 4: 3000,
+                     5: b"n" * 32, 6: 1, 7: bytes.fromhex(sha(payload)), 8: payload})
+        return wire({1: body, 2: b"s" * 64})
+    save(root / "source.txt", source)
+    source_manifest = signed(source, "document-source", "text/plain")
+    save(root / "source.manifest", source_manifest)
+    enrollment["source_manifest_id"] = sha(source_manifest)
+    supervisor = dict(child_reaped=True, network_access=False, gpu_access=False,
+                      max_observed_rss_bytes=100, rss_limit_bytes=3 * 1024**3)
+    def plan_for(text, ranges):
+        return dict(version=1, source_bytes=len(text), source_sha256=sha(text),
+            question_sha256=sha(check["QUESTION"].encode()), model_id=profile["model"]["model_id"],
+            model_revision=profile["model"]["model_revision"], tokenizer_sha256=check["DOCUMENT"]["TOKENIZER"],
+            prompt_limit=1024, parts=[dict(start=start, end=end, prompt_tokens=20) for start, end in ranges])
+    plan = plan_for(source, [(0, split), (split, len(source))])
+    save(root / "document-plan.json", plan)
+    def dataset(ranges):
+        return dict(version=2, visibility="public", license=enrollment["license"],
+            source_manifest_hex=source_manifest.hex(), inference=[dict(question=check["QUESTION"],
+                context=source[start:end].decode(), start=start, end=end) for start, end in ranges])
+    def publication(path, data, name, mime=None):
+        raw = save(path / "dataset.json", data)
+        manifest = signed(raw, name, mime or check["DOCUMENT"]["PROFILE"])
+        save(path / "dataset.manifest", manifest)
+        save(path / "work/package-0000/dataset.json", raw)
+        save(path / "work/package-0000/manifest.bin", manifest)
+        save(path / "work/workflow.json", dict(provider_keys=keys, model_fingerprint=profile["fingerprint"]))
+        return sha(manifest)
+    observed = {}
+    def job(path, data, manifest_id, number, provider, row, start, end, reason="eos", level=None):
+        output = dict(sample_index=0, text=f"Synthetic output {number}", text_truncated=False,
+            generated_tokens=256 if reason == "token_limit" else 3,
+            generation=dict(version=1, stop_reason=reason, max_new_tokens=256, model_profile=profile["name"]))
+        derived = dict(data, inference=[data["inference"][row]])
+        binding = dict(job_id=f"{number:032x}", dataset_manifest_id=manifest_id, dataset_sha256=sha(encode(derived)),
+            row_indices=[row], expires_unix_seconds=2000, task=dict(kind="answer_public_question_v1", question=check["QUESTION"]),
+            model_fingerprint=profile["fingerprint"])
+        handle = dict(provider_key=keys[provider], binding=binding,
+            capabilities=dict(model=profile["model"], max_rows=1, max_job_seconds=600,
+                model_fingerprint=profile["fingerprint"], public_inference_only=True))
+        report = dict(mode="infer", status="ok", device="cpu", threads=2,
+            dataset=dict(version=data["version"], sha256=binding["dataset_sha256"], source_manifest_sha256=sha(source_manifest)),
+            model=dict(id=profile["model"]["model_id"], revision=profile["model"]["model_revision"],
+                       files={"model.safetensors": profile["model"]["base_weights"]}),
+            supervisor=supervisor, outputs=[output])
+        report_json = encode(report).decode()
+        status = dict(state="complete", binding=binding, report_json=report_json, report_sha256=sha(report_json.encode()))
+        attempt = path / "work/package-0000/attempt-0000"
+        save(attempt / f"job-{provider}.json", handle)
+        save(attempt / f"receipt-{binding['job_id']}.json", dict(handle=handle, status=status))
+        observed[binding["job_id"]] = dict(node=layout["provider_nodes"][provider], level=level)
+        return dict(text=output["text"], provider_key=keys[provider], job_id=binding["job_id"],
+            report_sha256=status["report_sha256"], package_manifest_id=manifest_id, model_fingerprint=profile["fingerprint"],
+            output_index=0, source_start=start, source_end=end, generated_tokens=output["generated_tokens"],
+            text_truncated=False, generation=output["generation"])
+    data = dataset([(0, split), (split, len(source))])
+    package = root / "package-0000"
+    package_id = publication(package, data, "document-package-0000")
+    enrollment["packages"].append(dict(manifest_id=package_id, dataset_sha256=sha(encode(data)), first_part=0, rows=2))
+    originals = [job(package, data, package_id, 1, 0, 0, 0, split, "token_limit"),
+                 job(package, data, package_id, 2, 1, 1, split, len(source))]
+    parent = originals[0]
+    parent_root = root / "refinement/leaf-0000"
+    ranges = [(0, split // 2), (split // 2, split)]
+    intent = dict(version=1, part_index=0, parent_sha256=sha(check["answer_bytes"](parent)),
+        parent_report_sha256=parent["report_sha256"], parent_job_id=parent["job_id"],
+        parent_source_start=0, parent_source_end=split, source_manifest_id=sha(source_manifest), source_sha256=sha(source),
+        source_bytes=len(source), model_profile=profile["name"], model_fingerprint=profile["fingerprint"],
+        publisher_key=enrollment["publisher_key"], provider_keys=keys, selected_at_unix_seconds=1000,
+        expires_at_unix_seconds=3000, license=enrollment["license"], question_sha256=sha(check["QUESTION"].encode()),
+        children=[dict(start=start, end=end, source_sha256=sha(source[start:end])) for start, end in ranges])
+    save(parent_root / "intent.json", intent)
+    children, replacements = [], []
+    for index, (start, end) in enumerate(ranges):
+        child_root = parent_root / f"child-{index}"
+        child_plan = plan_for(source[start:end], [(0, end - start)])
+        input_raw = save(child_root / "planner-input.json", dict(version=1, model_profile=profile["name"],
+            visibility="public", license=enrollment["license"], document=source[start:end].decode(), question=check["QUESTION"]))
+        save(child_root / "document-plan.json", child_plan)
+        artifact = save(child_root / "tokenizer/document-plan.json", child_plan)
+        save(child_root / "tokenizer-report.json", dict(mode="plan_document", status="ok", device="cpu",
+            model_weights_loaded=False, updates_completed=0, dataset=dict(sha256=sha(input_raw)), supervisor=supervisor,
+            artifacts=[dict(relative_path="document-plan.json", bytes=len(artifact), sha256=sha(artifact))]))
+        child_data = dataset([(start, end)])
+        child_id = publication(child_root, child_data, f"refined-leaf-0000-child-{index}")
+        replacements.append(job(child_root, child_data, child_id, 3 + index, index, 0, start, end))
+        children.append(dict(start=start, end=end, complete=True, answer_complete=True, package_manifest_id=child_id))
+    frontier = replacements + originals[1:]
+    group = root / "synthesis/level-01-group-0000"
+    combined = "".join(answer["text"] + "\n" for answer in frontier).encode()
+    synthesis_plan = plan_for(combined, [(0, len(combined))])
+    _text, rows = check["DOCUMENT"]["SYNTHESIS"]["expected_rows"](frontier, synthesis_plan["parts"], check["QUESTION"], 0)
+    save(group / "document-plan.json", synthesis_plan)
+    parent_bytes = save(group / "parents.json", frontier)
+    save(group / "group.json", dict(parents_sha256=sha(parent_bytes), source_manifest_id=sha(source_manifest), parent_offset=0, level=1))
+    synthesis_data = dict(version=3, visibility="public", license=enrollment["license"], source_manifest_hex=source_manifest.hex(),
+        level=1, claim_scope=check["DOCUMENT"]["SYNTHESIS"]["CLAIM"], inference=rows)
+    synthesis_id = publication(group / "package-0000", synthesis_data, "derived-l01-g0000-p0000",
+                                check["DOCUMENT"]["SYNTHESIS"]["PROFILE"])
+    final = job(group / "package-0000", synthesis_data, synthesis_id, 5, 0, 0, 0, len(source), level=1)
+    original_answers = [dict(source_part=index, start=answer["source_start"], end=answer["source_end"],
+        context_sha256=sha(source[answer["source_start"]:answer["source_end"]]),
+        answer_status=answer["generation"]["stop_reason"], answer_complete=answer["generation"]["stop_reason"] == "eos",
+        **{key: answer[key] for key in ("text", "provider_key", "job_id", "report_sha256", "package_manifest_id",
+                                       "generated_tokens", "text_truncated", "generation")}) for index, answer in enumerate(originals)]
+    result = dict(joining="hierarchical_peer_synthesis", execution_complete=True, complete=True, answer_complete=True,
+        semantic_completeness_proven=False, source_sha256=sha(source), source_manifest_id=sha(source_manifest),
+        license=enrollment["license"], public_question=check["QUESTION"], total_parts=2, packages=[{}], answers=original_answers,
+        synthesized_answer=final, synthesis=dict(levels=[dict(level=1, complete=True, parents=3, answers=[final],
+            groups=[dict(parts=1, input_sha256=sha(combined))])]),
+        refinement=dict(version=1, enabled=True, complete=True, reason="complete", maximum_refined_leaves=16, split_levels=1,
+            original_parts=2, eligible_leaves=1, refined_leaves=1, answers=frontier, parents=[dict(part_index=0,
+                parent_report_sha256=parent["report_sha256"], parent_job_id=parent["job_id"], parent_source_start=0,
+                parent_source_end=split, intent_sha256=sha(encode(intent)), complete=True, children=children)]))
+    save(root / "document.json", enrollment)
+    save(root / "result.json", result)
+    fixture_input = dict(context=source.decode(), question=check["QUESTION"], license=enrollment["license"])
+    return check, fixture_input, layout, observed, save
+
+
 class CooperativeBrowserProof(unittest.TestCase):
+    def test_refinement_joins_real_shaped_receipts_without_relabelling_original_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            check, fixture_input, layout, observed, _save = retained_refinement_fixture(root)
+            originals = {path: path.read_bytes() for path in (root / "package-0000").rglob("receipt-*.json")}
+            summary = check["retained_result"](root, fixture_input, layout, observed)
+            self.assertEqual(summary["refinement"], dict(version=1, enabled=True, applied=True,
+                original_parts=2, refined_leaves=1, effective_parts=3, original_token_limited_outputs=1,
+                exact_frontier_verified=True))
+            self.assertEqual(summary["jobs"], 5)
+            self.assertTrue(summary["answer_complete"])
+            self.assertNotIn("Synthetic output", json.dumps(summary))
+            result = json.loads((root / "result.json").read_bytes())
+            self.assertEqual(result["answers"][0]["answer_status"], "token_limit")
+            self.assertFalse(result["answers"][0]["answer_complete"])
+            for path, raw in originals.items():
+                self.assertEqual(path.read_bytes(), raw)
+
+    def test_refinement_rejects_missing_or_mutated_frontier_receipts_and_authority(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            check, fixture_input, layout, observed, save = retained_refinement_fixture(root)
+            initial = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+            def modify(relative, mutation):
+                path = root / relative
+                value = json.loads(path.read_bytes())
+                mutation(value)
+                save(path, value)
+            child = "refinement/leaf-0000/child-0"
+            receipt = child + "/work/package-0000/attempt-0000/receipt-00000000000000000000000000000003.json"
+            cases = [
+                ("result.json", lambda v: v.pop("refinement")),
+                ("result.json", lambda v: v["answers"][0].update(answer_complete=True, answer_status="eos")),
+                ("result.json", lambda v: v["answers"][0].update(report_sha256="0" * 64)),
+                ("result.json", lambda v: v["refinement"]["parents"].clear()),
+                ("result.json", lambda v: v["refinement"]["parents"][0]["children"].pop()),
+                ("result.json", lambda v: v["refinement"]["parents"][0].update(parent_job_id="f" * 32)),
+                ("result.json", lambda v: v["refinement"]["parents"][0]["children"][0].update(answer_complete=False)),
+                ("result.json", lambda v: v["refinement"]["answers"][0].update(source_start=1)),
+                ("result.json", lambda v: v["refinement"]["answers"][1].update(source_start=0)),
+                ("result.json", lambda v: v["refinement"]["answers"][0].update(provider_key="0" * 64)),
+                ("result.json", lambda v: v["refinement"]["answers"][0].update(model_fingerprint="0" * 64)),
+                ("result.json", lambda v: v["synthesized_answer"].update(text="invented answer")),
+                ("document.json", lambda v: v.update(refine_incomplete=False)),
+                ("refinement/leaf-0000/intent.json", lambda v: v.update(parent_sha256="0" * 64)),
+                ("refinement/leaf-0000/intent.json", lambda v: v.update(expires_at_unix_seconds=4000)),
+                (child + "/planner-input.json", lambda v: v.update(document="omitted original bytes")),
+                (child + "/document-plan.json", lambda v: v.update(prompt_limit=2048)),
+                (child + "/tokenizer-report.json", lambda v: v.update(model_weights_loaded=True)),
+                (child + "/tokenizer-report.json", lambda v: v["artifacts"][0].update(sha256="0" * 64)),
+                (child + "/work/workflow.json", lambda v: v["provider_keys"].reverse()),
+                (child + "/work/package-0000/dataset.json", lambda v: v["inference"][0].update(start=1)),
+                (receipt, lambda v: v["status"].update(state="cancelled")),
+                (receipt, lambda v: v["status"].update(report_sha256="0" * 64)),
+                ("synthesis/level-01-group-0000/parents.json", lambda v: v[0].update(text="failed parent substituted")),
+                ("synthesis/level-01-group-0000/package-0000/dataset.json", lambda v: v["inference"][0].update(context="other source")),
+            ]
+            for relative, mutation in cases:
+                with self.subTest(relative=relative, mutation=mutation):
+                    for path, raw in initial.items():
+                        save(path, raw)
+                    modify(relative, mutation)
+                    with self.assertRaises((ValueError, KeyError, IndexError)):
+                        check["retained_result"](root, fixture_input, layout, observed)
+            for path, raw in initial.items():
+                save(path, raw)
+            (root / receipt).unlink()
+            with self.assertRaises((ValueError, KeyError, FileNotFoundError)):
+                check["retained_result"](root, fixture_input, layout, observed)
+
+    def test_refinement_rejects_an_actual_token_limited_child_despite_complete_flags(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            check, fixture_input, layout, observed, save = retained_refinement_fixture(root)
+            path = root / "refinement/leaf-0000/child-0/work/package-0000/attempt-0000/receipt-00000000000000000000000000000003.json"
+            receipt = json.loads(path.read_bytes())
+            report = json.loads(receipt["status"]["report_json"])
+            report["outputs"][0]["generation"]["stop_reason"] = "token_limit"
+            report["outputs"][0]["generated_tokens"] = 256
+            receipt["status"]["report_json"] = check["encoded"](report).decode()
+            receipt["status"]["report_sha256"] = check["sha"](receipt["status"]["report_json"].encode())
+            save(path, receipt)
+            result = json.loads((root / "result.json").read_bytes())
+            child = result["refinement"]["answers"][0]
+            child.update(generation=report["outputs"][0]["generation"], generated_tokens=256,
+                         report_sha256=receipt["status"]["report_sha256"])
+            save(root / "result.json", result)
+            with self.assertRaisesRegex(ValueError, "token-limited answer"):
+                check["retained_result"](root, fixture_input, layout, observed)
+
     def test_discovered_source_is_a_longer_literal_prefix_without_changing_legacy_input(self):
         check, _value = discovered_fixture()
         source = (HERE.parents[1] / "README.md").read_bytes()
@@ -130,6 +364,8 @@ class CooperativeBrowserProof(unittest.TestCase):
             lambda v: v["result"].update(model_fingerprint="0" * 64),
             lambda v: v["result"].update(synthesis_levels=0),
             lambda v: v["result"].update(total_parts=1),
+            lambda v: v["result"]["refinement"].update(exact_frontier_verified=False),
+            lambda v: v["result"]["refinement"].update(original_token_limited_outputs=1),
             lambda v: v["panel"]["observed"].update(explicit_consent=False),
             lambda v: v["panel"]["observed"].update(scoped_cancel_confirmed=False),
             lambda v: v["model_provision"].update(download_bytes=523040250),
@@ -175,7 +411,7 @@ class CooperativeBrowserProof(unittest.TestCase):
         selected = source.split('    set -- --model-profile', 1)[1].split('    PHASE=agent-cooperative-browser-service', 1)[0]
         selector = 'set -- --model-profile' + selected
         for flag, expected in (("no", ["--model-profile", "smollm2-135m-v1", "--provider-key", "peer-a", "--provider-key", "peer-b"]),
-                               ("yes", ["--model-profile", "smollm2-360m-v1", "--discover-peers"])):
+                               ("yes", ["--model-profile", "smollm2-360m-v1", "--discover-peers", "--refine-incomplete"])):
             inert = 'jobs_key_a=peer-a\njobs_key_b=peer-b\nagent_cooperative_browser_discovered="$1"\n' + selector + '\nprintf "%s\\0" "$@"\n'
             result = subprocess.run(["sh", "-c", inert, "test", flag], capture_output=True, timeout=3, check=True)
             self.assertEqual(result.stdout.decode().split("\0")[:-1], expected)
@@ -306,6 +542,7 @@ class CooperativeBrowserProof(unittest.TestCase):
             receipts=dict(phase='complete', handles=0, receipts=0, terminal=0, error='none', confirmed=True),
             cleanup_confirmed=False)
         CHECK['check_execution_diagnostic'](value)
+        CHECK['check_execution_diagnostic'](dict(value, phase='refinement'))
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             path = root / 'execution-diagnostic.json'

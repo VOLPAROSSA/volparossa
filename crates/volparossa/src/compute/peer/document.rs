@@ -3,6 +3,7 @@
 mod collection;
 mod graph;
 pub(in crate::compute) mod public;
+mod refinement;
 mod storage;
 mod synthesis;
 #[cfg(test)]
@@ -47,6 +48,7 @@ pub(super) enum Phase {
     Publication,
     EnrollmentSave,
     PeerExecution,
+    Refinement,
     Synthesis,
     CollectionJoin,
     ResultSave,
@@ -71,6 +73,10 @@ pub(crate) struct Options {
     /// Combine all fragment answers through further peer inference; retains every intermediate receipt.
     #[arg(long, conflicts_with = "resume")]
     synthesize: bool,
+    /// Authorize one bounded pass of new, smaller source tasks for token-limited leaves.
+    /// Complete leaves and every original receipt are retained, not rerun or relabelled.
+    #[arg(long, requires = "synthesize", conflicts_with_all = ["resume", "batch_barrier", "replace_peers"])]
+    refine_incomplete: bool,
     /// Explicit public question/dependency graph over the selected sources; not an autonomous planner.
     #[arg(long, conflicts_with_all = ["resume", "public_question", "synthesize", "batch_barrier"])]
     task_plan: Option<PathBuf>,
@@ -194,6 +200,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             "input":args.input,"source_plan":args.source_plan,"source_cache":args.source_cache,
             "directory":args.directory,"resume":args.resume,
             "synthesize":args.synthesize,
+            "refine_incomplete":args.refine_incomplete,
             "task_plan":args.task_plan,"plan_tasks":args.plan_tasks,"plan_task_graph":args.plan_task_graph,"model_profile":args.model_profile,
             "plan_structure":args.plan_structure,
             "grounded_synthesis":args.grounded_synthesis,
@@ -253,6 +260,11 @@ async fn report_with_phase(
         "compute_document_report_mode"
     );
     ensure!(
+        !args.refine_incomplete
+            || (args.synthesize && !args.batch_barrier && !args.discovery.replace_peers),
+        "compute_document_refinement_mode"
+    );
+    ensure!(
         args.directory.is_absolute(),
         "compute_document_absolute_directory"
     );
@@ -277,7 +289,27 @@ async fn report_with_phase(
     *phase = Phase::PeerExecution;
     let mut result = advance(args, socket, cancelled).await?;
     if result["synthesis_requested"] == true {
-        if result["complete"] == true {
+        let recovered = if result["execution_complete"] == true && result["complete"] != true {
+            *phase = Phase::Refinement;
+            refinement::advance(args, socket, cancelled, &mut result).await?
+        } else {
+            None
+        };
+        if let Some(frontier) = recovered {
+            let (enrollment, input, _) = storage::load(&args.directory)?;
+            *phase = Phase::Synthesis;
+            synthesis::advance_frontier(
+                args,
+                socket,
+                cancelled,
+                &mut result,
+                &enrollment,
+                &input,
+                frontier,
+                false,
+            )
+            .await?;
+        } else if result["complete"] == true {
             *phase = Phase::Synthesis;
             synthesis::advance(args, socket, cancelled, &mut result).await?;
         } else {
@@ -425,6 +457,7 @@ async fn prepare(
     enrollment.model_fingerprint = Some(model_fingerprint);
     enrollment.replace_peers = args.discovery.replace_peers;
     enrollment.scheduling = workflow::Scheduling::from_batch_barrier(args.batch_barrier);
+    enrollment.refine_incomplete = args.refine_incomplete;
     enrollment.collection_sha256 = collection
         .as_ref()
         .map(collection::Ledger::sha256)
