@@ -5,9 +5,9 @@ The peer control envelope is hard-incompatible version 4. Envelope versions 1, 2
 every future version are rejected without fallback. Historical schemas are retained only for tag
 archaeology and refusal tests; they are not registered or negotiated.
 
-The checked-in [control-v4 schema](../proto/volparossa/control/v4/control.proto) covers
+The checked-in [control-v4 schema](../../proto/volparossa/control/v4/control.proto) covers
 `SignedEnvelope` and the signed `ControlPayload` messages. The separate checked-in
-[discovery-v4 schema](../proto/volparossa/discovery/v4/discovery.proto) mirrors the hand-written
+[discovery-v4 schema](../../proto/volparossa/discovery/v4/discovery.proto) mirrors the hand-written
 advertisement, exit-forwarding, and datapath-relay request-response wrappers. Descriptor and fuzz
 gates verify tag/enum parity; the two forwarding-hop Rust marker types remain distinct even though
 their canonical wire bytes are deliberately identical.
@@ -1250,8 +1250,8 @@ The local `PathSummary` adds the same explicitly named u64 at tag 8, printed as
 `acked_transport_bytes=` beside the unchanged `bytes=` user counter. Warm/non-native paths have
 no such native measurement and report zero. Transport counters alone prove neither unique
 application bytes nor useful aggregate throughput; complete application hashes and carrying-path
-evidence remain necessary. See the [native implementation contract](../native/volparossa-mpquic/README.md)
-and [current integration status](IMPLEMENTATION_STATUS.md#warm-mpquic-growth-integration).
+evidence remain necessary. See the [native implementation contract](../../native/volparossa-mpquic/README.md)
+and [current integration status](../IMPLEMENTATION_STATUS.md#warm-mpquic-growth-integration).
 
 ### Historical API6 implementation notes
 
@@ -1409,7 +1409,7 @@ maintainers/signatures, 4096 destination rules, 64 permissions per
 destination, and 16384 total permissions. A canonical body commits to monotonic version, validity,
 maintainer set/environment, exact and wildcard domains, exact IP rules, and exact TCP/UDP ports.
 Production defaults require three unique valid signatures from five trusted production maintainers;
-development maintainers are rejected in production mode. See [WHITELIST.md](WHITELIST.md).
+development maintainers are rejected in production mode. See [WHITELIST.md](../privacy/WHITELIST.md).
 
 ## Native static-site object v1
 

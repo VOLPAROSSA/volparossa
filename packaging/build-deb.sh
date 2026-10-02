@@ -189,8 +189,8 @@ for document_name in README.md LICENSE THIRD_PARTY_LICENSES.md SECURITY.md; do
     install -m 0644 "$repository_directory/$document_name" \
         "$package_root/usr/share/doc/volparossa/$document_name"
 done
-install -m 0644 docs/OPERATIONS.md "$package_root/usr/share/doc/volparossa/OPERATIONS.md"
-install -m 0644 docs/PRIVACY.md "$package_root/usr/share/doc/volparossa/PRIVACY.md"
+install -m 0644 docs/development/OPERATIONS.md "$package_root/usr/share/doc/volparossa/OPERATIONS.md"
+install -m 0644 docs/privacy/PRIVACY.md "$package_root/usr/share/doc/volparossa/PRIVACY.md"
 install -m 0644 "$script_directory/debian/copyright" \
     "$package_root/usr/share/doc/volparossa/copyright"
 if [ "$mode" = stage-built ]; then

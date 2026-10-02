@@ -297,7 +297,7 @@ actor replaces the total and directional ceilings before initial dialing and on 
 tick using current RAM/descriptor/pressure headroom. Capacity reduction never revokes live
 records or queued, already-admitted events; retention keeps a numeric high-water bound without
 preallocating that many entries. Pending and per-peer guards remain separate. See
-[adaptive control admission](OPERATIONS.md#adaptive-control-connections) for policy and limits.
+[adaptive control admission](../development/OPERATIONS.md#adaptive-control-connections) for policy and limits.
 Every connection,
 including one whose remote address is unusable, counts toward per-peer uniqueness. A usable native
 prefix is accepted only from an exact direct public-IP TCP or QUIC-v1 remote multiaddress, with an
@@ -563,4 +563,4 @@ These are wire and control-service foundations only. They do not prove the produ
 state machine, a real two-leg probe producer, helper-backed endpoints, client ingress, Internet
 bootstrap failover, NAT traversal, enabled relay/exit serving, or any WireGuard/MPTCP/MPQUIC
 dataplane. Those items remain governed by
-[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+[IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md).

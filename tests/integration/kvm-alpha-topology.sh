@@ -1067,7 +1067,7 @@ if [ "$agent_public_document" = yes ] || [ "$agent_public_collection" = yes ]; t
 fi
 if [ "$agent_public_collection" = yes ]; then
     for collection_fixture in tests/integration/agent-public-collection-smoke.sh tests/integration/agent-public-collection-smoke.py \
-        docs/PROTOCOL.md docs/DECENTRALIZED_AGENTS.md; do
+        docs/architecture/PROTOCOL.md docs/services/DECENTRALIZED_AGENTS.md; do
         [ -f "$source_directory/$collection_fixture" ] && [ ! -L "$source_directory/$collection_fixture" ] || exit 69
     done
 fi

@@ -1,6 +1,6 @@
 # Optional configuration fragment, not an installer or a ready reciprocal deployment.
 # The operator must provision/protect this Exit-side validator first; see
-# docs/UNBOUND_FALLBACK.md. All omitted role settings remain off by default.
+# docs/network/UNBOUND_FALLBACK.md. All omitted role settings remain off by default.
 dns_cache:
   enabled: true
   upstream: null

@@ -1,6 +1,6 @@
 # Common questions
 
-[Documentation](README.md) · [Project overview](../README.md) · [Applications](APPLICATIONS.md)
+[Documentation](README.md) · [Project overview](../README.md) · [Applications](applications/APPLICATIONS.md)
 
 ## Can I use this as my everyday network or backup service
 
@@ -11,7 +11,7 @@ the complete service already works on those devices.
 
 Keep independent copies of important data and do not route sensitive traffic through an
 unqualified build. Start with the [development summary](../README.md#development-status),
-then the [operations guide](OPERATIONS.md) if you want to investigate a development setup.
+then the [operations guide](development/OPERATIONS.md) if you want to investigate a development setup.
 
 ## Is this a VPN or a new Internet
 
@@ -31,7 +31,7 @@ is reached; it does not remove the relay/exit privacy boundary.
 
 The design admits useful additional connections within available resources and transport
 limits. More connections sharing one radio or uplink do not automatically add bandwidth.
-[Route architecture](ARCHITECTURE.md) · [Local links](LOCAL_LINK_NETWORK.md)
+[Route architecture](architecture/ARCHITECTURE.md) · [Local links](network/LOCAL_LINK_NETWORK.md)
 
 ## Can I participate without my own Internet subscription
 
@@ -54,7 +54,7 @@ does not count as space contributed to others.
 Fragments are spread among providers, with two copies of each fragment. Older full-archive
 backups remain recoverable. Automatic reciprocal accounting and safe reduction of contributed
 capacity are unfinished; lowering your usage must not delete someone else's live data.
-[Storage details](PRIVATE_STORAGE.md)
+[Storage details](services/PRIVATE_STORAGE.md)
 
 ## Can storage peers read or classify my files
 
@@ -77,7 +77,7 @@ responses or trust a peer's hash as proof of what a website published.
 
 The aim is to use peers when they help and fall back to an authorized origin when appropriate.
 Current support does not cover arbitrary browser HTTPS traffic.
-[Cache design](CONTENT_NETWORK_PROPOSAL.md) · [HTTPS download modes](OPERATIONS.md#https-checksum-file-downloads)
+[Cache design](services/CONTENT_NETWORK_PROPOSAL.md) · [HTTPS download modes](development/OPERATIONS.md#https-checksum-file-downloads)
 
 ## Is the AI only local and does more hardware make it smarter
 
@@ -90,7 +90,7 @@ More participants can add resources and diversity, but intelligence, latency and
 are different measurements. Actual small-model runs still make mistakes. Improvements must
 be measured rather than inferred from node count or training activity. Model labels such as
 135M, 360M and 1.7B refer to approximate parameter counts, not a quality score or the number
-of agents. [Compute design and evidence](DECENTRALIZED_AGENTS.md)
+of agents. [Compute design and evidence](services/DECENTRALIZED_AGENTS.md)
 
 ## Does the immune system inspect everything or assign moral scores
 
@@ -98,7 +98,7 @@ No. It is intended to review **agents, artifacts and scoped decisions**, not sco
 The seven virtues are a values framework for reasoning, not a list of keywords to block.
 The current destination/port whitelist does not classify every page behind a hostname or
 make encrypted traffic readable. Mutual review, authority, correction and privacy protection
-remain separate requirements. [Principles](../README.md#governed-by-7-virtues) · [Policy](WHITELIST.md)
+remain separate requirements. [Principles](../README.md#governed-by-7-virtues) · [Policy](privacy/WHITELIST.md)
 
 ## Where should I report an idea or a problem
 

@@ -281,7 +281,7 @@ the worker context; the fixed alpha score remains **11/100 (11%)**.
 
 ## Privileged helper boundary
 
-The helper accepts only the operations documented in [PROTOCOL.md](PROTOCOL.md). It must validate
+The helper accepts only the operations documented in [PROTOCOL.md](../architecture/PROTOCOL.md). It must validate
 Unix peer credentials, protocol version, fixed identifier/key/address sizes, enum values, numerical
 ranges, ownership token, and lifecycle transition before invoking netlink or WireGuard UAPI.
 
@@ -424,4 +424,4 @@ Destroy and sequential capacity reuse. They have no trusted selection/policy aut
 simultaneous route, transport descriptor, ingress, usable VPN/datapath or crash/restart recovery. The
 forwarding proof is retained exact-main helper-boundary evidence, not acceptance evidence. None of
 these results closes an A01--A15 result or changes the **11/100 (11%)** alpha score. See
-[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+[IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md).

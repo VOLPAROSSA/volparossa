@@ -174,7 +174,7 @@ does not install on the development host or fetch dependencies at worker runtime
 An explicit second profile, `smollm2-360m-v1`, pins SmolLM2-360M-Instruct at
 `a10cc1512eabd3dde888204e902eca88bddb4951`. It supports inference, source tokenization and
 task planning, not training or the incompatible 135M adapters. It uses the same pinned CPU
-runtime and isolation; see [asset and license provenance](../THIRD_PARTY_LICENSES.md).
+runtime and isolation; see [asset and license provenance](../../THIRD_PARTY_LICENSES.md).
 
 | Explicit profile | Ordinary prompt | Generated answer | Escaped answer bytes | Rows per worker |
 | --- | ---: | ---: | ---: | ---: |
@@ -274,7 +274,7 @@ then finishes eight updates within its original deadline. Total acknowledged pau
 seconds. All contenders/worker are reaped, temporary roots are removed and original guest-root
 hashes match. This measures CPU-pressure handling, not all owner activity, owner-triggered
 cancellation, battery/thermal behavior or the entire B01 criterion. Exact artifact/checker/hash
-details are retained in [implementation status](IMPLEMENTATION_STATUS.md).
+details are retained in [implementation status](../IMPLEMENTATION_STATUS.md).
 
 The device-priority candidate additionally reads exposed Linux system-battery and thermal
 sysfs data, caching observations for at most one second. Battery charge at or below 20%
@@ -341,7 +341,7 @@ bytes and 1,005 dataset bytes with zero origin bytes, and actual use of the same
 parameters through read-only received inodes. Cache-only reopening after provider stop,
 complete private/network cleanup and unchanged original guest-state hashes also pass.
 The exact-source checker independently reconstructs the retained raw evidence; artifact and
-hash details are recorded in [implementation status](IMPLEMENTATION_STATUS.md#current-candidate-functional-integration-in-progress).
+hash details are recorded in [implementation status](../IMPLEMENTATION_STATUS.md#current-candidate-functional-integration-in-progress).
 This completes B02's explicit transfer/reuse scope, not automatic model activation or improved
 answer quality. Native peer fetch
 does not yet implement general external-corpus ingestion or bias-aware source selection.
@@ -383,7 +383,7 @@ frames have zero drops or forbidden tuples, both selected relay paths carry data
 leaves zero owned objects with matching original guest-root hashes. The earlier `0d756a64`
 fixture failure remains historical failure, not a retrospectively passing run. B05 remains open:
 this is an explicitly chosen cycle, not autonomous training, defended aggregation or general
-source discovery. Full source/artifact/hash details are in [implementation status](IMPLEMENTATION_STATUS.md).
+source discovery. Full source/artifact/hash details are in [implementation status](../IMPLEMENTATION_STATUS.md).
 
 ### Continuous public training candidate
 
@@ -1836,7 +1836,7 @@ sandbox supervisor; the slot stays owned until execution returns through cleanup
 cleanup quarantines admission. Temporary input/report files follow the private-task contract:
 this is not RAM-only processing, secure erasure or confidential remote execution.
 
-The [v1 local wire contract](../crates/volparossa/src/compute/private_serve/WIRE.md) documents
+The [v1 local wire contract](../../crates/volparossa/src/compute/private_serve/WIRE.md) documents
 the strict length-prefixed JSON exception, response correlation and cancellation lifecycle.
 Private text belongs in bounded message bodies, never URLs, logs, public cache or training.
 Web pages must not receive the socket or a generic command bridge; model output is untrusted
@@ -1851,7 +1851,7 @@ public-path rejection, complete temporary cleanup and unchanged host network sta
 This proves the bounded core IPC lane, **not a Firefox UI, confidential remote execution,
 general answer quality or completed B04**. The earlier `9d870440` proof remains a historical
 file-oriented CLI result, not relabeled socket evidence. Failed earlier IPC runs are retained
-in [the implementation record](IMPLEMENTATION_STATUS.md).
+in [the implementation record](../IMPLEMENTATION_STATUS.md).
 
 A separate [combined browser/core run on `5beb8d2d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36614266330)
 now passes with browser integration `4b1fdbe` and the real ESR 140.16.0 sidebar. The actual
@@ -1864,7 +1864,7 @@ not the Firefox 157 source build/native provider selector, general answer qualit
 
 ## Fully automatic whitelist/blacklist decisions
 
-The existing [whitelist](WHITELIST.md) already enforces threshold-signed **destination/port**
+The existing [whitelist](../privacy/WHITELIST.md) already enforces threshold-signed **destination/port**
 rules. It does not classify all content behind an allowed hostname. Native object decisions,
 individual HTTPS resources, domain reachability and worker/tool permissions require separate
 typed scopes; allowing a domain is not approval of every page it serves. Relays and exits do

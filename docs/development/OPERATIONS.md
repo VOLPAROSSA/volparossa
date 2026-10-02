@@ -2,7 +2,7 @@
 
 This guide targets Debian 13 (Trixie) amd64 with systemd, nftables, kernel WireGuard, and kernel
 MPTCP. It is not a release announcement. Do not enable services or route sensitive traffic until
-the relevant checks in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) are complete.
+the relevant checks in [IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md) are complete.
 
 The original v1 datapaths and A01--A15 passed together on the unchanged `482e33d0` build in
 [the retained Debian 13 KVM run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34047766913).
@@ -123,7 +123,7 @@ Internet access obtained through the overlay must never be offered back as an in
 The uplink setting is an operator declaration of available capability, not runtime connectivity
 proof, an uptime measurement, or automatic outage detection. Offline consumption and simultaneous
 relay contribution have separate disposable Ethernet and simulated-radio proofs; see
-[local-link scope](LOCAL_LINK_NETWORK.md). Configuration validation alone is still not datapath
+[local-link scope](../network/LOCAL_LINK_NETWORK.md). Configuration validation alone is still not datapath
 evidence, and simulated radios do not establish compatibility or performance on physical Wi-Fi.
 
 Installing or initializing the package does not consent to Internet egress. Configure those
@@ -295,7 +295,7 @@ the Exit uses the packaged private libunbound worker for bounded recursion and v
 Independently validated evidence may be retained and shared; a native validation flag alone
 is not peer-proof authority. `enabled: false` disables retention and exchange, not this fallback.
 An enabled Exit needs the exact-version worker companion and distribution root-anchor files;
-an all-off installation starts no worker. See [private Unbound](UNBOUND_FALLBACK.md) for build,
+an all-off installation starts no worker. See [private Unbound](../network/UNBOUND_FALLBACK.md) for build,
 package and source-exact proof status. No host resolver configuration changes are made.
 
 The OS resolver is an explicit opt-out: `fallback: { mode: system }`. Only in that mode may
@@ -303,7 +303,7 @@ The OS resolver is an explicit opt-out: `fallback: { mode: system }`. Only in th
 upstream without that explicit mode is rejected with a migration hint. VOLPAROSSA does not
 install or reconfigure such a listener. Restart the agent after explicit configuration changes.
 
-An explicit [Exit-side Unbound fallback](UNBOUND_FALLBACK.md) can instead be selected with
+An explicit [Exit-side Unbound fallback](../network/UNBOUND_FALLBACK.md) can instead be selected with
 `fallback: { mode: unbound, endpoint: '127.0.0.1:5335' }` and `upstream: null`. In that mode
 resolver errors never fall through to OS resolution. The endpoint must already be provisioned
 and protected: loopback alone is not sufficient isolation, and a normal Unbound service account
@@ -317,7 +317,7 @@ upstream lookup on another peer's cache miss. Names are not published in the DHT
 the authenticated cache peer serving a question necessarily sees that question. Involved route
 relays are excluded from those requests. CNAME and negative-answer sharing remain outside this
 initial positive-answer implementation. See the source-bound
-[implementation status](IMPLEMENTATION_STATUS.md) for the passed two-Exit cache proof and the
+[implementation status](../IMPLEMENTATION_STATUS.md) for the passed two-Exit cache proof and the
 separate remaining packaged-default/reciprocal-node acceptance.
 
 ## Offline content commands
@@ -700,7 +700,7 @@ The origin must support the documented anonymous binary-content descriptor and s
 normal signed Exit policy. Debian's normal public CA bundle is used unless an explicit public
 `--ca-file` is supplied for this operation. This is not interception or generic browser caching.
 The CLI/process, origin-library and different-UID network checks pass, as recorded in
-[implementation status](IMPLEMENTATION_STATUS.md).
+[implementation status](../IMPLEMENTATION_STATUS.md).
 
 Both HTTPS download commands accept `--source-strategy auto|peers-first|origin-only`:
 
@@ -1255,7 +1255,7 @@ scripts and local assets but excludes persistent origin storage, service workers
 embedded frames and external network requests. This is a static publication, not a dynamic
 server/database, transparent HTTPS cache or a promise of permanent replica availability.
 The publisher may be offline only while reachable replicas retain valid metadata and every
-required chunk. See [source-scoped verification](IMPLEMENTATION_STATUS.md).
+required chunk. See [source-scoped verification](../IMPLEMENTATION_STATUS.md).
 
 ### Opportunistic replica cache
 

@@ -44,7 +44,7 @@ trap 'exit 130' HUP INT TERM
 install -d "$staging/DEBIAN" "$staging/usr/libexec" "$staging/usr/share/doc/volparossa-private-dns-worker"
 install -m 0755 "$root/native/volparossa-dns-worker/build/volparossa-dns-worker" "$staging/usr/libexec/volparossa-dns-worker"
 install -m 0644 "$root/LICENSE" "$staging/usr/share/doc/volparossa-private-dns-worker/copyright"
-install -m 0644 "$root/THIRD_PARTY_LICENSES.md" "$root/docs/UNBOUND_FALLBACK.md" \
+install -m 0644 "$root/THIRD_PARTY_LICENSES.md" "$root/docs/network/UNBOUND_FALLBACK.md" \
     "$staging/usr/share/doc/volparossa-private-dns-worker/"
 printf '%s\n' \
     'Package: volparossa-private-dns-worker' "Version: $version" 'Architecture: amd64' \
