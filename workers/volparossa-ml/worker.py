@@ -1713,8 +1713,10 @@ def execute_private_infer(request, session, tokenizer, torch, transformers, vers
     profile_name = request.get("model_profile", DEFAULT_MODEL_PROFILE)
     profile = model_profile(profile_name)
     conversation = request["mode"] == "private_conversation"
+    generation_policy = None
     if conversation:
         try:
+            generation_policy = conversation_module().generation_policy(dataset, profile_name)
             prompt = conversation_module().encode(tokenizer, dataset, profile)
         except (ValueError, TypeError, UnicodeError, RecursionError) as error:
             raise JobError("PRIVATE_CONVERSATION_TOKENIZATION_FAILED") from error
@@ -1725,7 +1727,8 @@ def execute_private_infer(request, session, tokenizer, torch, transformers, vers
     model = load_model(transformers, torch, model_root, profile_name)
     session.check()
     session.progress("baseline")
-    outputs = generate(model, samples, tokenizer, torch, session, transformers, profile_name)
+    outputs = generate(model, samples, tokenizer, torch, session, transformers, profile_name,
+                       generation_policy=generation_policy)
     require(file_hash(model_root / "model.safetensors", profile["files"]["model.safetensors"])["sha256"]
             == profile["hashes"]["model.safetensors"], "MODEL_WEIGHTS_CHANGED_ON_DISK")
     result = {"version": VERSION, "id": request["id"], "kind": "result", "status": "ok", "mode": request["mode"],
@@ -1738,6 +1741,8 @@ def execute_private_infer(request, session, tokenizer, torch, transformers, vers
     if conversation:
         result.update(conversation=conversation_module().decode(dataset, outputs[0], profile_name, request["id"]), prompt_tokens=len(prompt),
                       conversation_limits=conversation_module().capabilities(profile_name, profile))
+    if generation_policy is not None:
+        result["generation_policy"] = generation_policy
     result.update(model_dtype_report(profile_name, model, torch))
     return finish_result(result, output_root, session)
 
@@ -1778,14 +1783,13 @@ def generation_metadata(tokens, eos_token_id, profile_name=DEFAULT_MODEL_PROFILE
     return result
 
 
-def generate(model, samples, tokenizer, torch, session, transformers, profile_name=DEFAULT_MODEL_PROFILE):
+def generate(model, samples, tokenizer, torch, session, transformers, profile_name=DEFAULT_MODEL_PROFILE,
+             generation_policy=None):
     profile = model_profile(profile_name)
     require(1 <= len(samples) <= profile["max_rows"], "INVALID_DATASET_SIZE")
-    # The exact pinned Qwen README recommends this nonthinking sampling profile.
-    # Keep the existing seed 7; no retry/seed search or forced tool selection.
-    # https://huggingface.co/Qwen/Qwen3-0.6B/blob/c1899de289a04d12100db370d81485cdf75e47ca/README.md
-    generation_options = ({"do_sample": True, "temperature": 0.7, "top_p": 0.8,
-                           "top_k": 20, "min_p": 0.0}
+    require(generation_policy is None or profile_name == QWEN_MODEL_PROFILE,
+            "CONVERSATION_GENERATION_POLICY")
+    generation_options = (conversation_module().native().generation_options(generation_policy)
                           if profile_name == QWEN_MODEL_PROFILE else {"do_sample": False})
     class OwnerCheckpoint(transformers.StoppingCriteria):
         def __call__(self, _input_ids, _scores, **_kwargs):

@@ -13,6 +13,16 @@ def base():
     return sys.modules["volparossa_conversation"]
 
 
+def generation_options(policy=None):
+    base().require(policy is None or (type(policy) is str and policy == "greedy_v1"),
+                   "CONVERSATION_GENERATION_POLICY")
+    if policy == "greedy_v1":
+        return {"do_sample": False, "num_beams": 1}
+    # Preserve the pinned upstream nonthinking sampling profile when not opted in.
+    # https://huggingface.co/Qwen/Qwen3-0.6B/blob/c1899de289a04d12100db370d81485cdf75e47ca/README.md
+    return {"do_sample": True, "temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0}
+
+
 def native_tools(value):
     result = []
     for index, tool in enumerate(value["tools"]):

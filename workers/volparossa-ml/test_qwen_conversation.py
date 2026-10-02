@@ -26,9 +26,19 @@ def output(raw, reason="eos", truncated=False):
 
 class QwenConversationTests(unittest.TestCase):
     def test_worker_dispatch_reaches_native_template_and_real_generation_boundary(self):
+        self.check_worker_generation_policy(None)
+
+    def test_greedy_policy_drives_actual_generate_kwargs_and_report(self):
+        self.check_worker_generation_policy("greedy_v1")
+
+    def check_worker_generation_policy(self, policy):
         # Inert tensor/tokenizer/model doubles exercise dispatch, not inference quality.
         data = conversation()
+        if policy is not None:
+            data["generation_policy"] = policy
         raw = json.dumps(data).encode()
+        self.assertIs(WORKER.validate_dataset(data, "private_conversation", PROFILE), data)
+        self.assertEqual(json.dumps(data).encode(), raw, "validation must not rewrite request bytes")
         identity = {"sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw), "visibility": "private_local"}
         profile = WORKER.model_profile(PROFILE)
         files = {name: {"bytes": size, "sha256": profile["hashes"][name]} for name, size in profile["files"].items()}
@@ -65,12 +75,59 @@ class QwenConversationTests(unittest.TestCase):
             self.assertEqual(model.generate.call_args.kwargs["max_new_tokens"], 1024)
             self.assertEqual(model.generate.call_args.kwargs["eos_token_id"], 151645)
             generation = model.generate.call_args.kwargs
-            self.assertEqual({key: generation[key] for key in
-                ("do_sample", "temperature", "top_p", "top_k", "min_p")},
-                {"do_sample": True, "temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0})
+            report = json.loads((root/"report.json").read_text(encoding="ascii"))
+            self.assertEqual(report, result)
+            if policy is None:
+                self.assertNotIn("generation_policy", result)
+                self.assertNotIn("num_beams", generation)
+                self.assertEqual({key: generation[key] for key in
+                    ("do_sample", "temperature", "top_p", "top_k", "min_p")},
+                    {"do_sample": True, "temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0})
+            else:
+                self.assertEqual(result["generation_policy"], data["generation_policy"])
+                self.assertEqual({key: generation[key] for key in ("do_sample", "num_beams")},
+                                 {"do_sample": False, "num_beams": 1})
+                self.assertFalse({"temperature", "top_p", "top_k", "min_p"} & generation.keys())
             self.assertTrue(generation["use_cache"])
             self.assertEqual(len(generation["stopping_criteria"]), 1)
             tokenizer.decode.assert_called_once_with([21], skip_special_tokens=False)
+
+    def test_generation_policy_is_strictly_opt_in_and_qwen_only(self):
+        for profile_name in WORKER.MODEL_PROFILES:
+            data = conversation()
+            before = CONVERSATION.canonical(data)
+            self.assertIsNone(CONVERSATION.generation_policy(data, profile_name))
+            self.assertIs(CONVERSATION.validate(data, profile_name), data)
+            self.assertEqual(CONVERSATION.canonical(data), before)
+            data["generation_policy"] = "greedy_v1"
+            if profile_name == PROFILE:
+                self.assertIs(CONVERSATION.validate(data, profile_name), data)
+                self.assertEqual(CONVERSATION.generation_policy(data, profile_name), "greedy_v1")
+            else:
+                with self.subTest(profile=profile_name), self.assertRaisesRegex(ValueError, "GENERATION_POLICY"):
+                    CONVERSATION.validate(data, profile_name)
+        for policy in (None, "", "greedy", "GREEDY_V1", "sample_v1", False, 1, [], {}):
+            data = dict(conversation(), generation_policy=policy)
+            with self.subTest(policy=policy), self.assertRaisesRegex(WORKER.JobError, "INVALID_PRIVATE_CONVERSATION"):
+                WORKER.validate_dataset(data, "private_conversation", PROFILE)
+        with self.assertRaises(WORKER.JobError):
+            WORKER.validate_request(dict(request(), generation_policy="greedy_v1"))
+
+    def test_generation_policy_keeps_strict_duplicate_and_constant_json_rejection(self):
+        raw = CONVERSATION.canonical(dict(conversation(), generation_policy="greedy_v1"))
+        for invalid in (raw[:-1] + ',"generation_policy":"greedy_v1"}',
+                        raw.replace('"greedy_v1"', 'NaN')):
+            with self.subTest(raw=invalid), self.assertRaises(WORKER.JobError):
+                WORKER.parse_json(invalid)
+
+    def test_invalid_generation_selector_never_reaches_backend(self):
+        for profile_name, policy in ((PROFILE, "unknown"), (PROFILE, False),
+                                     (WORKER.DEFAULT_MODEL_PROFILE, "greedy_v1")):
+            model, tokenizer, torch, transformers = task_planner_doubles("unused")
+            with self.subTest(profile=profile_name, policy=policy), self.assertRaises((ValueError, WORKER.JobError)):
+                WORKER.generate(model, [torch.tensor([[11]])], tokenizer, torch, mock.Mock(),
+                                transformers, profile_name, generation_policy=policy)
+            model.generate.assert_not_called()
 
     def test_exact_pins_preserve_runtime_and_private_only_admission(self):
         spec = importlib.util.spec_from_file_location("qwen_provision", Path(__file__).with_name("provision.py"))

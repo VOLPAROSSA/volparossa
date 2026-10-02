@@ -6,6 +6,56 @@ Last updated: 2026-10-02
 
 ## Current integration and active work
 
+### Native editor, core and model integration candidate
+
+The separate Code PR4 at `4263b8ba4b28e6617d2a57de33db1efcda01a828`
+provides an explicit native coding command, selected-workspace consent and
+one-shot tool approvals. A real isolated VSCodium admission probe reached the
+command, prompt and consent dialog, then cancelled; it did not execute a model
+or prove that a coding task succeeds.
+
+The new `agent-native-editor` guest scenario composes that real UI driver,
+the source-built native runtime and the core's private Qwen service. It reuses
+the verified build rather than compiling the unchanged native app-server again.
+An independently pinned complete VSCodium package tree is staged only in the
+guest; the active development editor and its profile are not used. The original
+`agent-native-coding` scenario and its failed results below remain separate.
+
+Success requires actual UI consent/command approvals, model-selected read,
+edit and test operations, independent verification of the changed fixture,
+runtime/service cleanup and unchanged host networking. Bundle/source checks
+and UI admission alone are not that result. The joined editor/model test and
+general-purpose coding ability remain unproved.
+
+The first actual joined local trial, `build/native-editor-vm-01` on exact core
+`fbd07c40c17f5deee506909d8e295a3accf4de62`, fails before the first task is
+submitted. Runtime, Node and model provisioning pass; the real isolated editor
+starts and its CDP page is reachable. After the first F1 input, the UI driver does
+not observe a command-palette input within the existing 15-second window. The
+closed receipt remains at `editor-connect/deadline`, with no Start consent,
+command approval or model-directed read/edit/test. A workbench-startup race is a
+candidate explanation, not established by the retained DOM-free receipt.
+The editor exits normally through Ctrl-Q (exit 0, no forced stop); the driver,
+services and descendants are joined, private state and VM scratch are removed,
+and the guest network-state hashes both equal
+`0039b886f89fa265c6ee85e8d1392c70b6cda2dbbd9fa701d2e85fdb01f59d97`.
+Original report SHA-256:
+`03f42f6580261700ac55a176383fa0b5e8c31adfb76c8d2f18769410cc10e81b`.
+This remains a failed integration trial, not a completed coding task. The next
+UI correction must observe actual workbench/palette readiness without weakening
+consent, command approval, isolation or the task's success criteria.
+
+Code `4263b8ba` now waits for visible workbench/editor DOM before opening the
+palette, and retries only an unobserved palette within the original 15 seconds;
+unknown dialogs are never approved. Seven focused driver checks and an actual
+isolated editor admission probe pass without the earlier fixed startup sleep:
+both palettes open after one F1, task/consent are reached, then Cancel ends the
+probe without model, tool or app-server execution. The guest requires UI receipt
+v2 with only closed readiness flags and a bounded attempt count; seven guest
+contract checks reject missing readiness, unknown fields and false task success.
+This does not retrospectively prove the cause of trial01 or complete the joined
+model-driven coding task. A new source-bound full trial remains necessary.
+
 ### Native Codex read/edit/test integration candidate
 
 The separate [Code candidate](https://github.com/VOLPAROSSA/volparossa-code/pull/3)
@@ -241,6 +291,17 @@ unfinished; none is inferred from the protocol or controller checks.
   and recovery. No development-host installer or update channel has been enabled.
 
 ### Native private conversation candidate
+
+The current candidate adds explicit, same-connection generation-policy negotiation
+to the [private conversation wire contract](../crates/volparossa/src/compute/private_conversation/WIRE.md).
+Only Qwen may select `greedy_v1`: actual worker generation receives `do_sample:false`
+and `num_beams:1`, and the same selector is recorded in the worker report and
+checked against the request before a result is returned. Legacy requests/replies
+and omitted-policy sampling remain unchanged. Unknown/null/duplicate policies,
+unsupported versions/profiles and mismatched report claims fail closed.
+Focused protocol/report tests and offline backend-double checks cover that
+contract, not real model quality. No new model/VM run, completed coding task or
+explanation of earlier Code failures is claimed by this change.
 
 Qwen native private-conversation source candidate (2026-09-30): explicit
 `qwen3-0.6b-v1` pins Qwen3-0.6B at `c1899de289a04d12100db370d81485cdf75e47ca`

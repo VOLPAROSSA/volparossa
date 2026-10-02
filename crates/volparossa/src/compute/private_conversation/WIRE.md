@@ -18,6 +18,8 @@ authorize conversation submission. Both families share one execution slot.
 
 Operation: `{ "type": "submit_conversation", "conversation": INPUT }`, where INPUT
 has exactly `version:1`, `visibility:"private_local"`, `instructions`, `history`, `tools`.
+The explicitly negotiated generation-policy extension below permits one additional
+`generation_policy` field; omission preserves the legacy request and generation.
 Instructions are text, not commands executed by the worker. History is ordered:
 
 - `{ "type":"message", "role":"user"|"assistant", "text":"..." }`
@@ -48,6 +50,30 @@ object shape/size and offered identity, **not arbitrary JSON Schema semantics**.
 The application/tool harness remains responsible for argument validation, user
 approval, workspace restrictions and execution. Custom tools accept literal input;
 grammar-enforced custom tools are not advertised by this contract.
+
+## Explicit generation-policy negotiation
+
+To select generation behavior, first send
+`{ "type":"conversation_capabilities", "generation_policy_version":1 }`
+on the same connection. Only this extended handshake adds
+`generation_policy_version:1` and `generation_policies` to `capabilities`:
+`["greedy_v1"]` for Qwen, `[]` for every other profile. Unknown versions, null,
+wrong types and duplicate fields are invalid requests. The original handshake
+request/reply remains unchanged; returning to it resets policy negotiation.
+
+After that handshake, Qwen INPUT may include `generation_policy:"greedy_v1"`.
+The worker uses `do_sample:false, num_beams:1`, without changing token budgets,
+model/template, offered tools, output parsing or execution authority. Its report
+and the validated result contain the same top-level `generation_policy` field.
+Rust requires exact presence/value agreement with the request before returning a
+result; missing, null, conflicting or unsolicited policy claims fail binding.
+Worker JSON duplicate keys are rejected before conversion to a generic value.
+
+Omission retains Qwen's existing sampled nonthinking generation, or the existing
+Smol behavior, and adds no field to input serialization, worker report or result.
+No other policy or non-Qwen opt-in is accepted. Negotiation is not model-quality,
+coding-task-completion or cross-hardware reproducibility evidence. All existing
+private-execution, approval, cancellation and cleanup boundaries still apply.
 
 ## Result and cancellation
 

@@ -212,6 +212,108 @@ fn native_output(raw: &str) -> Value {
 }
 
 #[test]
+fn generation_policy_is_explicit_qwen_only_and_preserves_legacy_bytes() {
+    let legacy = br#"{"version":1,"visibility":"private_local","instructions":"Review.","history":[{"type":"message","role":"user","text":"Read first."}],"tools":[]}"#;
+    for profile in [ModelProfile::Smol360, ModelProfile::Qwen600] {
+        let decoded = Input::decode_profile(legacy, profile).unwrap();
+        assert_eq!(decoded.bytes_profile(profile).unwrap(), legacy);
+        assert!(!decoded.requires_generation_policy_handshake());
+        assert!(
+            capabilities(profile)
+                .get("generation_policy_version")
+                .is_none()
+        );
+        assert!(capabilities(profile).get("generation_policies").is_none());
+    }
+    let mut selected: Value = serde_json::from_slice(legacy).unwrap();
+    selected["generation_policy"] = "greedy_v1".into();
+    let raw = serde_json::to_vec(&selected).unwrap();
+    let decoded = Input::decode_profile(&raw, ModelProfile::Qwen600).unwrap();
+    assert!(decoded.requires_generation_policy_handshake());
+    let roundtrip: Value =
+        serde_json::from_slice(&decoded.bytes_profile(ModelProfile::Qwen600).unwrap()).unwrap();
+    assert_eq!(roundtrip, selected);
+    for profile in [
+        ModelProfile::Default135,
+        ModelProfile::Smol360,
+        ModelProfile::Smol1700,
+    ] {
+        assert!(Input::decode_profile(&raw, profile).is_err());
+    }
+    for invalid in [
+        Value::Null,
+        json!(1),
+        json!(true),
+        json!("sampled_v2"),
+        json!([]),
+    ] {
+        selected["generation_policy"] = invalid;
+        assert!(
+            Input::decode_profile(
+                &serde_json::to_vec(&selected).unwrap(),
+                ModelProfile::Qwen600
+            )
+            .is_err()
+        );
+    }
+    let duplicate = String::from_utf8(raw).unwrap().replace(
+        "\"generation_policy\":\"greedy_v1\"",
+        "\"generation_policy\":\"greedy_v1\",\"generation_policy\":\"greedy_v1\"",
+    );
+    assert!(Input::decode_profile(duplicate.as_bytes(), ModelProfile::Qwen600).is_err());
+}
+
+#[test]
+fn generation_policy_report_must_match_request_before_summary() {
+    let profile = ModelProfile::Qwen600;
+    let mut selected = input();
+    let legacy_raw = serde_json::to_vec(&selected).unwrap();
+    selected["generation_policy"] = "greedy_v1".into();
+    let raw = serde_json::to_vec(&selected).unwrap();
+    let mut report = json!({"id":"ab".repeat(16),"outputs":[native_output("Ready.")],
+        "conversation":{"type":"assistant","text":"Ready."},
+        "prompt_tokens":128,"conversation_limits":capabilities(profile)});
+    validate_report(&report, &legacy_raw, profile).unwrap();
+    let legacy_summary = summary(&report, profile);
+    assert!(legacy_summary.get("generation_policy").is_none());
+    assert!(validate_report(&report, &raw, profile).is_err());
+    report["generation_policy"] = "greedy_v1".into();
+    validate_report(&report, &raw, profile).unwrap();
+    assert!(validate_report(&report, &legacy_raw, profile).is_err());
+    let mut result = summary(&report, profile);
+    assert_eq!(
+        result.as_object_mut().unwrap().remove("generation_policy"),
+        Some(json!("greedy_v1"))
+    );
+    assert_eq!(
+        serde_json::to_vec(&result).unwrap(),
+        serde_json::to_vec(&legacy_summary).unwrap()
+    );
+    for invalid in [Value::Null, json!(true), json!(1), json!("sampled_v2")] {
+        report["generation_policy"] = invalid;
+        assert!(validate_report(&report, &raw, profile).is_err());
+        assert!(validate_report(&report, &legacy_raw, profile).is_err());
+    }
+}
+
+#[test]
+fn worker_policy_report_duplicate_keys_are_rejected_before_value_projection() {
+    let id = "ab".repeat(16);
+    let legacy = json!({"version":1,"id":id,"kind":"result","status":"ok"});
+    let raw = serde_json::to_vec(&legacy).unwrap();
+    assert_eq!(super::super::check_message(&raw, &id).unwrap(), legacy);
+    for duplicate in [
+        r#""generation_policy":"greedy_v1","generation_policy":"greedy_v1""#,
+        r#""generation_policy":null,"generation_policy":"greedy_v1""#,
+        r#""generation_policy":"other","generation_policy":"greedy_v1""#,
+    ] {
+        let malformed =
+            format!(r#"{{"version":1,"id":"{id}","kind":"result","status":"ok",{duplicate}}}"#);
+        assert!(super::super::check_message(malformed.as_bytes(), &id).is_err());
+    }
+}
+
+#[test]
 fn qwen_native_aliases_strictly_bind_real_output_and_owner_assigned_ids() {
     let mut value = input();
     value["tools"][0]["namespace"] = "files".into();

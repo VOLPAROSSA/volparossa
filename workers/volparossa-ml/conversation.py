@@ -58,6 +58,15 @@ def fields(value, required, optional=()):
             and value.keys() <= set(required) | set(optional), "CONVERSATION_SCHEMA")
 
 
+def generation_policy(value, profile_name=None):
+    if "generation_policy" not in value:
+        return None
+    policy = value["generation_policy"]
+    require(profile_name == QWEN and type(policy) is str and policy == "greedy_v1",
+            "CONVERSATION_GENERATION_POLICY")
+    return policy
+
+
 def validate_call(value, tools, seen):
     custom = value["type"] == "custom_tool_call"
     fields(value, ("type", "call_id", "name", "input" if custom else "arguments"), ("namespace",))
@@ -70,7 +79,8 @@ def validate_call(value, tools, seen):
 
 def validate(value, profile_name=None):
     maximum, instructions, history, tools, message, description = bounds(profile_name)
-    fields(value, ("version", "visibility", "instructions", "history", "tools"))
+    fields(value, ("version", "visibility", "instructions", "history", "tools"), ("generation_policy",))
+    generation_policy(value, profile_name)
     require(type(value["version"]) is int and value["version"] == 1
             and value["visibility"] == "private_local", "CONVERSATION_SCOPE")
     require(text(value["instructions"], instructions) and type(value["history"]) is list
