@@ -1,12 +1,47 @@
 # Decentralised discovery
 
-VOLPAROSSA uses rust-libp2p for its control plane. Discovery is not a source of trust: it produces
-candidates that remain subject to signed-message, policy, diversity, capacity, reachability, and
-local-observation checks.
+Discovery answers **“which peers might be useful?”**, not **“which peers may be trusted?”**.
+It finds possible relay and exit services; signed advertisements, policy checks and real
+path measurements decide whether a candidate can become part of a route. No participant
+needs a central catalogue of every node.
+
+## How a node finds a usable path
+
+1. **Find contacts.** Remembered peers, local discovery and replaceable bootstrap contacts
+   provide entry points. A contact is an introduction, not an authority.
+2. **Find a relay.** The distributed index points to peers advertising relay capability.
+   The client retrieves a signed advertisement and chooses a control relay.
+3. **Find an exit without contacting it directly.** The control relay obtains candidate
+   exit advertisements on the client's behalf. Their signatures are checked end to end.
+4. **Check the candidates.** Advertisements must be current and policy-compatible; peers
+   must meet identity and network-diversity requirements. Advertising capacity is not
+   proof that a usable tunnel exists.
+5. **Hand over to route setup.** Reservations, controlled probes and helper-owned network
+   preparation establish the actual path. Discovery alone does not authorize traffic;
+   see [route setup](ROUTING.md#control-plane-and-setup-transaction).
+
+An **advertisement** is a signed, short-lived description of a peer's services. A
+**capability index** is a lookup hint for finding those advertisements. A **control relay**
+forwards setup messages toward an exit; a **datapath relay** carries the protected traffic.
+These roles are related, but one does not automatically grant the other.
+
+## Current evidence boundary
+
+The [source-bound v1 checkpoint](../IMPLEMENTATION_STATUS.md#current-live-integration-checkpoint)
+records all A01--A15 passing on the unchanged `482e33d0` build. That includes the real
+probe/helper/agent/ingress chain; it is not a claim that every later extension or current
+deployment has passed the same acceptance sequence.
+
+The protocol and privacy rules below explain the design. The
+[historical development record](#historical-discovery-development) preserves earlier
+control-plane and preselection milestones, including their then-missing production
+callers. Its words “now”, “dormant” and “remain absent” describe those stages, not today's
+overall implementation status. For current work and unresolved integration, use
+[IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md).
 
 ## Protocol composition
 
-The current discovery crate composes:
+The control plane uses rust-libp2p. The discovery crate composes:
 
 - QUIC and TCP+Noise+Yamux transports;
 - Identify and Ping;
@@ -111,10 +146,18 @@ Advertisements contain only non-secret, static selection metadata. They never pu
 per-path WireGuard public keys or listen ports, and a capability is not evidence of kernel state,
 reachability, admission, or probe success. Relay and exit provider publication therefore remains
 fail closed until the corresponding local helper-backed preparation and service admission are
-actually available. The default client-only configuration publishes neither a fake operator nor a
-useless service provider record.
+actually available. Installation leaves all participation roles off. A consuming node must
+contribute according to its available capabilities; client-only consumption is not a production
+mode. An inactive node does not publish invented service capacity.
 
-## Current evidence boundary
+## Historical discovery development
+
+<details>
+<summary>Earlier control-plane, preselection and native-handoff milestones</summary>
+
+The following notes retain the original development sequence and evidence limits. A successful
+unit test at one stage was not a live datapath proof; later integration does not change what
+that earlier test or failure established.
 
 The crate contains the v4 codecs, role-aware behaviours, capability namespace, peerlink validation,
 and process-local swarm tests. One three-peer test proves an exit advertisement request cannot be
@@ -564,3 +607,5 @@ state machine, a real two-leg probe producer, helper-backed endpoints, client in
 bootstrap failover, NAT traversal, enabled relay/exit serving, or any WireGuard/MPTCP/MPQUIC
 dataplane. Those items remain governed by
 [IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md).
+
+</details>

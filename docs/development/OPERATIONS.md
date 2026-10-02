@@ -9,6 +9,26 @@ The original v1 datapaths and A01--A15 passed together on the unchanged `482e33d
 That functional checkpoint does not certify an arbitrary host installation, every later extension,
 or release readiness. Consult the current status and each feature's scoped evidence separately.
 
+## Choose the operation you need
+
+This is a command reference, not a script to run from top to bottom. The examples
+use explicit identities, paths and policy-authorized endpoints; substitute those
+only after checking the prerequisites of the relevant task.
+
+- To inspect a machine without changing it, start with [read-only prerequisites](#read-only-prerequisites).
+- To prepare a development build or install a candidate, use [development dependencies](#prepare-development-dependencies)
+  and [build and package](#build-and-package). Installation and participation are separate decisions.
+- To initialize and operate a node, read [first initialization](#first-initialization),
+  [services and sockets](#services-and-sockets) and the [normal CLI lifecycle](#normal-cli-lifecycle).
+- For files and messages, choose the local, protected-service, HTTPS, browser or
+  encrypted-message workflow below. Their authority and retention rules differ.
+- Before removing or recovering a node, read [crash and cleanup](#crash-and-cleanup)
+  and [uninstall and data removal](#uninstall-and-data-removal).
+
+Each command group states what it changes and what its evidence does **not** prove.
+Source-bound runs remain attached to the behavior they exercised; they are not
+blanket approval to enable every feature on a real host.
+
 ## Read-only prerequisites
 
 Run the checker as an ordinary user:
@@ -21,7 +41,11 @@ It reads OS, architecture, kernel feature/configuration, command/library availab
 and potentially conflicting VOLPAROSSA-reserved route/rule ranges. It does not load modules, write
 sysctls, create sockets/interfaces/namespaces, query external hosts, or alter networking.
 
-For development, first preview exact Debian package candidates, then opt in:
+## Prepare development dependencies
+
+This is the first step here that can install packages; it is not part of the
+read-only checker. For development, first preview exact Debian package candidates,
+then opt in:
 
 ```sh
 ./scripts/bootstrap-debian13-dev.sh --print-only
@@ -32,6 +56,11 @@ The script does not run `apt update` or install optional mptcpd by default. It u
 packages and asks before `apt-get install`. Review the complete command shown.
 
 ## Build and package
+
+### Build and verify a candidate
+
+The following block combines a build, verification gates and an explicit package
+build. These write build outputs; they do not install or enable the services.
 
 ```sh
 cargo build --locked --workspace --all-features
@@ -50,6 +79,8 @@ Debian-Rust-compatible source backports plus the reviewed single-backend Yamux
 override before applying the documented scanner exemptions; see
 `third_party/rust/README.md`.
 
+### Package outputs and reproducibility limits
+
 `just package-deb` and `./packaging/build-deb.sh` are non-writing previews. Building requires the
 explicit `./packaging/build-deb.sh --build` form and refuses to run as root or overwrite an existing
 candidate. A combined client/exit node runs two immutable-role native workers under one service;
@@ -60,7 +91,11 @@ root-owned archive metadata, deterministic file ordering from `dpkg-deb`, and a 
 staging directory. It must fail if any required runtime binary is absent. Reproducibility is proven
 only by comparing two clean Debian 13 builds, not by these flags alone.
 
-Inspect before installation:
+### Inspect, then explicitly install
+
+The first two commands inspect the package. The final `sudo apt install` command
+installs it and creates the accounts/directories described below. Review the
+inspection results before choosing to run that last command:
 
 ```sh
 dpkg-deb --info dist/volparossa_0.1.0_amd64.deb
@@ -68,17 +103,24 @@ dpkg-deb --contents dist/volparossa_0.1.0_amd64.deb
 sudo apt install ./dist/volparossa_0.1.0_amd64.deb
 ```
 
+### What installation changes
+
 Package installation creates the locked `volparossa` system account, `/var/lib/volparossa` mode
 0700, `/etc/volparossa` mode 0750, `/run/volparossa` root/service mode 0750, a separate
 agent-owned `/run/volparossa/control` mode 0750 that members of `volparossa-users` may traverse,
-and a service-only native socket directory. Human control users can connect to the group-writable
-agent socket but cannot replace it or access/unlink the helper socket. Installation does not
-enable agent/helper services. journald is the default; no file log or logrotate configuration is
-enabled. A search-only access ACL on `/run/volparossa` lets `volparossa-users` reach the
+and a service-only native socket directory.
+
+Human control users can connect to the group-writable agent socket but cannot replace it or
+access/unlink the helper socket. A search-only access ACL on `/run/volparossa` lets `volparossa-users` reach the
 control subdirectory without listing the parent or inheriting access to helper/native files.
 This uses Debian 13's [tmpfiles access-ACL support](https://manpages.debian.org/trixie/systemd/tmpfiles.d.5.en.html).
 
+Installation does not enable agent/helper services. journald is the default; no file log or
+logrotate configuration is enabled.
+
 ## First initialization
+
+### Initialize and validate the identity
 
 As the service identity through the final supported CLI flow, initialize one permanent identity and
 verify file ownership/mode without printing its content:
@@ -89,6 +131,8 @@ volparossa config validate
 volparossa policy verify /etc/volparossa/policy.manifest
 volparossa doctor
 ```
+
+### Store the passphrase as a service credential
 
 Provision the already initialized identity's passphrase as an encrypted systemd credential. The
 passphrase is read interactively and is not placed in the command line, shell history, unit, or
@@ -111,6 +155,8 @@ encrypted credential and identity file together when backing up or rotating the 
 identity. This provisioning flow still requires a Debian 13 systemd integration test before a
 package is declared releasable.
 
+### Choose participation before starting services
+
 The packaged example keeps all roles off, the kill switch on, direct-exit debug off,
 plain-TCP fallback off, required MPQUIC paths at two or more, and policy fail-closed. An empty policy
 path means connections fail closed; it is not an allow-all policy.
@@ -130,6 +176,8 @@ Installing or initializing the package does not consent to Internet egress. Conf
 responsibilities in `/etc/volparossa/config.yaml`, run `volparossa config validate`, then start the services or
 restart them after changing an existing configuration. Role-isolated development fixtures are
 not a client-only production participation option.
+
+### Match protocol and advertisement requirements
 
 Privacy-v4 is a hard-incompatible migration: set `network.protocol_version: 4`. Signed peer
 control and `/volparossa/advertisement/4` accept exactly v4; v1, v2, v3, zero, and future values are
@@ -163,42 +211,60 @@ can also carry a datapath.
 
 ## Services and sockets
 
-Candidate units are installed as:
+Each unit has a different responsibility and authority boundary. Installing the
+candidate units does not by itself enable them.
 
-- `volparossa-helper.service`: root, only the bounded networking capabilities/address families and
-  `/run/volparossa`; creates a root-owned `helper.sock` with group `volparossa` and mode 0660. Its
-  main process is the only accepted systemd notifier, and PID 1 accepts at most 128 preserved
-  descriptors for at most 64 pidfd/network-namespace custody pairs. Production seals, duplicates
-  and structurally validates inherited activation groups before Tokio. Durable Prepare publication
-  uses `FDPOLL=0`, a manager barrier and complete post-barrier store-inventory attestation before
-  arming. Startup correlates the durable journal with inherited custody and settles supported
-  exact recovery states before socket bind. Ambiguous or unsupported custody still fails closed;
-  do not remove journal entries or stored descriptors to force startup;
-- `volparossa-agent.service`: user/group `volparossa`, no capabilities, persistent state/config,
-  control-plane network access, the helper socket, and an agent-owned mode-0660 socket under a
-  non-group-writable `/run/volparossa/control`; the unit loads only the named encrypted identity
-  credential;
-- `volparossa-mpquic.service`: unprivileged Client and Exit role workers, not a release-security claim.
-  API v6 preflights one client or exit role/process lifetime, targets that instance thereafter, and
-  correlates every response to the exact canonical request. It accepts exact 43-character
-  base64url client auth and TLS names only in bounded, signed-scope route-session messages; the
-  native commitment check proves bearer equality, not generator entropy or binary attestation.
-  `AddPath` consumes exactly one request-bound UDP descriptor and native never creates or binds a
-  path socket. The agent passes helper-prepared descriptors through the role-specific native
-  socket. Combined roles have
-  separate native workers and sockets under one same-UID service; separate service identities
-  remain required before an untrusted agent can use this as an authenticated boundary.
-  `StartExitSession` carries bounded, unparsed in-memory TLS candidate material and consumes exactly
-  one caller-supplied, pre-bound IPv6 UDP descriptor whose current tuple and flags are checked by
-  Rust and native. Those descriptor checks do not prove assigned-address or network-namespace
-  state. Native converts the supplied wall expiry to a BOOTTIME deadline and keeps a bounded,
-  process-local reservation/finalize ledger with no live eviction; it rejects pair replay and
-  one-ID scope collisions, but does not independently verify the reservation signature or general
-  nonce freshness, and restart clears the ledger. The Exit backend now runs the pinned mqvpn/xquic
-  server, accepts authorized path listeners and exchanges protected datagrams with the agent's
-  policy-controlled egress. The original v1 KVM checkpoint exercised this real backend; it is no
-  longer a dormant descriptor-closing stub. This does not independently certify the installed
-  service's security boundary or make the package release-ready.
+### Privileged helper
+
+`volparossa-helper.service`: root, only the bounded networking capabilities/address families and
+`/run/volparossa`; creates a root-owned `helper.sock` with group `volparossa` and mode 0660.
+
+Its main process is the only accepted systemd notifier, and PID 1 accepts at most 128 preserved
+descriptors for at most 64 pidfd/network-namespace custody pairs. Production seals, duplicates
+and structurally validates inherited activation groups before Tokio. Durable Prepare publication
+uses `FDPOLL=0`, a manager barrier and complete post-barrier store-inventory attestation before
+arming. Startup correlates the durable journal with inherited custody and settles supported
+exact recovery states before socket bind. Ambiguous or unsupported custody still fails closed;
+do not remove journal entries or stored descriptors to force startup.
+
+### Unprivileged agent
+
+`volparossa-agent.service`: user/group `volparossa`, no capabilities, persistent state/config,
+control-plane network access, the helper socket, and an agent-owned mode-0660 socket under a
+non-group-writable `/run/volparossa/control`; the unit loads only the named encrypted identity
+credential.
+
+### Native MPQUIC workers
+
+`volparossa-mpquic.service`: unprivileged Client and Exit role workers, not a release-security claim.
+
+API v6 preflights one client or exit role/process lifetime, targets that instance thereafter, and
+correlates every response to the exact canonical request. It accepts exact 43-character
+base64url client auth and TLS names only in bounded, signed-scope route-session messages; the
+native commitment check proves bearer equality, not generator entropy or binary attestation.
+
+`AddPath` consumes exactly one request-bound UDP descriptor and native never creates or binds a
+path socket. The agent passes helper-prepared descriptors through the role-specific native
+socket. Combined roles have separate native workers and sockets under one same-UID service; separate service identities
+remain required before an untrusted agent can use this as an authenticated boundary.
+
+`StartExitSession` carries bounded, unparsed in-memory TLS candidate material and consumes exactly
+one caller-supplied, pre-bound IPv6 UDP descriptor whose current tuple and flags are checked by
+Rust and native. Those descriptor checks do not prove assigned-address or network-namespace
+state.
+
+Native converts the supplied wall expiry to a BOOTTIME deadline and keeps a bounded,
+process-local reservation/finalize ledger with no live eviction; it rejects pair replay and
+one-ID scope collisions, but does not independently verify the reservation signature or general
+nonce freshness, and restart clears the ledger.
+
+The Exit backend now runs the pinned mqvpn/xquic
+server, accepts authorized path listeners and exchanges protected datagrams with the agent's
+policy-controlled egress. The original v1 KVM checkpoint exercised this real backend; it is no
+longer a dormant descriptor-closing stub. This does not independently certify the installed
+service's security boundary or make the package release-ready.
+
+### Verify the installed service boundary
 
 Review `systemd-analyze verify`, `systemd-analyze security`, and functional tests in an installed
 Debian 13 package root before operational deployment; passing the disposable topology does not
@@ -214,7 +280,8 @@ document the failing operation and narrowly adjust the unit; do not disable the 
 
 ## Normal CLI lifecycle
 
-The required CLI surface is:
+Use this surface to inspect state and request lifecycle changes. Role validation
+and an active data-carrying route are different outcomes:
 
 ```text
 volparossa init                 volparossa doctor
@@ -232,6 +299,8 @@ volparossa content recipient-key
 volparossa content publish-message    volparossa content open-message
 ```
 
+### Interpret role and path status
+
 Role commands validate the proposed change but effective changes require editing configuration
 and restarting the service: the current agent returns `ROLE_RESTART_REQUIRED`, without silently
 changing its active protocols or persisted roles. `role enable client` alone on a dormant
@@ -239,9 +308,11 @@ production node returns `ROLE_PREREQUISITES`; it never silently enables relay or
 Exit enablement requires an independent uplink, explicit valid policy, and nonzero configured
 capacity. Relay enablement requires explicit capacity, and both service roles require the operator
 identity described above.
-`status`,
-`paths`, and `sessions` distinguish configured, validated, active, and real data-carrying paths and
+
+`status`, `paths`, and `sessions` distinguish configured, validated, active, and real data-carrying paths and
 separate user bytes from tunnel bytes. Output never contains private keys.
+
+### Request a route for one transport
 
 With valid participation, policy, discovery and helper configuration, `connect` can complete the
 signed reservation, helper preparation/activation, native transport and ingress chain. Select the
@@ -261,6 +332,8 @@ a Permit, valid configuration, signed advertisement or role state alone as a usa
 
 ## Shared positive DNS cache
 
+### Inspect the separate DNS route
+
 UDP and TCP DNS ingress share a dedicated, bounded protected association, separate from the
 main data/content route. Normal DNS ingress prepares it on demand. To inspect readiness explicitly:
 
@@ -279,6 +352,8 @@ client-route owners; retiring one DNS context does not remove the main route's p
 The agent can reuse independently validated positive DNSSEC A/AAAA answers at the Exit. It keeps
 proofs only in bounded RAM; disabling/restarting it does not leave a DNS-history database. Existing
 destination policy, protected DNS ingress and exact destination pinning still apply.
+
+### Choose fallback behavior explicitly
 
 The default configuration is:
 
@@ -310,6 +385,8 @@ and protected: loopback alone is not sufficient isolation, and a normal Unbound 
 does not automatically work with simultaneous Client+Exit ingress. This optional endpoint mode
 does not install a resolver service; see the linked readiness limits before opting in.
 
+### Understand proof and privacy limits
+
 Peer signatures authenticate the transport peer, not the DNS answer. Every usable peer proof must
 validate against the built-in DNSSEC root anchors. Unsigned, missing or unsupported evidence falls
 back to existing resolution and is not shared as validated data. Cache peers never perform an
@@ -322,11 +399,19 @@ separate remaining packaged-default/reciprocal-node acceptance.
 
 ## Offline content commands
 
-By default, `content publish` and `content assemble` work locally without starting services, opening network
-listeners or contacting peers. Run them as the existing identity/cache owner in caller-chosen local
-directories. Publishing unlocks the existing encrypted Ed25519 identity; it neither generates a new
-permanent identity nor exports a private key. These commands authenticate native publisher content,
-not an HTTPS origin, a latest-version name lookup or network distribution.
+Use this section to publish or reconstruct an explicitly selected local file.
+By default, `content publish` and `content assemble` work locally: they do not start
+services, open network listeners or contact peers.
+
+Run them as the existing identity/cache owner in caller-chosen local directories.
+Publishing unlocks the existing encrypted Ed25519 identity; it neither generates a
+new permanent identity nor exports a private key.
+
+The authority is the native publisher's signature, not an HTTPS origin, a
+latest-version name lookup or proof of network distribution. Network handoff and
+retrieval are covered separately under [public content services](#public-content-services).
+
+### Publish a local file
 
 For an explicit regular input file, choose a new cache directory and new manifest path:
 
@@ -355,6 +440,8 @@ path and revision. Reuse accepts only a verified owned `ChunkStore`; it never ad
 directory. Applying its byte/entry quotas may evict older **owned** chunks. Without this flag,
 an existing cache directory is rejected. Existing manifest files are never overwritten.
 
+### Reconstruct from owned local caches
+
 To reconstruct, obtain the publisher's 64-character hexadecimal public key through an independently
 trusted channel. Replace `TRUSTED_PUBLISHER_PUBLIC_KEY_HEX` below; do not trust a key merely because
 the supplied manifest or a provider contains it:
@@ -371,6 +458,200 @@ not silently evicted to fit. The command verifies the exact manifest, publisher,
 hashes, and exposes a new `0600` output atomically only after complete reconstruction. Wrong keys,
 expired manifests, absent/corrupt chunks and an existing output are errors. No peer discovery or
 network retrieval occurs; successful output explicitly reports `network_retrieval: false`.
+
+## Recipient-encrypted message commands
+
+### Derive and authenticate the recipient key
+
+These commands use the existing encrypted node identity; they do not create a separate plaintext
+recipient key file, start networking, or capture application messages. First, the recipient runs:
+
+```sh
+volparossa content recipient-key --identity /path/to/recipient/identity.key
+```
+
+Share `recipient_public_key_hex` with the sender through an independently authenticated channel.
+This X25519 encryption key is **not** the Ed25519 signing key. The JSON also identifies the node's
+public signing key, but does not itself authenticate that association for a remote party.
+
+### Encrypt an explicit message
+
+The sender encrypts an explicit regular file of at most 4 MiB before caching any bytes:
+
+```sh
+volparossa content publish-message \
+  --identity /path/to/sender/identity.key \
+  --recipient-key TRUSTED_RECIPIENT_PUBLIC_KEY_HEX \
+  --input ./message.txt --cache ./encrypted-message-cache --manifest ./message.pb
+```
+
+### Hand ciphertext to the service
+
+The signed manifest uses a random opaque name and contains no subject or recipient identifier.
+Sender identity, ciphertext length and expiry remain public. The existing lifetime/cache limits
+and explicit `--reuse-cache` option apply. Publishing is local. The packaged service runs as
+`volparossa`, not your user account, so first copy ciphertext through its protected local socket:
+
+```sh
+volparossa content import --manifest ./message.pb --publisher-key TRUSTED_SENDER_PUBLIC_KEY_HEX \
+  --cache ./encrypted-message-cache --agent-cache /var/lib/volparossa/new-message-cache
+```
+
+The agent cache must be a new path with an existing agent-writable parent. Use `content serve`
+with that agent-owned cache, the same manifest and sender key, and a policy-authorized endpoint
+to make ciphertext available. Import itself starts no network service and transfers no keys.
+For this explicit-object workflow, recipients must receive the exact manifest and authenticate
+the sender key independently. The separate mailbox workflow below removes the per-message
+manifest handoff, not the need to authenticate contacts. `content fetch` can retrieve the ciphertext through
+the existing protected route into a new agent-owned cache/output. That fetched output is still
+encrypted. Export its ciphertext to a new cache owned by the receiving user:
+
+```sh
+volparossa content export --manifest ./message.pb --publisher-key TRUSTED_SENDER_PUBLIC_KEY_HEX \
+  --agent-cache /var/lib/volparossa/fetched-message-cache --cache ./retrieved-ciphertext-cache
+```
+
+Import/export accept complete recipient-encrypted messages by default (at most 4 MiB of
+plaintext plus the bounded encrypted envelope), not partial caches. Ordinary native public
+objects require the separate explicit `--public-content` flag described above; that flag never
+bypasses envelope validation for the exact private-message content type.
+They preserve each account's `0700` cache ownership and do not change permissions. No destination
+cache is reused or overwritten. A failed transfer may leave verified encrypted chunks in its
+new destination; it never reports them as a complete message. This is local ciphertext copying,
+not recipient authentication, decryption, a network transfer or a delivery acknowledgement.
+
+### Open the verified ciphertext locally
+
+Once the needed chunks are present in user-owned caches, the recipient opens the message:
+
+```sh
+volparossa content open-message \
+  --identity /path/to/recipient/identity.key \
+  --manifest ./message.pb --sender-key TRUSTED_SENDER_PUBLIC_KEY_HEX \
+  --cache ./retrieved-ciphertext-cache --output ./received-message.txt
+```
+
+Repeat `--cache` for partial stores. The command checks the sender, validity, every chunk and the
+encrypted envelope before writing plaintext to a new `0600` output. It never emits plaintext on
+stdout or writes it back to the shared cache. Existing outputs are never overwritten. All three
+commands support the same strict `--passphrase-file` option as `content publish`.
+
+### Keep the identity needed for old messages
+
+The recipient key is reproducible from the existing encrypted identity using a versioned,
+domain-separated RFC 9180 derivation. Changing its passphrase preserves the key; **rotating or
+losing the identity loses access to old messages unless the old encrypted identity is retained**.
+Use `--identity` to select such a retained copy explicitly. One identity has one recipient key,
+not one per local profile. Identity compromise also compromises these messages; there is no
+ratchet, forward secrecy, delivery acknowledgement, guaranteed retention or email interoperability.
+
+## Known-contact mailboxes
+
+`content mailbox` adds a private inbox to the existing protected content service. It is an
+explicit development feature: use disposable test nodes until its normal-network scenario has
+passed. There is no automatic contact lookup, SMTP delivery, background boot activation or
+promise of permanent availability. Existing encrypted identities remain in the calling user's
+account; providers and the agent receive neither passphrases nor recipient decryption keys.
+
+### Prepare providers and authenticate contacts
+
+First select **two independently authenticated provider Ed25519 keys** and a known sender's
+Ed25519 key. Distinct keys alone do not prove independent operators or failure domains.
+Each provider explicitly starts its mailbox service using its normal agent socket:
+
+```sh
+volparossa content mailbox serve --bind 0.0.0.0:7443 \
+  --advertised-hostname mailbox.example.net --cache /var/lib/volparossa/mailbox-cache
+```
+
+The hostname/port must already be authorized by the common signed Exit policy. The cache parent
+must be agent-writable. Use a new cache initially; after `content stop` or restart, add
+`--reuse-cache` to reopen only that same owned store. A mailbox can attach to an already running
+public content service only at its exact existing bind and advertised endpoint. Otherwise stop
+that service first. `content stop` stops both services while retaining their owned cache files.
+
+### Enroll the recipient inbox
+
+The recipient creates an invitation using an existing encrypted identity and registers it:
+
+```sh
+volparossa content mailbox invite --identity /path/to/recipient/identity.key \
+  --sender-key TRUSTED_SENDER_PUBLIC_KEY_HEX \
+  --provider-key TRUSTED_PROVIDER_A_KEY_HEX --provider-key TRUSTED_PROVIDER_B_KEY_HEX \
+  --invitation ./invitation.pb
+volparossa content mailbox enroll --identity /path/to/recipient/identity.key \
+  --invitation ./invitation.pb
+```
+
+Give the invitation privately to that sender, who must independently authenticate the recipient's
+Ed25519 key. The invitation binds the recipient encryption key, sender, exact providers, an opaque
+inbox ID, original expiry and limits. It is not a registration receipt. Enrollment succeeds only
+after two actual signed provider confirmations; registration does not reserve future disk space.
+Defaults are seven days, 64 MiB and 64 messages per invitation; acknowledged-message records count
+against the message limit until their original expiry. Limits cannot be silently renewed.
+
+### Send and resume the same message
+
+The sender encrypts and deposits an explicit file, at most 4 MiB:
+
+```sh
+volparossa content mailbox send --identity /path/to/sender/identity.key \
+  --invitation ./invitation.pb --owner-key TRUSTED_RECIPIENT_SIGNING_KEY_HEX \
+  --input ./message.txt --cache ./outgoing-ciphertext --manifest ./outgoing-message.pb
+```
+
+Success requires two signed storage confirmations after durable writes. Keep the original local
+manifest/cache until that succeeds. If a connection fails after one provider stored the message,
+repeat with `--resume` and the same invitation/cache/manifest, omitting `--input`. That retries the
+same message rather than producing a duplicate. Storage receipts attest to the operation then;
+they cannot prove future reachability or force a dishonest provider to keep bytes.
+
+### Receive, verify and acknowledge
+
+The recipient needs only its identity and original invitation, **not a message ID or manifest**:
+
+```sh
+volparossa content mailbox receive --identity /path/to/recipient/identity.key \
+  --invitation ./invitation.pb --output-dir ./new-inbox
+```
+
+The command asks both enrolled providers for signed private inbox metadata and accepts at least
+one valid list; `listed_providers` and `degraded` expose a missing provider rather than claiming
+the complete network inbox was checked. It verifies sender and original expiry, tries the other
+provider if retrieval fails, and decrypts locally. It creates a new `0700` directory
+and `0600` files named only by opaque message IDs; existing outputs are never overwritten.
+
+Only after a complete verified file is durably written does it acknowledge that exact message
+at both providers. An interrupted or partially acknowledged receive preserves already written
+files and reports the incomplete operation; it does not claim two confirmations. Provider
+tombstones prevent an acknowledged message from returning through a sender retry.
+
+An exact `send --resume` after acknowledgement reports `already_acknowledged_providers`, not
+renewed storage; `retained_providers` counts only actual still-retained copies.
+
+### Retention, privacy and verification limits
+
+Provider storage is bounded to 16 invitations and a shared configurable payload quota of at most
+256 MiB, also respecting the configured free-space reserve. It refuses excess deposits rather
+than evicting unexpired accepted mail to admit another sender. Expiry removes retained messages;
+acknowledgement can free their ciphertext earlier. There is no automatic replica repair, global
+fairness/Sybil guarantee or remote secure-deletion guarantee.
+
+Providers see pseudonymous contact
+keys, opaque IDs, length, expiry and operation timing; do not infer metadata anonymity or forward
+secrecy from encryption. Private inbox names and message IDs are not published into Kademlia or
+the public-name service. All identity commands support the existing strict `--passphrase-file`.
+
+The additive disposable-VM acceptance scenario is `content-mailbox`; inspect it without changing
+network state with `tests/integration/run-alpha-topology-vm.sh --preview --scenario content-mailbox`.
+It exercises separate storage agents and distinct sender/recipient applications using one Client
+agent, not two independently located client nodes. A local checker pass is not a passing VM run.
+
+## Public content services
+
+These tasks cross the user/service ownership boundary or use a running protected
+content service. Start with the local handoff when the object is in your account;
+serving and network retrieval are separate explicit operations.
 
 ### Moving an explicit public publication to or from the service
 
@@ -406,168 +687,6 @@ selected an ordinary native object; it does not mean a peer may automatically pu
 Native signatures are not HTTPS origin authentication. This command does not export an authenticated
 HTTPS descriptor or make arbitrary cached HTTPS responses shareable.
 
-### Recipient-encrypted message commands
-
-These commands use the existing encrypted node identity; they do not create a separate plaintext
-recipient key file, start networking, or capture application messages. First, the recipient runs:
-
-```sh
-volparossa content recipient-key --identity /path/to/recipient/identity.key
-```
-
-Share `recipient_public_key_hex` with the sender through an independently authenticated channel.
-This X25519 encryption key is **not** the Ed25519 signing key. The JSON also identifies the node's
-public signing key, but does not itself authenticate that association for a remote party.
-The sender encrypts an explicit regular file of at most 4 MiB before caching any bytes:
-
-```sh
-volparossa content publish-message \
-  --identity /path/to/sender/identity.key \
-  --recipient-key TRUSTED_RECIPIENT_PUBLIC_KEY_HEX \
-  --input ./message.txt --cache ./encrypted-message-cache --manifest ./message.pb
-```
-
-The signed manifest uses a random opaque name and contains no subject or recipient identifier.
-Sender identity, ciphertext length and expiry remain public. The existing lifetime/cache limits
-and explicit `--reuse-cache` option apply. Publishing is local. The packaged service runs as
-`volparossa`, not your user account, so first copy ciphertext through its protected local socket:
-
-```sh
-volparossa content import --manifest ./message.pb --publisher-key TRUSTED_SENDER_PUBLIC_KEY_HEX \
-  --cache ./encrypted-message-cache --agent-cache /var/lib/volparossa/new-message-cache
-```
-
-The agent cache must be a new path with an existing agent-writable parent. Use `content serve`
-with that agent-owned cache, the same manifest and sender key, and a policy-authorized endpoint
-to make ciphertext available. Import itself starts no network service and transfers no keys.
-For this explicit-object workflow, recipients must receive the exact manifest and authenticate
-the sender key independently. The separate mailbox workflow below removes the per-message
-manifest handoff, not the need to authenticate contacts. `content fetch` can retrieve the ciphertext through
-the existing protected route into a new agent-owned cache/output. That fetched output is still
-encrypted. Export its ciphertext to a new cache owned by the receiving user:
-
-```sh
-volparossa content export --manifest ./message.pb --publisher-key TRUSTED_SENDER_PUBLIC_KEY_HEX \
-  --agent-cache /var/lib/volparossa/fetched-message-cache --cache ./retrieved-ciphertext-cache
-```
-
-Import/export accept complete recipient-encrypted messages by default (at most 4 MiB of
-plaintext plus the bounded encrypted envelope), not partial caches. Ordinary native public
-objects require the separate explicit `--public-content` flag described above; that flag never
-bypasses envelope validation for the exact private-message content type.
-They preserve each account's `0700` cache ownership and do not change permissions. No destination
-cache is reused or overwritten. A failed transfer may leave verified encrypted chunks in its
-new destination; it never reports them as a complete message. This is local ciphertext copying,
-not recipient authentication, decryption, a network transfer or a delivery acknowledgement.
-Once the needed chunks are present in user-owned caches, the recipient opens the message:
-
-```sh
-volparossa content open-message \
-  --identity /path/to/recipient/identity.key \
-  --manifest ./message.pb --sender-key TRUSTED_SENDER_PUBLIC_KEY_HEX \
-  --cache ./retrieved-ciphertext-cache --output ./received-message.txt
-```
-
-Repeat `--cache` for partial stores. The command checks the sender, validity, every chunk and the
-encrypted envelope before writing plaintext to a new `0600` output. It never emits plaintext on
-stdout or writes it back to the shared cache. Existing outputs are never overwritten. All three
-commands support the same strict `--passphrase-file` option as `content publish`.
-
-The recipient key is reproducible from the existing encrypted identity using a versioned,
-domain-separated RFC 9180 derivation. Changing its passphrase preserves the key; **rotating or
-losing the identity loses access to old messages unless the old encrypted identity is retained**.
-Use `--identity` to select such a retained copy explicitly. One identity has one recipient key,
-not one per local profile. Identity compromise also compromises these messages; there is no
-ratchet, forward secrecy, delivery acknowledgement, guaranteed retention or email interoperability.
-
-### Known-contact mailboxes
-
-`content mailbox` adds a private inbox to the existing protected content service. It is an
-explicit development feature: use disposable test nodes until its normal-network scenario has
-passed. There is no automatic contact lookup, SMTP delivery, background boot activation or
-promise of permanent availability. Existing encrypted identities remain in the calling user's
-account; providers and the agent receive neither passphrases nor recipient decryption keys.
-
-First select **two independently authenticated provider Ed25519 keys** and a known sender's
-Ed25519 key. Distinct keys alone do not prove independent operators or failure domains.
-Each provider explicitly starts its mailbox service using its normal agent socket:
-
-```sh
-volparossa content mailbox serve --bind 0.0.0.0:7443 \
-  --advertised-hostname mailbox.example.net --cache /var/lib/volparossa/mailbox-cache
-```
-
-The hostname/port must already be authorized by the common signed Exit policy. The cache parent
-must be agent-writable. Use a new cache initially; after `content stop` or restart, add
-`--reuse-cache` to reopen only that same owned store. A mailbox can attach to an already running
-public content service only at its exact existing bind and advertised endpoint. Otherwise stop
-that service first. `content stop` stops both services while retaining their owned cache files.
-
-The recipient creates an invitation using an existing encrypted identity and registers it:
-
-```sh
-volparossa content mailbox invite --identity /path/to/recipient/identity.key \
-  --sender-key TRUSTED_SENDER_PUBLIC_KEY_HEX \
-  --provider-key TRUSTED_PROVIDER_A_KEY_HEX --provider-key TRUSTED_PROVIDER_B_KEY_HEX \
-  --invitation ./invitation.pb
-volparossa content mailbox enroll --identity /path/to/recipient/identity.key \
-  --invitation ./invitation.pb
-```
-
-Give the invitation privately to that sender, who must independently authenticate the recipient's
-Ed25519 key. The invitation binds the recipient encryption key, sender, exact providers, an opaque
-inbox ID, original expiry and limits. It is not a registration receipt. Enrollment succeeds only
-after two actual signed provider confirmations; registration does not reserve future disk space.
-Defaults are seven days, 64 MiB and 64 messages per invitation; acknowledged-message records count
-against the message limit until their original expiry. Limits cannot be silently renewed.
-
-The sender encrypts and deposits an explicit file, at most 4 MiB:
-
-```sh
-volparossa content mailbox send --identity /path/to/sender/identity.key \
-  --invitation ./invitation.pb --owner-key TRUSTED_RECIPIENT_SIGNING_KEY_HEX \
-  --input ./message.txt --cache ./outgoing-ciphertext --manifest ./outgoing-message.pb
-```
-
-Success requires two signed storage confirmations after durable writes. Keep the original local
-manifest/cache until that succeeds. If a connection fails after one provider stored the message,
-repeat with `--resume` and the same invitation/cache/manifest, omitting `--input`. That retries the
-same message rather than producing a duplicate. Storage receipts attest to the operation then;
-they cannot prove future reachability or force a dishonest provider to keep bytes.
-
-The recipient needs only its identity and original invitation, **not a message ID or manifest**:
-
-```sh
-volparossa content mailbox receive --identity /path/to/recipient/identity.key \
-  --invitation ./invitation.pb --output-dir ./new-inbox
-```
-
-The command asks both enrolled providers for signed private inbox metadata and accepts at least
-one valid list; `listed_providers` and `degraded` expose a missing provider rather than claiming
-the complete network inbox was checked. It verifies sender and original expiry, tries the other
-provider if retrieval fails, and decrypts locally. It creates a new `0700` directory
-and `0600` files named only by opaque message IDs; existing outputs are never overwritten.
-Only after a complete verified file is durably written does it acknowledge that exact message
-at both providers. An interrupted or partially acknowledged receive preserves already written
-files and reports the incomplete operation; it does not claim two confirmations. Provider
-tombstones prevent an acknowledged message from returning through a sender retry.
-An exact `send --resume` after acknowledgement reports `already_acknowledged_providers`, not
-renewed storage; `retained_providers` counts only actual still-retained copies.
-
-Provider storage is bounded to 16 invitations and a shared configurable payload quota of at most
-256 MiB, also respecting the configured free-space reserve. It refuses excess deposits rather
-than evicting unexpired accepted mail to admit another sender. Expiry removes retained messages;
-acknowledgement can free their ciphertext earlier. There is no automatic replica repair, global
-fairness/Sybil guarantee or remote secure-deletion guarantee. Providers see pseudonymous contact
-keys, opaque IDs, length, expiry and operation timing; do not infer metadata anonymity or forward
-secrecy from encryption. Private inbox names and message IDs are not published into Kademlia or
-the public-name service. All identity commands support the existing strict `--passphrase-file`.
-
-The additive disposable-VM acceptance scenario is `content-mailbox`; inspect it without changing
-network state with `tests/integration/run-alpha-topology-vm.sh --preview --scenario content-mailbox`.
-It exercises separate storage agents and distinct sender/recipient applications using one Client
-agent, not two independently located client nodes. A local checker pass is not a passing VM run.
-
 ### Explicit protected content service and retrieval
 
 The development runtime now also has `content serve`, `content fetch`, `content status` and `content stop`.
@@ -579,6 +698,8 @@ result, not complete C02, generic browser integration or guaranteed availability
 Use a disposable topology while this integration is under development. These commands talk to
 the already running unprivileged agent (`--control-socket` can select its socket); they neither
 unlock another private key nor install/change the host network.
+
+#### Prepare a service-owned cache and endpoint
 
 A provider needs an existing cache created by the **agent account**, an independently trusted
 publisher key, and an explicitly chosen reachable bind address/DNS name. That hostname and TCP
@@ -602,12 +723,16 @@ volparossa content status
 volparossa content stop
 ```
 
+#### Interpret serve and fetch behavior
+
 Serve announces a five-minute node-signed generic service offer and refreshes it while active.
 Repeat it with the same endpoint for up to 64 explicit manifests; a cache may hold only some
 chunks. Fetch asks an authenticated control Relay for at most 16 provider hints, validates their
 signatures and opens policy-authorized MPTCP/TLS streams through the normal Relay/Exit route.
 It does not connect directly to provider endpoints or use ordinary TCP as a fallback. The
 selected route's Exit and Relays are excluded as content suppliers in this initial runtime.
+
+#### Resume without changing authority
 
 Fetch requires a **new** cache by default and always a **new** output path; it verifies every chunk
 and the whole object before publishing output. To resume an interrupted `content fetch` or
@@ -622,13 +747,16 @@ Missing data causes failure, retaining any verified owned cache data;
 this native command does not yet compose the separate HTTPS-origin fallback API. Its explicit
 JSON receipt includes reconstructed bytes/chunks and the unique supplying `provider_peer_ids`;
 those identifiers are not written to a background browsing log.
+
+#### Inspect or stop the service
+
 Status inspects only retained local state, including `control_relay_peer_id`; it opens no
 network connection or route. Fetch's receipt binds that same control identity. Stop withdraws the offer and
 closes the listener but retains the owned cache files. Primary publications must be explicitly
 registered again; this is not automatic publication retention. Without the replica configuration below, these commands start
 no background copying. They never capture browsing or promise faster retrieval.
 
-#### Retrieving a native publication by publisher and name
+### Retrieving a native publication by publisher and name
 
 Public native publications can also be retrieved without distributing a manifest file first.
 The provider must explicitly enable name lookup when starting its service:
@@ -663,6 +791,8 @@ The caller receives a verified `0600` file through the same local socket; no use
 is sent to the agent. An offline publisher is usable only while reachable replicas retain valid
 metadata and all required chunks. This is not yet general website hosting or a message mailbox.
 
+#### Reopen a named download without network retrieval
+
 To reopen a previously completed named download without network retrieval, use the same cache,
 trusted publisher key and exact name with both `--reuse-cache --cache-only`. Keep the existing
 `--local-output` argument pointed at a new file. The current download path retains up to 64
@@ -678,6 +808,15 @@ apply. A higher observed revision with missing content or a recorded conflict bl
 snapshots; there is no silent network fallback. JSON reports `cache_only: true` and zero
 peer/provider/origin activity. Other independently enabled agent services are not stopped by
 this option. This native mode cannot replace fresh origin authentication for HTTPS downloads.
+
+## HTTPS downloads
+
+Choose the authority profile supplied by the origin: a cooperative descriptor, a
+same-origin checksum file or a supported resource HEAD digest. The examples below
+are alternatives, not a sequence. In every profile, peer transport does not replace
+fresh origin authorization.
+
+### Cooperative-origin descriptor downloads
 
 For cooperative HTTPS origins, `content fetch-https` first obtains fresh authenticated
 same-origin metadata, uses matching peer chunks and fills missing ranges from that origin.
@@ -702,25 +841,6 @@ normal signed Exit policy. Debian's normal public CA bundle is used unless an ex
 The CLI/process, origin-library and different-UID network checks pass, as recorded in
 [implementation status](../IMPLEMENTATION_STATUS.md).
 
-Both HTTPS download commands accept `--source-strategy auto|peers-first|origin-only`:
-
-- `auto` (default) prefers the origin when recent comparable completion-cost measurements are
-  absent. Otherwise it refreshes at most two recently useful peers and attempts them only within
-  a lookup-plus-transfer budget projected to beat the origin. Network changes can still make a
-  prediction wrong; this is not a guarantee of higher speed.
-- `peers-first` explicitly explores/preferentially uses peers, then obtains missing ranges from
-  the origin in descriptor mode, or one full GET in digest mode. It is useful for provider
-  tests but may be slower than origin retrieval.
-- `origin-only` skips provider lookup/body retrieval and gets missing bytes from the origin.
-  Descriptor mode reuses verified local chunks with `--reuse-cache`; digest mode performs a
-  full GET because the HEAD digest supplies no authenticated chunk index.
-
-All modes retain fresh same-origin authorization, the normal protected route and signed Exit
-policy. No mode publishes private HTTPS content, accepts a peer as an origin authority or races
-duplicate full-object downloads. Recent cost hints are RAM-only and short-lived, with no URL or
-object catalogue; native/explicit peer transfers supply useful-peer observations. A node with no
-such observations conservatively uses the origin, rather than inventing a speed estimate.
-
 ### HTTPS checksum-file downloads
 
 For an anonymous public binary download whose origin publishes a SHA-256 checksum file,
@@ -744,12 +864,16 @@ agree. The selected whole hash and length authorize the existing protected peer 
 complete bytes must verify before local output, browser readiness or contribution. Missing
 peer content uses one full authenticated origin GET, not guessed partial ranges.
 
+#### Supported checksum profile
+
 The first checksum profile accepts at most 64 KiB of `text/plain`, with strict GNU-style
 SHA-256 text/binary rows and exactly one matching simple filename. Query strings, ambiguous
 or escaped filenames, duplicate matching rows, redirects, cookies, private/no-store responses
 and unsupported representations are rejected. Resource bodies retain the public
 `application/octet-stream`, identity-encoding profile. This does not enable arbitrary browser
 capture, DRM bypass or offline HTTPS authority.
+
+#### Read traffic counters and retained evidence
 
 Local/browser JSON uses `authentication_scope: "origin-checksum"`. The separate
 `origin_authority_body_bytes` counts the checksum-document body; `origin_body_bytes` continues
@@ -775,6 +899,8 @@ This example explicitly explores peers; omit `--source-strategy` for measured `a
 which prefers origin when useful comparable costs are unavailable. `browser-download` accepts
 the same mode in place of its metadata path, without either output option.
 
+#### Supported origin authority
+
 The consumer authenticates the exact resource using its own TLS 1.3 HEAD exchange through the
 normal protected route. The supported profile is status 200, identity encoding,
 `application/octet-stream`, explicit public freshness and one canonical SHA-256 representation
@@ -782,6 +908,8 @@ digest; cookies, credentials, variants, redirects and content-location indirecti
 `Content-Digest` on HEAD is not accepted as the resource digest. No custom VOLPAROSSA descriptor
 is needed, but an origin without supported `Repr-Digest` is currently unavailable in this mode;
 there is no silent trust downgrade or generic ordinary-download fallback for such origins.
+
+#### Peer transport and fallback
 
 Protected providers are queried by whole-object hash and length, not URL. Their original signed
 manifest is only a bounded transport index, never origin authority. The agent verifies the
@@ -791,6 +919,8 @@ reported. This mode does not request partial origin ranges. Existing descriptor-
 retrieval remains available. With `--reuse-cache`, matching local chunks can help after a valid
 peer index is found, but an offline origin still cannot authorize a new download.
 
+#### Interpret receipts and the first scoped trial
+
 Local/browser JSON reports `authentication_scope: "origin-repr-digest"` and the original
 `transport_manifest_id`; descriptor mode reports `cooperative-origin`. These labels distinguish
 authorization from transport signatures. The original HTTP expiry is never renewed by caching.
@@ -799,6 +929,8 @@ Targeted local origin-TLS, provider, CLI and harness checks pass. The
 also passes: fresh HEAD and two providers supply 2,097,275 bytes with zero origin body.
 It takes 9.23 seconds versus 2.58 seconds origin-only in this fixture; no general website support
 or speed gain is claimed. This does not verify the later cache-only native-site extension.
+
+#### Independent provider indexes and bounded admission
 
 The newer digest consumer can use each provider's own original transport index when the
 whole hash, length, public media type and complete ordered chunk layout agree. It does not
@@ -815,6 +947,8 @@ measurements must also have a fresh successful digest-index measurement; missing
 prefer the origin. Admission includes that fixed setup cost and is checked again after the
 actual index round, using only the selected peers and the original remaining deadline. These
 RAM-only costs expire within sixty seconds and do not renew offers or establish content trust.
+
+#### Joined-batch measurements and automatic-hit evidence
 
 A complete, cold, peer-only digest retrieval can now retain its actual joined-batch completion
 cost. Every participating worker must contribute verified bytes and complete its close; partial,
@@ -833,6 +967,393 @@ passes with all later publication/name/site/cache-only phases. Its full automati
 4.319381088 seconds versus 6.392691790 seconds origin-only, with both peers and zero origin body.
 These are bounded comparisons, not a general speed guarantee or three-provider network proof.
 
+### Choose between peer and origin retrieval
+
+Both HTTPS download commands accept `--source-strategy auto|peers-first|origin-only`:
+
+- `auto` (default) prefers the origin when recent comparable completion-cost measurements are
+  absent. Otherwise it refreshes at most two recently useful peers and attempts them only within
+  a lookup-plus-transfer budget projected to beat the origin. Network changes can still make a
+  prediction wrong; this is not a guarantee of higher speed.
+- `peers-first` explicitly explores/preferentially uses peers, then obtains missing ranges from
+  the origin in descriptor mode, or one full GET in digest mode. It is useful for provider
+  tests but may be slower than origin retrieval.
+- `origin-only` skips provider lookup/body retrieval and gets missing bytes from the origin.
+  Descriptor mode reuses verified local chunks with `--reuse-cache`; digest mode performs a
+  full GET because the HEAD digest supplies no authenticated chunk index.
+
+All modes retain fresh same-origin authorization, the normal protected route and signed Exit
+policy. No mode publishes private HTTPS content, accepts a peer as an origin authority or races
+duplicate full-object downloads. Recent cost hints are RAM-only and short-lived, with no URL or
+object catalogue; native/explicit peer transfers supply useful-peer observations. A node with no
+such observations conservatively uses the origin, rather than inventing a speed estimate.
+
+## Browser delivery and native sites
+
+Use the first workflow for a one-shot verified binary attachment. Use the second
+for an explicitly published native static site. Neither is general transparent
+website caching, and their temporary localhost URLs are not publication identities.
+
+### One-shot browser download
+
+For the same supported cooperative HTTPS origin, let the browser choose where to save the
+already verified result:
+
+```sh
+volparossa content browser-download \
+  --url https://downloads.example/asset.bin \
+  --metadata-path /.well-known/volparossa/content/asset \
+  --cache /agent-owned/new-browser-cache
+```
+
+For the supported [origin-digest profile](#https-origin-digest-downloads), replace the
+`--metadata-path` argument with `--origin-digest`; the remaining browser behavior is identical.
+
+#### Save and protect the temporary download URL
+
+Keep the command running. After protected retrieval and verification, its first JSON line contains
+`download_url`; paste that temporary URL directly into the browser's address bar. It binds only
+`127.0.0.1` on an automatically chosen port, accepts one authorized GET and sends a binary attachment.
+There is no `--output`, `--local-output` or `--bind` option, proxy endpoint or resumable browser Range
+request. The unguessable URL is a temporary access secret: do not publish or share it.
+The link and transfer deadline are the earlier of five minutes or the original authenticated
+authority's expiry. The CLI removes its private temporary spool on completion or interruption;
+the browser's saved download remains under the user's control. A final JSON receipt reports
+delivery and spool cleanup.
+
+The normal agent-owned cache, optional `--reuse-cache`, limits and explicit public `--ca-file`
+retain the same meaning as `fetch-https`. Fresh origin authentication still precedes peer reuse;
+no certificate is installed, verification bypassed or origin authority persisted. The localhost
+attachment gains none of the source website's browser permissions, cookies or login state.
+This is an explicit download integration, not general website rendering or transparent HTTPS
+caching. Measured benefit and the complete C08 checkpoint remain unproved.
+
+### Native static websites
+
+#### Pack and publish explicitly public assets
+
+Pack an explicitly selected directory with an `index.html`, then publish the bundle with the
+existing encrypted identity and ordinary native-content commands:
+
+```sh
+volparossa content site pack --directory ./public --output ./site.vps
+volparossa content publish \
+  --identity /path/to/existing/identity.key \
+  --input ./site.vps --cache ./site-cache --manifest ./site.v1.pb \
+  --name my-site --revision 1 --content-type application/vnd.volparossa.site.v1
+```
+
+Packing is offline and does not publish anything. It selects at most 256 regular files within
+the native 256-MiB object limit, excludes dotfiles/directories, rejects symlinks and requires
+unambiguous UTF-8 paths. Keep secrets outside this explicitly public directory. The new private
+bundle is never written over an existing file. HTML, CSS, JavaScript, images, fonts and media are
+indexed into one signed publication; no files are extracted while viewing.
+
+#### Retrieve and view by trusted publisher name
+
+Import and serve that public publication using the [existing account handoff](#moving-an-explicit-public-publication-to-or-from-the-service)
+and `content serve --name-lookup`. Each consumer obtains the trusted publisher key and exact name,
+not the publisher's private key or a browser localhost URL:
+
+```sh
+volparossa content site open \
+  --publisher-key TRUSTED_PUBLISHER_PUBLIC_KEY_HEX --name my-site --min-revision 1 \
+  --cache /agent-owned/new-site-cache
+```
+
+Keep the command running and paste `site_url` from its first JSON line into the browser. It first
+retrieves and verifies the entire named publication through the existing protected chunk path,
+then serves only those immutable assets on a random `*.localhost` name and loopback-only port.
+Root-relative links, directory `index.html`, UTF-8 paths, GET/HEAD and single byte ranges work;
+bounded query strings are ignored for immutable lookup, not interpreted as server operations.
+`--reuse-cache` and `--min-revision` retain the normal named-cache semantics.
+
+#### Reopen a previously verified site offline
+
+After an initial successful download with the current manifest-retaining implementation,
+reopen the same site without requiring network access:
+
+```sh
+volparossa content site open --publisher-key "$PUBLISHER_KEY" --name my-site \
+  --cache /agent-owned/site-cache --reuse-cache --cache-only
+```
+
+The original signed bundle must remain valid and complete in that cache. This mode keeps the
+same temporary localhost viewer, HTTP/range behavior and browser isolation; it does not extend
+expiry or claim that the cached version is globally newest. Missing/expired content fails
+without trying the network. The
+[integrated no-route reopen run on `4e6cc308`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34214732165)
+passes, including same-cache identity, all assets, HEAD/range behavior and cleanup. The VM
+uses actual HTTP requests rather than a browser engine.
+
+#### Viewer lifetime and browser isolation
+
+The local viewer expires at the earlier of the original signed expiry or its own
+`--lifetime-seconds` (default one hour, maximum one day). SIGINT/TERM closes the listener and
+in-flight responses and removes the private spool. No certificate is installed and the page
+does not inherit an external website's origin, login or cookies. Its browser sandbox supports
+scripts and local assets but excludes persistent origin storage, service workers, forms,
+embedded frames and external network requests. This is a static publication, not a dynamic
+server/database, transparent HTTPS cache or a promise of permanent replica availability.
+The publisher may be offline only while reachable replicas retain valid metadata and every
+required chunk. See [source-scoped verification](../IMPLEMENTATION_STATUS.md).
+
+## Public-copy contribution and maintenance
+
+The workflows below retain **public** content. They are distinct from encrypted
+mailboxes and private cloud storage: enabling a contribution service is not consent
+to publish private browsing or a promise of permanent availability.
+
+Choose the scope you need: configured local contribution, a confirmed local
+publication, explicitly selected remote holders, owner-driven holder maintenance,
+or a receiving holder's optional cache work. Each subsection keeps its own
+prerequisites, budget and receipt semantics.
+
+### Automatic public-content contribution
+
+This integration removes the manual initial `content serve --manifest` step for received
+public objects. Its [dedicated source-stop/restart network proof on `f76ac97a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34211580709)
+passes; it is not a permanent-retention or global-fairness guarantee.
+On an explicitly participating relay, configure a policy-authorized endpoint and private cache:
+
+```yaml
+content_contribution:
+  enabled: true
+  bind_address: "0.0.0.0:18080"
+  advertised_hostname: cache.example
+  cache: /var/lib/volparossa/public-contribution
+  quota_bytes: 67108864
+  max_entries: 256
+  min_free_bytes: 268435456
+  max_bytes: 1048576
+  max_chunks: 4
+```
+
+#### Configuration and explicit content consent
+
+This block requires the existing `sharing` and `download_sharing` settings, with explicit local
+interfaces and usable capacities; it does not configure those interfaces, enable roles or
+grant new Exit policy permissions. The hostname and TCP port must already be permitted by the
+active signed policy. The directory must be new or the same exclusively owned contribution
+cache; arbitrary existing directories are not adopted. An empty configured listener now offers
+its generic receiving capability so publishers can contact it. This does not advertise possession
+of any object; object lookup and complete-custody receipts require actual verified retained bytes.
+
+Enabling this setting is explicit consent to retain and serve successfully verified public
+native/named objects and supported anonymous cooperative-HTTPS or origin-digest content. Private messages and
+mailbox storage are excluded; ordinary encrypted browsing, cookies, login sessions and
+`private`/`no-store` responses are not opted in. Every later HTTPS consumer still obtains fresh
+origin authorization. Storage peers do not become publishers or origin authorities.
+
+#### Quota, foreground priority and retention limits
+
+One quota covers both received content and incidental extra chunks. Admission never evicts live
+content to make room; insufficient space skips optional work. A bounded in-memory queue expires
+after at most five minutes, and each idle batch copies at most four chunks / one MiB. Foreground
+downloads and configured owner traffic take precedence. Cache persistence is not a retention
+promise, global fairness measurement or guarantee that other clients can always retrieve an
+entire object. `content status` reports the same service and replica counters as manual serving;
+`content stop` stops the current service, and the explicit configuration takes effect again at
+the next agent start.
+
+### Publishing through the configured contribution service
+
+With the preceding contribution configuration already enabled and its policy-authorized service
+running, publish an explicit public file without a separate `import` or `serve` command:
+
+```sh
+volparossa content publish --contribute \
+  --identity /path/to/existing/identity.key \
+  --input ./notes.pdf --cache ./content-cache --manifest ./notes.v1.pb \
+  --name notes --revision 1 --content-type application/pdf
+```
+
+For a site, first use `content site pack`, then publish its bundle with `--contribute` and
+`--content-type application/vnd.volparossa.site.v1`. Consumers can use the existing `fetch-name`
+or `site open` with your independently authenticated public publisher key and exact name.
+
+#### Local handoff and its success receipt
+
+The CLI completes and saves the original local publication before opening the authorized Unix
+control socket. It streams chunks from your private cache; the agent never needs access to that
+directory, a signing key, or a caller-selected destination/listener. Its existing configuration
+selects the contribution cache, quota and endpoint. A private temporary receiving cache is
+removed on completion or cancellation. Admission does not evict existing live contribution
+data, and foreground publication pauses the same optional background writer.
+
+`network_publication: true` is returned only after complete hash verification, durable original
+manifest/chunk ownership, registration in that configured service and its service announcement.
+The same journal restores the original publication after restart, with unchanged expiry and
+name lookup. Empty public objects are supported; private-message content is refused. Missing
+configuration, insufficient quota or a busy/failed service returns an error while retaining the
+completed local manifest/cache. Without `--contribute`, the old offline behavior is unchanged.
+
+#### What this publication proves
+
+This confirms a complete **local provider publication**, not that other nodes have retained
+copies or promised storage until expiry. The publisher's node must remain reachable unless
+other peers have actually received the required chunks. Opportunistic propagation remains
+best effort; no permanent website availability, HTTPS authority or external custody is implied.
+The [publish/restart/network proof on `ac782769`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34221501655)
+passes: an ordinary publisher supplies a site through this command, its source files are
+removed, the provider restarts with the same journal, and an independent client fetches all
+2,097,628 bytes by trusted publisher/name. The provider node remains online for that retrieval.
+
+### Depositing a public copy with other participants
+
+The development CLI adds `content custody deposit` and `content custody inspect`. Use the
+original public manifest and its publisher's encrypted identity, plus independently selected
+provider public keys. Receiving nodes must have the preceding contribution service configured;
+ordinary `content serve` alone is not a custody receiver. Their endpoints must remain authorized
+by the existing Exit policy. Local tests and the dedicated
+[`content-custody` network scenario on `f590aa86`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34850149035)
+pass, including two restarted receivers, source-cache removal and protected name-based retrieval.
+
+```sh
+volparossa content custody deposit \
+  --manifest ./notes.v1.pb --cache ./content-cache \
+  --identity /path/to/existing/identity.key \
+  --provider-key <provider-a-public-key-hex> \
+  --provider-key <provider-b-public-key-hex>
+
+volparossa content custody inspect \
+  --manifest ./notes.v1.pb --identity /path/to/existing/identity.key \
+  --provider-key <provider-a-public-key-hex> \
+  --provider-key <provider-b-public-key-hex>
+```
+
+#### Deposit, inspect and retry semantics
+
+Deposit streams verified chunks through the normal agent/Relay/Exit route; it does not pass
+source paths or publisher private keys to a peer. Each receiver verifies the whole object,
+commits its existing non-evicting replica journal and registers the copy before signing a
+Complete receipt. Retries retain the original manifest and expiry. Admission respects existing
+storage quotas and does not evict another live publication to make room.
+
+Inspect needs no source cache and performs no upload. It obtains a fresh signed Complete or
+Missing observation of that exact original publication. JSON retains each signed observation
+and reports which provider handoffs completed, even when another provider fails. The command
+returns nonzero unless every requested provider confirms a complete copy; a successful Missing
+observation is therefore an incomplete-custody result, not a complete copy. Reported object
+bytes describe retained logical content, not upload traffic (a retry can upload no new bytes).
+
+#### Keep source data until copies are established
+
+Keep the original files while establishing copies. Signed receipts establish observations at
+the stated time, not future reachability, a global latest revision or permanent website uptime.
+This explicit workflow does not yet choose holders automatically or repair a lost replica.
+Private messages use the separate encrypted mailbox workflow, not public custody.
+
+### Automatically maintaining public copies
+
+The development `content retain` controller adds owner-enrolled holder discovery and repair.
+It retains an existing public publication; it does not publish private browsing responses or
+renew the publisher's original expiry. No provider keys need to be chosen manually. Receivers
+must run the contribution service above, and both the sender's `sharing` and
+`download_sharing` budgets must be enabled with the actual accounting interfaces configured.
+Unknown/busy accounting defers background work; configured capacity is not measured spare
+ISP capacity or a guarantee of zero slowdown.
+
+```sh
+volparossa content retain \
+  --manifest /private/publishing/notes.v1.pb \
+  --cache /private/publishing/content-cache \
+  --identity /private/publishing/identity.key \
+  --passphrase-file /private/publishing/passphrase \
+  --copies 2 --directory /private/publishing/notes-retention \
+  --max-seconds 3600 --poll-seconds 30 --max-upload-bytes 67108864
+```
+
+#### Preview, execute and resume an enrollment
+
+Without `--execute`, this only prints the enrollment preview: no files, key unlock or network
+requests. The state directory must be new under a private owned `0700` parent and separate
+from the source cache. Add `--execute` to maintain copies for the stated lifetime, capped by
+the original publication expiry. To resume, repeat the exact original arguments with
+`--execute --resume`; neither the deadline nor spent upload budget resets. Every deposit
+reserves the full logical object size before attempting upload, including failed/interrupted
+attempts. This conservative budget is not a count of actual wire bytes.
+
+#### Status, stopping and retained evidence
+
+The private `status.json` reports the last poll, observed holders and remaining enrollment
+state. Signed offers are only discovery hints, not storage-capacity promises. A counted copy
+requires the fresh original signed custody exchange and successful local handoff. Historical
+receipts are retained for verification, never treated as fresh availability after restart.
+SIGINT/SIGTERM ends the owner loop and closes its in-flight exchange; the original stored
+copies may still be served until their original expiry while holders remain available.
+Maintenance does not continue while the owner is offline. The
+[original source-exact trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35916493141)
+and [fresh integration trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35921884371)
+demonstrate holder loss/replacement and subsequent retrieval without the publisher's source.
+The Client node stays online; neither proves globally fair placement or permanent site availability.
+This function is integrated by PR #160.
+
+### Repairing a holder's partial public copies
+
+The configured contribution service now also schedules bounded idle repair of **healthy partial
+public journal records** after restart. This is separate from the explicit publisher Deposit/
+Inspect commands. A receiving node must have client and relay roles, active policy and the
+existing upload/download contribution budgets; a service-only holder does not invent client
+capability. The worker can establish the normal protected route and discover generic providers
+without waiting for a foreground download. Missing object/chunk identities travel only inside
+the protected content stream. New foreground work, Stop, expiry or unavailable accounting ends
+or defers the attempt. It neither creates arbitrary new holder assignments nor promises a
+global copy count. Local runtime/stream tests pass; the dedicated repair VM is still pending.
+Missing or corrupt bytes in an already complete journal are not silently reinterpreted as a
+healthy partial record. Do not delete journaled files to trigger repair.
+
+### Opportunistic replica cache
+
+For the first development-only redistribution integration, add `--replica-cache /agent-owned/new-extras`
+to `content serve`. By default the directory must be new, private to the agent and different from
+the existing publication cache. To restart this service with an existing owned replica store,
+repeat the primary publication's Serve command with the same `--replica-cache` and limits, adding
+`--reuse-replica-cache`. This restores unexpired original replica manifests and verified chunks
+before opening the listener; it does not infer registrations from loose files, extend expiry or
+activate anything on boot. Missing metadata means zero restored publications; foreign, corrupt,
+busy or incomplete stores fail without adoption or automatic deletion. Primary registrations
+take precedence, and excess valid metadata remains stored when the 64-publication registry is full.
+Optional limits are `--replica-quota-bytes` (default 64 MiB, at most
+256 MiB), `--replica-max-entries` (default 256), `--replica-max-bytes` (64 bytes through 1 MiB,
+default 1 MiB of protocol traffic) and `--replica-max-chunks` (1--4, default 4). Repeated Serve
+registrations use the same replica configuration; changing it requires stopping the service.
+
+#### Admit optional work only within current budgets
+
+The job starts only after a successful native/HTTPS content fetch has actually received verified
+chunks from a provider. Both `sharing` and `download_sharing` must be explicitly configured and
+enabled, with meaningful link capacities and the real carrying interfaces. Unknown/down/overlay
+interfaces or a busy preflight sample cause uptake to pause; no host configuration is changed by
+the sampling itself. The receiver uses protocol v3: after each received chunk the provider must
+wait for a new one-chunk credit. A fresh sample of the configured links precedes that credit;
+a busy sample withholds credit and waits for quiet within the same original deadline, then
+resumes that exchange without renewing its budget. Unavailable accounting never authorizes
+credit; cancellation or deadline expiry ends the job without extending authority.
+Credit, stop and finish framing share the original protocol budget/deadline. There is no silent
+fallback to the unsolicited v2 exchange. New foreground content operations cancel background
+uptake. One already credited chunk can still overlap new demand; unmeasured links, per-flow
+owner accounting and radio contention are not covered. This is not the full C04 fairness proof.
+
+#### Distinguish enabled work from retained bytes
+
+`content status` reports `replication_enabled` separately from actual retained `replica_chunks`,
+`replica_bytes` and registered `replica_publications`; an enabled job is not evidence of useful
+replication. Busy cache access returns Busy rather than a fabricated count. Stop cancels the job
+and withdraws the service, retaining owned cache files and the cache-bound registration journal.
+Explicit reuse restores the journal, not the old service, contacts or route authority. Expired
+records are not offered again; maintenance before new uptake reclaims only expired, unshared
+journaled chunks, preserving live/foreground references and refusing mailbox stores. It does not
+repair lost replicas.
+It remains a development service, not reliable offline hosting or guaranteed owner-priority sharing.
+
+## Adaptive resource and path behavior
+
+This section explains runtime behavior and its scoped evidence, rather than a
+sequence of commands to enable more capacity. Connection allowance, useful cache
+workers, mesh admission and data-carrying transport paths are different measures;
+none alone proves higher owner throughput.
+
 ### Adaptive foreground cache workers
 
 Native and named retrieval now pass their bounded signed-provider batch to one adaptive writer,
@@ -843,6 +1364,8 @@ aggregate-throughput probe. An unhelpful probe is closed and further throughput 
 An in-flight chunk is never duplicated. Original provider identity, manifest, expiry and operation
 deadline remain unchanged, and all worker futures/flows finish or drop before origin fallback.
 
+#### Shared resource admission
+
 The advisory shared allowance derives from read-only available RAM (including cgroup limits)
 and process file-descriptor headroom, reserving conservative 8-MiB/eight-descriptor worker units
 within 1/32 of available RAM and one quarter of free descriptors. These are resource
@@ -852,6 +1375,7 @@ remains. This preserves existing foreground progress; it is not a one-stream glo
 policy. The actual RAM/descriptor limit remains global. Missing pressure telemetry prevents
 expansion; unknown RAM/descriptor capacity refuses new workers. No host settings are changed.
 This is not a kernel memory reservation, measured radio fairness or an owner-goodput guarantee.
+
 HTTPS source-selection plans now accept the same bounded candidate batch rather than requiring
 a pair. Digest indexes are fetched in batches sized by currently available protected-flow leases;
 every lookup acquires its lease before route/TLS setup and releases it only on full close/drop.
@@ -859,12 +1383,16 @@ The original compatible indexes then reach the adaptive single writer together, 
 third useful provider. Predictions include each index batch's slowest cost at the current resource
 width, not imaginary all-at-once concurrency. All owners stop before origin fallback.
 
+#### Provider-hint retention limits
+
 Successful-provider hints are RAM-only, route/policy scoped and valid for at most sixty seconds.
 Their retention allowance uses conservative entry units within 1/1024 of free RAM, divided by
 sixteen under pressure; no permanent pair cap or preallocated peer catalogue remains. Fresh
 offer lookup still uses at most sixteen candidates per bounded discovery response. This does
 not create content authority, renew offer deadlines or prove three-provider HTTPS speedup.
 Control and mesh admission are described below; native transport ceilings remain separate work.
+
+#### Read the three-provider evidence
 
 The [exact `d0251a27` provider VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34232194290)
 passes the three-provider extension: disjoint R3/R4/R5 caches each supply five unique chunks,
@@ -900,6 +1428,8 @@ forcibly closed or stripped of route/provenance authority when capacity falls. O
 idle handling and actual connection closure continue to retire unused connections. Pressure
 therefore slows new admission, not guarantees immediate resource reclamation or owner speed.
 
+#### Retained state and separate ceilings
+
 The passive provenance registry scales its numeric retention bound together with admission,
 without preallocating the allowed number of records. Capacity reduction preserves queued,
 already-admitted events and live witness generations. The separate 64-pending-per-direction,
@@ -925,6 +1455,8 @@ guarantee owner performance. The agent changes only admission via a typed helper
 the helper checks the exact owned runtime/interface/wiphy/network namespace, changes only
 `MESHCONF_MAX_PEER_LINKS`, and requires ACK plus actual readback. Mesh forwarding stays disabled.
 
+#### Backend bound and simulated-radio evidence
+
 The helper's bounded station dump currently supports 512 observations and limits effective
 admission accordingly; it is a defensive representation boundary, not proven hardware capacity.
 Physical-radio and large-mesh performance remain untested. The
@@ -945,6 +1477,8 @@ No new user flag or host setting is required. Native path ceilings remain in for
 TLS carries directional application EOF using authenticated `close_notify`; the underlying
 MPTCP socket remains joinable during the response and closes when the full flow ends. Abrupt
 TLS truncation remains an error, not an authenticated end of content.
+
+#### Read the scoped MPTCP growth proof
 
 `mptcp-growth` is a separate disposable topology scenario, not the full alpha or a speed benchmark.
 It requires the same live download before/after expansion, actual kernel subflow ACK and receive
@@ -971,6 +1505,8 @@ grants, descriptor ownership and the signed minimum remain unchanged. Growth is 
 and retirement cannot cross that signed minimum. Native API7 exposes `acked_transport_bytes`
 separately from the CLI's unchanged `bytes` user counter; transport ACKs are not unique user bytes.
 
+#### Read the scoped MPQUIC growth proof
+
 The separate `mpquic-growth` VM scenario starts with two active paths and one reserved backup,
 uses a real 32-MiB HTTP/3 upload and download, and applies fixed 15% loss only to one owned
 Relay veth. It requires two-to-three native payload deltas, all six WireGuard legs, exact hashes,
@@ -985,319 +1521,9 @@ hashes match, and the owned loss rule and route are removed with unchanged guest
 report was independently rebuilt from the retained raw evidence. This is not a throughput-gain
 claim; the existing eight-path backend ceiling and other transport limits remain.
 
-### Automatic public-content contribution
-
-This integration removes the manual initial `content serve --manifest` step for received
-public objects. Its [dedicated source-stop/restart network proof on `f76ac97a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34211580709)
-passes; it is not a permanent-retention or global-fairness guarantee.
-On an explicitly participating relay, configure a policy-authorized endpoint and private cache:
-
-```yaml
-content_contribution:
-  enabled: true
-  bind_address: "0.0.0.0:18080"
-  advertised_hostname: cache.example
-  cache: /var/lib/volparossa/public-contribution
-  quota_bytes: 67108864
-  max_entries: 256
-  min_free_bytes: 268435456
-  max_bytes: 1048576
-  max_chunks: 4
-```
-
-This block requires the existing `sharing` and `download_sharing` settings, with explicit local
-interfaces and usable capacities; it does not configure those interfaces, enable roles or
-grant new Exit policy permissions. The hostname and TCP port must already be permitted by the
-active signed policy. The directory must be new or the same exclusively owned contribution
-cache; arbitrary existing directories are not adopted. An empty configured listener now offers
-its generic receiving capability so publishers can contact it. This does not advertise possession
-of any object; object lookup and complete-custody receipts require actual verified retained bytes.
-
-Enabling this setting is explicit consent to retain and serve successfully verified public
-native/named objects and supported anonymous cooperative-HTTPS or origin-digest content. Private messages and
-mailbox storage are excluded; ordinary encrypted browsing, cookies, login sessions and
-`private`/`no-store` responses are not opted in. Every later HTTPS consumer still obtains fresh
-origin authorization. Storage peers do not become publishers or origin authorities.
-
-One quota covers both received content and incidental extra chunks. Admission never evicts live
-content to make room; insufficient space skips optional work. A bounded in-memory queue expires
-after at most five minutes, and each idle batch copies at most four chunks / one MiB. Foreground
-downloads and configured owner traffic take precedence. Cache persistence is not a retention
-promise, global fairness measurement or guarantee that other clients can always retrieve an
-entire object. `content status` reports the same service and replica counters as manual serving;
-`content stop` stops the current service, and the explicit configuration takes effect again at
-the next agent start.
-
-### Publishing through the configured contribution service
-
-With the preceding contribution configuration already enabled and its policy-authorized service
-running, publish an explicit public file without a separate `import` or `serve` command:
-
-```sh
-volparossa content publish --contribute \
-  --identity /path/to/existing/identity.key \
-  --input ./notes.pdf --cache ./content-cache --manifest ./notes.v1.pb \
-  --name notes --revision 1 --content-type application/pdf
-```
-
-For a site, first use `content site pack`, then publish its bundle with `--contribute` and
-`--content-type application/vnd.volparossa.site.v1`. Consumers can use the existing `fetch-name`
-or `site open` with your independently authenticated public publisher key and exact name.
-
-The CLI completes and saves the original local publication before opening the authorized Unix
-control socket. It streams chunks from your private cache; the agent never needs access to that
-directory, a signing key, or a caller-selected destination/listener. Its existing configuration
-selects the contribution cache, quota and endpoint. A private temporary receiving cache is
-removed on completion or cancellation. Admission does not evict existing live contribution
-data, and foreground publication pauses the same optional background writer.
-
-`network_publication: true` is returned only after complete hash verification, durable original
-manifest/chunk ownership, registration in that configured service and its service announcement.
-The same journal restores the original publication after restart, with unchanged expiry and
-name lookup. Empty public objects are supported; private-message content is refused. Missing
-configuration, insufficient quota or a busy/failed service returns an error while retaining the
-completed local manifest/cache. Without `--contribute`, the old offline behavior is unchanged.
-
-This confirms a complete **local provider publication**, not that other nodes have retained
-copies or promised storage until expiry. The publisher's node must remain reachable unless
-other peers have actually received the required chunks. Opportunistic propagation remains
-best effort; no permanent website availability, HTTPS authority or external custody is implied.
-The [publish/restart/network proof on `ac782769`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34221501655)
-passes: an ordinary publisher supplies a site through this command, its source files are
-removed, the provider restarts with the same journal, and an independent client fetches all
-2,097,628 bytes by trusted publisher/name. The provider node remains online for that retrieval.
-
-### Depositing a public copy with other participants
-
-The development CLI adds `content custody deposit` and `content custody inspect`. Use the
-original public manifest and its publisher's encrypted identity, plus independently selected
-provider public keys. Receiving nodes must have the preceding contribution service configured;
-ordinary `content serve` alone is not a custody receiver. Their endpoints must remain authorized
-by the existing Exit policy. Local tests and the dedicated
-[`content-custody` network scenario on `f590aa86`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34850149035)
-pass, including two restarted receivers, source-cache removal and protected name-based retrieval.
-
-```sh
-volparossa content custody deposit \
-  --manifest ./notes.v1.pb --cache ./content-cache \
-  --identity /path/to/existing/identity.key \
-  --provider-key <provider-a-public-key-hex> \
-  --provider-key <provider-b-public-key-hex>
-
-volparossa content custody inspect \
-  --manifest ./notes.v1.pb --identity /path/to/existing/identity.key \
-  --provider-key <provider-a-public-key-hex> \
-  --provider-key <provider-b-public-key-hex>
-```
-
-Deposit streams verified chunks through the normal agent/Relay/Exit route; it does not pass
-source paths or publisher private keys to a peer. Each receiver verifies the whole object,
-commits its existing non-evicting replica journal and registers the copy before signing a
-Complete receipt. Retries retain the original manifest and expiry. Admission respects existing
-storage quotas and does not evict another live publication to make room.
-
-Inspect needs no source cache and performs no upload. It obtains a fresh signed Complete or
-Missing observation of that exact original publication. JSON retains each signed observation
-and reports which provider handoffs completed, even when another provider fails. The command
-returns nonzero unless every requested provider confirms a complete copy; a successful Missing
-observation is therefore an incomplete-custody result, not a complete copy. Reported object
-bytes describe retained logical content, not upload traffic (a retry can upload no new bytes).
-
-Keep the original files while establishing copies. Signed receipts establish observations at
-the stated time, not future reachability, a global latest revision or permanent website uptime.
-This explicit workflow does not yet choose holders automatically or repair a lost replica.
-Private messages use the separate encrypted mailbox workflow, not public custody.
-
-### Automatically maintaining public copies
-
-The development `content retain` controller adds owner-enrolled holder discovery and repair.
-It retains an existing public publication; it does not publish private browsing responses or
-renew the publisher's original expiry. No provider keys need to be chosen manually. Receivers
-must run the contribution service above, and both the sender's `sharing` and
-`download_sharing` budgets must be enabled with the actual accounting interfaces configured.
-Unknown/busy accounting defers background work; configured capacity is not measured spare
-ISP capacity or a guarantee of zero slowdown.
-
-```sh
-volparossa content retain \
-  --manifest /private/publishing/notes.v1.pb \
-  --cache /private/publishing/content-cache \
-  --identity /private/publishing/identity.key \
-  --passphrase-file /private/publishing/passphrase \
-  --copies 2 --directory /private/publishing/notes-retention \
-  --max-seconds 3600 --poll-seconds 30 --max-upload-bytes 67108864
-```
-
-Without `--execute`, this only prints the enrollment preview: no files, key unlock or network
-requests. The state directory must be new under a private owned `0700` parent and separate
-from the source cache. Add `--execute` to maintain copies for the stated lifetime, capped by
-the original publication expiry. To resume, repeat the exact original arguments with
-`--execute --resume`; neither the deadline nor spent upload budget resets. Every deposit
-reserves the full logical object size before attempting upload, including failed/interrupted
-attempts. This conservative budget is not a count of actual wire bytes.
-
-The private `status.json` reports the last poll, observed holders and remaining enrollment
-state. Signed offers are only discovery hints, not storage-capacity promises. A counted copy
-requires the fresh original signed custody exchange and successful local handoff. Historical
-receipts are retained for verification, never treated as fresh availability after restart.
-SIGINT/SIGTERM ends the owner loop and closes its in-flight exchange; the original stored
-copies may still be served until their original expiry while holders remain available.
-Maintenance does not continue while the owner is offline. The
-[original source-exact trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35916493141)
-and [fresh integration trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35921884371)
-demonstrate holder loss/replacement and subsequent retrieval without the publisher's source.
-The Client node stays online; neither proves globally fair placement or permanent site availability.
-This function is integrated by PR #160.
-
-### Repairing a holder's partial public copies
-
-The configured contribution service now also schedules bounded idle repair of **healthy partial
-public journal records** after restart. This is separate from the explicit publisher Deposit/
-Inspect commands. A receiving node must have client and relay roles, active policy and the
-existing upload/download contribution budgets; a service-only holder does not invent client
-capability. The worker can establish the normal protected route and discover generic providers
-without waiting for a foreground download. Missing object/chunk identities travel only inside
-the protected content stream. New foreground work, Stop, expiry or unavailable accounting ends
-or defers the attempt. It neither creates arbitrary new holder assignments nor promises a
-global copy count. Local runtime/stream tests pass; the dedicated repair VM is still pending.
-Missing or corrupt bytes in an already complete journal are not silently reinterpreted as a
-healthy partial record. Do not delete journaled files to trigger repair.
-
-### One-shot browser download
-
-For the same supported cooperative HTTPS origin, let the browser choose where to save the
-already verified result:
-
-```sh
-volparossa content browser-download \
-  --url https://downloads.example/asset.bin \
-  --metadata-path /.well-known/volparossa/content/asset \
-  --cache /agent-owned/new-browser-cache
-```
-
-For the supported [origin-digest profile](#https-origin-digest-downloads), replace the
-`--metadata-path` argument with `--origin-digest`; the remaining browser behavior is identical.
-
-Keep the command running. After protected retrieval and verification, its first JSON line contains
-`download_url`; paste that temporary URL directly into the browser's address bar. It binds only
-`127.0.0.1` on an automatically chosen port, accepts one authorized GET and sends a binary attachment.
-There is no `--output`, `--local-output` or `--bind` option, proxy endpoint or resumable browser Range
-request. The unguessable URL is a temporary access secret: do not publish or share it.
-The link and transfer deadline are the earlier of five minutes or the original authenticated
-authority's expiry. The CLI removes its private temporary spool on completion or interruption;
-the browser's saved download remains under the user's control. A final JSON receipt reports
-delivery and spool cleanup.
-
-The normal agent-owned cache, optional `--reuse-cache`, limits and explicit public `--ca-file`
-retain the same meaning as `fetch-https`. Fresh origin authentication still precedes peer reuse;
-no certificate is installed, verification bypassed or origin authority persisted. The localhost
-attachment gains none of the source website's browser permissions, cookies or login state.
-This is an explicit download integration, not general website rendering or transparent HTTPS
-caching. Measured benefit and the complete C08 checkpoint remain unproved.
-
-### Native static websites
-
-Pack an explicitly selected directory with an `index.html`, then publish the bundle with the
-existing encrypted identity and ordinary native-content commands:
-
-```sh
-volparossa content site pack --directory ./public --output ./site.vps
-volparossa content publish \
-  --identity /path/to/existing/identity.key \
-  --input ./site.vps --cache ./site-cache --manifest ./site.v1.pb \
-  --name my-site --revision 1 --content-type application/vnd.volparossa.site.v1
-```
-
-Packing is offline and does not publish anything. It selects at most 256 regular files within
-the native 256-MiB object limit, excludes dotfiles/directories, rejects symlinks and requires
-unambiguous UTF-8 paths. Keep secrets outside this explicitly public directory. The new private
-bundle is never written over an existing file. HTML, CSS, JavaScript, images, fonts and media are
-indexed into one signed publication; no files are extracted while viewing.
-
-Import and serve that public publication using the [existing account handoff](#moving-an-explicit-public-publication-to-or-from-the-service)
-and `content serve --name-lookup`. Each consumer obtains the trusted publisher key and exact name,
-not the publisher's private key or a browser localhost URL:
-
-```sh
-volparossa content site open \
-  --publisher-key TRUSTED_PUBLISHER_PUBLIC_KEY_HEX --name my-site --min-revision 1 \
-  --cache /agent-owned/new-site-cache
-```
-
-Keep the command running and paste `site_url` from its first JSON line into the browser. It first
-retrieves and verifies the entire named publication through the existing protected chunk path,
-then serves only those immutable assets on a random `*.localhost` name and loopback-only port.
-Root-relative links, directory `index.html`, UTF-8 paths, GET/HEAD and single byte ranges work;
-bounded query strings are ignored for immutable lookup, not interpreted as server operations.
-`--reuse-cache` and `--min-revision` retain the normal named-cache semantics.
-
-After an initial successful download with the current manifest-retaining implementation,
-reopen the same site without requiring network access:
-
-```sh
-volparossa content site open --publisher-key "$PUBLISHER_KEY" --name my-site \
-  --cache /agent-owned/site-cache --reuse-cache --cache-only
-```
-
-The original signed bundle must remain valid and complete in that cache. This mode keeps the
-same temporary localhost viewer, HTTP/range behavior and browser isolation; it does not extend
-expiry or claim that the cached version is globally newest. Missing/expired content fails
-without trying the network. The
-[integrated no-route reopen run on `4e6cc308`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34214732165)
-passes, including same-cache identity, all assets, HEAD/range behavior and cleanup. The VM
-uses actual HTTP requests rather than a browser engine.
-
-The local viewer expires at the earlier of the original signed expiry or its own
-`--lifetime-seconds` (default one hour, maximum one day). SIGINT/TERM closes the listener and
-in-flight responses and removes the private spool. No certificate is installed and the page
-does not inherit an external website's origin, login or cookies. Its browser sandbox supports
-scripts and local assets but excludes persistent origin storage, service workers, forms,
-embedded frames and external network requests. This is a static publication, not a dynamic
-server/database, transparent HTTPS cache or a promise of permanent replica availability.
-The publisher may be offline only while reachable replicas retain valid metadata and every
-required chunk. See [source-scoped verification](../IMPLEMENTATION_STATUS.md).
-
-### Opportunistic replica cache
-
-For the first development-only redistribution integration, add `--replica-cache /agent-owned/new-extras`
-to `content serve`. By default the directory must be new, private to the agent and different from
-the existing publication cache. To restart this service with an existing owned replica store,
-repeat the primary publication's Serve command with the same `--replica-cache` and limits, adding
-`--reuse-replica-cache`. This restores unexpired original replica manifests and verified chunks
-before opening the listener; it does not infer registrations from loose files, extend expiry or
-activate anything on boot. Missing metadata means zero restored publications; foreign, corrupt,
-busy or incomplete stores fail without adoption or automatic deletion. Primary registrations
-take precedence, and excess valid metadata remains stored when the 64-publication registry is full.
-Optional limits are `--replica-quota-bytes` (default 64 MiB, at most
-256 MiB), `--replica-max-entries` (default 256), `--replica-max-bytes` (64 bytes through 1 MiB,
-default 1 MiB of protocol traffic) and `--replica-max-chunks` (1--4, default 4). Repeated Serve
-registrations use the same replica configuration; changing it requires stopping the service.
-
-The job starts only after a successful native/HTTPS content fetch has actually received verified
-chunks from a provider. Both `sharing` and `download_sharing` must be explicitly configured and
-enabled, with meaningful link capacities and the real carrying interfaces. Unknown/down/overlay
-interfaces or a busy preflight sample cause uptake to pause; no host configuration is changed by
-the sampling itself. The receiver uses protocol v3: after each received chunk the provider must
-wait for a new one-chunk credit. A fresh sample of the configured links precedes that credit;
-a busy sample withholds credit and waits for quiet within the same original deadline, then
-resumes that exchange without renewing its budget. Unavailable accounting never authorizes
-credit; cancellation or deadline expiry ends the job without extending authority.
-Credit, stop and finish framing share the original protocol budget/deadline. There is no silent
-fallback to the unsolicited v2 exchange. New foreground content operations cancel background
-uptake. One already credited chunk can still overlap new demand; unmeasured links, per-flow
-owner accounting and radio contention are not covered. This is not the full C04 fairness proof.
-
-`content status` reports `replication_enabled` separately from actual retained `replica_chunks`,
-`replica_bytes` and registered `replica_publications`; an enabled job is not evidence of useful
-replication. Busy cache access returns Busy rather than a fabricated count. Stop cancels the job
-and withdraws the service, retaining owned cache files and the cache-bound registration journal.
-Explicit reuse restores the journal, not the old service, contacts or route authority. Expired
-records are not offered again; maintenance before new uptake reclaims only expired, unshared
-journaled chunks, preserving live/foreground references and refusing mailbox stores. It does not
-repair lost replicas.
-It remains a development service, not reliable offline hosting or guaranteed owner-priority sharing.
-
 ## Crash and cleanup
+
+### Retire routes without discarding authority
 
 Route teardown is Destroy-first. From successful helper `Prepare`, a cancellation-safe supervisor
 retains the exact opaque cleanup authority. Rejection, expiry, cancellation, disconnect and failure
@@ -1315,12 +1541,16 @@ Normal daemon shutdown stops new operations first and keeps discovery available 
 bounded retirement attempt. It reports `ShutdownCleanup` if route destruction remains unconfirmed;
 stopping discovery afterwards does not turn failed cleanup into success.
 
+### Observe the remaining remote-state limits
+
 Current development limitation: remote retirement scopes, including completed ones, are retained
 in memory under a hard 1,024-context bound per role. New scope admission fails when that bound is
 full. They cannot safely be evicted merely because the original route expired: another selected
 relay may still need its Exit confirmation. Capacity reclamation and restart recovery of these
 remote scopes remain separate unfinished work; neither missing memory state nor restarting an
 agent is treated as proof that remote network resources were removed.
+
+### Recover exact journal and descriptor ownership
 
 The helper's boot-scoped v3 ownership journal and systemd descriptor custody are live. Startup
 revalidates the journal and complete inherited inventory before serving requests; supported recovery
@@ -1341,6 +1571,8 @@ fail-stop; status 71 marks diagnostic live-proof setup ambiguity. The packaged u
 from automatic restart. Inspect the journal and service logs rather than repeatedly restarting or
 loosening systemd's cgroup retirement settings to hide the failure.
 
+### Preview and request normal cleanup
+
 Use the normal scoped cleanup lifecycle while the helper is still installed:
 
 ```sh
@@ -1352,6 +1584,8 @@ The first command previews the service/resource scope. The explicit execution re
 Disconnect, stops the VOLPAROSSA service set and triggers helper shutdown cleanup. It is not a
 generic repair tool for an unrecognized journal or unrelated host resources. Check the resulting
 status and cleanup evidence before declaring resources absent.
+
+### Do not replace ownership proof with broad deletion
 
 Acceptance networking remains confined to disposable namespaces. A later supervisor may delete
 only an exact object recorded by its current run, after checking its namespace device/inode;
@@ -1388,6 +1622,8 @@ to IPv4 loopback; only the non-zero port is configurable. The endpoint has bound
 concurrency, and time-outs, and exports no labels, peer IDs, route IDs, hostnames, destination
 addresses, URLs, or payload data. Disable it with `privacy.metrics_enabled: false`; no listener is
 created in that mode.
+
+### Share diagnostics without exposing private data
 
 Never publish an identity file, passphrase, WireGuard key, full hostname, destination IP, DNS history,
 payload, or unredacted packet capture. The system checker emits no secrets. There is no external
