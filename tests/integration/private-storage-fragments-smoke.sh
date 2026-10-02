@@ -200,7 +200,10 @@ private_storage_fragments_run() {
     private_storage_fragments_usage deleted_usage
     benchmark_disconnect_route private-storage-fragments || fail FRAGMENTS_ROUTE_CLEANUP_FAILED
     private_storage_fragments_cleanup || fail FRAGMENTS_PRIVATE_CLEANUP_FAILED
-    if [ "${cloud_private_file:-no}" = yes ]; then
+    if [ "${cloud_private_upload:-no}" = yes ]; then
+        python3 -B "$source_directory/tests/integration/cloud-private-upload-smoke.py" evidence "$WORK" \
+            "$WORK/cloud-private-upload-evidence.json" >/dev/null || fail CLOUD_PRIVATE_UPLOAD_EVIDENCE_INVALID
+    elif [ "${cloud_private_file:-no}" = yes ]; then
         python3 -B "$source_directory/tests/integration/cloud-private-file-smoke.py" evidence "$WORK" \
             "$WORK/cloud-private-file-evidence.json" >/dev/null || fail CLOUD_PRIVATE_FILE_EVIDENCE_INVALID
     elif [ "${image_snapshot:-no}" = yes ]; then
@@ -211,7 +214,8 @@ private_storage_fragments_run() {
             "$WORK/private-storage-fragments-evidence.json" >/dev/null || fail FRAGMENTS_EVIDENCE_INVALID
     fi
     OBSERVED_BLOCKER=NONE
-    if [ "${cloud_private_file:-no}" = yes ]; then PHASE=cloud-private-file-complete
+    if [ "${cloud_private_upload:-no}" = yes ]; then PHASE=cloud-private-upload-complete
+    elif [ "${cloud_private_file:-no}" = yes ]; then PHASE=cloud-private-file-complete
     elif [ "${image_snapshot:-no}" = yes ]; then PHASE=image-snapshot-complete
     else PHASE=private-storage-fragments-complete; fi
 }

@@ -269,6 +269,17 @@ feature branches are not implied to be integrated into `main`.
   This proves selected owner-local read-only recovery through the original UI, not
   ordinary OpenCloud account/ACL recovery, writes, sharing, synchronization or
   general server-independent OpenCloud availability.
+- [ ] The separate `cloud-private-upload` acceptance sibling is prepared against
+  Cloud `311f6070dc8950a75133567a9eff724e975593b6`, not yet executed. It keeps the
+  preceding read-only proof/pins unchanged and requires an original Files/Uppy
+  upload of 262,145 synthetic bytes, actual owner GPG encryption, three 128-KiB
+  fragments with the core's two-copy target, retained owner catalogs, a stopped
+  and restarted service, removed local ciphertext and provider A offline before
+  two fresh-browser native downloads. The existing imported baseline must also
+  restore twice. All fourteen copies remain charged until confirmed retirement;
+  three existing 1-MiB stores, private cleanup and unchanged guest state are
+  independently checked. Pure fixture checks are not UI execution, peer proof,
+  writable synchronization or a general server-independent service claim.
 - [ ] Cooperative maintenance of current/future VOLPAROSSA organization repositories:
   actual coding jobs, independent immune review and exact-revision scoped GitHub
   publication. [Agreed scope](REPOSITORY_MAINTENANCE.md); no autonomous publisher,
