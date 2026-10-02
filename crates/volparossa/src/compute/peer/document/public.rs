@@ -46,6 +46,9 @@ pub(in crate::compute) struct Config {
     /// Authorize a bounded pass of smaller source jobs when a leaf reaches its output limit.
     #[arg(long)]
     refine_incomplete: bool,
+    /// Explicit owner permission for up to four source-refinement levels, sharing one budget.
+    #[arg(long, default_value_t = 1, requires = "refine_incomplete", value_parser = clap::value_parser!(u8).range(1..=4))]
+    refinement_levels: u8,
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u16).range(1..=600))]
     pub max_seconds: u16,
     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u16).range(1..=2))]
@@ -72,6 +75,11 @@ impl Config {
             }) && (1..=600).contains(&self.max_seconds)
                 && (1..=2).contains(&self.threads),
             "compute_public_fixed_configuration"
+        );
+        ensure!(
+            (1..=4).contains(&self.refinement_levels)
+                && (self.refinement_levels == 1 || self.refine_incomplete),
+            "compute_public_refinement_levels"
         );
         ensure!(
             self.model_profile != ModelProfile::Qwen600,
@@ -121,6 +129,7 @@ impl Config {
             batch_barrier: false,
             synthesize: true,
             refine_incomplete: self.refine_incomplete,
+            refinement_levels: self.refinement_levels,
             task_plan: None,
             plan_tasks: false,
             plan_task_graph: false,
@@ -245,6 +254,7 @@ fn selected_provider_keys(root: &Path, report: &Value, config: &Config) -> Resul
     ensure!(
         enrollment.synthesize
             && enrollment.refine_incomplete == config.refine_incomplete
+            && enrollment.refinement_levels == config.refinement_levels
             && !enrollment.replace_peers
             && enrollment.publisher_key == hex::encode(config.publisher_key.as_bytes())
             && input.model_profile == config.model_profile
@@ -501,6 +511,42 @@ mod tests {
             "CC0-1.0".into(),
         );
         assert!(recovery_options.refine_incomplete && recovery_options.synthesize);
+        assert_eq!(recovery_options.refinement_levels, 1);
+        let deeper = arguments(&[
+            "--discover-peers",
+            "--refine-incomplete",
+            "--refinement-levels",
+            "4",
+        ])
+        .unwrap();
+        deeper.validate_selection().unwrap();
+        assert_eq!(
+            deeper
+                .options(
+                    Path::new("/unused/deeper"),
+                    "Question?".into(),
+                    "CC0-1.0".into()
+                )
+                .refinement_levels,
+            4
+        );
+        for extra in [
+            vec!["--discover-peers", "--refinement-levels", "2"],
+            vec![
+                "--discover-peers",
+                "--refine-incomplete",
+                "--refinement-levels",
+                "0",
+            ],
+            vec![
+                "--discover-peers",
+                "--refine-incomplete",
+                "--refinement-levels",
+                "5",
+            ],
+        ] {
+            assert!(arguments(&extra).is_err());
+        }
         assert_eq!(recovery_options.max_batches, options.max_batches);
         assert_eq!(recovery_options.max_seconds, options.max_seconds);
         let first = hex::encode(

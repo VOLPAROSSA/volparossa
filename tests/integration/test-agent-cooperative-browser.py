@@ -89,7 +89,7 @@ def discovered_fixture():
     return check, value
 
 
-def retained_refinement_fixture(root):
+def retained_refinement_fixture(root, helpers=None):
     """Synthetic retained-tree/parser exercise only; no signature/model/peer proof."""
     check, evidence = discovered_fixture()
     wire = runpy.run_path(str(HERE / "test-content-custody-smoke.py"))["wire"]
@@ -228,10 +228,123 @@ def retained_refinement_fixture(root):
     save(root / "document.json", enrollment)
     save(root / "result.json", result)
     fixture_input = dict(context=source.decode(), question=check["QUESTION"], license=enrollment["license"])
+    if helpers is not None:
+        helpers.update(source=source, source_manifest=source_manifest, enrollment=enrollment, profile=profile,
+                       plan_for=plan_for, dataset=dataset, publication=publication, job=job, supervisor=supervisor)
+    return check, fixture_input, layout, observed, save
+
+
+def retained_deep_refinement_fixture(root):
+    """Two-level synthetic retained receipts; deliberately not model/signature proof."""
+    helper = {}
+    check, fixture_input, layout, observed, save = retained_refinement_fixture(root, helper)
+    source, enrollment, profile = helper["source"], helper["enrollment"], helper["profile"]
+    encode, sha = check["encoded"], check["sha"]
+    read = lambda path: json.loads(path.read_bytes())
+    result = read(root / "result.json")
+    parent_root = root / "refinement/leaf-0000"
+    child_root = parent_root / "child-0"
+    original_child = result["refinement"]["answers"][0]
+    end = original_child["source_end"]
+    failed = helper["job"](child_root, read(child_root / "dataset.json"), original_child["package_manifest_id"],
+                           3, 0, 0, 0, end, "token_limit")
+    nested = child_root / "refinement"
+    ranges = [(0, end // 2), (end // 2, end)]
+    intent = read(parent_root / "intent.json")
+    intent.update(parent_sha256=sha(check["answer_bytes"](failed)), parent_report_sha256=failed["report_sha256"],
+                  parent_job_id=failed["job_id"], parent_source_start=0, parent_source_end=end,
+                  children=[dict(start=start, end=finish, source_sha256=sha(source[start:finish])) for start, finish in ranges])
+    save(nested / "intent.json", intent)
+    children, answers = [], []
+    for index, (start, finish) in enumerate(ranges):
+        destination = nested / f"child-{index}"
+        plan = helper["plan_for"](source[start:finish], [(0, finish - start)])
+        input_raw = save(destination / "planner-input.json", dict(version=1, model_profile=profile["name"],
+            visibility="public", license=enrollment["license"], document=source[start:finish].decode(), question=check["QUESTION"]))
+        save(destination / "document-plan.json", plan)
+        raw = save(destination / "tokenizer/document-plan.json", plan)
+        save(destination / "tokenizer-report.json", dict(mode="plan_document", status="ok", device="cpu",
+            model_weights_loaded=False, updates_completed=0, dataset=dict(sha256=sha(input_raw)),
+            artifacts=[dict(relative_path="document-plan.json", bytes=len(raw), sha256=sha(raw))], supervisor=helper["supervisor"]))
+        data = helper["dataset"]([(start, finish)])
+        manifest = helper["publication"](destination, data, f"refined-leaf-0000-child-{index}")
+        answer = helper["job"](destination, data, manifest, 6 + index, index, 0, start, finish)
+        answers.append(answer)
+        children.append(dict(start=start, end=finish, complete=True, answer_complete=True, package_manifest_id=manifest,
+            **{key: answer[key] for key in ("generation", "generated_tokens", "text_truncated")}))
+    old_frontier = result["refinement"]["answers"]
+    frontier = answers + old_frontier[1:]
+    parent = result["refinement"]["parents"][0]
+    parent.update(address=[], level=1, complete=False)
+    for index, answer in enumerate((failed, old_frontier[1])):
+        parent["children"][index].update(answer_complete=index == 1,
+            **{key: answer[key] for key in ("generation", "generated_tokens", "text_truncated")})
+    descendant = dict(part_index=0, address=[0], level=2, parent_report_sha256=failed["report_sha256"],
+        parent_job_id=failed["job_id"], parent_source_start=0, parent_source_end=end,
+        intent_sha256=sha(encode(intent)), complete=True, children=children)
+    result["refinement"].update(version=2, split_levels=4, maximum_child_jobs=32, retained_splits=2,
+        remaining_splits=14, remaining_rounds=30, deepest_level=2, unresolved_leaves=0, stop_reasons=[],
+        source_admission_expires_unix_seconds=enrollment["expires_at_unix_seconds"], answers=frontier,
+        descendants=[descendant])
+    enrollment["refinement_levels"] = 4
+    group = root / "synthesis/level-01-group-0000"
+    combined = "".join(answer["text"] + "\n" for answer in frontier).encode()
+    plan = helper["plan_for"](combined, [(0, len(combined))])
+    _text, rows = check["DOCUMENT"]["SYNTHESIS"]["expected_rows"](frontier, plan["parts"], check["QUESTION"], 0)
+    save(group / "document-plan.json", plan)
+    parent_bytes = save(group / "parents.json", frontier)
+    save(group / "group.json", dict(parents_sha256=sha(parent_bytes), source_manifest_id=enrollment["source_manifest_id"],
+                                   parent_offset=0, level=1))
+    data = dict(version=3, visibility="public", license=enrollment["license"], source_manifest_hex=helper["source_manifest"].hex(),
+        level=1, claim_scope=check["DOCUMENT"]["SYNTHESIS"]["CLAIM"], inference=rows)
+    manifest = helper["publication"](group / "package-0000", data, "derived-l01-g0000-p0000", check["DOCUMENT"]["SYNTHESIS"]["PROFILE"])
+    final = helper["job"](group / "package-0000", data, manifest, 5, 0, 0, 0, len(source), level=1)
+    result.update(synthesized_answer=final, synthesis=dict(levels=[dict(level=1, complete=True, parents=4, answers=[final],
+        groups=[dict(parts=1, input_sha256=sha(combined))])]))
+    save(root / "document.json", enrollment)
+    save(root / "result.json", result)
     return check, fixture_input, layout, observed, save
 
 
 class CooperativeBrowserProof(unittest.TestCase):
+    def test_deeper_refinement_requires_each_real_shaped_receipt_and_exact_descendant_intent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            check, fixture_input, layout, observed, save = retained_deep_refinement_fixture(root)
+            initial = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+            summary = check["retained_result"](root, fixture_input, layout, observed)
+            self.assertEqual(summary["refinement"], dict(version=2, enabled=True, applied=True, original_parts=2,
+                refined_leaves=1, effective_parts=4, original_token_limited_outputs=1, exact_frontier_verified=True,
+                retained_splits=2, deepest_level=2, intermediate_token_limited_outputs=1))
+            self.assertEqual(summary["jobs"], 7)
+            _check, evidence = discovered_fixture()
+            evidence["result"]["refinement"] = summary["refinement"]
+            evidence["result"]["jobs"] = summary["jobs"]
+            check["check_evidence"](evidence, REVISION, evidence["provision"])
+            wrong = copy.deepcopy(evidence)
+            wrong["result"]["refinement"]["intermediate_token_limited_outputs"] = 0
+            with self.assertRaises(ValueError):
+                check["check_evidence"](wrong, REVISION, wrong["provision"])
+            for path, raw in initial.items():
+                self.assertEqual(path.read_bytes(), raw)
+            for relative, change in (
+                ("document.json", lambda value: value.update(refinement_levels=1)),
+                ("result.json", lambda value: value["refinement"]["descendants"].clear()),
+                ("result.json", lambda value: value["refinement"]["descendants"][0].update(address=[1])),
+                ("result.json", lambda value: value["refinement"]["parents"][0]["children"][0].update(answer_complete=True)),
+                ("result.json", lambda value: value["refinement"]["parents"][0].update(complete=True)),
+                ("result.json", lambda value: value["refinement"].update(retained_splits=3)),
+                ("refinement/leaf-0000/child-0/refinement/intent.json", lambda value: value.update(parent_report_sha256="0" * 64)),
+                ("refinement/leaf-0000/child-0/refinement/intent.json", lambda value: value.update(expires_at_unix_seconds=4000)),
+            ):
+                for path, raw in initial.items():
+                    save(path, raw)
+                target = root / relative
+                changed = json.loads(target.read_bytes())
+                change(changed); save(target, changed)
+                with self.subTest(relative=relative), self.assertRaises((ValueError, KeyError)):
+                    check["retained_result"](root, fixture_input, layout, observed)
+
     def test_refinement_joins_real_shaped_receipts_without_relabelling_original_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -411,7 +524,7 @@ class CooperativeBrowserProof(unittest.TestCase):
         selected = source.split('    set -- --model-profile', 1)[1].split('    PHASE=agent-cooperative-browser-service', 1)[0]
         selector = 'set -- --model-profile' + selected
         for flag, expected in (("no", ["--model-profile", "smollm2-135m-v1", "--provider-key", "peer-a", "--provider-key", "peer-b"]),
-                               ("yes", ["--model-profile", "smollm2-360m-v1", "--discover-peers", "--refine-incomplete"])):
+                               ("yes", ["--model-profile", "smollm2-360m-v1", "--discover-peers", "--refine-incomplete", "--refinement-levels", "4"])):
             inert = 'jobs_key_a=peer-a\njobs_key_b=peer-b\nagent_cooperative_browser_discovered="$1"\n' + selector + '\nprintf "%s\\0" "$@"\n'
             result = subprocess.run(["sh", "-c", inert, "test", flag], capture_output=True, timeout=3, check=True)
             self.assertEqual(result.stdout.decode().split("\0")[:-1], expected)
@@ -728,6 +841,62 @@ class CooperativeBrowserProof(unittest.TestCase):
             outside.chmod(0o600)
             path.symlink_to(outside)
             self.assertEqual(project(), dict(state="invalid"))
+
+    def test_refinement_diagnostic_keeps_original_failure_and_actual_child_metadata_distinct(self):
+        generation = dict(version=1, stop_reason="token_limit", max_new_tokens=256, model_profile="smollm2-360m-v1")
+        row = dict(text="PRIVATE_ANSWER", text_truncated=False, generation=generation)
+        children = [dict(complete=True, answer_complete=False, generation=generation,
+                         package_manifest_id="PRIVATE_MANIFEST", text_truncated=False),
+                    dict(complete=True, answer_complete=True, generation=dict(generation, stop_reason="eos"))]
+        refinement = dict(version=2, enabled=True, complete=False, reason="split_level_exhausted",
+            stop_reasons=["split_level_exhausted"], split_levels=4, answers=[],
+            parents=[dict(level=1, complete=False, parent_job_id="PRIVATE_JOB", children=children)],
+            descendants=[dict(level=2, address=[0], complete=False, children=copy.deepcopy(children))])
+        value = dict(version=2, operation="compute_public_document", complete=False, execution_complete=True,
+            answer_complete=False, interrupted=False, joining="incomplete_fragment_answers",
+            answers=[row, dict(row, generation=dict(generation, stop_reason="eos"))], refinement=refinement)
+        with tempfile.TemporaryDirectory() as temporary:
+            task = Path(temporary)
+            (task / "document").mkdir(mode=0o700)
+            path = task / "document/result.json"
+            path.write_text(json.dumps(value)); path.chmod(0o600)
+            original = path.read_bytes()
+            projected = CHECK["closed_answer_diagnostic"](task)
+            self.assertEqual(projected["state"], "valid")
+            self.assertFalse(projected["status"]["answer_complete"])
+            self.assertEqual(projected["status"]["leaf_answers"]["counts"]["token_limit"], 1)
+            repair = projected["status"]["refinement"]["status"]
+            self.assertEqual(repair["reason"], "split_level_exhausted")
+            self.assertFalse(repair["complete"])
+            self.assertEqual(repair["children_observed"], 4)
+            self.assertEqual(repair["child_generation_counts"], dict(eos=2, json_boundary=0, token_limit=2,
+                                                                     absent=0, invalid_or_unknown=0))
+            self.assertEqual(repair["child_answer_complete"], dict(complete=2, incomplete=2, unknown=0))
+            self.assertFalse(repair["nodes"][0]["children"][0]["answer_complete"])
+            self.assertNotIn("PRIVATE", json.dumps(projected))
+            self.assertNotIn("address", json.dumps(projected))
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_refinement_diagnostic_absent_unknown_or_oversized_is_never_success(self):
+        legacy = dict(version=1, enabled=True, complete=False, reason="children_incomplete", split_levels=1,
+            answers=[], parents=[dict(complete=False, children=[dict(complete=True, answer_complete=False)])])
+        self.assertEqual(CHECK["closed_refinement"](None), dict(state="absent"))
+        projected = CHECK["closed_refinement"](legacy)
+        self.assertEqual(projected["state"], "incomplete")
+        self.assertEqual(projected["status"]["child_generation_counts"]["absent"], 1)
+        self.assertFalse(projected["status"]["complete"])
+        changed = copy.deepcopy(legacy)
+        changed["reason"] = "PRIVATE_REASON"
+        changed["parents"][0]["children"][0].update(answer_complete="true", generation={"stop_reason": "PRIVATE_END"})
+        projected = CHECK["closed_refinement"](changed)
+        self.assertEqual(projected["state"], "incomplete")
+        self.assertIsNone(projected["status"]["reason"])
+        self.assertEqual(projected["status"]["child_answer_complete"]["unknown"], 1)
+        self.assertEqual(projected["status"]["child_generation_counts"]["invalid_or_unknown"], 1)
+        self.assertNotIn("PRIVATE", json.dumps(projected))
+        for changed in (dict(legacy, version=True), dict(legacy, parents=legacy["parents"] * 17),
+                        dict(legacy, parents=[dict(children=[{}] * 3)])):
+            self.assertEqual(CHECK["closed_refinement"](changed), dict(state="invalid"))
 
     def test_guest_account_home_is_created_only_when_absent_and_removed_only_when_owned_and_empty(self):
         with tempfile.TemporaryDirectory() as temporary:

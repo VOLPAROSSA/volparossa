@@ -331,6 +331,7 @@ fn replay_options(root: &Path) -> Options {
         batch_barrier: false,
         synthesize: false,
         refine_incomplete: false,
+        refinement_levels: 1,
         task_plan: None,
         plan_tasks: false,
         plan_task_graph: false,

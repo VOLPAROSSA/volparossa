@@ -46,6 +46,17 @@ def driver():
 
 
 class CooperativeCode(unittest.TestCase):
+    def test_code_uses_shared_closed_refinement_projection_without_content(self):
+        value = dict(version=1, enabled=True, complete=False, reason="children_incomplete", split_levels=1,
+            parents=[dict(complete=False, parent_job_id="PRIVATE_ID", children=[dict(complete=True,
+                answer_complete=False, generation=dict(version=1, stop_reason="token_limit"), text="PRIVATE_OUTPUT")])],
+            answers=[])
+        projected = CHECK["BROWSER"]["closed_refinement"](value)
+        self.assertEqual(projected["state"], "valid")
+        self.assertFalse(projected["status"]["complete"])
+        self.assertEqual(projected["status"]["child_generation_counts"]["token_limit"], 1)
+        self.assertNotIn("PRIVATE", json.dumps(projected))
+
     def test_guest_registration_preview_and_invalid_inputs_never_reach_execution(self):
         script = HERE / "kvm-alpha-topology.sh"
         def invoke(*args, env=None):

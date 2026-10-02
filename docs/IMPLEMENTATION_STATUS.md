@@ -70,18 +70,27 @@ Last updated: 2026-10-02
 
 ### Cooperative browser execution
 
-The latest exact-source [run `37052601519`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37052601519)
-on `abb30f34` remains failed: initial protected routing succeeds and four workers are
-observed, but only two of four terminal receipts are retained. One original answer
-reaches EOS and one its token limit; refinement, synthesis and joined browser completion
-remain unproved. Retained-Poll reconciliation fails with `exchange_unconfirmed`; the
-limited client-agent ring records 48 discovery failures but not their underlying reason.
-Normal task cleanup is unconfirmed. Final fixture teardown leaves zero objects and
-identical host-state snapshots; that does not replace missing terminal receipts.
-The candidate retains existing closed discovery reasons and separate provider-lifecycle
-counts without changing TTL, lineage, retry budgets or proof gates. Nineteen focused
-Browser fixture checks pass; no live recovery success is claimed. Original failure
-details and hashes remain in [the scoped evidence record](COOPERATIVE_BROWSER.md).
+The latest exact-source [run `37058432693`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37058432693)
+on `b76b8a24` remains **failed**, now with four observed workers, four terminal receipts
+and confirmed normal task cleanup, without reconciliation. The original leaf answers
+are one EOS and one token-limited output; answer completion is false and synthesis is
+absent. Child generation/status metadata was not exported, so the subtype of the
+incomplete refinement is unknown. The retained 1,000-event ring has zero matching RPC
+or discovery failures but does not cover the phase baseline; that is not a whole-run
+absence claim. Final private cleanup passes, zero owned objects remain, and guest-root
+network snapshots are identical. The older `abb30f34` run remains separately failed
+with its two missing terminal receipts and 48 observed discovery failures. Exact
+original artifact/log hashes remain in [the scoped evidence record](COOPERATIVE_BROWSER.md).
+
+The shared Browser/Code diagnostic now projects closed refinement reasons, child
+completion flags and available generation endings from the retained report. Missing
+historical metadata remains absent/unknown, never an inferred EOS or successful repair.
+The explicit discovered-360M fixture now selects up to four owner-enrolled split levels,
+still capped at sixteen split intents/thirty-two child jobs across all levels. Its v2
+checker binds every intermediate token-limit receipt to its exact descendant intent,
+signed source range and eventual EOS frontier before accepting real synthesis. The
+default one-level/v1 and original fixed-135M contracts remain unchanged. No new live
+model recovery or successful end-to-end answer is claimed.
 
 An independently reproduced listener-lifecycle fault is fixed in the candidate:
 temporary discovery-registration Busy/Timeout preserves the same listener and compute

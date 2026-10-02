@@ -6,6 +6,9 @@ use crate::compute::{ModelProfile, document_plan::Plan, inference_output::Genera
 use ed25519_dalek::SigningKey;
 use std::{fs, os::unix::fs::PermissionsExt as _, path::PathBuf};
 
+#[path = "frontier_tests.rs"]
+mod frontier_tests;
+
 fn parent(text: &str) -> synthesis::Answer {
     synthesis::Answer {
         text: "Protocol fixture partial answer".into(),
@@ -138,10 +141,13 @@ fn only_untruncated_token_limit_is_eligible_and_utf8_ranges_cover_exact_original
         answer.text_truncated = false;
         answer.generation = None;
         assert!(!eligible(&answer));
+        assert!(!complete(&answer));
         answer.generation = parent(text).generation;
         answer.generation.as_mut().unwrap().stop_reason = StopReason::Eos;
         assert!(!eligible(&answer));
         assert!(complete(&answer));
+        answer.text.clear();
+        assert!(!complete(&answer) && !eligible(&answer));
     }
     assert!(halves(&input("é"), &parent("é")).unwrap().is_none());
 }
@@ -217,21 +223,20 @@ fn intent_replay_is_byte_identical_and_rejects_changed_parent_or_authority() {
 // Retain synthetic tokenizer plans and genuine signed child publications, so the
 // following tests exercise peer admission/receipt replay without executing a model.
 fn retain_children(fixture: &Fixture, answer: &synthesis::Answer) -> Vec<PathBuf> {
+    retain_children_at(
+        fixture,
+        answer,
+        &fixture.root.path().join("refinement/leaf-0000"),
+    )
+}
+
+fn retain_children_at(fixture: &Fixture, answer: &synthesis::Answer, root: &Path) -> Vec<PathBuf> {
     use volparossa_content::provider::compute::dataset::{
         DOCUMENT_CONTENT_TYPE, DocumentDataset, DocumentQuestion,
     };
     use volparossa_content::{CacheLimits, ChunkStore, Validity};
     let ranges = halves(&fixture.input, answer).unwrap().unwrap();
-    let root = fixture.root.path().join("refinement/leaf-0000");
-    storage::intent(
-        &root,
-        &fixture.enrollment,
-        &fixture.input,
-        answer,
-        0,
-        ranges,
-    )
-    .unwrap();
+    storage::intent(root, &fixture.enrollment, &fixture.input, answer, 0, ranges).unwrap();
     let mut cache = ChunkStore::create(
         &root.join("test-publication-cache"),
         CacheLimits {
@@ -331,6 +336,7 @@ async fn serve_protocol_fixture(
     listener: tokio::net::UnixListener,
     original_manifest: String,
     submissions: std::sync::Arc<std::sync::Mutex<Vec<rpc::JobBinding>>>,
+    limit_first_child: bool,
 ) {
     use volparossa_local_control::{
         CONTROL_PROTOCOL_VERSION, ComputeReady, ControlResponse, ControlResult, Empty,
@@ -373,8 +379,12 @@ async fn serve_protocol_fixture(
                 assert_eq!(submit.binding.model_fingerprint, caps.model_fingerprint);
                 // Synthetic answers only; the real protocol, signed datasets, durable
                 // handles and receipt validation are under test, not ML inference.
-                let limited = submit.binding.dataset_manifest_id == original_manifest
-                    && submit.binding.row_indices == [0];
+                let original = submit.binding.dataset_manifest_id == original_manifest;
+                let source: volparossa_content::provider::compute::dataset::DocumentDataset =
+                    serde_json::from_str(&submit.dataset_json).unwrap();
+                let row = &source.inference[0];
+                let limited = (original && submit.binding.row_indices == [0])
+                    || (limit_first_child && !original && row.start == 0 && row.end > 6);
                 let report=json!({"mode":"infer","status":"ok","updates_completed":0,
                     "dataset":{"sha256":submit.binding.dataset_sha256,"visibility":"public","inference_examples":1},
                     "model":{"id":caps.model.model_id,"revision":caps.model.model_revision,
@@ -447,6 +457,7 @@ async fn bounded_real_ipc_refinement_preserves_originals_and_resumes_only_unfini
         listener,
         fixture.enrollment.packages[0].manifest_id.clone(),
         submissions.clone(),
+        false,
     ));
     let (owner, cancelled) = watch::channel(false);
     let mut args = options(fixture.root.path());

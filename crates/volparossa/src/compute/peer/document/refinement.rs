@@ -1,5 +1,6 @@
-//! One owner-enrolled source refinement level; terminal original receipts are immutable.
+//! Owner-enrolled source refinement; terminal original and child receipts are immutable.
 
+mod frontier;
 mod storage;
 #[cfg(test)]
 mod tests;
@@ -99,6 +100,18 @@ pub(super) async fn advance(
         return Ok(None);
     }
     let originals = synthesis::leaf_answers(&args.directory, &enrollment, &input, &plan)?;
+    if enrollment.refinement_levels > 1 {
+        return frontier::advance(
+            args,
+            socket,
+            cancelled,
+            result,
+            &enrollment,
+            &input,
+            originals,
+        )
+        .await;
+    }
     let count = originals.iter().filter(|answer| eligible(answer)).count();
     if count == 0 || count > MAX_LEAVES || originals.iter().any(|a| !complete(a) && !eligible(a)) {
         status(

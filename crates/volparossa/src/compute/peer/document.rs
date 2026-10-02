@@ -77,6 +77,9 @@ pub(crate) struct Options {
     /// Complete leaves and every original receipt are retained, not rerun or relabelled.
     #[arg(long, requires = "synthesize", conflicts_with_all = ["resume", "batch_barrier", "replace_peers"])]
     refine_incomplete: bool,
+    /// Explicit maximum source-refinement depth; existing enrollments retain one level.
+    #[arg(long, default_value_t = 1, requires = "refine_incomplete", conflicts_with = "resume", value_parser = clap::value_parser!(u8).range(1..=4))]
+    refinement_levels: u8,
     /// Explicit public question/dependency graph over the selected sources; not an autonomous planner.
     #[arg(long, conflicts_with_all = ["resume", "public_question", "synthesize", "batch_barrier"])]
     task_plan: Option<PathBuf>,
@@ -201,6 +204,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             "directory":args.directory,"resume":args.resume,
             "synthesize":args.synthesize,
             "refine_incomplete":args.refine_incomplete,
+            "refinement_levels":args.refinement_levels,
             "task_plan":args.task_plan,"plan_tasks":args.plan_tasks,"plan_task_graph":args.plan_task_graph,"model_profile":args.model_profile,
             "plan_structure":args.plan_structure,
             "grounded_synthesis":args.grounded_synthesis,
@@ -263,6 +267,11 @@ async fn report_with_phase(
         !args.refine_incomplete
             || (args.synthesize && !args.batch_barrier && !args.discovery.replace_peers),
         "compute_document_refinement_mode"
+    );
+    ensure!(
+        (1..=4).contains(&args.refinement_levels)
+            && (args.refinement_levels == 1 || args.refine_incomplete),
+        "compute_document_refinement_levels"
     );
     ensure!(
         args.directory.is_absolute(),
@@ -458,6 +467,7 @@ async fn prepare(
     enrollment.replace_peers = args.discovery.replace_peers;
     enrollment.scheduling = workflow::Scheduling::from_batch_barrier(args.batch_barrier);
     enrollment.refine_incomplete = args.refine_incomplete;
+    enrollment.refinement_levels = args.refinement_levels;
     enrollment.collection_sha256 = collection
         .as_ref()
         .map(collection::Ledger::sha256)

@@ -1,10 +1,10 @@
 # Cooperative browser: real public peer execution
 
 Status: implemented candidate; the latest discovered-360M KVM attempt starts four
-workers but retains only two terminal receipts. Retained-Poll discovery fails, so normal
-task cleanup remains unconfirmed; final disposable-fixture teardown succeeds. The
-joined browser result, synthesis and cancellation proof remain incomplete. Local
-fixture checks are not a browser, model or network execution claim.
+workers and retains all four terminal receipts with normal task cleanup confirmed.
+Its answer is still incomplete; child ending subtypes were not exported. The joined
+browser result, synthesis and cancellation proof remain incomplete. Local fixture
+checks are not a browser, model or network execution claim.
 
 The public browser integration has a separate socket and panel from private local
 compute. `ask(question, context)` prefills the panel only. Sending requires a supported
@@ -30,25 +30,29 @@ actual executor keys remain separate. This does not yet implement automatic mode
 choice or cross-job answer continuation. Completed browser/Code live trials used
 fixed peers, so they do not prove this new service discovery path.
 
-An explicit operator `--refine-incomplete` setting now authorizes one recovery pass
+An explicit operator `--refine-incomplete` setting authorizes bounded recovery
 for token-limited public document leaves. It is retained with the original enrollment;
 the browser cannot enable it or select new peers. Complete original answers are reused,
 while each affected source range becomes two smaller, genuinely tokenized and signed
 jobs in the same model/cohort. Every original answer and receipt remains unchanged.
-The pass is bounded to sixteen affected leaves and thirty-two child jobs and shares
-the existing invocation round budget and cancellation. CLI `--follow` retains its
+The default remains one split level. Explicit `--refinement-levels 2..4` allows a
+still-token-limited child to be split again, with a new intent bound to that child's
+own immutable receipt and exact source range. Across all levels together the bound
+remains sixteen split intents and thirty-two child jobs, sharing the existing
+invocation round/time budget, original validity and cancellation. CLI `--follow` retains its
 existing window semantics but grants at most one shared recovery window, not a new
 window for every child.
 
-The effective answer set may feed synthesis only after both child receipts show EOS
-and cover the exact original range. A child that is still incomplete remains visible
-as incomplete; the mechanism does not repeat the same terminal job, enlarge the model
+The effective answer set may feed synthesis only after every terminal frontier leaf
+shows EOS and covers the exact original range. Intermediate token-limited child
+receipts remain unchanged and cannot enter synthesis themselves. A child that cannot
+be repaired within the limits remains incomplete; the mechanism does not repeat the same terminal job, enlarge the model
 limits or turn a partial answer into a complete one. Retained child jobs resume under
 the same source validity and receipt bindings. Actual end-to-end model recovery is
 still unproved; EOS alone is not proof of answer correctness.
 
 The separate `agent-cooperative-browser-discovered` candidate selects
-`--model-profile smollm2-360m-v1 --discover-peers --refine-incomplete`. It preserves the public README,
+`--model-profile smollm2-360m-v1 --discover-peers --refine-incomplete --refinement-levels 4`. It preserves the public README,
 question, browser revision and consent boundary, but selects a literal 4096-byte
 UTF-8-safe prefix rather than the original 3840-byte prefix. The existing pinned
 360M profile is used without enlarging its limits. Real tokenizer preflight found
@@ -279,3 +283,33 @@ refuses inference. Five existing relay/policy lifecycle tests, formatter and str
 agent-library/test Clippy also pass on this source. This proves listener ownership
 and recovery, not model execution or the cause of the earlier 48 discovery errors.
 The discovered-peer end-to-end trial remains required.
+
+## Joined cleanup, still incomplete answers
+
+[Run `37058432693`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37058432693)
+on `b76b8a2497a428b96b7379af9939de2c87dcf698` remains **failed** at
+`agent-cooperative-browser-panel / COOPERATIVE_BROWSER_PEER_PROOF_FAILED`.
+Four actual workers are observed and all four retained handles have terminal receipts.
+Execution and normal local/peer cleanup are confirmed; no reconciliation was needed.
+The original two leaf answers remain one EOS and one token-limited answer. The answer
+is incomplete and no synthesis is retained. This source did not export refinement-child
+completion or generation metadata: their particular incomplete subtype is unknown.
+Four terminal receipts are not proof of four EOS answers or successful refinement.
+
+The sampled client event ring contains 1,000 records and zero matching RPC/discovery
+failure events, but does not cover its phase baseline. It cannot prove the entire run
+had no such failures, or reclassify the earlier `abb30f34` failure. Guest exit status is
+1. All four private-job cleanup checks pass; final teardown leaves zero owned objects.
+Guest-root network-state snapshots outside the owned namespaces are byte-identical.
+These are guest observations, not a new physical-host-state claim. Original records:
+
+- Artifact ZIP SHA-256: `06f4789bc13aaa9d6f824797ca6fe90b729a81c4acde5c0ea2d2dd617bf883ac` (20 files).
+- Job log SHA-256: `14dfe6dd264f58010489bd87c9110cc87ade78defb4ad8520aca1aeaece76f67`.
+- Both guest network snapshots SHA-256: `1b5add81e352354d72d59b47634e1b0be169c58147152a40d614c3ba46f22806`.
+
+The shared Browser/Code closed diagnostic now includes retained refinement reasons,
+per-child completion flags and available generation-ending counts. It exports neither
+text nor source ranges, identifiers, manifests, endpoints or private paths. Legacy
+children without generation metadata remain explicitly absent; unknown values never
+become success. Diagnostic flags are observations, not replacement authority for the
+separate signed-receipt, exact-frontier and real-synthesis acceptance checks.

@@ -122,6 +122,9 @@ SYNTHESIS_REASONS = frozenset(("worker_output_was_wire_truncated", "worker_produ
     "legacy_generation_end_unknown", "worker_output_hit_token_limit", "cancelled", "peer_work_pending",
     "invocation_round_budget",
     "reduction_did_not_shrink_no_inputs_discarded", "hierarchy_budget_no_inputs_discarded"))
+REFINEMENT_REASONS = frozenset(("complete", "unsupported_or_over_limit", "children_incomplete", "cancelled",
+    "source_expired", "round_budget_exhausted", "split_budget_exhausted", "split_level_exhausted",
+    "source_cannot_split", "unsupported_child"))
 ANSWER_STATUSES = ("eos", "json_boundary", "token_limit", "wire_truncated", "empty",
                    "legacy_unknown", "invalid_or_unknown")
 
@@ -440,6 +443,79 @@ def answer_status_counts(rows):
                 observed=len(rows), counts=counts)
 
 
+def closed_refinement(value):
+    """Observe retained metadata, never infer child endings from parent flags.
+
+    Source/receipt authority is validated separately by the acceptance checker.
+    Historical v1 reports did not retain child generation: that stays absent.
+    """
+    if value is None:
+        return dict(state="absent")
+    try:
+        require(type(value) is dict and type(value.get("version")) is int and value["version"] in (1, 2),
+                "invalid refinement diagnostic version")
+        parents, descendants = value.get("parents"), value.get("descendants", [])
+        require(type(parents) is list and type(descendants) is list and len(parents) + len(descendants) <= 16
+                and (value["version"] != 1 or not descendants), "invalid refinement diagnostic nodes")
+        status, incomplete = dict(version=value["version"]), False
+        for key in ("enabled", "complete"):
+            status[key] = value.get(key) if type(value.get(key)) is bool else None
+            incomplete |= status[key] is None
+        reason = value.get("reason")
+        status["reason"] = reason if type(reason) is str and reason in REFINEMENT_REASONS else None
+        incomplete |= status["reason"] is None
+        levels = value.get("split_levels")
+        status["split_levels"] = levels if type(levels) is int and 1 <= levels <= 4 else None
+        incomplete |= status["split_levels"] is None
+        if value["version"] == 2:
+            require("descendants" in value, "missing descendant diagnostics")
+            stops = value.get("stop_reasons")
+            known_stops = (type(stops) is list and len(stops) <= len(REFINEMENT_REASONS)
+                           and all(type(reason) is str and reason in REFINEMENT_REASONS for reason in stops))
+            status["stop_reasons"] = stops if known_stops else None
+            incomplete |= not known_stops
+        counts = dict.fromkeys(("eos", "json_boundary", "token_limit", "absent", "invalid_or_unknown"), 0)
+        completions = dict(complete=0, incomplete=0, unknown=0)
+        nodes = []
+        for number, parent in enumerate(parents + descendants, 1):
+            require(type(parent) is dict and type(parent.get("children")) is list
+                    and len(parent["children"]) <= 2, "invalid refinement diagnostic children")
+            level = parent.get("level", 1 if number <= len(parents) else None)
+            node = dict(ordinal=number, level=level if type(level) is int and 1 <= level <= 4 else None,
+                        complete=parent.get("complete") if type(parent.get("complete")) is bool else None, children=[])
+            incomplete |= node["level"] is None or node["complete"] is None
+            for index, child in enumerate(parent["children"], 1):
+                require(type(child) is dict, "invalid refinement diagnostic child")
+                projected = dict(ordinal=index)
+                for key in ("complete", "answer_complete"):
+                    projected[key] = child.get(key) if type(child.get(key)) is bool else None
+                    incomplete |= projected[key] is None
+                if "text_truncated" in child:
+                    projected["text_truncated"] = child["text_truncated"] if type(child["text_truncated"]) is bool else None
+                completions["unknown" if projected["answer_complete"] is None else
+                            "complete" if projected["answer_complete"] else "incomplete"] += 1
+                generation = child.get("generation")
+                if generation is None:
+                    projected["generation"], ending = dict(state="absent"), "absent"
+                elif (type(generation) is dict and type(generation.get("version")) is int
+                      and generation["version"] == 1 and type(generation.get("stop_reason")) is str
+                      and generation["stop_reason"] in ("eos", "json_boundary", "token_limit")):
+                    ending = generation["stop_reason"]
+                    projected["generation"] = dict(state="valid", stop_reason=ending)
+                else:
+                    projected["generation"], ending = dict(state="invalid"), "invalid_or_unknown"
+                counts[ending] += 1
+                incomplete |= ending in ("absent", "invalid_or_unknown")
+                node["children"].append(projected)
+            nodes.append(node)
+        status.update(nodes=nodes, children_observed=sum(counts.values()), child_answer_complete=completions,
+                      child_generation_counts=counts, effective_answers=answer_status_counts(value.get("answers")))
+        incomplete |= status["effective_answers"]["state"] != "valid"
+        return dict(state="incomplete" if incomplete else "valid", status=status)
+    except (ValueError, KeyError, TypeError):
+        return dict(state="invalid")
+
+
 def closed_answer_diagnostic(task):
     """Project the original retained report, not the compact IPC answer or guessed failure text.
 
@@ -469,6 +545,8 @@ def closed_answer_diagnostic(task):
         incomplete |= status["joining"] is None
         status["leaf_answers"] = answer_status_counts(value.get("answers"))
         incomplete |= status["leaf_answers"]["state"] != "valid"
+        status["refinement"] = closed_refinement(value.get("refinement"))
+        incomplete |= status["refinement"]["state"] not in ("valid", "absent")
         synthesis = value.get("synthesis")
         status["synthesis"] = dict(state="absent")
         if "synthesis" in value:
@@ -734,8 +812,21 @@ def answer_bytes(answer):
     return encoded(value)
 
 
-def checked_refinement_children(document, source, enrollment, parent, original, frontier, reports):
+def checked_refinement_children(document, source, enrollment, parent, original, frontier, reports,
+                                address=(), descendants=None, visited=None, child_jobs=None, repaired_jobs=None):
+    descendants = {} if descendants is None else descendants
+    visited = set() if visited is None else visited
+    child_jobs = set() if child_jobs is None else child_jobs
+    repaired_jobs = set() if repaired_jobs is None else repaired_jobs
     root = document / f"refinement/leaf-{parent['part_index']:04}"
+    for bit in address:
+        root = root / f"child-{bit}" / "refinement"
+    require(parent["parent_job_id"] == original["job_id"]
+            and parent["parent_report_sha256"] == original["report_sha256"]
+            and parent["parent_source_start"] == original["source_start"]
+            and parent["parent_source_end"] == original["source_end"]
+            and len(parent["children"]) == 2 and original["generation"]["stop_reason"] == "token_limit",
+            "refinement did not retain exact failed parent")
     intent_bytes = exact_bytes(root / "intent.json")
     intent = json.loads(intent_bytes)
     expected = dict(version=1, part_index=parent["part_index"], parent_sha256=sha(answer_bytes(original)),
@@ -754,7 +845,7 @@ def checked_refinement_children(document, source, enrollment, parent, original, 
     for index, child in enumerate(parent["children"]):
         start, end = child["start"], child["end"]
         require(type(start) is int and type(end) is int and start == previous_end < end <= original["source_end"]
-                and child["complete"] is True and child["answer_complete"] is True,
+                and child["complete"] is True and type(child["answer_complete"]) is bool,
                 "refinement children omitted, overlapped or remain incomplete")
         child_root = root / f"child-{index}"
         text = source[start:end].decode()
@@ -787,18 +878,48 @@ def checked_refinement_children(document, source, enrollment, parent, original, 
         manifest_id = DOCUMENT["manifest"](signed, raw, enrollment,
             f"refined-leaf-{parent['part_index']:04}-child-{index}", DOCUMENT["PROFILE"])
         require(manifest_id == child["package_manifest_id"], "refinement child manifest changed")
-        found = [answer for answer in frontier if answer["package_manifest_id"] == manifest_id]
-        require(len(found) == 1, "refinement child has no unique effective answer")
-        answer = found[0]
-        record = source_answer(answer, reports, source)
+        matches = [(job, record) for job, record in reports.items()
+                   if record["handle"]["binding"]["dataset_manifest_id"] == manifest_id
+                   and record["path"].is_relative_to(child_root / "work")]
+        require(len(matches) == 1, "refinement child has no unique terminal receipt")
+        job, record = matches[0]
+        output = record["report"]["outputs"][0]
+        answer = {key: output[key] for key in ("text", "generated_tokens", "text_truncated", "generation")}
+        answer.update(provider_key=record["handle"]["provider_key"], job_id=job,
+            report_sha256=record["status"]["report_sha256"], package_manifest_id=manifest_id,
+            model_fingerprint=record["handle"]["binding"]["model_fingerprint"],
+            output_index=0, source_start=start, source_end=end)
+        source_answer(answer, reports, source, complete=False)
         require(answer["source_start"] == start and answer["source_end"] == end and answer["output_index"] == 0
                 and record["path"].is_relative_to(child_root / "work")
                 and record["data"] == json.loads(raw) and len(record["data"]["inference"]) == 1
                 and exact_bytes(child_root / "work/package-0000/dataset.json") == raw
                 and exact_bytes(child_root / "work/package-0000/manifest.bin", 65536) == signed,
                 "refinement answer is not the exact child execution")
-        answers.append(answer)
+        eos = output["generation"]["stop_reason"] == "eos"
+        require(child["answer_complete"] is eos, "token-limited answer or child ending was relabelled")
+        for field in ("generation", "generated_tokens", "text_truncated"):
+            if field in child:
+                require(child[field] == output[field], "refinement child metadata changed its receipt")
+        require(job not in child_jobs, "refinement reused a child receipt")
+        child_jobs.add(job)
+        key = (parent["part_index"], address + (index,))
+        if eos:
+            found = [saved for saved in frontier if saved["package_manifest_id"] == manifest_id]
+            require(found == [answer], "refinement child has no unique effective answer")
+            answers.append(answer)
+        else:
+            # A terminal token-limit receipt is retained, never promoted to EOS.
+            # Only its own source/receipt-bound descendant may replace it.
+            require(output["generation"]["stop_reason"] == "token_limit" and key in descendants
+                    and key not in visited, "token-limited answer lacks verified descendant repair")
+            visited.add(key)
+            repaired_jobs.add(job)
+            answers.extend(checked_refinement_children(document, source, enrollment, descendants[key], answer,
+                frontier, reports, key[1], descendants, visited, child_jobs, repaired_jobs))
         previous_end = end
+    require(parent["complete"] is all(child["answer_complete"] for child in parent["children"]),
+            "parent ending was relabelled from descendant results")
     require(previous_end == original["source_end"], "refinement lost original source tail")
     return answers
 
@@ -887,26 +1008,49 @@ def checked_frontier(document, source, enrollment, plan, result, reports):
         originals.append(answer)
     limited = {index for index, answer in enumerate(originals) if answer["generation"]["stop_reason"] == "token_limit"}
     refinement = result.get("refinement")
+    child_jobs, repaired_jobs, descendants, visited = set(), set(), {}, set()
+    split_count, deepest = len(limited), 1
     if limited:
-        require(type(refinement) is dict and refinement["version"] == 1 and refinement["enabled"] is True
+        levels = enrollment.get("refinement_levels", 1)
+        require(type(levels) is int and 1 <= levels <= 4, "invalid enrolled refinement depth")
+        require(type(refinement) is dict and type(refinement["version"]) is int
+                and refinement["version"] == (1 if levels == 1 else 2) and refinement["enabled"] is True
                 and refinement["complete"] is True and refinement["reason"] == "complete"
-                and refinement["maximum_refined_leaves"] == 16 and refinement["split_levels"] == 1
+                and refinement["maximum_refined_leaves"] == 16 and refinement["split_levels"] == levels
                 and 1 <= len(limited) <= 16 and refinement["eligible_leaves"] == refinement["refined_leaves"] == len(limited)
                 and refinement["original_parts"] == len(originals), "complete bounded refinement missing")
         parents = refinement["parents"]
         require(len(parents) == len(limited) and {parent["part_index"] for parent in parents} == limited,
                 "refinement omitted or duplicated an original failed leaf")
+        if levels > 1:
+            nested = refinement["descendants"]
+            require(type(nested) is list and len(parents) + len(nested) <= 16,
+                    "refinement exceeded shared split budget")
+            for parent in parents + nested:
+                address = parent["address"]
+                require(type(parent["part_index"]) is int and parent["part_index"] in limited
+                        and type(address) is list and len(address) < levels
+                        and all(type(bit) is int and bit in (0, 1) for bit in address)
+                        and type(parent["level"]) is int and parent["level"] == len(address) + 1,
+                        "refinement descendant address or level differs")
+            require(all(parent["address"] == [] for parent in parents), "original refinement root moved")
+            for child in nested:
+                key = (child["part_index"], tuple(child["address"]))
+                require(key[1] and key not in descendants, "duplicate or root descendant")
+                descendants[key] = child
+            split_count = len(parents) + len(nested)
+            deepest = max(parent["level"] for parent in parents + nested)
+            require(refinement["maximum_child_jobs"] == 32 and refinement["retained_splits"] == split_count
+                    and refinement["remaining_splits"] == 16 - split_count and refinement["deepest_level"] == deepest
+                    and refinement["unresolved_leaves"] == 0
+                    and refinement["source_admission_expires_unix_seconds"] == enrollment["expires_at_unix_seconds"],
+                    "refinement shared accounting or original expiry differs")
         replacements = {}
         for parent in parents:
             index, original = parent["part_index"], originals[parent["part_index"]]
-            require(parent["parent_job_id"] == original["job_id"]
-                    and parent["parent_report_sha256"] == original["report_sha256"]
-                    and parent["parent_source_start"] == original["source_start"]
-                    and parent["parent_source_end"] == original["source_end"]
-                    and parent["complete"] is True and len(parent["children"]) == 2,
-                    "refinement did not retain exact failed parent")
             replacements[index] = checked_refinement_children(document, source, enrollment, parent,
-                                                              original, refinement["answers"], reports)
+                original, refinement["answers"], reports, (), descendants, visited, child_jobs, repaired_jobs)
+        require(visited == set(descendants), "unreachable or unnecessary descendant claimed")
         frontier = [child for index, original in enumerate(originals) for child in replacements.get(index, [original])]
         require(refinement["answers"] == frontier, "reported refinement is not the exact effective frontier")
     else:
@@ -920,15 +1064,19 @@ def checked_frontier(document, source, enrollment, plan, result, reports):
     require(previous_end == len(source), "effective frontier omitted original tail")
     incomplete_jobs = {key for key, record in reports.items()
                        if any(output["generation"]["stop_reason"] != "eos" for output in record["report"]["outputs"])}
-    require(incomplete_jobs == {originals[index]["job_id"] for index in limited},
+    require(incomplete_jobs == {originals[index]["job_id"] for index in limited} | repaired_jobs,
             "an incomplete child or synthesis output was accepted")
-    used = {answer["job_id"] for answer in originals + frontier}
+    used = {answer["job_id"] for answer in originals + frontier} | child_jobs
     used.update(answer["job_id"] for level in result["synthesis"]["levels"] for answer in level["answers"])
     require(used == set(reports), "a native receipt lies outside the original/refinement/synthesis frontier")
     check_synthesis_frontier(document, enrollment, result, reports, frontier)
-    return dict(version=1, enabled=True, applied=bool(limited), original_parts=len(originals),
+    summary = dict(version=1, enabled=True, applied=bool(limited), original_parts=len(originals),
         refined_leaves=len(limited), effective_parts=len(frontier), original_token_limited_outputs=len(limited),
         exact_frontier_verified=True)
+    if refinement is not None and refinement["version"] == 2:
+        summary.update(version=2, retained_splits=split_count, deepest_level=deepest,
+                       intermediate_token_limited_outputs=len(repaired_jobs))
+    return summary
 
 
 def retained_result(document, fixture, layout, observed):
@@ -1152,16 +1300,24 @@ def check_evidence(value, revision, source_pins=None):
                 and value["result"]["model_fingerprint"] == selected_model()["fingerprint"],
                 "discovered evidence selection differs")
         refinement = value["result"]["refinement"]
+        extra = {"retained_splits", "deepest_level", "intermediate_token_limited_outputs"} if refinement.get("version") == 2 else set()
         require(set(refinement) == {"version", "enabled", "applied", "original_parts", "refined_leaves",
-                    "effective_parts", "original_token_limited_outputs", "exact_frontier_verified"}
-                and refinement["version"] == 1 and refinement["enabled"] is True
+                    "effective_parts", "original_token_limited_outputs", "exact_frontier_verified"} | extra
+                and type(refinement["version"]) is int and refinement["version"] in (1, 2) and refinement["enabled"] is True
                 and refinement["exact_frontier_verified"] is True
                 and type(refinement["refined_leaves"]) is int and 0 <= refinement["refined_leaves"] <= 16
                 and refinement["applied"] is (refinement["refined_leaves"] > 0)
                 and refinement["original_parts"] == value["result"]["total_parts"]
-                and refinement["effective_parts"] == refinement["original_parts"] + refinement["refined_leaves"]
+                and refinement["effective_parts"] == refinement["original_parts"] + refinement.get("retained_splits", refinement["refined_leaves"])
                 and refinement["original_token_limited_outputs"] == refinement["refined_leaves"],
                 "discovered refinement evidence differs")
+        if extra:
+            require(type(refinement["retained_splits"]) is int
+                    and 1 <= refinement["refined_leaves"] <= refinement["retained_splits"] <= 16
+                    and type(refinement["deepest_level"]) is int and 1 <= refinement["deepest_level"] <= 4
+                    and type(refinement["intermediate_token_limited_outputs"]) is int
+                    and refinement["intermediate_token_limited_outputs"] == refinement["retained_splits"] - refinement["refined_leaves"],
+                    "multi-level refinement evidence accounting differs")
     require(value["source_revision"] == revision and value["success"] is True
             and all(value[field] is False for field in FALSE_SCOPE), "cooperative proof scope overstated")
     selected = pins() if source_pins is None else source_pins

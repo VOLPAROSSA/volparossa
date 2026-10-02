@@ -47,7 +47,7 @@ agent_cooperative_browser_run() {
     done
     set -- --model-profile smollm2-135m-v1 --provider-key "$jobs_key_a" --provider-key "$jobs_key_b"
     if [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
-        set -- --model-profile smollm2-360m-v1 --discover-peers --refine-incomplete
+        set -- --model-profile smollm2-360m-v1 --discover-peers --refine-incomplete --refinement-levels 4
     fi
     PHASE=agent-cooperative-browser-service
     systemd-run --no-block --unit="$cooperative_unit" --slice=system.slice --service-type=exec \
