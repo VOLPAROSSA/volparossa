@@ -270,7 +270,14 @@ feature branches are not implied to be integrated into `main`.
   ordinary OpenCloud account/ACL recovery, writes, sharing, synchronization or
   general server-independent OpenCloud availability.
 - [ ] The separate `cloud-private-upload` acceptance sibling is prepared against
-  Cloud `311f6070dc8950a75133567a9eff724e975593b6`, not yet executed. It keeps the
+  Cloud `311f6070dc8950a75133567a9eff724e975593b6`. Its first exact-source
+  [run `37070505538`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37070505538)
+  on core `4950e1013e074cad60ec3c0ff9cb89dcdd1a4854` failed **before VM startup**:
+  the shared public-training self-test expected two historical README sentences
+  that the documentation rewrite had removed. No upload, model or network trial
+  ran; this is not a Cloud runtime result. Original job `111048578923` log SHA-256:
+  `0e7f67a3009510fca28ecb31a5069f927ba8ab40decf9052de4eeea493d30b0e`.
+  The candidate keeps the
   preceding read-only proof/pins unchanged and requires an original Files/Uppy
   upload of 262,145 synthetic bytes, actual owner GPG encryption, three 128-KiB
   fragments with the core's two-copy target, retained owner catalogs, a stopped
