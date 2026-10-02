@@ -90,6 +90,31 @@ RPC_EVENT_CODES = frozenset(("COMPUTE_RPC_LOCAL_REQUEST_FAILED", "COMPUTE_RPC_LO
     "COMPUTE_RPC_CHALLENGE_FAILED", "COMPUTE_RPC_PREEXPORT_CHECK_FAILED", "COMPUTE_RPC_SIGNED_EXCHANGE_FAILED",
     "COMPUTE_RPC_REPLY_BINDING_FAILED", "COMPUTE_RPC_PROVIDER_CLOSE_FAILED", "COMPUTE_RPC_ROUTE_CLOSE_FAILED",
     "COMPUTE_RPC_FINAL_POLICY_FAILED"))
+# Preserve fixed discovery rejection reasons, not arbitrary event names or raw errors.
+# These are event counts, not distinct failed exchanges; one exchange may emit several.
+DISCOVERY_FAILURE_EVENT_CODES = frozenset((
+    "CONTENT_DISCOVERY_CONTROL_CONNECTION_LOST", "CONTENT_DISCOVERY_RESPONSE_AUTHORITY_REJECTED",
+    "CONTENT_DISCOVERY_RESPONSE_TARGETS_UNAVAILABLE", "CONTENT_DISCOVERY_RESPONSE_OFFER_REJECTED",
+    "CONTENT_DISCOVERY_RESPONSE_REJECTED", "CONTENT_DISCOVERY_DIAL_FAILED",
+    "CONTENT_DISCOVERY_RPC_TIMED_OUT", "CONTENT_DISCOVERY_CONNECTION_CLOSED",
+    "CONTENT_DISCOVERY_PROTOCOL_UNSUPPORTED", "CONTENT_DISCOVERY_RPC_IO_FAILED",
+    "CONTENT_DISCOVERY_RELAY_NONCE_INVALID", "CONTENT_DISCOVERY_RELAY_SERVICE_UNAVAILABLE",
+    "CONTENT_DISCOVERY_RELAY_AUTHORITY_UNAVAILABLE", "CONTENT_DISCOVERY_RELAY_SELF_REJECTED",
+    "CONTENT_DISCOVERY_RELAY_CONNECTION_INVALID", "CONTENT_DISCOVERY_RELAY_QUEUE_FULL",
+    "CONTENT_DISCOVERY_RELAY_REPLAY_FULL", "CONTENT_DISCOVERY_RELAY_REPLAY_REJECTED",
+    "CONTENT_DISCOVERY_RELAY_QUERY_REJECTED", "CONTENT_DISCOVERY_LIMIT_INVALID",
+    "CONTENT_DISCOVERY_CALLER_CLOSED", "CONTENT_DISCOVERY_CLIENT_ROLE_REJECTED",
+    "CONTENT_DISCOVERY_CLIENT_QUEUE_FULL", "CONTENT_DISCOVERY_CONTROL_MISSING",
+    "CONTENT_DISCOVERY_CONTROL_SELF_REJECTED", "CONTENT_DISCOVERY_CONTROL_EXPIRED",
+    "CONTENT_DISCOVERY_CONTROL_LIFETIME_SHORT", "CONTENT_DISCOVERY_CONNECTION_REGISTRY_POISONED",
+    "CONTENT_DISCOVERY_CONNECTION_ABSENT", "CONTENT_DISCOVERY_CONNECTION_NO_DIRECT",
+    "CONTENT_DISCOVERY_REQUEST_REJECTED", "CONTENT_DISCOVERY_LOCAL_DEADLINE",
+    "CONTENT_EXACT_ADDRESS_UNAVAILABLE"))
+# Lifecycle observations are separate: registration/withdrawal need not be a failure.
+PROVIDER_LIFECYCLE_EVENT_CODES = frozenset(("CONTENT_PROVIDER_REGISTERED",
+    "CONTENT_PROVIDER_WITHDRAWN", "CONTENT_PROVIDER_REGISTRATION_EXPIRED",
+    "CONTENT_PROVIDER_REGISTRATION_RETRY_PENDING", "CONTENT_PROVIDER_REGISTRATION_RECOVERED",
+    "CONTENT_PROVIDER_REGISTRATION_FAILED"))
 ANSWER_JOININGS = frozenset(("ordered_source_ranges_not_neural_synthesis", "single_source_answer",
     "hierarchical_peer_synthesis", "hierarchical_peer_synthesis_incomplete",
     "incomplete_fragment_answers", "awaiting_fragments_before_peer_synthesis"))
@@ -542,18 +567,24 @@ def closed_rpc_events(path, baseline, query_code):
                 and stat.S_IMODE(info.st_mode) == 0o600 and info.st_uid == os.geteuid(), "invalid private RPC event file")
         records = []
         counts = dict.fromkeys(sorted(RPC_EVENT_CODES), 0)
+        discovery_counts = dict.fromkeys(sorted(DISCOVERY_FAILURE_EVENT_CODES), 0)
+        provider_counts = dict.fromkeys(sorted(PROVIDER_LIFECYCLE_EVENT_CODES), 0)
         for line in path.read_text(encoding="ascii").splitlines():
             match = re.fullmatch(r"([0-9]{1,20})\tlevel=([0-9])\tevent=([A-Z0-9_]{1,96})\tsession=[0-9a-f]{0,64}\tpath=(?:-|[0-9]{1,10})", line)
             require(match is not None, "invalid bounded RPC event record")
             timestamp = int(match[1])
             require(timestamp > 0 and (not records or timestamp >= records[-1]), "RPC event clock regressed")
             records.append(timestamp)
-            if timestamp > baseline and match[3] in counts:
-                counts[match[3]] += 1
+            if timestamp > baseline:
+                for group in (counts, discovery_counts, provider_counts):
+                    if match[3] in group:
+                        group[match[3]] += 1
         require(len(records) <= 1000, "RPC event ring exceeded")
         return dict(state="valid", baseline_unix_ms=baseline, limit=1000, records=len(records),
             window_covers_baseline=bool(records) and records[0] <= baseline,
-            matching_failures=sum(counts.values()), counts=counts)
+            matching_failures=sum(counts.values()), counts=counts,
+            discovery_failure_events=sum(discovery_counts.values()), discovery_counts=discovery_counts,
+            provider_lifecycle_counts=provider_counts)
     except FileNotFoundError:
         return dict(state="absent")
     except (OSError, ValueError, UnicodeError):

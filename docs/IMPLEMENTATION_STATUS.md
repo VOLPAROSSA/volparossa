@@ -70,15 +70,25 @@ Last updated: 2026-10-02
 
 ### Cooperative browser execution
 
-The latest exact-source [run `37048803131`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37048803131)
-on `b6f054b4` is terminal failed before compute: `JOBS_ROUTE_UNAVAILABLE`, after
-successful model provisioning, without workers or refinement receipts. The underlying
-route reason is absent, not inferred; cleanup leaves zero objects and matching network
-state. The fixture now retains closed route-selection diagnostics for both cooperative
-applications without changing selection, retry budgets or proof gates. Fifteen route,
-eighteen Browser and eight Code fixture checks and targeted shell lint pass; no new
-real-route or model-recovery success is claimed. Original failure details remain in
-[the scoped evidence record](COOPERATIVE_BROWSER.md).
+The latest exact-source [run `37052601519`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37052601519)
+on `abb30f34` remains failed: initial protected routing succeeds and four workers are
+observed, but only two of four terminal receipts are retained. One original answer
+reaches EOS and one its token limit; refinement, synthesis and joined browser completion
+remain unproved. Retained-Poll reconciliation fails with `exchange_unconfirmed`; the
+limited client-agent ring records 48 discovery failures but not their underlying reason.
+Normal task cleanup is unconfirmed. Final fixture teardown leaves zero objects and
+identical host-state snapshots; that does not replace missing terminal receipts.
+The candidate retains existing closed discovery reasons and separate provider-lifecycle
+counts without changing TTL, lineage, retry budgets or proof gates. Nineteen focused
+Browser fixture checks pass; no live recovery success is claimed. Original failure
+details and hashes remain in [the scoped evidence record](COOPERATIVE_BROWSER.md).
+
+An independently reproduced listener-lifecycle fault is fixed in the candidate:
+temporary discovery-registration Busy/Timeout preserves the same listener and compute
+registry, retrying on its existing 60-second clock without extending advertisement
+authority. Fatal errors still close it. Two actual TCP/TLS/signed-framing regression
+tests and five relay/policy tests pass, together with formatter and strict agent
+Clippy. This does not establish the earlier run's cause or complete live peer recovery.
 
 The 2026-10-02 integration candidate reconciles this public service with main
 `b51cdb21820453289346f6c4fcc130f951ae4173`, retaining the private-conversation/Qwen

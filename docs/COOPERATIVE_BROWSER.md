@@ -1,8 +1,9 @@
 # Cooperative browser: real public peer execution
 
-Status: implemented candidate; the latest discovered-360M KVM attempt confirms both
-original terminal receipts and cleanup, but one answer reaches its generation limit.
-The joined browser result, synthesis and cancellation proof remain incomplete. Local
+Status: implemented candidate; the latest discovered-360M KVM attempt starts four
+workers but retains only two terminal receipts. Retained-Poll discovery fails, so normal
+task cleanup remains unconfirmed; final disposable-fixture teardown succeeds. The
+joined browser result, synthesis and cancellation proof remain incomplete. Local
 fixture checks are not a browser, model or network execution claim.
 
 The public browser integration has a separate socket and panel from private local
@@ -221,3 +222,60 @@ cooperative Browser and Code exports, without raw stderr, identities, paths or i
 Selection, retries, deadlines and acceptance requirements are unchanged. Fifteen route
 contract tests, eighteen Browser tests, eight Code tests and targeted shell lint pass;
 these checks do not prove that a real route or complete answer is now available.
+
+## Discovery failures during retained-job recovery
+
+[Run `37052601519`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37052601519)
+on `abb30f3495d3690b8e3a3ab238f44c170f7eb876` remains **failed**. Initial protected
+route setup completes (`SELECTED` / `CONNECTED`). The observer sees four actual workers,
+but the retained task contains four handles and only two terminal receipts. Of the two
+original leaf answers, one reaches EOS and one reaches its token limit. No completed
+refinement result, synthesis, displayed answer or live cancellation proof is retained.
+
+Reconciliation attempts both outstanding handles but records a `peer_rpc` error at
+`poll` with `exchange_unconfirmed`. The bounded event window retains 48
+`COMPUTE_RPC_DISCOVERY_FAILED` events; it does not cover the original phase baseline.
+That source version did not export the underlying discovery reason. These records
+therefore do not identify expiry, connection invalidation, missing targets or provider
+withdrawal as the particular cause. They also do not establish the quality or completion
+of the unjoined child outputs. The browser reports `first-task / cleanup_unconfirmed`;
+the observer ends at `completion_check` without its specific invariant reason retained.
+
+The workflow acceptance step correctly fails first on the nonzero topology exit status;
+the report checker is not reached. Final fixture teardown succeeds with zero owned
+objects and all private-job cleanup checks true. This later forced cleanup does not
+substitute for the missing signed terminal receipts or confirmed normal task cleanup.
+The original records remain unchanged:
+
+- Artifact ZIP SHA-256: `fce562e1f8642dacf87f65d0a9b05378168d0923dec547722dafa95b39fc0461`.
+- Job log SHA-256: `41cbb9c004739f3d1b6d15767451294bc4e02886cd2582913e8605d29163ebbe`.
+- Closed diagnostic SHA-256: `916a7fe1121f1403ae1424700f133dba640c970bb427016f276430bc56e8d45e`.
+- Both host-state snapshots SHA-256: `c5053b9c0181fbefc2f08bed05e7e5a27942320807eaeafaedfa3d7f89168fa0`.
+
+The next source candidate additionally exports allowlisted counts of the existing
+`CONTENT_DISCOVERY_*` / `CONTENT_EXACT_*` failure reasons and, separately, provider
+registration/withdrawal/expiry events. The 1,000-record ring bound, phase baseline and
+coverage flag remain unchanged. Counts describe events, not distinct failed exchanges;
+one exchange can emit several codes. The sampled ring is the client agent's, not an
+inventory of the provider agents' logs. An absent event is not evidence that a provider
+remained registered. No event payload, identity, endpoint, session/path identifier,
+prompt or answer is exported. Nineteen focused Browser fixture checks pass, including
+distinct expiry/connection/target diagnostics and refusal of unknown/private data.
+These synthetic exporter checks do not fix or reclassify the original failed run.
+
+An independently reproduced service-lifecycle fault is now fixed: a temporary `Busy`
+or `Timeout` during advertisement renewal no longer permanently destroys the bound
+listener and its compute registration. Renewal retries on the existing 60-second
+clock; expired/withdrawn advertisements gain no additional authority, and clients
+retain their TTL, identity and policy checks. Invalid authority, invalidation, an
+unavailable service and a closed discovery channel still terminate the listener.
+Only the fixed CONTENT-key Kademlia publication failure is reclassified as temporary,
+after withdrawing its advertisement. Closed retry/recovery/failure events distinguish
+this lifecycle from successful job execution.
+
+Two asynchronous regression tests exercise actual local TCP/TLS and signed compute
+framing across both temporary and four fatal outcomes; their backend explicitly
+refuses inference. Five existing relay/policy lifecycle tests, formatter and strict
+agent-library/test Clippy also pass on this source. This proves listener ownership
+and recovery, not model execution or the cause of the earlier 48 discovery errors.
+The discovered-peer end-to-end trial remains required.

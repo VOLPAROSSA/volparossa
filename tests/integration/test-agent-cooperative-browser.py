@@ -536,6 +536,62 @@ class CooperativeBrowserProof(unittest.TestCase):
         self.assertLess(shell.index('logs --limit 1000'), shell.index('diagnostic "$WORK"'))
         self.assertNotIn('agent-cooperative-browser-rpc-events.private', CHECK['EXPORT_NAMES'])
 
+    def test_discovery_diagnostic_keeps_expiry_connection_and_target_failures_distinct(self):
+        # Synthetic producer events exercise the closed exporter, not a live lookup.
+        # The Rust lookup retains its own authority/connection/target enforcement.
+        cases = (
+            'CONTENT_DISCOVERY_CONTROL_EXPIRED',
+            'CONTENT_DISCOVERY_CONTROL_LIFETIME_SHORT',
+            'CONTENT_DISCOVERY_CONTROL_CONNECTION_LOST',
+            'CONTENT_DISCOVERY_RESPONSE_AUTHORITY_REJECTED',
+            'CONTENT_DISCOVERY_CONNECTION_ABSENT',
+            'CONTENT_DISCOVERY_RESPONSE_TARGETS_UNAVAILABLE',
+            'CONTENT_EXACT_ADDRESS_UNAVAILABLE',
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'rpc-events.private'
+            def event(stamp, code):
+                return f'{stamp}\tlevel=1\tevent={code}\tsession={"b" * 64}\tpath=2\n'
+            for cause in cases:
+                with self.subTest(cause=cause):
+                    path.write_text(event(99, cause) + event(101, cause)
+                        + event(102, 'COMPUTE_RPC_DISCOVERY_FAILED')
+                        + event(103, 'CONTENT_DISCOVERY_COMPLETED')
+                        + event(104, 'CONTENT_DISCOVERY_PRIVATE_UNKNOWN')
+                        + event(105, 'CONTENT_PROVIDER_REGISTERED')
+                        + event(106, 'CONTENT_PROVIDER_WITHDRAWN')
+                        + event(107, 'CONTENT_PROVIDER_REGISTRATION_EXPIRED')
+                        + event(108, 'CONTENT_PROVIDER_REGISTRATION_RETRY_PENDING')
+                        + event(109, 'CONTENT_PROVIDER_REGISTRATION_RECOVERED')
+                        + event(110, 'CONTENT_PROVIDER_REGISTRATION_FAILED'))
+                    path.chmod(0o600)
+                    value = CHECK['closed_rpc_events'](path, 100, 0)
+                    self.assertEqual(value['state'], 'valid')
+                    self.assertEqual(value['matching_failures'], 1)
+                    self.assertEqual(value['counts']['COMPUTE_RPC_DISCOVERY_FAILED'], 1)
+                    self.assertEqual(value['discovery_failure_events'], 1)
+                    self.assertEqual({key: count for key, count in value['discovery_counts'].items() if count},
+                                     {cause: 1})
+                    self.assertEqual(value['provider_lifecycle_counts'], {
+                        'CONTENT_PROVIDER_REGISTERED': 1, 'CONTENT_PROVIDER_WITHDRAWN': 1,
+                        'CONTENT_PROVIDER_REGISTRATION_EXPIRED': 1,
+                        'CONTENT_PROVIDER_REGISTRATION_RETRY_PENDING': 1,
+                        'CONTENT_PROVIDER_REGISTRATION_RECOVERED': 1,
+                        'CONTENT_PROVIDER_REGISTRATION_FAILED': 1})
+                    self.assertNotIn('PRIVATE', json.dumps(value))
+                    self.assertNotIn('b' * 64, json.dumps(value))
+                    self.assertNotIn('CONTENT_DISCOVERY_COMPLETED', json.dumps(value))
+            discovery = HERE.parents[1] / 'crates/volparossa-agent/src/discovery'
+            producer_source = ((discovery / 'content.rs').read_text()
+                + (discovery / 'content/exact.rs').read_text()
+                + (discovery.parent / 'content.rs').read_text())
+            producer_events = set(re.findall(r'"(CONTENT_[A-Z_]+)"', producer_source))
+            self.assertTrue(CHECK['DISCOVERY_FAILURE_EVENT_CODES'] <= producer_events)
+            self.assertTrue(CHECK['PROVIDER_LIFECYCLE_EVENT_CODES'] <= producer_events)
+            self.assertTrue(set(cases) <= CHECK['DISCOVERY_FAILURE_EVENT_CODES'])
+            self.assertTrue(CHECK['DISCOVERY_FAILURE_EVENT_CODES'].isdisjoint(CHECK['RPC_EVENT_CODES']))
+            self.assertTrue(CHECK['PROVIDER_LIFECYCLE_EVENT_CODES'].isdisjoint(CHECK['DISCOVERY_FAILURE_EVENT_CODES']))
+
     def test_coordinator_diagnostic_retains_only_closed_stage_and_cleanup_facts(self):
         value = dict(version=1, phase='tokenization', execution_ok=False,
             error_class='io_permission', rpc=None, local_cleanup_confirmed=False,
