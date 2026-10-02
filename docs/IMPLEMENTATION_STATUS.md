@@ -291,6 +291,51 @@ feature branches are not implied to be integrated into `main`.
   This proves selected owner-local read-only recovery through the original UI, not
   ordinary OpenCloud account/ACL recovery, writes, sharing, synchronization or
   general server-independent OpenCloud availability.
+- [ ] The separate `cloud-private-upload` acceptance sibling is prepared against
+  Cloud `3e3d6587012ed46d200218e4447506300f8a4f18`. Its first exact-source
+  [run `37070505538`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37070505538)
+  on core `4950e1013e074cad60ec3c0ff9cb89dcdd1a4854` failed **before VM startup**:
+  the shared public-training self-test expected two historical README sentences
+  that the documentation rewrite had removed. No upload, model or network trial
+  ran; this is not a Cloud runtime result. Original job `111048578923` log SHA-256:
+  `0e7f67a3009510fca28ecb31a5069f927ba8ab40decf9052de4eeea493d30b0e`.
+  After the fixture-source correction, [run `37072452868`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37072452868)
+  on `3b80003d3ca890abe7a07a1413c4e747ab043cc8` passed preflight but failed during
+  guest UI provisioning: Cloud's patch applied, but its bytes did not equal the
+  builder's required canonical `git diff --binary HEAD`. No UI build, topology,
+  upload or recovery proof completed. The five retained artifacts report cleanup
+  and unchanged host state as **unverified**, not passed. Original ZIP SHA-256:
+  `d925f19d5710aa3e44f26ba08d94dfde2719131c2e0e8bfbe45178a81e98fd2c`;
+  original job-log SHA-256:
+  `7298f3bff7f0a1bceddc5b972e3e6ef7ad5a71eb39b25ed812550aa3db5c7eeb`.
+  That failed run used Cloud `311f6070dc8950a75133567a9eff724e975593b6`.
+  The new pin canonicalizes patch metadata, order and empty context prefixes;
+  all eight resulting upstream files remain byte-identical. Two local tests
+  exercise the unchanged actual builder guard: the canonical patch passes and
+  an applicable noncanonical patch is rejected. This fixes source admission,
+  not proof of the still-uncompleted upload/recovery trial.
+  The subsequent exact-source [run `37074744602`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37074744602)
+  on `0a47980d39b719c24cf702e9f32c0c924c4fce42` passed the original Web-UI
+  build/provisioning but stopped at `FRAGMENTS_ROUTE_UNAVAILABLE` before providers,
+  baseline import or native upload started. There were 24 connect attempts and 23
+  retries; only the last code, `NO_ELIGIBLE_PATHS`, was retained. Private cleanup
+  passed with zero owned objects and identical disposable guest-root network
+  snapshots; there is no separate outer-host proof. ZIP SHA-256:
+  `fd9dc5aef44052eca09c59e3f55caaa850ddf2eb6278c6dc3c3c90aa4e6a6dfa`;
+  original job-log SHA-256:
+  `c57ecadc947baf7e9eda0f2833cc60766d99d2a2dc0a129a31f4b41a39b5c4a5`.
+  The exact preselection rejection is not known; no new Cloud attempt is inferred
+  from this result.
+  The candidate keeps the
+  preceding read-only proof/pins unchanged and requires an original Files/Uppy
+  upload of 262,145 synthetic bytes, actual owner GPG encryption, three 128-KiB
+  fragments with the core's two-copy target, retained owner catalogs, a stopped
+  and restarted service, removed local ciphertext and provider A offline before
+  two fresh-browser native downloads. The existing imported baseline must also
+  restore twice. All fourteen copies remain charged until confirmed retirement;
+  three existing 1-MiB stores, private cleanup and unchanged guest state are
+  independently checked. Pure fixture checks are not UI execution, peer proof,
+  writable synchronization or a general server-independent service claim.
 - [ ] Cooperative maintenance of current/future VOLPAROSSA organization repositories:
   actual coding jobs, independent immune review and exact-revision scoped GitHub
   publication. [Agreed scope](services/REPOSITORY_MAINTENANCE.md); no autonomous publisher,

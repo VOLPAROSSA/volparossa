@@ -21,6 +21,7 @@ signal_backup_fragments=no
 private_storage_fragments=no
 image_snapshot=no
 cloud_private_file=no
+cloud_private_upload=no
 agent_jobs_loss=no
 agent_jobs_follow=no
 agent_jobs_peer_recovery=no
@@ -79,6 +80,13 @@ print_plan() {
             '  native Signal checks messages, attachment hashes and screenshots after original ciphertext removal;' \
             '  verify retained receipts, delete remote copies, remove private profiles/keys/logs and restore guest state;' \
             '  registration/relink uses upstream local mock server; no server-free messaging or full-alpha claim.'
+        return
+    fi
+    if [ "$cloud_private_upload" = yes ]; then
+        printf '%s\n' \
+            'Cloud-private-upload: original Files/Uppy upload, actual GPG and protected fragment deposits;' \
+            '  original source off; restart service, remove local ciphertext, stop A, download twice via B/C;' \
+            '  exact quota, all-copy retirement and private cleanup; no general writable synchronization claim.'
         return
     fi
     if [ "$cloud_private_file" = yes ]; then
@@ -709,6 +717,7 @@ while [ "$#" -gt 0 ]; do
             private_storage_fragments=no
             image_snapshot=no
             cloud_private_file=no
+            cloud_private_upload=no
             download_sharing=no
             agent_jobs_loss=no
             agent_jobs_follow=no
@@ -741,6 +750,7 @@ while [ "$#" -gt 0 ]; do
                 private-storage-fragments) scenario=content-custody; private_storage_fragments=yes; wifi_link=no; uplink_link=no ;;
                 image-snapshot) scenario=content-custody; private_storage_fragments=yes; image_snapshot=yes; wifi_link=no; uplink_link=no ;;
                 cloud-private-file) scenario=content-custody; private_storage_fragments=yes; cloud_private_file=yes; wifi_link=no; uplink_link=no ;;
+                cloud-private-upload) scenario=content-custody; private_storage_fragments=yes; cloud_private_upload=yes; wifi_link=no; uplink_link=no ;;
                 agent-artifact-quarantine) scenario=agent-artifact; agent_train_loop=yes; agent_artifact_quarantine=yes; wifi_link=no; uplink_link=no ;;
                 agent-train-loop) scenario=agent-artifact; agent_train_loop=yes; wifi_link=no; uplink_link=no ;;
                 agent-train-cycle) scenario=agent-artifact; agent_train_cycle=yes; wifi_link=no; uplink_link=no ;;
@@ -980,7 +990,7 @@ if [ "$private_storage_fragments" = yes ]; then
             && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
     done
 fi
-if [ "$cloud_private_file" = yes ]; then
+if [ "$cloud_private_file" = yes ] || [ "$cloud_private_upload" = yes ]; then
     for cloud_fixture in cloud-private-file-smoke.sh cloud-private-file-smoke.py cloud-private-file-pins.json cloud-private-file-sdk.mjs cloud-private-file-ui.py \
         image-snapshot-smoke.py image-snapshot-pins.json; do
         [ -f "$source_directory/tests/integration/$cloud_fixture" ] \
@@ -988,6 +998,12 @@ if [ "$cloud_private_file" = yes ]; then
     done
     for cloud_tool in gpg gpg-agent gpgconf; do
         command -v "$cloud_tool" >/dev/null 2>&1 || exit 69
+    done
+fi
+if [ "$cloud_private_upload" = yes ]; then
+    for upload_fixture in cloud-private-upload-smoke.sh cloud-private-upload-smoke.py cloud-private-upload-pins.json; do
+        [ -f "$source_directory/tests/integration/$upload_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$upload_fixture" ] || exit 69
     done
 fi
 if [ "$image_snapshot" = yes ]; then
@@ -1269,8 +1285,15 @@ A02_EXIT_SOURCE=47.163.4.1
 # root filesystem so both transient units see and can execute the exact build.
 # Keep every nested AF_UNIX path below Linux SUN_LEN, including the longest
 # bootstrap control socket, while retaining a run-bound disposable root.
-WORK=$(mktemp -d "/opt/va.$RUN_ID.XXXXXX")
-case $WORK in /opt/va.*) ;; *) exit 69 ;; esac
+if [ "$cloud_private_upload" = yes ]; then
+    # Upload object identities add 39 bytes before GnuPG sockets. RUN_ID remains
+    # in every unit/report; cleanup still owns only this exact mktemp directory.
+    WORK=$(mktemp -d /opt/vu.XXXXXX)
+    case $WORK in /opt/vu.??????) ;; *) exit 69 ;; esac
+else
+    WORK=$(mktemp -d "/opt/va.$RUN_ID.XXXXXX")
+    case $WORK in /opt/va.*) ;; *) exit 69 ;; esac
+fi
 longest_control_socket=$WORK/runtime-bootstrap1/control/agent.sock
 [ "${#longest_control_socket}" -lt 108 ] || exit 69
 chmod 0700 "$WORK"
@@ -2314,6 +2337,8 @@ cleanup() {
         signal_backup_fragments_finalize_report "$original_status" || original_status=1
     elif [ "$signal_backup" = yes ]; then
         signal_backup_finalize_report "$original_status" || original_status=1
+    elif [ "$cloud_private_upload" = yes ]; then
+        cloud_private_upload_finalize_report "$original_status" || original_status=1
     elif [ "$cloud_private_file" = yes ]; then
         cloud_private_file_finalize_report "$original_status" || original_status=1
     elif [ "$image_snapshot" = yes ]; then
@@ -2503,6 +2528,10 @@ fi
 if [ "$image_snapshot" = yes ]; then
     # shellcheck source=tests/integration/image-snapshot-smoke.sh
     . "$source_directory/tests/integration/image-snapshot-smoke.sh"
+fi
+if [ "$cloud_private_upload" = yes ]; then
+    # shellcheck source=tests/integration/cloud-private-upload-smoke.sh
+    . "$source_directory/tests/integration/cloud-private-upload-smoke.sh"
 fi
 if [ "$cloud_private_file" = yes ]; then
     # shellcheck source=tests/integration/cloud-private-file-smoke.sh
@@ -2712,13 +2741,17 @@ if [ "$private_storage_fragments" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/private-storage-fragments-smoke.py" \
         "$WORK/bin/private-storage-fragments-smoke.py"
 fi
-if [ "$image_snapshot" = yes ] || [ "$cloud_private_file" = yes ]; then
+if [ "$image_snapshot" = yes ] || [ "$cloud_private_file" = yes ] || [ "$cloud_private_upload" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/image-snapshot-smoke.py" \
         "$WORK/bin/image-snapshot-smoke.py"
     install -o root -g root -m 0444 "$source_directory/tests/integration/image-snapshot-pins.json" \
         "$WORK/bin/image-snapshot-pins.json"
 fi
-if [ "$cloud_private_file" = yes ]; then
+if [ "$cloud_private_upload" = yes ]; then
+    install -o root -g root -m 0555 "$source_directory/tests/integration/cloud-private-upload-smoke.py" "$WORK/bin/cloud-private-upload-smoke.py"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/cloud-private-upload-pins.json" "$WORK/bin/cloud-private-upload-pins.json"
+fi
+if [ "$cloud_private_file" = yes ] || [ "$cloud_private_upload" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/cloud-private-file-smoke.py" \
         "$WORK/bin/cloud-private-file-smoke.py"
     install -o root -g root -m 0555 "$source_directory/tests/integration/cloud-private-file-sdk.mjs" \
@@ -6678,7 +6711,10 @@ if [ "$signal_backup" = yes ]; then
     signal_backup_run
     exit 0
 fi
-if [ "$cloud_private_file" = yes ]; then
+if [ "$cloud_private_upload" = yes ]; then
+    cloud_private_upload_run
+    exit 0
+elif [ "$cloud_private_file" = yes ]; then
     cloud_private_file_run
     exit 0
 fi
