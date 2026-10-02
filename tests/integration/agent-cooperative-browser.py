@@ -28,7 +28,8 @@ FILES = (
     "integration/VolparossaCooperativePanel.sys.mjs", "defaults/privacy.json",
 )
 EXPORT_NAMES = tuple(f"{NAME}-{suffix}.json" for suffix in (
-    "smoke", "evidence", "provision", "panel", "observation", "result", "cleanup", "input", "diagnostic")) + (
+    "smoke", "evidence", "provision", "panel", "observation", "result", "cleanup", "input", "diagnostic",
+    "route-diagnostic")) + (
     "a01-expected-peers.json", "agent-jobs-layout.json", "agent-jobs-provision.json", "agent-jobs-private-cleanup.json",
     "content-custody-fetch-live-selection.json", "content-custody-fetch-gates.json",
     "content-provider-custody-fetch-control.json",

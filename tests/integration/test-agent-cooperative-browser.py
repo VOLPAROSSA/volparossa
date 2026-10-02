@@ -774,6 +774,7 @@ agent_jobs_cgroup_empty() { return 0; }
         module = {"__name__": "cooperative_collect_test"}
         exec(compile(collector, "guest_diagnostics", "exec"), module)
         names = set(CHECK["EXPORT_NAMES"])
+        self.assertIn("agent-cooperative-browser-route-diagnostic.json", names)
         extras = {"host-state-before.json", "host-state-after.json", "guest-exit-status", "current-phase"}
         self.assertEqual(names | extras, module["COOPERATIVE_BROWSER_NAMES"])
         with tempfile.TemporaryDirectory() as temporary:
@@ -784,6 +785,8 @@ agent_jobs_cgroup_empty() { return 0; }
                 (out / name).write_text("{}\n")
             for name in ("runner.stdout", "agent-jobs-private.log", "agent-cooperative-browser-driver.log",
                          "agent-cooperative-browser-rpc-events.private",
+                         "agent-jobs-connect.err", "agent-jobs-paths.txt",
+                         "agent-cooperative-browser-route-diagnostic.part",
                          "input.json", "identity.key", "passphrase"):
                 (out / name).write_text("PRIVATE_DO_NOT_EXPORT\n")
             for scenario in ("agent-cooperative-browser", "agent-cooperative-browser-discovered"):

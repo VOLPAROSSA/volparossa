@@ -37,7 +37,8 @@ CODE_FILES = tuple("src/" + name for name in (
 BUNDLE_FILES = tuple("code/" + name for name in CODE_FILES) + (
     "runtime/opencode", "runtime/build-report.json", "runtime/node", "runtime/node-LICENSE")
 EXPORT_NAMES = tuple(f"{NAME}-{suffix}.json" for suffix in (
-    "smoke", "evidence", "provision", "input", "driver", "observation", "result", "cleanup", "diagnostic")) + (
+    "smoke", "evidence", "provision", "input", "driver", "observation", "result", "cleanup", "diagnostic",
+    "route-diagnostic")) + (
     "a01-expected-peers.json", "agent-jobs-layout.json", "agent-jobs-provision.json", "agent-jobs-private-cleanup.json",
     "content-custody-fetch-live-selection.json", "content-custody-fetch-gates.json",
     "content-provider-custody-fetch-control.json",

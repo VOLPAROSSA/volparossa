@@ -208,3 +208,16 @@ The bounded source-refinement implementation follows that failure; it cannot cha
 the historical result. Tokenizer-only preflight of both possible original ranges
 finds child prompts of 599/532 and 120/118 tokens respectively, within the unchanged
 1024-token profile. This establishes input fit, not successful model recovery.
+
+The next exact-source [run `37048803131`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37048803131)
+on `b6f054b4` fails before compute: `agent-jobs-source` reports `JOBS_ROUTE_UNAVAILABLE`
+after successful pinned model provisioning. No brokers, model receipts, refinement or
+synthesis started. The artifact does not retain the underlying route refusal or path-query
+reason; it does not establish a model/refinement failure. Cleanup leaves zero objects
+and identical before/after network-state hashes. Original artifact SHA-256:
+`5fc3a6b48cfe250e61f891da18283f4164fd32d76ffb39aeae6a3202880097c8`.
+The fixture now retains the existing closed route-stage/reason/count diagnostic in both
+cooperative Browser and Code exports, without raw stderr, identities, paths or input data.
+Selection, retries, deadlines and acceptance requirements are unchanged. Fifteen route
+contract tests, eighteen Browser tests, eight Code tests and targeted shell lint pass;
+these checks do not prove that a real route or complete answer is now available.

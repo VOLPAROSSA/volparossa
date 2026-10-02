@@ -54,7 +54,11 @@ Last updated: 2026-10-02
   pass. Actual pinned OpenCode also passes invalid/truncated-output cases with
   one coding submission each, zero retries/approvals/edits and confirmed cleanup.
   These controlled core replies are synthetic, not model-driven edit/test or
-  private-peer execution evidence. The original VM03 remains failed.
+  private-peer execution evidence. The original VM03 remains failed. The single
+  subsequent real-Qwen VM04 on Code `11a7063` also fails: the first native request
+  returns `invalid_output`, with zero retries, approvals, edits or test commands.
+  Private/runtime cleanup, QEMU/scratch removal and checked host routes/DNS pass.
+  The exact malformed output subtype is not retained; coding remains unproved.
 - [ ] Default network cooperation, shared improvement and protected private
   execution are required across integrations, not optional extras beside local
   AI. Local subagents/fallback do not fulfill this requirement. The existing
@@ -65,6 +69,16 @@ Last updated: 2026-10-02
   split tasks and signed RPC receipts do not protect against the executing host.
 
 ### Cooperative browser execution
+
+The latest exact-source [run `37048803131`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37048803131)
+on `b6f054b4` is terminal failed before compute: `JOBS_ROUTE_UNAVAILABLE`, after
+successful model provisioning, without workers or refinement receipts. The underlying
+route reason is absent, not inferred; cleanup leaves zero objects and matching network
+state. The fixture now retains closed route-selection diagnostics for both cooperative
+applications without changing selection, retry budgets or proof gates. Fifteen route,
+eighteen Browser and eight Code fixture checks and targeted shell lint pass; no new
+real-route or model-recovery success is claimed. Original failure details remain in
+[the scoped evidence record](COOPERATIVE_BROWSER.md).
 
 The 2026-10-02 integration candidate reconciles this public service with main
 `b51cdb21820453289346f6c4fcc130f951ae4173`, retaining the private-conversation/Qwen

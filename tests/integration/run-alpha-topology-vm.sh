@@ -916,7 +916,8 @@ CLOUD_NAMES = (FRAGMENTS_NAMES - {"private-storage-fragments-smoke.json", "priva
 
 
 COOPERATIVE_BROWSER_NAMES = {f"agent-cooperative-browser-{name}.json" for name in (
-    "smoke", "evidence", "provision", "panel", "observation", "result", "cleanup", "input", "diagnostic")
+    "smoke", "evidence", "provision", "panel", "observation", "result", "cleanup", "input", "diagnostic",
+    "route-diagnostic")
 } | {"a01-expected-peers.json", "agent-jobs-layout.json", "agent-jobs-provision.json",
      "agent-jobs-private-cleanup.json", "content-custody-fetch-live-selection.json",
      "content-custody-fetch-gates.json", "content-provider-custody-fetch-control.json",
