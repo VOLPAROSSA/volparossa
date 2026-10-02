@@ -1147,7 +1147,7 @@ The source-exact report checker also passes locally. Registration/relink still u
 upstream local mock server; this is not server-free Signal messaging, calling, independent
 hardware availability, automatic storage repair, reciprocal accounting or a full-alpha PASS.
 
-### Signal fragment-backup integration candidate — 2026-10-02
+### Signal fragment-backup integration and native recovery — 2026-10-02
 
 [Chat PR #3](https://github.com/VOLPAROSSA/volparossa-chat/pull/3), exact source
 `76bab5ba546206f1fa402e9b1120ffcab081f95b`, sends new native encrypted exports
@@ -1166,8 +1166,8 @@ a second non-consuming core restore, exact physical charges, all-copy retirement
 and complete private/network cleanup. An atomic test-only rendezvous places
 provider withdrawal between completed deposition and native restore. The old
 `signal-backup` source cohort and historical replica proof are retained unchanged.
-**No native fragment acceptance PASS is claimed yet.** This does not complete
-Signal messaging/calling, mobile clients, recovery UX or the full alpha.
+The source-exact native fragment trial below now **passes** these boundaries. This does
+not complete Signal messaging/calling, mobile clients, recovery UX or the full alpha.
 Core candidate `57eb59e18f2cf1e58cd5671169a4e8d961914d2e` was exercised in
 [run37056433170](https://github.com/VOLPAROSSA/volparossa/actions/runs/37056433170).
 The run is terminal failed during `signal-backup-provision`, before native
@@ -1185,8 +1185,29 @@ archive, removing its separate Tree API dependency. Ten focused source tests
 four pnpm tests pass; this is not a fresh upstream download or native launch.
 The provisioner retains only a closed phase/category/type/HTTP-status diagnostic
 after a failed, joined source process. Eleven provisioner and four fragment
-fixture checks pass. No historical failure is reclassified and native fragment
-restore remains unproved pending the next exact-source trial.
+fixture checks pass. No historical failure is reclassified.
+
+The corrected native fragment trial at core `3964c0916624d4cda35d7820bd44c85c1f728690`
+and Chat `78d3cb43ba10ce46cb60ea0a4ec18d962e64d190`,
+[run 37058891559](https://github.com/VOLPAROSSA/volparossa/actions/runs/37058891559),
+**passes** actual Signal encrypted export and import after provider A is stopped.
+The local 198,352-byte ciphertext is removed first. Four fragments (66,117, 66,117,
+66,117 and 1 byte), with two copies each across three providers, charge all 396,704
+payload bytes. B and C supply the surviving copies; Signal verifies messages,
+attachment plaintext hashes and screenshots. A second complete hash-verified restore
+does not consume the backup. The same original stores are reopened, all eight copies
+are explicitly retired, and final leases and charges are zero.
+
+The three original network-phase reports pass protected MPTCP/WireGuard route and privacy
+checks. Native processes join, all five private-cleanup checks pass and no owned topology
+objects remain. Before/after network snapshots of the disposable guest's root namespace
+are byte-identical (SHA-256 `8c5eb731f1d31b34f27ac13b09e8a1be3d30e7b8209eec747d05fbfdf40c5fe2`).
+The original source-exact evidence and report validators pass independently; all 44
+original artifacts are retained, ZIP SHA-256
+`398bf7736cc076fe09545d873e3314b7fd21c7feab678c7f6a2770a65da37383`.
+This does not prove independent hardware, automatic repair, reciprocal contribution
+credit, erasure coding, server-free Signal registration/delivery/calling or Electron's
+Chromium sandbox. The failed first trial and older whole-archive proof stay unchanged.
 
 ## Earlier milestone evidence
 
