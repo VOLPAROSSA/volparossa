@@ -204,6 +204,92 @@ class CooperativeBrowserProof(unittest.TestCase):
             with self.assertRaises(ValueError):
                 CHECK['check_execution_diagnostic'](bad)
 
+    def test_answer_counts_distinguish_execution_from_generation_without_exporting_content(self):
+        row = dict(text="PRIVATE_ANSWER", generated_tokens=64, text_truncated=False,
+                   generation=dict(version=1, stop_reason="eos", max_new_tokens=64))
+        rows = [row, dict(row, generation=dict(row["generation"], stop_reason="token_limit")),
+                dict(row, text_truncated=True), dict(row, text=" "), dict(text="PRIVATE_LEGACY"),
+                dict(row, generation=dict(row["generation"], stop_reason="json_boundary"))]
+        result = CHECK["answer_status_counts"](rows)
+        self.assertEqual(result["state"], "valid")
+        self.assertEqual(result["observed"], 6)
+        self.assertEqual(result["counts"], dict(eos=1, token_limit=1, wire_truncated=1, empty=1,
+                                               legacy_unknown=1, json_boundary=1, invalid_or_unknown=0))
+        rows += [dict(row, answer_status="token_limit"), dict(row, generation={"stop_reason": "PRIVATE_REASON"})]
+        result = CHECK["answer_status_counts"](rows)
+        self.assertEqual(result["state"], "incomplete")
+        self.assertEqual(result["counts"]["invalid_or_unknown"], 2)
+        self.assertNotIn("PRIVATE", json.dumps(result))
+        self.assertEqual(CHECK["answer_status_counts"](None), dict(state="absent"))
+        self.assertEqual(CHECK["answer_status_counts"]({}), dict(state="invalid"))
+        self.assertEqual(CHECK["answer_status_counts"]([row] * 16385), dict(state="invalid"))
+
+    def test_retained_answer_diagnostic_is_additive_closed_and_explicit_about_missing_data(self):
+        row = dict(text="PRIVATE_ANSWER", generated_tokens=64, text_truncated=False,
+                   generation=dict(version=1, stop_reason="token_limit", max_new_tokens=64))
+        value = dict(version=2, operation="compute_public_document", complete=False,
+            execution_complete=True, answer_complete=False, interrupted=False,
+            joining="hierarchical_peer_synthesis_incomplete", answers=[row],
+            public_question="PRIVATE_QUESTION", provider_key="PRIVATE_ID", private_path="/PRIVATE_PATH",
+            synthesis=dict(reason="worker_output_hit_token_limit", levels=[dict(level=1, answers=[row])]))
+        with tempfile.TemporaryDirectory() as temporary:
+            task = Path(temporary)
+            project = lambda: CHECK["closed_answer_diagnostic"](task)
+            self.assertEqual(project(), dict(state="absent"))
+            document = task / "document"
+            document.mkdir(mode=0o700)
+            self.assertEqual(project(), dict(state="absent"))
+            path = document / "result.json"
+            def save(report):
+                path.write_text(json.dumps(report))
+                path.chmod(0o600)
+            save(value)
+            projected = project()
+            self.assertEqual(projected["state"], "valid")
+            status = projected["status"]
+            self.assertTrue(status["execution_complete"])
+            self.assertFalse(status["answer_complete"])
+            self.assertEqual(status["synthesis"]["reason"], "worker_output_hit_token_limit")
+            self.assertEqual(status["leaf_answers"]["counts"]["token_limit"], 1)
+            self.assertEqual(status["synthesis"]["levels"][0]["answers"]["counts"]["token_limit"], 1)
+            self.assertNotIn("PRIVATE", json.dumps(projected))
+            # Existing consumers keep their exact execution status schema and meaning.
+            original = dict(state="valid", status={"existing": "unchanged"})
+            with mock.patch.dict(CHECK["coordinator_diagnostic"].__globals__, {
+                    "task_roots": lambda _state: [task], "closed_execution": lambda _path: original}):
+                entry = CHECK["coordinator_diagnostic"](task)["tasks"][0]
+            self.assertEqual({key: entry[key] for key in original}, original)
+            self.assertEqual(entry["answer_diagnostic"], projected)
+            partial = copy.deepcopy(value)
+            partial.pop("interrupted")
+            partial["joining"] = "PRIVATE_JOINING"
+            partial["synthesis"]["reason"] = "PRIVATE_REASON"
+            partial["synthesis"]["levels"][0].pop("answers")
+            save(partial)
+            projected = project()
+            self.assertEqual(projected["state"], "incomplete")
+            self.assertIsNone(projected["status"]["interrupted"])
+            self.assertIsNone(projected["status"]["joining"])
+            self.assertIsNone(projected["status"]["synthesis"]["reason"])
+            self.assertEqual(projected["status"]["synthesis"]["levels"][0]["answers"], dict(state="absent"))
+            self.assertNotIn("PRIVATE", json.dumps(projected))
+            for mutation in (lambda bad: bad.update(operation="PRIVATE_OPERATION"),
+                             lambda bad: bad["synthesis"].update(levels=[dict(level=17)]),
+                             lambda bad: bad["synthesis"].update(levels=[dict(level=1)] * 17)):
+                bad = copy.deepcopy(value)
+                mutation(bad)
+                save(bad)
+                self.assertEqual(project(), dict(state="invalid"))
+            save(value)
+            path.chmod(0o644)
+            self.assertEqual(project(), dict(state="invalid"))
+            path.unlink()
+            outside = task / "outside.json"
+            outside.write_text(json.dumps(value))
+            outside.chmod(0o600)
+            path.symlink_to(outside)
+            self.assertEqual(project(), dict(state="invalid"))
+
     def test_guest_account_home_is_created_only_when_absent_and_removed_only_when_owned_and_empty(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -334,7 +420,8 @@ agent_jobs_cgroup_empty() { return 0; }
         source = (HERE / "run-alpha-topology-vm.sh").read_text()
         driver = source.split("<<'GUEST_DRIVER_SCRIPT'\n", 1)[1].split("\nGUEST_DRIVER_SCRIPT\n", 1)[0]
         subprocess.run(["sh", "-n"], input=driver, text=True, check=True)
-        self.assertIn("agent-cooperative-browser.py export-names", driver)
+        self.assertIn('if [ "$scenario" = agent-cooperative-browser ] || [ "$scenario" = agent-cooperative-code ]; then', driver)
+        self.assertIn('"tests/integration/$scenario.py" export-names', driver)
         self.assertIn("libgtk-3-0t64", driver)
 
 

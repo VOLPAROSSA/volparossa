@@ -88,6 +88,14 @@ RPC_EVENT_CODES = frozenset(("COMPUTE_RPC_LOCAL_REQUEST_FAILED", "COMPUTE_RPC_LO
     "COMPUTE_RPC_CHALLENGE_FAILED", "COMPUTE_RPC_PREEXPORT_CHECK_FAILED", "COMPUTE_RPC_SIGNED_EXCHANGE_FAILED",
     "COMPUTE_RPC_REPLY_BINDING_FAILED", "COMPUTE_RPC_PROVIDER_CLOSE_FAILED", "COMPUTE_RPC_ROUTE_CLOSE_FAILED",
     "COMPUTE_RPC_FINAL_POLICY_FAILED"))
+ANSWER_JOININGS = frozenset(("ordered_source_ranges_not_neural_synthesis", "single_source_answer",
+    "hierarchical_peer_synthesis", "hierarchical_peer_synthesis_incomplete",
+    "incomplete_fragment_answers", "awaiting_fragments_before_peer_synthesis"))
+SYNTHESIS_REASONS = frozenset(("worker_output_was_wire_truncated", "worker_produced_empty_answer",
+    "legacy_generation_end_unknown", "worker_output_hit_token_limit", "cancelled", "peer_work_pending",
+    "reduction_did_not_shrink_no_inputs_discarded", "hierarchy_budget_no_inputs_discarded"))
+ANSWER_STATUSES = ("eos", "json_boundary", "token_limit", "wire_truncated", "empty",
+                   "legacy_unknown", "invalid_or_unknown")
 
 
 def sha(raw):
@@ -306,10 +314,92 @@ def closed_execution(path):
         return dict(state='invalid')
 
 
+def answer_status_counts(rows):
+    """Closed observations only; neither generation validation nor task-success authority."""
+    if rows is None:
+        return dict(state="absent")
+    if type(rows) is not list or len(rows) > 16384:
+        return dict(state="invalid")
+    counts = dict.fromkeys(ANSWER_STATUSES, 0)
+    for row in rows:
+        status = "invalid_or_unknown"
+        if type(row) is dict:
+            generation = row.get("generation")
+            if "generation" not in row:
+                status = "legacy_unknown"
+            elif (type(generation) is dict and generation.get("stop_reason") in
+                    ("eos", "json_boundary", "token_limit") and type(row.get("text")) is str
+                    and type(row.get("text_truncated")) is bool):
+                # Same presentation precedence as peer/batch/output.rs; text is never exported.
+                status = ("wire_truncated" if row["text_truncated"] else
+                          "empty" if not row["text"].strip() else generation["stop_reason"])
+            if "answer_status" in row and row["answer_status"] != status:
+                status = "invalid_or_unknown"
+        counts[status] += 1
+    return dict(state="incomplete" if counts["invalid_or_unknown"] else "valid",
+                observed=len(rows), counts=counts)
+
+
+def closed_answer_diagnostic(task):
+    """Project the original retained report, not the compact IPC answer or guessed failure text.
+
+    `valid` means the diagnostic could be projected, never that the answer is complete.
+    No receipt revalidation, new inference or recursive journal search occurs here.
+    """
+    try:
+        document = task / "document"
+        directory = document.lstat()
+        require(stat.S_ISDIR(directory.st_mode) and stat.S_IMODE(directory.st_mode) == 0o700
+                and directory.st_uid == task.stat().st_uid, "invalid retained document directory")
+        path = document / "result.json"
+        info = path.lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= 8 * 1048576
+                and stat.S_IMODE(info.st_mode) == 0o600 and info.st_uid == directory.st_uid,
+                "invalid retained document result")
+        value = read(path, 8 * 1048576)
+        require(type(value) is dict and type(value.get("version")) is int and value["version"] in (1, 2)
+                and value.get("operation") == "compute_public_document", "invalid document result kind")
+        incomplete = False
+        status = dict(version=1)
+        for name in ("complete", "execution_complete", "answer_complete", "interrupted"):
+            status[name] = value.get(name) if type(value.get(name)) is bool else None
+            incomplete |= status[name] is None
+        joining = value.get("joining")
+        status["joining"] = joining if type(joining) is str and joining in ANSWER_JOININGS else None
+        incomplete |= status["joining"] is None
+        status["leaf_answers"] = answer_status_counts(value.get("answers"))
+        incomplete |= status["leaf_answers"]["state"] != "valid"
+        synthesis = value.get("synthesis")
+        status["synthesis"] = dict(state="absent")
+        if "synthesis" in value:
+            require(type(synthesis) is dict, "invalid retained synthesis")
+            reason = synthesis.get("reason")
+            known_reason = reason is None or (type(reason) is str and reason in SYNTHESIS_REASONS)
+            levels = synthesis.get("levels")
+            require(type(levels) is list and len(levels) <= 16, "invalid retained synthesis levels")
+            projected, seen = [], set()
+            for level in levels:
+                require(type(level) is dict and type(level.get("level")) is int
+                        and 1 <= level["level"] <= 16 and level["level"] not in seen,
+                        "invalid retained synthesis level")
+                seen.add(level["level"])
+                counts = answer_status_counts(level.get("answers"))
+                incomplete |= counts["state"] != "valid"
+                projected.append(dict(level=level["level"], answers=counts))
+            status["synthesis"] = dict(state="valid" if known_reason else "incomplete",
+                reason=reason if known_reason else None, levels=projected)
+            incomplete |= not known_reason
+        return dict(state="incomplete" if incomplete else "valid", status=status)
+    except FileNotFoundError:
+        return dict(state="absent")
+    except (OSError, ValueError, KeyError, TypeError):
+        return dict(state="invalid")
+
+
 def coordinator_diagnostic(state):
     try:
         tasks = task_roots(state)
-        return dict(state='valid', tasks=[dict(ordinal=index + 1,
+        return dict(state='valid', tasks=[dict(ordinal=index + 1, answer_diagnostic=closed_answer_diagnostic(task),
             **closed_execution(task / 'execution-diagnostic.json')) for index, task in enumerate(tasks)])
     except FileNotFoundError:
         return dict(state='absent')
