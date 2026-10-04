@@ -2354,7 +2354,7 @@ mod tests {
                     snapshot.direct_relays[0].clone(),
                 ),
                 InvalidSnapshotReason::SubjectSet => {
-                    snapshot.preselection_subjects.available = false
+                    snapshot.preselection_subjects.available = false;
                 }
                 InvalidSnapshotReason::DirectBinding => {
                     snapshot.direct_relays[0].capability.expires_at_ms = sampled_at_ms;

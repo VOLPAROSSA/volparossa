@@ -83,6 +83,13 @@ The combined candidate passes 28 focused Rust sampler/snapshot/admission checks,
 VM contracts and the static KVM runner contract. The actual argument parser and
 dispatch matrix keep browser, native-editor, cooperative-Code and Wi-Fi restart
 inputs separate. These are local source/fixture checks, not a new Firefox VM result.
+The first integration source run
+[`37228779356`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37228779356)
+on `f50db8b0` failed strict Clippy on a missing semicolon in the new snapshot
+diagnostic test. The original job log is retained (SHA-256
+`a013251f63edefafec75b699cc7426b864a7cda33283da23835b5e221d85068c`).
+The correction adds that test statement terminator only; no predicate, assertion,
+product code or trial gate changes. No new native Browser VM was launched.
 
 ### Bank and Transaction layer research
 
