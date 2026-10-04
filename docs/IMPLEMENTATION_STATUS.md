@@ -6,6 +6,15 @@ Last updated: 2026-10-04
 
 ## Current integration and active work
 
+### Autonomous Internet use authorized
+
+The user explicitly authorized autonomous Internet use for tasks, research,
+improvement, maintenance and learning on 2026-10-04. Selected-source acquisition
+exists, but general autonomous browsing/source selection and external training
+ingestion remain unfinished. The [Internet-use scope](DECENTRALIZED_AGENTS.md#autonomous-internet-use)
+retains mediated core tools, protected egress, privacy and spare-capacity limits;
+it does not enable arbitrary network access in model workers.
+
 ### Requested multimodal compute extension
 
 Audio/image understanding and natural spoken conversation were requested on
