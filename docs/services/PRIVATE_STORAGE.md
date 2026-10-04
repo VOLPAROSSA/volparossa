@@ -1034,3 +1034,20 @@ complete server-independent OpenCloud. Earlier failures remain failures.
 Preview with
 `sh tests/integration/run-alpha-topology-vm.sh --preview --scenario cloud-private-file`;
 execution belongs only in the explicitly approved disposable KVM workflow.
+
+### Cloud: original uploads and restarted recovery
+
+The separate owner-private new-file scenario now **passes** in
+[run37218270756](https://github.com/VOLPAROSSA/volparossa/actions/runs/37218270756),
+core `929c2ff909f4e9704046459e0434006397dc9110` / Cloud
+`ffdcfaa15cdd2a029dae545904b0a58603da4e17`. The original Files/Uppy upload is
+encrypted and deposited through the real core. After source/local-ciphertext
+removal, service/browser restart and provider A withdrawal, two baseline restores
+and two original UI downloads succeed from B/C with exact hashes. All sixteen
+baseline/upload copies keep their actual charges through nonconsuming reads,
+then all three stores reach zero bytes/leases after deletion. Continuous bounded
+log observations, privacy captures, private cleanup and unchanged guest-root
+network state pass. See the [source-bound evidence and historical failures](../IMPLEMENTATION_STATUS.md#additional-application-and-autonomous-maintenance-scope).
+This is an explicit owner-private upload space, not recovery of ordinary
+OpenCloud accounts, permissions, sharing, writable synchronization or complete
+server-independent service. The preceding read-only trial remains unchanged.

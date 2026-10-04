@@ -291,7 +291,35 @@ feature branches are not implied to be integrated into `main`.
   This proves selected owner-local read-only recovery through the original UI, not
   ordinary OpenCloud account/ACL recovery, writes, sharing, synchronization or
   general server-independent OpenCloud availability.
-- [ ] The separate `cloud-private-upload` acceptance sibling was initially prepared against
+- [x] Original owner-private upload and restarted peer recovery now **pass** in
+  [run `37218270756`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37218270756),
+  attempt 1 / job `111483163553`, on core
+  `929c2ff909f4e9704046459e0434006397dc9110` and exact Cloud
+  `ffdcfaa15cdd2a029dae545904b0a58603da4e17`. The original Files/Uppy input uploads
+  262,145 plaintext bytes with one PUT/creation/201, privately encrypted into
+  266,429 bytes across four fragments and eight copies. The source and both local
+  ciphertexts are removed. With provider A stopped, a fresh service/browser
+  performs two baseline restores and two original UI downloads with exact hashes;
+  A supplies no restore payload. Actual stopped-provider store inspection retains
+  2,131,150 charged payload bytes across sixteen baseline/upload copies through
+  nonconsuming reads. Idempotent retirement then leaves all three stores with zero
+  reservations, committed bytes and leases. Incremental overlapping observations
+  verify 88/32/32 completed protected exchanges for upload/restore/finish, with no
+  failed flows or gaps; the upload's final ring alone no longer covers its baseline
+  and is not treated as cumulative evidence. All privacy captures, joined
+  service/browser/private cleanup and zero remaining owned objects pass.
+  Guest-root network snapshots are byte-identical, SHA-256
+  `da3d0280e780e4e5523430ea50e3823d2c79e018aa41b15ccf452f573e89c594`;
+  this is not separate outer-host proof. Exact-source replay reconstructs both
+  aggregates from the 45 original artifacts. Original ZIP SHA-256
+  `0f4da4f71ed7c0ddbf58668c6982f2a0d6e1d510789c21e8293b815c8474e11c`;
+  original job-log SHA-256
+  `ba1108cc84edaff8d01b322b231064c3995c1d9d83ee838823e7b7c90a265209`.
+  This proves the explicit owner-private new-file space, not ordinary OpenCloud
+  accounts/ACL recovery, sharing, writable synchronization, second-device owner
+  recovery or general server-independent availability. Historical failures below
+  remain failed; the original read-only scenario/pins remain unchanged.
+  The separate `cloud-private-upload` acceptance sibling was initially prepared against
   Cloud `3e3d6587012ed46d200218e4447506300f8a4f18`. Its first exact-source
   [run `37070505538`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37070505538)
   on core `4950e1013e074cad60ec3c0ff9cb89dcdd1a4854` failed **before VM startup**:
