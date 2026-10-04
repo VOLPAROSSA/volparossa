@@ -27,6 +27,19 @@ WORKER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(WORKER)
 
 
+def embedded_command():
+    # Mirror sandbox.rs: the complete fixed source is split across bounded argv
+    # strings, not truncated to Linux's per-argument limit. stdin remains protocol.
+    source = SOURCE.read_text(encoding="utf-8")
+    bootstrap = ("import sys as _vp_boot_sys\n"
+                 "_vp_source = ''.join(_vp_boot_sys.argv[1:])\n"
+                 "_vp_boot_sys.argv = ['-c']\n"
+                 "exec(compile(_vp_source, '<volparossa-worker>', 'exec'))\n")
+    chunks = [source[start:start + 8192] for start in range(0, len(source), 8192)]
+    assert "".join(chunks) == source and all(len(part.encode("utf-8")) <= 32768 for part in chunks)
+    return [sys.executable, "-I", "-c", bootstrap, *chunks]
+
+
 def request():
     return {"version": 1, "id": "a" * 32, "mode": "train", "model_root": "/model",
             "dataset_path": "/dataset.json", "output_root": "/output"}
@@ -57,7 +70,7 @@ def controlled_process(seconds=10, initial=True):
     with tempfile.TemporaryDirectory() as directory:
         value = dict(request(), owner_control=True, max_seconds=seconds,
                      model_root=str(Path(directory) / "missing-model"))
-        process = subprocess.Popen([sys.executable, "-I", "-c", SOURCE.read_text(encoding="utf-8")],
+        process = subprocess.Popen(embedded_command(),
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, bufsize=0)
         try:
@@ -2099,7 +2112,7 @@ class WorkerProtocolTests(unittest.TestCase):
 
     def run_embedded(self, raw):
         # The actual deployment mode has no __file__ and a bounded stdin/stdout contract.
-        return subprocess.run([sys.executable, "-I", "-c", SOURCE.read_text(encoding="utf-8")],
+        return subprocess.run(embedded_command(),
                               input=raw, capture_output=True, timeout=10, check=False)
 
     def test_real_embedded_process_rejects_extra_frames_and_preserves_valid_correlation(self):

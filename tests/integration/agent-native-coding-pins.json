@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "repository": "https://github.com/VOLPAROSSA/volparossa-code",
+  "revision": "2f7014b0014b90e488b15364d6e596d7d1a30782",
+  "files": {
+    "src/app-server.cjs": {"bytes": 7623, "sha256": "3a99c131e322feb82d73a181fe9ddb668d150285157282c2b50c4cda89c7b70b"},
+    "src/private-compute.cjs": {"bytes": 15290, "sha256": "75261e5842bba0003a55efc7ce262816cc4171fdb589611ce989428bf5682672"},
+    "src/private-conversation.cjs": {"bytes": 11248, "sha256": "6fa4d7cae95fa6e033a2db3940416aa109cfd5f6454fad1609e106c4be7d67d2"},
+    "src/responses-provider.cjs": {"bytes": 17854, "sha256": "bf8d0791e0a0825929cdce2b72ac3eed26222d40a5f0eb1e3ba726d4db4da1f5"},
+    "src/native-coding-fixture.cjs": {"bytes": 11359, "sha256": "91254c25ba14ebd1444d53c1650cb4fc230b68f273796ecbc0ca5145cfb7ee5d"},
+    "scripts/smoke_native_coding.py": {"bytes": 18612, "sha256": "5eb70c842e0afab33f5207a51a639e51bc0b93626c013636f23bcdad423bf61b"},
+    "scripts/smoke_native_coding.cjs": {"bytes": 6943, "sha256": "713d509b59dfa473a16bcdf657ed8561ae6db7bc6996d18858ad59a9f16b9f1e"},
+    "scripts/native_coding_fixture.py": {"bytes": 3547, "sha256": "a1e72d8318d1ddbe2b4b85074ff47772a2e99cc8bd051426478cbfe4aa67f3ea"},
+    "third_party/codex-runtime.json": {"bytes": 1793, "sha256": "ccb847e7f118b9f6f42989e624f9bb887ce85d3a87f747abeffdeb393e8c137f"},
+    "LICENSE": {"bytes": 35149, "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"}
+  }
+}

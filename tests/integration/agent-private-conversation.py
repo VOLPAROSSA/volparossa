@@ -3,6 +3,7 @@
 """Explicit disposable Qwen tool/result proof; no host inference or invented outputs."""
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -58,10 +59,15 @@ SERVICE_CODES = {
     'compute_private_process_stat_bound', 'compute_private_process_children', 'compute_private_process_cleanup_deadline',
     'compute_private_storage_cleanup_failed', 'compute_reap_deadline', 'compute_reap',
     'compute_request_write_deadline', 'compute_request_write', 'compute_control_write_deadline', 'compute_control_write',
+    'compute_control_ack_deadline', 'compute_private_progress',
     'compute_memory_pressure', 'compute_device_reserve', 'compute_owner_pressure', 'compute_pressure_observation',
     'compute_worker_json', 'compute_worker_correlation', 'compute_worker_phase', 'compute_worker_status',
     'compute_worker_kind', 'compute_worker_line_size', 'compute_worker_unterminated_line', 'compute_stdout_size',
     'compute_stderr_size', 'compute_stderr_read', 'compute_wait', 'compute_worker_exit',
+    'conversation_request_id', 'conversation_native_marker', 'conversation_native_call',
+    'conversation_native_preface', 'conversation_native_json', 'conversation_unknown_tool',
+    'conversation_custom_input', 'conversation_arguments', 'conversation_call_id',
+    'conversation_empty_answer', 'conversation_native_output_other',
     'JOB_INPUT_NOT_FOUND', 'JOB_PATH_PERMISSION_DENIED', 'JOB_MEMORY_EXHAUSTED', 'BACKEND_IMPORT_FAILED',
     'BACKEND_EXECUTION_FAILED', 'BACKEND_NOT_INSTALLED', 'BACKEND_VERSION_MISMATCH', 'CPU_BACKEND_REQUIRED',
     'MODEL_PARAMETER_DTYPE_MISMATCH', 'MODEL_WEIGHTS_CHANGED_ON_DISK', 'CONVERSATION_TOKENIZER_SHAPE',
@@ -311,6 +317,41 @@ def closed_log(path):
         ('missing_library', b'error while loading shared libraries'))})
 
 
+def execution_state(value):
+    """A bounded observation at failure, never a successful operation or cleanup claim."""
+    require(type(value) is dict and set(value) == {'version', 'last_phase', 'substage', 'capacity',
+                'controls', 'peak_rss_bytes'} and type(value['version']) is int and value['version'] == 1,
+            'execution state fields')
+    require(value['last_phase'] in {None, 'preparing', 'baseline', 'training', 'checkpoint', 'reload',
+                'complete', 'paused', 'resumed'}, 'execution phase')
+    stage = value['substage']
+    require(stage is None or (type(stage) is dict and set(stage) == {'stage', 'state', 'elapsed_ms'}
+        and stage['stage'] in {'owner_gate', 'verify_files', 'backend_import', 'tokenizer_load', 'prompt_encode',
+                              'model_load', 'generation', 'verify_after', 'result'}
+        and stage['state'] in {'begin', 'complete'} and type(stage['elapsed_ms']) is int
+        and 0 <= stage['elapsed_ms'] < 600000), 'execution substage')
+    capacity = value['capacity']
+    require(type(capacity) is dict and set(capacity) == {'decision', 'constraint', 'cpu_some_avg10',
+        'io_some_avg10', 'memory_bytes'} and capacity['decision'] in {'run', 'pause', 'cancel'}
+        and capacity['constraint'] in {'memory', 'device', 'cpu', 'io', 'quiet_hold', 'none'}, 'execution capacity')
+    for key in ('cpu_some_avg10', 'io_some_avg10'):
+        number = capacity[key]
+        require(number is None or (type(number) in (int, float) and math.isfinite(number)
+                                    and 0 <= number <= 100), 'execution pressure')
+    number = capacity['memory_bytes']
+    require(number is None or (type(number) is int and 0 <= number <= 2**64-1), 'execution memory')
+    controls = value['controls']
+    if controls is not None:
+        require(type(controls) is dict and set(controls) == {'issued', 'acknowledged', 'last_issued', 'last_acknowledged'}
+            and type(controls['issued']) is int and type(controls['acknowledged']) is int
+            and 0 <= controls['acknowledged'] <= controls['issued'] <= 128, 'execution controls')
+        for count, action in (('issued', 'last_issued'), ('acknowledged', 'last_acknowledged')):
+            require((controls[count] == 0 and controls[action] is None)
+                    or (controls[count] > 0 and controls[action] in {'pause', 'resume'}), 'execution control action')
+    require(type(value['peak_rss_bytes']) is int and 0 <= value['peak_rss_bytes'] <= 10 * GIB, 'execution peak rss')
+    return value
+
+
 def service_diagnostic(path):
     """Local observations only; fixed vocabulary, no raw log, prompt, path or request ID."""
     if not path.exists():
@@ -324,9 +365,21 @@ def service_diagnostic(path):
     lines = raw[:65536].splitlines()
     if truncated:
         lines = lines[:-1]  # Never accept a partial final record.
-    events, unknown = [], False
+    events, states, state_seen, unknown = [], [], False, False
     marker = b'private_execution_diagnostic '
+    state_marker = b'private_execution_state '
     for line in lines:
+        if state_marker in line:
+            state_seen = True
+            try:
+                value = execution_state(json.loads(line.split(state_marker, 1)[1]))
+                if len(states) < 16:
+                    states.append(value)
+                else:
+                    truncated = True
+            except (ValueError, KeyError, TypeError):
+                unknown = True
+            continue
         if marker not in line:
             continue
         try:
@@ -347,7 +400,10 @@ def service_diagnostic(path):
                 truncated = True
         except (ValueError, KeyError, TypeError):
             unknown = True
-    return dict(version=1, events=events, truncated=truncated, unrecognized_record=unknown)
+    result = dict(version=1, events=events, truncated=truncated, unrecognized_record=unknown)
+    if state_seen:
+        result['states'] = states
+    return result
 
 
 def check_report(value, revision):

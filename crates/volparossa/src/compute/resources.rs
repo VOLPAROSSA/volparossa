@@ -32,6 +32,11 @@ pub(super) const fn limits(profile: ModelProfile) -> Limits {
             observed_rss: 4 * GIB,
             admission_headroom: Some(4 * GIB + RESERVE),
         },
+        ModelProfile::Qwen4bInstruct2507 => Limits {
+            address_space: 24 * GIB,
+            observed_rss: 10 * GIB,
+            admission_headroom: Some(10 * GIB + RESERVE),
+        },
     }
 }
 
@@ -86,5 +91,18 @@ mod tests {
         assert!(!admits(profile, None));
         assert!(!admits(profile, Some(4 * GIB + RESERVE - 1)));
         assert!(admits(profile, Some(4 * GIB + RESERVE)));
+    }
+
+    #[test]
+    fn qwen4b_candidate_budget_is_explicit_and_never_bypasses_missing_memory() {
+        let profile = ModelProfile::Qwen4bInstruct2507;
+        assert_eq!(limits(profile).observed_rss, 10 * GIB);
+        assert_eq!(limits(profile).address_space, 24 * GIB);
+        assert_eq!(limits(profile).admission_headroom, Some(10 * GIB + RESERVE));
+        for available in [None, Some(0), Some(10 * GIB + RESERVE - 1)] {
+            assert!(!admits(profile, available));
+        }
+        assert!(admits(profile, Some(10 * GIB + RESERVE)));
+        assert_eq!(limits(ModelProfile::Qwen600).observed_rss, 4 * GIB);
     }
 }

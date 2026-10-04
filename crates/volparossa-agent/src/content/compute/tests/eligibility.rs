@@ -53,6 +53,7 @@ pub(super) fn fixture() -> Fixture {
             require_document_inference_v2: false,
             require_derived_inference_v3: false,
             require_principle_inference_v4: false,
+            require_code_proposal_v6: false,
         }),
     };
     Fixture {

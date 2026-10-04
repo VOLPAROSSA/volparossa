@@ -203,6 +203,10 @@ pub struct Capabilities {
     /// This capability never grants network-policy authority.
     #[serde(default, skip_serializing_if = "is_false")]
     pub principle_inference_v4: bool,
+    /// Supports only the explicit signed public-code proposal purpose on a compatible model.
+    /// This never admits private conversations or grants workspace/tool access.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub code_proposal_v6: bool,
     /// This owner broker may activate validated local successors for new jobs.
     /// Existing job bindings stay immutable and pollable through the same broker.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -233,6 +237,9 @@ pub struct EligibilityQuery {
     /// Require the explicit structured principle inference profile.
     #[serde(default, skip_serializing_if = "is_false")]
     pub require_principle_inference_v4: bool,
+    /// Require the separate inference-only public-code proposal contract.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub require_code_proposal_v6: bool,
 }
 
 impl EligibilityQuery {
@@ -286,6 +293,7 @@ impl EligibilityQuery {
             && (!self.require_document_inference_v2 || capabilities.document_inference_v2)
             && (!self.require_derived_inference_v3 || capabilities.derived_inference_v3)
             && (!self.require_principle_inference_v4 || capabilities.principle_inference_v4)
+            && (!self.require_code_proposal_v6 || capabilities.code_proposal_v6)
     }
 }
 
@@ -293,6 +301,9 @@ fn profile_model_id(profile: &str) -> Option<&'static str> {
     match profile {
         "smollm2-135m-v1" => Some("HuggingFaceTB/SmolLM2-135M-Instruct"),
         "smollm2-360m-v1" => Some("HuggingFaceTB/SmolLM2-360M-Instruct"),
+        "smollm2-1.7b-v1" => Some("HuggingFaceTB/SmolLM2-1.7B-Instruct"),
+        "qwen3-0.6b-v1" => Some("Qwen/Qwen3-0.6B"),
+        "qwen3-4b-instruct-2507-v1" => Some("Qwen/Qwen3-4B-Instruct-2507"),
         _ => None,
     }
 }
@@ -584,6 +595,7 @@ mod tests {
             require_document_inference_v2: false,
             require_derived_inference_v3: false,
             require_principle_inference_v4: false,
+            require_code_proposal_v6: false,
         }
     }
 
@@ -686,6 +698,7 @@ mod tests {
             document_inference_v2: false,
             derived_inference_v3: false,
             principle_inference_v4: false,
+            code_proposal_v6: false,
             successor_activation_v1: false,
         }
     }
@@ -714,6 +727,46 @@ mod tests {
             invalid[forbidden] = "not authorized".into();
             assert!(serde_json::from_value::<Capabilities>(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn public_code_requires_its_own_capability_and_exact_selected_profile() {
+        let mut caps = capabilities();
+        let mut query = eligibility_query();
+        let legacy_caps = serde_json::to_string(&caps).unwrap();
+        let legacy_query = serde_json::to_string(&query).unwrap();
+        assert!(!legacy_caps.contains("code_proposal_v6"));
+        assert!(!legacy_query.contains("require_code_proposal_v6"));
+        assert!(
+            !serde_json::from_str::<Capabilities>(&legacy_caps)
+                .unwrap()
+                .code_proposal_v6
+        );
+        query.require_code_proposal_v6 = true;
+        assert!(!query.matches(&caps));
+        caps.code_proposal_v6 = true;
+        assert!(query.matches(&caps));
+        for (profile, model) in [
+            ("qwen3-0.6b-v1", "Qwen/Qwen3-0.6B"),
+            ("qwen3-4b-instruct-2507-v1", "Qwen/Qwen3-4B-Instruct-2507"),
+        ] {
+            query.model_profile = Some(profile.into());
+            caps.model.model_id = model.into();
+            assert!(query.matches(&caps));
+            caps.code_proposal_v6 = false;
+            assert!(!query.matches(&caps));
+            caps.code_proposal_v6 = true;
+            caps.model.model_id.push('x');
+            assert!(!query.matches(&caps));
+        }
+        query.model_profile = Some("smollm2-1.7b-v1".into());
+        query.require_code_proposal_v6 = false;
+        caps.code_proposal_v6 = false;
+        caps.model.model_id = "HuggingFaceTB/SmolLM2-1.7B-Instruct".into();
+        assert!(query.matches(&caps));
+        let duplicate = serde_json::to_string(&query).unwrap().replacen(
+            "\"publisher_keys\":", "\"require_code_proposal_v6\":true,\"require_code_proposal_v6\":false,\"publisher_keys\":", 1);
+        assert!(serde_json::from_str::<EligibilityQuery>(&duplicate).is_err());
     }
 
     #[test]

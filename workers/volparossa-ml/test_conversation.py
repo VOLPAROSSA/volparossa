@@ -151,8 +151,11 @@ class ConversationTests(unittest.TestCase):
             self.assertGreater(result["prompt_tokens"], 0)
             self.assertEqual(result["artifacts"], [])
             self.assertEqual(result["updates_completed"], 0)
+            self.assertNotIn("generation_policy", result)
             model.generate.assert_called_once()
             self.assertEqual(model.generate.call_args.kwargs["max_new_tokens"], 256)
+            self.assertFalse(model.generate.call_args.kwargs["do_sample"])
+            self.assertNotIn("num_beams", model.generate.call_args.kwargs)
             self.assertLessEqual((root/"report.json").stat().st_size, WORKER.MAX_LINE)
 
 

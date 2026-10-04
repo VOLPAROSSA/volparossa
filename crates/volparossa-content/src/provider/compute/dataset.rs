@@ -6,9 +6,14 @@
 //! or private messages. Document excerpts are assertions signed by their source publisher,
 //! not cryptographic range proofs of unavailable original bytes.
 
+mod code_proposal;
 mod derived;
 mod document;
 mod principle;
+pub use code_proposal::{
+    CODE_PROPOSAL_CONTENT_TYPE, CodeProposalDataset, CodeProposalOutputContract,
+    validate_code_proposal_json,
+};
 pub use derived::{
     DERIVED_CLAIM_SCOPE, DERIVED_CONTENT_TYPE, DerivedDataset, DerivedInput, DerivedQuestion,
     GROUNDED_DERIVED_CONTENT_TYPE, validate_derived_json,
@@ -70,6 +75,7 @@ enum Profile {
     Document(DocumentDataset),
     Derived(DerivedDataset),
     Principle(PrincipleDataset),
+    CodeProposal(CodeProposalDataset),
 }
 
 impl VerifiedPublicDataset {
@@ -90,6 +96,7 @@ impl VerifiedPublicDataset {
             Profile::Document(dataset) => dataset.inference.len(),
             Profile::Derived(dataset) => dataset.inference.len(),
             Profile::Principle(dataset) => dataset.inference.len(),
+            Profile::CodeProposal(dataset) => dataset.inference.len(),
         }
     }
 
@@ -97,7 +104,10 @@ impl VerifiedPublicDataset {
     pub fn is_document(&self) -> bool {
         matches!(
             self.dataset,
-            Profile::Document(_) | Profile::Derived(_) | Profile::Principle(_)
+            Profile::Document(_)
+                | Profile::Derived(_)
+                | Profile::Principle(_)
+                | Profile::CodeProposal(_)
         )
     }
 
@@ -109,6 +119,19 @@ impl VerifiedPublicDataset {
     /// Explicit structured principle assessment/review, never ordinary free-text inference.
     pub fn is_principle(&self) -> bool {
         matches!(self.dataset, Profile::Principle(_))
+    }
+
+    /// Explicit public single-source code proposal, not a generic document task.
+    pub fn is_code_proposal(&self) -> bool {
+        matches!(self.dataset, Profile::CodeProposal(_))
+    }
+
+    /// Signed code-task model requirement; ordinary document packages do not have one.
+    pub fn code_model_profile(&self) -> Option<crate::model_profile::ModelProfile> {
+        match &self.dataset {
+            Profile::CodeProposal(dataset) => Some(dataset.model_profile),
+            _ => None,
+        }
     }
 
     /// Publisher-bound fixed output contract, not permission to activate network policy.
@@ -137,7 +160,7 @@ impl VerifiedPublicDataset {
     /// derived datasets larger than the existing object bound, and fixed-contract principle inputs.
     pub fn derive_question(&self, rows: &[u16], question: &str) -> Result<String, ComputeError> {
         text(question, 512)?;
-        if question.trim().is_empty() || self.is_principle() {
+        if question.trim().is_empty() || self.is_principle() || self.is_code_proposal() {
             return Err(ComputeError::Invalid);
         }
         self.derive_selected(rows, Some(question))
@@ -173,6 +196,7 @@ impl VerifiedPublicDataset {
             Profile::Document(original) => original.derive_selected(rows, question)?,
             Profile::Derived(original) => original.derive_selected(rows, question)?,
             Profile::Principle(original) => original.derive_selected(rows)?,
+            Profile::CodeProposal(original) => original.derive_selected(rows)?,
         };
         if json.len() > MAX_DATASET_BYTES {
             return Err(ComputeError::Invalid);
@@ -205,6 +229,7 @@ pub fn verify_source(
             | DERIVED_CONTENT_TYPE
             | GROUNDED_DERIVED_CONTENT_TYPE
             | PRINCIPLE_CONTENT_TYPE
+            | CODE_PROPOSAL_CONTENT_TYPE
     ) || manifest.length() != original_json.len() as u64
         || manifest.object_sha256() != &<[u8; 32]>::from(Sha256::digest(original_json.as_bytes()))
     {
@@ -222,7 +247,12 @@ pub fn verify_source(
     {
         return Err(ComputeError::Authentication);
     }
-    let dataset = if manifest.metadata().content_type == PRINCIPLE_CONTENT_TYPE {
+    let dataset = if manifest.metadata().content_type == CODE_PROPOSAL_CONTENT_TYPE {
+        let code: CodeProposalDataset =
+            serde_json::from_str(original_json).map_err(|_| ComputeError::Invalid)?;
+        code.verify_source(publisher, now, manifest.validity().expires)?;
+        Profile::CodeProposal(code)
+    } else if manifest.metadata().content_type == PRINCIPLE_CONTENT_TYPE {
         let principle: PrincipleDataset =
             serde_json::from_str(original_json).map_err(|_| ComputeError::Invalid)?;
         principle.verify_source(publisher, now, manifest.validity().expires)?;

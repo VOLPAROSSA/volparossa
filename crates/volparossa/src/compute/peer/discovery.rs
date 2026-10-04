@@ -55,6 +55,7 @@ impl Options {
             require_document_inference_v2: document,
             require_derived_inference_v3: derived,
             require_principle_inference_v4: false,
+            require_code_proposal_v6: false,
         };
         query.validate()?;
         Ok(query)
@@ -85,7 +86,7 @@ pub(super) async fn select_replacements(
     select_query(socket, query, cancelled, 1, 4).await
 }
 
-async fn select_query(
+pub(super) async fn select_query(
     socket: &Path,
     query: rpc::EligibilityQuery,
     cancelled: &tokio::sync::watch::Receiver<bool>,
@@ -106,6 +107,7 @@ async fn select_query(
         require_document_inference_v2: query.require_document_inference_v2,
         require_derived_inference_v3: query.require_derived_inference_v3,
         require_principle_inference_v4: query.require_principle_inference_v4,
+        require_code_proposal_v6: query.require_code_proposal_v6,
         maximum,
         // Ordinary selection retains the original omitted/default minimum on the wire.
         minimum: if minimum == 2 { 0 } else { minimum },
