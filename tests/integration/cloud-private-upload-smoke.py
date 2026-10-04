@@ -186,14 +186,38 @@ def upload_status(root, binary, client, keys, operation="status", phase="committ
     return usage
 
 
+def ui_upload_observation(value):
+    require(type(value) is dict and set(value) == {"puts", "completed", "created", "last_status", "statuses"}
+        and all(type(value[key]) is int and 0 <= value[key] <= 4 for key in ("puts", "completed", "created"))
+        and value["created"] <= value["completed"] <= value["puts"]
+        and type(value["last_status"]) is int
+        and (value["last_status"] == 0 or 100 <= value["last_status"] <= 599), "invalid UI upload observation")
+    statuses = value["statuses"]
+    require(type(statuses) is list and len(statuses) == value["completed"]
+        and all(type(status) is int and (status == 0 or 100 <= status <= 599) for status in statuses)
+        and value["created"] == statuses.count(201)
+        and value["last_status"] == (statuses[-1] if statuses else 0), "invalid UI upload status sequence")
+    return dict(value, statuses=list(statuses))
+
+
+def ui_upload_receipt(value):
+    value = ui_upload_observation(value)
+    require(1 <= value["puts"] == value["completed"] <= 4 and value["created"] == 1
+        and value["last_status"] == 201 and all(not 200 <= status < 300 for status in value["statuses"][:-1]),
+        "original uploader retry sequence incomplete")
+    return value
+
+
 def ui_record(value, mode):
+    receipt = ui_upload_receipt(value["upload_receipt"]) if mode == "upload" else None
     expected = dict(version=1, kind="cloud-owner-upload-original-ui", mode=mode, success=True, stage="cleanup",
         original_files_ui=True, synthetic_backend=False, original_file_input_used=mode == "upload",
         upload_201_observed=mode == "upload", uploaded_file_listed=True, reload_reauthenticated=mode == "upload",
         file_downloads_verified=0 if mode == "upload" else 2, wrong_token_denied=True, logout_relocks=True,
         token_absent_from_url_and_web_storage=True, browser_stopped_and_joined=True, private_profile_removed=True,
         browser_version="140.16.0", bytes=len(UPLOAD), sha256=UPLOAD_SHA, peer_storage_proven=False,
-        service_restart_owned_by_parent=True, source_shutdown_owned_by_parent=True, owner_secrets_exported=False)
+        service_restart_owned_by_parent=True, source_shutdown_owned_by_parent=True, owner_secrets_exported=False,
+        upload_receipt=receipt)
     require(value == expected, "original upload UI incomplete")
     return value
 
@@ -210,14 +234,7 @@ def closed_ui_failure(value, mode):
             and all(type(value[key]) is bool for key in UI_FAILURE_FLAGS), "invalid UI failure fields")
         observation = value["upload_observation"]
         if observation is not None:
-            require(type(observation) is dict and set(observation) == {"puts", "completed", "created", "last_status"}
-                and all(type(observation[key]) is int and 0 <= observation[key] <= 65535
-                        for key in ("puts", "completed", "created"))
-                and observation["created"] <= observation["completed"] <= observation["puts"]
-                and type(observation["last_status"]) is int
-                and (observation["last_status"] == 0 or 100 <= observation["last_status"] <= 599),
-                "invalid UI upload observation")
-            observation = dict(observation)
+            observation = ui_upload_observation(observation)
         return dict(failure_kind=value["failure_kind"], upload_observation=observation,
             **{key: value[key] for key in UI_FAILURE_FLAGS})
     except (KeyError, TypeError, ValueError):

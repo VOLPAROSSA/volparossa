@@ -338,12 +338,34 @@ feature branches are not implied to be integrated into `main`.
   `a5d061cebc974258e0555aed954f675dc632196eb356ea89128ac29d736e5c99`;
   original job `111436210673` log SHA-256:
   `d3e00e77b95e6dfd9f800d66c471a684b45a972c094e096240ee6484f6f515c9`.
-  The candidate pins Cloud `32836543d950081a2b1505ebde117d8f9db35b82` and
-  retains only a closed UI failure class, bounded upload counters
+  The diagnostic pinned Cloud `32836543d950081a2b1505ebde117d8f9db35b82` and
+  retained only a closed UI failure class, bounded upload counters
   and five explicit progress/cleanup booleans. Invalid or missing observations
   remain unknown; URLs, tokens, paths, payloads and raw exceptions are not exported.
   This diagnostic does not reinterpret the failed run or relax upload, recovery,
   resource, timeout or cleanup requirements.
+  The subsequent exact-source [run `37204384631`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37204384631)
+  on `e57102a26c4a1d0bbda8062459f6f31f6b2b2a9c` reaches a route after 23 attempts
+  and 22 retries, but remains **failed** at `original_ui_upload`/`upload_commit`.
+  Its closed observation has two completed PUTs, exactly one creation and final
+  HTTP 201; `boundary_failed` occurs before the upload-201/listing flags. The
+  fixture's single-PUT guard rejected the two observed attempts. The first HTTP
+  status and initial failure cause were not retained. This is not proof of the
+  independent object/charge checks or later recovery. Browser/profile cleanup
+  and final guest cleanup pass with zero owned objects and matching guest-root
+  network hashes `ab634960a3e4e7d4db46208d26ae9fa79a8c45d656b5343fe93ccf5583385522`.
+  Original ZIP SHA-256: `03ec315aeb2f256db49e53176853a51159c6a5a2a5747eb595872260e9d785c5`;
+  original job `111442430475` log SHA-256:
+  `be006200a4b6b2be6b3509fd33589aaeebe6c248c9446f3db8057b82404fde66`.
+  The new candidate pins Cloud `b1a425964d725472e79b6f0f05ce96e5953cadcf`
+  and aligns only that fixture condition with the pinned native
+  Uppy fetcher's existing three retries: at most four completed PUTs, exactly one
+  final 201, and only status 0 or non-2xx responses before it. A bounded, validated
+  status sequence accompanies success; other 2xx, duplicate creation, missing
+  completion or overflow rejects. No retries or runtime budgets are added. The
+  single logical object, retained manifests/leases, fourteen physical copies,
+  actual provider charges, restart/download, retirement and cleanup gates remain
+  mandatory. These parser/observer checks do not reclassify either original failure.
   The candidate keeps the
   preceding read-only proof/pins unchanged and requires an original Files/Uppy
   upload of 262,145 synthetic bytes, actual owner GPG encryption, three 128-KiB

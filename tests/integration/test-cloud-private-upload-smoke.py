@@ -26,13 +26,14 @@ def ui(mode):
         browser_version="140.16.0", bytes=262145,
         sha256="9012cf78cb493db125d4a0f4f761ae8cb021c5ed16b5085bf32cd4252be575f6",
         peer_storage_proven=False, service_restart_owned_by_parent=True,
-        source_shutdown_owned_by_parent=True, owner_secrets_exported=False)
+        source_shutdown_owned_by_parent=True, owner_secrets_exported=False,
+        upload_receipt=dict(puts=1, completed=1, created=1, last_status=201, statuses=[201]) if mode == "upload" else None)
 
 
 def ui_failure():
     return dict(ui("upload"), success=False, stage="upload_commit", upload_201_observed=False,
         uploaded_file_listed=False, failure_kind="condition_timeout",
-        upload_observation=dict(puts=1, completed=0, created=0, last_status=0))
+        upload_receipt=None, upload_observation=dict(puts=1, completed=0, created=0, last_status=0, statuses=[]))
 
 
 def fixture():
@@ -141,7 +142,7 @@ class UploadContracts(unittest.TestCase):
         module = runpy.run_path(str(HERE / "cloud-private-upload-provision.py"))
         state = module["configured"]()
         pins = state["load_pins"]()
-        self.assertEqual(pins["revision"], "32836543d950081a2b1505ebde117d8f9db35b82")
+        self.assertEqual(pins["revision"], "b1a425964d725472e79b6f0f05ce96e5953cadcf")
         self.assertEqual(len(pins["files"]), 27)
         self.assertTrue({"src/owner-uploads.mjs", "scripts/upload_lock.py", "scripts/smoke_owner_upload_ui.py"} <= pins["files"].keys())
         self.assertEqual(pins["runtime"]["version"], "24.19.0")
@@ -164,8 +165,8 @@ class UploadContracts(unittest.TestCase):
         parse = CHECK["closed_ui_failure"]
         fields = {"failure_kind", "upload_observation", *CHECK["UI_FAILURE_FLAGS"]}
         for kind in CHECK["UI_FAILURE_KINDS"]:
-            for observation in (None, dict(puts=1, completed=0, created=0, last_status=0),
-                dict(puts=65535, completed=65535, created=65535, last_status=599)):
+            for observation in (None, dict(puts=1, completed=0, created=0, last_status=0, statuses=[]),
+                dict(puts=4, completed=4, created=1, last_status=201, statuses=[0, 401, 503, 201])):
                 value = dict(ui_failure(), failure_kind=kind, upload_observation=observation,
                     raw_error="PRIVATE_URL_TOKEN_PAYLOAD")
                 result = parse(value, "upload")
@@ -175,6 +176,7 @@ class UploadContracts(unittest.TestCase):
                 self.assertNotIn("PRIVATE", json.dumps(result))
                 if observation is not None:
                     self.assertIsNot(result["upload_observation"], observation)
+                    self.assertIsNot(result["upload_observation"]["statuses"], observation["statuses"])
         value = ui_failure()
         for key in CHECK["UI_FAILURE_FLAGS"]:
             value[key] = False
@@ -196,8 +198,11 @@ class UploadContracts(unittest.TestCase):
             lambda v: v["upload_observation"].update(raw="PRIVATE_URL"),
             lambda v: v["upload_observation"].update(puts=-1),
             lambda v: v["upload_observation"].update(puts=65536),
+            lambda v: v["upload_observation"].update(puts=5),
             lambda v: v["upload_observation"].update(completed=2),
             lambda v: v["upload_observation"].update(created=1),
+            lambda v: v["upload_observation"].update(statuses=[201]),
+            lambda v: v["upload_observation"].update(statuses="PRIVATE"),
         ]
         for key in CHECK["UI_FAILURE_FLAGS"]:
             mutations.append(lambda v, key=key: v.update({key: 1}))
@@ -209,6 +214,27 @@ class UploadContracts(unittest.TestCase):
         for mutate in mutations:
             value = ui_failure(); mutate(value)
             self.assertIsNone(parse(value, "upload"))
+
+    def test_native_retry_receipt_does_not_replace_object_charge_or_original_success_gates(self):
+        def receipt(statuses):
+            return dict(puts=len(statuses), completed=len(statuses), created=statuses.count(201),
+                last_status=statuses[-1] if statuses else 0, statuses=statuses)
+        for statuses in ([201], [503, 201], [0, 401, 503, 201]):
+            value = fixture()
+            value["upload"]["ui"]["upload_receipt"] = receipt(statuses)
+            CHECK["validate_evidence"](value)
+            value["uploaded_usage"][0]["leases"] += 1
+            with self.assertRaises(ValueError): CHECK["validate_evidence"](value)
+        for statuses in ([], [503], [0], [200, 201], [204, 201], [299, 201], [201, 503],
+            [201, 201], [0, 503, 503, 503, 201], [True, 201], ["503", 201], [99, 201], [600, 201]):
+            value = ui("upload"); value["upload_receipt"] = receipt(statuses)
+            with self.subTest(statuses=statuses), self.assertRaises(ValueError): CHECK["ui_record"](value, "upload")
+        for change in (dict(puts=2), dict(completed=2), dict(created=0), dict(last_status=503),
+            dict(puts=True), dict(statuses=[201, 503]), dict(raw="PRIVATE")):
+            value = ui("upload"); value["upload_receipt"].update(change)
+            with self.assertRaises(ValueError): CHECK["ui_record"](value, "upload")
+        value = ui("download"); value["upload_receipt"] = receipt([201])
+        with self.assertRaises(ValueError): CHECK["ui_record"](value, "download")
 
     def test_parent_keeps_failed_ui_receipt_without_masking_original_failure(self):
         serve = CHECK["serve_ui"]
