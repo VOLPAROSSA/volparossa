@@ -21,6 +21,7 @@ expected_commit=
 scenario=alpha
 code_bundle=
 code_manifest_sha256=
+browser_native_bundle=
 
 guest_memory_for_scenario() {
     # These fixtures co-locate two 360M providers in one guest. Production
@@ -43,6 +44,7 @@ usage() {
         '       agent-cooperative-code also requires --code-bundle DIRECTORY --code-manifest-sha256 SHA256.' \
         '       --native-runtime PATH is required for agent-native-coding or agent-native-editor (exact verified bundle).' \
         '       Native-editor and cooperative-code optionally accept --host-tools-directory PATH (verified workspace-only QEMU).'
+    printf '%s\n' '       browser-network optionally accepts --host-tools-directory PATH --browser-native-bundle PATH'
 }
 
 print_plan() {
@@ -510,6 +512,11 @@ while [ "$#" -gt 0 ]; do
             image_path=$2
             shift
             ;;
+        --browser-native-bundle)
+            [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+            browser_native_bundle=$2
+            shift
+            ;;
         --mpquic)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             mpquic_path=$2
@@ -554,7 +561,7 @@ done
 
 if [ "$mode" = preview ]; then
     if [ "$approval" != no ] \
-        || [ -n "$image_path$mpquic_path$package_path$native_runtime_path$host_tools_directory$output_directory$expected_commit$code_bundle$code_manifest_sha256" ]; then
+        || [ -n "$image_path$mpquic_path$package_path$native_runtime_path$host_tools_directory$output_directory$expected_commit$code_bundle$code_manifest_sha256$browser_native_bundle" ]; then
         usage >&2
         exit 64
     fi
@@ -588,11 +595,20 @@ case ${#expected_commit} in 40|64) ;; *) exit 64 ;; esac
 [ "$(id -u)" -ne 0 ] || { printf '%s\n' 'VM runner must remain unprivileged' >&2; exit 77; }
 
 if [ -n "$host_tools_directory" ]; then
-    case $scenario in agent-native-editor|agent-cooperative-code|agent-cooperative-code-proposal) ;; *) exit 64 ;; esac
+    case $scenario in browser-network|agent-native-editor|agent-cooperative-code|agent-cooperative-code-proposal) ;; *) exit 64 ;; esac
     case $host_tools_directory in /*) ;; *) exit 64 ;; esac
     python3 -B "$(dirname -- "$0")/browser-native-tools.py" --verify --output "$host_tools_directory"
     PATH=$host_tools_directory/bin:$PATH
     export PATH
+fi
+BROWSER_NATIVE_SHA256=none
+if [ -n "$browser_native_bundle" ]; then
+    [ "$scenario" = browser-network ] || exit 64
+    case $browser_native_bundle in /*) ;; *) exit 64 ;; esac
+    [ "$(readlink -f -- "$browser_native_bundle")" = "$browser_native_bundle" ] || exit 64
+    [ -f "$browser_native_bundle" ] && [ ! -L "$browser_native_bundle" ] || exit 64
+    [ "$(stat -Lc '%s' "$browser_native_bundle")" -le 1073741824 ] || exit 64
+    BROWSER_NATIVE_SHA256=$(sha256sum "$browser_native_bundle" | awk '{print $1}')
 fi
 
 for command_name in awk cat chmod cloud-localds cmp cut dpkg-deb find git grep gzip install \
@@ -688,6 +704,13 @@ elif [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperati
     [ "$(readlink -f -- "$output_directory")" = "$output_directory" ] || exit 64
     RUN_DIRECTORY_PARENT=$(dirname -- "$output_directory")
     RUN_DIRECTORY_PREFIX=cooperative-code-kvm
+elif [ -n "$browser_native_bundle" ]; then
+    # Local native trials may run on a host whose /tmp is RAM-backed. Keep the
+    # disposable VM disk beside, never inside, the SSD evidence directory:
+    # temporary SSH keys must not enter the evidence privacy scan or archive.
+    [ "$(readlink -f -- "$output_directory")" = "$output_directory" ] || exit 64
+    RUN_DIRECTORY_PARENT=$(dirname -- "$output_directory")
+    RUN_DIRECTORY_PREFIX=browser-native-kvm
 fi
 RUN_DIRECTORY=$(mktemp -d "$RUN_DIRECTORY_PARENT/$RUN_DIRECTORY_PREFIX.XXXXXX")
 case $RUN_DIRECTORY in "$RUN_DIRECTORY_PARENT"/"$RUN_DIRECTORY_PREFIX".??????) ;; *) exit 69 ;; esac
@@ -715,6 +738,7 @@ cleanup() {
             2>/dev/null || true
     fi
     if [ -f "$RUN_DIRECTORY/qemu.stderr" ]; then
+        # Preserve startup failures too: there may not be a serial console yet.
         tail -c 131072 "$RUN_DIRECTORY/qemu.stderr" >"$output_directory/qemu.stderr" \
             2>/dev/null || status=1
     fi
@@ -722,10 +746,6 @@ cleanup() {
         # Keep runner-owned provenance even when guest retrieval fails or a
         # guest archive happens to contain the same basename.
         install -m 0600 "$RUN_DIRECTORY/qemu-outer-uplink.json" "$output_directory/qemu-outer-uplink.json" \
-            2>/dev/null || status=1
-    fi
-    if [ -f "$RUN_DIRECTORY/qemu.stderr" ]; then
-        tail -c 131072 "$RUN_DIRECTORY/qemu.stderr" >"$output_directory/qemu.stderr" \
             2>/dev/null || status=1
     fi
     case $RUN_DIRECTORY in
@@ -1341,9 +1361,10 @@ mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
 native_runtime_sha256=none
+browser_native_sha256=none
 code_archive_sha256=none
 code_manifest_sha256=none
-# Native and cooperative bundles share positions only in disjoint scenarios.
+# Native, browser and cooperative bundles share positions only in disjoint scenarios.
 case $scenario in
     agent-native-coding|agent-native-editor)
         [ "$#" -eq 6 ] || exit 64
@@ -1353,6 +1374,10 @@ case $scenario in
         [ "$#" -eq 7 ] || exit 64
         code_archive_sha256=${6:-none}
         code_manifest_sha256=${7:-none}
+        ;;
+    browser-network)
+        [ "$#" -eq 6 ] || exit 64
+        browser_native_sha256=${6:-none}
         ;;
     *) [ "$#" -eq 5 ] || exit 64 ;;
 esac
@@ -1528,8 +1553,13 @@ elif [ "$scenario" = cloud-private-file ]; then
     sudo -n python3 -B tests/integration/cloud-private-file-provision.py provision --download
 elif [ "$scenario" = browser-network ]; then
     guest_phase browser-network-provision
-    sudo -n runuser -u vpci -- python3 -B tests/integration/browser-network-provision.py \
-        provision /home/vpci/browser-network-runtime
+    if [ "$browser_native_sha256" = none ]; then
+        sudo -n runuser -u vpci -- python3 -B tests/integration/browser-network-provision.py \
+            provision /home/vpci/browser-network-runtime
+    else
+        sudo -n runuser -u vpci -- python3 -B tests/integration/browser-native-runtime.py \
+            provision /home/vpci/browser-native-runtime.tar.gz "$browser_native_sha256"
+    fi
 fi
 guest_phase build
 # The 4-GiB guest cannot compile three large Rust crates concurrently. This bounds
@@ -1860,6 +1890,7 @@ if [ -n "$native_runtime_path" ]; then scp_to "$native_runtime_path" /home/vpci/
 if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then scp_to "$CODE_ARCHIVE" /home/vpci/cooperative-code.tar; fi
 if [ -n "$mpquic_path" ]; then scp_to "$mpquic_path" /home/vpci/volparossa-mpquic; fi
 if [ -n "$package_path" ]; then scp_to "$package_path" /home/vpci/volparossa.deb; fi
+if [ -n "$browser_native_bundle" ]; then scp_to "$browser_native_bundle" /home/vpci/browser-native-runtime.tar.gz; fi
 scp_to "$GUEST_DRIVER" /home/vpci/guest-driver.sh
 scp_to "$GUEST_DIAGNOSTICS" /home/vpci/guest-diagnostics.py
 ssh_base chmod 0700 /home/vpci/guest-driver.sh
@@ -1906,6 +1937,10 @@ case $scenario in
     agent-cooperative-code|agent-cooperative-code-proposal)
         ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
             "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" "$CODE_ARCHIVE_SHA256" "$CODE_MANIFEST_SHA256"
+        ;;
+    browser-network)
+        ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
+            "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" "$BROWSER_NATIVE_SHA256"
         ;;
     *)
         ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \

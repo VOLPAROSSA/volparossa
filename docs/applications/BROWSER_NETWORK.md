@@ -29,6 +29,191 @@ ECH-GREASE to match the existing Exit inspection boundary; product-scoped native
 compatibility remains separate work. Earlier failed trials below remain historical
 failures; their pending-proof descriptions are superseded only for this component.
 
+## Native ordinary-tab integration: actual trials remain failed
+
+The separate native candidate uses the locally compiled Firefox 157.0.1 source
+`47c5f402c8d3a5369f1fb1b6cd61b0bb92725af1` and browser adapter
+`c3311ebedcc02dc45ff9c9822cee62f091609f86`. Its original native build receipt and
+binaries are unchanged; a separately recorded product-JavaScript resource overlay
+fixes DOM-owner lookup. It does not substitute ESR compatibility modules or disable
+ECH-GREASE globally. The actual disposable core VM trials below have **not** yet
+completed the ordinary-tab WireGuard/MPTCP integration proof.
+
+- Local `build/browser-native-vm-02`, core `683e0ede8e0061f9efaf521006af4f61f300d0ba`,
+  failed before attachments/origin connections. Its original browser report SHA-256 is
+  `8ed5cf164e8ac6d7553781533e7142504043359d4423caa1631ceb9d2fd2e4dd`.
+  The original diagnostic does not establish a Firefox crash. A subsequent source
+  check proved that pinned Marionette returns `GetWindowHandles` as a direct array,
+  while the driver incorrectly indexed a `value` field; that harness bug was fixed.
+- Local `build/browser-native-vm-03`, core `b3f31a98dab04538124aa4e464a18c52b26a10f2`,
+  confirms Firefox startup and an actual Marionette session. It failed because two
+  initial tabs were present while the driver required exactly one. Firefox was still
+  running before cleanup; it was then terminated by the driver's own SIGTERM.
+  No attachment or origin connection had started. Original browser report SHA-256:
+  `05f24c95d9088b442c11e5a283231d69a2c3eafda297bed36147e3cab5205192`.
+  The corrected candidate accepts a nonempty initial set bounded to 128 handles;
+  it still requires exactly two **new** tab handles and both real body hashes.
+
+Both original failures are retained. Private/profile cleanup and guest A15 pass;
+before/after guest-state hashes are respectively
+`fb3e9a997cb35de534b2394cebe5c82d4db945f8bfa0f5891c03720788ed09ef` and
+`13cd2d65376c4f841df6b19da3b030bca6b47a3ea2cd0153b78e8efd10c13192`.
+Both temporary VMs were removed and host DNS/route hashes stayed unchanged.
+Native ordinary-tab/core payload, HTTP/3, a browser-wide kill switch and raw
+ECH ClientHello wire evidence remain unproved by these trials.
+
+Local `build/browser-native-vm-04` on
+`76e9edbfe33c91c66d399209302102d32f96d00f` passes those startup/initial-tab
+steps and enters attachment A. The actual core reports route preparation followed
+by `PreselectionUnavailable`, before any origin connection. This is not a Firefox
+startup failure, and does not establish a specific policy, candidate, address-family
+or connection-lineage cause: the existing mapping collapses several discovery
+errors, separately from `NoEligiblePaths`. The candidate now records only that
+closed inner enum through the existing opt-in, bounded gateway diagnostic; no
+retry, timer, policy or network authority changes. The original browser receipt
+SHA-256 is `6d2000d87b03792ce9657ecd3d3fa8347480db42f13842234488fa542f9405f6`.
+A15/private/profile cleanup passes; guest-state hash
+`5c78a1aa3fe989c5e031e05593e551c05aac0885fe893f9adeed2983b8bfb93b`
+matches before/after, the VM is removed and host DNS/routes remain unchanged.
+
+Local `build/browser-native-vm-05` on
+`923d61a571cde9bbd95deddefd01c9312f27614c` observes transient `Unavailable`
+and then `Busy` preselection results, but **both attachments eventually become
+ready** using the existing retry behavior. This does not prove the diagnostic
+change fixed preselection. The ordinary first tab's CONNECT is accepted and the
+origin verifies one GET after TLS completion. The original kernel baseline has
+two genuine MPTCP subflows on distinct WireGuard relay paths. The trial then
+fails at `request-a` / `BROWSER_NETWORK_PAYLOAD_UNAVAILABLE`: no progress sample,
+full body hash, second response or independent detach proof was completed.
+The candidate retains fixed navigation failure stages, numeric statuses, byte
+counts and state booleans to distinguish the four currently collapsed callback
+failures; it changes no browser module, native binary, route or timeout.
+Original browser/driver receipt SHA-256 values are
+`188c6f6d4bb80d7db52f2f8facbd3f2d6ea2854eee89f8d8597d955ceb1344c6` and
+`064787125056906a3d7a314e7d077f55c13a383ceb724fed9925594f33a6dee1`.
+A15/private/profile cleanup passes with matching guest-state hash
+`bf53a77017aa24b464027065df7dfeb17c069a0a1b03a84634b62e5bacf65cb4`;
+the VM is removed and host DNS/routes remain unchanged. All earlier failures
+remain retained; no native ECH wire or complete browser-payload claim is made.
+
+Local `build/browser-native-vm-06` on
+`f1596e3b6eebea8c2d90460835cf5fa830d89af3`, with driver bundle05
+`90cf1655f9c084bd5b7b135f4fd64ec017c481115117a395ad8e4fb51cfc9191`,
+starts Firefox normally but fails attachment A after 34 `Unavailable` preselection
+results and terminal `PreselectionUnavailable`. No origin connection or navigation
+callback occurs. Original browser/driver receipt hashes are
+`8296515dffb591973b5518e94b568ac13cb7ac7e1653644a7dec327d2b982ede` and
+`e9219f612f9a0a5be257baf0a87f00c7235bf5a538e8fff19fd3f26b86d48e5c`.
+A15/private/profile cleanup passes, guest-state hash
+`28e3787d6cedcb54f171950bd186a098222f3bab448a90e41cbef79c38e3ae8c`
+is unchanged, and the VM/scratch are removed with unchanged host DNS/routes.
+
+The candidate now exports only existing actor ring codes/counts and aggregate
+status before private cleanup, not raw logs or a route-readiness assertion.
+Independently, its native origin now generates printable ASCII for its `text/plain`
+ordinary-tab response: the old random binary bytes could trigger the pinned
+Firefox misconfigured-text sniffer (`nsHttpChannel::ShouldSniffMisconfiguredType`
+and `nsUnknownDecoder::SniffBinary`). This is a fixture correction, **not a proven
+cause or fix of trials05/06**. Historical ESR binary content is unchanged; native
+responses still require exactly 32 MiB, independently recomputed full hashes and
+the same two carrying-path/cleanup proofs. No browser preference, product code,
+native binary, route deadline or retry has changed.
+
+Local `build/browser-native-vm-07` on
+`10479854ee8cef1fd82e004aa0058d8699d1a15f`, with unchanged bundle05,
+reaches two ready attachments and receives **16,777,216 bytes** in the actual
+first tab. It still fails: `stream-stop` reports `NS_ERROR_NET_PARTIAL_TRANSFER`
+(`0x804b004c`), and the topology reports `BROWSER_NETWORK_TWO_CARRYING_PATHS_MISSING`.
+The original baseline revalidates two real MPTCP subflows on relay1/relay2; its
+monotonic sampling interval is 639.074547001–639.209327516 seconds. The final
+progress receipt instead says `native_owner_not_verified` with no candidates.
+There is no valid same-lifetime progress delta, complete 32-MiB hash, second
+response or independent detach proof. Original browser, driver and baseline hashes:
+
+- `5fc698c83eed0739115c68be30e45853876f3cd5d935d32169609689c91e0a82`
+- `bce9aae06dc9bb5f13dea49ead6c36ced14a8f1b13061ec63a34c50a70fcd0c5`
+- `009ea687717655f296fe966ffa5b84289e26a8c790de814a0540045a3eeb13db`
+
+The gateway records two accepted CONNECTs during the first request. A source-level
+observer defect is reproduced by a focused test: it rejected any worker containing
+more than one MPTCP connection, even when the original transfer remained present.
+The candidate now pins progress to the original worker incarnation and exact meta
+cookie/token/tuple, retaining full bounded kernel dumps and every original subflow
+lifetime, path and byte-delta check. Unrelated connections cannot supply progress.
+It also retains the first failed observation with a closed stage and monotonic
+timestamps instead of overwriting it with later empty-socket observations.
+
+The origin's `request_rejected` is recorded at `wait-continue`, after its first
+16 MiB, not while parsing the HTTP request. That fixture gate is released only
+after successful path sampling; its unchanged timeout is 60 seconds. The original
+first failed sample was overwritten, and origin/gateway events have no retained
+timestamps, so the exact ordering of observer and transport failure is **not
+recoverable**. The concurrent-connection defect is not yet proved to be this
+trial's cause or a live fix. A15/private/profile cleanup passes with unchanged
+guest-state hash `0fec7e486a2ec776598501c8ca26bdb2fa2349e62dee6914dc00592368460890`;
+VM/scratch removal and unchanged host DNS/routes are verified. All earlier failed
+receipts remain intact; no native ECH wire or complete browser claim is made.
+
+Local `build/browser-native-vm-08` on
+`ca37a68a48a352b3e2edf62a24a10cf7aca84cd0`, still using unchanged bundle05,
+fails earlier at attachment A with `PreselectionUnavailable`. Its untruncated
+client event window identifies **34 `PRESELECTION_SAMPLE_INVALID_SNAPSHOT`**
+events. The origin accepts no connection; no baseline or progress sample exists,
+so this run does not exercise the exact-flow observer correction. The category
+does not identify which snapshot predicate failed. Relay provider-unavailable
+events are also present, but do not establish the client's precise failure cause.
+Original browser, driver and readiness hashes:
+
+- `022a7d5556ff34532f107243a1459b344d1854f6c0bba5d8691b7b79202b2b97`
+- `e9219f612f9a0a5be257baf0a87f00c7235bf5a538e8fff19fd3f26b86d48e5c`
+- `4d15f7aadc89a6a169dd9ecf452600c037b2321f4fc6f48b08903c9c2b59d709`
+
+A15/private/browser cleanup passes with unchanged guest-state hash
+`0c45d14704680dd97bae8e12fffa70df500a5ad127c4d23b5325f12949cb36f0`.
+VM/scratch removal and unchanged host DNS/routes are verified; trials02–07
+remain intact. The next diagnostic candidate reports one of eight closed
+snapshot-clause categories through the existing bounded in-memory event ring;
+it retains every existing rejection, wire format, timer and privacy boundary.
+Six focused Rust tests pass, including an actor-local sequence that rejects a
+provider index without a signed Exit, then admits preselection after real
+signature-verified forwarded ingestion on the same connected control. This
+does not reproduce provider-network delivery or identify trial08's missing
+clause. The 22 browser fixture checks and nine native-driver checks also pass.
+This remains diagnosis, not a product fix or a successful browser datapath claim.
+
+Local `build/browser-native-vm-09` on
+`f8dda1e3e5dddac2b208b795f99afe4472c8d861` also **fails**, ending at
+`attach-b` / `SCRIPT_FAILED`. Firefox startup and Marionette succeed, but the
+origin accepts no connection. The untruncated client event ring records 19
+`PRESELECTION_SNAPSHOT_RELAY_COUNT`, 11 `PRESELECTION_SNAPSHOT_NO_FORWARDED_EXIT`
+and five `PRESELECTION_SAMPLE_NO_EXIT` events. The separate gateway ring includes
+one later Ready. These bounded aggregate windows are not a per-attachment
+timeline and do not identify the final JavaScript exception or establish its cause.
+Original browser, driver and readiness receipt SHA-256 values are:
+
+- `c2b340ca2a0bca70e5bad640d8c527bb9dab12e181111aad06bfc15610ef09c1`
+- `b165ef53c84e6248060426cf085209da0b41c18ad54a8560fafec982cdf70e24`
+- `dd2c2466d516df9b61e6495a66846eaa05b5a2638a772e93e3eec2f34f076e69`
+
+Its `native_bundle_sha256` is the verified **manifest** digest
+`15b7cbc3a63002229ae50a4459de3d7df4259cbc4764f982213c8273cfeb7b12`;
+the unchanged bundle05 **archive** digest remains
+`90cf1655f9c084bd5b7b135f4fd64ec017c481115117a395ad8e4fb51cfc9191`.
+These identify different objects, not different Firefox builds. Browser/profile
+and private cleanup pass, zero owned topology objects remain, and the before/after
+guest-root network snapshot digest is
+`5e3d25d06e35825e490910ef2d585ab7ccfc1aee8b7cb26c17f576bf7fcd4567`.
+That A15 receipt concerns the disposable guest root outside owned namespaces;
+it is not a broader assertion about every part of the development host.
+
+The main integration preserves this native driver, bundle provenance and all
+payload/cleanup gates, while retaining main's request-scoped route snapshot and
+eligible relay/Exit-control selection. The scoped-selection changes were absent
+from the original trial's source. They do not invent missing advertisements, and
+the integration alone does not prove a fix for this or any earlier failed trial.
+Native ordinary-tab payload, full hashes, two carrying paths per route and
+independent detach still require a new exact-source disposable proof.
+
 ## One daemon, independent application connections
 
 An explicitly authorized application can obtain its own short-lived TCP gateway from the

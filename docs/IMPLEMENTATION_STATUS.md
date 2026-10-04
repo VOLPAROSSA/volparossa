@@ -15,6 +15,82 @@ Last updated: 2026-10-04
 
 ## Current integration and active work
 
+### Native Firefox ordinary-tab integration candidate
+
+The optional `browser-network` native variant now carries the actual local
+Firefox 157.0.1 build receipt, unchanged native binaries and the separately
+hashed browser controller from `volparossa-browser@c3311eb`. It navigates two
+ordinary tabs, observes their original streams without replacing navigation,
+and requires independent real WireGuard/MPTCP routes, byte hashes, route-A
+retirement while B survives, privacy captures and disposable cleanup. The
+historical ESR proof is unchanged. Narrow provenance/evidence tests pass, but
+the actual joined VM trials `browser-native-vm-02` and `browser-native-vm-03`
+failed before attachment/origin traffic. The latter proves Firefox startup and
+a Marionette session, then records two initial tabs where the driver required
+one; Firefox was alive before deliberate cleanup. The candidate now accepts a
+nonempty, bounded initial set while retaining exactly two new tabs and full
+body checks. Both failed receipts, successful A15/private cleanup and unchanged
+host state are retained in [the native trial record](applications/BROWSER_NETWORK.md#native-ordinary-tab-integration-actual-trials-remain-failed).
+The next actual trial `browser-native-vm-04` passes startup and reaches attachment A,
+but fails at core `PreselectionUnavailable` before origin traffic. Its cleanup and
+unchanged host-state checks pass. A closed inner-enum diagnostic is prepared; the
+original evidence does not identify policy, readiness, family or lineage as the cause.
+Actual follow-up `browser-native-vm-05` records transient `Unavailable`/`Busy`,
+then two ready attachments, an accepted ordinary-tab CONNECT and one origin TLS/GET.
+Its original kernel baseline contains two MPTCP subflows over distinct WireGuard
+relays, but the first transfer fails before the required payload progress/full
+hashes. Cleanup and unchanged host state pass. A closed four-site navigation
+diagnostic is prepared; neither the transfer cause nor a preselection fix is proved.
+Actual `browser-native-vm-06` fails earlier at attachment A: 34 inner `Unavailable`
+events, no origin connection and no navigation callback. Firefox startup and all
+cleanup/host-state checks pass. The candidate now retains existing bounded actor
+event codes/counts before cleanup and fixes native-only binary-as-text fixture
+content to genuine ASCII, keeping 32 MiB and full path/hash gates. Neither change
+is evidence of a successful native transfer or a fix for the preselection failure.
+Actual `browser-native-vm-07` reaches both attachments and receives 16 MiB in the
+ordinary first tab, but ends in partial transfer and missing two-path progress
+proof. Its real two-subflow baseline passes; the final observation has no verified
+owner. The gateway also records a second CONNECT. A focused test reproduces the
+observer's erroneous one-connection-per-worker assumption; the candidate now pins
+progress to the exact original worker/flow and retains the first failed sample.
+The original intermediate observations were overwritten, so this is not yet a
+proved cause/fix of trial07. Full hashes, the second tab and detach remain unproved;
+all cleanup and unchanged host-state checks pass. Details and original hashes are
+in the native trial record linked above.
+Actual `browser-native-vm-08` fails at attachment A with 34 untruncated
+`PRESELECTION_SAMPLE_INVALID_SNAPSHOT` events and no origin connection. It does
+not exercise the exact-flow observer fix; the failed snapshot clause is not yet
+known. A bounded eight-category diagnostic candidate retains the existing
+admission rules, wire format and timers. Original receipts, successful cleanup
+and unchanged host state are preserved; this is not a preselection fix.
+Successful native ordinary-tab/core integration remains pending. This is not a full
+browser kill-switch, HTTP/3 or native ECH wire-proof claim. Workspace-only
+pinned QEMU tools are explicit local test inputs, not a host installation or
+redistributable browser package.
+
+The retained original `browser-native-vm-09` on `f8dda1e3` also remains
+failed: the final browser stage is `attach-b` / `SCRIPT_FAILED`, with no origin
+connection. Its bounded client ring records 19 relay-count and 11 missing-forwarded-Exit
+snapshot rejections, plus five no-eligible-Exit samples; the separate gateway ring
+also records one later Ready. These aggregate records do not establish the exact
+terminal exception or a per-attachment causal sequence. Browser/profile and private
+cleanup pass, zero owned objects remain, and the guest-root network snapshots match.
+This integration preserves the native fixture and brings in main's scoped eligible-
+control selection; it is not evidence that those changes fix any old native trial.
+Exact original hashes and the manifest/archive distinction are in the native trial record.
+The combined candidate passes 28 focused Rust sampler/snapshot/admission checks,
+12 native Browser fixture checks, 22 scoped gateway checks, five cooperative-Code
+VM contracts and the static KVM runner contract. The actual argument parser and
+dispatch matrix keep browser, native-editor, cooperative-Code and Wi-Fi restart
+inputs separate. These are local source/fixture checks, not a new Firefox VM result.
+The first integration source run
+[`37228779356`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37228779356)
+on `f50db8b0` failed strict Clippy on a missing semicolon in the new snapshot
+diagnostic test. The original job log is retained (SHA-256
+`a013251f63edefafec75b699cc7426b864a7cda33283da23835b5e221d85068c`).
+The correction adds that test statement terminator only; no predicate, assertion,
+product code or trial gate changes. No new native Browser VM was launched.
+
 ### Bank and Transaction layer research
 
 The 2026-10-04 user extension adds VOLPAROSSA Bank and a reusable Transaction-layer.
@@ -1716,10 +1792,12 @@ all CodeQL analyses and the aggregate passed before merging.
 
 This establishes the scoped TCP component, not the complete browser integration.
 Ordinary tab navigation over the actual overlay, live availability fallback, full
-browser kill switch, HTTP/3 and the native Firefox 157 build remain open. The actual
-ESR fixture explicitly disables ECH-GREASE; product-scoped ECH compatibility is still
-being built. The earlier failed-trial history below is retained, but its pending
-live-TCP-proof statements are superseded by this exact successful run.
+browser kill switch and HTTP/3 remain open. The native Firefox 157 build now exists
+with a separate exact receipt, but its joined ordinary-tab/core trials remain failed
+as described above. The actual ESR fixture explicitly disables ECH-GREASE; it does
+not prove product-scoped native ECH compatibility. The earlier failed-trial history
+below is retained, but its pending live-TCP-proof statements are superseded by this
+exact successful run.
 
 ### Editor-to-core private execution candidate
 

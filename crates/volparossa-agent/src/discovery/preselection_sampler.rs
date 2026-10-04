@@ -161,6 +161,34 @@ pub(super) enum PreselectionSamplingError {
 pub(super) struct PreselectionSamplingFailure {
     pub(super) snapshot: Box<RouteCandidateSnapshot>,
     pub(super) error: PreselectionSamplingError,
+    pub(super) snapshot_reason: Option<InvalidSnapshotReason>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum InvalidSnapshotReason {
+    Time,
+    Policy,
+    RelayCount,
+    NoForwardedExit,
+    CandidateBound,
+    SubjectSet,
+    DirectBinding,
+    ForwardedBinding,
+}
+
+impl InvalidSnapshotReason {
+    pub(super) const fn diagnostic_code(self) -> &'static str {
+        match self {
+            Self::Time => "PRESELECTION_SNAPSHOT_TIME",
+            Self::Policy => "PRESELECTION_SNAPSHOT_POLICY",
+            Self::RelayCount => "PRESELECTION_SNAPSHOT_RELAY_COUNT",
+            Self::NoForwardedExit => "PRESELECTION_SNAPSHOT_NO_FORWARDED_EXIT",
+            Self::CandidateBound => "PRESELECTION_SNAPSHOT_CANDIDATE_BOUND",
+            Self::SubjectSet => "PRESELECTION_SNAPSHOT_SUBJECT_SET",
+            Self::DirectBinding => "PRESELECTION_SNAPSHOT_DIRECT_BINDING",
+            Self::ForwardedBinding => "PRESELECTION_SNAPSHOT_FORWARDED_BINDING",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
@@ -256,11 +284,10 @@ fn narrow_route_candidate_snapshot_at<R: RngCore + ?Sized>(
     let Some(scope) = scope.validated() else {
         return Err(failure(snapshot, PreselectionSamplingError::InvalidPolicy));
     };
-    if !snapshot_shape_is_valid(&snapshot, scope, sampled_at_ms) {
-        return Err(failure(
-            snapshot,
-            PreselectionSamplingError::InvalidSnapshot,
-        ));
+    if let Err(reason) = validate_snapshot_shape(&snapshot, scope, sampled_at_ms) {
+        let mut rejected = failure(snapshot, PreselectionSamplingError::InvalidSnapshot);
+        rejected.snapshot_reason = Some(reason);
+        return Err(rejected);
     }
 
     let mut exit_candidates = scored_forwarded_exits(&snapshot, scope, sampled_at_ms);
@@ -344,30 +371,41 @@ fn failure(
     PreselectionSamplingFailure {
         snapshot: Box::new(snapshot),
         error,
+        snapshot_reason: None,
     }
 }
 
-fn snapshot_shape_is_valid(
+fn validate_snapshot_shape(
     snapshot: &RouteCandidateSnapshot,
     scope: ValidatedSamplingScope,
     sampled_at_ms: u64,
-) -> bool {
+) -> Result<(), InvalidSnapshotReason> {
     let direct_count = snapshot.direct_relays.len();
     let exit_count = snapshot.forwarded_exits.len();
-    if sampled_at_ms == 0
-        || sampled_at_ms < snapshot.captured_at_ms
-        || snapshot.captured_at_ms == 0
-        || snapshot.policy.version() == 0
+    if sampled_at_ms == 0 || sampled_at_ms < snapshot.captured_at_ms || snapshot.captured_at_ms == 0
+    {
+        return Err(InvalidSnapshotReason::Time);
+    }
+    if snapshot.policy.version() == 0
         || snapshot.policy.hash() == [0; 32]
         || snapshot.policy.expires_at_ms() <= sampled_at_ms
-        || direct_count < scope.minimum_other_relays.saturating_add(1)
-        || exit_count == 0
-        || direct_count.saturating_add(exit_count) > MAXIMUM_SELECTION_CANDIDATES
-        || !snapshot.preselection_subjects.available
+    {
+        return Err(InvalidSnapshotReason::Policy);
+    }
+    if direct_count < scope.minimum_other_relays.saturating_add(1) {
+        return Err(InvalidSnapshotReason::RelayCount);
+    }
+    if exit_count == 0 {
+        return Err(InvalidSnapshotReason::NoForwardedExit);
+    }
+    if direct_count.saturating_add(exit_count) > MAXIMUM_SELECTION_CANDIDATES {
+        return Err(InvalidSnapshotReason::CandidateBound);
+    }
+    if !snapshot.preselection_subjects.available
         || snapshot.preselection_subjects.entries.len() != direct_count.saturating_add(exit_count)
         || snapshot.preselection_subjects.forwarded_pairs.len() != exit_count
     {
-        return false;
+        return Err(InvalidSnapshotReason::SubjectSet);
     }
 
     let mut nodes = HashSet::with_capacity(direct_count.saturating_add(exit_count));
@@ -380,20 +418,20 @@ fn snapshot_shape_is_valid(
             || !keys.insert(capability.public_key)
             || !direct_binding_is_valid(relay, snapshot, sampled_at_ms)
         {
-            return false;
+            return Err(InvalidSnapshotReason::DirectBinding);
         }
     }
 
     let mut paired_exits = vec![false; exit_count];
     for &(control_index, exit_subject) in &snapshot.preselection_subjects.forwarded_pairs {
         let Some(exit_index) = exit_subject.checked_sub(direct_count) else {
-            return false;
+            return Err(InvalidSnapshotReason::ForwardedBinding);
         };
         let Some(exit) = snapshot.forwarded_exits.get(exit_index) else {
-            return false;
+            return Err(InvalidSnapshotReason::ForwardedBinding);
         };
         let Some(control) = snapshot.direct_relays.get(control_index) else {
-            return false;
+            return Err(InvalidSnapshotReason::ForwardedBinding);
         };
         let capability = exit.capability();
         if paired_exits[exit_index]
@@ -403,11 +441,15 @@ fn snapshot_shape_is_valid(
             || !keys.insert(capability.exit_public_key)
             || !forwarded_binding_is_valid(exit, control, snapshot, sampled_at_ms)
         {
-            return false;
+            return Err(InvalidSnapshotReason::ForwardedBinding);
         }
         paired_exits[exit_index] = true;
     }
-    paired_exits.into_iter().all(|paired| paired)
+    if paired_exits.into_iter().all(|paired| paired) {
+        Ok(())
+    } else {
+        Err(InvalidSnapshotReason::ForwardedBinding)
+    }
 }
 
 fn direct_binding_is_valid(
@@ -2289,6 +2331,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_snapshot_diagnostics_identify_the_first_closed_clause_before_entropy() {
+        for reason in [
+            InvalidSnapshotReason::Time,
+            InvalidSnapshotReason::Policy,
+            InvalidSnapshotReason::RelayCount,
+            InvalidSnapshotReason::NoForwardedExit,
+            InvalidSnapshotReason::CandidateBound,
+            InvalidSnapshotReason::SubjectSet,
+            InvalidSnapshotReason::DirectBinding,
+            InvalidSnapshotReason::ForwardedBinding,
+        ] {
+            let mut snapshot = preselection_snapshot_fixture(2, false).await.snapshot;
+            let sampled_at_ms = snapshot.captured_at_ms;
+            match reason {
+                InvalidSnapshotReason::Time => snapshot.captured_at_ms = 0,
+                InvalidSnapshotReason::Policy => snapshot.policy.expires_at_ms = sampled_at_ms,
+                InvalidSnapshotReason::RelayCount => snapshot.direct_relays.truncate(1),
+                InvalidSnapshotReason::NoForwardedExit => snapshot.forwarded_exits.clear(),
+                InvalidSnapshotReason::CandidateBound => snapshot.direct_relays.resize(
+                    MAXIMUM_SELECTION_CANDIDATES,
+                    snapshot.direct_relays[0].clone(),
+                ),
+                InvalidSnapshotReason::SubjectSet => {
+                    snapshot.preselection_subjects.available = false;
+                }
+                InvalidSnapshotReason::DirectBinding => {
+                    snapshot.direct_relays[0].capability.expires_at_ms = sampled_at_ms;
+                }
+                InvalidSnapshotReason::ForwardedBinding => {
+                    snapshot.preselection_subjects.forwarded_pairs[0].0 = usize::MAX;
+                }
+            }
+            let storage = snapshot_storage_identity(&snapshot);
+            let value = snapshot_value_identity(&snapshot);
+            let calls = Cell::new(0);
+            let failure = expect_sampling_failure(
+                narrow_route_candidate_snapshot_at(
+                    snapshot,
+                    sampling_scope(ObservationAddressFamily::Ipv4, 1, 2),
+                    sampled_at_ms,
+                    &mut CountingRng { calls: &calls },
+                ),
+                "closed snapshot diagnostic",
+            );
+            assert_eq!(failure.error, PreselectionSamplingError::InvalidSnapshot);
+            assert_eq!(failure.snapshot_reason, Some(reason));
+            assert_eq!(calls.get(), 0);
+            assert_snapshot_identity(&failure.snapshot, &storage, &value);
+        }
+    }
+
+    #[tokio::test]
     async fn invalid_policy_and_ambiguous_pairing_fail_before_rng_and_retain_snapshot() {
         let snapshot = preselection_snapshot_fixture(2, false).await.snapshot;
         let original_direct = snapshot.direct_relays.len();
@@ -2305,6 +2399,7 @@ mod tests {
             "invalid bounds",
         );
         assert_eq!(failure.error, PreselectionSamplingError::InvalidPolicy);
+        assert_eq!(failure.snapshot_reason, None);
         assert_eq!(failure.snapshot.direct_relays.len(), original_direct);
         assert_eq!(failure.snapshot.forwarded_exits.len(), original_exits);
         assert_eq!(calls.get(), 0);
@@ -2324,6 +2419,10 @@ mod tests {
             "duplicate pair ambiguity",
         );
         assert_eq!(failure.error, PreselectionSamplingError::InvalidSnapshot);
+        assert_eq!(
+            failure.snapshot_reason,
+            Some(InvalidSnapshotReason::SubjectSet)
+        );
         assert_eq!(failure.snapshot.direct_relays.len(), original_direct);
         assert_eq!(failure.snapshot.forwarded_exits.len(), original_exits);
         assert_eq!(calls.get(), 0);
