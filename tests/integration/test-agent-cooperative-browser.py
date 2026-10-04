@@ -710,6 +710,10 @@ class CooperativeBrowserProof(unittest.TestCase):
     def test_observer_failure_is_retained_before_driver_interrupt_without_private_details(self):
         self.assertEqual(CHECK["observer_invariant_reason"](ValueError("actual worker mounts not isolated")),
                          "worker_mounts")
+        self.assertEqual(CHECK["observer_invariant_reason"](ValueError("observed task workers still alive")),
+                         "worker_cleanup")
+        self.assertEqual(CHECK["observer_invariant_reason"](ValueError("observed worker ownership differs")),
+                         "worker_ownership")
         self.assertIsNone(CHECK["observer_invariant_reason"](ValueError("PRIVATE_PROMPT /private/path")))
         self.assertIsNone(CHECK["observer_invariant_reason"](OSError("actual worker mounts not isolated")))
         with tempfile.TemporaryDirectory() as temporary:

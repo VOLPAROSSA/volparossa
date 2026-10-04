@@ -73,6 +73,8 @@ OBSERVER_INVARIANT_REASONS = {
     "broker is not the unprivileged node owner": "broker_owner",
     "runtime lock is aliased": "worker_runtime_lock",
     "observed worker does not hold its runtime lease": "worker_runtime_lease",
+    "observed worker ownership differs": "worker_ownership",
+    "observed task workers still alive": "worker_cleanup",
     "synthesis published different frontier rows": "synthesis_dataset_binding",
 }
 EXECUTION_PHASES = frozenset(('input', 'validation', 'directory', 'source_selection', 'provider_selection',
@@ -821,9 +823,30 @@ def scan_workers(work, document, layout, brokers, observed):
                     "observed worker did not receive exact public fragment/derived input")
             observed[key] = dict(node=node, level=int(match[1]) if match else None,
                 handle_path=relative, provider_key=handle["provider_key"], dataset_sha256=binding["dataset_sha256"],
-                worker=current["worker"], owned_processes=current["owned_processes"],
+                broker=current["broker"], worker=current["worker"], owned_processes=current["owned_processes"],
                 isolated_live_worker=True, base_model_sha256=handle["capabilities"]["model"]["base_weights"]["sha256"])
     require(len(observed) <= 128, "unbounded observed worker set")
+
+
+def task_processes(entry):
+    # descendants() deliberately includes its root. The validated broker is a
+    # persistent service, stopped by the later fixture cleanup, not by a task.
+    # Retain every other observed process, including sandbox parents/tokenizers;
+    # never remove a live process merely because the model worker has ended.
+    broker, worker, family = entry["broker"], entry["worker"], entry["owned_processes"]
+    require(isinstance(family, list) and 2 <= len(family) <= 32
+            and all(isinstance(member, dict) and set(member) == {"pid", "start_ticks"}
+                    and type(member["pid"]) is int and member["pid"] > 0
+                    and type(member["start_ticks"]) is int and member["start_ticks"] >= 0 for member in family)
+            and len({member["pid"] for member in family}) == len(family)
+            and family.count(broker) == 1 and worker != broker and worker in family,
+            "observed worker ownership differs")
+    return [member for member in family if member != broker]
+
+
+def check_task_workers_ended(entries):
+    require(not any(JOBS["alive"](member) for entry in entries for member in task_processes(entry)),
+            "observed task workers still alive")
 
 
 def exact_bytes(path, maximum=1048576):
@@ -1350,8 +1373,7 @@ def observe_inner(work, pid, progress, tracked):
     require(not JOBS["alive"](owner) and consent and result is not None and cancelled,
             "browser did not complete both real public tasks within fixture bound")
     progress["phase"] = "worker_cleanup_check"
-    require(not any(JOBS["alive"](member) for entry in [*observed.values(), *cancelled.values()]
-                    for member in entry["owned_processes"]), "observed task workers still alive")
+    check_task_workers_ended([*observed.values(), *cancelled.values()])
     progress["phase"] = "observation_write"
     write(work / f"{NAME}-observation.json", dict(no_dispatch_before_consent=True,
         real_fragment_peers=sorted({entry["node"] for entry in observed.values() if entry["level"] is None}),
