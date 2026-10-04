@@ -156,6 +156,58 @@ def selected_model():
     return JOBS["TRAIN"]["inference_profile"]("smollm2-360m-v1" if TRIAL else "smollm2-135m-v1")
 
 
+def expected_inventory(peers):
+    names = ("client", "bootstrap1", "bootstrap2", *(f"relay{i}" for i in range(6)), "exit", "exit2")
+    require(set(peers) == set(names) and all(isinstance(peers[name], str)
+            and re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,128}", peers[name]) for name in names)
+            and len(set(peers.values())) == len(names), "invalid expected fixture identities")
+    return {peers[name]: "0b010" if name.startswith("relay") else "0b100"
+            for name in names if name.startswith("relay") or name.startswith("exit")}
+
+
+def inventory_ready(raw, expected):
+    # Same six relay/two exit advertisements as A01, read from the real agent's
+    # authenticated inventory. This is NOT current capability or route readiness.
+    if not isinstance(raw, bytes) or len(raw) > 1048576:
+        return False
+    try:
+        lines = raw.decode("ascii").splitlines()
+    except UnicodeError:
+        return False
+    if len(lines) > 4096:
+        return False
+    observed = {}
+    for line in lines:
+        match = re.fullmatch(r"([1-9A-HJ-NP-Za-km-z]{32,128})\troles=(0b[01]{3})\treachability=([0-3])", line)
+        if match is None or match[1] in observed:
+            return False
+        observed[match[1]] = match[2]
+    return all(observed.get(peer) == role for peer, role in expected.items())
+
+
+def await_inventory(work):
+    JOBS["guest_work"](work)
+    require(TRIAL == "discovered-360m", "inventory wait is only for the discovered fixture")
+    expected = expected_inventory(read(work / "a01-expected-peers.json", 8192))
+    command = [str(work / "bin/volparossa"), "--control-socket",
+               str(work / "runtime-client/control/agent.sock"), "peers"]
+    deadline = time.monotonic() + 60
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            # The CLI validates a <=256 KiB RPC frame, <=4096 entries and
+            # <=128-byte IDs before printing; stdout is bounded below 1 MiB.
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    check=False, timeout=min(2, remaining))
+            if time.monotonic() < deadline and result.returncode == 0 and inventory_ready(result.stdout, expected):
+                return
+        except subprocess.TimeoutExpired:
+            pass
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(0.1, remaining))
+    raise ValueError("expected advertisement inventory did not arrive within its deadline")
+
+
 def source_excerpt(original):
     """Literal public README prefix: legacy 3840B, explicit discovered trial 4096B."""
     limit = 4096 if TRIAL else 3840
@@ -1482,6 +1534,8 @@ def main(args):
         return
     if args == ["export-names"]:
         print("\n".join(EXPORT_NAMES))
+    elif len(args) == 2 and args[0] == "await-inventory":
+        await_inventory(Path(args[1]))
     elif len(args) == 2 and args[0] == "provision":
         provision(Path(args[1]))
     elif len(args) == 3 and args[0] == "observe":

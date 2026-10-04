@@ -306,6 +306,136 @@ def retained_deep_refinement_fixture(root):
     return check, fixture_input, layout, observed, save
 
 
+class CooperativeInventoryReadiness(unittest.TestCase):
+    def setUp(self):
+        self.check = runpy.run_path(str(HERE / "agent-cooperative-browser.py"))
+        names = ("client", "bootstrap1", "bootstrap2", *(f"relay{i}" for i in range(6)), "exit", "exit2")
+        self.peers = {name: "A" * 31 + chr(66 + i) for i, name in enumerate(names)}
+        # Base58 excludes I; these are parser fixture identities, not real peers.
+        self.peers["relay4"] = "Z" * 32
+        self.expected = self.check["expected_inventory"](self.peers)
+        self.lines = [f"{peer}\troles={role}\treachability=0" for peer, role in self.expected.items()]
+        self.complete = ("\n".join(self.lines) + "\n").encode()
+
+    def test_inventory_requires_all_exact_roles_without_claiming_reachability(self):
+        ready = self.check["inventory_ready"]
+        self.assertTrue(ready(self.complete, self.expected))
+        bootstrap = f'{self.peers["bootstrap1"]}\troles=0b000\treachability=1\n'.encode()
+        self.assertTrue(ready(self.complete + bootstrap, self.expected))
+        for index in range(8):
+            with self.subTest(index=index):
+                self.assertFalse(ready("\n".join(self.lines[:index] + self.lines[index + 1:]).encode(), self.expected))
+                mutated = self.lines.copy()
+                mutated[index] = mutated[index].replace("roles=0b010", "roles=0b100") if index < 6 else mutated[index].replace("roles=0b100", "roles=0b010")
+                self.assertFalse(ready("\n".join(mutated).encode(), self.expected))
+
+    def test_inventory_rejects_duplicates_malformed_and_oversized_input(self):
+        for raw in (self.complete + self.lines[0].encode(), self.complete + b"unstructured\n",
+                    self.complete + b"\xff", b"x" * 1048577, self.complete.decode(),
+                    self.complete.replace(b"\troles=", b"\tunknown=")):
+            with self.subTest(kind=type(raw), length=len(raw)):
+                self.assertFalse(self.check["inventory_ready"](raw, self.expected))
+        for peers in ({}, dict(self.peers, exit=self.peers["relay0"]),
+                      dict(self.peers, exit="bad/identity")):
+            with self.assertRaises(ValueError):
+                self.check["expected_inventory"](peers)
+
+    def run_wait(self, responses, discovered=True):
+        if discovered:
+            self.check["select_trial"]("discovered-360m")
+        elapsed, calls = [0.0], []
+        def sleep(seconds):
+            elapsed[0] += seconds
+        def run(command, **options):
+            calls.append((command, options))
+            item = responses.pop(0) if len(responses) > 1 else responses[0]
+            if item == "timeout":
+                elapsed[0] += options["timeout"]
+                raise subprocess.TimeoutExpired(command, options["timeout"])
+            code, output, delay = item
+            elapsed[0] += delay
+            return subprocess.CompletedProcess(command, code, output)
+        globals_ = self.check["await_inventory"].__globals__
+        guard = mock.Mock()
+        with mock.patch.dict(globals_, read=lambda *_args: self.peers,
+                             JOBS=dict(self.check["JOBS"], guest_work=guard)), \
+             mock.patch.object(self.check["time"], "monotonic", side_effect=lambda: elapsed[0]), \
+             mock.patch.object(self.check["time"], "sleep", side_effect=sleep), \
+             mock.patch.object(self.check["subprocess"], "run", side_effect=run):
+            error = None
+            try:
+                self.check["await_inventory"](Path("/opt/va.inventory-unit-test"))
+            except ValueError as caught:
+                error = caught
+        guard.assert_called_once()
+        return error, elapsed[0], calls
+
+    def test_readiness_waits_for_inventory_and_queries_only_client_peers(self):
+        error, elapsed, calls = self.run_wait([(0, b"", 0), (0, self.lines[0].encode(), 0),
+                                              (1, self.complete, 0), (0, self.complete, 0)])
+        self.assertIsNone(error)
+        self.assertEqual(len(calls), 4)
+        self.assertAlmostEqual(elapsed, 0.3)
+        for command, options in calls:
+            self.assertEqual(command, ["/opt/va.inventory-unit-test/bin/volparossa", "--control-socket",
+                "/opt/va.inventory-unit-test/runtime-client/control/agent.sock", "peers"])
+            self.assertEqual(options, dict(stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False, timeout=2))
+
+    def test_query_timeouts_and_incomplete_inventory_do_not_extend_deadline(self):
+        for response in ("timeout", (0, b"", 0), (1, self.complete, 0)):
+            with self.subTest(response=response):
+                self.check = runpy.run_path(str(HERE / "agent-cooperative-browser.py"))
+                error, elapsed, calls = self.run_wait([response])
+                self.assertIsInstance(error, ValueError)
+                self.assertAlmostEqual(elapsed, 60)
+                self.assertTrue(all(0 < options["timeout"] <= 2 for _, options in calls))
+                self.assertLessEqual(len(calls), 601)
+
+    def test_late_complete_inventory_cannot_pass_and_legacy_does_not_query(self):
+        error, elapsed, calls = self.run_wait([(0, self.complete, 60)])
+        self.assertIsInstance(error, ValueError)
+        self.assertEqual(elapsed, 60)
+        self.check = runpy.run_path(str(HERE / "agent-cooperative-browser.py"))
+        error, elapsed, calls = self.run_wait([(0, self.complete, 0)], discovered=False)
+        self.assertIsInstance(error, ValueError)
+        self.assertEqual((elapsed, calls), (0, []))
+
+    def test_fixture_gate_precedes_connect_without_changing_its_retry_allowlist(self):
+        jobs = (HERE / "agent-jobs-smoke.sh").read_text()
+        gate = '''if [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
+        # Unlike the full A01 scenario, agent-jobs skips its discovery barrier.'''
+        start = jobs.index(gate)
+        end = jobs.index("\n    fi", start)
+        self.assertIn('agent_cooperative_browser_python await-inventory "$WORK"', jobs[start:end])
+        self.assertTrue(jobs[end:].startswith("\n    fi\n    benchmark_select_route agent-jobs mptcp || fail JOBS_ROUTE_UNAVAILABLE"))
+        selection = (HERE / "benchmark-selection.sh").read_text()
+        retry = selection.split("a01_transient_connect_unavailable() {", 1)[1].split("\n}", 1)[0]
+        self.assertEqual(re.findall(r"\b[A-Z_]+_UNAVAILABLE\b", retry), ["PRESELECTION_UNAVAILABLE",
+            "NATIVE_PERMIT_UNAVAILABLE", "NATIVE_RELAY_READY_UNAVAILABLE", "NATIVE_HELPER_COMMIT_UNAVAILABLE",
+            "NATIVE_PROBE_START_UNAVAILABLE", "NATIVE_PROBE_PROOF_UNAVAILABLE", "ROUTE_ADMISSION_UNAVAILABLE"])
+        self.assertNotIn("NO_ELIGIBLE_PATHS", retry)
+
+    def test_unavailable_inventory_exits_fixture_before_connect(self):
+        jobs = (HERE / "agent-jobs-smoke.sh").read_text()
+        start = jobs.index('    if [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then',
+                           jobs.index("agent_jobs_setup() {"))
+        end = jobs.index("\n    benchmark_bind_slots", start)
+        # Execute only the fixture's actual gate with fake read-only inventory
+        # and Connect commands; no runner, network, root action or model starts.
+        harness = '''set -eu
+WORK=/unused
+agent_cooperative_browser_discovered=$1
+agent_cooperative_browser_python() { printf 'inventory\n'; return 1; }
+fail() { printf '%s\n' "$1"; exit 86; }
+benchmark_select_route() { printf 'connect\n'; }
+'''
+        for scenario, status, output in (("yes", 86, "inventory\nCOOPERATIVE_BROWSER_INVENTORY_UNAVAILABLE\n"),
+                                          ("no", 0, "connect\n")):
+            result = subprocess.run(["sh", "-c", harness + jobs[start:end], "inventory-gate-test", scenario],
+                                    capture_output=True, text=True, check=False, timeout=5)
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (status, output, ""))
+
+
 class CooperativeBrowserProof(unittest.TestCase):
     def test_deeper_refinement_requires_each_real_shaped_receipt_and_exact_descendant_intent(self):
         with tempfile.TemporaryDirectory() as temporary:

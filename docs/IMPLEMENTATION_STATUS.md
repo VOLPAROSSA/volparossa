@@ -82,7 +82,35 @@ unchanged; no model or VM was rerun, and the original failed run remains failed.
 
 ### Cooperative browser execution
 
-The latest exact-source [run `37202586461`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37202586461)
+The latest exact-source [run `37204198825`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37204198825)
+on `774597444616af465e684dde3ed874b80542971f` remains **failed before compute**
+under the discovered-360M contract. Source-route setup stopped at
+`JOBS_ROUTE_UNAVAILABLE` after 14 attempts/13 retries with final
+`NO_ELIGIBLE_PATHS`. The retained 48/400-event ring contains 13
+`PRESELECTION_SAMPLE_INVALID_SNAPSHOT` and one `PRESELECTION_SAMPLE_NO_EXIT`;
+other recognized sampler counts are zero. It remains `unknown/ambiguous`, not
+last-attempt attribution. `INVALID_SNAPSHOT` also covers an incomplete inventory;
+these counts do not identify a specific absent advertisement or corrupt lineage.
+No peer inference, browser task, refinement or synthesis was reached. Private
+cleanup completed with zero owned objects and identical disposable guest-root
+network hashes (not an outer-host unchanged claim). Original artifact ZIP SHA-256:
+`0c6d00f7769579fc093564f165781f3b1dd5b0762ef79f7b0a88d269251bdf9a`;
+original job `111441866632` log SHA-256:
+`5e66d9e34c645a5b5f90cea357ed189896ea34da798c05115a7ae204c19b149a`.
+
+The fixture candidate now waits up to 60 seconds for the same six relay/two exit
+advertisements expected by A01 before the discovered scenario's first Connect.
+The `agent-jobs` shortcut otherwise skips A01's discovery-inventory wait. Each
+read-only client inventory query is bounded to two seconds; no raw peer inventory
+is exported. Inventory presence is **not route readiness**. Production selection,
+Connect retry classifications, capacities, budgets after Connect and all compute
+success criteria are unchanged; legacy fixed-135M and other fixtures do not wait.
+All 31 cooperative fixture checks pass, including seven inventory/gate controls;
+shell syntax and whitespace checks pass. These are local synthetic checks only.
+This is a candidate startup-order correction, not a proven explanation of the
+original missing capability or a successful VM/model result.
+
+The previous exact-source [run `37202586461`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37202586461)
 on `95e45ac122347622253e1506f4f02b618de9ec7d` selected the intended
 `agent-cooperative-browser-discovered` 360M contract, but remains **failed before
 compute**. Source-route setup ended at `JOBS_ROUTE_UNAVAILABLE`: 26 connect attempts,

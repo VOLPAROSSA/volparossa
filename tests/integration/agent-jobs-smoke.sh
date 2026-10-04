@@ -300,6 +300,14 @@ agent_jobs_setup() {
         >"$WORK/agent-jobs-publish.json" 2>"$WORK/agent-jobs-publish.err" || fail JOBS_PUBLICATION_FAILED
     jobs_publisher=$(jq -er '.publisher_key_hex' "$WORK/agent-jobs-publish.json")
     agent_jobs_private publication "$jobs_source" >"$WORK/agent-jobs-source.json" || fail JOBS_SOURCE_HASH_FAILED
+    if [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
+        # Unlike the full A01 scenario, agent-jobs skips its discovery barrier.
+        # Wait for the real expected advertisements, not a favorable route draw.
+        # The unmodified Connect still decides capabilities, diversity and paths.
+        PHASE=agent-cooperative-browser-inventory
+        agent_cooperative_browser_python await-inventory "$WORK" || fail COOPERATIVE_BROWSER_INVENTORY_UNAVAILABLE
+        PHASE=agent-jobs-source
+    fi
     benchmark_select_route agent-jobs mptcp || fail JOBS_ROUTE_UNAVAILABLE
     benchmark_bind_slots "$WORK/agent-jobs-selection.json" || fail JOBS_ROUTE_INVALID
     custody_context=$(jq -er '.route_context_id' "$WORK/agent-jobs-selection.json")
