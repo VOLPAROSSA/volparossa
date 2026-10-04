@@ -1,6 +1,7 @@
 //! Explicit public tasks on independently selected peers, never private prompt offload.
 
 mod batch;
+pub(in crate::compute) mod code_proposal;
 mod discovery;
 pub(in crate::compute) mod document;
 mod executors;
@@ -396,7 +397,12 @@ fn supports_source(
     source: &volparossa_content::provider::compute::dataset::VerifiedPublicDataset,
     caps: &rpc::Capabilities,
 ) -> bool {
-    if source.is_principle() {
+    if source.is_code_proposal() {
+        caps.code_proposal_v6
+            && source.code_model_profile() == super::broker::profile_for_model(&caps.model).ok()
+    } else if caps.code_proposal_v6 {
+        false
+    } else if source.is_principle() {
         caps.principle_inference_v4
     } else if source.is_derived() {
         caps.derived_inference_v3
@@ -466,6 +472,14 @@ fn validate_profile(caps: &rpc::Capabilities) -> Result<()> {
     ensure!(
         caps.public_inference_only
             && (!caps.principle_inference_v4 || profile.supports_rich_inference())
+            && caps.code_proposal_v6 == profile.is_native_conversation()
+            && (!caps.code_proposal_v6
+                || (!caps.task_derivation_v1
+                    && !caps.document_inference_v2
+                    && !caps.derived_inference_v3
+                    && !caps.principle_inference_v4
+                    && !caps.successor_activation_v1
+                    && caps.max_rows == 1))
             && caps.runtime_slots == 1
             && caps.max_threads <= 2
             && (1..=600).contains(&caps.max_job_seconds)

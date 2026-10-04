@@ -373,7 +373,10 @@ fn pressure_action(budget: &mut Budget) -> Result<Action> {
 }
 
 fn check_public_contract(value: &Value, options: &Options) -> Result<()> {
-    if options.mode == Mode::Infer {
+    if options.mode == Mode::PublicCodeProposal {
+        let dataset = super::read_file(&options.dataset, super::MAX_DATASET_BYTES)?;
+        super::public_code::validate_report(value, &dataset, options.model_profile)?;
+    } else if options.mode == Mode::Infer {
         let dataset = super::read_file(&options.dataset, super::MAX_DATASET_BYTES)?;
         super::inference_output::check_dataset_contract(value, &dataset)?;
     }
@@ -398,7 +401,10 @@ fn check_model_backend(value: &Value, request: &WorkerRequest) -> Result<()> {
     }
     if request.model_profile.is_native_conversation() {
         ensure!(
-            request.mode == Mode::PrivateConversation && value["model_attention_backend"] == "sdpa",
+            matches!(
+                request.mode,
+                Mode::PrivateConversation | Mode::PublicCodeProposal
+            ) && value["model_attention_backend"] == "sdpa",
             "compute_result_model_attention"
         );
     }
@@ -425,6 +431,7 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
     let updates = value.get("updates_completed").and_then(Value::as_u64);
     match request.mode {
         Mode::Infer
+        | Mode::PublicCodeProposal
         | Mode::PrivateInfer
         | Mode::PrivateConversation
         | Mode::PlanDocument
@@ -474,7 +481,11 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
     }
     if matches!(
         request.mode,
-        Mode::Infer | Mode::PrivateInfer | Mode::PrivateConversation | Mode::Train
+        Mode::Infer
+            | Mode::PublicCodeProposal
+            | Mode::PrivateInfer
+            | Mode::PrivateConversation
+            | Mode::Train
     ) {
         let outputs = value["outputs"]
             .as_array()
@@ -538,7 +549,7 @@ fn check_artifacts(value: &Value, mode: Mode, output: &Path) -> Result<()> {
         .context("compute_artifacts")?;
     if matches!(
         mode,
-        Mode::Infer | Mode::PrivateInfer | Mode::PrivateConversation
+        Mode::Infer | Mode::PublicCodeProposal | Mode::PrivateInfer | Mode::PrivateConversation
     ) {
         ensure!(artifacts.is_empty(), "compute_inference_artifacts");
         return Ok(());

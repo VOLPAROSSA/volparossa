@@ -97,6 +97,9 @@ pub struct ComputeDiscoverRequest {
     /// Require fixed structured principle assessment/review inference.
     #[prost(bool, tag = "9")]
     pub require_principle_inference_v4: bool,
+    /// Require the independently signed public-code proposal purpose, not private offload.
+    #[prost(bool, tag = "10")]
+    pub require_code_proposal_v6: bool,
 }
 
 /// One authenticated capability observation, not a reservation or successful worker job.
@@ -158,6 +161,7 @@ impl ComputeDiscoverRequest {
             require_document_inference_v2: self.require_document_inference_v2,
             require_derived_inference_v3: self.require_derived_inference_v3,
             require_principle_inference_v4: self.require_principle_inference_v4,
+            require_code_proposal_v6: self.require_code_proposal_v6,
         };
         query
             .validate()

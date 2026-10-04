@@ -22,6 +22,13 @@ pub(super) struct Request {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Operation {
     Capabilities {},
+    PublicCodeProposal {
+        question: String,
+        context: String,
+        license: String,
+        public_content: bool,
+        rights_confirmed: bool,
+    },
     Submit {
         question: String,
         context: String,
@@ -52,7 +59,14 @@ impl Request {
             Operation::Cancel { task_id } => {
                 ensure!(valid_id(task_id), "public_ipc_invalid_request");
             }
-            Operation::Submit {
+            Operation::PublicCodeProposal {
+                question,
+                context,
+                license,
+                public_content,
+                rights_confirmed,
+            }
+            | Operation::Submit {
                 question,
                 context,
                 license,

@@ -21,10 +21,13 @@ use diagnostic::{ReceiptObservation, ReceiptPhase};
 
 #[derive(Clone, Debug, Args)]
 pub(in crate::compute) struct Config {
+    /// Serve only explicit public single-file proposals, without a local model.
     #[arg(long)]
-    pub runtime_root: PathBuf,
-    #[arg(long)]
-    pub model_root: PathBuf,
+    pub code_proposal_v6: bool,
+    #[arg(long, required_unless_present = "code_proposal_v6")]
+    pub runtime_root: Option<PathBuf>,
+    #[arg(long, required_unless_present = "code_proposal_v6")]
+    pub model_root: Option<PathBuf>,
     #[arg(long, default_value_t = ModelProfile::default())]
     pub model_profile: ModelProfile,
     /// Existing encrypted publisher identity, never supplied by an IPC request.
@@ -39,10 +42,10 @@ pub(in crate::compute) struct Config {
     pub provider_key: Vec<VerifyingKey>,
     /// Select two to four eligible peers in the operator-selected model cohort for each new task.
     #[arg(long, conflicts_with = "provider_key")]
-    discover_peers: bool,
+    pub(in crate::compute) discover_peers: bool,
     /// Optional exact base/adapter fingerprint within the selected discovery profile.
     #[arg(long, requires = "discover_peers", conflicts_with = "provider_key", value_parser = super::discovery::parse_fingerprint)]
-    model_fingerprint: Option<String>,
+    pub(in crate::compute) model_fingerprint: Option<String>,
     /// Authorize a bounded pass of smaller source jobs when a leaf reaches its output limit.
     #[arg(long)]
     refine_incomplete: bool,
@@ -92,14 +95,60 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        ensure!(!self.code_proposal_v6, "compute_public_document_scope");
         self.validate_selection()?;
-        private_directory(&self.runtime_root)?;
-        private_directory(&self.model_root)?;
+        let runtime_root = self
+            .runtime_root
+            .as_ref()
+            .context("compute_public_runtime_missing")?;
+        let model_root = self
+            .model_root
+            .as_ref()
+            .context("compute_public_runtime_missing")?;
+        private_directory(runtime_root)?;
+        private_directory(model_root)?;
         ensure!(
-            self.runtime_root.join("bin/python3").is_file()
-                && self.model_root.join("model.safetensors").is_file(),
+            runtime_root.join("bin/python3").is_file()
+                && model_root.join("model.safetensors").is_file(),
             "compute_public_runtime_missing"
         );
+        self.validate_signer()
+    }
+
+    pub(in crate::compute) fn validate_code(&self) -> Result<()> {
+        ensure!(
+            self.code_proposal_v6
+                && self.model_profile.is_native_conversation()
+                && self.runtime_root.is_none()
+                && self.model_root.is_none()
+                && !self.refine_incomplete
+                && self.refinement_levels == 1
+                && (1..=600).contains(&self.max_seconds)
+                && (1..=2).contains(&self.threads),
+            "compute_public_code_configuration"
+        );
+        let unique = self
+            .provider_key
+            .iter()
+            .map(VerifyingKey::to_bytes)
+            .collect::<BTreeSet<_>>();
+        ensure!(
+            if self.discover_peers {
+                self.provider_key.is_empty()
+            } else {
+                self.provider_key.len() == 1
+                    && unique.len() == 1
+                    && self.model_fingerprint.is_none()
+            },
+            "compute_public_code_selection"
+        );
+        if let Some(fingerprint) = &self.model_fingerprint {
+            super::discovery::parse_fingerprint(fingerprint).map_err(anyhow::Error::msg)?;
+        }
+        self.validate_signer()
+    }
+
+    fn validate_signer(&self) -> Result<()> {
         for path in [&self.identity, &self.passphrase_file] {
             ensure!(
                 path.is_absolute() && fs::canonicalize(path)? == *path,
@@ -143,8 +192,8 @@ impl Config {
             public_content: true,
             public_question: Some(question),
             license: Some(license),
-            runtime_root: Some(self.runtime_root.clone()),
-            model_root: Some(self.model_root.clone()),
+            runtime_root: self.runtime_root.clone(),
+            model_root: self.model_root.clone(),
             model_profile: self.model_profile,
             identity: Some(self.identity.clone()),
             passphrase_file: Some(self.passphrase_file.clone()),
@@ -165,6 +214,12 @@ impl Config {
 pub(in crate::compute) struct Execution {
     pub result: Result<Value>,
     pub cleanup_confirmed: bool,
+}
+
+/// Reuse the exact retained-handle cleanup for the separate code coordinator.
+pub(in crate::compute) async fn reconcile_code(root: &Path, socket: &Path) -> bool {
+    let _ = reconciliation::run(root, socket).await;
+    terminal_receipts(root, &mut ReceiptObservation::default()).unwrap_or(false)
 }
 
 pub(in crate::compute) async fn execute(
@@ -646,6 +701,7 @@ mod tests {
             document_inference_v2: true,
             derived_inference_v3: true,
             principle_inference_v4: false,
+            code_proposal_v6: false,
             successor_activation_v1: false,
         };
         let found = ComputeDiscovered {

@@ -328,6 +328,7 @@ fn capabilities() -> rpc::Capabilities {
         document_inference_v2: true,
         derived_inference_v3: true,
         principle_inference_v4: false,
+        code_proposal_v6: false,
         successor_activation_v1: false,
     }
 }

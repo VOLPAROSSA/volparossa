@@ -66,6 +66,8 @@ pub(super) struct Attachment {
     document_inference_v2: bool,
     derived_inference_v3: bool,
     principle_inference_v4: bool,
+    code_proposal_v6: bool,
+    code_model_profile: Option<ModelProfile>,
     successor_activation_v1: bool,
     enabled: AtomicBool,
 }
@@ -146,6 +148,16 @@ impl ContentRuntime {
             document_inference_v2: capabilities.document_inference_v2,
             derived_inference_v3: capabilities.derived_inference_v3,
             principle_inference_v4: capabilities.principle_inference_v4,
+            code_proposal_v6: capabilities.code_proposal_v6,
+            code_model_profile: capabilities.code_proposal_v6.then(|| {
+                ModelProfile::from_identity(
+                    &capabilities.model.model_id,
+                    &capabilities.model.model_revision,
+                    capabilities.model.base_weights.bytes,
+                    &capabilities.model.base_weights.sha256,
+                )
+                .expect("independently validated capability profile")
+            }),
             successor_activation_v1: capabilities.successor_activation_v1,
             enabled: AtomicBool::new(true),
         });
@@ -340,9 +352,14 @@ impl Attachment {
                 if hex::encode(source.manifest_id()) != submit.binding.dataset_manifest_id
                     || (source.is_derived() && !self.derived_inference_v3)
                     || (source.is_principle() && !self.principle_inference_v4)
+                    || (source.is_code_proposal()
+                        && (!self.code_proposal_v6
+                            || source.code_model_profile() != self.code_model_profile))
+                    || (self.code_proposal_v6 && !source.is_code_proposal())
                     || (source.is_document()
                         && !source.is_derived()
                         && !source.is_principle()
+                        && !source.is_code_proposal()
                         && !self.document_inference_v2)
                     || submit.binding.expires_unix_seconds > source.expires()
                     || derive_submission(&source, &submit.binding)? != submit.dataset_json
@@ -383,6 +400,7 @@ impl Attachment {
                     || capabilities.document_inference_v2 != self.document_inference_v2
                     || capabilities.derived_inference_v3 != self.derived_inference_v3
                     || capabilities.principle_inference_v4 != self.principle_inference_v4
+                    || capabilities.code_proposal_v6 != self.code_proposal_v6
                 {
                     return Err(ComputeError::Authentication);
                 }
@@ -500,6 +518,14 @@ pub(super) fn validate_capabilities(caps: &Capabilities) -> Result<(), ComputeEr
         || (!profile.is_default()
             && (caps.model.adapter_files.is_some() || caps.successor_activation_v1))
         || (caps.principle_inference_v4 && !profile.supports_rich_inference())
+        || caps.code_proposal_v6 != profile.is_native_conversation()
+        || (caps.code_proposal_v6
+            && (caps.task_derivation_v1
+                || caps.document_inference_v2
+                || caps.derived_inference_v3
+                || caps.principle_inference_v4
+                || caps.successor_activation_v1
+                || caps.max_rows != 1))
         || caps.model_fingerprint
             != hex::encode(Sha256::digest(
                 serde_json::to_vec(&caps.model).map_err(|_| ComputeError::Invalid)?,

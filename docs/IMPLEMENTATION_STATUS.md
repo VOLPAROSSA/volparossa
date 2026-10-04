@@ -6,6 +6,30 @@ Last updated: 2026-10-04
 
 ## Current integration and active work
 
+### Explicit public code proposals: integrated candidate, live proof pending
+
+The core now has a separate signed v6 `code_proposal` purpose for one whole,
+explicitly public source file (up to 4KiB) and a public instruction (up to 512
+bytes). The original publisher, manifest, exact source bytes, selected model and
+job are bound together. Private conversations, arbitrary paths, tools, training
+and requester overrides are not admitted through this purpose.
+
+An explicitly configured `--code-proposal-v6` broker can run the pinned Qwen
+0.6B or 4B profile. A code-only `compute public-serve` service discovers an
+eligible peer or uses its operator-selected provider, without requiring a local
+planner or model. It retains job handles before submission and uses the existing
+exact-handle cancellation, terminal receipts and cleanup gate. The response is
+the original generated source text, not repaired/extracted output; empty,
+truncated or token-limited output cannot claim a complete proposal. Applying or
+executing a proposal requires separate local application authority.
+
+Targeted checks pass: three content-source tests, eighteen local-control tests,
+two agent-boundary tests, eleven code-purpose/report tests and the existing
+broker/public-service/document-reconciliation checks. Worker protocol/template
+checks use inert data, not model execution. The separate real peer/model/editor
+trial remains pending. This does not establish useful coding quality, complete
+immune review or protected execution of private code on another node.
+
 ### Autonomous Internet use authorized
 
 The user explicitly authorized autonomous Internet use for tasks, research,
@@ -28,8 +52,9 @@ functionality. See the [multimodal direction and limits](DECENTRALIZED_AGENTS.md
 This branch combines the native-editor/Qwen implementation at `23d9718e` with
 the public cooperative service at `7621087a`. Both execution paths remain
 separate: the merged source does **not** admit private Qwen conversations to
-public peers or implement confidential remote execution. Explicit admission now
-rejects both native Qwen profiles at the public service configuration boundary.
+public peers or implement confidential remote execution. Native Qwen profiles
+remain rejected by ordinary public document services; only the separate explicit
+v6 public-code purpose above admits them.
 The isolated VM runner retains both scenario families and their distinct source
 bundles, resource budgets and closed evidence exports.
 

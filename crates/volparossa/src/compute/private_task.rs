@@ -298,7 +298,7 @@ pub(super) fn validate_mode_report(
     Ok(())
 }
 
-fn validate_model_weights(model: &Value, profile: ModelProfile) -> Result<()> {
+pub(super) fn validate_model_weights(model: &Value, profile: ModelProfile) -> Result<()> {
     let spec = profile.spec();
     if let Some(files) = profile.sharded_weight_files() {
         ensure!(

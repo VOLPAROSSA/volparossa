@@ -65,6 +65,9 @@ pub(crate) struct Serve {
     /// Enable fixed principle JSON inference; requires the explicitly provisioned pinned decoder.
     #[arg(long)]
     principle_inference_v4: bool,
+    /// Explicit public single-file proposals, separate from document/training authority.
+    #[arg(long)]
+    code_proposal_v6: bool,
     /// Optional existing compatible fixed adapter, never selected by an incoming path.
     #[arg(long)]
     adapter_root: Option<PathBuf>,
@@ -147,10 +150,11 @@ pub(super) async fn run(options: Serve) -> Result<()> {
                 "max_job_seconds": compute::MAX_JOB_SECONDS, "same_uid_only": true,
                 "remote_network_authentication": "required-agent-boundary",
                 "network_access": false, "remote_execution_proved": false,
-                "task_derivation_v1": true,
-                "document_inference_v2": true,
+                "task_derivation_v1": !options.code_proposal_v6,
+                "document_inference_v2": !options.code_proposal_v6,
                 "principle_inference_v4": options.principle_inference_v4,
-                "derived_inference_v3": true
+                "derived_inference_v3": !options.code_proposal_v6,
+                "code_proposal_v6": options.code_proposal_v6
             })
         );
         return Ok(());
@@ -204,8 +208,15 @@ pub(super) async fn run(options: Serve) -> Result<()> {
 
 fn validate_roots(options: &Serve) -> Result<()> {
     ensure!(
-        !options.model_profile.is_native_conversation(),
+        options.model_profile.is_native_conversation() == options.code_proposal_v6,
         "compute_profile_private_conversation_only"
+    );
+    ensure!(
+        !options.code_proposal_v6
+            || (!options.principle_inference_v4
+                && options.adapter_root.is_none()
+                && options.serving_directory.is_none()),
+        "compute_code_proposal_scope"
     );
     ensure!(
         !options.principle_inference_v4 || options.model_profile.supports_rich_inference(),
@@ -280,10 +291,7 @@ fn validate_roots(options: &Serve) -> Result<()> {
 
 fn capabilities(options: &Serve) -> Result<Capabilities> {
     let profile = options.model_profile.spec();
-    let base_weights = identity(
-        &options.model_root.join("model.safetensors"),
-        profile.weights_bytes,
-    )?;
+    let base_weights = model_weights_identity(&options.model_root, options.model_profile)?;
     ensure!(
         base_weights.bytes == profile.weights_bytes
             && base_weights.sha256 == profile.weights_sha256,
@@ -331,16 +339,66 @@ fn capabilities(options: &Serve) -> Result<Capabilities> {
         max_threads: 2,
         max_job_seconds: compute::MAX_JOB_SECONDS,
         max_dataset_bytes: compute::MAX_DATASET_BYTES as u64,
-        max_rows: profile.max_rows,
-        task_derivation_v1: true,
-        document_inference_v2: true,
+        max_rows: if options.code_proposal_v6 {
+            1
+        } else {
+            profile.max_rows
+        },
+        task_derivation_v1: !options.code_proposal_v6,
+        document_inference_v2: !options.code_proposal_v6,
         principle_inference_v4: options.principle_inference_v4,
-        derived_inference_v3: true,
+        code_proposal_v6: options.code_proposal_v6,
+        derived_inference_v3: !options.code_proposal_v6,
         successor_activation_v1: options.serving_directory.is_some(),
     })
 }
 
+fn model_weights_identity(root: &Path, profile: ModelProfile) -> Result<FileIdentity> {
+    let Some(files) = profile.sharded_weight_files() else {
+        return identity(
+            &root.join("model.safetensors"),
+            profile.spec().weights_bytes,
+        );
+    };
+    // Each original file is independently pinned. The identity is the ordered raw
+    // shard concatenation, never the small index JSON hash.
+    let mut aggregate = Sha256::new();
+    let mut total = 0_u64;
+    for (index, expected) in files.iter().enumerate() {
+        let path = root.join(expected.name);
+        let found = identity_accum(
+            &path,
+            expected.bytes,
+            if index == 0 {
+                None
+            } else {
+                Some(&mut aggregate)
+            },
+        )?;
+        ensure!(
+            found.bytes == expected.bytes && found.sha256 == expected.sha256,
+            "compute_broker_model_mismatch"
+        );
+        if index == 0 {
+            continue;
+        }
+        total += found.bytes;
+    }
+    Ok(FileIdentity {
+        bytes: total,
+        sha256: hex::encode(aggregate.finalize()),
+    })
+}
+
 fn identity(path: &Path, maximum: u64) -> Result<FileIdentity> {
+    identity_accum(path, maximum, None)
+}
+
+fn identity_accum(
+    path: &Path,
+    maximum: u64,
+    mut aggregate: Option<&mut Sha256>,
+) -> Result<FileIdentity> {
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -365,6 +423,9 @@ fn identity(path: &Path, maximum: u64) -> Result<FileIdentity> {
         bytes += count as u64;
         ensure!(bytes <= maximum, "compute_broker_model_file_size");
         hasher.update(&buffer[..count]);
+        if let Some(aggregate) = &mut aggregate {
+            aggregate.update(&buffer[..count]);
+        }
     }
     ensure!(bytes == info.len(), "compute_broker_model_file_changed");
     Ok(FileIdentity {
@@ -434,7 +495,11 @@ impl Broker {
             || submit.binding.row_indices.len() > usize::from(self.capabilities.max_rows)
             || dataset::validate(&submit.dataset_json, submit.binding.row_indices.len()).is_err()
             || super::validate_profile_dataset(
-                Mode::Infer,
+                if self.options.code_proposal_v6 {
+                    Mode::PublicCodeProposal
+                } else {
+                    Mode::Infer
+                },
                 self.options.adapter_root.is_some(),
                 submit.dataset_json.as_bytes(),
                 self.options.model_profile,
@@ -481,6 +546,11 @@ impl Broker {
     }
 
     fn accepts_task(&self, submit: &Submit) -> bool {
+        let code = serde_json::from_str::<Value>(&submit.dataset_json)
+            .is_ok_and(|value| value["version"] == 6);
+        if self.capabilities.code_proposal_v6 || code {
+            return self.capabilities.code_proposal_v6 && code && submit.binding.task.is_none();
+        }
         if serde_json::from_str::<Value>(&submit.dataset_json)
             .is_ok_and(|value| value["version"] == 4)
         {
@@ -535,7 +605,11 @@ impl Broker {
         dataset.sync_all()?;
         drop(dataset);
         let options = Options {
-            mode: Mode::Infer,
+            mode: if self.options.code_proposal_v6 {
+                Mode::PublicCodeProposal
+            } else {
+                Mode::Infer
+            },
             model_profile: self.options.model_profile,
             runtime_root: self.options.runtime_root.clone(),
             model_root: self.options.model_root.clone(),
@@ -827,7 +901,12 @@ pub(super) fn checked_report(
 ) -> Result<String> {
     let profile = profile_for_model(&caps.model)?;
     ensure!(
-        report["mode"] == "infer"
+        report["mode"]
+            == if caps.code_proposal_v6 {
+                "public_code_proposal"
+            } else {
+                "infer"
+            }
             && report["status"] == "ok"
             && report["updates_completed"] == 0
             && report["dataset"]["sha256"] == binding.dataset_sha256
@@ -835,12 +914,27 @@ pub(super) fn checked_report(
             && report["dataset"]["inference_examples"] == binding.row_indices.len()
             && report["model"]["id"] == caps.model.model_id
             && report["model"]["revision"] == caps.model.model_revision
-            && report["model"]["files"]["model.safetensors"]
-                == serde_json::to_value(&caps.model.base_weights)?
             && report["supervisor"]["child_reaped"] == true
             && report["supervisor"]["network_access"] == false,
         "compute_broker_result_binding"
     );
+    super::private_task::validate_model_weights(&report["model"], profile)?;
+    ensure!(
+        profile.is_native_conversation() == caps.code_proposal_v6,
+        "compute_broker_result_purpose"
+    );
+    if caps.code_proposal_v6 {
+        ensure!(
+            report["purpose"] == "code_proposal"
+                && report["output_contract"] == "single_file_replacement_v1"
+                && report["dataset"]["version"] == 6
+                && report["dataset"]["purpose"] == "code_proposal"
+                && report["dataset"]["output_contract"] == "single_file_replacement_v1"
+                && binding.row_indices == [0]
+                && binding.task.is_none(),
+            "compute_broker_result_purpose"
+        );
+    }
     match &caps.model.adapter_files {
         Some(files) => ensure!(
             report["input_adapter"]["applied"] == true
@@ -859,6 +953,20 @@ pub(super) fn checked_report(
         outputs.len() == binding.row_indices.len(),
         "compute_broker_result_rows"
     );
+    if caps.code_proposal_v6 {
+        let output = &outputs[0];
+        let complete = super::inference_output::Generation::from_output(output, true)?
+            .context("compute_code_proposal_generation")?
+            .is_eos()
+            && output["text_truncated"] == false
+            && output["text"]
+                .as_str()
+                .is_some_and(|text| !text.trim().is_empty());
+        ensure!(
+            report["proposal_complete"] == complete,
+            "compute_code_proposal_completeness"
+        );
+    }
     for (index, output) in outputs.iter().enumerate() {
         ensure!(
             output["sample_index"] == index

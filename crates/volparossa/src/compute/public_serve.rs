@@ -54,11 +54,16 @@ struct Config {
     state_parent: PathBuf,
     agent_socket: PathBuf,
     max_task_seconds: u16,
+    code_proposal_v6: bool,
 }
 
 impl Options {
     fn validate(&self, agent_socket: &Path) -> Result<()> {
-        self.backend.validate()?;
+        if self.backend.code_proposal_v6 {
+            self.backend.validate_code()?;
+        } else {
+            self.backend.validate()?;
+        }
         private_directory(&self.state_parent)?;
         ensure!(
             self.socket.is_absolute() && agent_socket.is_absolute() && self.socket != agent_socket,
@@ -70,7 +75,10 @@ impl Options {
                 .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound),
             "public_ipc_socket_exists"
         );
-        for root in [&self.backend.runtime_root, &self.backend.model_root] {
+        for root in [&self.backend.runtime_root, &self.backend.model_root]
+            .into_iter()
+            .flatten()
+        {
             ensure!(
                 !self.state_parent.starts_with(root) && !root.starts_with(&self.state_parent),
                 "public_ipc_roots_overlap"
@@ -205,16 +213,29 @@ impl Active {
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs(u64::from(config.max_task_seconds));
         let execution = tokio::spawn(async move {
-            let result = backend::execute(
-                &config.backend,
-                &root,
-                &config.agent_socket,
-                question,
-                context,
-                license,
-                &cancelled,
-            )
-            .await;
+            let result = if config.code_proposal_v6 {
+                super::peer::code_proposal::execute(
+                    &config.backend,
+                    &root,
+                    &config.agent_socket,
+                    question,
+                    context,
+                    license,
+                    &cancelled,
+                )
+                .await
+            } else {
+                backend::execute(
+                    &config.backend,
+                    &root,
+                    &config.agent_socket,
+                    question,
+                    context,
+                    license,
+                    &cancelled,
+                )
+                .await
+            };
             slot.confirmed = result.cleanup_confirmed;
             // Capture the whole guard, not just its Copy `confirmed` field.
             // Otherwise disjoint async capture drops the guard at start() return
@@ -248,14 +269,21 @@ impl Drop for Active {
 }
 
 fn capabilities(config: &Config, gate: &Semaphore) -> Value {
-    json!({"visibility":"public_cooperative","network_access":true,"private_data_supported":false,
+    let mut caps = json!({"visibility":"public_cooperative","network_access":true,"private_data_supported":false,
         "public_cache":true,"training":false,"cloud_fallback":false,"retained_public_receipts":true,
         "remote_erasure_guaranteed":false,"model_execution_proven":false,"model_profile":config.backend.model_profile,
         "max_question_bytes":512,"max_context_bytes":4096,"max_request_bytes":wire::MAX_REQUEST_BYTES,
         "max_response_bytes":wire::MAX_RESPONSE_BYTES,"execution_slots":1,"max_connections":MAX_CONNECTIONS,
         "max_seconds":config.backend.max_seconds,"max_task_seconds":config.max_task_seconds,
         "max_retained_tasks":MAX_RETAINED_TASKS,"retained_bytes_admission_limit":MAX_RETAINED_BYTES,
-        "quarantined":gate.is_closed()})
+        "quarantined":gate.is_closed()});
+    if config.code_proposal_v6 {
+        // Existing browser/document clients validate a closed capability shape.
+        // Preserve their exact legacy response rather than adding a false flag.
+        caps["code_proposal_v6"] = true.into();
+        caps["output_contract"] = "single_file_replacement_v1".into();
+    }
+    caps
 }
 
 enum Incoming {
@@ -314,14 +342,17 @@ async fn connection(
                     let _=wire::write(&mut writer,&wire::error(Some(&request.id),"invalid_request")).await;
                     break;
                 }
+                let code_request = matches!(&request.operation, wire::Operation::PublicCodeProposal{..});
                 let response=match request.operation {
                     wire::Operation::Capabilities{}=>{
                         handshake=true;
                         let mut response=wire::response(&request.id,"capabilities");
                         response["capabilities"]=capabilities(&config,&gate); response
                     },
-                    wire::Operation::Submit{question,context,license,..}=>{
+                    wire::Operation::Submit{question,context,license,..}
+                    | wire::Operation::PublicCodeProposal{question,context,license,..}=>{
                         if !handshake { wire::error(Some(&request.id),"handshake_required") }
+                        else if code_request != config.code_proposal_v6 { wire::error(Some(&request.id),"unsupported_operation") }
                         else if gate.is_closed() { wire::error(Some(&request.id),"cleanup_unconfirmed") }
                         else if active.is_some() { wire::error(Some(&request.id),"busy") }
                         else if let Ok(permit)=gate.clone().try_acquire_owned() {
@@ -379,6 +410,7 @@ async fn run_inner(options: Options, agent_socket: &Path) -> Result<()> {
     options.validate(agent_socket)?;
     let gate = Arc::new(Semaphore::new(1));
     let config = Arc::new(Config {
+        code_proposal_v6: options.backend.code_proposal_v6,
         backend: options.backend,
         state_parent: options.state_parent,
         agent_socket: agent_socket.to_owned(),

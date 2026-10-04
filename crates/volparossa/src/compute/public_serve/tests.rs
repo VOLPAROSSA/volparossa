@@ -8,6 +8,107 @@ const FIRST: &str = "01010101010101010101010101010101";
 const SECOND: &str = "02020202020202020202020202020202";
 const THIRD: &str = "03030303030303030303030303030303";
 
+#[test]
+fn public_code_cli_needs_no_local_model_but_legacy_document_still_does() {
+    #[derive(Parser)]
+    struct Arguments {
+        #[command(flatten)]
+        options: Options,
+    }
+    let key = hex::encode(
+        ed25519_dalek::SigningKey::from_bytes(&[1; 32])
+            .verifying_key()
+            .as_bytes(),
+    );
+    let mut args = vec![
+        "public-serve",
+        "--identity",
+        "/unused/id",
+        "--passphrase-file",
+        "/unused/pass",
+        "--publisher-key",
+        &key,
+        "--discover-peers",
+        "--state-parent",
+        "/unused/state",
+        "--socket",
+        "/unused/socket",
+    ];
+    assert!(Arguments::try_parse_from(&args).is_err());
+    args.extend([
+        "--code-proposal-v6",
+        "--model-profile",
+        "qwen3-4b-instruct-2507-v1",
+    ]);
+    let parsed = Arguments::try_parse_from(args).unwrap().options;
+    assert!(parsed.backend.code_proposal_v6);
+    assert!(parsed.backend.runtime_root.is_none() && parsed.backend.model_root.is_none());
+}
+
+#[tokio::test]
+async fn public_code_ipc_never_aliases_ordinary_document_submit() {
+    for code_service in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = config(root.path());
+        config.code_proposal_v6 = code_service;
+        let gate = Arc::new(Semaphore::new(1));
+        let _permit = gate.clone().acquire_owned().await.unwrap();
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let (stop, shutdown) = watch::channel(false);
+        let serving = tokio::spawn(connection(server, Arc::new(config), gate, shutdown));
+        wire::write(&mut client, &request(FIRST, json!({"type":"capabilities"})))
+            .await
+            .unwrap();
+        let caps: Value = wire::read(&mut client).await.unwrap().unwrap();
+        if code_service {
+            assert_eq!(caps["capabilities"]["code_proposal_v6"], true);
+            assert_eq!(
+                caps["capabilities"]["output_contract"],
+                "single_file_replacement_v1"
+            );
+        } else {
+            assert!(caps["capabilities"].get("code_proposal_v6").is_none());
+            assert!(caps["capabilities"].get("output_contract").is_none());
+        }
+        let mut wrong = submit();
+        if !code_service {
+            wrong["type"] = "public_code_proposal".into();
+        }
+        wire::write(&mut client, &request(SECOND, wrong))
+            .await
+            .unwrap();
+        let result: Value = wire::read(&mut client).await.unwrap().unwrap();
+        assert_eq!(result["code"], "unsupported_operation");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+        stop.send(true).unwrap();
+        serving.await.unwrap();
+    }
+}
+
+#[test]
+fn public_code_request_requires_same_public_rights_and_closed_fields() {
+    let mut operation = submit();
+    operation["type"] = "public_code_proposal".into();
+    let valid = request(FIRST, operation);
+    serde_json::from_value::<wire::Request>(valid.clone())
+        .unwrap()
+        .validate()
+        .unwrap();
+    for field in ["public_content", "rights_confirmed"] {
+        let mut invalid = valid.clone();
+        invalid["operation"][field] = false.into();
+        assert!(
+            serde_json::from_value::<wire::Request>(invalid)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+    }
+    let mut invalid = valid;
+    invalid["operation"]["path"] = "/private/source.rs".into();
+    assert!(serde_json::from_value::<wire::Request>(invalid).is_err());
+}
+
 fn request(id: &str, operation: Value) -> Value {
     let mut request = json!({"version":1,"id":id});
     request["operation"] = operation;
@@ -59,6 +160,7 @@ fn config(root: &Path) -> Config {
     .unwrap()
     .options;
     Config {
+        code_proposal_v6: options.backend.code_proposal_v6,
         backend: options.backend,
         state_parent: root.to_owned(),
         agent_socket: root.join("agent.sock"),

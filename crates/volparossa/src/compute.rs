@@ -10,6 +10,7 @@ mod policy_assessment;
 mod private_conversation;
 mod private_serve;
 mod private_task;
+mod public_code;
 mod public_serve;
 mod resources;
 mod sandbox;
@@ -82,6 +83,9 @@ pub(crate) enum Mode {
     #[value(skip)]
     #[serde(rename = "private_conversation")]
     PrivateConversation,
+    #[value(skip)]
+    #[serde(rename = "public_code_proposal")]
+    PublicCodeProposal,
     #[value(skip)]
     #[serde(rename = "aggregate_adapter")]
     AggregateAdapter,
@@ -276,6 +280,12 @@ impl Options {
                 "compute_private_execution_scope"
             );
         }
+        if self.mode == Mode::PublicCodeProposal {
+            ensure!(
+                self.adapter_root.is_none() && self.steps == 1 && self.spare_capacity,
+                "compute_public_code_execution_scope"
+            );
+        }
         ensure!((1..=64).contains(&self.steps), "compute_steps");
         ensure!((1..=2).contains(&self.threads), "compute_threads");
         ensure!((1..=600).contains(&self.max_seconds), "compute_deadline");
@@ -325,6 +335,14 @@ impl Options {
 // Shared by direct execution and Broker::start before a worker is created. Inference-only
 // profiles must pass their strict validator here as well as at the signed RPC boundary.
 fn validate_dataset(mode: Mode, has_adapter: bool, dataset: &[u8]) -> Result<()> {
+    if mode == Mode::PublicCodeProposal {
+        ensure!(!has_adapter, "compute_public_code_adapter_forbidden");
+        return volparossa_content::provider::compute::dataset::validate_code_proposal_json(
+            std::str::from_utf8(dataset)?,
+            1,
+        )
+        .map_err(Into::into);
+    }
     if mode == Mode::AggregateAdapter {
         ensure!(has_adapter, "compute_aggregation_cohort_required");
     }
@@ -388,7 +406,8 @@ fn validate_profile_dataset(
     profile: ModelProfile,
 ) -> Result<()> {
     ensure!(
-        !profile.is_native_conversation() || mode == Mode::PrivateConversation,
+        !profile.is_native_conversation()
+            || matches!(mode, Mode::PrivateConversation | Mode::PublicCodeProposal),
         "compute_profile_conversation_only"
     );
     ensure!(
@@ -398,6 +417,20 @@ fn validate_profile_dataset(
     if mode == Mode::PrivateConversation {
         ensure!(!has_adapter, "compute_private_adapter_unsupported");
         return private_task::validate_profile_input(mode, dataset, profile);
+    }
+    if mode == Mode::PublicCodeProposal {
+        ensure!(
+            profile.is_native_conversation(),
+            "compute_public_code_model_profile"
+        );
+        validate_dataset(mode, has_adapter, dataset)?;
+        let input: volparossa_content::provider::compute::dataset::CodeProposalDataset =
+            serde_json::from_slice(dataset)?;
+        ensure!(
+            input.model_profile == profile,
+            "compute_public_code_model_profile"
+        );
+        return Ok(());
     }
     validate_dataset(mode, has_adapter, dataset)?;
     if mode == Mode::PlanTasks {
