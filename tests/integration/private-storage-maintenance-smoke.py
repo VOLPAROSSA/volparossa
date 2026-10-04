@@ -311,7 +311,11 @@ def upload(root, binary, client, keys):
     before = status(root, binary, client)
     STAGE = 'renew'
     renewal = run_turn(root, binary, client, keys[1])
-    require(renewal['detail']['refresh'] == dict(fragment_index=0, renewal=True, operation_complete=True),
+    refresh = renewal['detail']['refresh']
+    require(refresh == dict(fragment_index=0, renewal=True, operation_complete=True,
+            copy_outcomes=['confirmed', 'confirmed'])
+        and type(refresh['fragment_index']) is int
+        and refresh['renewal'] is True and refresh['operation_complete'] is True,
         'real rotating renewal not observed')
     after = status(root, binary, client)
     for old, new in zip(before['fragments'][0]['copies'], after['fragments'][0]['copies']):

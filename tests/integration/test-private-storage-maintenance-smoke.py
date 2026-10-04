@@ -68,6 +68,50 @@ def report(value):
 
 
 class MaintenanceEvidence(unittest.TestCase):
+    def test_initial_renewal_accepts_current_receipt_without_weakening_fields(self):
+        # Exercise the actual upload guard, not an independent schema replica.
+        # CLI/provider calls are doubles; this is not live renewal evidence.
+        class RenewalAccepted(Exception):
+            pass
+
+        namespace = CHECK['upload'].__globals__
+        expected = dict(fragment_index=0, renewal=True, operation_complete=True,
+            copy_outcomes=['confirmed', 'confirmed'])
+
+        def probe(refresh, accepted):
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / 'foreground.bin').write_bytes(CHECK['FG'])
+                invoke = Mock(side_effect=[dict(committed=True, stored_bytes=len(CHECK['FG'])),
+                    dict(stage='enrolled', turns=0)])
+                status = Mock(side_effect=[{}, RenewalAccepted()])
+                owner = Mock(return_value=dict(detail=dict(refresh=refresh)))
+                with patch.dict(CHECK['F'], upload=Mock(return_value={})), \
+                        patch.dict(namespace, invoke=invoke, status=status, run_turn=owner,
+                            unlock=lambda root: [], STAGE='not_started'):
+                    failure = RenewalAccepted if accepted else ValueError
+                    with self.assertRaises(failure) as raised:
+                        CHECK['upload'](root, '/synthetic/cli', '/synthetic/socket', ['a', 'b', 'c'])
+                    if not accepted:
+                        self.assertEqual(str(raised.exception), 'real rotating renewal not observed')
+                    self.assertEqual(status.call_count, 2 if accepted else 1)
+                    self.assertEqual(owner.call_count, 1)
+
+        probe(expected, True)
+        for key in expected:
+            with self.subTest(missing=key):
+                probe({name: value for name, value in expected.items() if name != key}, False)
+        for key, values in (
+                ('fragment_index', (1, -1, False, 0.0, '0', None)),
+                ('renewal', (False, 1, 'true', None)),
+                ('operation_complete', (False, 1, 'true', None)),
+                ('copy_outcomes', (None, [], ['confirmed'], ['confirmed'] * 3,
+                    ['confirmed', 'unconfirmed_retained'], ['confirmed', 'unknown'], 'confirmed'))):
+            for value in values:
+                with self.subTest(field=key, value=value):
+                    probe(dict(expected, **{key: value}), False)
+        probe(dict(expected, unexpected='not part of the closed receipt'), False)
+
     def test_retirement_projects_only_existing_bounded_checkpoint_fields(self):
         namespace = CHECK['retirement_turn'].__globals__
         with patch.dict(namespace, RETIREMENT_TURNS=[]):
