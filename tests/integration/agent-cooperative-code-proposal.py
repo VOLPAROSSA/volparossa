@@ -37,11 +37,14 @@ ORIGINAL = b"def add(a, b):\n    return a - b\n"
 TEST_SHA = "78a8726db93e31cbe6f87dd58c7cb76d35cd5086d090c40b0e68caf9f0836835"
 QUESTION_SHA = "e1c169f57923c644bcdd3d7ac9ce5796049393c6e2c0ccd9938ad155d9bfdd0e"
 EXPORT_NAMES = tuple(f"{NAME}-{suffix}.json" for suffix in (
-    "smoke", "evidence", "provision", "driver", "observation", "result", "diagnostic", "capacity")) + (
+    "smoke", "evidence", "provision", "driver", "observation", "result", "diagnostic", "capacity", "discovery", "discovery-drain", "control")) + (
     "a01-expected-peers.json", "agent-jobs-layout.json", "agent-jobs-provision.json", "agent-jobs-private-cleanup.json",
     "content-custody-fetch-live-selection.json", "content-custody-fetch-gates.json",
     "content-provider-custody-fetch-control.json",
-    *(f"content-custody-fetch-privacy-{role}.json" for role in JOBS["CUSTODY"]["ROLES"]))
+    *(f"content-custody-fetch-privacy-{role}.json" for role in JOBS["CUSTODY"]["ROLES"]),
+    "content-custody-executor-discovery-live-selection.json", "content-custody-executor-discovery-gates.json",
+    "content-provider-custody-executor-discovery-control.json",
+    *(f"content-custody-executor-discovery-privacy-{role}.json" for role in JOBS["CUSTODY"]["ROLES"]))
 FLAGS = {"passed", "synthetic_model_answers", "synthetic_public_core", "local_planner_used",
     "private_peer_execution_proven", "full_coding_quality_proven", "peer_datapath_proof_owned_by_parent",
     "vm_cleanup_owned_by_parent", "owner_edit_approved", "owner_test_approved", "replacement_applied",
@@ -57,6 +60,127 @@ RESULT_FIELDS = RESULT_HASHES | {"tool_call_id", "core_task_id", "model_profile"
 
 def paths(work):
     return work / "agent-jobs-user/code", work / "state-client/compute-source/public-code"
+
+
+def control_observation(value, layout, released):
+    require(type(value) is dict and set(value) == {"version", "purpose", "failure", "discovery",
+        "discovery_response_released", "selected_provider_key", "operations", "completed_exchanges", "connections",
+        "active_connections", "byte_preserving", "responses_generated"}
+        and value["version"] == 1 and value["purpose"] == "original_control_frame_phase_observation"
+        and value["failure"] is None and value["discovery_response_released"] is released
+        and value["byte_preserving"] is True and value["responses_generated"] is False
+        and len(layout["provider_nodes"]) == 1
+        and value["selected_provider_key"] == layout["provider_keys"][layout["provider_nodes"][0]], "control observer identity")
+    selected = value["discovery"]
+    require(type(selected) is dict and set(selected) == {"request_sha256", "response_sha256", "public_code_v6_only",
+        "minimum", "maximum", "selected_count", "task_requests_before_release"}
+        and all(hex64(selected[key]) for key in ("request_sha256", "response_sha256"))
+        and selected["public_code_v6_only"] is True and selected["minimum"] == selected["maximum"] == selected["selected_count"] == 1
+        and selected["task_requests_before_release"] == 0, "one original content-free discovery")
+    operations = value["operations"]
+    require(type(operations) is dict and set(operations) == {"capabilities", "submit", "poll", "cancel"}
+        and all(type(count) is int and 0 <= count <= 4096 for count in operations.values())
+        and all(type(value[key]) is int and 0 <= value[key] <= 4096
+            for key in ("completed_exchanges", "connections", "active_connections")), "bounded observed operations")
+    if released:
+        require(operations["submit"] >= 1 and operations["poll"] >= 1
+            and value["active_connections"] == 0
+            and value["completed_exchanges"] == value["connections"] == sum(operations.values()) + 1,
+            "all exact selected-provider exchanges must complete")
+    else:
+        require(all(count == 0 for count in operations.values()) and value["connections"] == value["active_connections"] == 1
+            and value["completed_exchanges"] == 0, "job started before capture boundary")
+
+
+def await_discovery(work, pid):
+    JOBS["guest_work"](work)
+    owner = JOBS["identity"](pid)
+    path = paths(work)[1].parent / "control-observer/discovery-ready.json"
+    deadline = time.monotonic() + 155
+    while not path.exists() and JOBS["alive"](owner) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    value = read(path, 4096)
+    control_observation(value, read(work / "agent-jobs-layout.json"), False)
+    write(work / f"{NAME}-discovery.json", value)
+    # A completed eligibility reply is not by itself TCP teardown proof. Observe
+    # actual owned namespaces, then drain the existing packet observers in shell.
+    deadline = min(deadline, time.monotonic() + 10)
+    while True:
+        drained = provider_streams()
+        if drained["live_tcp_streams"] == 0:
+            break
+        require(JOBS["alive"](owner) and time.monotonic() < deadline, "discovery streams remain active")
+        time.sleep(0.02)
+    write(work / f"{NAME}-discovery-drain.json", drained)
+
+
+def tcp_counts(raw):
+    require(len(raw) <= 1048576 and raw.splitlines() and raw.splitlines()[0].split()[0] == "sl", "bounded kernel TCP table")
+    live, waiting = 0, 0
+    for line in raw.splitlines()[1:]:
+        row = line.split()
+        require(len(row) >= 10 and all(re.fullmatch(r"(?:[0-9A-F]{8}|[0-9A-F]{32}):[0-9A-F]{4}", field)
+            for field in row[1:3]) and re.fullmatch(r"[0-9A-F]{2}", row[3]), "kernel TCP row")
+        state = int(row[3], 16)
+        require(1 <= state <= 12, "unknown kernel TCP state")
+        if any(int(field.rsplit(":", 1)[1], 16) == 18080 for field in row[1:3]):
+            # TIME_WAIT cannot carry new application data without a new connection.
+            # Late/retransmitted packets remain subject to the real capture gates.
+            waiting += state == 6
+            live += state not in {6, 7, 10}
+    return live, waiting
+
+
+def provider_streams():
+    nodes = ["exit", "relay3", "relay4", "relay5"]
+    result = dict(version=1, scope="owned_kernel_provider_tcp_before_capture_drain", inspected_nodes=nodes,
+        tables=8, live_tcp_streams=0, time_wait_sockets=0)
+    for node in nodes:
+        raw = subprocess.check_output(["systemctl", "show", "--property=MainPID", "--value",
+            f"volparossa-alpha-agent@{node}.service"], text=True, timeout=2).strip()
+        require(raw.isdecimal() and int(raw) > 0, "owned provider agent unavailable")
+        identity = JOBS["identity"](int(raw))
+        for table in ("tcp", "tcp6"):
+            with Path(f"/proc/{raw}/net/{table}").open() as source:
+                live, waiting = tcp_counts(source.read(1048577))
+            result["live_tcp_streams"] += live
+            result["time_wait_sockets"] += waiting
+        require(JOBS["identity"](int(raw)) == identity, "owned provider process changed")
+    return result
+
+
+def check_drain(value):
+    require(type(value) is dict and set(value) == {"version", "scope", "inspected_nodes", "tables", "live_tcp_streams", "time_wait_sockets"}
+        and value["version"] == 1 and value["scope"] == "owned_kernel_provider_tcp_before_capture_drain"
+        and value["inspected_nodes"] == ["exit", "relay3", "relay4", "relay5"] and value["tables"] == 8
+        and type(value["live_tcp_streams"]) is int and value["live_tcp_streams"] == 0
+        and type(value["time_wait_sockets"]) is int and 0 <= value["time_wait_sockets"] <= 65535, "discovery TCP teardown missing")
+
+
+def release_discovery(work):
+    JOBS["guest_work"](work)
+    discovery = read(work / "content-custody-executor-discovery-gates.json")
+    require(discovery["exit_mptcp_tls_completed"] >= 1, "discovery capture not drained")
+    check_drain(read(work / f"{NAME}-discovery-drain.json"))
+    target = paths(work)[1].parent / "control-observer/release"
+    require(not target.exists() and not target.is_symlink(), "fresh capture release required")
+    temporary = target.with_suffix(".tmp")
+    with temporary.open("xb") as output:
+        output.write(b"release\n")
+    # Root-owned, nonsecret observation barrier must be readable by the existing
+    # unprivileged fixture owner. Publish only the complete eight original bytes.
+    temporary.chmod(0o444)
+    temporary.replace(target)
+
+
+def control_observed(work):
+    JOBS["guest_work"](work)
+    value = read(paths(work)[1].parent / "control-observer/control-observer.json", 4096)
+    control_observation(value, read(work / "agent-jobs-layout.json"), True)
+    initial = read(work / f"{NAME}-discovery.json")
+    require(value["discovery"] == initial["discovery"] and value["selected_provider_key"] == initial["selected_provider_key"],
+        "original discovery response changed")
+    write(work / f"{NAME}-control.json", value)
 
 
 def capacity(work):
@@ -330,14 +454,20 @@ def evidence(work, revision):
     JOBS["guest_work"](work)
     root, state = paths(work)
     require(not root.exists() and not state.exists() and not (state.parent / "public.sock").exists(), "private state remains")
-    value = {key: read(work / f"{NAME}-{key}.json", 1048576) for key in ("provision", "driver", "observation", "result")}
+    value = {key: read(work / f"{NAME}-{key}.json", 1048576) for key in ("provision", "driver", "observation", "result", "discovery", "control")}
+    value["discovery_drain"] = read(work / f"{NAME}-discovery-drain.json")
     value.update(source_revision=revision, layout=read(work / "agent-jobs-layout.json"),
         peers=read(work / "a01-expected-peers.json"), private_cleanup=read(work / "agent-jobs-private-cleanup.json"),
         path=dict(selected_route=read(work / "content-custody-fetch-live-selection.json"),
             privacy={role: read(work / f"content-custody-fetch-privacy-{role}.json") for role in JOBS["CUSTODY"]["ROLES"]},
             control_privacy=read(work / "content-provider-custody-fetch-control.json"), gates=read(work / "content-custody-fetch-gates.json")),
         public_service_stopped=True, peer_broker_stopped=True, private_state_removed=True)
+    value["discovery_path"] = dict(selected_route=read(work / "content-custody-executor-discovery-live-selection.json"),
+        privacy={role: read(work / f"content-custody-executor-discovery-privacy-{role}.json") for role in JOBS["CUSTODY"]["ROLES"]},
+        control_privacy=read(work / "content-provider-custody-executor-discovery-control.json"),
+        gates=read(work / "content-custody-executor-discovery-gates.json"))
     for unit in ("volparossa-alpha-public-code.service", "volparossa-alpha-cooperative-code.service",
+            "volparossa-alpha-code-control-observer.service",
             f"volparossa-alpha-compute@{value['layout']['provider_nodes'][0]}.service"):
         require(subprocess.check_output(["systemctl", "show", "--property=ActiveState", "--value", unit], text=True).strip()
             in {"inactive", "failed"}, "service still active")
@@ -359,7 +489,20 @@ def check_evidence(value, revision):
         and value["layout"]["provider_nodes"] == [value["observation"]["node"]]
         and value["private_cleanup"] == dict(observed_compute_processes_ended=True, model_runtime_removed=True,
             private_job_roots_removed=True, publisher_key_removed=True), "isolated worker/cleanup missing")
-    JOBS["CUSTODY"]["validate_path"](value["path"], value["peers"], value["layout"], "fetch", payload_minimum=1)
+    control_observation(value["discovery"], value["layout"], False)
+    control_observation(value["control"], value["layout"], True)
+    check_drain(value["discovery_drain"])
+    require(value["control"]["discovery"] == value["discovery"]["discovery"]
+        and value["control"]["selected_provider_key"] == shown["public_result"]["provider_key"]
+        and value["discovery_path"]["gates"]["event_baseline_unix_ms"] < value["path"]["gates"]["event_baseline_unix_ms"],
+        "discovery and task phases not separately observed")
+    # Physical generic-control links retain their actual cp0/cp1 order. They are
+    # not the selected compute-worker set and may still carry background discovery.
+    controls = ["relay4", "relay5"]
+    JOBS["CUSTODY"]["validate_path"](value["discovery_path"], value["peers"], value["layout"], "executor-discovery",
+        control_provider_nodes=controls, discovery_minimum_flows=1)
+    JOBS["CUSTODY"]["validate_path"](value["path"], value["peers"], value["layout"], "fetch", payload_minimum=1,
+        control_provider_nodes=controls)
 
 
 def finalize(work, revision, status, complete, remaining, phase, blocker):
@@ -399,6 +542,12 @@ def main(args):
         provision(Path(args[1]), Path(args[2]), args[3])
     elif len(args) == 3 and args[0] == "observe":
         observe(Path(args[1]), int(args[2]))
+    elif len(args) == 3 and args[0] == "await-discovery":
+        await_discovery(Path(args[1]), int(args[2]))
+    elif len(args) == 2 and args[0] == "release-discovery":
+        release_discovery(Path(args[1]))
+    elif len(args) == 2 and args[0] == "control-observed":
+        control_observed(Path(args[1]))
     elif len(args) == 4 and args[0] == "capture":
         capture(Path(args[1]), int(args[2]), int(args[3]))
     elif len(args) == 3 and args[0] == "evidence":

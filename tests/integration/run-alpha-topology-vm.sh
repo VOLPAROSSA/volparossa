@@ -974,8 +974,12 @@ COOPERATIVE_CODE_NAMES = {name.replace("agent-cooperative-browser-", "agent-coop
                           for name in COOPERATIVE_BROWSER_NAMES
                           if name != "agent-cooperative-browser-panel.json"} | {"agent-cooperative-code-driver.json"}
 COOPERATIVE_CODE_PROPOSAL_NAMES = {f"agent-cooperative-code-proposal-{name}.json" for name in (
-    "smoke", "evidence", "provision", "driver", "observation", "result", "diagnostic", "capacity")
+    "smoke", "evidence", "provision", "driver", "observation", "result", "diagnostic", "capacity", "discovery", "discovery-drain", "control")
 } | {name for name in COOPERATIVE_BROWSER_NAMES if not name.startswith("agent-cooperative-browser-")}
+COOPERATIVE_CODE_PROPOSAL_NAMES |= {
+    "content-custody-executor-discovery-live-selection.json", "content-custody-executor-discovery-gates.json",
+    "content-provider-custody-executor-discovery-control.json",
+} | {f"content-custody-executor-discovery-privacy-{role}.json" for role in ("client", "relay0", "relay1", "relay2", "exit")}
 
 
 def read_tail(path, limit=FILE_LIMIT):

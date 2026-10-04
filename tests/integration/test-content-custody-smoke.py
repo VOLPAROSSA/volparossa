@@ -106,6 +106,69 @@ def fixture():
 
 
 class CustodyEvidence(unittest.TestCase):
+    def single_executor(self):
+        value = fixture()
+        phase = value["phases"]["fetch"]
+        value["layout"]["provider_nodes"] = ["relay4"]
+        phase["privacy"]["exit"]["provider_application"]["relay5"] = dict(
+            request_packets=0, response_packets=0, response_payload_bytes=0)
+        return phase, value["expected_peers"], value["layout"]
+
+    def test_single_task_executor_retains_both_exact_control_links(self):
+        args = self.single_executor()
+        CHECK["validate_path"](*args, "fetch", payload_minimum=1,
+                               control_provider_nodes=["relay4", "relay5"])
+        with self.assertRaises(ValueError):
+            CHECK["validate_path"](*args, "fetch", payload_minimum=1)
+        for nodes in (["relay5", "relay4"], ["relay4"], ["relay4", "relay4"],
+                      ["relay3", "relay5"], ["relay4", "unknown"], [[], "relay4"], "relay4"):
+            with self.subTest(nodes=nodes), self.assertRaises(ValueError):
+                CHECK["validate_path"](*args, "fetch", payload_minimum=1, control_provider_nodes=nodes)
+        phase, peers, layout = copy.deepcopy(args)
+        phase["control_privacy"]["content_control_pairs"]["cp1"][1] = "wrong-physical-provider"
+        with self.assertRaises(ValueError):
+            CHECK["validate_path"](phase, peers, layout, "fetch", payload_minimum=1,
+                                   control_provider_nodes=["relay4", "relay5"])
+
+    def test_control_scope_never_allows_unselected_fetch_or_weaker_wireguard_legs(self):
+        for mutate in (
+            lambda phase: phase["privacy"]["exit"]["provider_application"]["relay5"].update(request_packets=1),
+            lambda phase: phase["privacy"]["relay0"].update(client_leg_wireguard_data_datagrams=16),
+            lambda phase: phase["privacy"]["relay1"].update(exit_leg_wireguard_data_datagrams=16),
+            lambda phase: phase["privacy"]["client"].update(direct_client_exit_packets=1),
+        ):
+            phase, peers, layout = self.single_executor()
+            mutate(phase)
+            with self.assertRaises(ValueError):
+                CHECK["validate_path"](phase, peers, layout, "fetch", payload_minimum=1,
+                                       control_provider_nodes=["relay4", "relay5"])
+
+    def test_one_eligibility_flow_requires_explicit_single_executor_discovery(self):
+        args = self.single_executor()
+        phase, peers, layout = args
+        phase["gates"]["exit_mptcp_tls_completed"] = 1
+        # Eligibility can contact an unselected peer; this is not fetch permission.
+        phase["privacy"]["exit"]["provider_application"]["relay5"].update(request_packets=1)
+        CHECK["validate_path"](*args, "executor-discovery", control_provider_nodes=["relay4", "relay5"],
+                               discovery_minimum_flows=1)
+        for minimum in (0, 2, 3, True, "1"):
+            with self.subTest(minimum=minimum), self.assertRaises(ValueError):
+                CHECK["validate_path"](*args, "executor-discovery", control_provider_nodes=["relay4", "relay5"],
+                                       discovery_minimum_flows=minimum)
+        with self.assertRaises(ValueError):
+            CHECK["validate_path"](*args, "executor-discovery", control_provider_nodes=["relay4", "relay5"])
+        with self.assertRaises(ValueError):
+            CHECK["validate_path"](*args, "fetch", control_provider_nodes=["relay4", "relay5"],
+                                   discovery_minimum_flows=1)
+        phase["gates"]["exit_mptcp_tls_completed"] = 0
+        with self.assertRaises(ValueError):
+            CHECK["validate_path"](*args, "executor-discovery", control_provider_nodes=["relay4", "relay5"],
+                                   discovery_minimum_flows=1)
+        phase["gates"]["exit_mptcp_tls_completed"] = 2
+        layout["provider_nodes"] = ["relay4", "relay5"]
+        with self.assertRaises(ValueError):
+            CHECK["validate_path"](*args, "executor-discovery", discovery_minimum_flows=1)
+
     def test_bound_receipts_restarts_reassembly_and_captures_are_required(self):
         valid = fixture()
         CHECK["validate_evidence"](valid)

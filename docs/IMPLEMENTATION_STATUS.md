@@ -6,7 +6,7 @@ Last updated: 2026-10-04
 
 ## Current integration and active work
 
-### Explicit public code proposals: integrated candidate, live proof pending
+### Explicit public code proposals: real bounded repair, overall acceptance incomplete
 
 The core now has a separate signed v6 `code_proposal` purpose for one whole,
 explicitly public source file (up to 4KiB) and a public instruction (up to 512
@@ -31,9 +31,42 @@ The separate `agent-cooperative-code-proposal` trial binds the immutable Code
 driver `f27576eb` to one real Qwen 0.6B peer, an explicitly public source file,
 owner-approved replacement and unchanged tests. Its owner has no local model;
 the raw peer output must complete at EOS and pass the original checks without
-output repair. Live execution remains pending. This is an owner-helper trial,
+output repair. This is an owner-helper trial,
 not proof of the native editor UI, OpenCode planner, useful general coding
 quality, complete immune review or protected private execution on another node.
+
+The original [Code run37213737334](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37213737334)
+on workflow `73ede9ec` / core `6b24c3d2` is terminal **failed**. Its retained
+driver and independent peer observer exited zero: the real pinned 0.6B model on
+relay4 produced an unmodified 31-byte EOS proposal in 12 tokens. The initial
+three-test fixture failed; the separately owner-approved edit then passed the
+unchanged original tests and independent verification. Exact input/model/receipt
+joins and worker cleanup passed. Overall acceptance failed at
+`CODE_PROPOSAL_EVIDENCE_FAILED`: one combined capture includes both capability
+discovery and execution, while the fetch validator requires application traffic
+only to the selected executor. The unselected relay5 counters (14 requests,
+16 responses, 1851 response payload bytes) cannot retrospectively prove that
+those packets were eligibility-only. The two physical control links also must
+not be confused with the single selected worker. Cleanup left zero owned objects;
+the original guest snapshots match at SHA-256
+`c095ba9023e57d4803d9c996762576dd6756e587bf37088ec8d501aa0d9246f8`.
+Original ZIP SHA-256:
+`b75255d6cbf854dd5a427f34773619fbacbb4ca4061d029fc7dcfd532a4868da`;
+original job log SHA-256:
+`2c879aba273b1132b2c0bc18e49a6d086b862446c3cf629b208b783d08678ffa`.
+
+The next fixture candidate observes the original same-owner control frames and
+holds the genuine completed discovery response while discovery captures drain
+and execution captures start. Original kernel TCP tables must first show no
+active provider streams in the owned exit/provider namespaces; LISTEN and
+TIME_WAIT are distinguished from live streams, not treated as a fixed sleep.
+The existing exact packet-drain and protected-flow-completion gates then run.
+It never creates responses, selects a peer or
+changes the immutable Code driver, model, task, owner approvals or deadlines.
+Execution still requires zero application traffic to unselected providers;
+both phases retain the exact physical control-link and relay/exit privacy gates.
+Focused socket/parser checks prove only this instrumentation contract, not a
+passed replacement live run. The original failed outcome remains unchanged.
 
 ### Autonomous Internet use authorized
 

@@ -40,7 +40,93 @@ def manifest():
     return result
 
 
+def phase_evidence():
+    # Synthetic parser data only: these counters never stand in for real captures.
+    custody = runpy.run_path(str(HERE / "test-content-custody-smoke.py"))["fixture"]()
+    layout = custody["layout"]; layout["provider_nodes"] = ["relay4"]
+    layout["provider_keys"] = {"relay4":layout["provider_keys"]["relay4"]}
+    shown = driver(); shown["public_result"]["provider_key"] = layout["provider_keys"]["relay4"]
+    path = custody["phases"]["fetch"]
+    discovery_path = copy.deepcopy(path)
+    discovery_path["gates"]["event_baseline_unix_ms"] = 500
+    path["privacy"]["exit"]["provider_application"]["relay5"] = dict(request_packets=0, response_packets=0, response_payload_bytes=0)
+    discovery = dict(version=1, purpose="original_control_frame_phase_observation", failure=None,
+        discovery=dict(request_sha256="a"*64, response_sha256="b"*64, public_code_v6_only=True,
+            minimum=1, maximum=1, selected_count=1, task_requests_before_release=0),
+        discovery_response_released=False, selected_provider_key=layout["provider_keys"]["relay4"],
+        operations=dict(capabilities=0, submit=0, poll=0, cancel=0), completed_exchanges=0,
+        connections=1, active_connections=1, byte_preserving=True, responses_generated=False)
+    control = copy.deepcopy(discovery)
+    control.update(discovery_response_released=True, operations=dict(capabilities=1, submit=1, poll=2, cancel=0),
+        completed_exchanges=5, connections=5, active_connections=0)
+    return dict(source_revision="a"*40, public_service_stopped=True, peer_broker_stopped=True,
+        private_state_removed=True, provision=dict(manifest=manifest()), driver=shown,
+        result=dict(shown["public_result"], exact_receipt_join=True, original_input_observed=True,
+            observed_task_processes_ended=True), layout=layout, peers=custody["expected_peers"],
+        observation=dict(isolated_live_worker=True, observed_task_processes_ended=True,
+            base_model_sha256=C["MODEL"]["base_weights"]["sha256"],
+            dataset_sha256=shown["public_result"]["dataset_sha256"], node="relay4"),
+        private_cleanup=dict(observed_compute_processes_ended=True, model_runtime_removed=True,
+            private_job_roots_removed=True, publisher_key_removed=True),
+        discovery=discovery, control=control, path=path, discovery_path=discovery_path,
+        discovery_drain=dict(version=1, scope="owned_kernel_provider_tcp_before_capture_drain",
+            inspected_nodes=["exit", "relay3", "relay4", "relay5"], tables=8, live_tcp_streams=0, time_wait_sockets=2))
+
+
 class PublicCodeProposal(unittest.TestCase):
+    def test_separate_original_discovery_and_exact_worker_execution(self):
+        C["check_evidence"](phase_evidence(), "a"*40)
+        mutations = (
+            lambda v: v["discovery"]["operations"].update(submit=1),
+            lambda v: v["control"].update(responses_generated=True),
+            lambda v: v["control"].update(byte_preserving=False),
+            lambda v: v["control"].update(selected_provider_key="f"*64),
+            lambda v: v["control"]["discovery"].update(response_sha256="c"*64),
+            lambda v: v["control"].update(active_connections=1),
+            lambda v: v["control"].update(completed_exchanges=4),
+            lambda v: v["control"].update(failure="invalid_frame"),
+            lambda v: v["discovery_drain"].update(live_tcp_streams=1),
+            lambda v: v["discovery_path"]["gates"].update(event_baseline_unix_ms=1000),
+            lambda v: v["path"]["privacy"]["exit"]["provider_application"]["relay5"].update(request_packets=1),
+            lambda v: v["path"]["control_privacy"]["content_control_pairs"]["cp1"].append("wrong-link"),
+        )
+        for mutate in mutations:
+            value = phase_evidence(); mutate(value)
+            with self.assertRaises(ValueError): C["check_evidence"](value, "a"*40)
+
+    def test_capture_barrier_order_and_no_fixture_or_runtime_substitution(self):
+        shell = (HERE / (C["NAME"] + ".sh")).read_text()
+        ordered = ["content_custody_phase_start executor-discovery", '"$proposal_script" await-discovery',
+            "content_custody_phase_finish 1", "content_custody_phase_start fetch", '"$proposal_script" release-discovery',
+            '"$proposal_script" observe']
+        offsets = [shell.index(value) for value in ordered]
+        self.assertEqual(offsets, sorted(offsets))
+        self.assertIn('--control-socket "$code_control_socket"', shell)
+        self.assertIn('--upstream "$WORK/runtime-client/control/agent.sock"', shell)
+        self.assertIn('--max-seconds 600 --max-task-seconds 2400', shell)
+        self.assertEqual(C["CODE_REVISION"], "f27576ebd7e7ded2f1319186f34df87f48e970d7")
+        self.assertIn("content-custody-executor-discovery-privacy-exit.json", C["EXPORT_NAMES"])
+        self.assertIn(C["NAME"] + "-control.json", C["EXPORT_NAMES"])
+
+    def test_kernel_stream_barrier_does_not_confuse_listener_timewait_and_active_flow(self):
+        header = "  sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n"
+        def row(state, port="46A0"):
+            return f"0: 00000000:{port} 00000000:0000 {state} 0 0 0 0 0 0\n"
+        self.assertEqual(C["tcp_counts"](header + row("0A") + row("06")), (0, 1))
+        for state in ("01", "02", "03", "04", "05", "08", "09", "0B", "0C"):
+            self.assertEqual(C["tcp_counts"](header + row(state)), (1, 0))
+        self.assertEqual(C["tcp_counts"](header + row("01", "1000")), (0, 0))
+        for value in ("", header + row("0D"), header + "malformed", "x"*1048577):
+            with self.assertRaises(ValueError): C["tcp_counts"](value)
+
+    def test_exact_closed_export_set_includes_both_phase_captures(self):
+        source = (HERE / "run-alpha-topology-vm.sh").read_text()
+        raw = source.split("<<'GUEST_DIAGNOSTICS_PYTHON'\n", 1)[1].split("\nGUEST_DIAGNOSTICS_PYTHON\n", 1)[0]
+        module = {"__name__":"public_code_export_contract"}
+        exec(compile(raw, "inert-collector", "exec"), module)
+        self.assertEqual(module["COOPERATIVE_CODE_PROPOSAL_NAMES"], set(C["EXPORT_NAMES"]) |
+            {"host-state-before.json", "host-state-after.json", "guest-exit-status", "current-phase"})
+
     def test_exact_node_only_manifest_and_purpose(self):
         C["bundle_manifest"](manifest())
         self.assertEqual(len(C["BUNDLE_FILES"]), 28)

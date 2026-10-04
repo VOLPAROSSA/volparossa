@@ -97,10 +97,10 @@ class CooperativeCodeVm(unittest.TestCase):
         self.assertIn('/home/vpci/cooperative-code.tar /home/vpci/cooperative-code-inputs "$code_manifest_sha256"', DRIVER)
         self.assertIn('--code-bundle /home/vpci/cooperative-code-inputs', DRIVER)
         self.assertIn('--code-manifest-sha256 "$code_manifest_sha256"', DRIVER)
-        self.assertIn('agent-cooperative-code|agent-public-collection', DRIVER)
+        self.assertRegex(DRIVER, r'agent-cooperative-code\|(?:agent-cooperative-code-proposal\|)?agent-public-collection')
         self.assertIn('--scenario "$topology_scenario"', DRIVER)
         self.assertIn('"tests/integration/$scenario.py" export-names', DRIVER)
-        self.assertIn('[ "$scenario" != agent-cooperative-code ] || driver_time_bound=4800s', SOURCE)
+        self.assertIn('{ [ "$scenario" != agent-cooperative-code ] && [ "$scenario" != agent-cooperative-code-proposal ]; } || driver_time_bound=4800s', SOURCE)
 
     def test_timeout_exports_only_code_structural_receipts(self):
         extras = {"host-state-before.json", "host-state-after.json", "guest-exit-status", "current-phase"}
