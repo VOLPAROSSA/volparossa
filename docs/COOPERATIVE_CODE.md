@@ -1,5 +1,44 @@
 # OpenCode to real cooperative execution
 
+Two separate trials cover different application boundaries. The newer public
+single-file owner-helper trial passes; the original native OpenCode / two-peer
+document trial below still fails answer completion. Neither proves protected
+execution of private code on other clients.
+
+## Public single-file proposal: passed development milestone
+
+[Run `37221727043`](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37221727043)
+passes the original `agent-cooperative-code-proposal` checker on core
+`2a1b4ad347b7d9f12a6a4c2beee40ff8706bd477`. Workflow source is
+`54af18cc5d30a880e3be298192af150daf01b805`; the actual Node owner driver remains
+the immutable `f27576ebd7e7ded2f1319186f34df87f48e970d7`.
+
+The owner explicitly publishes one bounded, GPL-3.0-only source file and task.
+The core discovers a real Qwen3-0.6B executor; no owner-side model is required.
+The original peer model returns a complete 31-byte source replacement at EOS
+after 12 tokens, with no repaired text or supplied answer. The initial tests fail.
+Separate owner edit permission then applies that exact proposal only to the
+selected, base-hash-bound file; separate test permission runs the unchanged
+three-test fixture and independent verification successfully.
+
+Discovery and task captures are separated by an actual control-response and
+kernel-stream drain barrier. The observer forwards original bytes and generates
+no response. Both phases pass their original protected MPTCP and privacy gates;
+task traffic goes only to the selected executor. Original source, model, dataset
+and terminal job receipts are joined independently. Final observer/service/worker
+and private-state cleanup passes, zero owned objects remain, and guest-network
+snapshots match. The inventory gate first observes all required relays and exits.
+
+This proves the public owner-helper chain, **not a native editor UI or autonomous
+OpenCode planning turn**, broader coding ability, confidential private-peer
+execution or complete immune-system review. Earlier failed trials keep their
+original status and evidence. Exact artifact, report and log hashes and the
+failure chronology are in the
+[implementation ledger](IMPLEMENTATION_STATUS.md#explicit-public-code-proposals-bounded-peer-repair-passes).
+Replay against the integration branch is not a new live combined-source trial.
+
+## Original native OpenCode / two-peer document trial
+
 This disposable integration connects the source-built OpenCode runtime in
 `volparossa-code` to the core's public cooperative service and two real model
 workers. It reuses the existing protected MPTCP topology, peer receipts and

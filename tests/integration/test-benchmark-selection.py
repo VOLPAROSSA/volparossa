@@ -271,6 +271,7 @@ WORK=$2; mode=$3
 case $4 in
     image-snapshot) image_snapshot=yes ;;
     cloud-private-file) cloud_private_file=yes ;;
+    cloud-private-upload) cloud_private_upload=yes ;;
     agent-cooperative-browser) agent_cooperative_browser=yes ;;
     agent-cooperative-code) agent_cooperative_code=yes ;;
     no) : ;;
@@ -314,7 +315,7 @@ printf '%s\n' "$result"
                  ("success", 0, "complete", "SELECTED", 0, 1))
         fields = {"schema_version", "stage", "reason", "last_connect_reason", "connect_exit_status",
                   "attempts", "retries", "redraws", "path_polls", "path_status"}
-        scenarios = ("image-snapshot", "cloud-private-file", "agent-cooperative-browser",
+        scenarios = ("image-snapshot", "cloud-private-file", "cloud-private-upload", "agent-cooperative-browser",
                      "agent-cooperative-code")
         for scenario, case in ((scenario, case) for scenario in scenarios for case in cases):
             mode, status, stage, reason, connect_exit, attempts = case

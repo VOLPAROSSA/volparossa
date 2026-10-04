@@ -2,11 +2,105 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
+[New to the project?](README.md) Start with the documentation guide or the
+[short development summary](../README.md#development-status). This document is the
+detailed evidence ledger, including historical failures—not an installation guide.
+
+[Current work](#current-integration-and-active-work) ·
+[Earlier milestones](#earlier-milestone-evidence) ·
+[Original v1 scorecard](#fixed-alpha-v1-scorecard) ·
+[Completion requirements](#definition-of-done)
+
 Last updated: 2026-10-04
 
 ## Current integration and active work
 
-### Explicit public code proposals: real bounded repair, overall acceptance incomplete
+### Bank and Transaction layer research
+
+The 2026-10-04 user extension adds VOLPAROSSA Bank and a reusable Transaction-layer.
+The [design](services/TRANSACTION_LAYER.md) separates portfolio construction,
+beneficial ownership, payment authorization, ledger ordering, external settlement
+and authorized corrections. Research prototypes are isolated from the daemon;
+they accept no real funds and provide no distributed or cryptographic settlement.
+Live payments, custody, financial gateway integration, confidential AML review,
+price discovery and recovery of forwarded funds remain unimplemented. Research
+tests do not satisfy these functional requirements.
+
+Nine offline transaction-state tests pass: exact integer conservation, scoped
+simulation authority, reservations, duplicate IDs, external uncertainty, bounded
+append-only corrections, forwarded/split-value shortfalls and resource limits.
+All state and authority are single-process test inputs; restart-safe idempotency,
+distributed consensus and actual recovery are not proved. The separate Bank
+arithmetic prototype has nine passing tests for the confirmed ROIC × FCF-yield
+rule and configured ownership headroom, not investment performance or compliance.
+
+### Eligible controls in route preselection
+
+New route attempts filter alternative controls for the same signed Exit using the
+existing transport, address-family, capacity and diversity predicates before drawing
+one control. An incompatible draw can no longer hide a compatible alternative.
+Signed-group ambiguity checks remain first; retained routes keep their exact pinned
+control, and wholly incompatible groups still reject before dispatch. Seven signed
+route tests and eighteen sampler tests pass. This is unit-level evidence, not
+a proved explanation or live fix for the Cloud/browser route-selection failures.
+
+Main `c1a6cada` [quality run37076590769](https://github.com/VOLPAROSSA/volparossa/actions/runs/37076590769)
+failed because the actor source-contract test still searched for the former
+unscoped snapshot call after the scoped builder was introduced. The test now
+recognizes the scoped call and additionally verifies that the request-derived
+scope is built first and passed into the snapshot. All original affine, privacy
+and dispatch-order assertions remain. The corrected contract, seven route-snapshot
+tests and eighteen sampler tests pass locally, as do formatting and diff checks.
+Only the test and this record changed; production behavior is unchanged. The
+original CI failure remains failed, and this is not a fresh full-suite or live
+datapath claim.
+
+### Explicit public code proposals: bounded peer repair passes
+
+The original [Code run `37221727043`](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37221727043)
+passes the complete unchanged public-proposal checker on core
+`2a1b4ad347b7d9f12a6a4c2beee40ff8706bd477`, workflow source
+`54af18cc5d30a880e3be298192af150daf01b805` and immutable owner driver
+`f27576ebd7e7ded2f1319186f34df87f48e970d7`. A genuinely discovered, isolated
+Qwen3-0.6B worker on relay4 produces the original 31-byte replacement at EOS
+after 12 generated tokens. The baseline fails first; the owner-approved edit
+passes all three unchanged original tests and separate independent verification.
+There is no supplied model answer, local planner or output repair.
+
+The original source/model/dataset/receipt bindings, separated discovery and task
+captures, exact selected-executor traffic and relay/exit privacy checks all pass.
+The byte-preserving control observer records eight completed exchanges, no active
+connections and no generated responses. Final private cleanup is confirmed,
+zero owned objects remain and the disposable guest's network hashes match.
+This is a real **Node owner-helper / public peer / approved edit / original-test**
+milestone, not native OpenCode UI/planner completion, general coding quality,
+complete immune review or confidential execution of private code on peers.
+
+All 36 original artifact files remain unchanged. ZIP SHA-256:
+`8a17e92c2bc4148093651a020cf0a2daaf46b2e14fcad74a4e4343024de02d11`;
+original job `111493248899` log SHA-256:
+`0dbc4650b89ba5d6bb8a3474f886ff4016feb1a0042d88b52c9e5391776fee26`;
+original smoke-report SHA-256:
+`514cdae4d76d06aa8b0441d1937e80dce1b92769e8f0fe0d819fc0af1e965235`.
+The before/after guest hash is
+`e36d3544b51972d62c5f0393048a69643dbcb6d318126ad4f15016ea795abf59`.
+Earlier failures below remain failed. The integration from main `4cda03c6`
+preserves the proven runtime and owner fixture while retaining main's Cloud,
+Signal, DNS and documentation changes. Local replay of the original checker is
+not a fresh live run of this combined revision.
+
+The first integration [quality run `37223838526`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37223838526)
+on `f38fcbd7` remains **failed** at strict Clippy. Its original log identifies
+five test-code lints: numeric separators, similar helper argument names, a test
+module before a later item, generic default construction and a missing statement
+semicolon. The follow-up changes only those test spellings/layout, with no
+product behavior, assertions, fixture budget or acceptance gate changed. The
+original job `111499330436` log SHA-256 is
+`b0acddfd22b400a18e6a9fb5a77aba464e6d10b5c3c6a7c96e376aeb7b809912`.
+The source-bound public execution result above is a separate passing trial;
+neither result substitutes for the other.
+
+#### Public-purpose implementation and retained development history
 
 The core now has a separate signed v6 `code_proposal` purpose for one whole,
 explicitly public source file (up to 4KiB) and a public instruction (up to 512
@@ -159,7 +253,7 @@ job `111488876530` log SHA-256: `9b0f259e574f7e9399d6751adcb3c7d5130ab36d6725fe3
 The user explicitly authorized autonomous Internet use for tasks, research,
 improvement, maintenance and learning on 2026-10-04. Selected-source acquisition
 exists, but general autonomous browsing/source selection and external training
-ingestion remain unfinished. The [Internet-use scope](DECENTRALIZED_AGENTS.md#autonomous-internet-use)
+ingestion remain unfinished. The [Internet-use scope](services/DECENTRALIZED_AGENTS.md#autonomous-internet-use)
 retains mediated core tools, protected egress, privacy and spare-capacity limits;
 it does not enable arbitrary network access in model workers.
 
@@ -169,7 +263,7 @@ Audio/image understanding and natural spoken conversation were requested on
 2026-10-04. The current compute contracts remain text-oriented; media transport
 or storage is not multimodal inference. Shared execution, eligible learning and
 adaptive spare-capacity budgets are part of the requested scope, not completed
-functionality. See the [multimodal direction and limits](DECENTRALIZED_AGENTS.md#audio-images-and-natural-conversation).
+functionality. See the [multimodal direction and limits](services/DECENTRALIZED_AGENTS.md#audio-images-and-natural-conversation).
 
 ### Combined native and cooperative compute source
 
@@ -592,6 +686,8 @@ unchanged; no model or VM was rerun, and the original failed run remains failed.
 
 ### OpenCode migration and network-first compute
 
+These development records preserve individual revisions and trial boundaries. The linked
+feature branches are not implied to be integrated into `main`.
 - [ ] User-selected OpenCode foundation replaces Codex for `volparossa-code`.
   [Code PR #5](https://github.com/VOLPAROSSA/volparossa-code/pull/5), source
   `ed1209b` on `feature/opencode-integration`, wires the editor to pinned OpenCode
@@ -616,18 +712,98 @@ unchanged; no model or VM was rerun, and the original failed run remains failed.
   result. Eight focused driver checks and four namespace checks pass. The first
   joined live-peer trial now establishes original-result roundtrip, but fails
   answer completeness as described below; dependency integration remains open.
-- [ ] The [OpenCode cooperative topology](COOPERATIVE_CODE.md) now connects that
-  exact `b3a4cfe` driver to the real public service and two model peers, with a
-  separately hash-bound source/runtime bundle. Actual capture/transfer of all 25
-  input files passes; eight fixture, three transfer and four VM-contract checks
-  pass. Actual VM01 on core `938c7f2b` returns the original tool result through
-  OpenCode: two providers, eleven observed workers and eleven confirmed terminal
-  receipts. Execution and cleanup complete, but `incomplete_fragment_answers`
-  produces no complete answer and zero synthesis levels; the trial remains failed.
-  Guest cleanup leaves zero objects and identical guest-network snapshots; QEMU,
-  scratch and SSH listener are removed. The outer raw IPv6-route hash later differs
-  for an unknown reason (no before-table contents retained), so outer-host unchanged
-  is **not** proved. IPv4 and DNS hashes still match. Code `0282ffe`
+- [ ] Core candidate `938c7f2b` (PR #178) includes the actual OpenCode/two-peer
+  topology. VM01 returns the original tool result through OpenCode: two providers,
+  eleven observed workers and eleven confirmed terminal receipts. Execution and
+  cleanup complete, but `incomplete_fragment_answers` produces no complete answer
+  and zero synthesis levels; the trial remains failed. Guest cleanup leaves zero
+  objects and identical guest-network snapshots; QEMU, scratch and SSH listener
+  are removed. The outer raw IPv6-route hash later differs for an unknown reason
+  (no before-table contents retained), so outer-host unchanged is **not** proved.
+  IPv4 and DNS hashes still match.
+  The 25-file input bundle passes exact capture/transfer checks; eight fixture,
+  three transfer and four VM-contract checks pass. These are not live-peer success.
+  The admission-guard fix `9b984ad8` reproduces and corrects premature async guard
+  release: two tests fail before it, all seven public-service tests pass after it.
+  The separate browser [run37037361187](https://github.com/VOLPAROSSA/volparossa/actions/runs/37037361187)
+  on `c0362ba5` is terminal failed: ten of eleven leaf answers hit the token
+  limit, one ended at EOS, and no synthesis started. All eleven receipts and
+  guest cleanup were confirmed; the original artifact remains failed. ZIP SHA-256:
+  `7b17bde4d55293951c4baaacc8632e545a13c235171ae5959ec034cb5d9d7484`.
+  Candidate `43be09c3` adds core-authenticated public peer discovery with 21
+  focused checks and strict Clippy passing, not a live discovered-model proof.
+  Candidate `e04860bc` adds the separate discovered-360M browser scenario. Its
+  literal 4096-byte README prefix produces two parts with the actual tokenizer;
+  the original 3840-byte fixed-135M input/requirements remain unchanged. Fifteen
+  browser fixture and eight Code fixture checks pass. Exact-source
+  [run37042900209](https://github.com/VOLPAROSSA/volparossa/actions/runs/37042900209)
+  is terminal failed: two workers and two terminal receipts, one leaf at EOS and
+  one at the generation limit, so no synthesis or complete answer. Guest/private
+  cleanup passes with zero remaining objects and identical guest network state.
+  The original 19-file artifact ZIP SHA-256 is
+  `2502bab058dc8a917040f1f7b7b0d8d6686e163d190a7f88bbe52a711fb99bf6`.
+  Code `0282ffe` preserves first task failures separately from cleanup, and its
+  [source CI](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37028210288)
+  passes. Original real-Qwen VM03 failed to complete a coding turn/edit/test;
+  private-state cleanup, QEMU stop and unchanged host routes/DNS were confirmed.
+  Code `9fdca1e` distinguishes terminal peer responses from complete answers in
+  the editor; thirteen focused editor checks and its source CI pass.
+  Code `11a7063` prevents automatic regeneration of cleanup-confirmed invalid
+  model output and separates known terminal task failures from runtime cleanup.
+  Forty-one targeted checks pass; the actual pinned OpenCode runtime also passes
+  both invalid/truncated-output cases with one coding submission each, zero
+  retries/approvals/edits and confirmed cleanup. These controlled core replies
+  are synthetic, not model-driven edit/test or private-peer execution evidence;
+  the original VM03 cause and failed outcome remain unchanged. Exact-source
+  [Code CI37045053283](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37045053283)
+  passes. Hash-bound inference bundle06 contains the new source. After available
+  host memory exceeded the unchanged 8 GiB runner guard, a single VM04 trial
+  started and is now terminal failed: exact-core build and pinned Qwen provisioning
+  pass, but the first real native inference returns `invalid_output`. One coding
+  request, zero retries, zero approvals/edits/commands/tests; runtime and private
+  cleanup confirmed, QEMU/scratch removed, checked host routes/DNS unchanged.
+  The original malformed output was not retained, so its exact subtype is unknown.
+  This proves neither model-driven coding nor private peer execution.
+  Core `b6f054b4` (PR #178, not main) adds owner-enrolled source refinement:
+  retain complete original answers, split only token-limited source ranges into
+  two genuine child jobs, and require their full receipts before synthesis.
+  Seventy-two document tests, eighteen browser fixture checks and strict CLI/test
+  Clippy pass; local IPC tests use synthetic model answers. Exact-source
+  [run37048803131](https://github.com/VOLPAROSSA/volparossa/actions/runs/37048803131)
+  is terminal failed, attempt 1, before compute: `agent-jobs-source` reports
+  `JOBS_ROUTE_UNAVAILABLE`. Model provisioning passed, but route selection failed
+  before brokers, worker receipts, source refinement or synthesis. The original
+  artifact does not expose the underlying route reason; do not infer it. Cleanup
+  leaves zero owned objects and matching before/after network hashes. Actual
+  model recovery, joined browser completion and cancellation remain unproved;
+  original failed artifacts are unchanged.
+  Candidate `abb30f34` retains a closed route diagnostic; its exact-source
+  [run37052601519](https://github.com/VOLPAROSSA/volparossa/actions/runs/37052601519)
+  is terminal failed at `agent-cooperative-browser-panel`, not route setup.
+  Four workers and four handles are observed, but only two terminal receipts:
+  the original leaves contain one EOS and one token-limited answer, with no
+  synthesis. Reconciliation of the two remaining handles fails at Poll with
+  `exchange_unconfirmed`; the truncated diagnostic window counts 48
+  `COMPUTE_RPC_DISCOVERY_FAILED` events without their underlying subtype.
+  This does not prove complete refinement or joined answers. Final disposable
+  cleanup leaves zero objects and identical guest network hashes; the original
+  artifact ZIP is `fce562e1f8642dacf87f65d0a9b05378168d0923dec547722dafa95b39fc0461`.
+  Candidate `b76b8a24` fixes an independently reproduced permanent listener loss
+  after temporary provider-registration Busy/Timeout; the existing 60-second
+  refresh clock and all advertisement authority checks remain. Two actual local
+  TCP/TLS/signed-framing regressions, five relay/policy checks and strict agent
+  Clippy pass. Nineteen Browser and eight Code fixture checks also pass with
+  closed discovery subreasons. Source-bound
+  [run37058432693](https://github.com/VOLPAROSSA/volparossa/actions/runs/37058432693)
+  is terminal failed: four workers and four terminal receipts with normal task cleanup
+  confirmed, but the answer is incomplete and no synthesis occurs. Original leaves are
+  one EOS and one token-limited output; child generation metadata was not exported,
+  so the cause of incomplete refinement is unknown. The retained diagnostic window
+  does not span the phase baseline; zero matching failures is not a whole-run absence
+  claim. Final private cleanup passes, no owned objects remain and guest-root network
+  snapshots match. Original ZIP SHA-256:
+  `06f4789bc13aaa9d6f824797ca6fe90b729a81c4acde5c0ea2d2dd617bf883ac`.
+- [ ] Code `0282ffe`
   separately preserves primary model-task failures and closed provider counters;
   the original Qwen VM03 trial failed without a completed coding turn or edit/test,
   while its VM/private-state cleanup and unchanged host routes/DNS were confirmed.
@@ -1043,7 +1219,6 @@ The fixture also exports only counts from its allowlisted existing `COMPUTE_RPC_
 events, with an explicit baseline/ring-coverage indication. Full event records remain
 private and are not collected. Seven focused pure fixture checks, including closed-export
 and invalid-data controls, pass; they do not establish real browser/peer completion.
-
 ### Additional application and autonomous-maintenance scope
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
@@ -1169,9 +1344,258 @@ and invalid-data controls, pass; they do not establish real browser/peer complet
   This proves selected owner-local read-only recovery through the original UI, not
   ordinary OpenCloud account/ACL recovery, writes, sharing, synchronization or
   general server-independent OpenCloud availability.
+- [x] Original owner-private upload and restarted peer recovery now **pass** in
+  [run `37218270756`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37218270756),
+  attempt 1 / job `111483163553`, on core
+  `929c2ff909f4e9704046459e0434006397dc9110` and exact Cloud
+  `ffdcfaa15cdd2a029dae545904b0a58603da4e17`. The original Files/Uppy input uploads
+  262,145 plaintext bytes with one PUT/creation/201, privately encrypted into
+  266,429 bytes across four fragments and eight copies. The source and both local
+  ciphertexts are removed. With provider A stopped, a fresh service/browser
+  performs two baseline restores and two original UI downloads with exact hashes;
+  A supplies no restore payload. Actual stopped-provider store inspection retains
+  2,131,150 charged payload bytes across sixteen baseline/upload copies through
+  nonconsuming reads. Idempotent retirement then leaves all three stores with zero
+  reservations, committed bytes and leases. Incremental overlapping observations
+  verify 88/32/32 completed protected exchanges for upload/restore/finish, with no
+  failed flows or gaps; the upload's final ring alone no longer covers its baseline
+  and is not treated as cumulative evidence. All privacy captures, joined
+  service/browser/private cleanup and zero remaining owned objects pass.
+  Guest-root network snapshots are byte-identical, SHA-256
+  `da3d0280e780e4e5523430ea50e3823d2c79e018aa41b15ccf452f573e89c594`;
+  this is not separate outer-host proof. Exact-source replay reconstructs both
+  aggregates from the 45 original artifacts. Original ZIP SHA-256
+  `0f4da4f71ed7c0ddbf58668c6982f2a0d6e1d510789c21e8293b815c8474e11c`;
+  original job-log SHA-256
+  `ba1108cc84edaff8d01b322b231064c3995c1d9d83ee838823e7b7c90a265209`.
+  This proves the explicit owner-private new-file space, not ordinary OpenCloud
+  accounts/ACL recovery, sharing, writable synchronization, second-device owner
+  recovery or general server-independent availability. Historical failures below
+  remain failed; the original read-only scenario/pins remain unchanged.
+  The separate `cloud-private-upload` acceptance sibling was initially prepared against
+  Cloud `3e3d6587012ed46d200218e4447506300f8a4f18`. Its first exact-source
+  [run `37070505538`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37070505538)
+  on core `4950e1013e074cad60ec3c0ff9cb89dcdd1a4854` failed **before VM startup**:
+  the shared public-training self-test expected two historical README sentences
+  that the documentation rewrite had removed. No upload, model or network trial
+  ran; this is not a Cloud runtime result. Original job `111048578923` log SHA-256:
+  `0e7f67a3009510fca28ecb31a5069f927ba8ab40decf9052de4eeea493d30b0e`.
+  After the fixture-source correction, [run `37072452868`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37072452868)
+  on `3b80003d3ca890abe7a07a1413c4e747ab043cc8` passed preflight but failed during
+  guest UI provisioning: Cloud's patch applied, but its bytes did not equal the
+  builder's required canonical `git diff --binary HEAD`. No UI build, topology,
+  upload or recovery proof completed. The five retained artifacts report cleanup
+  and unchanged host state as **unverified**, not passed. Original ZIP SHA-256:
+  `d925f19d5710aa3e44f26ba08d94dfde2719131c2e0e8bfbe45178a81e98fd2c`;
+  original job-log SHA-256:
+  `7298f3bff7f0a1bceddc5b972e3e6ef7ad5a71eb39b25ed812550aa3db5c7eeb`.
+  That failed run used Cloud `311f6070dc8950a75133567a9eff724e975593b6`.
+  The new pin canonicalizes patch metadata, order and empty context prefixes;
+  all eight resulting upstream files remain byte-identical. Two local tests
+  exercise the unchanged actual builder guard: the canonical patch passes and
+  an applicable noncanonical patch is rejected. This fixes source admission,
+  not proof of the still-uncompleted upload/recovery trial.
+  The subsequent exact-source [run `37074744602`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37074744602)
+  on `0a47980d39b719c24cf702e9f32c0c924c4fce42` passed the original Web-UI
+  build/provisioning but stopped at `FRAGMENTS_ROUTE_UNAVAILABLE` before providers,
+  baseline import or native upload started. There were 24 connect attempts and 23
+  retries; only the last code, `NO_ELIGIBLE_PATHS`, was retained. Private cleanup
+  passed with zero owned objects and identical disposable guest-root network
+  snapshots; there is no separate outer-host proof. ZIP SHA-256:
+  `fd9dc5aef44052eca09c59e3f55caaa850ddf2eb6278c6dc3c3c90aa4e6a6dfa`;
+  original job-log SHA-256:
+  `c57ecadc947baf7e9eda0f2833cc60766d99d2a2dc0a129a31f4b41a39b5c4a5`.
+  The exact preselection rejection is not known; no new Cloud attempt is inferred
+  from this result.
+  The next exact-source [run `37202264396`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37202264396)
+  on `d7ca3d88a350e8a0c83852131d07ffbbec79126e` reaches a connected route after
+  27 attempts and 26 retries (`CONNECTED`), but remains **failed** at
+  `original_ui_upload`, UI stage `upload_commit`, with `FRAGMENTS_UPLOAD_FAILED`.
+  The retained parent report does not identify the underlying UI/transport cause;
+  it proves neither a successful original upload nor subsequent recovery. Final
+  private cleanup reports zero owned objects, and guest-root network snapshot
+  hashes match at `364f454db76523ac5d22042795efd1581e1c47de46549d74d885cfcfe20a84cf`;
+  this is not an outer-host unchanged claim. Original artifact ZIP SHA-256:
+  `a5d061cebc974258e0555aed954f675dc632196eb356ea89128ac29d736e5c99`;
+  original job `111436210673` log SHA-256:
+  `d3e00e77b95e6dfd9f800d66c471a684b45a972c094e096240ee6484f6f515c9`.
+  The diagnostic pinned Cloud `32836543d950081a2b1505ebde117d8f9db35b82` and
+  retained only a closed UI failure class, bounded upload counters
+  and five explicit progress/cleanup booleans. Invalid or missing observations
+  remain unknown; URLs, tokens, paths, payloads and raw exceptions are not exported.
+  This diagnostic does not reinterpret the failed run or relax upload, recovery,
+  resource, timeout or cleanup requirements.
+  The subsequent exact-source [run `37204384631`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37204384631)
+  on `e57102a26c4a1d0bbda8062459f6f31f6b2b2a9c` reaches a route after 23 attempts
+  and 22 retries, but remains **failed** at `original_ui_upload`/`upload_commit`.
+  Its closed observation has two completed PUTs, exactly one creation and final
+  HTTP 201; `boundary_failed` occurs before the upload-201/listing flags. The
+  fixture's single-PUT guard rejected the two observed attempts. The first HTTP
+  status and initial failure cause were not retained. This is not proof of the
+  independent object/charge checks or later recovery. Browser/profile cleanup
+  and final guest cleanup pass with zero owned objects and matching guest-root
+  network hashes `ab634960a3e4e7d4db46208d26ae9fa79a8c45d656b5343fe93ccf5583385522`.
+  Original ZIP SHA-256: `03ec315aeb2f256db49e53176853a51159c6a5a2a5747eb595872260e9d785c5`;
+  original job `111442430475` log SHA-256:
+  `be006200a4b6b2be6b3509fd33589aaeebe6c248c9446f3db8057b82404fde66`.
+  The fixture revision pinned Cloud `b1a425964d725472e79b6f0f05ce96e5953cadcf`
+  and aligned only that fixture condition with the pinned native
+  Uppy fetcher's existing three retries: at most four completed PUTs, exactly one
+  final 201, and only status 0 or non-2xx responses before it. A bounded, validated
+  status sequence accompanies success; other 2xx, duplicate creation, missing
+  completion or overflow rejects. No retries or runtime budgets are added. The
+  single logical object, retained manifests/leases, fourteen physical copies,
+  actual provider charges, restart/download, retirement and cleanup gates remain
+  mandatory. These parser/observer checks do not reclassify either original failure.
+  Its exact-source [run `37206160237`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37206160237)
+  on `e1cb044c7086f97c2a25991a22ac2ae2f7aeef22` remains **failed**. Route selection
+  reaches `CONNECTED` after 59 attempts and 58 retries. The UI observes two completed
+  PUTs with statuses `[0, 201]`, accepts the bounded receipt and sets
+  `upload_201_observed=true`, then reports `condition_timeout` waiting for the live
+  listing (`uploaded_file_listed=false`) at `original_ui_upload`/`upload_commit`.
+  Status 0 does not identify the first transport failure. Independent object/charge
+  checks and restarted downloads were not reached. All private cleanup flags pass;
+  final cleanup has zero owned objects and matching guest-root network hashes
+  `b3f416680272675689a31bd7f6d2bd6c21b1ca614e5fa8393966048b6c51eb7f`.
+  Original ZIP SHA-256: `f3501056fbe9323314d34ba1bfee24ab4682f62c193de40684e19831b00b922c`;
+  original job `111447666985` log SHA-256:
+  `d0e0ecd7b88fafacf0897023ded71b01705f7ecf572d3a29c210bca711a81708`.
+  Pinned original Files awaits Graph `getDrive` before DAV listing refresh. Its
+  generated SDK requests `/graph/v1.0/drives/{id}`, but the adapter only accepted
+  `v1beta1`. A real HTTP/pinned-SDK reproduction confirms this 404; the original
+  browser's Graph response was not retained, so it is not retroactively asserted.
+  Cloud `0d483f5c452eef2e9d1bc555a478b2bff57404c2` aliases only that
+  authenticated v1.0 drive read to the same exact owner-selected root; no v1.0
+  accounts, collections, permissions or writes are added. Actual SDK
+  upload/Graph refresh/listing/read passes against
+  a synthetic storage contract, not real peer recovery. UI criteria, native retries,
+  deadlines, resource budgets and historical read-only pins remain unchanged.
+  Its exact-source [run `37207919255`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37207919255)
+  on `21f5cfc78f3266249fe10544c384371596ef7c13` remains **failed**. Selection
+  reaches `CONNECTED` after 16 attempts and 15 retries; the parent retains
+  `original_ui_upload`, UI stage `cleanup` and no closed UI-failure record.
+  The pinned child sets that stage only after its success/browser/profile-cleanup
+  path, but the full UI receipt and exact subsequent parent failure were not
+  retained. This does not establish independent object/charge checks or recovery.
+  All private cleanup flags pass; final cleanup has zero owned objects and equal
+  guest-root network hashes `c27ed94d831d21b4d47a1aff168f9b9a22d9a153e586ff1c024d56367361be97`.
+  Original ZIP SHA-256: `9995515c4b1120b30b3dd2bc2317ecb6c6018b76c58c97b848cb8728d8d3da49`;
+  original job `111452913742` log SHA-256:
+  `e69ac4cc153cdf2a379c63968c3bd0ba832fab63e441e7d2267a509ff820e403`.
+  A real Node-owner/Python-lock process-group regression then reproduces premature
+  lock termination on group SIGTERM: the owner cannot acknowledge clean shutdown.
+  Cloud candidate `ffdcfaa15cdd2a029dae545904b0a58603da4e17` retains the
+  supervised lock through SIGTERM/SIGINT/SIGHUP until
+  the owner's pipe closes; lock contention before EOF and release afterward are
+  checked, while SIGKILL remains a failed acknowledgement. The original run's
+  exact cleanup result was not retained, so this cause is not retroactively claimed.
+  The parent now selects a closed phase for UI execution/contract, service shutdown
+  and staging cleanup, plus fixed post-UI object/cipher/identity/status stages;
+  unknown values never expose raw errors. Original success, cleanup, resource and
+  deadline gates are unchanged. Focused process/contract checks are not a live
+  UI/peer-storage pass.
+  The original [run `37210057593`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37210057593)
+  on `17e1bf3aa4cf4528dfcc8405db7e6e2c8b5cdfe4` remains **failed** before
+  storage preparation: 24 Connect attempts / 23 transient retries end in
+  `NO_ELIGIBLE_PATHS`, with no path polls, owner encryption or UI execution.
+  Cleanup is complete with zero owned objects and unchanged guest-root network
+  state. ZIP SHA-256 `21fd3819a2e9e4080390fc515c70a42c72e7d5fd67ad6ef1101aa923c73e4519`;
+  original job `111459244322` log SHA-256
+  `7799de27d7a9d7374d3cfcf742cdbbd3d4f336c545b371b15589954933a97236`.
+  The original archive cannot distinguish missing eligible exits from insufficient
+  diverse relays. The initial readiness candidate waits up to the existing 60-second
+  fixture inventory budget for the exact six relay / two exit advertisements,
+  retaining closed query outcomes and role-presence booleans. It also summarizes
+  the existing cleanup log's fixed sampler reasons without exporting raw records.
+  Inventory presence is not usable-route proof; this is not a demonstrated cause
+  or fix of the original failure. Connect refusal/retry policy, application success
+  criteria, worker budgets and cleanup gates remain unchanged.
+  Its original [run `37212170649`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37212170649)
+  on `90ef58bbf001e001057f80f4260a81be1dbfc4d3` remains **failed** before
+  Connect: all 547 inventory replies within 60 seconds are valid, with no query
+  timeouts or nonzero exits. Both exit advertisements and relay0/1/2 are present;
+  relay3/4/5 are absent. This matches the fixture's existing, intentional
+  `content-custody` client-control filter, which blocks UDP 41000 on cr3/cr4/cr5
+  before agents start. Requiring those concealed custody advertisements was an
+  incorrect pre-Connect fixture barrier, not evidence of a failed storage transfer.
+  The corrected Cloud-only barrier requires exact relay0/1/2 and both exits while
+  validating the full fixture identity map. It does not open the custody links,
+  change production selection or reduce required paths. Missing any required route
+  identity still refuses at the original deadline, even if custody peers appear.
+  The ordinary cooperative-browser inventory predicate is unchanged. Focused
+  parser/topology regressions are not a new live route or upload success.
+  Original cleanup is complete, with zero owned objects, all private-removal flags
+  true and equal guest-root network hashes
+  `c2da467502f0874410128f2dac3d38f70cd630bcc7bd1d442d21a474b8523d34`.
+  Original ZIP SHA-256 `7607c546ff4efc38150a5cf1f31beddf745f7e39272627aa18090d39d75584a3`;
+  job `111465403193` log SHA-256
+  `fee1fa885d762e4332677d0998bd27303210cc877f6479ebb8c890834b9d204f`.
+  The next original [run `37214237542`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37214237542)
+  on `b837194e859873e8c59f27fe6d62d326d8a48fba` remains **failed**, now at
+  `upload_status` / `FRAGMENTS_UPLOAD_FAILED`. The route-inventory barrier passes
+  after 215 valid queries; Connect selects a route on its first attempt without
+  retries. The closed parent record has UI stage `cleanup`, parent stage `complete`
+  and no UI failure. In this exact driver, reaching `upload_status` follows its
+  original Files/Uppy UI success checks, joined service shutdown, uploaded-object
+  receipt, ciphertext hash and retained-identity capture. The full UI receipt,
+  actual upload ciphertext length and failing status assertion were not retained;
+  exact charge validation, source removal and restarted recovery remain unproved.
+  Cleanup is complete with zero owned objects, all eight private-removal flags
+  true and matching guest-root network hashes
+  `706638df66225b06c08ce0109d8a5e3f9e5ec076f30d94aec2111bdb71443155`.
+  Original ZIP SHA-256 `cf3839504ff72b0b6a83b70453a34a52d31adfe2eae6f73c6e9011d160d53ddb`;
+  job `111471394933` log SHA-256
+  `93d7f2f8c514c30e9de1d0970859fb1a69c94c27e12979b3b105b24349db345d`.
+  A focused reproduction establishes a fixture contract mismatch: production uses
+  `min(fragment_bytes, ciphertext_bytes / provider_count)` with integer division,
+  not three fixed 128-KiB pieces. For three providers this upload can have three
+  equal pieces or a fourth short remainder. The candidate derives every range,
+  retained identity, physical charge, lease count, uncertain copy, survivor byte
+  and final retirement count from that unchanged production geometry. It retains
+  the original minimum flow gate and additionally requires the exact derived
+  reconstruction minimum. Closed failure categories distinguish geometry,
+  accounting, identity and CLI failures without private status/error export.
+  Targeted parser tests fail before and pass after the correction; they are not
+  a new live upload/recovery pass or proof of the original failing assertion.
+  Original [run `37216378788`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37216378788)
+  on `f4bb38d2dc31310a3857e3d6a8a2419473fae4a5` remains **failed** at
+  `FRAGMENTS_EXIT_LOG_WINDOW_TRUNCATED`. Its retained upload receipt now proves
+  the original Files/Uppy upload and 201 response, 266,429 encrypted bytes,
+  four uploaded fragments/eight copies, exact receipt-based provider charges
+  of 177,620 / 177,620 / 177,618 bytes, retained identities, both local ciphertexts
+  removed and joined source/service/browser cleanup. Provider-store inspection,
+  withdrawal, restarted recovery and final retirement were not reached.
+  The Exit ring contained 1,000 records; its oldest timestamp was 14.158 seconds
+  after the phase baseline. Its 85 completions and one failure are only tail
+  counts, not valid whole-phase evidence. Cleanup completed with zero owned
+  objects, all eight private-removal flags true and matching guest-root network
+  hashes `315a04db62e4e1e873b10cd563e467977343474153ec20b38e61f09edf26e2c6`.
+  Original ZIP SHA-256 `2001402450822d7fd1d1a81507306d9cdf00f177783782eeae678e5222e91eca`;
+  job `111477625117` log SHA-256
+  `296a3087d2226807a88b56c2e7e1ce98a799a47d4aff2be883d8e05f3ae31005`.
+  A Cloud-upload-only fixture candidate samples the unchanged bounded Exit ring
+  before and throughout each real phase. Complete overlapping timestamp groups
+  must agree exactly, including repeated records; missing or ambiguous overlap,
+  clock regression, query failure and insufficient completions still refuse.
+  Only bounded counters/timestamps and closed observation/command status are
+  exported, never raw records. Existing phase commands, deadlines, flow minima,
+  product retention and privacy captures are unchanged. Targeted collector and
+  local subprocess-cleanup tests do not establish a new live Cloud recovery pass.
+  The candidate keeps the
+  preceding read-only proof/pins unchanged and requires an original Files/Uppy
+  upload of 262,145 synthetic bytes, actual owner GPG encryption, three or four
+  canonical fragments bounded by 128 KiB with the core's two-copy target,
+  retained owner catalogs, a stopped
+  and restarted service, removed local ciphertext and provider A offline before
+  two fresh-browser native downloads. The existing imported baseline must also
+  restore twice. All fourteen or sixteen copies, as derived from actual ciphertext
+  geometry, remain charged until confirmed retirement;
+  three existing 1-MiB stores, private cleanup and unchanged guest state are
+  independently checked. Pure fixture checks are not UI execution, peer proof,
+  writable synchronization or a general server-independent service claim.
 - [ ] Cooperative maintenance of current/future VOLPAROSSA organization repositories:
   actual coding jobs, independent immune review and exact-revision scoped GitHub
-  publication. [Agreed scope](REPOSITORY_MAINTENANCE.md); no autonomous publisher,
+  publication. [Agreed scope](services/REPOSITORY_MAINTENANCE.md); no autonomous publisher,
   independent code-review quorum or automatic client updater is implemented.
 - [ ] Automatically distribute and install independently authorized releases on
   VOLPAROSSA clients (explicit user approval 2026-10-01), with client-side update
@@ -1319,7 +1743,7 @@ MPTCP subflows through distinct WireGuard relays per transfer. End-to-origin TLS
 absence of proxy credentials at the origin, wrong-scope rejection and independent A
 retirement while B remains active are verified. All 30 original artifacts revalidate
 against the source; privacy captures, private-file/topology cleanup and unchanged
-guest-root host state pass. See [the exact evidence and boundaries](BROWSER_NETWORK.md).
+guest-root host state pass. See [the exact evidence and boundaries](applications/BROWSER_NETWORK.md).
 
 After incorporating the merged storage-flow lifetime fix, the exact follow-up
 [trial 36893366706](https://github.com/VOLPAROSSA/volparossa/actions/runs/36893366706)
@@ -1365,7 +1789,7 @@ preserves existing pinned callers. Existing higher-copy archives keep their orig
 metadata, restore/renew/delete paths and every physical charge. No existing copy is
 automatically removed, and temporary replacement overhead is not a separate redundancy
 tier. This change does not implement automatic repair or application-wide migration; see
-[the policy and legacy boundary](PRIVATE_STORAGE.md#one-core-owned-redundancy-policy).
+[the policy and legacy boundary](services/PRIVATE_STORAGE.md#one-core-owned-redundancy-policy).
 Two targeted tests pass: fixed-target CLI handling and a real four-provider signed-service
 lifecycle for legacy three-copy fragments and complete replicas, including source removal,
 provider-loss restore, renewal and deletion to zero leases. Package Clippy also passes.
@@ -1378,7 +1802,7 @@ immune system must address prohibited-content admission and abuse without disclo
 backups. This is a requirement clarification, not new runtime enforcement: signed grants,
 quotas and ciphertext hashes do not classify encrypted files, and uploader self-attestation
 does not defeat malicious clients. The content-admission/review mechanism remains open; see
-[storage privacy and abuse boundaries](PRIVATE_STORAGE.md#storage-immune-system-and-private-content-limits).
+[storage privacy and abuse boundaries](services/PRIVATE_STORAGE.md#storage-immune-system-and-private-content-limits).
 Different-chunk placement now has a passing real overlay/provider-loss trial:
 [36773683946](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773683946)
 on `64c4f18cadb839ad6024c21166d6154e6665733f` restores the removed 786,505-byte
@@ -1470,7 +1894,7 @@ automatic maintenance, adaptive provider-capacity drain or a new protected-overl
 Post-replacement reports use additive version 2 and include temporary/historical physical
 charges. The pinned Image v1 parser needs a coordinated update before it can consume these
 archives; no Image compatibility is claimed for repaired archives yet. See
-[the command, accounting contract and remaining limits](PRIVATE_STORAGE.md#explicit-fragment-copy-replacement).
+[the command, accounting contract and remaining limits](services/PRIVATE_STORAGE.md#explicit-fragment-copy-replacement).
 
 ### Owner-driven archive drain candidate
 
@@ -1485,7 +1909,7 @@ delete replies, provider restart, source-free restore, bounded partial completio
 placement and final zero-lease cleanup. CLI bounds and ineligible candidate handling are covered.
 This is not yet a background capacity-shrink service, discovery-based repair, network-wide
 storage credit or a new overlay proof. See
-[bounded drain and its scope](PRIVATE_STORAGE.md#bounded-owner-driven-archive-drain).
+[bounded drain and its scope](services/PRIVATE_STORAGE.md#bounded-owner-driven-archive-drain).
 
 ### Bounded owner repair without blocking on an offline source
 
@@ -1505,11 +1929,11 @@ unavailable, then A's return and confirmed retirement. Retry identities, unchang
 signed reconstruction root, conservative charges and final zero-lease cleanup are checked.
 This is an explicit owner-online operation, not background peer discovery, automatic
 contribution resizing, a new redundancy policy or new protected-overlay evidence. See
-[repair progress versus outstanding retirement](PRIVATE_STORAGE.md#bounded-owner-driven-repair-pass).
+[repair progress versus outstanding retirement](services/PRIVATE_STORAGE.md#bounded-owner-driven-repair-pass).
 
 ### Mailbox import confirmation
 
-The [mailbox import-confirmation candidate](MAILBOX_IMPORT_CONFIRMATION.md) adds a
+The [mailbox import-confirmation candidate](services/MAILBOX_IMPORT_CONFIRMATION.md) adds a
 reusable split handoff: `content mailbox fetch` retains provider custody while writing
 bounded private payload/token/owner-signed pending receipts; `confirm-import` validates
 the exact owner, original grant/message, token and imported-byte digest before authenticating
@@ -1539,7 +1963,7 @@ zero-context final status, owned qdisc removal, zero leftover objects and unchan
 state pass. This closes the same-flow fourth-path/normal-cleanup boundary, not broader
 alpha acceptance, unlimited connections or a speed-improvement claim. The eight-issued-
 path-identity lifetime bound and 64-issued-flow-handle bound remain. See
-[the exact source, hashes and limitations](MPTCP_REFILL.md#current-result-complete-same-flow-refill-proof).
+[the exact source, hashes and limitations](network/MPTCP_REFILL.md#current-result-complete-same-flow-refill-proof).
 Earlier failures and pending statements below retain their historical source scope.
 
 The live-relay-refill candidate adds signed +1 path extensions to an existing Client/Exit
@@ -1598,7 +2022,7 @@ discarded, so a precise cause is not proved. Fixed, non-private transport-failur
 are now logged at that existing failure boundary; one focused mapping test passes.
 Retry, retirement and cleanup behavior are unchanged by that diagnostic addition.
 
-[Refill acceptance version 3](MPTCP_REFILL.md) now keeps exact anchored closing residues
+[Refill acceptance version 3](network/MPTCP_REFILL.md) now keeps exact anchored closing residues
 separate from established subflows and independently observes Exit endpoint withdrawal.
 It requires a sustained ten-second withdrawal interval, no useful progress on surviving
 old warm residues and fresh progress on the unchanged healthy original path before exposing
@@ -1640,7 +2064,7 @@ verifier incorrectly required that retained path 4 equal the fresh two-path samp
 and complete fresh native batch; original-route ordinal, privacy, timing and payload/hash
 requirements remain intact. No passing live refill is claimed. Fixture cleanup/A15 pass,
 but the separate Client `SHUTDOWN_CLEANUP_FAILED` diagnostic remains unresolved in this
-artifact. See [the scoped evidence notes](MPTCP_REFILL.md).
+artifact. See [the scoped evidence notes](network/MPTCP_REFILL.md).
 
 The [run on `82fe0f39`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36601313163)
 remains **failed**, earlier at `MPTCP_REFILL_WARM_NEVER_APPEARED`. Both original paths
@@ -1666,7 +2090,7 @@ An exact owned Client userspace-PM seam is now implemented, without replacing ke
 scheduling/retransmission; it has a 64-issued-flow/context-generation bound. Later partial
 fourth-path data evidence is recorded below; normal retirement is not yet accepted.
 Disposable teardown and host-state checks pass for the original run; separate agent
-shutdown/retirement failures remain visible. See [the exact evidence and limitations](MPTCP_REFILL.md).
+shutdown/retirement failures remain visible. See [the exact evidence and limitations](network/MPTCP_REFILL.md).
 
 The first userspace-PM run (`01fcabe7`, `36614116209`) fails earlier: its first owned
 subflow update is rejected and the application connection resets. Source review identifies
@@ -1707,7 +2131,7 @@ The original artifact did not retain failed dial endpoints, so this is a reprodu
 defect and candidate explanation, not proof of that exact remote failure. Scoped fixed-class
 dial diagnostics are added; a new live cleanup proof remains required. The original 169
 files retain failed normal cleanup, successful disposable teardown and unchanged host state;
-see [the exact evidence and remaining limitation](MPTCP_REFILL.md).
+see [the exact evidence and remaining limitation](network/MPTCP_REFILL.md).
 
 The first [Firefox integration PR](https://github.com/VOLPAROSSA/volparossa-browser/pull/1)
 is merged (`bab677ba`): isolated ESR 140.16 privacy defaults and native Strict tracking
@@ -1724,7 +2148,7 @@ selector. Daemon network attachment, browser-scoped kill switch (requested off b
 and cache integration remain unfinished. Core defaults for other consumers are not weakened
 by the requested browser availability fallback.
 
-The [scoped TCP gateway candidate](BROWSER_NETWORK.md) now connects operator-delegated
+The [scoped TCP gateway candidate](applications/BROWSER_NETWORK.md) now connects operator-delegated
 application scopes to the existing MPTCP route API. A separate UID/capability-authenticated
 Unix attachment owns its own loopback CONNECT endpoint and route controller; EOF/expiry
 does not disconnect other apps or the main/DNS controllers. Three CLI, one protocol and
@@ -1812,7 +2236,7 @@ shell syntax pass; all six focused Rust preparation checks now pass, including a
 capability never polling route admission and expiry/shutdown winning during the final
 ready poll. Actual browser payload
 on two protected MPTCP paths, ordinary browsing interception and a full browser kill switch
-remain unproven. See [the scoped evidence and boundaries](BROWSER_NETWORK.md).
+remain unproven. See [the scoped evidence and boundaries](applications/BROWSER_NETWORK.md).
 
 The next exact [run 36773190344](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773190344)
 at `d58e5514759d421a1ee3a629d5569b4c67c06639` now prepares both routes before Ready,
@@ -1832,7 +2256,7 @@ working modified client. Ordinary Signal compatibility, authenticated direct cip
 delivery, linked-device synchronization and native encrypted snapshot restore need actual
 implementation and proof. Existing core private messages are not Signal interoperability.
 
-The [private-storage local/library milestone](PRIVATE_STORAGE.md) combines the non-evicting
+The [private-storage local/library milestone](services/PRIVATE_STORAGE.md) combines the non-evicting
 local ciphertext store with resumable uploads, provider-issued bounded grants, owner-signed
 fresh-challenge operations and durable provider/owner/archive/lease bindings. Lease creation
 and ownership registration are atomic; deletion retains a durable tombstone so retries cannot
@@ -1879,7 +2303,7 @@ Progress/Finalize, two non-consuming reads and Renew/Delete. Three agent grant/a
 and two local-control checks also pass. These are separate from the baseline evidence
 above and **not a real-overlay acceptance result**. The current administrative socket is
 also not a finished per-application authority boundary;
-see [shared-core application lifecycle](APPLICATION_LIFECYCLE.md). Signal encryption,
+see [shared-core application lifecycle](architecture/APPLICATION_LIFECYCLE.md). Signal encryption,
 snapshot export/import and application integration are not supplied by opaque file storage.
 
 The agreed contribution rule matches **actual remote physical usage**, including every replica
@@ -1900,7 +2324,7 @@ with their original quota as the initial target; older binaries reject schema 2.
 change deletes another owner's archive or claims freed disk, measured overhead, automatic
 migration or completed 1:1 reciprocity. Five new backend checks, two actual CLI/IPC checks,
 two protocol checks and strict four-crate Clippy pass; no network resize proof is claimed.
-See [commands and scope](PRIVATE_STORAGE.md#local-admission-target-and-pending-drain).
+See [commands and scope](services/PRIVATE_STORAGE.md#local-admission-target-and-pending-drain).
 
 The [live peer-storage run on `434ed112`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36589770066)
 **passes**. The exact-source report checker accepts the original 93-file artifact bundle
@@ -1928,7 +2352,7 @@ overhead or prove reciprocity, independent failure domains, automatic repair or 
 
 All **three targeted replica tests pass** (7.36 seconds), including two real SQLite providers
 over local Unix/framed streams with lost confirmations, durable reopen, resume, failover
-and surviving-copy retention. [Operator usage and reconciliation](PRIVATE_STORAGE.md#replica-set-candidate-explicit-copies-and-restore-failover)
+and surviving-copy retention. [Operator usage and reconciliation](services/PRIVATE_STORAGE.md#replica-set-candidate-explicit-copies-and-restore-failover)
 describe the explicit workflow; placement, adaptive contribution and acknowledged drain remain
 separate unfinished work.
 
@@ -1974,7 +2398,7 @@ ranges/hashes, provider/grant pairs and original copy identities; mutable lease 
 must match that root. It reuses the existing authenticated protected-transfer entrypoints,
 stages one fragment at a time and publishes restored output only after the full signed
 archive identity verifies. Conservative charges include every reserved/committed/uncertain
-fragment copy, including expired or unavailable ones. [Bounds and operator workflow](PRIVATE_STORAGE.md#fragment-placement-candidate-redundant-pieces-not-whole-archives-per-provider)
+fragment copy, including expired or unavailable ones. [Bounds and operator workflow](services/PRIVATE_STORAGE.md#fragment-placement-candidate-redundant-pieces-not-whole-archives-per-provider)
 are explicit; this is not erasure coding or whole-archive replication at every provider.
 
 All **three focused fragment tests pass**, including real three-store SQLite/signed-frame
@@ -2195,6 +2619,103 @@ remain retained, ZIP SHA-256 `8eb0cfa37d26f9864e28ca13c570c7c251736d9e196c97e0c1
 The source-exact report checker also passes locally. Registration/relink still uses the
 upstream local mock server; this is not server-free Signal messaging, calling, independent
 hardware availability, automatic storage repair, reciprocal accounting or a full-alpha PASS.
+
+### Signal fragment-backup integration and native recovery — 2026-10-02
+
+[Chat PR #3](https://github.com/VOLPAROSSA/volparossa-chat/pull/3), exact source
+`76bab5ba546206f1fa402e9b1120ffcab081f95b`, sends new native encrypted exports
+through the core's fragment lifecycle with three to eight authorized providers
+and the common two-copy target. The private v2 recovery descriptor binds the
+original provider order and reconstruction journal. Existing v1 full-archive
+backups retain their original resume/restore path; a failed fragment operation
+does not silently choose replicas. Signal encryption and native import remain
+unchanged. Fourteen focused Node checks and a targeted strict TypeScript check
+pass; the CLI/process responses in those checks are explicit test fixtures.
+
+The separate `signal-backup-fragments` acceptance candidate provisions that exact
+Chat source. It must prove native export/deposit, removal of local ciphertext,
+withdrawal of provider A, native Signal import from surviving fragment copies,
+a second non-consuming core restore, exact physical charges, all-copy retirement
+and complete private/network cleanup. An atomic test-only rendezvous places
+provider withdrawal between completed deposition and native restore. The old
+`signal-backup` source cohort and historical replica proof are retained unchanged.
+The source-exact native fragment trial below now **passes** these boundaries. This does
+not complete Signal messaging/calling, mobile clients, recovery UX or the full alpha.
+Core candidate `57eb59e18f2cf1e58cd5671169a4e8d961914d2e` was exercised in
+[run37056433170](https://github.com/VOLPAROSSA/volparossa/actions/runs/37056433170).
+The run is terminal failed during `signal-backup-provision`, before native
+compilation, app execution or the network topology. All 17 pinned Chat files
+were verified, but source staging returned `INSTALL_COMMAND_FAILED` after
+0.256 seconds without an exported error subtype. No specific HTTP/network
+cause, guest cleanup or unchanged host state is proved by the incomplete report.
+The six original artifacts remain retained, ZIP SHA-256
+`3534ddfdfea1902ad3f9f63120f3892fdf6b1b0be8eef88c4895df43c9bc8ae4`.
+
+The next fragment-only source cohort pins Chat `78d3cb43`: source staging now
+reconstructs the unchanged pinned Git tree from the unchanged SHA-256-pinned
+archive, removing its separate Tree API dependency. Ten focused source tests
+(including reconstruction of the real 4,570-file local checkout), four Node and
+four pnpm tests pass; this is not a fresh upstream download or native launch.
+The provisioner retains only a closed phase/category/type/HTTP-status diagnostic
+after a failed, joined source process. Eleven provisioner and four fragment
+fixture checks pass. No historical failure is reclassified.
+
+The corrected native fragment trial at core `3964c0916624d4cda35d7820bd44c85c1f728690`
+and Chat `78d3cb43ba10ce46cb60ea0a4ec18d962e64d190`,
+[run 37058891559](https://github.com/VOLPAROSSA/volparossa/actions/runs/37058891559),
+**passes** actual Signal encrypted export and import after provider A is stopped.
+The local 198,352-byte ciphertext is removed first. Four fragments (66,117, 66,117,
+66,117 and 1 byte), with two copies each across three providers, charge all 396,704
+payload bytes. B and C supply the surviving copies; Signal verifies messages,
+attachment plaintext hashes and screenshots. A second complete hash-verified restore
+does not consume the backup. The same original stores are reopened, all eight copies
+are explicitly retired, and final leases and charges are zero.
+
+The three original network-phase reports pass protected MPTCP/WireGuard route and privacy
+checks. Native processes join, all five private-cleanup checks pass and no owned topology
+objects remain. Before/after network snapshots of the disposable guest's root namespace
+are byte-identical (SHA-256 `8c5eb731f1d31b34f27ac13b09e8a1be3d30e7b8209eec747d05fbfdf40c5fe2`).
+The original source-exact evidence and report validators pass independently; all 44
+original artifacts are retained, ZIP SHA-256
+`398bf7736cc076fe09545d873e3314b7fd21c7feab678c7f6a2770a65da37383`.
+This does not prove independent hardware, automatic repair, reciprocal contribution
+credit, erasure coding, server-free Signal registration/delivery/calling or Electron's
+Chromium sandbox. The failed first trial and older whole-archive proof stay unchanged.
+
+### Explicit hosted OpenCode coding trial candidate — 2026-10-02
+
+Code `e021e5ca` adds a manual GitHub-hosted profile for the same real
+OpenCode/core/Qwen edit-and-test guest, not a substitute model or synthetic reply.
+It preserves exact source binding, 8 GiB host admission, a 6 GiB/two-vCPU guest,
+7 GiB cgroup/no swap, scoped ephemeral CI changes and closed cleanup receipts.
+Twelve focused contracts and shell/syntax checks pass; original VM04 remains
+failed and no successful hosted coding or protected private peer execution is
+claimed. [Code PR #7](https://github.com/VOLPAROSSA/volparossa-code/pull/7)
+registered only the identical manual workflow on main via merge `8186b651`,
+after five checks passed, separately from the pending runtime migration. Its
+merged temporary branch was removed without deleting local work or history.
+The actual hosted coding trial, source-bound
+[run37059547905](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37059547905)
+on `e021e5ca`, is terminal **failed**, not a coding PASS. Hosted KVM/cgroup admission,
+pinned OpenCode source build, exact input packing and actual Qwen provisioning passed.
+Two real model outputs (one function call, one assistant response) completed the native
+turn with confirmed provider cleanup, but the fixture was not edited, no test command
+completed and the independent test failed. No raw model output was retained, so these
+counters do not identify why the model did not complete the requested change.
+
+Runtime/private state, QEMU, scratch and owned CI host changes were cleaned up. The guest's
+network checks passed. The outer host's IPv4/DNS hashes match, but its IPv6-route hash differs;
+unchanged outer-host networking is not proved and no cause is inferred. Original 11-file
+ZIP SHA-256: `20e768b6ee3535564b3d967a1e192402258087fb6b21cae315874f5d68c14314`.
+The original job-log SHA-256 is
+`ebf52ea810aa2bae88cb5a719d05fef44648a03e5f496d26c87aa8f65e9a976f`.
+
+PR #5's unrelated README merge conflict was resolved by `9435c84f`, which changes only
+README relative to `e021e5ca` and joins main ancestry. Later `8685bd0` fixes a
+Python-version-sensitive source-contract test by comparing the unchanged guest function's
+exact source instead of an AST printer hash; its five source/code-scanning checks pass.
+Neither change is relabelled as a new inference trial. Model-driven coding and protected
+private peer execution remain incomplete.
 
 ## Earlier milestone evidence
 
@@ -3123,7 +3644,7 @@ It uses all fourteen Latin principles as its reasoning framework, not the histor
 as a classifier. Nine focused Rust checks and a compiled-CLI inert-preview smoke pass. A real
 four-job disposable test is wired but not yet passed. No threshold signing, network-policy
 activation, legal correctness, independent model judgment or full B06 completion is claimed.
-See [scope and usage](DECENTRALIZED_AGENTS.md#public-principle-assessments-and-cross-review).
+See [scope and usage](services/DECENTRALIZED_AGENTS.md#public-principle-assessments-and-cross-review).
 
 Latest real-model results remain failures, not completed agent cooperation. The
 [model-selected graph run on `7de9448a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35656629758)
@@ -3158,7 +3679,7 @@ snapshot/model mounts, owner acknowledgements and cleanup at the first stdout re
 requires the public executor to reject that private input before acquiring the runtime. Pure
 fixture and static workflow checks pass. Only selected proof and
 the explicitly synthetic test answer may be exported, never a user's private input or internal
-worker report. See [usage](DECENTRALIZED_AGENTS.md#local-only-private-questions).
+worker report. See [usage](services/DECENTRALIZED_AGENTS.md#local-only-private-questions).
 The [first private run on `75dcc9ad`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35660153750)
 executes the actual 360M worker, returns the generated synthetic identifier with EOS after
 12 tokens, and records cleanup and unchanged host state. Its overall check nevertheless fails:
@@ -3227,7 +3748,7 @@ host-state bytes pass. The original artifact ZIP has SHA-256
 The two earlier failed IPC runs remain failed and immutable. The original `9d870440` direct-CLI
 proof above remains evidence only for that historical source and stdout boundary; it is not
 relabeled as IPC evidence. B04, confidential offload and browser-UI integration remain open.
-See [service usage](DECENTRALIZED_AGENTS.md#application-local-private-compute-ipc) and the
+See [service usage](services/DECENTRALIZED_AGENTS.md#application-local-private-compute-ipc) and the
 [local wire contract](../crates/volparossa/src/compute/private_serve/WIRE.md).
 
 Original combined browser proof candidate (2026-09-29): the explicit `agent-private-browser` VM scenario
@@ -3642,7 +4163,7 @@ all-target CLI/agent/local-control Clippy pass; the actual trained-model/protect
 transition now has the source-exact VM proof below. This is not a B03/B05 completion or evidence
 of general model improvement. The 360M inference-only profile rejects a successor-serving
 directory and does not activate the incompatible 135M adapters.
-See [usage and limits](DECENTRALIZED_AGENTS.md#using-approved-successors-for-new-peer-jobs).
+See [usage and limits](services/DECENTRALIZED_AGENTS.md#using-approved-successors-for-new-peer-jobs).
 
 The [first learning-to-serving run on
 `98ce45bf`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35636907319) fails before
@@ -3788,7 +4309,7 @@ input files and the source plan are removed before zero-round offline resume wit
 receipts. Captures retain 70,144 frames with zero drops or direct client-to-exit packets;
 private/network cleanup and unchanged host state pass. This verifies local-source collection
 execution, not semantic answer quality, network-source retrieval or completion of B03.
-See [source-plan format and usage](DECENTRALIZED_AGENTS.md#working-with-several-public-sources).
+See [source-plan format and usage](services/DECENTRALIZED_AGENTS.md#working-with-several-public-sources).
 
 Verified single-package ready queue: new `compute peer workflow`, `task` and `document` enrollments
 use `ready_rows_v1`. Within one signed source package, a free compatible peer receives the
@@ -3888,7 +4409,7 @@ new-third-peer disposable proof is recorded above. This is not general planning,
 a capacity reservation or quality-based model selection. The 123 focused CLI compute tests,
 three local-control discovery tests, six agent discovery tests, formatting and strict Clippy
 for all targets of those three packages pass. No local model execution was used.
-See [automatic executor selection](DECENTRALIZED_AGENTS.md#automatic-executor-selection).
+See [automatic executor selection](services/DECENTRALIZED_AGENTS.md#automatic-executor-selection).
 
 The follow-up recovery slice preserves previously checked terminal failure/cancellation receipts
 even after their broker disappears. The owning workflow passes the exact retained handle/status
@@ -4000,7 +4521,7 @@ cleanup leaves zero owned objects and unchanged guest-host state. Canonical raw-
 `d4968cbbf0f4d13e363dfc87a5c3d2d69069001a5a3883659a7ead6f8dd701ca`.
 This proves the inference chain, not answer quality. The original `342b8a80` run stays failed.
 General task planning, private offload and B03 remain incomplete.
-See [public answer synthesis](DECENTRALIZED_AGENTS.md#synthesizing-one-public-answer).
+See [public answer synthesis](services/DECENTRALIZED_AGENTS.md#synthesizing-one-public-answer).
 
 Current publication-retry correction: a finite training loop no longer stops immediately
 after the first handoff once its cycle budget is exhausted. It drains already approved
@@ -4055,7 +4576,7 @@ row 0 to a new worker. The replacement appeared 18.821 seconds after loss. Six c
 28 interfaces show no direct client-to-exit or forbidden traffic; all owned objects were removed
 and the guest-host state stayed unchanged. No general planning, private offload, answer synthesis
 or completed B03 is established by that run.
-See [automatic continuation](DECENTRALIZED_AGENTS.md#automatic-continuation-of-enrolled-work).
+See [automatic continuation](services/DECENTRALIZED_AGENTS.md#automatic-continuation-of-enrolled-work).
 
 Current cooperative-learning slice: `compute train-loop --peer-updates` follows explicitly
 enrolled signed adapter channels, resolves their exact datasets only against independently
@@ -4071,7 +4592,7 @@ new local publication remained `publish_pending` after the one-cycle invocation 
 original catalog's later independent Client import was not reached, so its earlier failure is
 not claimed fixed by that run. Cleanup completed with unchanged guest-host state. The later
 `998b79ed` run above supplies the completed cross-node learning and republication proof.
-See [peer update enrollment and scope](DECENTRALIZED_AGENTS.md#learning-from-peer-updates).
+See [peer update enrollment and scope](services/DECENTRALIZED_AGENTS.md#learning-from-peer-updates).
 
 The preceding version-2 `compute train-loop` enrollment now follows
 explicitly selected, signed public source catalogs. The runtime refreshes catalog metadata,
@@ -4085,7 +4606,7 @@ the new dataset, validation source and both published updates independently pass
 verification. Cleanup completed with unchanged guest-host state. The new combined proof retains
 this original gate and adds fixed, non-sensitive provider failure categories to distinguish the
 next failure; cache/registry contention is a hypothesis, not an established cause. See
-[catalog usage and bounds](DECENTRALIZED_AGENTS.md#signed-public-source-catalogs).
+[catalog usage and bounds](services/DECENTRALIZED_AGENTS.md#signed-public-source-catalogs).
 
 The prior [second-source run on `57fa30f7`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34899111394)
 completed two eight-update training cycles, four isolated zero-update inference jobs, both
@@ -4134,9 +4655,9 @@ verify; six captures / 28 interfaces / 45,450 frames contain no forbidden/direct
 drops. Cleanup leaves zero owned objects and unchanged guest-host state. PR #125 is merged;
 this is public document execution, not private distributed inference or general reasoning.
 
-New user-requested scope: [distributed content caching, publishing and offline delivery](CONTENT_NETWORK_PROPOSAL.md).
+New user-requested scope: [distributed content caching, publishing and offline delivery](services/CONTENT_NETWORK_PROPOSAL.md).
 Additional scope requested on 2026-09-14: [cooperative trained agents and fully automatic
-whitelist/blacklist governance](DECENTRALIZED_AGENTS.md). Its first local CPU-worker candidate
+whitelist/blacklist governance](services/DECENTRALIZED_AGENTS.md). Its first local CPU-worker candidate
 now includes pinned explicit provisioning, inference/LoRA training, saved-adapter reload and
 a Rust-supervised mandatory sandbox. Five narrow Rust supervisor tests and the Python
 protocol/provisioning tests pass. The first model-runtime attempt on
@@ -4287,7 +4808,7 @@ stops earlier at `JOBS_BROKER_UNAVAILABLE` for R4, before attach/tokenizer execu
 logs are empty and the original artifact lacks unit exit-state details, so it does not identify
 or disprove the earlier worker-startup cause. Cleanup is complete with unchanged guest state.
 This is not confidential offload, source-cache discovery, automatic network replication,
-neural answer synthesis or completed B03. See [usage](DECENTRALIZED_AGENTS.md#public-document-tasks).
+neural answer synthesis or completed B03. See [usage](services/DECENTRALIZED_AGENTS.md#public-document-tasks).
 Eight focused peer/workflow tests and strict CLI Clippy pass, including early cancellation
 before new submission and reusing full validated local receipt fixtures after restart.
 Synthetic receipt fixtures prove coordinator/storage behavior, not remote model execution.
@@ -4464,7 +4985,7 @@ Exact-source Quality and all CodeQL checks also pass. PR #123 merged normally in
 `main` at `b3e2f08c1a1b9984e6ff536eb609798c24aa312c`, with the exact candidate tree.
 These two cycles on an explicitly repeated source are not
 fresh-corpus discovery, quality improvement, aggregation, private training or completed B05.
-See [usage and limitations](DECENTRALIZED_AGENTS.md#continuous-public-training-candidate).
+See [usage and limitations](services/DECENTRALIZED_AGENTS.md#continuous-public-training-candidate).
 Concrete prohibited/contextual/allowed content examples are now recorded in that design;
 the selected legal baseline is Netherlands/EU plus local exit restrictions, while its enforcement
 and contextual decision thresholds remain unimplemented. Existing byte-integrity
@@ -4702,7 +5223,7 @@ power-off of a whole provider machine. Its HTTPS reference again shows no latenc
 7.567 seconds peer-assisted versus 1.848 seconds origin-only (descriptive ratio 0.244212).
 Run the opt-in browser proof with `sh tests/integration/site-browser-smoke.sh`, supplying
 the built named-download test executable and a new empty `0700` evidence directory; it installs
-nothing and does not disable Firefox's sandbox. See [site commands](OPERATIONS.md#native-static-websites).
+nothing and does not disable Firefox's sandbox. See [site commands](development/OPERATIONS.md#native-static-websites).
 
 ### Measured source selection under development
 
@@ -5504,8 +6025,8 @@ retrieval/local decryption and acknowledgement. Original invitations bind indepe
 contact/provider keys, quotas and expiry. The provider uses its existing signed identity and
 protected content endpoint, not a new central service; application keys stay with the local CLI.
 Every operation binds a fresh provider-signed connection challenge to its exact invitation and
-object. See the [commands and limits](OPERATIONS.md#known-contact-mailboxes) and
-[wire contract](PROTOCOL.md#known-contact-mailbox-operations-development-v1).
+object. See the [commands and limits](development/OPERATIONS.md#known-contact-mailboxes) and
+[wire contract](architecture/PROTOCOL.md#known-contact-mailbox-operations-development-v1).
 
 Three actual disk-store tests pass, including reopen/HPKE delivery, quota refusal, expiry,
 acknowledgement tombstones and corrupt/foreign cache rejection. Two authenticated-stream tests
@@ -5584,7 +6105,7 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   Cleanup leaves zero owned objects and unchanged host state. This is not a release-build,
   full installed-agent DNS-query or full-alpha proof. The combined revision with the newly
   merged MPTCP-refill milestone still needs its integration check; historical failures below
-  are not relabelled. See [scope and receipts](UNBOUND_FALLBACK.md#complete-development-package-and-cache-pass).
+  are not relabelled. See [scope and receipts](network/UNBOUND_FALLBACK.md#complete-development-package-and-cache-pass).
 
 - [ ] Protected deployed Unbound fallback and measured source selection: an explicit
   Exit-side TCP backend/configuration is implemented, with targeted parser and isolated TCP
@@ -5610,7 +6131,7 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   There is no persistent libunbound cache, adaptive racing, host package installation/DNS change
   or default switch. A separate optional Debian 13 companion builder declares the private worker
   and dependencies; existing core package construction/dependencies remain unchanged.
-  See [Unbound fallback scope and readiness](UNBOUND_FALLBACK.md).
+  See [Unbound fallback scope and readiness](network/UNBOUND_FALLBACK.md).
   The [first native guest run on `9aa777fd`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36594857358)
   **fails overall**: real signed and unsigned recursion returns the correct native secure flags
   despite the OS-positive sentinel, but the bogus case emits no result with a retained typed
@@ -5674,7 +6195,7 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   warm 819-ms and local 25-ms answers, post-DNS echoes, and natural retirement with 404 status
   reads/no timeouts. It still fails on one exact gateway-to-TAP ARP reply's capture shape;
   seven other captures and final cleanup/host-state pass. No historical packet bytes or full
-  PASS are invented. See [the retained evidence](UNBOUND_FALLBACK.md).
+  PASS are invented. See [the retained evidence](network/UNBOUND_FALLBACK.md).
   A separate packaged-default candidate now selects private Unbound even when caching is off,
   while disabling all proof retention and peer sharing in that mode. Inactive nodes need no
   worker; effective Exits reject missing assets. Four config, three resolver and three startup
@@ -5686,7 +6207,7 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   Its 170 originals are retained. The separate package/C05 run `36621100178` remains failed:
   C05 and all five native cases pass, as do source binding and installed-agent startup guards,
   but the shipped-sandbox probe fails and upgrade/removal acceptance is not established.
-  No missing probe diagnostics are invented. See [exact results and hashes](UNBOUND_FALLBACK.md).
+  No missing probe diagnostics are invented. See [exact results and hashes](network/UNBOUND_FALLBACK.md).
   The diagnostic repeat `36624654504` on `d4791119` again passes C05/native/startup checks,
   but records systemd `203/EXEC` before the probe or worker runs; no underlying exec errno
   or historical mount flags were retained. The fixture now stages the source-exact probe
@@ -5716,7 +6237,7 @@ that two-line ordering is corrected without changing behavior. No full Quality p
   plus the unchanged helper lifetime. Success and failure paths have stateful regression
   coverage; all twelve pure package-proof checks pass. New live package acceptance is
   pending. The 270 originals, complete topology cleanup and equal host hashes are retained
-  in [the exact evidence history](UNBOUND_FALLBACK.md).
+  in [the exact evidence history](network/UNBOUND_FALLBACK.md).
 
 The positive DNSSEC cache is now composed into the normal agent: the same bounded RAM resolver
 serves protected DNS, TCP resolution, general UDP and browser-QUIC destination pinning. Its peer
@@ -5724,7 +6245,7 @@ backend uses signed, bounded cache-only RPC and a generic provider capability, n
 the DHT. Complete control/data-relay exclusions come from the verified reservation and survive
 detached TCP ownership; ambiguous provenance disables peer requests. No roles, root anchors or
 host resolver settings are changed automatically. The
-[configuration and fallback rules](OPERATIONS.md#shared-positive-dns-cache) are documented.
+[configuration and fallback rules](development/OPERATIONS.md#shared-positive-dns-cache) are documented.
 
 The existing exact Hickory version now enables its ring DNSSEC backend, with the recorded NSEC3
 backport and unchanged vendor/license verification. A real cryptographic root/DS/child/A+AAAA
@@ -6422,7 +6943,7 @@ service stop cancel uptake. A full-budget cooldown bounds the declared average t
 not instantaneous owner/radio contention. Agent/UAPI compilation and strict Clippy pass; three
 focused cache/owner-generation/idle-accounting tests and the UAPI counter test pass. Independent-node C03 uptake/re-serving,
 durable registration/retention and complete C04 owner isolation remain unproven and unchecked.
-See the [bounded redistribution scope](CONTENT_NETWORK_PROPOSAL.md#bounded-post-download-redistribution).
+See the [bounded redistribution scope](services/CONTENT_NETWORK_PROPOSAL.md#bounded-post-download-redistribution).
 
 The next local owner-priority slice uses explicit replication v3, with one receiver credit per
 chunk and a fresh configured-interface quiet sample before each credit. Busy ends the exchange
@@ -7699,7 +8220,7 @@ zero interfaces/radios/owned objects with hwsim unloaded and identical guest-sta
 The native delivered-byte metadata remained zero; application and packet measurements provide
 the actual traffic evidence. This proves simulated mesh plus Ethernet, not physical radios,
 Wi-Fi-only operation, MPQUIC aggregation, mobile support or added bandwidth.
-See [local-link scope](LOCAL_LINK_NETWORK.md).
+See [local-link scope](network/LOCAL_LINK_NETWORK.md).
 
 ## Fixed alpha v1 scorecard
 

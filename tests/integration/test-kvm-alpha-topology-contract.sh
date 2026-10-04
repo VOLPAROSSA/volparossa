@@ -499,7 +499,6 @@ grep -F 'agent_autonomous_aggregation_finalize_report "$jobs_status"' "$HERE/age
 "$HOST" --preview --scenario agent-autonomous-aggregation | grep -F 'Guest resources: 4 vCPUs, 4096 MiB RAM;' >/dev/null
 python3 -B - "$HERE" <<'PYTHON_AUTONOMOUS_AGGREGATION'
 from pathlib import Path
-import re
 import sys
 
 root = Path(sys.argv[1])
@@ -508,15 +507,16 @@ jobs = (root / "agent-jobs-smoke.sh").read_text()
 workflow = (root / "../../.github/workflows/alpha-topology.yml").resolve().read_text()
 assert guest.count("agent_autonomous_aggregation=no") == 2
 timeout_line = next(line.strip() for line in workflow.splitlines() if line.strip().startswith('timeout-minutes:'))
-overrides = dict(re.findall(r"inputs.scenario == '([^']+)' && ([0-9]+)", timeout_line))
-assert overrides.get('agent-autonomous-aggregation') == '180' and timeout_line.endswith('|| 120 }}')
 # Native Codex is built from pinned source before the guest trial; only that
 # scenario gets a 240-minute window. Keep all existing scenario bounds intact.
-assert overrides.get('agent-native-coding') == '240'
-# The independent native Signal build may require its existing 150-minute window.
-assert overrides.get('signal-backup') == '150'
-assert all((name, bound) in {('agent-autonomous-aggregation', '180'), ('signal-backup', '150'), ('agent-native-coding', '240')}
-           for name, bound in overrides.items())
+# Both main-line Signal scenarios retain their existing 150-minute window.
+# Compare the whole closed expression: the former single-clause regex did not
+# understand main's parenthesized Signal alternatives and dropped their bound.
+assert timeout_line == (
+    "timeout-minutes: ${{ inputs.scenario == 'agent-native-coding' && 240 || "
+    "inputs.scenario == 'agent-autonomous-aggregation' && 180 || "
+    "(inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments') "
+    "&& 150 || 120 }}")
 host = (root / "run-alpha-topology-vm.sh").read_text()
 assert 'if scenario == "agent-autonomous-aggregation":\n        file_count_limit = 192' in host
 assert 'if scenario in ("agent-adapter-aggregation", "agent-autonomous-aggregation"):' in host

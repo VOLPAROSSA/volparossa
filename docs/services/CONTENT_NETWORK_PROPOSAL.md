@@ -99,7 +99,7 @@ The [source-exact `ca7` integration proof](https://github.com/VOLPAROSSA/volparo
 also passes and is integrated by PR #160. Original expiry, signed observations, upload budget,
 privacy captures and cleanup are verified; the Client node remains online. This is not
 globally fair placement, maintenance after the owner controller stops or guaranteed uptime. See the
-[development commands](OPERATIONS.md#depositing-a-public-copy-with-other-participants).
+[development commands](../development/OPERATIONS.md#depositing-a-public-copy-with-other-participants).
 
 ### Private messages and optional mail interoperability
 
@@ -150,11 +150,11 @@ anchors, followed by local cache reuse, in the
 The subsequent [two-Exit peer-hit/fallback checkpoint on `b172d11f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34192821990)
 passes real positive A/AAAA sharing, local reuse after peer shutdown and miss/fallback. This
 does not add CNAME or negative-answer sharing; see the current
-[DNS implementation evidence](IMPLEMENTATION_STATUS.md#latest-dns-integration-checkpoint).
+[DNS implementation evidence](../IMPLEMENTATION_STATUS.md#latest-dns-integration-checkpoint).
 
 ## First delivered foundation (2026-09-07)
 
-[`volparossa-content`](../crates/volparossa-content/README.md) now has real, bounded local
+[`volparossa-content`](../../crates/volparossa-content/README.md) now has real, bounded local
 SHA-256 chunk stores, canonical Ed25519-signed native manifests and verified reconstruction.
 The caller supplies an independently trusted publisher key; the verified result retains that
 publisher identity. Byte/entry quotas, a free-space check and LRU eviction bound each fresh
@@ -168,7 +168,7 @@ The normal CLI now exposes explicit offline publication and reconstruction: `con
 uses the existing encrypted node identity, and `content assemble` requires an independently
 trusted publisher key and explicit local cache paths. Both have real separate-invocation
 roundtrip evidence. By default they do not announce a provider, distribute chunks or resolve a public name.
-See the [operational commands](OPERATIONS.md#offline-content-commands).
+See the [operational commands](../development/OPERATIONS.md#offline-content-commands).
 
 Explicit `content publish --contribute` now adds complete publication through an already
 configured contribution service: the authorized local stream carries bytes from the user's
@@ -212,9 +212,9 @@ opt in; names stay out of DHT records and private-message metadata stays exclude
 passes retrieval of nine chunks / 2,097,275 bytes from two providers without the Client's
 manifest copy, into a separate user's private file. Both actual relay paths, account isolation
 and cleanup pass. Source-specific evidence is recorded in
-[implementation status](IMPLEMENTATION_STATUS.md); no globally newest-version, retention or
+[implementation status](../IMPLEMENTATION_STATUS.md); no globally newest-version, retention or
 general website-hosting claim is implied.
-The newer normal HTTPS command is described below; [implementation status](IMPLEMENTATION_STATUS.md)
+The newer normal HTTPS command is described below; [implementation status](../IMPLEMENTATION_STATUS.md)
 retains the source-specific network and Quality results.
 
 The runtime uses a real provider application-TLS layer inside the protected path. The
@@ -237,7 +237,7 @@ destination. Both providers observe the Exit address; ten complete, zero-drop bo
 captures and cleanup with unchanged guest state pass. This completes C01. Two replica processes
 on the same destination do not establish
 distributed provider discovery, independent provider nodes, durable offline availability,
-HTTPS authenticity or speed gain. No browsing capture is enabled. [Testing instructions](TESTING.md#native-content-storage-foundation)
+HTTPS authenticity or speed gain. No browsing capture is enabled. [Testing instructions](../development/TESTING.md#native-content-storage-foundation)
 and crate documentation record these limits. Only existing workspace dependencies are reused.
 
 ### Recipient-encrypted native messages
@@ -393,7 +393,7 @@ and [source-exact `ca7` integration trial](https://github.com/VOLPAROSSA/volparo
 pass origin-only retrieval, a fresh two-provider download and wrong-checksum refusal.
 Checksum-document bytes are reported separately from resource bytes, and elapsed time includes
 both authentication requests. The function is integrated by PR #160; C08 remains open.
-See [operations](OPERATIONS.md#https-checksum-file-downloads) for selection
+See [operations](../development/OPERATIONS.md#https-checksum-file-downloads) for selection
 and current compatibility limits.
 
 ### Own-origin representation digests without a custom descriptor

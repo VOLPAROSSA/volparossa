@@ -1,8 +1,15 @@
 # Contributing to VOLPAROSSA
 
-VOLPAROSSA values small, reviewable changes backed by evidence. Read `AGENTS.md`, the
-[architecture](docs/ARCHITECTURE.md), and the [implementation status](docs/IMPLEMENTATION_STATUS.md)
-before changing code.
+VOLPAROSSA welcomes documentation improvements, reproducible bug reports and complete,
+reviewable feature slices. The current priority is a functional development alpha, not
+release polish. Start with the [documentation guide](docs/README.md), then read
+[AGENTS.md](AGENTS.md), the [architecture](docs/architecture/ARCHITECTURE.md) and the relevant section of
+[implementation status](docs/IMPLEMENTATION_STATUS.md) before changing code.
+
+For a first contribution, improve an unclear guide, reproduce an existing bounded example,
+or propose a feature with a concrete user outcome and verification plan. Use
+[issues](https://github.com/VOLPAROSSA/volparossa/issues) for non-sensitive questions and bugs;
+follow [SECURITY.md](SECURITY.md) for vulnerabilities.
 
 ## Ground rules
 
@@ -12,8 +19,12 @@ before changing code.
 - Keep the agent unprivileged and the helper request schema typed, bounded, and free of arbitrary
   commands, paths, interface names, sysctls, and firewall text.
 - Reject ambiguous, expired, replayed, unsupported, oversized, or policy-inconsistent input.
-- Never add production private keys, accounts, analytics, remote telemetry, update channels, or
-  automatic code downloads.
+- Never add production private keys, accounts, analytics, remote telemetry or hidden update channels.
+  The explicit authorized-update design is separate: only independently authorized releases,
+  verified against established trust and without expanded installation privileges, may become
+  client updates. Peer content and model output are not update authority. See
+  [repository maintenance](docs/services/REPOSITORY_MAINTENANCE.md); this is not permission to install
+  anything on a contributor's host.
 - Do not add production logging or persistence of URLs, DNS history, payloads, full browsing
   hostnames, destination-IP history, or durable node-to-browsing links.
 - Do not modify a development host's routes, DNS, firewall, interfaces, namespaces, sysctls, or VPN.
@@ -23,12 +34,15 @@ before changing code.
 
 ## Workflow
 
-1. Describe the invariant and failure mode the change addresses.
-2. Add the narrowest unit/property test first for parsers, signatures, policy, selection, framing,
-   or cleanup logic.
+1. Describe the user-visible outcome, invariant and failure mode the change addresses.
+2. Add focused verification for the behavior being changed. Parsers, signatures, policy,
+   selection, framing and cleanup need tests of their relevant boundaries.
 3. Keep every externally controlled length, allocation, peer/session count, timeout, and queue
    bounded.
-4. Run focused tests while iterating, then run:
+4. During iteration, run the narrowest relevant formatter/compile check and functional smoke.
+   Documentation-only changes need link, structure and claim checks, not a fresh network trial.
+   Use the broad gate at integration checkpoints/CI and release preparation, rather than
+   repeating it for every small edit:
 
    ```sh
    ./scripts/check-shell.sh
@@ -45,6 +59,18 @@ before changing code.
 
 Do not weaken a fail-closed default to make a test pass. If a kernel or Debian limitation is real,
 capture its exact version and reproducible evidence, then document the bounded alternative.
+
+## Documentation placement
+
+Put topic guides in the matching folder under [docs/](docs/README.md): architecture,
+network, services, applications, privacy or development. Keep the top level for the
+documentation index, FAQ and `IMPLEMENTATION_STATUS.md`. Link new guides from the index
+and use relative links to related topics and source files.
+
+When moving a document, update code includes, packaging inputs and fixture source paths
+as well as Markdown links. Preserve installed documentation filenames and historical
+evidence URLs tied to exact commits. A changed README or guide can change the input to a
+future model trial; it does not rewrite the results of an earlier source-bound trial.
 
 ## Native code and dependencies
 

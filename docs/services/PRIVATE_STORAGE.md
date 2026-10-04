@@ -1,8 +1,48 @@
 # Private cooperative storage
 
-Development scope: reusable core storage for encrypted application backups, including
-the separately developed [Signal client](https://github.com/VOLPAROSSA/volparossa-chat).
-This is **not** the public cache, a training-data source or the message-delivery mailbox.
+The storage layer keeps **encrypted private data on other participants' devices**.
+The owner retains the recovery keys and reconstruction metadata. Providers hold encrypted
+fragments; they do not need a readable copy of the owner's files.
+
+This is a developer guide to the design, available commands and scoped trials—not a
+finished cloud-storage service. It is **separate from the public cache and message
+mailbox**: a cache may evict reusable content, a mailbox may acknowledge delivery, but
+restoring a backup must leave its retained copies intact.
+
+## How storage works
+
+1. **Encrypt locally.** The application produces the encrypted archive. The core's
+   storage commands accept ciphertext; they do not encrypt a plaintext backup for you.
+2. **Split and place.** The fragment path distributes different pieces to selected
+   providers, with the same two-copy target for every new archive.
+3. **Retain and account.** Reserved and retained copies occupy real capacity. Their
+   charges remain visible until the corresponding deletion is confirmed.
+4. **Restore and verify.** The owner retrieves the required pieces, verifies reconstruction
+   and decrypts locally. A restore does not consume the backup.
+5. **Renew, repair or retire.** Retention and replacement are separate authorized actions;
+   a lower contribution target does not delete another owner's data.
+
+Explicit fragment transfer and provider-loss recovery have passing scoped trials.
+**Automatic network-wide placement, contribution reconciliation and safe capacity
+reduction remain unfinished.** Do not treat an individual recovery test as proof of
+permanent availability or rely on the development service as your only copy.
+
+### Find the relevant section
+
+- **Understand the design:** [redundancy](#one-core-owned-redundancy-policy),
+  [fragments versus transfer chunks](#fragment-placement-versus-transfer-chunks),
+  [contribution](#reciprocal-contribution), and [privacy and abuse response](#storage-immune-system-and-private-content-limits).
+- **Use the primitives:** [local store](#first-executable-slice-local-provider-storage),
+  [admission target](#local-admission-target-and-pending-drain), and
+  [protected peer commands](#peer-command-candidate-protected-agent-attachment).
+- **Manage archives:** [whole-copy compatibility](#replica-set-candidate-explicit-copies-and-restore-failover),
+  [distributed fragments](#fragment-placement-candidate-redundant-pieces-not-whole-archives-per-provider),
+  [replacement](#explicit-fragment-copy-replacement), [drain](#bounded-owner-driven-archive-drain),
+  and [repair](#bounded-owner-driven-repair-pass).
+- **Check the evidence:** [fragment proof](#disposable-protected-fragment-proof),
+  [Signal round trip](#native-signal-backup-round-trip), and
+  [Image/Cloud recovery trials](#recorded-application-recovery-trials).
+  The [status ledger](../IMPLEMENTATION_STATUS.md) retains exact revisions and remaining work.
 
 ## One core-owned redundancy policy
 
@@ -52,93 +92,8 @@ archive in this trial. Automatic placement, independent replica repair and recov
 the private reconstruction metadata remain unfinished. Complete-copy proofs are still
 not interchangeable with distributed-fragment evidence.
 
-The `image-snapshot` scenario is a verified cross-repository slice: it uses pinned
-VOLPAROSSA Image code to encrypt a synthetic quiesced database/assets snapshot with GPG,
-passes only that ciphertext through the actual Image Node storage CLI, and requires two
-independently hash-verified plaintext restorations after provider A stops. The owner keeps
-the recovery key private. In [trial 36901573120](https://github.com/VOLPAROSSA/volparossa/actions/runs/36901573120),
-the actual guest report confirms those operations and complete cleanup, but the overall
-workflow fails its runner-side report check because runtime-generated synthetic gzip
-headers differ between Python versions. Fixed synthetic bytes preserve the exact guest
-identity and remove that cross-version dependency. The subsequent complete
-[run 36905847039](https://github.com/VOLPAROSSA/volparossa/actions/runs/36905847039)
-passes on core `cf4de524ce885af95d0f75fcb53d80254486c27f`: real GPG, actual Node/core
-fragment storage, A offline, two B/C decryptions, all-copy deletion, zero owned
-objects and unchanged host state. Its original report passes exact-revision replay.
-This trial uses pinned Image `e177afeb`, not a newer adapter, and does not establish a
-running Immich database, mobile synchronization or general serverless Immich availability.
-
-The `cloud-private-file` scenario has **passed its one-file protected-peer trial**.
-It reuses the
-same protected topology with Cloud `541cc826fe14ce69cf89a82ecb600ad14dd534c6`:
-an actual authenticated synthetic DAV endpoint feeds the pinned Cloud importer,
-which encrypts the file and source metadata locally. The endpoint is stopped and
-joined before create/deposit, its credentials are removed, and the local encrypted
-file is removed before two provider-loss restores. The actual Cloud CLI must fetch
-through core fragment storage and complete authenticated GPG/manifest verification
-before new plaintext directories appear. Owner keys never go to peers or exported
-reports. Retained physical charges, explicit lease deletion, private cleanup and
-unchanged host state passed in [run36909989038](https://github.com/VOLPAROSSA/volparossa/actions/runs/36909989038)
-on core `41e404a40312f039827f761dea7b90be48d0c21f`; the original exact-source
-report also passed replay. This source-bound result does not establish a newer
-Cloud read service or an actual OpenCloud server/web UI.
-
-The subsequent catalog/SDK integration uses Cloud
-`a67b91fbed42ecd23ba215eb21ef54397fc9f06a`: an encrypted immutable owner selection,
-private restoration through the core and authenticated loopback DAV listing and
-reads. Its real GPG/OpenCloud SDK local integration test passes with an explicitly
-injected storage adapter. The new protected-peer client proof now independently
-passes in [run36916040042](https://github.com/VOLPAROSSA/volparossa/actions/runs/36916040042)
-on core `5d9d347fc52e4cc13498ed3b6790d1f00de370c3`. The original source and local
-ciphertext are absent and provider A is offline before direct recovery, catalog
-creation and actual SDK full/range reads reconstruct from B/C. All 32 required
-MPTCP/TLS exchanges complete; authentication/ETag denial, private cleanup, retained
-physical charges and final zero leases pass. Exact-source replay of the 44
-original artifacts reproduces the aggregate; ZIP SHA-256
-`f59a2c2baf693b5087c0827c0971589da23bf15610f96c885db6f2bbe0abdaef`.
-Range requests still reconstruct and verify the complete encrypted file before
-selecting plaintext bytes. This is not the full web UI. Accounts, shared permissions,
-writes, peer-distributed catalogs and second-device recovery are not completed.
-The joined original-UI scenario pins Cloud `63bba5d1163a69e1ee6b4218c9e7462d941f22f7` and builds
-the original OpenCloud Web8 Files UI from its exact source in the disposable guest.
-It connects a fresh isolated Firefox profile to the same owner-private read service
-and requires two actual Download actions, in addition to the four preceding SDK/
-catalog/direct reconstructions. The source, local ciphertext and provider A remain
-unavailable. At least 48 completed protected exchanges and the corresponding B/C
-payloads are required; browser profiles, temporary plaintext and all leases must
-be cleaned up. The earlier Cloud-local UI test uses a synthetic backend and is
-not peer-storage evidence.
-The original joined run `36935715873` using Cloud `c81980dd` failed during UI
-unlock, after the preceding recovery/catalog/SDK operations; private cleanup and
-unchanged host state passed. A local original-Web8 synthetic diagnostic reproduced
-the same failure when six idle browser connections exhausted the service's socket
-limit. The new Cloud pin keeps at least eight transport slots only for web mode,
-while private request/restoration concurrency, authentication and all joined-proof
-gates stay unchanged. Focused HTTP and synthetic UI checks pass; a fresh joined
-original-UI/peer-storage result was still required at that stage.
-
-That combined result now **passes** in
-[run36940326270](https://github.com/VOLPAROSSA/volparossa/actions/runs/36940326270)
-on exact core `d7403106837962c66cd0af0e049236785d8053cb`. The original Files UI,
-using the real owner-local service rather than a synthetic backend, completes two
-786,433-byte Downloads with independently checked hash
-`5cb6c6ae54a29c1769e7189e1e6d4457e65afdbf78c48c89beb5780f86593f5c`.
-All six protected B/C reconstructions and actual GPG decryptions succeed with the
-source off, local ciphertext absent and A offline. All 48 restore exchanges finish;
-A contributes zero restore payload. Authentication/ETag checks, listing, logout,
-private browser/service cleanup and unchanged host state pass. Eight retained
-fragment copies keep their 1,598,292-byte charge through nonconsuming reads, then
-all three reopened provider stores reach zero reservations, committed bytes and
-leases after idempotent deletion. The 18 privacy captures have zero drops and no
-direct client/exit traffic. Exact-source replay reconstructs both aggregates from
-44 original files; ZIP SHA-256
-`9815e1ee6435f39a03c9b566008068e471aa4ac2ad405006df530044b65ffbab`.
-This is selected owner-local read-only recovery in the original Files application,
-not general account/permission recovery, writable synchronization, sharing or
-complete server-independent OpenCloud. Earlier failures remain failures.
-Preview with
-`sh tests/integration/run-alpha-topology-vm.sh --preview --scenario cloud-private-file`;
-execution belongs only in the explicitly approved disposable KVM workflow.
+The application trials are collected [at the end of this guide](#recorded-application-recovery-trials),
+so their revision-by-revision results do not interrupt the storage design.
 
 ## Reciprocal contribution
 
@@ -146,14 +101,22 @@ The user-selected rule is:
 
 `required usable local contribution >= actual remote storage used, counting every copy`
 
-One GB retained at one remote provider requires at least one GB contributed locally.
-Two full copies of that GB require about two GB plus counted overhead: the first one-GB
-copy and one additional one-GB recovery copy, not three GB. The matching local contribution
-is usable space for other participants, not the owner's own retained original archive.
-Keeping that original consumes separate local disk space. Replica repairs
-and in-flight reservations must be accounted for without charging a retry twice or
-pretending that a promised copy already exists. Logical archive length, reserved bytes,
-retained ciphertext bytes, replication and any charged metadata must remain distinct.
+For a **1 GB encrypted archive with two copies**, the accounting is:
+
+| What occupies space | Amount, before counted overhead |
+| --- | ---: |
+| First copy distributed across remote providers | 1 GB |
+| Additional recovery copy distributed across remote providers | 1 GB |
+| Total remote usage, and matching space to offer other participants locally | 2 GB |
+
+The first copy is already included in that 2 GB; it is not 3 GB. Your matching local
+contribution holds **other people's data**. If you also keep your own original file,
+that consumes separate local disk space and does not count as that contribution.
+Fragmenting the archive changes where pieces live, not this two-copy accounting.
+
+Repairs and in-flight reservations must be accounted for without charging a retry twice
+or pretending that a promised copy already exists. Logical archive length, reserved bytes,
+retained ciphertext bytes, replication and any charged metadata remain distinct.
 
 A configured disk allowance is not proof that a participant provides reachable storage,
 that replicas exist, or that the same allowance has not been promised to several peers.
@@ -204,9 +167,9 @@ legal risk. No decryption escrow, blanket client-file scanning, or specific conf
 hardware scheme is selected or authorized by this design note.
 
 See [principle-led governance](DECENTRALIZED_AGENTS.md#principles-guide-rules-not-the-other-way-around)
-and the [four-layer overview](../README.md#storage-layer-private-cloud-storage).
+and the [four-layer overview](../../README.md#storage-layer-private-cloud-storage).
 
-### Adaptive contribution and safe handoff
+## Adaptive contribution and safe handoff
 
 The intended controller follows **actual remote physical usage**, including every recovery
 copy and any charged overhead. If that usage falls from 2 GB to 1 GB, the local contribution
@@ -234,7 +197,8 @@ requirements, **not completed by the current storage primitives**. Explicit owne
 handoff and the local admission-target control below are building blocks, not automatic
 migration or verified network-wide reciprocity. Reopening a provider with `--reuse-store`
 preserves its original capacity/free-space floor and its current admission target; it does
-not choose a new target. No replication factor or coding scheme is prescribed here.
+not choose a new target. This contribution controller does not select a separate redundancy
+tier: the common [core-owned policy](#one-core-owned-redundancy-policy) still applies.
 
 ### Queued investigation: storage erasure coding
 
@@ -406,7 +370,7 @@ provider-signed grant, a fresh provider challenge and the exact owner-signed ope
 never the owner's signing key or passphrase. A successful command requires both the
 request-bound provider receipt and the final correlated response on the same agent
 connection. Grant issuance authorizes limits; it does not reserve disk or establish a
-replica. See [shared-core and application lifetimes](APPLICATION_LIFECYCLE.md) for the
+replica. See [shared-core and application lifetimes](../architecture/APPLICATION_LIFECYCLE.md) for the
 remaining enrollment, per-application authority and lifecycle work.
 
 ### Explicit usage
@@ -864,7 +828,7 @@ pass. The genuine local three-store lifecycle passes the actual fixture's restor
 A closed failure record now distinguishes CLI, accounting, survivor-receipt, output,
 identity and cleanup stages, preserving only fixed incomplete-report categories/counters
 before rejecting a nonzero CLI exit, without exporting raw private diagnostics. See
-[implementation status](IMPLEMENTATION_STATUS.md) for the original failure evidence.
+[implementation status](../IMPLEMENTATION_STATUS.md) for the original failure evidence.
 
 The subsequent exact [trial 36773683946](https://github.com/VOLPAROSSA/volparossa/actions/runs/36773683946)
 at `64c4f18cadb839ad6024c21166d6154e6665733f` **passes the complete protected-fragment
@@ -947,6 +911,9 @@ pending-drain case when replacement capacity is insufficient.
 
 ### Native Signal backup round trip
 
+The [VOLPAROSSA Chat integration](https://github.com/VOLPAROSSA/volparossa-chat) uses
+the shared storage interface while keeping Signal's backup keys with the owner.
+
 The [exact native Signal trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/36742201942)
 on core `90dbea789b57efcbc6cab941e54dfb6a5240511e` and chat
 `c897667d76bea8140f0bc5f373404e43cbd54552` passes. Signal exports and encrypts its real snapshot
@@ -962,6 +929,125 @@ Its local upstream mock server still handles registration/relink, its Electron t
 does not establish Chromium sandboxing, and the provider namespaces are not independent
 hardware failure domains. Production account recovery UX, least-authority app enrollment,
 automatic repair/contribution accounting and decentralized Signal messages/calls remain open.
-The [implementation status](IMPLEMENTATION_STATUS.md) retains the exact artifact hashes and
+The [implementation status](../IMPLEMENTATION_STATUS.md) retains the exact artifact hashes and
 earlier failed trials. Other applications can use the same core storage interface without
 reimplementing custody or acquiring Signal's private recovery keys.
+
+## Recorded application recovery trials
+
+These records describe the pinned revisions and test conditions, not a guarantee about
+newer builds. Earlier failures remain part of the record. For the concepts and commands,
+use the sections above; for exact historical evidence, follow the individual runs below.
+
+### Image: encrypted snapshot recovery
+
+The `image-snapshot` scenario is a verified cross-repository slice: it uses pinned
+VOLPAROSSA Image code to encrypt a synthetic quiesced database/assets snapshot with GPG,
+passes only that ciphertext through the actual Image Node storage CLI, and requires two
+independently hash-verified plaintext restorations after provider A stops. The owner keeps
+the recovery key private. In [trial 36901573120](https://github.com/VOLPAROSSA/volparossa/actions/runs/36901573120),
+the actual guest report confirms those operations and complete cleanup, but the overall
+workflow fails its runner-side report check because runtime-generated synthetic gzip
+headers differ between Python versions. Fixed synthetic bytes preserve the exact guest
+identity and remove that cross-version dependency. The subsequent complete
+[run 36905847039](https://github.com/VOLPAROSSA/volparossa/actions/runs/36905847039)
+passes on core `cf4de524ce885af95d0f75fcb53d80254486c27f`: real GPG, actual Node/core
+fragment storage, A offline, two B/C decryptions, all-copy deletion, zero owned
+objects and unchanged host state. Its original report passes exact-revision replay.
+This trial uses pinned Image `e177afeb`, not a newer adapter, and does not establish a
+running Immich database, mobile synchronization or general serverless Immich availability.
+
+### Cloud: one-file recovery
+
+The `cloud-private-file` scenario has **passed its one-file protected-peer trial**.
+It reuses the
+same protected topology with Cloud `541cc826fe14ce69cf89a82ecb600ad14dd534c6`:
+an actual authenticated synthetic DAV endpoint feeds the pinned Cloud importer,
+which encrypts the file and source metadata locally. The endpoint is stopped and
+joined before create/deposit, its credentials are removed, and the local encrypted
+file is removed before two provider-loss restores. The actual Cloud CLI must fetch
+through core fragment storage and complete authenticated GPG/manifest verification
+before new plaintext directories appear. Owner keys never go to peers or exported
+reports. Retained physical charges, explicit lease deletion, private cleanup and
+unchanged host state passed in [run36909989038](https://github.com/VOLPAROSSA/volparossa/actions/runs/36909989038)
+on core `41e404a40312f039827f761dea7b90be48d0c21f`; the original exact-source
+report also passed replay. This source-bound result does not establish a newer
+Cloud read service or an actual OpenCloud server/web UI.
+
+### Cloud: catalog and SDK reads
+
+The subsequent catalog/SDK integration uses Cloud
+`a67b91fbed42ecd23ba215eb21ef54397fc9f06a`: an encrypted immutable owner selection,
+private restoration through the core and authenticated loopback DAV listing and
+reads. Its real GPG/OpenCloud SDK local integration test passes with an explicitly
+injected storage adapter. The new protected-peer client proof now independently
+passes in [run36916040042](https://github.com/VOLPAROSSA/volparossa/actions/runs/36916040042)
+on core `5d9d347fc52e4cc13498ed3b6790d1f00de370c3`. The original source and local
+ciphertext are absent and provider A is offline before direct recovery, catalog
+creation and actual SDK full/range reads reconstruct from B/C. All 32 required
+MPTCP/TLS exchanges complete; authentication/ETag denial, private cleanup, retained
+physical charges and final zero leases pass. Exact-source replay of the 44
+original artifacts reproduces the aggregate; ZIP SHA-256
+`f59a2c2baf693b5087c0827c0971589da23bf15610f96c885db6f2bbe0abdaef`.
+Range requests still reconstruct and verify the complete encrypted file before
+selecting plaintext bytes. This is not the full web UI. Accounts, shared permissions,
+writes, peer-distributed catalogs and second-device recovery are not completed.
+### Cloud: original Files UI downloads
+
+The joined original-UI scenario pins Cloud `63bba5d1163a69e1ee6b4218c9e7462d941f22f7` and builds
+the original OpenCloud Web8 Files UI from its exact source in the disposable guest.
+It connects a fresh isolated Firefox profile to the same owner-private read service
+and requires two actual Download actions, in addition to the four preceding SDK/
+catalog/direct reconstructions. The source, local ciphertext and provider A remain
+unavailable. At least 48 completed protected exchanges and the corresponding B/C
+payloads are required; browser profiles, temporary plaintext and all leases must
+be cleaned up. The earlier Cloud-local UI test uses a synthetic backend and is
+not peer-storage evidence.
+The original joined run `36935715873` using Cloud `c81980dd` failed during UI
+unlock, after the preceding recovery/catalog/SDK operations; private cleanup and
+unchanged host state passed. A local original-Web8 synthetic diagnostic reproduced
+the same failure when six idle browser connections exhausted the service's socket
+limit. The new Cloud pin keeps at least eight transport slots only for web mode,
+while private request/restoration concurrency, authentication and all joined-proof
+gates stay unchanged. Focused HTTP and synthetic UI checks pass; a fresh joined
+original-UI/peer-storage result was still required at that stage.
+
+That combined result now **passes** in
+[run36940326270](https://github.com/VOLPAROSSA/volparossa/actions/runs/36940326270)
+on exact core `d7403106837962c66cd0af0e049236785d8053cb`. The original Files UI,
+using the real owner-local service rather than a synthetic backend, completes two
+786,433-byte Downloads with independently checked hash
+`5cb6c6ae54a29c1769e7189e1e6d4457e65afdbf78c48c89beb5780f86593f5c`.
+All six protected B/C reconstructions and actual GPG decryptions succeed with the
+source off, local ciphertext absent and A offline. All 48 restore exchanges finish;
+A contributes zero restore payload. Authentication/ETag checks, listing, logout,
+private browser/service cleanup and unchanged host state pass. Eight retained
+fragment copies keep their 1,598,292-byte charge through nonconsuming reads, then
+all three reopened provider stores reach zero reservations, committed bytes and
+leases after idempotent deletion. The 18 privacy captures have zero drops and no
+direct client/exit traffic. Exact-source replay reconstructs both aggregates from
+44 original files; ZIP SHA-256
+`9815e1ee6435f39a03c9b566008068e471aa4ac2ad405006df530044b65ffbab`.
+This is selected owner-local read-only recovery in the original Files application,
+not general account/permission recovery, writable synchronization, sharing or
+complete server-independent OpenCloud. Earlier failures remain failures.
+Preview with
+`sh tests/integration/run-alpha-topology-vm.sh --preview --scenario cloud-private-file`;
+execution belongs only in the explicitly approved disposable KVM workflow.
+
+### Cloud: original uploads and restarted recovery
+
+The separate owner-private new-file scenario now **passes** in
+[run37218270756](https://github.com/VOLPAROSSA/volparossa/actions/runs/37218270756),
+core `929c2ff909f4e9704046459e0434006397dc9110` / Cloud
+`ffdcfaa15cdd2a029dae545904b0a58603da4e17`. The original Files/Uppy upload is
+encrypted and deposited through the real core. After source/local-ciphertext
+removal, service/browser restart and provider A withdrawal, two baseline restores
+and two original UI downloads succeed from B/C with exact hashes. All sixteen
+baseline/upload copies keep their actual charges through nonconsuming reads,
+then all three stores reach zero bytes/leases after deletion. Continuous bounded
+log observations, privacy captures, private cleanup and unchanged guest-root
+network state pass. See the [source-bound evidence and historical failures](../IMPLEMENTATION_STATUS.md#additional-application-and-autonomous-maintenance-scope).
+This is an explicit owner-private upload space, not recovery of ordinary
+OpenCloud accounts, permissions, sharing, writable synchronization or complete
+server-independent service. The preceding read-only trial remains unchanged.

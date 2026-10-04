@@ -1,0 +1,13 @@
+[package]
+name = "volparossa-transaction-simulation"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-only"
+publish = false
+description = "Research-only, in-memory transaction state-machine simulation"
+
+# Intentionally NOT a member/dependency of the production workspace.
+[workspace]
+
+[dependencies]

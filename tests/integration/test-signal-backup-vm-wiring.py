@@ -76,20 +76,53 @@ class SignalBackupWiring(unittest.TestCase):
 
     def test_complete_archive_and_workflow_use_dedicated_proof(self):
         archive = DRIVER.split("# The exact closed receipt files", 1)[1].split("\nelse\n", 1)[0]
-        self.assertIn("signal-backup-smoke.py export-names", archive)
+        self.assertIn('"tests/integration/$scenario-smoke.py" export-names', archive)
+        self.assertIn('if [ "$scenario" = signal-backup ] || [ "$scenario" = signal-backup-fragments ]; then', DRIVER)
         self.assertIn('stat -Lc', archive)
         self.assertIn(' -le 131072', archive)
         self.assertIn(' -T /home/vpci/signal-backup-export.list', archive)
         self.assertNotIn('tar.gz .', archive)
         workflow = (HERE.parents[1] / ".github/workflows/alpha-topology.yml").read_text()
         self.assertIn("          - signal-backup\n", workflow)
-        self.assertIn("inputs.scenario == 'signal-backup' && 150", workflow)
+        self.assertIn("(inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments') && 150", workflow)
         gate = workflow.split("      - name: Require real Signal encrypted backup", 1)[1].split("\n      - name:", 1)[0]
         self.assertIn('test "$TOPOLOGY_EXIT_CODE" = 0', gate)
         self.assertIn('signal-backup-smoke.py report "$report" "$GITHUB_SHA"', gate)
         self.assertIn("host-state-before.json", gate)
         self.assertIn("host-state-after.json", gate)
         self.assertEqual(workflow.count("env.VOLPAROSSA_ALPHA_SCENARIO != 'signal-backup'"), 2)
+
+    def test_fragment_variant_has_separate_pins_proof_and_closed_failure_surface(self):
+        fixture = runpy.run_path(str(HERE / "signal-backup-fragments-smoke.py"))
+        extras = {"signal-backup-provision.json", "host-state-before.json", "host-state-after.json",
+                  "guest-exit-status", "current-phase"}
+        self.assertEqual(MODULE["SIGNAL_FRAGMENT_NAMES"], set(fixture["EXPORT_NAMES"]) | extras)
+        preview = subprocess.run(["sh", str(HERE / "run-alpha-topology-vm.sh"), "--preview",
+                                  "--scenario", "signal-backup-fragments"],
+                                 check=True, capture_output=True, text=True, timeout=10)
+        for required in ("6144 MiB", "32 GiB disposable disk", "three real providers", "provider A stopped"):
+            self.assertIn(required, preview.stdout)
+        self.assertIn('[ "$scenario" != signal-backup-fragments ] || set -- --trial fragments', DRIVER)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); home = root / "home"; output = home / "alpha-output"
+            output.mkdir(parents=True)
+            for name in MODULE["SIGNAL_FRAGMENT_NAMES"]:
+                (output / name).write_text("{}\n")
+            for name in ("signal-backup-smoke.json", "runner.stdout", "native.log", "archive.signal",
+                         "recovery.json", "withdrawal-ready.json", "withdrawal-confirmed.json"):
+                (output / name).write_text("PRIVATE_DO_NOT_EXPORT\n")
+            archive = MODULE["collect"](home, root / "missing-opt", "a" * 40, "signal-backup-fragments", 1,
+                                        root / "missing-cgroups", root / "missing-proc")
+            with tarfile.open(archive) as bundle:
+                self.assertEqual(set(bundle.getnames()),
+                    {f"published/{name}" for name in MODULE["SIGNAL_FRAGMENT_NAMES"]} | {"vm-incomplete.json"})
+                for member in bundle.getmembers():
+                    self.assertNotIn(b"PRIVATE_DO_NOT_EXPORT", bundle.extractfile(member).read())
+        workflow = (HERE.parents[1] / ".github/workflows/alpha-topology.yml").read_text()
+        gate = workflow.split("      - name: Require native Signal fragments", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn('test "$TOPOLOGY_EXIT_CODE" = 0', gate)
+        self.assertIn('signal-backup-fragments-smoke.py report "$report" "$GITHUB_SHA"', gate)
+        self.assertEqual(workflow.count("env.VOLPAROSSA_ALPHA_SCENARIO != 'signal-backup-fragments'"), 2)
 
 
 if __name__ == "__main__":

@@ -6,10 +6,25 @@
 private_storage_fragments_private() {
     # One phase may perform two restores, each trying stopped A twice. This
     # fixture-only bound does not widen core exchange deadlines or leases.
-    timeout --signal=TERM --kill-after=5s "${storage_phase_timeout_seconds:-1500}s" setpriv \
+    storage_observe_minimum=0
+    if [ "${storage_incremental_flows:-no}" = yes ]; then
+        case $1 in
+            upload) storage_observe_minimum=56 ;;
+            restore) storage_observe_minimum=${storage_restore_flows:-16} ;;
+            finish) storage_observe_minimum=16 ;;
+        esac
+    fi
+    set -- timeout --signal=TERM --kill-after=5s "${storage_phase_timeout_seconds:-1500}s" setpriv \
         --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$custody_control_gid" \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- python3 -B "$WORK/bin/${storage_fixture_driver:-private-storage-fragments-smoke.py}" "$@"
+    if [ "$storage_observe_minimum" -gt 0 ]; then
+        set -- python3 -B "$WORK/bin/private-storage-fragments-smoke.py" observe-flows \
+            "$binary_directory/volparossa" "$WORK/runtime-exit/control/agent.sock" \
+            "$provider_baseline_ms" "$WORK/private-storage-fragments-$storage_phase-gates.json" \
+            "$storage_observe_minimum" -- "$@"
+    fi
+    "$@"
 }
 
 private_storage_fragments_cleanup() {
@@ -35,6 +50,12 @@ private_storage_fragments_phase_finish() {
         "$WORK/private-storage-fragments-$storage_phase-live-selection.json" >/dev/null || fail FRAGMENTS_ROUTE_CHANGED
     stop_privacy_observers || fail FRAGMENTS_CAPTURE_INCOMPLETE
     content_provider_stop_control_observer || fail FRAGMENTS_CONTROL_CAPTURE_INCOMPLETE
+    if [ "${storage_incremental_flows:-no}" = yes ]; then
+        python3 -B "$WORK/bin/private-storage-fragments-smoke.py" validate-flow-gates \
+            "$WORK/private-storage-fragments-$storage_phase-gates.json" "$storage_expected_flows" \
+            || fail FRAGMENTS_EXIT_LOG_OBSERVATION_INCOMPLETE
+        return
+    fi
     storage_poll=0
     while [ "$storage_poll" -lt 50 ]; do
         # The shared diagnostic snapshot requests only the newest 400 records.
@@ -93,7 +114,7 @@ private_storage_fragments_stop() {
         || fail FRAGMENTS_PROVIDER_STILL_SERVING
 }
 
-private_storage_fragments_run() {
+private_storage_fragments_setup() {
     PHASE=private-storage-fragments-prepare
     custody_control_gid=$(getent group volparossa-users | cut -d: -f3)
     case $custody_control_gid in ''|*[!0-9]*) fail FRAGMENTS_CONTROL_GROUP_INVALID ;; esac
@@ -158,7 +179,10 @@ PY
         agent_cannot_read_user_state:true,client_cannot_read_any_provider_store:true,agent_mount_positive_control:true,
         all_provider_keys_match_independent_fixture_peers:true,three_provider_namespaces_distinct:true}' \
         >"$WORK/private-storage-fragments-isolation.json"
+}
 
+private_storage_fragments_run() {
+    private_storage_fragments_setup
     PHASE=private-storage-fragments-upload
     private_storage_fragments_phase_start upload
     private_storage_fragments_private upload "$storage_user" "$binary_directory/volparossa" \
@@ -197,7 +221,10 @@ PY
     private_storage_fragments_usage deleted_usage
     benchmark_disconnect_route private-storage-fragments || fail FRAGMENTS_ROUTE_CLEANUP_FAILED
     private_storage_fragments_cleanup || fail FRAGMENTS_PRIVATE_CLEANUP_FAILED
-    if [ "${cloud_private_file:-no}" = yes ]; then
+    if [ "${cloud_private_upload:-no}" = yes ]; then
+        python3 -B "$source_directory/tests/integration/cloud-private-upload-smoke.py" evidence "$WORK" \
+            "$WORK/cloud-private-upload-evidence.json" >/dev/null || fail CLOUD_PRIVATE_UPLOAD_EVIDENCE_INVALID
+    elif [ "${cloud_private_file:-no}" = yes ]; then
         python3 -B "$source_directory/tests/integration/cloud-private-file-smoke.py" evidence "$WORK" \
             "$WORK/cloud-private-file-evidence.json" >/dev/null || fail CLOUD_PRIVATE_FILE_EVIDENCE_INVALID
     elif [ "${image_snapshot:-no}" = yes ]; then
@@ -208,7 +235,8 @@ PY
             "$WORK/private-storage-fragments-evidence.json" >/dev/null || fail FRAGMENTS_EVIDENCE_INVALID
     fi
     OBSERVED_BLOCKER=NONE
-    if [ "${cloud_private_file:-no}" = yes ]; then PHASE=cloud-private-file-complete
+    if [ "${cloud_private_upload:-no}" = yes ]; then PHASE=cloud-private-upload-complete
+    elif [ "${cloud_private_file:-no}" = yes ]; then PHASE=cloud-private-file-complete
     elif [ "${image_snapshot:-no}" = yes ]; then PHASE=image-snapshot-complete
     else PHASE=private-storage-fragments-complete; fi
 }

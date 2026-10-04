@@ -1,9 +1,46 @@
 # Route contexts, WireGuard, and privileged routing
 
+A route is a temporary, authorized way to carry application traffic through the network.
+The client chooses an exit and reaches it through a relay, never directly. Several such
+paths can work in parallel, with a different relay on each path.
+
+A **route context** keeps related flows and their permissions together. A **path** is one
+`client -> relay -> exit` connection within that context. Its **two legs** are two separate
+WireGuard links; they do not mean two parallel paths. The payload remains protected
+between client and exit even though the relay terminates the WireGuard links.
+
 A route context is scoped by local profile, registrable domain/origin, transport class, and policy
 version. Existing flows never migrate to a new exit. Context expiry affects admission of new flows;
 LRU eviction drains and removes all associated interfaces, routes, MPTCP/MPQUIC paths, and firewall
 state.
+
+## Route setup at a glance
+
+- **Discover and choose:** obtain verified candidates without directly contacting the exit.
+- **Reserve and measure:** obtain permission for candidate paths, probe both legs and select
+  the paths that meet the policy.
+- **Prepare and authorize:** the privileged helper prepares local resources; the exit and
+  selected relays supply matching grants and confirmations.
+- **Activate and carry traffic:** only the fully authorized route may carry application data.
+- **Retire and clean up:** cancellation, expiry and failure retain an owner until the helper
+  has confirmed removal of the resources.
+
+The **control relay** carries exit-facing setup messages. The **datapath relay** carries
+traffic on a selected path. One node may perform both roles only after separately meeting
+the requirements for each. The detailed transaction below makes those checks explicit.
+
+## Current evidence boundary
+
+The [source-bound v1 checkpoint](../IMPLEMENTATION_STATUS.md#current-live-integration-checkpoint)
+records the unchanged `482e33d0` build passing A01--A15, including the real routing chain,
+privacy captures and crash cleanup. This is scoped functional evidence, not a release
+security audit or completion of every later extension.
+
+Earlier helper-only and dormant-planner notes are retained below in clearly marked
+historical records. Their old **11/100 (11%)** score and statements that a production
+caller was absent describe those milestones; they are not the current project score or
+an assertion that the later demonstrated route does not exist. Current progress and
+remaining failures belong in [IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md).
 
 ## Path invariant
 
@@ -63,6 +100,12 @@ connection session. The client nevertheless requires Bind and Prepare on one `SO
 Unix stream. A failure before the first Prepare-frame write is definitive for network mutation;
 every error after the first Prepare write is polled is ambiguous and carries the complete same-runtime
 reconciliation authority.
+
+<details>
+<summary>Historical staged planner and ownership development</summary>
+
+These are earlier implementation-stage notes, not a second route-setup procedure to follow.
+The original dormant/fake-only limits are retained as the scope of those stages.
 
 The crate now has a dormant in-process boundary for the beginning of steps 1-4. A bounded command
 asks the single-owner discovery actor for an immutable candidate snapshot. The actor purges expiry,
@@ -218,6 +261,8 @@ callers and exercise first/last probe cancellation, late success, future drop, q
 destroy-before-release ordering and shutdown fencing. Production admission, lifecycle ownership
 and orchestration remain absent.
 
+</details>
+
 ## Addressing and keys
 
 The WireGuard crate derives a deterministic ULA prefix and four `/128` endpoint addresses from the
@@ -226,7 +271,15 @@ generate or expose private keys. The helper-v3 worker contract requires each eph
 private key to be generated and retained only inside the route namespace worker; the unprivileged
 agent receives an opaque lease handle plus the kernel-proven public key and public UDP endpoint.
 Interface names are derived, bounded to Linux's 15-character limit, and never accepted from the
-agent. The production functional-alpha backend now runs Prepare, Activate, Probe/Commit and Destroy
+agent.
+
+<details>
+<summary>Historical single-path helper implementation and retained trials</summary>
+
+The following record describes the early isolated helper boundary. Its unavailable
+production-route and 11% statements must not be read as the current integration state.
+
+The production functional-alpha backend now runs Prepare, Activate, Probe/Commit and Destroy
 for exactly one process-owned Client/Exit singleton or one ordered `RelayClient` + `RelayExit`
 endpoint pair. It verifies the exact nested relay/exit grant and binds it to helper-owned
 context/path/role/expiry. For Relay it additionally verifies the exact client-session-signed request,
@@ -279,9 +332,11 @@ usable VPN/datapath or crash recovery. Its cryptographically bound request/respo
 an independent discovery/connection trust anchor. Keys are never persisted and are destroyed with
 the worker context; the fixed alpha score remains **11/100 (11%)**.
 
+</details>
+
 ## Privileged helper boundary
 
-The helper accepts only the operations documented in [PROTOCOL.md](PROTOCOL.md). It must validate
+The helper accepts only the operations documented in [PROTOCOL.md](../architecture/PROTOCOL.md). It must validate
 Unix peer credentials, protocol version, fixed identifier/key/address sizes, enum values, numerical
 ranges, ownership token, and lifecycle transition before invoking netlink or WireGuard UAPI.
 
@@ -295,9 +350,10 @@ For one signed path, forwarding is permitted only between the derived client-fac
 WireGuard interfaces, for the exact overlay prefix, within the reservation lifetime and rate limits.
 Rules deny traffic to relay host addresses, unrelated overlay prefixes, other contexts, physical
 interfaces, and NAT/Internet egress. Default input/forward behavior for that context is deny.
-The current helper implements this fence for its exact single-path Relay pair with two direction
-rules bound to the derived interface indices and `/128` peers, one singleton kernel-timeout lease,
-one realtime cutoff and a terminal drop. It does not yet make that pair a product route.
+The early single-path helper proof implemented this fence with two direction rules bound to
+the derived interface indices and `/128` peers, one singleton kernel-timeout lease, one realtime
+cutoff and a terminal drop. That helper-only milestone did not by itself prove a complete route;
+its original receipts are retained in the historical records below.
 
 ## Client interception and leak prevention
 
@@ -308,6 +364,14 @@ reachability and authenticated tunnel setup on physical interfaces. No protected
 may fall back to the host route when the overlay fails.
 
 ## Lifecycle and cleanup
+
+Cleanup is part of owning a route, not an optional step after a successful request.
+A caller disappearing does not cancel the service's responsibility for the resources it
+created. If removal cannot be confirmed, the state stays quarantined rather than being
+reported as safely released.
+
+The following technical contract explains how that ownership survives cancellation,
+ambiguous replies and expiry.
 
 Setup is transactional. The owned route-ticket supervisor starts before the helper call and remains
 responsible after its external waiter is cancelled. As soon as `Prepare` succeeds, it owns exact
@@ -368,7 +432,14 @@ namespace/interface/table operations, ask before execution where appropriate, tr
 compare host routes, DNS, and firewall before/after. No development command may experiment on the
 active host network.
 
-## Current evidence boundary
+## Historical helper-boundary evidence
+
+<details>
+<summary>Original early evidence boundary, preserved with its limitations</summary>
+
+This was the evidence boundary of the early helper/preselection milestones. The fixed 11%
+score and missing production integration below are historical, not current status. Later
+acceptance does not turn these narrower tests into broader proof.
 
 The v4 wire types, service state machines, forwarding codecs, helper plan/call/commit supervisor, and
 authorization binding have unprivileged tests. They are not proof of a live route. The production
@@ -424,4 +495,6 @@ Destroy and sequential capacity reuse. They have no trusted selection/policy aut
 simultaneous route, transport descriptor, ingress, usable VPN/datapath or crash/restart recovery. The
 forwarding proof is retained exact-main helper-boundary evidence, not acceptance evidence. None of
 these results closes an A01--A15 result or changes the **11/100 (11%)** alpha score. See
-[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+[IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md).
+
+</details>

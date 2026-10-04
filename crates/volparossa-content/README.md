@@ -42,7 +42,7 @@ The normal `volparossa` executable also exposes this library through offline com
 more explicit local caches. Neither command starts a network service. New manifest/output
 files never overwrite existing entries; `--reuse-cache` must explicitly select an existing
 owned cache and can evict older chunks under its quotas. See the
-[CLI usage and defaults](../../docs/OPERATIONS.md#offline-content-commands).
+[CLI usage and defaults](../../docs/development/OPERATIONS.md#offline-content-commands).
 
 The example publishes three chunks, copies alternating chunks into two separate disk stores,
 deletes the publisher's directory and drops its signing key, then reconstructs the exact
@@ -120,5 +120,5 @@ one ordinary native object. The existing signed manifest authenticates the whole
 codec alone conveys no publisher or HTTPS authority and performs no filesystem or network I/O.
 The CLI's `content site pack` and `content site open` compose it with explicit publication,
 protected named retrieval and an isolated local browser origin. See the
-[site commands](../../docs/OPERATIONS.md#native-static-websites) and
-[wire format](../../docs/PROTOCOL.md#native-static-site-object-v1).
+[site commands](../../docs/development/OPERATIONS.md#native-static-websites) and
+[wire format](../../docs/architecture/PROTOCOL.md#native-static-site-object-v1).

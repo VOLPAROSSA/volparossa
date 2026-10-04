@@ -103,7 +103,9 @@ benchmark_disconnect_route() {
 # This observation must never change selection, its retry budget or its result.
 benchmark_route_diagnostic_prefix() {
     benchmark_diagnostic_prefix=
-    if [ "${cloud_private_file:-no}" = yes ]; then
+    if [ "${cloud_private_upload:-no}" = yes ]; then
+        benchmark_diagnostic_prefix=cloud-private-upload
+    elif [ "${cloud_private_file:-no}" = yes ]; then
         benchmark_diagnostic_prefix=cloud-private-file
     elif [ "${image_snapshot:-no}" = yes ]; then
         benchmark_diagnostic_prefix=image-snapshot

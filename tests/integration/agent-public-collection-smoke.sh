@@ -83,7 +83,7 @@ agent_public_collection_run() {
     PHASE=agent-public-collection-owner-inputs
     printf '%s\n' 'Disposable guest only: stage three public repository documents, retain literal 768-byte prefixes, copy the pinned owner tokenizer assets, sign their exact compilation, run real protected peer fragment/synthesis jobs, remove the four original fixture input files, prove completed offline resume and clean all owned resources.'
     collection_index=0
-    for collection_source in README.md docs/PROTOCOL.md docs/DECENTRALIZED_AGENTS.md; do
+    for collection_source in README.md docs/architecture/PROTOCOL.md docs/services/DECENTRALIZED_AGENTS.md; do
         install -o root -g root -m 0444 "$source_directory/$collection_source" "$WORK/bin/collection-source-$collection_index.md"
         collection_index=$((collection_index + 1))
     done

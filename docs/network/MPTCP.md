@@ -48,4 +48,4 @@ enough. The disposable topology must prove:
 - cleanup removes endpoints, interfaces, routes, rules, and namespaces without host changes.
 
 Until acceptance checks A02–A04 pass, the MPTCP dataplane remains incomplete regardless of unit-test
-coverage. See [TESTING.md](TESTING.md).
+coverage. See [TESTING.md](../development/TESTING.md).

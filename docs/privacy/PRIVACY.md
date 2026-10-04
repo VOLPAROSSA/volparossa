@@ -55,7 +55,7 @@ that authority into browsing history.
 
 ## Planned content storage and sharing
 
-The requested [content layer](CONTENT_NETWORK_PROPOSAL.md) adds a separate bounded storage
+The requested [content layer](../services/CONTENT_NETWORK_PROPOSAL.md) adds a separate bounded storage
 purpose; it does not turn ordinary routed traffic or logs into a browsing archive. Public
 publication/shared-cache bytes can be visible to their holders. Chunk identifiers, queries,
 replica placement and timing can reveal known content or interests even without a plaintext URL;
@@ -123,7 +123,7 @@ client-side packet capture plus route evidence proving that no direct client-exi
 dataplane path exists. Those captures and the real probe/helper/agent/ingress chain passed as part
 of A01--A15 on unchanged `482e33d0`: the retained native/MPTCP capture windows were complete, with
 zero socket drops, and cleanup left no owned objects and unchanged guest state. See the exact
-run and artifact in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md). This establishes that
+run and artifact in [IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md). This establishes that
 topology's result, not a guarantee against correlation or proof for later sharing/content changes.
 Sensitive traffic should not rely on development builds as a release-security assurance.
 

@@ -1,18 +1,74 @@
 # Decentralized cooperative agents and automatic policy governance
 
-Requested extension, 2026-09-14. **Design and implementation scope, not delivered functionality.**
-The user explicitly chose fully automatic network-policy decisions, without a required human
-approval step. This extends the functional-development alpha; it does not replace unfinished
-network/content work or make existing checkpoint results cover machine learning.
+VOLPAROSSA's compute layer is intended to let agents on different devices **share tasks,
+combine results and improve reusable models together**. Network collaboration is the target
+architecture, not an optional collection of unrelated local chatbots. Participants contribute
+within their available resources; the owner's own activity comes first.
+
+This guide separates that design from executable development commands and recorded trials.
+Public peer tasks and model-transfer milestones exist. **Reliable general reasoning, protected
+private execution on other people's devices and complete automatic governance remain unfinished.**
+Network/content checkpoints do not establish those compute capabilities.
+
+## How the pieces fit together
+
+There are two connected activities:
+
+1. **Doing work:** an authorized task supplies its input and scope; the coordinator selects
+   compatible workers, sends permitted subtasks, collects their results and, where supported,
+   combines them into an answer. A completed model response is not proof of a correct answer.
+2. **Improving the workers:** eligible data is used to train a compatible model update.
+   Evaluation checks the candidate before it can replace an accepted version. Sharing an
+   update does not automatically authorize activation or prove that it is better.
+
+The shared cache helps distribute permitted datasets, models and updates. It is a delivery
+mechanism, not the definition of what the network may know or train on. Missing eligible
+sources may need authorized retrieval outside the cache.
+
+A few terms recur throughout this guide:
+
+- **Network agent:** `volparossa-agent`, the unprivileged network supervisor—not an AI model.
+- **AI worker:** the isolated process that performs model inference or a supported training job.
+- **Model / adapter:** a model provides the base parameters; a compatible adapter carries a
+  trained update. Arbitrary models and adapters cannot simply be combined.
+- **Broker / coordinator:** a broker exposes an admitted worker slot; a coordinator manages
+  an authorized task across workers. Neither grants unrestricted access to the device.
+- **Immune system:** the intended mutual assessment, restriction and repair mechanisms.
+  Its individual working pieces do not yet form the complete system.
+
+### Reading paths
+
+- **Understand the goal:** [requested outcome](#requested-outcome),
+  [principle-led reasoning](#principles-guide-rules-not-the-other-way-around),
+  [cache and data boundaries](#reuse-and-separation), and [resource sharing](#owner-first-resource-allocation).
+- **Train and share models:** [training and model exchange](#training-and-model-exchange).
+- **Run public work:** [peer jobs](#current-public-peer-job-candidate),
+  [document tasks](#public-document-tasks), [cooperation](#cooperating-public-tasks),
+  and [answer synthesis](#synthesizing-one-public-answer).
+- **Understand privacy and governance:** [private tasks](#private-tasks-and-training-data),
+  [policy decisions](#fully-automatic-whitelistblacklist-decisions), and
+  [mutual checking](#mutual-checking-quarantine-and-repair).
+- **Evaluate completion:** [B01–B07 requirements](#executable-sequence-and-completion-evidence)
+  and the [implementation-status ledger](../IMPLEMENTATION_STATUS.md).
+
+Command examples below are explicit development workflows. Their adjacent limits and evidence
+apply to that workflow, not automatically to the whole compute layer.
 
 ## Requested outcome
 
-Capable participating nodes autonomously train agents, exchange their reusable artifacts and
-cooperate on individual users' tasks as one decentralized service. The same network maintains
-shared content whitelist/blacklist decisions and checks, repairs or excludes defective agents.
-Participation remains capability-based: an idle device can contribute useful work without
-every device training a large model or retaining every model. No permanent central compute,
-training, task-dispatch or decision authority is part of the target.
+The intended service has three responsibilities:
+
+- **Assist users:** distribute suitable tasks and combine useful results across participating
+  devices, rather than limiting every user to their own device's computing power.
+- **Learn cooperatively:** train and exchange reusable artifacts, while evaluating whether
+  each proposed successor actually improves the accepted model or workflow.
+- **Maintain shared rules:** assess permitted/prohibited content and check, repair or exclude
+  defective agents through the mutual governance system.
+
+Participation remains capability-based. An idle device can contribute without training a
+large model or retaining every model. No permanent central compute, training, task-dispatch
+or decision authority is part of the target. Network-policy decisions are intended to be
+fully automatic, without substituting a mandatory human approval step.
 
 The user extended this scope on 2026-10-01 to autonomous maintenance of the core
 and all current/future VOLPAROSSA organization repositories. Agents should share
@@ -23,6 +79,8 @@ user additionally approved automatic installation of authenticated releases on
 VOLPAROSSA clients; this requires a separate verified update/activation facility,
 not execution of arbitrary peer programs. See the separate
 [repository-maintenance scope and publication boundaries](REPOSITORY_MAINTENANCE.md).
+
+### Shared values
 
 The requested positive principles are **Humilitas, Humanitas, Mansuetudo, Diligentia,
 Liberalitas, Temperantia and Castitas**. The negative principles are **Superbia, Invidia,
@@ -110,11 +168,31 @@ reasoning from the seven virtues/vices; they are not foundational rules, an exha
 or a template that substitutes example-matching for assessment. They do not activate destination
 rules. The legal and privacy constraints remain independently applicable.
 
-| Illustrative assessment | User examples | Distinction to explain from the principles |
-| --- | --- | --- |
-| Prohibited | Illegal content/conduct, unauthorized piracy, scams/fraud and child sexual abuse material (CSAM) | Refuse the prohibited material and tasks facilitating that conduct. Lawful reporting, prevention, victim support, legal education and critical discussion are not the conduct itself; this does not authorize distributing illegal source material as "research". |
-| Requires contextual assessment; no blanket verdict agreed yet | Lawful adult pornography, gambling, harmful compulsive/low-value social-media use and radicalizing forums/chat groups | Distinguish legal consensual adult material from exploitation; licensed lawful activity from prohibited activity; ordinary discussion from incitement, threats or recruitment to violence. A platform name, unpopular opinion or political/religious identity is not enough evidence. |
-| Remains allowed; constructive alternatives may be suggested | Lawful shopping/overconsumption, including Amazon, and ordinary viewing/posting on X/Twitter, Reddit and Facebook | Do not turn "unnecessary," environmentally undesirable or unwise spending into an automatic ban. Advice is transparent and dismissible, not covert throttling, forced redirection or public profiling of users. |
+### Prohibited conduct and material
+
+Examples include illegal content/conduct, unauthorized piracy, scams/fraud and child sexual
+abuse material (CSAM). Refuse prohibited material and tasks facilitating that conduct.
+Lawful reporting, prevention, victim support, legal education and critical discussion are
+not the conduct itself; this does not authorize distributing illegal source material as
+"research".
+
+### Context-dependent cases
+
+No blanket verdict has been agreed for lawful adult pornography, gambling, harmful
+compulsive/low-value social-media use or radicalizing forums/chat groups. Assessment must
+distinguish legal consensual adult material from exploitation, licensed lawful activity
+from prohibited activity, and ordinary discussion from incitement, threats or recruitment
+to violence. A platform name, unpopular opinion or political/religious identity is not
+enough evidence.
+
+### Allowed behavior with optional advice
+
+Lawful shopping/overconsumption, including Amazon, and ordinary viewing/posting on X/Twitter,
+Reddit and Facebook remain allowed. Do not turn "unnecessary," environmentally undesirable
+or unwise spending into an automatic ban. Constructive advice must be transparent and
+dismissible—not covert throttling, forced redirection or public profiling of users.
+
+### Boundaries that apply to every assessment
 
 An assessment must distinguish the **content or requested action** from a **pattern of use**.
 A short video is not inherently evidence of harmful compulsive use. Personalized wellbeing
@@ -240,6 +318,13 @@ that the current network-isolated model workers can browse the Internet.
   tool authority. External task effects require narrowly scoped user-authorized capabilities;
   another agent's output cannot grant them.
 
+## Training and model exchange
+
+This reference follows the model lifecycle: provision a pinned backend, produce a compatible
+update, distribute it through the cache, evaluate successors and, for explicitly enrolled
+work, use an accepted successor. The sections retain the command limits and source-bound
+results for each step. A later step does not retroactively qualify every earlier experiment.
+
 ### Initial executable backend (development candidate)
 
 The user approved an existing open model as a starting point: SmolLM2-135M-Instruct at
@@ -251,7 +336,7 @@ does not install on the development host or fetch dependencies at worker runtime
 An explicit second profile, `smollm2-360m-v1`, pins SmolLM2-360M-Instruct at
 `a10cc1512eabd3dde888204e902eca88bddb4951`. It supports inference, source tokenization and
 task planning, not training or the incompatible 135M adapters. It uses the same pinned CPU
-runtime and isolation; see [asset and license provenance](../THIRD_PARTY_LICENSES.md).
+runtime and isolation; see [asset and license provenance](../../THIRD_PARTY_LICENSES.md).
 
 | Explicit profile | Ordinary prompt | Generated answer | Escaped answer bytes | Rows per worker |
 | --- | ---: | ---: | ---: | ---: |
@@ -284,6 +369,9 @@ it requires at least 5.5 GiB of observed spare memory, using the minimum of host
 and observed cgroup parent limits. This is admission, not a memory reservation; existing
 pressure cancellation and owner-priority controls still apply. RSS sampling is not a hard
 cgroup cap or a guarantee that a user never notices load.
+<details>
+<summary>Recorded model-execution trials and their reasoning limits</summary>
+
 The explicit 360M provision preview downloads 977,655,758 bytes, including the existing runtime
 wheels; no model or runtime is installed on the development host. The later 360M trials prove
 peer execution but retain factual errors. The first 1.7B single-worker
@@ -302,6 +390,10 @@ The answer names the missing performance measurements but then repeatedly treats
 the client's public address to the exit as a capability to investigate, contradicting the
 privacy requirement. Generally useful reasoning remains unproved. Original source, question
 and answer remain distinct from quality claims.
+
+</details>
+
+#### Answer instructions and isolation
 
 New public answers and source-grounded synthesis now use the explicit
 `public-source-parts-v1` instruction: address every requested part, treat supplied text as
@@ -333,6 +425,8 @@ passes below. Improved answer quality, distributed
 training and the full brain remain separate work. A small development model is not sufficient evidence for reliable
 legal or content-policy judgments.
 
+#### Yielding to the owner's activity
+
 Owner-priority control adds `--spare-capacity` to `compute run` and `compute train-cycle`;
 `compute serve` uses the same mechanism by default. Fixed, sequenced private-pipe commands
 pause and resume at model/optimizer checkpoints, with acknowledgements from the execution
@@ -351,7 +445,9 @@ then finishes eight updates within its original deadline. Total acknowledged pau
 seconds. All contenders/worker are reaped, temporary roots are removed and original guest-root
 hashes match. This measures CPU-pressure handling, not all owner activity, owner-triggered
 cancellation, battery/thermal behavior or the entire B01 criterion. Exact artifact/checker/hash
-details are retained in [implementation status](IMPLEMENTATION_STATUS.md).
+details are retained in [implementation status](../IMPLEMENTATION_STATUS.md).
+
+#### Battery, temperature and cancellation
 
 The device-priority candidate additionally reads exposed Linux system-battery and thermal
 sysfs data, caching observations for at most one second. Battery charge at or below 20%
@@ -418,7 +514,7 @@ bytes and 1,005 dataset bytes with zero origin bytes, and actual use of the same
 parameters through read-only received inodes. Cache-only reopening after provider stop,
 complete private/network cleanup and unchanged original guest-state hashes also pass.
 The exact-source checker independently reconstructs the retained raw evidence; artifact and
-hash details are recorded in [implementation status](IMPLEMENTATION_STATUS.md#current-candidate-functional-integration-in-progress).
+hash details are recorded in [implementation status](../IMPLEMENTATION_STATUS.md#current-candidate-functional-integration-in-progress).
 This completes B02's explicit transfer/reuse scope, not automatic model activation or improved
 answer quality. Native peer fetch
 does not yet implement general external-corpus ingestion or bias-aware source selection.
@@ -460,7 +556,7 @@ frames have zero drops or forbidden tuples, both selected relay paths carry data
 leaves zero owned objects with matching original guest-root hashes. The earlier `0d756a64`
 fixture failure remains historical failure, not a retrospectively passing run. B05 remains open:
 this is an explicitly chosen cycle, not autonomous training, defended aggregation or general
-source discovery. Full source/artifact/hash details are in [implementation status](IMPLEMENTATION_STATUS.md).
+source discovery. Full source/artifact/hash details are in [implementation status](../IMPLEMENTATION_STATUS.md).
 
 ### Continuous public training candidate
 
@@ -999,12 +1095,19 @@ continuation step, not general task decomposition or unlimited execution permiss
 
 ## Current public peer-job candidate
 
-The development CLI now has an explicit `compute serve` broker and `compute peer
-attach/capabilities/submit/poll/cancel/distribute/resume/workflow/task/document` commands. The broker must already have the
-pinned runtime/model (and optional verified adapter), uses one isolated worker slot, and is
-off until explicitly executed. The agent attaches only a protected same-UID socket and an
-explicit allowlist of dataset publishers. It does not launch Python inside the hardened
-network-agent service or accept remote commands, model downloads or filesystem paths.
+The public-work interface separates worker service from task coordination:
+
+- `compute serve` starts the explicit broker. Its pinned runtime/model—and any verified
+  adapter—must already be provisioned. It has one isolated worker slot and stays off
+  until explicitly executed.
+- `compute peer attach/capabilities` connects the service and inspects its supported scope.
+- `compute peer submit/poll/cancel` handles an individual job's lifecycle.
+- `compute peer distribute/resume/workflow/task/document` coordinates the supported
+  multi-job and source-based workflows described below.
+
+The network agent attaches only a protected same-UID socket and an explicit allowlist of
+dataset publishers. It does not launch Python inside the hardened network-agent service
+or accept remote commands, model downloads or filesystem paths.
 
 Peer requests use short challenge-bound signed exchanges inside the existing authenticated
 provider TLS over protected MPTCP/WireGuard, never a direct Client-to-Exit or provider dial.
@@ -1913,7 +2016,7 @@ sandbox supervisor; the slot stays owned until execution returns through cleanup
 cleanup quarantines admission. Temporary input/report files follow the private-task contract:
 this is not RAM-only processing, secure erasure or confidential remote execution.
 
-The [v1 local wire contract](../crates/volparossa/src/compute/private_serve/WIRE.md) documents
+The [v1 local wire contract](../../crates/volparossa/src/compute/private_serve/WIRE.md) documents
 the strict length-prefixed JSON exception, response correlation and cancellation lifecycle.
 Private text belongs in bounded message bodies, never URLs, logs, public cache or training.
 Web pages must not receive the socket or a generic command bridge; model output is untrusted
@@ -1928,7 +2031,7 @@ public-path rejection, complete temporary cleanup and unchanged host network sta
 This proves the bounded core IPC lane, **not a Firefox UI, confidential remote execution,
 general answer quality or completed B04**. The earlier `9d870440` proof remains a historical
 file-oriented CLI result, not relabeled socket evidence. Failed earlier IPC runs are retained
-in [the implementation record](IMPLEMENTATION_STATUS.md).
+in [the implementation record](../IMPLEMENTATION_STATUS.md).
 
 A separate [combined browser/core run on `5beb8d2d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36614266330)
 now passes with browser integration `4b1fdbe` and the real ESR 140.16.0 sidebar. The actual
@@ -1941,7 +2044,7 @@ not the Firefox 157 source build/native provider selector, general answer qualit
 
 ## Fully automatic whitelist/blacklist decisions
 
-The existing [whitelist](WHITELIST.md) already enforces threshold-signed **destination/port**
+The existing [whitelist](../privacy/WHITELIST.md) already enforces threshold-signed **destination/port**
 rules. It does not classify all content behind an allowed hostname. Native object decisions,
 individual HTTPS resources, domain reachability and worker/tool permissions require separate
 typed scopes; allowing a domain is not approval of every page it serves. Relays and exits do
@@ -1951,7 +2054,12 @@ catalogue is introduced.
 The proposed automatic pipeline begins with reasoning from the seven virtues/vices, not from
 the example categories above:
 
-`subject and context -> principle-based assessment -> independent evaluations -> conflict resolution -> signed decision -> activation`
+1. Identify the **subject and context** being assessed.
+2. Produce a **principle-based assessment**, with evidence and uncertainty.
+3. Obtain **independent evaluations** of that reasoning.
+4. Resolve **conflicts**, or retain an explicit undetermined outcome.
+5. Produce a **signed decision** within the authorized scope.
+6. **Activate** that decision only through the applicable verification and enforcement path.
 
 Prior decisions can supply relevant context, but neither a matching example nor an existing list
 entry replaces assessment against the framework when a decision is made or reconsidered.
