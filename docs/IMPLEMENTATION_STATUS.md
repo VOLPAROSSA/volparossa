@@ -1363,6 +1363,21 @@ and invalid-data controls, pass; they do not establish real browser/peer complet
   skipped. No model, live network, build or VM ran. Production, resource limits,
   retirement gates and the earlier live failures remain unchanged; complete
   maintenance still needs a successful source-bound trial.
+  The original [run37237068674 on `25b6e21f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37237068674)
+  passes source binding but **fails before owner/provider preparation** at
+  `private-storage-fragments-prepare` / `FRAGMENTS_ROUTE_UNAVAILABLE`.
+  `maintenance` is null; this run adds no upload, renewal or retirement proof.
+  All nine private cleanup checks pass, owned objects remaining is zero, and
+  the disposable guest root network-state hashes match. Original artifact ZIP
+  SHA-256: `f45d8ee4ad00fb9a7ead93b6119ee05a47913c0110d0dbff1ab938b43903d9dd`;
+  job111538220479 log SHA-256:
+  `9cabdfef25a6f04742f1b91e2339090a94984fc47c7f4ecd50f49051c9ec6a69`.
+  The lower Connect/Paths failure was not exported: maintenance did not enable
+  the existing closed route diagnostic. The narrow follow-up enables only that
+  scenario prefix and exact JSON export name. Seven synthetic selection cases
+  fail before and pass after; private stderr, paths and product logs remain
+  excluded. Route policy, retries, budgets, storage proofs and cleanup gates
+  are unchanged. This is diagnostic coverage, not a routing or retirement fix.
   See [private storage maintenance](services/PRIVATE_STORAGE.md#explicit-owner-private-background-maintenance).
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):

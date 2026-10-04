@@ -983,6 +983,7 @@ SIGNAL_FRAGMENT_NAMES = {"a01-expected-peers.json", "signal-backup-provision.jso
 
 MAINTENANCE_NAMES = (FRAGMENTS_NAMES - {"private-storage-fragments-smoke.json", "private-storage-fragments-evidence.json"}) | {
     "private-storage-maintenance-smoke.json", "private-storage-maintenance-evidence.json",
+    "private-storage-maintenance-route-diagnostic.json",
 }
 
 IMAGE_NAMES = (FRAGMENTS_NAMES - {"private-storage-fragments-smoke.json", "private-storage-fragments-evidence.json"}) | {

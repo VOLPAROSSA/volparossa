@@ -299,8 +299,10 @@ class MaintenanceEvidence(unittest.TestCase):
             root = Path(temporary)
             OLD['write_evidence'](root, value)
             self.assertEqual(CHECK['evidence'](root), value)
+            # The optional route-attempt diagnostic is not storage/network proof.
             self.assertEqual(set(CHECK['EXPORT_NAMES']) - {
-                'private-storage-maintenance-smoke.json', 'private-storage-maintenance-evidence.json'},
+                'private-storage-maintenance-smoke.json', 'private-storage-maintenance-evidence.json',
+                'private-storage-maintenance-route-diagnostic.json'},
                 {p.name for p in root.iterdir()})
             (root / 'private-storage-fragments-restored_usage.json').write_text('{}')
             with self.assertRaises(ValueError):

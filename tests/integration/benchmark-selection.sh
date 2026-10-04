@@ -113,6 +113,8 @@ benchmark_route_diagnostic_prefix() {
         benchmark_diagnostic_prefix=agent-cooperative-code
     elif [ "${agent_cooperative_browser:-no}" = yes ]; then
         benchmark_diagnostic_prefix=agent-cooperative-browser
+    elif [ "${private_storage_maintenance:-no}" = yes ]; then
+        benchmark_diagnostic_prefix=private-storage-maintenance
     else
         return 1
     fi

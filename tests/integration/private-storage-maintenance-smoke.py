@@ -25,7 +25,8 @@ FG = b'VOLPAROSSA independent foreground fixture'.ljust(64, b'.')
 MAX_CHARGE = 2 * BYTES + A_BYTES
 EXPORT_NAMES = tuple(name for name in F['EXPORT_NAMES'] if name not in
     ('private-storage-fragments-smoke.json', 'private-storage-fragments-evidence.json')) + (
-    'private-storage-maintenance-smoke.json', 'private-storage-maintenance-evidence.json')
+    'private-storage-maintenance-smoke.json', 'private-storage-maintenance-evidence.json',
+    'private-storage-maintenance-route-diagnostic.json')
 SCOPE_FALSE = ('independent_failure_domains_proven', 'network_contribution_credit',
     'archive_encryption_proven', 'automatic_archive_discovery', 'automatic_grant_refresh',
     'contribution_resize_proven', 'full_alpha_acceptance_claimed')

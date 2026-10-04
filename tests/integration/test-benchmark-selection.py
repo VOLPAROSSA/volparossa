@@ -274,6 +274,7 @@ case $4 in
     cloud-private-upload) cloud_private_upload=yes ;;
     agent-cooperative-browser) agent_cooperative_browser=yes ;;
     agent-cooperative-code) agent_cooperative_code=yes ;;
+    private-storage-maintenance) private_storage_maintenance=yes ;;
     no) : ;;
     *) exit 98 ;;
 esac
@@ -316,7 +317,7 @@ printf '%s\n' "$result"
         fields = {"schema_version", "stage", "reason", "last_connect_reason", "connect_exit_status",
                   "attempts", "retries", "redraws", "path_polls", "path_status"}
         scenarios = ("image-snapshot", "cloud-private-file", "cloud-private-upload", "agent-cooperative-browser",
-                     "agent-cooperative-code")
+                     "agent-cooperative-code", "private-storage-maintenance")
         for scenario, case in ((scenario, case) for scenario in scenarios for case in cases):
             mode, status, stage, reason, connect_exit, attempts = case
             with self.subTest(scenario=scenario, mode=mode), tempfile.TemporaryDirectory(

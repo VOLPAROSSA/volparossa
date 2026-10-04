@@ -96,6 +96,7 @@ class PrivateStorageMaintenanceWiring(unittest.TestCase):
         module = diagnostics()
         names = set(checker["EXPORT_NAMES"])
         self.assertEqual(names, module["MAINTENANCE_NAMES"])
+        self.assertIn("private-storage-maintenance-route-diagnostic.json", names)
         self.assertEqual(len(names), len(checker["EXPORT_NAMES"]))
         self.assertTrue(all(name.endswith(".json") and "/" not in name for name in names))
         self.assertLess(len(names), 128)
@@ -112,6 +113,8 @@ class PrivateStorageMaintenanceWiring(unittest.TestCase):
                 "private-storage-maintenance-result.log", "private-storage-maintenance-input.bin",
                 "private-storage-maintenance.key", "content-provider-adaptive-private-storage-fragments-upload-control.log",
                 "content-private-owner.json", "content-private-request.json",
+                "private-storage-fragments-connect.err", "private-storage-fragments-connect.out",
+                "private-storage-fragments-paths.txt", "logs-client.txt",
             )
             for name in forbidden:
                 (published / name).write_text("PRIVATE_SENTINEL_DO_NOT_EXPORT\n")
