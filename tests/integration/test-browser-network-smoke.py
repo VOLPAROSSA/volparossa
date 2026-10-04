@@ -92,6 +92,142 @@ def fixture(root):
 
 
 class BrowserNetworkEvidence(unittest.TestCase):
+    def test_progress_pins_original_worker_and_flow_despite_concurrent_browser_connection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            report = fixture(Path(temporary))
+            phase = report["network"]["phases"][0]
+            before, after = phase["baseline"], copy.deepcopy(phase["progress"])
+            for role in ("client", "exit"):
+                expected = before[role]
+                entry = after[role]
+                # Same worker, different meta/token/cookies/ports; place the new connection
+                # first so a first-socket shortcut would select the wrong application flow.
+                own = entry["kernel"]["token"]
+                extra = {key: raw.replace(own, "fedcba").replace("sk:a1", "sk:c1")
+                    .replace("sk:b1", "sk:d1").replace(":40001", ":41001").replace(":40002", ":41002")
+                    for key, raw in entry["raw"].items()}
+                entry["raw"] = {key: extra[key] + raw for key, raw in entry["raw"].items()}
+                self.assertEqual(len(CHECK["MPTCP"]["socket_rows"](entry["raw"]["meta"])), 2)
+                links = [dict(ifname=path["interface"], ifindex=path["ifindex"],
+                    addr_info=[dict(local=row["local"][0])])
+                    for path, row in zip(entry["owner"]["paths"], entry["kernel"]["subflows"], strict=True)]
+                owner = {key: entry["owner"][key] for key in ("unit", "pid", "start_ticks", "netns")}
+                def command(args):
+                    if "ss" in args:
+                        return entry["raw"]["meta" if "-HOnMie" in args else "tcp"]
+                    if "ip" in args:
+                        return json.dumps(links)
+                    interface = args[-2]
+                    endpoint = next(path["endpoint"] for path in entry["owner"]["paths"] if path["interface"] == interface)
+                    return "not-exported-wg-key " + endpoint + "\n"
+                with patch.dict(CHECK["native_owner"].__globals__,
+                        command=command, helper_members=lambda _role: [dict(owner)]):
+                    # Reproduces the old global-one-flow observer failure, without traffic.
+                    with self.assertRaisesRegex(ValueError, "ambiguous app flow"):
+                        CHECK["native_owner"](role)
+                    self.assertEqual(CHECK["native_owner"](role, expected=expected), entry)
+                    for field in ("pid", "start_ticks", "netns"):
+                        invalid = copy.deepcopy(expected)
+                        invalid["owner"][field] = 999 if field == "pid" else "999"
+                        with self.assertRaises(ValueError):
+                            CHECK["native_owner"](role, expected=invalid)
+                # A different meta lifetime, token or tuple cannot replace the original.
+                for field, replacement in (("cookie", "ffff"), ("token", "ffffff"),
+                        ("local", [expected["kernel"]["local"][0], 54321])):
+                    with self.assertRaises(ValueError):
+                        CHECK["exact_flow_raw"](entry["raw"], expected["kernel"] | {field: replacement})
+                duplicate = dict(entry["raw"])
+                duplicate["meta"] += duplicate["meta"].splitlines()[-1] + "\n"
+                with self.assertRaises(ValueError):
+                    CHECK["exact_flow_raw"](duplicate, expected["kernel"])
+            CHECK["validate_sample"](after)
+            CHECK["MPTCP"]["progress"](before, after, 2)
+            # Fresh counters from the extra connection cannot satisfy an idle selected path.
+            invalid = copy.deepcopy(after)
+            invalid["client"]["kernel"]["subflows"][1]["bytes_received"] = 1000
+            with self.assertRaises(ValueError):
+                CHECK["MPTCP"]["progress"](before, invalid, 2)
+            invalid = copy.deepcopy(after)
+            invalid["client"]["kernel"]["subflows"][1]["cookie"] = "ffff"
+            with self.assertRaises(ValueError):
+                CHECK["MPTCP"]["progress"](before, invalid, 2)
+
+    def test_first_owner_failure_survives_later_missing_socket_observations(self):
+        def failure(role, diagnostics, expected, observation):
+            observation["stage"] = "flow-selection"
+            diagnostics.append(dict(diagnostic_only=True, attempt=1))
+            raise ValueError("raw private exception must not escape")
+        def later_failure(role, diagnostics, expected, observation):
+            observation["stage"] = "worker-selection"
+            raise ValueError("raw private exception must not escape")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "progress.json"
+            for failing in (failure, later_failure, later_failure):
+                with patch.dict(CHECK["sample"].__globals__, native_owner=failing), self.assertRaises(ValueError):
+                    CHECK["sample"](output)
+            value = CHECK["read"](output)
+            self.assertEqual(value["failed_stage"], "worker-selection")
+            self.assertEqual(value["candidates"], [])
+            first = value["first_failure"]
+            self.assertEqual(first["failed_stage"], "flow-selection")
+            self.assertEqual(first["candidates"], [dict(diagnostic_only=True, attempt=1)])
+            self.assertLessEqual(first["observed_monotonic_ns"], value["started_monotonic_ns"])
+            self.assertNotIn("first_failure", first)
+            self.assertNotIn("private", json.dumps(value))
+
+    def test_native_text_payload_keeps_size_full_hash_and_historical_binary_contract(self):
+        # This ID guarantees control bytes in the historical binary body, rather than relying
+        # on random luck. The native body is printable UTF-8 for genuine ordinary-tab rendering.
+        run_id = "000102030405060708090a0b0c0d0e0f"
+        old_seed = b"volparossa-browser-network:" + bytes.fromhex(run_id)
+        self.assertEqual(CHECK["block"](run_id), (old_seed * (65536 // len(old_seed) + 1))[:65536])
+        native = CHECK["block"](run_id, native_tabs=True)
+        self.assertEqual(len(native), 65536)
+        self.assertTrue(all(byte == 10 or 32 <= byte <= 126 for byte in native))
+        self.assertTrue(native.decode("utf-8").startswith("volparossa-browser-network:"))
+        body = native * 512
+        self.assertEqual(len(body), 33554432)
+        self.assertEqual(hashlib.sha256(body).hexdigest(), CHECK["body_hash"](run_id, native_tabs=True))
+        self.assertNotEqual(CHECK["body_hash"](run_id), CHECK["body_hash"](run_id, native_tabs=True))
+        shell = (HERE / "browser-network-smoke.sh").read_text()
+        for action in ("bn_seed_action=seed-native", "bn_hash_action=hash-native", "bn_origin_action=origin-native"):
+            self.assertIn(action, shell)
+
+    def test_readiness_exports_only_existing_ring_codes_counts_and_status_before_cleanup(self):
+        source = (HERE.parents[1] / "crates/volparossa-agent/src/discovery.rs").read_text()
+        source += (HERE.parents[1] / "crates/volparossa-agent/src/discovery/preselection_sampler.rs").read_text()
+        for code in CHECK["READINESS_CODES"]:
+            self.assertIn('"' + code + '"', source)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            def row(code):
+                return f"1790882077582\tlevel=1\tevent={code}\tsession=abcdef\tpath=123\n"
+            log = root / "logs-client.txt"
+            log.write_text(row("PRESELECTION_SAMPLE_INVALID_SNAPSHOT") * 2
+                + row("PRESELECTION_SNAPSHOT_NO_FORWARDED_EXIT")
+                + row("ADVERTISEMENT_STORE_REJECTED") + row("PRESELECTION_PRIVATE_CANARY") + "private-canary raw line\n")
+            (root / "status-client.txt").write_text("connected: false\nactive peers: 6\ncandidate pool: 8\n"
+                "active contexts: 0\nMPTCP subflows: 0\nMPQUIC paths: 0\nprivate-canary hostname\n")
+            value = CHECK["readiness_diagnostic"](root)
+            client = value["nodes"]["client"]
+            self.assertEqual(client["counts"], dict(PRESELECTION_SAMPLE_INVALID_SNAPSHOT=2,
+                PRESELECTION_SNAPSHOT_NO_FORWARDED_EXIT=1, ADVERTISEMENT_STORE_REJECTED=1))
+            self.assertTrue(client["unknown_event"])
+            self.assertFalse(client["events_truncated"])
+            self.assertEqual(client["status"], dict(active_peers=6, candidate_pool=8, active_contexts=0, mptcp_subflows=0, mpquic_paths=0))
+            self.assertFalse(value["nodes"]["exit"]["events_available"])
+            for secret in ("1790882077582", "abcdef", "123", "CANARY", "private-canary", "hostname"):
+                self.assertNotIn(secret, json.dumps(value))
+            log.write_text(row("PRESELECTION_OWNER_BUSY") * 500)
+            value = CHECK["readiness_diagnostic"](root)["nodes"]["client"]
+            self.assertTrue(value["events_truncated"])
+            self.assertEqual(value["counts"], dict(PRESELECTION_OWNER_BUSY=400))
+            (root / "logs-exit.txt").symlink_to(log)
+            self.assertFalse(CHECK["readiness_diagnostic"](root)["nodes"]["exit"]["events_available"])
+        shell = (HERE / "browser-network-smoke.sh").read_text().split("browser_network_cleanup() {", 1)[1]
+        self.assertLess(shell.index("logs --limit 400"), shell.index("readiness-diagnostic"))
+        self.assertLess(shell.index("readiness-diagnostic"), shell.index('browser_network_check cleanup "$WORK"'))
+
     def test_exit_export_has_only_allowlisted_egress_codes_not_raw_errors(self):
         def event(code, **extra):
             return json.dumps(dict(target="volparossa_agent::mptcp_flow_runtime", fields=dict(
@@ -110,7 +246,7 @@ class BrowserNetworkEvidence(unittest.TestCase):
 
     def test_origin_failure_retains_closed_stage_and_longer_initial_accept_budget(self):
         # No sockets/traffic: the fixture's exception-to-closed-metadata contract only.
-        def failing_transfer(root, gates, run_id, report, status, observe):
+        def failing_transfer(root, gates, run_id, report, status, observe, *, native_tabs=False):
             status["accepted_connections"] = 1
             observe("tls-handshake")
             raise TimeoutError("private origin address and request must not escape")
@@ -184,6 +320,23 @@ class BrowserNetworkEvidence(unittest.TestCase):
         route_source = (HERE.parents[1] / "crates/volparossa-agent/src/route_setup.rs").read_text()
         body = route_source.split("pub(crate) enum ClientRouteConnectError {", 1)[1].split("}", 1)[0]
         self.assertEqual(set(re.findall(r"^\s*([A-Za-z]+),", body, re.M)), CHECK["ROUTE_ERRORS"])
+
+    def test_preselection_diagnostic_retains_only_the_exact_inner_enum(self):
+        source = (HERE.parents[1] / "crates/volparossa-agent/src/discovery.rs").read_text()
+        body = source.split("pub(crate) enum ClientPreselectionError {", 1)[1].split("}", 1)[0]
+        variants = set(re.findall(r"^\s*([A-Za-z]+),", body, re.M))
+        self.assertEqual(variants, CHECK["PRESELECTION_ERRORS"])
+        def event(code):
+            return json.dumps(dict(target="volparossa_agent::browser_gateway::connect", fields=dict(
+                message="browser_gateway_observation", stage="preselection", code=code,
+                private_field="private-canary"))) + "\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "private.log"
+            path.write_text("".join(event(code) for code in sorted(variants)) + event("private-canary"))
+            result = CHECK["gateway_diagnostic"](path)
+            self.assertEqual(result["events"], [dict(stage="preselection", code=code) for code in sorted(variants)])
+            self.assertTrue(result["unknown_event"])
+            self.assertNotIn("private", json.dumps(result))
 
     def test_attachment_substage_and_nsresult_are_closed_original_facts(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -302,7 +455,7 @@ class BrowserNetworkEvidence(unittest.TestCase):
 
     def test_fixture_pin_and_closed_names_do_not_allow_secret_files(self):
         names = CHECK["EXPORT_NAMES"]
-        self.assertEqual(len(set(names)), 23)
+        self.assertEqual(len(set(names)), 24)
         self.assertTrue(all(name.startswith("browser-network-") and name.endswith(".json") for name in names))
         self.assertFalse(any(word in name for name in names for word in ("grant", "key", "profile", ".log")))
         with tempfile.TemporaryDirectory() as temporary:
