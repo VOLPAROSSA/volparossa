@@ -73,6 +73,8 @@ OBSERVER_INVARIANT_REASONS = {
     "broker is not the unprivileged node owner": "broker_owner",
     "runtime lock is aliased": "worker_runtime_lock",
     "observed worker does not hold its runtime lease": "worker_runtime_lease",
+    "observed worker ownership differs": "worker_ownership",
+    "observed task workers still alive": "worker_cleanup",
     "synthesis published different frontier rows": "synthesis_dataset_binding",
 }
 EXECUTION_PHASES = frozenset(('input', 'validation', 'directory', 'source_selection', 'provider_selection',
@@ -167,45 +169,95 @@ def expected_inventory(peers):
 
 
 def inventory_ready(raw, expected):
+    observed = parse_inventory(raw)
+    return observed is not None and all(observed.get(peer) == role for peer, role in expected.items())
+
+
+def parse_inventory(raw):
     # Same six relay/two exit advertisements as A01, read from the real agent's
     # authenticated inventory. This is NOT current capability or route readiness.
     if not isinstance(raw, bytes) or len(raw) > 1048576:
-        return False
+        return None
     try:
         lines = raw.decode("ascii").splitlines()
     except UnicodeError:
-        return False
+        return None
     if len(lines) > 4096:
-        return False
+        return None
     observed = {}
     for line in lines:
         match = re.fullmatch(r"([1-9A-HJ-NP-Za-km-z]{32,128})\troles=(0b[01]{3})\treachability=([0-3])", line)
         if match is None or match[1] in observed:
-            return False
+            return None
         observed[match[1]] = match[2]
-    return all(observed.get(peer) == role for peer, role in expected.items())
+    return observed
+
+
+INVENTORY_ROLES = tuple(f"relay{i}" for i in range(6)) + ("exit", "exit2")
+INVENTORY_OUTCOMES = ("none", "timeout", "nonzero", "invalid_reply", "partial", "complete", "os_error")
+
+
+def closed_inventory(value):
+    fields = {"version", "scope", "deadline_seconds", "attempts", "query_timeouts", "query_nonzero",
+              "invalid_replies", "last_query_outcome", "last_valid_presence", "ready"}
+    if (not isinstance(value, dict) or value.keys() != fields or value["version"] != 1
+            or value["scope"] != "last_valid_inventory_not_route_readiness"
+            or value["deadline_seconds"] != 60 or type(value["ready"]) is not bool
+            or value["last_query_outcome"] not in INVENTORY_OUTCOMES
+            or any(type(value[key]) is not int or not 0 <= value[key] <= 601
+                   for key in ("attempts", "query_timeouts", "query_nonzero", "invalid_replies"))):
+        return None
+    presence = value["last_valid_presence"]
+    if presence is not None and (not isinstance(presence, dict) or set(presence) != set(INVENTORY_ROLES)
+                                or any(type(present) is not bool for present in presence.values())):
+        return None
+    return value
 
 
 def await_inventory(work):
     JOBS["guest_work"](work)
     require(TRIAL == "discovered-360m", "inventory wait is only for the discovered fixture")
-    expected = expected_inventory(read(work / "a01-expected-peers.json", 8192))
+    peers = read(work / "a01-expected-peers.json", 8192)
+    expected = expected_inventory(peers)
     command = [str(work / "bin/volparossa"), "--control-socket",
                str(work / "runtime-client/control/agent.sock"), "peers"]
     deadline = time.monotonic() + 60
+    record = dict(version=1, scope="last_valid_inventory_not_route_readiness", deadline_seconds=60,
+        attempts=0, query_timeouts=0, query_nonzero=0, invalid_replies=0,
+        last_query_outcome="none", last_valid_presence=None, ready=False)
     while (remaining := deadline - time.monotonic()) > 0:
+        record["attempts"] += 1
         try:
             # The CLI validates a <=256 KiB RPC frame, <=4096 entries and
             # <=128-byte IDs before printing; stdout is bounded below 1 MiB.
             result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                     check=False, timeout=min(2, remaining))
+            observed = parse_inventory(result.stdout) if result.returncode == 0 else None
+            if result.returncode != 0:
+                record["query_nonzero"] += 1
+                record["last_query_outcome"] = "nonzero"
+            elif observed is None:
+                record["invalid_replies"] += 1
+                record["last_query_outcome"] = "invalid_reply"
+            else:
+                record["last_valid_presence"] = {name: observed.get(peers[name]) == expected[peers[name]]
+                                                 for name in INVENTORY_ROLES}
+                record["last_query_outcome"] = "complete" if all(record["last_valid_presence"].values()) else "partial"
             if time.monotonic() < deadline and result.returncode == 0 and inventory_ready(result.stdout, expected):
+                record["ready"] = True
+                write(work / f"{NAME}-inventory.private", record)
                 return
         except subprocess.TimeoutExpired:
-            pass
+            record["query_timeouts"] += 1
+            record["last_query_outcome"] = "timeout"
+        except OSError:
+            record["last_query_outcome"] = "os_error"
+            write(work / f"{NAME}-inventory.private", record)
+            raise
         remaining = deadline - time.monotonic()
         if remaining > 0:
             time.sleep(min(0.1, remaining))
+    write(work / f"{NAME}-inventory.private", record)
     raise ValueError("expected advertisement inventory did not arrive within its deadline")
 
 
@@ -821,9 +873,30 @@ def scan_workers(work, document, layout, brokers, observed):
                     "observed worker did not receive exact public fragment/derived input")
             observed[key] = dict(node=node, level=int(match[1]) if match else None,
                 handle_path=relative, provider_key=handle["provider_key"], dataset_sha256=binding["dataset_sha256"],
-                worker=current["worker"], owned_processes=current["owned_processes"],
+                broker=current["broker"], worker=current["worker"], owned_processes=current["owned_processes"],
                 isolated_live_worker=True, base_model_sha256=handle["capabilities"]["model"]["base_weights"]["sha256"])
     require(len(observed) <= 128, "unbounded observed worker set")
+
+
+def task_processes(entry):
+    # descendants() deliberately includes its root. The validated broker is a
+    # persistent service, stopped by the later fixture cleanup, not by a task.
+    # Retain every other observed process, including sandbox parents/tokenizers;
+    # never remove a live process merely because the model worker has ended.
+    broker, worker, family = entry["broker"], entry["worker"], entry["owned_processes"]
+    require(isinstance(family, list) and 2 <= len(family) <= 32
+            and all(isinstance(member, dict) and set(member) == {"pid", "start_ticks"}
+                    and type(member["pid"]) is int and member["pid"] > 0
+                    and type(member["start_ticks"]) is int and member["start_ticks"] >= 0 for member in family)
+            and len({member["pid"] for member in family}) == len(family)
+            and family.count(broker) == 1 and worker != broker and worker in family,
+            "observed worker ownership differs")
+    return [member for member in family if member != broker]
+
+
+def check_task_workers_ended(entries):
+    require(not any(JOBS["alive"](member) for entry in entries for member in task_processes(entry)),
+            "observed task workers still alive")
 
 
 def exact_bytes(path, maximum=1048576):
@@ -1350,8 +1423,7 @@ def observe_inner(work, pid, progress, tracked):
     require(not JOBS["alive"](owner) and consent and result is not None and cancelled,
             "browser did not complete both real public tasks within fixture bound")
     progress["phase"] = "worker_cleanup_check"
-    require(not any(JOBS["alive"](member) for entry in [*observed.values(), *cancelled.values()]
-                    for member in entry["owned_processes"]), "observed task workers still alive")
+    check_task_workers_ended([*observed.values(), *cancelled.values()])
     progress["phase"] = "observation_write"
     write(work / f"{NAME}-observation.json", dict(no_dispatch_before_consent=True,
         real_fragment_peers=sorted({entry["node"] for entry in observed.values() if entry["level"] is None}),
@@ -1504,13 +1576,15 @@ def finalize(work, revision, status, complete, remaining, phase, blocker):
     value = read(path, 1048576) if path.is_file() else None
     host_path = work / "a15-evidence.json"
     host = read(host_path) if host_path.is_file() else {}
+    inventory_path = work / f"{NAME}-inventory.private"
+    inventory = closed_inventory(read(inventory_path, 4096)) if TRIAL and inventory_path.is_file() else None
     write(work / f"{NAME}-smoke.json", dict(report_kind="volparossa-cooperative-browser", schema_version=1,
         source_revision=revision, runner_exit_status=status, phase=phase,
         observed_blocker=None if blocker == "NONE" else blocker, evidence=value, host_state=host,
         preselection_diagnostic=closed_preselection_events(work / "logs-client.txt"),
         cleanup=dict(complete=complete, remaining_owned_objects=remaining),
         success=status == 0 and complete and remaining == 0 and host.get("unchanged") is True and value is not None,
-        **trial_fields()))
+        **({"inventory_diagnostic": inventory} if TRIAL else {}), **trial_fields()))
 
 
 def check_report(value, revision):

@@ -280,8 +280,7 @@ def observe(work, pid):
         document = unique_document(state, shown["original_public_result"]["source_manifest_id"])
         original = BROWSER["retained_result"](document, read(root / "input.json"), layout, observed)
         join_result(shown["original_public_result"], original, read(root / "input.json"))
-        require(not any(JOBS["alive"](member) for entry in observed.values() for member in entry["owned_processes"]),
-                "observed public workers remain alive")
+        BROWSER["check_task_workers_ended"](observed.values())
         write(work / f"{NAME}-result.json", original)
         write(work / f"{NAME}-observation.json", dict(version=1, unique_manifest_join=True,
             wire_id_is_not_directory_id=True, observed_workers_ended=True,

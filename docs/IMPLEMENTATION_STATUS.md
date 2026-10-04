@@ -463,7 +463,55 @@ unchanged; no model or VM was rerun, and the original failed run remains failed.
 
 ### Cooperative browser execution
 
-The latest exact-source [run `37205581731`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37205581731)
+The latest exact-source [run `37209763534`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37209763534)
+on `434431d897c50ca85706a56fc84b8f76df698c75` remains **failed** before the first
+Connect: `agent-cooperative-browser-inventory` reports
+`COOPERATIVE_BROWSER_INVENTORY_UNAVAILABLE`. No route, model task, retained-result
+join or pre-stop worker cleanup check ran, so this trial neither proves nor
+disproves the observer correction below. The retained 174-record log ring has no
+preselection reason signal; the exact missing inventory condition is not retained.
+Final private cleanup completes, zero owned objects remain, and the disposable
+guest-root network snapshots match; this is not an outer-host unchanged claim.
+Original artifact ZIP SHA-256:
+`ef329591112faefe0c9d57aee15fba6edaed5ccb7889d18e65154b9cd3398afb`;
+original job `111458379570` log SHA-256:
+`fb064e02425548c37b69b17eacd737ead4eeea11813dd6832899a25fd3a740a7`.
+
+The next diagnostic retains only fixed fixture-role presence and bounded inventory
+query outcomes in the smoke report. It preserves the original 60-second deadline,
+all eight required advertisements and the no-Connect-on-failure gate; no raw peer
+reply or stderr is exported. This is not a network fix or a passing new trial.
+
+The preceding exact-source [run `37207405766`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37207405766)
+on `7621087a9f287fdb68bb7b7127f72e029c45f865` passes the inventory gate, connects
+on its first attempt and now passes the exact retained-result join. Seven real
+peer jobs retain the original two-part source, two refinement splits to depth two,
+a four-answer EOS frontier and one EOS synthesis. The browser reaches its closed
+`complete` status; the second task reaches scoped cancellation with coordinator
+cleanup confirmed. Nevertheless the run remains **failed**: the observer stops
+at `worker_cleanup_check`, so the final process-lifetime/panel proof is incomplete.
+Semantic answer quality is not proved. Final private cleanup leaves zero owned
+objects and matching disposable guest-root network hashes, not an outer-host
+unchanged claim. Original artifact ZIP SHA-256:
+`63d50a3602f4bea04827d4ec0dc2d026f2fe6f3cdda68651c1b05813d62fb4d7`;
+original job `111451377964` log SHA-256:
+`ad19dcb449e5005bebd76e674cd70cb3c3ba0b4b3afe8f0724577e228faa0019`.
+
+The pre-stop observer incorrectly included the persistent broker itself in its
+task-process check: `descendants()` intentionally includes its root, and the broker
+is stopped only in later fixture cleanup. A correction retains the full original
+ownership list but excludes only the exact recorded broker PID/start-time from
+this pre-stop task check. All other observed descendants, including sandbox
+parents and tokenizer/worker processes, must have ended. Browser and Code share
+the corrected check; existing after-broker-stop cleanup is unchanged. Actual
+Linux process controls keep a broker alive, spawn children from a non-leader
+thread, reject a surviving sandbox parent after its model child exits, and pass
+only after all transient descendants are reaped; identity mismatch also refuses.
+The original artifact has no individual live-process identities, so additional
+surviving transient processes cannot be ruled out retrospectively. This is a
+tested observer correction, not a newly passing VM trial or a cleanup waiver.
+
+The earlier exact-source [run `37205581731`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37205581731)
 on `05e75021fe195e94b4dd32658ac9636ebde3422b` passes the inventory gate and connects
 its real source route on the first attempt. Under the unchanged discovered-360M
 contract it observes seven native peer workers and confirms seven terminal
@@ -482,17 +530,17 @@ original job `111445972182` log SHA-256:
 
 Source comparison identifies a verifier schema bug: Rust's signed v3 synthesis
 dataset includes `model_profile` for the non-default 360M model, while the
-observer's exact expected object omitted it. The candidate correction requires
+observer's exact expected object omitted it. The correction requires
 the selected profile in that equality; it does not ignore extra fields or alter
 model output, source lineage, EOS, resource or cancellation requirements. Both
 synthetic retained-tree fixtures now use the actual serialized field order. A
 regression first reproduced the rejection and then checks that omitted/wrong
 profiles still fail. Future occurrences use the closed `synthesis_dataset_binding`
 diagnostic, never raw exceptions or dataset contents. The private retained tree was cleaned, so the original
-run's first failing predicate cannot be attributed more precisely; this is a
-proven source-contract blocker, not a newly passing VM result. All 32 cooperative
+run's first failing predicate cannot be attributed more precisely; the subsequent
+run above passes the corrected join without changing that failed result. All 32 cooperative
 Python checks and the focused Rust non-default-profile serialization/signature/
-row-derivation test pass; whitespace checks pass. No new VM trial has run.
+row-derivation test passed before that subsequent VM trial.
 
 The earlier exact-source [run `37204198825`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37204198825)
 on `774597444616af465e684dde3ed874b80542971f` remains **failed before compute**
