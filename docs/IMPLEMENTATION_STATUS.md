@@ -476,6 +476,30 @@ feature branches are not implied to be integrated into `main`.
   accounting, identity and CLI failures without private status/error export.
   Targeted parser tests fail before and pass after the correction; they are not
   a new live upload/recovery pass or proof of the original failing assertion.
+  Original [run `37216378788`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37216378788)
+  on `f4bb38d2dc31310a3857e3d6a8a2419473fae4a5` remains **failed** at
+  `FRAGMENTS_EXIT_LOG_WINDOW_TRUNCATED`. Its retained upload receipt now proves
+  the original Files/Uppy upload and 201 response, 266,429 encrypted bytes,
+  four uploaded fragments/eight copies, exact receipt-based provider charges
+  of 177,620 / 177,620 / 177,618 bytes, retained identities, both local ciphertexts
+  removed and joined source/service/browser cleanup. Provider-store inspection,
+  withdrawal, restarted recovery and final retirement were not reached.
+  The Exit ring contained 1,000 records; its oldest timestamp was 14.158 seconds
+  after the phase baseline. Its 85 completions and one failure are only tail
+  counts, not valid whole-phase evidence. Cleanup completed with zero owned
+  objects, all eight private-removal flags true and matching guest-root network
+  hashes `315a04db62e4e1e873b10cd563e467977343474153ec20b38e61f09edf26e2c6`.
+  Original ZIP SHA-256 `2001402450822d7fd1d1a81507306d9cdf00f177783782eeae678e5222e91eca`;
+  job `111477625117` log SHA-256
+  `296a3087d2226807a88b56c2e7e1ce98a799a47d4aff2be883d8e05f3ae31005`.
+  A Cloud-upload-only fixture candidate samples the unchanged bounded Exit ring
+  before and throughout each real phase. Complete overlapping timestamp groups
+  must agree exactly, including repeated records; missing or ambiguous overlap,
+  clock regression, query failure and insufficient completions still refuse.
+  Only bounded counters/timestamps and closed observation/command status are
+  exported, never raw records. Existing phase commands, deadlines, flow minima,
+  product retention and privacy captures are unchanged. Targeted collector and
+  local subprocess-cleanup tests do not establish a new live Cloud recovery pass.
   The candidate keeps the
   preceding read-only proof/pins unchanged and requires an original Files/Uppy
   upload of 262,145 synthetic bytes, actual owner GPG encryption, three or four

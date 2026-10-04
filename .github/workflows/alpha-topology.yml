@@ -152,6 +152,7 @@ jobs:
           python3 -B tests/integration/test-private-storage-handoff-wiring.py
           sh -n tests/integration/private-storage-fragments-smoke.sh
           python3 -B tests/integration/test-private-storage-fragments-smoke.py
+          python3 -B tests/integration/test-private-storage-flow-observer.py
           python3 -B tests/integration/test-private-storage-fragments-wiring.py
           python3 -B tests/integration/test-image-snapshot-provision.py
           python3 -B tests/integration/test-image-snapshot-wiring.py

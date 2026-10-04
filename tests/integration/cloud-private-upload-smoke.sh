@@ -13,6 +13,9 @@ cloud_private_upload_run() {
     storage_fixture_driver=cloud-private-upload-smoke.py
     storage_restore_flows=28
     storage_phase_timeout_seconds=2400
+    # This longer real UI phase can outlive the existing 1000-record Exit ring.
+    # Observe continuous overlapping snapshots; never approve a cropped tail.
+    storage_incremental_flows=yes
     if [ -e "$storage_owner_parent" ] || [ -L "$storage_owner_parent" ]; then
         fail CLOUD_OWNER_PARENT_NOT_NEW
     fi
