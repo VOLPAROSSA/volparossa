@@ -11,7 +11,7 @@ detailed evidence ledger, including historical failures—not an installation gu
 [Original v1 scorecard](#fixed-alpha-v1-scorecard) ·
 [Completion requirements](#definition-of-done)
 
-Last updated: 2026-10-02
+Last updated: 2026-10-04
 
 ## Current integration and active work
 
@@ -24,6 +24,17 @@ Signed-group ambiguity checks remain first; retained routes keep their exact pin
 control, and wholly incompatible groups still reject before dispatch. Seven signed
 route tests and eighteen sampler tests pass. This is unit-level evidence, not
 a proved explanation or live fix for the Cloud/browser route-selection failures.
+
+Main `c1a6cada` [quality run37076590769](https://github.com/VOLPAROSSA/volparossa/actions/runs/37076590769)
+failed because the actor source-contract test still searched for the former
+unscoped snapshot call after the scoped builder was introduced. The test now
+recognizes the scoped call and additionally verifies that the request-derived
+scope is built first and passed into the snapshot. All original affine, privacy
+and dispatch-order assertions remain. The corrected contract, seven route-snapshot
+tests and eighteen sampler tests pass locally, as do formatting and diff checks.
+Only the test and this record changed; production behavior is unchanged. The
+original CI failure remains failed, and this is not a fresh full-suite or live
+datapath claim.
 
 ### Fixed public training source
 
