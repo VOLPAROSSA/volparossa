@@ -24,7 +24,8 @@ private_storage_fragments_private() {
             "$provider_baseline_ms" "$WORK/private-storage-fragments-$storage_phase-gates.json" \
             "$storage_observe_minimum" -- "$@"
     fi
-    "$@"
+    STORAGE_PROOF_BASELINE_MS=${provider_baseline_ms:-0} \
+      STORAGE_PROOF_ROUTE_SCOPE=${storage_route_scope:-} "$@"
 }
 
 private_storage_fragments_cleanup() {
@@ -46,14 +47,30 @@ private_storage_fragments_phase_start() {
 private_storage_fragments_phase_finish() {
     storage_expected_flows=$1
     benchmark_capture_paths "private-storage-fragments-$storage_phase-live" mptcp || fail FRAGMENTS_ROUTE_UNAVAILABLE
-    jq -e --arg context "$storage_context" '.route_context_id == $context' \
-        "$WORK/private-storage-fragments-$storage_phase-live-selection.json" >/dev/null || fail FRAGMENTS_ROUTE_CHANGED
+    if [ "${private_storage_maintenance:-no}" = yes ]; then
+        python3 -B "$WORK/bin/private-storage-log-sampler.py" route-check \
+            "$WORK/private-storage-fragments-layout.json" \
+            "$WORK/private-storage-fragments-$storage_phase-live-selection.json" \
+            "$storage_user/flow-$storage_phase.json" || fail FRAGMENTS_ROUTE_CHANGED
+    else
+        jq -e --arg context "$storage_context" '.route_context_id == $context' \
+            "$WORK/private-storage-fragments-$storage_phase-live-selection.json" >/dev/null || fail FRAGMENTS_ROUTE_CHANGED
+    fi
     stop_privacy_observers || fail FRAGMENTS_CAPTURE_INCOMPLETE
     content_provider_stop_control_observer || fail FRAGMENTS_CONTROL_CAPTURE_INCOMPLETE
     if [ "${storage_incremental_flows:-no}" = yes ]; then
         python3 -B "$WORK/bin/private-storage-fragments-smoke.py" validate-flow-gates \
             "$WORK/private-storage-fragments-$storage_phase-gates.json" "$storage_expected_flows" \
             || fail FRAGMENTS_EXIT_LOG_OBSERVATION_INCOMPLETE
+        return
+    fi
+    if [ "${private_storage_maintenance:-no}" = yes ]; then
+        # The owner phase continuously samples and joins before emitting success.
+        # Every overlap must match; a late truncated ring cannot replace coverage.
+        python3 -B "$WORK/bin/private-storage-log-sampler.py" check \
+            "$storage_user/flow-$storage_phase.json" "$provider_baseline_ms" "$storage_expected_flows" \
+            >"$WORK/private-storage-fragments-$storage_phase-gates.json" \
+            || fail FRAGMENTS_EXIT_LOG_WINDOW_TRUNCATED
         return
     fi
     storage_poll=0
@@ -172,8 +189,17 @@ PY
             -- test -r "$storage_private"; then fail FRAGMENTS_LOCAL_SHORTCUT; fi
     done
     jq -n --arg control "$provider_control_peer" --arg context "$storage_context" \
-        '{provider_nodes:["relay4","relay5","relay3"],control_relay_peer_id:$control,route_context_id:$context}' \
+        --arg maintenance "${private_storage_maintenance:-no}" \
+        --slurpfile selected "$WORK/private-storage-fragments-selection.json" \
+        '{provider_nodes:["relay4","relay5","relay3"],control_relay_peer_id:$control,route_context_id:$context}
+         + (if $maintenance == "yes" then {route_scope:{exit_peer_id:$selected[0].exact_selected_exit,
+             paths:[$selected[0].paths[] | {path_id,relay_peer_id}]}} else {} end)' \
         >"$WORK/private-storage-fragments-layout.json"
+    storage_route_scope=
+    if [ "${private_storage_maintenance:-no}" = yes ]; then
+        storage_route_scope=$(jq -ce '.route_scope' "$WORK/private-storage-fragments-layout.json") \
+            || fail FRAGMENTS_ROUTE_UNAVAILABLE
+    fi
     jq -n --argjson user "$WORKER_UID" --argjson agent "$AGENT_UID" --argjson control "$custody_control_gid" \
         --argjson group "$AGENT_GID" '{user_uid:$user,agent_uid:$agent,control_gid:$control,agent_gid:$group,
         agent_cannot_read_user_state:true,client_cannot_read_any_provider_store:true,agent_mount_positive_control:true,
@@ -224,6 +250,9 @@ private_storage_fragments_run() {
     if [ "${cloud_private_upload:-no}" = yes ]; then
         python3 -B "$source_directory/tests/integration/cloud-private-upload-smoke.py" evidence "$WORK" \
             "$WORK/cloud-private-upload-evidence.json" >/dev/null || fail CLOUD_PRIVATE_UPLOAD_EVIDENCE_INVALID
+    elif [ "${private_storage_maintenance:-no}" = yes ]; then
+        python3 -B "$source_directory/tests/integration/private-storage-maintenance-smoke.py" evidence "$WORK" \
+            "$WORK/private-storage-maintenance-evidence.json" >/dev/null || fail MAINTENANCE_EVIDENCE_INVALID
     elif [ "${cloud_private_file:-no}" = yes ]; then
         python3 -B "$source_directory/tests/integration/cloud-private-file-smoke.py" evidence "$WORK" \
             "$WORK/cloud-private-file-evidence.json" >/dev/null || fail CLOUD_PRIVATE_FILE_EVIDENCE_INVALID
@@ -236,6 +265,7 @@ private_storage_fragments_run() {
     fi
     OBSERVED_BLOCKER=NONE
     if [ "${cloud_private_upload:-no}" = yes ]; then PHASE=cloud-private-upload-complete
+    elif [ "${private_storage_maintenance:-no}" = yes ]; then PHASE=private-storage-maintenance-complete
     elif [ "${cloud_private_file:-no}" = yes ]; then PHASE=cloud-private-file-complete
     elif [ "${image_snapshot:-no}" = yes ]; then PHASE=image-snapshot-complete
     else PHASE=private-storage-fragments-complete; fi

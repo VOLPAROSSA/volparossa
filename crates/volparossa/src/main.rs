@@ -756,6 +756,7 @@ fn print_response(response: ControlResponse) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&receipt)?);
         }
         Payload::PrivateStorageReady(_)
+        | Payload::PrivateStorageMaintenanceReady(_)
         | Payload::PrivateStorageGrant(_)
         | Payload::PrivateStorageAdmission(_) => {
             anyhow::bail!("private storage reply requires its scoped storage command")

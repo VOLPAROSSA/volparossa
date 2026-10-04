@@ -67,6 +67,37 @@ pub struct PrivateStorageRemoteRequest {
     /// Original bounded provider-signed custody grant.
     #[prost(bytes = "vec", tag = "2")]
     pub grant: Vec<u8>,
+    /// Ephemeral core-issued background turn, empty for existing foreground callers.
+    #[prost(bytes = "vec", tag = "3")]
+    pub maintenance_turn: Vec<u8>,
+}
+
+/// Wait for one core-coordinated background turn. No owner paths or secrets are sent.
+#[derive(Clone, PartialEq, Message)]
+pub struct PrivateStorageMaintenanceRequest {
+    /// Public owner identity; every subsequent remote operation still requires its signature.
+    #[prost(bytes = "vec", tag = "1")]
+    pub owner_key: Vec<u8>,
+    /// Opaque local enrollment identifier, not an archive name or remote content identifier.
+    #[prost(bytes = "vec", tag = "2")]
+    pub enrollment_id: Vec<u8>,
+    /// Maximum checked payload plus conservative framing bytes in this turn.
+    #[prost(uint64, tag = "3")]
+    pub maximum_bytes: u64,
+}
+
+/// A finite, connection-owned background allowance; never provider custody authority.
+#[derive(Clone, PartialEq, Message)]
+pub struct PrivateStorageMaintenanceReady {
+    /// Random capability bound to this live local connection and kernel UID.
+    #[prost(bytes = "vec", tag = "1")]
+    pub turn: Vec<u8>,
+    /// Absolute finite deadline. EOF, foreground demand or service stop revoke earlier.
+    #[prost(uint64, tag = "2")]
+    pub expires: u64,
+    /// Checked byte ceiling, including unsuccessful requested operations.
+    #[prost(uint64, tag = "3")]
+    pub maximum_bytes: u64,
 }
 
 /// Fresh challenge for the already selected protected provider connection, not success.
@@ -229,7 +260,35 @@ impl PrivateStorageGrantRequest {
 impl PrivateStorageRemoteRequest {
     pub(crate) fn validate(&self) -> Result<(), ControlProtocolError> {
         key(&self.provider_key)?;
-        blob(&self.grant, 2048)
+        blob(&self.grant, 2048)?;
+        if !self.maintenance_turn.is_empty() && self.maintenance_turn.len() != 32 {
+            return Err(ControlProtocolError::Invalid("private maintenance turn"));
+        }
+        Ok(())
+    }
+}
+
+impl PrivateStorageMaintenanceRequest {
+    pub(crate) fn validate(&self) -> Result<(), ControlProtocolError> {
+        key(&self.owner_key)?;
+        if self.enrollment_id.len() != 32 || !(1..=134_217_728).contains(&self.maximum_bytes) {
+            return Err(ControlProtocolError::Invalid("private maintenance scope"));
+        }
+        Ok(())
+    }
+}
+
+impl PrivateStorageMaintenanceReady {
+    pub(crate) fn validate(&self) -> Result<(), ControlProtocolError> {
+        if self.turn.len() != 32
+            || self.expires == 0
+            || !(1..=134_217_728).contains(&self.maximum_bytes)
+        {
+            return Err(ControlProtocolError::Invalid(
+                "private maintenance allowance",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -302,10 +361,16 @@ mod tests {
             Operation::PrivateStorageRemote(PrivateStorageRemoteRequest {
                 provider_key: public_key(),
                 grant: vec![1; 2048],
+                maintenance_turn: Vec::new(),
             }),
             Operation::PrivateStorageAdmission(PrivateStorageAdmissionRequest {
                 provider_key: public_key(),
                 target_bytes: Some(0),
+            }),
+            Operation::PrivateStorageMaintenance(PrivateStorageMaintenanceRequest {
+                owner_key: public_key(),
+                enrollment_id: vec![2; 32],
+                maximum_bytes: 134_217_728,
             }),
         ];
         for operation in operations {
@@ -320,6 +385,11 @@ mod tests {
             );
         }
         for payload in [
+            Payload::PrivateStorageMaintenanceReady(PrivateStorageMaintenanceReady {
+                turn: vec![2; 32],
+                expires: 3600,
+                maximum_bytes: 134_217_728,
+            }),
             Payload::PrivateStorageReady(PrivateStorageReady {
                 provider_key: public_key(),
                 challenge: vec![1; 1024],
@@ -352,6 +422,36 @@ mod tests {
                 response
             );
         }
+    }
+
+    #[test]
+    fn private_storage_maintenance_bounds_ephemeral_resource_authority() {
+        let mut request = PrivateStorageMaintenanceRequest {
+            owner_key: public_key(),
+            enrollment_id: vec![2; 32],
+            maximum_bytes: 1,
+        };
+        assert!(request.validate().is_ok());
+        request.maximum_bytes = 134_217_729;
+        assert!(request.validate().is_err());
+        request.maximum_bytes = 0;
+        assert!(request.validate().is_err());
+        request.maximum_bytes = 1;
+        request.enrollment_id.pop();
+        assert!(request.validate().is_err());
+        let mut remote = PrivateStorageRemoteRequest {
+            provider_key: public_key(),
+            grant: vec![1; 2048],
+            maintenance_turn: vec![2; 32],
+        };
+        assert!(remote.validate().is_ok());
+        remote.maintenance_turn.pop();
+        assert!(remote.validate().is_err());
+        remote.maintenance_turn.clear();
+        assert!(
+            remote.validate().is_ok(),
+            "existing foreground IPC remains compatible"
+        );
     }
 
     #[test]
@@ -388,7 +488,8 @@ mod tests {
         assert!(
             PrivateStorageRemoteRequest {
                 provider_key: vec![0; 32],
-                grant: vec![1; 128]
+                grant: vec![1; 128],
+                maintenance_turn: Vec::new(),
             }
             .validate()
             .is_err()
@@ -396,7 +497,8 @@ mod tests {
         assert!(
             PrivateStorageRemoteRequest {
                 provider_key: public_key(),
-                grant: vec![1; 2049]
+                grant: vec![1; 2049],
+                maintenance_turn: Vec::new(),
             }
             .validate()
             .is_err()

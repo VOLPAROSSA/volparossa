@@ -198,6 +198,119 @@ feature branches are not implied to be integrated into `main`.
 
 ### Additional application and autonomous-maintenance scope
 
+- [ ] Owner-private storage-maintenance candidate: explicit signed enrollment of one
+  retained fragment archive, existing core-idle turns rather than a separate timer,
+  one rotating fragment renewal/reconciliation plus at most one repair per turn.
+  The agent gets no owner private key or archive path. Actual signed-request byte
+  admission, shared foreground/resource cancellation, retained retry identities and
+  conservative charges are wired; no independent ledger, automatic grant renewal,
+  archive discovery or contribution resizing is introduced. Combined daemon/overlay
+  execution is not yet proven. Twelve targeted maintenance checks pass (five new,
+  seven existing), including actual signed SQLite provider renew/repair/restart and
+  repeated source-free C/D restore; four focused bridge tests and strict CLI/agent
+  Clippy also pass. Positive live-link idle admission still needs the combined trial.
+  A disposable `private-storage-maintenance` scenario now wires explicit guest `cr0`
+  idle budgets, actual CLI enrollment/core turns, renewal, EOF/foreground cancellation,
+  A-offline B/C repair and repeated source-free restore, conservative charges and full
+  cleanup. Its five pure receipt/cleanup and four wiring/export checks pass. The first
+  [VM run36927623039 on `53cccdde`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36927623039)
+  failed at agent readiness, before maintenance executed: duplicate sharing sections
+  were emitted in client YAML. The emitter is consolidated and a full-client real
+  configuration-parser regression added. Original cleanup/unchanged-host evidence
+  passes, but combined maintenance execution remains unchecked pending a fresh trial.
+  The original [run36930275639 on `0ce48bb7`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36930275639)
+  reaches three replacement readbacks, eleven retained copy records, three pending
+  retirements and two genuine source-free B/C reconstructions. It then fails at
+  `retirement`, with successful cleanup and unchanged host state. The fixture
+  incorrectly treated a fresh readback of an existing replacement as a duplicate
+  placement. The candidate now checks unchanged placement/copy counts and exact
+  signed placement-journal bytes, while retaining the retirement, zero-charge and
+  deletion requirements. The original remains failed; complete retirement/deletion
+  is not yet proven. Original 38-file ZIP SHA-256:
+  `94776714aa211d2df2b6e8c06a1486414a5e17fd6f44511f3392de44ec02b93d`;
+  original job-log SHA-256:
+  `4081f8be0933b6f871fcd6ae1ba99bc4202720839204010348e1c79984368bf5`.
+  The next original [run36933314111 on `23891274`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36933314111)
+  confirms upload, real core renewal, owner EOF/restart and independent foreground
+  revocation, but fails before provider withdrawal: the late Exit snapshot contains
+  exactly 1,000 records, starting 5,449 ms after the phase baseline
+  (`FRAGMENTS_EXIT_LOG_WINDOW_TRUNCATED`). Its 72 completed flows are only a partial
+  window, not accepted full-phase evidence. Cleanup has zero remaining owned objects
+  and host state is unchanged. Original 19-file ZIP SHA-256:
+  `19a993b2c93ff6a71d9d12eb90d050f4a953f359ec3405470e5132be215d3163`;
+  original job-log SHA-256:
+  `359e1e027bb5eafd0e6f69f3ece6bb0db817fce2bcc213da20c519e013310eb8`.
+  The fixture-only correction samples the unchanged 1,000-record ring every five
+  seconds, verifies exact overlapping event identities and timestamp groups, fails
+  on gaps/ambiguity and joins the observer before producing closed counters. Only
+  this maintenance fixture gives its owner the existing package-style Exit control
+  group/traversal; service state, credentials and native sockets remain private.
+  The original five-second final completion drain and flow minima remain. Seven
+  focused sampler checks include 2,401 events, duplicate timestamps, rejected missing
+  overlap and late/missing completion. No raw logs are newly persisted or exported;
+  no product log limit changes. This candidate still requires a fresh real trial.
+  The next original [run36936987353 on `9cd3f660`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36936987353)
+  confirms continuous upload/restore coverage (42/54 overlapping samples,
+  1,142/2,005 records, 74/55 completed protected flows), three actual replacement
+  readbacks and two source-free B/C restores. Its owner finish report confirms
+  retirement, eleven copy deletions and zero remaining owner-side charge, but the
+  old phase gate rejects a new route-context ID (`FRAGMENTS_ROUTE_CHANGED`), even
+  though the selected exit and both relay/path identities are unchanged. The final
+  provider-store zero-lease snapshot and final flow gate were not reached, so this
+  is still a failed run, not completed acceptance. Private cleanup passes and host
+  SHA-256 stays `3d0ee3b059bc28fb89e22635ace6a06875a011326415ec4efb84b8169c087376`.
+  Original 39-file ZIP SHA-256:
+  `ae1b27afe1c51ec6fe861d631a8bb4fd03ee977483411612e4f7bb63ae65e54b`;
+  job110619445478 log SHA-256:
+  `11fa60b284d1eee18e3875183389f77c97b91ecdad01e95a6b5a2407d76bebce`.
+  Source inspection confirms that each new private-storage exchange calls the
+  existing `connect_tcp` expiry/reselection path; a whole maintenance round is not
+  one established flow. The candidate therefore permits a new context only in this
+  maintenance fixture, within the same selected exit and exact two relay/path scopes.
+  Both completed and failed Exit-flow events now carry their already owner-validated
+  ephemeral context ID in the existing bounded RAM-only local-control log; no new
+  routing behavior, timer, destination field or persistent log is introduced.
+  The joined sampler correlates those actual post-baseline events with live committed
+  client path snapshots, rejects foreign/unobserved scopes and requires the final
+  context's own completed flow. Old-context counts cannot satisfy a new-context gate.
+  Ordinary fragments/Image/Cloud checks remain initial-context strict. Signed owner
+  operations, flow minima, privacy captures, physical accounting and cleanup remain
+  required; the exact original exports do not establish the cause/time of retirement.
+  The targeted AgentState test passes for both outcomes, unchanged generic logs and
+  bounded eviction. Eleven sampler, seven maintenance, four wiring and nine ordinary
+  fragment checks pass, including rejection of old-context-only counts and a bounded
+  final drain that waits for the new context's own asynchronous completion.
+  The next original [run36943338754 on `4c31ac3b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36943338754)
+  also remains **failed**, at `FRAGMENTS_FINISH_FAILED`; the retained owner receipt
+  identifies only stage `retirement`, not a particular failed assertion or operation.
+  The exact-source checker revalidates its upload/restore context-bound network
+  evidence: 74/55 completed flows, 1/0 failed flows, actual renewal, owner EOF/restart,
+  foreground revocation, three replacement readbacks and two source-free restores.
+  The three stopped provider stores retain 524,361/786,569/786,505 committed bytes
+  with 3/5/4 leases, including the separate foreground copy. Final flow gates and
+  zero-lease accounting are absent; retirement/deletion completion is not proven.
+  Private/topology cleanup passes with zero owned objects and guest-root state
+  SHA-256 `ec0c29d52d5cc353c90046d9719d913b13fd2cb436e8a2572e1903e36dd567db` unchanged.
+  Original 38-file ZIP SHA-256:
+  `627513483840c31eda6ae10d44fa0256fd738c53d7cfd3ee746da0dae1c010fc`;
+  job110639681003 log SHA-256:
+  `9ff85adcc561fa45ed88f09797faaf623cdb56547296deee4a529d17c01a8de5`.
+  The next fixture candidate adds only closed failure codes, owner-turn substages,
+  bounded cursor/retirement counters and separate sampler/cleanup failure categories.
+  It preserves the primary owner error if final observation also fails; no raw
+  checkpoint detail, stderr, paths or owner data are exported. Existing deadlines,
+  turn counts, assertions and success requirements are unchanged. This is diagnostic
+  coverage, not a proven cause or product fix for the original failure.
+  The integration candidate retains this complete maintenance history alongside the
+  separately proven Cloud upload collector. Maintenance keeps its context-bound
+  joined sampler; Cloud keeps its incremental-overlap collector and strict initial
+  route-context check. Original Cloud run `37218270756` still reconstructs exactly
+  from its retained evidence under the combined checker, but is not maintenance
+  proof. No new maintenance VM run has been performed for this integration; a
+  complete context-bound finish, actual provider-store zero-lease accounting and
+  cleanup must still pass together on its exact source revision.
+  See [private storage maintenance](services/PRIVATE_STORAGE.md#explicit-owner-private-background-maintenance).
+
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
   authenticated source import, private fragment storage and source-off file access,
   followed by the account/metadata/sharing/synchronization functions needed for

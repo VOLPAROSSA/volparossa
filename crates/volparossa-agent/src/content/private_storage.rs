@@ -39,6 +39,7 @@ struct RemoteRequest {
     provider_key: [u8; 32],
     peer: PeerId,
     grant: VerifiedStorageGrant,
+    maintenance: Option<Arc<super::storage_maintenance::Turn>>,
 }
 
 struct SelectedProvider {
@@ -197,14 +198,41 @@ impl ContentRuntime {
         request_id: &[u8],
         ready_sent: &mut bool,
     ) -> Result<(), ContentError> {
-        let request = validate_remote(&request)?;
-        let _foreground = self.foreground.enter();
-        timeout(EXCHANGE_TIMEOUT, async {
-            let _retrieval = super::named_retrieval(&self.retrieval, local).await?;
+        let turn = request.maintenance_turn.clone();
+        let mut request = validate_remote(&request)?;
+        if !turn.is_empty() {
+            let uid = local.peer_cred().map_err(|_| ContentError::Invalid)?.uid();
+            request.maintenance =
+                Some(self.maintenance_turn(&turn, uid, request.grant.owner_key().as_bytes())?);
+        }
+        let _foreground = request
+            .maintenance
+            .is_none()
+            .then(|| self.foreground.enter());
+        let operation = timeout(EXCHANGE_TIMEOUT, async {
+            // One actual flow per retained background worker reservation, not just one
+            // allowance calculation at a time. Parallel callers cannot multiply its RAM/FD use.
+            let _maintenance_operation = request
+                .maintenance
+                .as_ref()
+                .map(|turn| turn.operation())
+                .transpose()?;
+            let _retrieval = if request.maintenance.is_none() {
+                Some(super::named_retrieval(&self.retrieval, local).await?)
+            } else {
+                None
+            };
             remote(&request, context, local, request_id, ready_sent).await
-        })
-        .await
-        .map_err(|_| ContentError::Unavailable)?
+        });
+        if let Some(turn) = &request.maintenance {
+            tokio::select! {
+                biased;
+                () = turn.cancelled() => Err(ContentError::Busy),
+                result = operation => result.map_err(|_| ContentError::Unavailable)?,
+            }
+        } else {
+            operation.await.map_err(|_| ContentError::Unavailable)?
+        }
     }
 }
 
@@ -279,6 +307,7 @@ fn validate_remote(request: &PrivateStorageRemoteRequest) -> Result<RemoteReques
         provider_key,
         peer: PeerId::from_public_key(&identity::PublicKey::from(public)),
         grant,
+        maintenance: None,
     })
 }
 
@@ -441,9 +470,21 @@ async fn exchange(
         }),
     )
     .await?;
-    let transfer = wire::bridge(local, &mut remote, &request.grant, &challenge)
-        .await
-        .map_err(|_| ContentError::Unavailable)?;
+    let transfer = wire::bridge_admitted(
+        local,
+        &mut remote,
+        &request.grant,
+        &challenge,
+        |bytes| async move {
+            if let Some(turn) = &request.maintenance {
+                turn.admit(bytes).await
+            } else {
+                true
+            }
+        },
+    )
+    .await
+    .map_err(|_| ContentError::Unavailable)?;
     tls::finish(&mut remote)
         .await
         .map_err(|_| ContentError::Unavailable)?;

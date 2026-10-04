@@ -63,6 +63,134 @@ policy is not automatic repair, independent-device availability or adaptive capa
 
 ## Separate lifecycles
 
+### Explicit owner-private background maintenance
+
+`storage fragments maintenance` enrolls one existing owner archive for finite,
+core-coordinated maintenance. It is a separate unlocked owner process, not another
+network node: the shared daemon receives only a public owner key, opaque enrollment
+ID and bounded resource request. Owner keys, archive paths, grants and the signed
+enrollment stay in its private workspace. The existing operator control socket is
+still an administrative boundary, not a completed per-application capability API.
+
+```sh
+volparossa storage fragments maintenance enroll \
+  --enrollment /absolute/private-maintenance --state /absolute/private-fragments \
+  --from-provider-key PROVIDER_A_KEY_HEX \
+  --provider-key PROVIDER_D_KEY_HEX --grant /absolute/provider-d.grant \
+  --authorization-seconds 604800 --lifetime-seconds 86400 \
+  --renew-before-seconds 43200 --maximum-charged-bytes 4294967296 \
+  --identity /absolute/owner.identity
+volparossa storage fragments maintenance serve \
+  --enrollment /absolute/private-maintenance --identity /absolute/owner.identity
+volparossa storage fragments maintenance status --enrollment /absolute/private-maintenance
+```
+
+The worker has no independent maintenance timer. The existing core maintenance tick
+may issue one live, owner/UID-bound turn when its foreground and shared resource
+conditions permit. Both existing upload/download sharing budgets must be explicitly
+configured. Each actual signed request is checked before its requested ciphertext
+bytes plus framing allowance consume the turn budget and shared quiet-link cooldown.
+Background reads use 256 KiB credits; ordinary foreground range reads are unchanged.
+Only one storage exchange can occupy the turn's RAM/descriptor reservation at a time.
+Foreground activity, owner disconnect, daemon shutdown, exhausted bytes or the one-hour
+turn ceiling revoke work; enrollment expiry also stops the owner process. A finite
+`--maximum-turns` is available for supervised trials. Quiet sampling and conservative
+limits are not a guarantee that a transfer can never affect interactive throughput.
+
+Each turn rotates through **one fragment** for lease reconciliation or renewal and
+attempts at most **one replacement** from the explicitly signed candidate grants.
+The durable checkpoint preserves this scan position across restart; the original
+signed reconstruction manifest and custody journals remain the only placement,
+lease and charge authority. Copying intents resume without a second replacement;
+verified pending retirement does not prevent repairing another fragment. A complete
+survivor and replacement readback still precede source deletion. An unavailable or
+unconfirmed original remains fully charged, including after process restart.
+
+The byte ceiling defaults to 128 MiB per turn, including metadata allowance. Enrollment
+rejects fragments whose successful replacement would already exceed that ceiling;
+explicit foreground repair remains available. Busy links, short remaining grants,
+insufficient capacity or insufficient uninterrupted time can leave work pending.
+`owner_locked`, `grant_refresh_required`, `charge_limit`, `retry_pending` and revoked
+turns are visible states, not completion. Provider grants are never silently extended.
+This is one explicit owner enrollment, not automatic archive discovery, device-offline
+authority, contribution resizing, an autonomous grant issuer or a guaranteed SLA.
+
+The targeted local maintenance checks pass: real signed SQLite provider operations
+preserve a longer existing lease, genuinely renew a shorter one, repair A's fragments
+one per pass while A is offline, retain charges across restart, restore the removed
+source twice from C/D and finally confirm A's deletion when it returns. Separate core
+tests cover owner/UID/token binding, shared leases, byte exhaustion, refusal of an
+ineligible loopback link and foreground/EOF revocation. The wire tests separately
+prove real signed transfer admission and refusal before provider mutation. Strict
+CLI/agent Clippy and formatting pass. A combined running-daemon/protected-overlay
+maintenance trial remains required; earlier fragment and Image proofs do not prove
+this new worker, and the local checks do not establish positive live-link admission.
+
+The new disposable `private-storage-maintenance` scenario is wired but **not yet
+passing**. It reuses the three protected fragment providers and explicitly enables
+both sharing budgets on the client's existing guest `cr0` veth; there is no loopback
+exception or host network change. Its proposed passing receipt requires actual
+core-issued renewal, cursor retention after owner-process EOF, revocation by a separate
+foreground journal, and one verified replacement per turn while A is stopped.
+The B/C replica set must then support two source-free archive reconstructions, with
+all unavailable A copies still charged until A returns and confirms deletion. Cleanup covers all eleven
+retained copy records, the separate foreground lease and private owner/enrollment state.
+Five pure receipt/cleanup tests and four dispatch/export tests pass; these check the
+fixture contract, not the missing live-daemon/protected-overlay result. No reciprocal
+credit, capacity resizing, physical failure diversity or owner-device-offline claim is
+made by this scenario.
+
+Its first [VM attempt on `53cccdde`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36927623039)
+failed at `agent-readiness` with `AGENT_OR_DESTINATION_NOT_READY`, **before any
+maintenance operation** (`maintenance: null`). The generated client YAML contained
+duplicate `sharing` and `download_sharing` sections: the new scenario emitter and the
+existing custody emitter both wrote them. The correction consolidates these settings
+in the existing custody function; a targeted test executes the full client emitter
+and checks it with the actual Rust configuration parser, including duplicate rejection.
+The original failed run remains failed. Its cleanup completed with zero owned objects,
+and both host-state snapshots have SHA-256
+`9ad34bb217725c3860b1b4ef57bb127a6ad1e0f29f7c2aad632fd05808834ac8`.
+The original seven-file artifact ZIP has SHA-256
+`7734d310d1c079fc1e86c77c62b6ad9ded11a81b841e1a7a3609e730ba78b141`.
+
+The later [run36933314111 on `23891274`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36933314111)
+passes its owner renewal/restart/foreground-revocation upload operations but stops
+before provider withdrawal: the final 1,000-record Exit window no longer covers the
+phase baseline. Cleanup and unchanged host state pass; the run remains failed.
+The candidate replaces that late-only observation with a joined, five-second sampler
+of the same bounded ring. Exact overlapping timestamp/event records, including
+same-millisecond multiplicity, must establish continuous coverage; a gap or ambiguous
+saturated window fails closed. Only closed cumulative counters are persisted, with
+the existing flow minima and at most five seconds to drain late completion events.
+The disposable fixture exposes only the existing Exit control-group access and parent
+traversal to the owner observer, never agent state, credentials or native sockets.
+This corrects evidence collection, not production maintenance or a proven passing
+overlay result. Original artifact hashes and partial evidence remain in
+[implementation status](../IMPLEMENTATION_STATUS.md#additional-application-and-autonomous-maintenance-scope).
+
+Run `36936987353` subsequently completes the actual repair/restore and owner-side
+retirement/deletion operations, but fails its final network gate because a fresh
+route context replaced the initial one. The exit and relay/path identities remain
+the same. Final provider accounting and the final flow gate were not reached; the
+run remains failed despite successful private/topology cleanup and unchanged host
+state. New signed storage operations may use a freshly authorized route; they are
+not permission to move an established flow. The maintenance-only candidate now
+requires unchanged exit/relay/path scope plus actual post-baseline completed flows
+for the observed new context. Completion and failure context IDs stay in the
+existing bounded in-memory log, without destinations or persistent browsing data.
+Missing/unobserved scopes, old-context-only successes and changed paths fail closed.
+Other storage fixtures retain their initial-context check. No routing timeout or
+success/accounting requirement is relaxed, and no new passing overlay proof is claimed.
+
+The subsequent original [run36943338754 on `4c31ac3b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36943338754)
+again proves renewal, owner restart/revocation, three replacements and two source-free
+restores, but fails during `retirement`. Its coarse failure receipt cannot identify
+the particular guard, owner operation or sampler failure. Final zero-lease accounting
+is missing; successful cleanup is not a substitute. The next fixture adds bounded,
+closed diagnostics and preserves an owner error separately from a sampler or cleanup
+error, without exporting private output or changing limits. It does not establish a
+cause or turn this failed run into a completed maintenance proof.
+
 Message delivery can acknowledge and consume an inbox item. A backup restore must not
 consume its storage lease. Backup retention, renewal, expiry and owner deletion are
 separate operations with separate authorization. They may share protected network
