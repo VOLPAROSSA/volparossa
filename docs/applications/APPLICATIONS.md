@@ -2,9 +2,9 @@
 
 [Documentation](../README.md) · [Project overview](../../README.md)
 
-The core is a reusable background service. These eight repositories connect familiar
-applications to its network, cache, private storage and compute capabilities. They are
-**development integrations**, not eight released products. Each repository records its
+The core is a reusable background service. The application repositories connect familiar
+applications and new research projects to its shared capabilities. They are
+**development integrations and research**, not released products. Each repository records its
 own current implementation and evidence; this page explains the scope and major boundaries.
 
 Applications should share one compatible core rather than create competing peer planners
@@ -101,6 +101,20 @@ The original Files web UI has a scoped source-off recovery proof. Accounts, meta
 sharing, writable synchronization and general service availability still need integration.
 Distributed backup or recovery does not alone create a server-independent OpenCloud service.
 Search, previews and AI must preserve the privacy of both files and derived information.
+
+## Bank
+
+[volparossa-bank](https://github.com/VOLPAROSSA/volparossa-bank) investigates
+participant-owned portfolios weighted by nonnegative ROIC and FCF-yield, internal
+micro-payments and external financial connections. It requires the proposed
+[Transaction-layer](../services/TRANSACTION_LAYER.md), separate from ordinary
+network contribution and from private file storage.
+
+The current scope is research and isolated simulations, not taking deposits,
+trading securities or operating a payment institution. Enforceable ownership,
+financial authorization, consensus, gateway settlement and dispute governance
+remain required work. The immune system supplies bounded analysis, not unilateral
+financial authority or a guarantee that dispersed funds can be recovered.
 
 ## Shared boundaries
 

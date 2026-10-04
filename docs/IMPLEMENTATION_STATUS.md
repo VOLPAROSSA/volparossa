@@ -11,9 +11,28 @@ detailed evidence ledger, including historical failures—not an installation gu
 [Original v1 scorecard](#fixed-alpha-v1-scorecard) ·
 [Completion requirements](#definition-of-done)
 
-Last updated: 2026-10-02
+Last updated: 2026-10-04
 
 ## Current integration and active work
+
+### Bank and Transaction layer research
+
+The 2026-10-04 user extension adds VOLPAROSSA Bank and a reusable Transaction-layer.
+The [design](services/TRANSACTION_LAYER.md) separates portfolio construction,
+beneficial ownership, payment authorization, ledger ordering, external settlement
+and authorized corrections. Research prototypes are isolated from the daemon;
+they accept no real funds and provide no distributed or cryptographic settlement.
+Live payments, custody, financial gateway integration, confidential AML review,
+price discovery and recovery of forwarded funds remain unimplemented. Research
+tests do not satisfy these functional requirements.
+
+Nine offline transaction-state tests pass: exact integer conservation, scoped
+simulation authority, reservations, duplicate IDs, external uncertainty, bounded
+append-only corrections, forwarded/split-value shortfalls and resource limits.
+All state and authority are single-process test inputs; restart-safe idempotency,
+distributed consensus and actual recovery are not proved. The separate Bank
+arithmetic prototype has nine passing tests for the confirmed ROIC × FCF-yield
+rule and configured ownership headroom, not investment performance or compliance.
 
 ### Eligible controls in route preselection
 
@@ -24,6 +43,17 @@ Signed-group ambiguity checks remain first; retained routes keep their exact pin
 control, and wholly incompatible groups still reject before dispatch. Seven signed
 route tests and eighteen sampler tests pass. This is unit-level evidence, not
 a proved explanation or live fix for the Cloud/browser route-selection failures.
+
+Main `c1a6cada` [quality run37076590769](https://github.com/VOLPAROSSA/volparossa/actions/runs/37076590769)
+failed because the actor source-contract test still searched for the former
+unscoped snapshot call after the scoped builder was introduced. The test now
+recognizes the scoped call and additionally verifies that the request-derived
+scope is built first and passed into the snapshot. All original affine, privacy
+and dispatch-order assertions remain. The corrected contract, seven route-snapshot
+tests and eighteen sampler tests pass locally, as do formatting and diff checks.
+Only the test and this record changed; production behavior is unchanged. The
+original CI failure remains failed, and this is not a fresh full-suite or live
+datapath claim.
 
 ### Fixed public training source
 
