@@ -68,6 +68,39 @@ both phases retain the exact physical control-link and relay/exit privacy gates.
 Focused socket/parser checks prove only this instrumentation contract, not a
 passed replacement live run. The original failed outcome remains unchanged.
 
+The subsequent [Code run37216555196](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37216555196),
+workflow `4f88b2eb` / core `f25352df`, also **failed**, earlier at
+`CODE_PROPOSAL_INVENTORY_UNAVAILABLE`. Model provisioning succeeded, but the
+60-second advertisement barrier made 552 valid queries and never observed the
+complete required inventory. Its last valid snapshot contains relay1/2/3/4;
+relay0/5 and both exits are absent. There were no query timeouts, nonzero exits
+or malformed replies. No Connect, new control observer, model task or owner edit
+was reached. Cleanup is complete with zero objects and equal guest-root hashes
+`f7f3b6b8a29d375b5f0ea24f66fe1af7b137a461ad130d43aebd4ef053fcab5e`.
+Original ZIP SHA-256:
+`4e3316ecc66550fac35149f4d91c5c694ce585a1f63e880d8c0946c65bda5bcf`;
+job `111478131440` log SHA-256:
+`1194adf179559faa89f1046bc8a621ab77313559f98df75a0f9608cd4754b04c`.
+
+This is not Cloud's intentionally hidden-custody-peer barrier mismatch: Code
+uses the `agent-jobs` topology, without that client control filter. All six relay
+advertisements remain required. Both exits bootstrap through relay0, and Client
+has no direct exit route; missing relay0 is a possible shared dependency, not a
+proved explanation of this run. Its retained evidence cannot identify failed
+startup, publication, discovery, verification or expiry as the cause. No
+production fix or longer readiness budget is claimed. The diagnostic candidate
+only summarizes existing cleanup `status`, `peers` and bounded log captures for
+the eleven fixed node roles. It exports role-presence states, status counts and
+a fixed event-code count set, not peer identifiers, endpoints or raw logs.
+These sequential captures occur after trial-service cleanup and before agent
+stop; they are not the deadline snapshot, simultaneous observations, lifetime
+event counters, advertisement-expiry evidence or usable-route proof. Missing or
+invalid captures stay explicitly unknown. Success gates and original deadlines
+are unchanged; the original inventory failure is still unresolved.
+Empty redirected captures also stay unknown: cleanup does not retain each CLI
+exit status, so an empty file cannot prove a successfully queried empty inventory
+or zero retained events.
+
 ### Autonomous Internet use authorized
 
 The user explicitly authorized autonomous Internet use for tasks, research,
@@ -136,8 +169,36 @@ the original whole-provision deadline. Each attempt starts the pinned file again
 removes only its own failed partial file, and still checks the original size,
 hash, HTTPS endpoint and redirect policy. HTTP refusals, TLS failures and invalid
 bytes are not retried; existing files are not replaced. Thirteen targeted,
-offline provision tests pass. This is bounded recovery, not a successful model
-download or a completed coding trial; a new actual-model run is still required.
+offline provision tests pass. The subsequent original run below distinguishes
+successful provisioning from the still-unsuccessful coding task.
+
+Code [run 37217032474](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37217032474),
+job `111479528317`, on Code `69308cd004f0c7ab662c1aafa47cc3e98b848277`
+and core `f25352dfbbbf98d1a1fcbbd43f6a91897d73f303` completed exact 4B
+provisioning: 50 ordered artifact downloads, 8,312,769,415 download bytes,
+checked wheel graph/runtime imports and process exit zero. The actual native
+task then **failed** after 152,995 ms: one cleanup-confirmed model result was
+`invalid_output`; there were no native tool calls, edit/check approvals or
+changed source. No OOM or execution deadline is recorded. Raw model output and
+its invalid subtype were not retained, so the particular parse failure is not
+known. Private runtime, guest and QEMU/scratch cleanup passed; guest snapshots
+and normalized outer-host routes/DNS match, but the raw outer-host route bytes
+do not. This is not proof that every host property was unchanged.
+Original ZIP SHA-256:
+`68f7558eb6bb3839c52c789c6e97b2702b15fa7996bd17fd359e5893cb50edd0`;
+original job-log SHA-256:
+`79900fe08f03c4b75526ef4fa3f1ec530f751f17f55dff2d4a50c24745700152`.
+
+A source-backed adapter correction now accepts the pinned Qwen template's
+optional assistant preface followed by a newline and one complete tagged tool
+call. The original Python parser reproducibly rejected that exact native form;
+both Python and Rust now preserve its original offered alias/arguments and
+owner-assigned call identity. EOS, duplicate-key, payload, correlation and
+separate execution-approval requirements remain. Fenced examples, additional
+calls, trailing prose, incomplete output and unknown aliases are not repaired
+or executed. This corrects a demonstrated template incompatibility, not a
+retrospectively proven cause of run 37217032474; useful native model-driven
+coding and protected private peer execution remain incomplete.
 
 ### Owner-selected 4B native coding candidate; no new execution claim
 

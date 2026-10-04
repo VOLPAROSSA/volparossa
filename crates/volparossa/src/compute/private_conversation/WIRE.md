@@ -107,18 +107,36 @@ mapping, payload bounds and fresh owner-assigned call ID. The JSON-only form
 reserves precisely the `name`/`arguments` object; it does not extract a proposal
 from prose, code fences, concatenated objects or malformed JSON. Those unwrapped
 non-proposals remain assistant text and must never be executed as calls. An exact
-proposal for an unknown alias is incomplete. Tagged mixed/partial calls and
-reasoning markers also remain incomplete. No Markdown stripping, JSON repair or
+proposal for an unknown alias is incomplete. The native tagged form may have a
+bounded assistant preface ending in a newline before its one complete call, as
+the pinned upstream template emits. The preface is not execution authority and
+is not returned as a separate assistant result: the typed result remains the
+exact offered proposal. Fenced examples, missing newline boundaries, extra calls,
+trailing prose, partial calls and reasoning markers remain incomplete. Literal
+delimiters inside valid JSON arguments remain data. No Markdown stripping, JSON repair or
 invented tool choice occurs. The worker never executes a proposal; the caller
 must still validate tool arguments and authorize every action within its own
 workspace/permission scope. `turn_complete` means syntactic completion, not correctness or task
 completion. Do not execute an incomplete result or count it as an answer.
+
+Template provenance: [Qwen3-4B-Instruct-2507 tokenizer configuration at the pinned revision](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507/blob/cdbee75f17c01a7cc42f958dc650907174af0554/tokenizer_config.json)
+emits assistant content before tagged tool calls. Its 9,377-byte file has SHA-256
+`a62ff0a2472a0fa1b8eaabcb57c59b58afa42a22831dc141400b6e0cf2b65ce3`,
+already bound by the model pins. Accepting that syntax is adapter compatibility,
+not evidence that a model produced it in a particular failed trial.
 
 Cancel uses the unchanged `{ "type":"cancel", "task_id": SUBMIT_ID }` operation.
 `cancel_requested` is not terminal cleanup. Disconnect, cancellation and shutdown
 retain the existing worker/descendant join and staging cleanup path; uncertain
 cleanup quarantines the slot. Existing closed error events apply. The server does
 not retry a failed generation or disclose raw parser/backend diagnostics.
+
+When explicitly enabled, the `volparossa::compute::private_diagnostic` debug
+target records a fixed native-output rejection category only after the complete
+report binding passes. It never includes raw output, tool names or arguments;
+the wire reply remains `invalid_output`. These events observe report validation,
+not model attempts: validating the same bound report again may repeat its code
+without another execution. Request/result counters track actual attempts.
 
 ## Explicit limits
 

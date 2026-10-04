@@ -13,6 +13,7 @@ import pwd
 import re
 import runpy
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -56,6 +57,91 @@ RESULT_HASHES = {"source_sha256", "source_manifest_id", "dataset_sha256", "datas
     "model_fingerprint", "report_sha256", "raw_result_sha256", "output_sha256"}
 RESULT_FIELDS = RESULT_HASHES | {"tool_call_id", "core_task_id", "model_profile", "source_bytes", "peer_job_id",
     "output_bytes", "proposal_complete", "stop_reason", "generated_tokens", "core_reported_cleanup_confirmed"}
+INVENTORY_NODES = ("client", "bootstrap1", "bootstrap2", *(f"relay{i}" for i in range(6)), "exit", "exit2")
+INVENTORY_EVENT_CODES = (
+    "DISCOVERY_QUERY_FAILED", "DISCOVERY_QUERY_PROVENANCE_CONFLICT", "DISCOVERY_LISTENER_FAILED",
+    "DISCOVERY_CONNECTION_FAILED", "ADVERTISEMENT_PUBLISH_FAILED", "ADVERTISEMENT_PROVIDER_FAILED",
+    "ADVERTISEMENT_PROVENANCE_MISMATCH", "ADVERTISEMENT_PEER_MISMATCH", "ADVERTISEMENT_SIGNATURE_VERIFY_FAILED",
+    "ADVERTISEMENT_CORE_REJECTED", "ADVERTISEMENT_STORE_REJECTED", "ADVERTISEMENT_FORWARDED_REPLAY_REJECTED",
+    "ADVERTISEMENT_DIRECT_REPLAY_REJECTED", "ADVERTISEMENT_PROVENANCE_CAPACITY", "PEER_ENDPOINT_STORE_FAILED",
+    "EXIT_POLICY_SERVICE_REFRESHED", "EXIT_POLICY_SERVICE_FAILED", "EXIT_POLICY_SERVICE_WITHDRAWN",
+    "INDEPENDENT_EGRESS_WITHDRAWN")
+
+
+def inventory_capture(path, maximum, parser):
+    """Read only an existing bounded root/owner capture; never make a new query."""
+    try:
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+            info = os.fstat(stream.fileno())
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == os.geteuid()
+                and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size <= maximum, "private diagnostic capture")
+            raw = stream.read(maximum + 1)
+        # Shell cleanup redirects stdout before invoking the CLI and does not
+        # retain its exit status. An empty file is not proof of a successful
+        # empty peer list/log ring; keep it unknown instead of inventing zeros.
+        require(0 < len(raw) <= maximum, "empty or oversized diagnostic capture")
+        value = parser(raw)
+        require(value is not None, "invalid diagnostic capture")
+        return dict(state="valid", value=value)
+    except FileNotFoundError:
+        return dict(state="missing", value=None)
+    except (OSError, ValueError, UnicodeError):
+        return dict(state="invalid", value=None)
+
+
+def inventory_status(raw):
+    # CLI status.connected means an active user route, not discovery readiness.
+    match = re.fullmatch(rb"connected: (true|false)\nactive peers: ([0-9]{1,10})\ncandidate pool: ([0-9]{1,10})\n"
+        rb"active contexts: ([0-9]{1,10})\nMPTCP subflows: ([0-9]{1,10})\nMPQUIC paths: ([0-9]{1,10})\n", raw)
+    require(match is not None and all(int(value) <= 4294967295 for value in match.groups()[1:]), "closed CLI status")
+    return dict(route_connected=match[1] == b"true", **dict(zip(
+        ("active_peers", "candidate_pool", "active_contexts", "mptcp_subflows", "mpquic_paths"),
+        (int(value) for value in match.groups()[1:]))))
+
+
+def inventory_events(raw):
+    lines = raw.decode("ascii").splitlines()
+    require(0 < len(lines) <= 400, "unconfirmed empty or oversized retained log")
+    counts = dict.fromkeys(INVENTORY_EVENT_CODES, 0)
+    other, previous = 0, 0
+    for line in lines:
+        match = re.fullmatch(r"([0-9]{1,20})\tlevel=([0-9])\tevent=([A-Z0-9_]{1,96})"
+            r"\tsession=[0-9a-f]{0,64}\tpath=(?:-|[0-9]{1,10})", line)
+        require(match is not None and 0 < int(match[1]) <= 18446744073709551615
+            and int(match[1]) >= previous, "closed event record")
+        previous = int(match[1])
+        if match[3] in counts:
+            counts[match[3]] += 1
+        else:
+            other += 1
+    return dict(records=len(lines), ring_at_capacity=len(lines) == 400, counts=counts, other_records=other)
+
+
+def inventory_failure_diagnostic(work):
+    # The existing shell cleanup captures these AFTER stopping trial-owned compute
+    # services but BEFORE stopping agents. They are not simultaneous, not the last
+    # inventory query, not lifetime counters and not usable-route/expiry proof.
+    try:
+        peers = read(work / "a01-expected-peers.json", 8192)
+        require(isinstance(peers, dict), "fixture identity map")
+        expected = BROWSER["expected_inventory"](peers)
+    except (OSError, ValueError, KeyError, UnicodeError):
+        return None
+
+    def presence(raw):
+        observed = BROWSER["parse_inventory"](raw)
+        require(observed is not None, "closed peer inventory")
+        return dict(advertisements={name: "absent" if peers[name] not in observed else
+            "expected_role" if observed[peers[name]] == expected[peers[name]] else "role_mismatch"
+            for name in BROWSER["INVENTORY_ROLES"]}, other_peer_count=len(set(observed) - set(expected)))
+
+    return dict(version=1, scope="existing_cleanup_captures_before_agent_stop_not_deadline_or_route_proof",
+        log_scope="last_at_most_400_records_not_whole_run", advertisement_expiry_observed=False,
+        nodes={node: dict(
+            status=inventory_capture(work / f"status-{node}.txt", 4096, inventory_status),
+            inventory=inventory_capture(work / f"peers-{node}.txt", 1048576, presence),
+            events=inventory_capture(work / f"logs-{node}.txt", 131072, inventory_events))
+            for node in INVENTORY_NODES})
 
 
 def paths(work):
@@ -513,10 +599,14 @@ def finalize(work, revision, status, complete, remaining, phase, blocker):
     host = read(work / "a15-evidence.json") if (work / "a15-evidence.json").is_file() else {}
     inventory_path = work / "agent-cooperative-browser-inventory.private"
     inventory = BROWSER["closed_inventory"](read(inventory_path, 4096)) if inventory_path.is_file() else None
+    # Failure-only metadata cannot promote an incomplete inventory or change any
+    # successful report/acceptance gate. Missing/invalid captures remain unknown.
+    diagnostic = {"inventory_failure_diagnostic": inventory_failure_diagnostic(work)} \
+        if blocker == "CODE_PROPOSAL_INVENTORY_UNAVAILABLE" else {}
     write(work / f"{NAME}-smoke.json", dict(report_kind="volparossa-public-code-proposal", schema_version=1,
         source_revision=revision, runner_exit_status=status, phase=phase,
         observed_blocker=None if blocker == "NONE" else blocker, evidence=value, host_state=host,
-        cleanup=dict(complete=complete, remaining_owned_objects=remaining), inventory_diagnostic=inventory,
+        cleanup=dict(complete=complete, remaining_owned_objects=remaining), inventory_diagnostic=inventory, **diagnostic,
         success=status == 0 and complete and remaining == 0 and host.get("unchanged") is True and value is not None))
 
 

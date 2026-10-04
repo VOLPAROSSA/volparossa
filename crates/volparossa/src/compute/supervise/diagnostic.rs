@@ -49,6 +49,17 @@ const FIXED_CODES: &[&str] = &[
     "compute_stderr_read",
     "compute_wait",
     "compute_worker_exit",
+    "conversation_request_id",
+    "conversation_native_marker",
+    "conversation_native_call",
+    "conversation_native_preface",
+    "conversation_native_json",
+    "conversation_unknown_tool",
+    "conversation_custom_input",
+    "conversation_arguments",
+    "conversation_call_id",
+    "conversation_empty_answer",
+    "conversation_native_output_other",
 ];
 
 const PRIVATE_STAGES: &[&str] = &[

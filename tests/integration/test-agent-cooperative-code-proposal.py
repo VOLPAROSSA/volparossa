@@ -3,6 +3,7 @@
 """Inert fixture/provenance/receipt tests. No model, VM or network is executed."""
 import copy
 import json
+import os
 from pathlib import Path
 import runpy
 import subprocess
@@ -74,6 +75,103 @@ def phase_evidence():
 
 
 class PublicCodeProposal(unittest.TestCase):
+    def test_inventory_scope_preserves_all_eight_roles_and_original_privacy(self):
+        source = (HERE / "kvm-alpha-topology.sh").read_text()
+        self.assertIn("agent-cooperative-code-proposal) scenario=agent-jobs;", source)
+        self.assertIn('if [ "$scenario" = content-provider ] || [ "$scenario" = content-custody ] || [ "$agent_policy_assessment" = yes ]; then', source)
+        self.assertIn('ip -n "$CLIENT" route add unreachable "$forbidden/32"', source)
+        for node, address in (("exit", "46.162.3.1"), ("exit2", "51.167.7.1")):
+            self.assertIn(f'write_config {node} acceptance-{node.replace("2", "-two")} false true {address} \\\n'
+                '    "/ip4/42.158.0.1/udp/41000/quic-v1/p2p/$R0_PEER" none none', source)
+        self.assertEqual(C["BROWSER"]["INVENTORY_ROLES"], tuple(f"relay{i}" for i in range(6)) + ("exit", "exit2"))
+        jobs = (HERE / "agent-jobs-smoke.sh").read_text()
+        self.assertLess(jobs.index('"$source_directory/tests/integration/agent-cooperative-code-proposal.py" await-inventory'),
+            jobs.index('benchmark_select_route agent-jobs mptcp'))
+
+    def test_existing_cleanup_capture_order_remains_before_agent_stop(self):
+        source = (HERE / "kvm-alpha-topology.sh").read_text()
+        capture = source.index('logs --limit 400 >"$WORK/logs-$cleanup_node.txt"')
+        self.assertLess(source.index('agent_jobs_cleanup || original_status=1'), capture)
+        self.assertLess(capture, source.index('for cleanup_unit in $AGENT_UNITS; do retire_unit'))
+        for kind in ("peers", "status"):
+            self.assertIn(f'{kind} >"$WORK/{kind}-$cleanup_node.txt"', source)
+
+    def test_failure_diagnostic_projects_exact_inventory_without_identifiers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            peers = {name: "1"*31 + "ABCDEFGHJKLMNPQRSTUVWXYZ"[i] for i, name in enumerate(C["INVENTORY_NODES"])}
+            C["write"](work / "a01-expected-peers.json", peers)
+            expected = C["BROWSER"]["expected_inventory"](peers)
+            observed = dict(expected); observed.pop(peers["relay0"]); observed[peers["relay5"]] = "0b100"
+            observed["2"*32] = "0b010"
+            path = work / "peers-client.txt"
+            path.write_text("".join(f"{peer}\troles={role}\treachability=0\n" for peer, role in observed.items()))
+            path.chmod(0o600)
+            value = C["inventory_failure_diagnostic"](work)
+            inventory = value["nodes"]["client"]["inventory"]
+            self.assertEqual(inventory["state"], "valid")
+            self.assertEqual(inventory["value"]["advertisements"]["relay0"], "absent")
+            self.assertEqual(inventory["value"]["advertisements"]["relay5"], "role_mismatch")
+            self.assertEqual(inventory["value"]["other_peer_count"], 1)
+            self.assertEqual(value["nodes"]["relay0"]["inventory"], dict(state="missing", value=None))
+            self.assertFalse(value["advertisement_expiry_observed"])
+            encoded = json.dumps(value)
+            for peer in (*peers.values(), "2"*32): self.assertNotIn(peer, encoded)
+            self.assertIn("not_deadline_or_route_proof", value["scope"])
+            self.assertIn("not_whole_run", value["log_scope"])
+            (work / "a01-expected-peers.json").write_text("null")
+            self.assertIsNone(C["inventory_failure_diagnostic"](work))
+
+    def test_status_and_log_summaries_are_bounded_not_service_readiness(self):
+        raw = b"connected: false\nactive peers: 4\ncandidate pool: 3\nactive contexts: 0\nMPTCP subflows: 0\nMPQUIC paths: 0\n"
+        self.assertEqual(C["inventory_status"](raw), dict(route_connected=False, active_peers=4,
+            candidate_pool=3, active_contexts=0, mptcp_subflows=0, mpquic_paths=0))
+        for invalid in (raw+b"private", raw.replace(b"peers: 4", b"peers: 4294967296"), raw.replace(b"false", b"0"), b""):
+            with self.assertRaises(ValueError): C["inventory_status"](invalid)
+        def row(code, timestamp=1):
+            return f"{timestamp}\tlevel=2\tevent={code}\tsession={'a'*64}\tpath=7\n".encode()
+        value = C["inventory_events"](row("ADVERTISEMENT_STORE_REJECTED") + row("UNRECOGNIZED_SENTINEL"))
+        self.assertEqual(value["counts"]["ADVERTISEMENT_STORE_REJECTED"], 1)
+        self.assertEqual(value["other_records"], 1)
+        self.assertNotIn("SENTINEL", json.dumps(value)); self.assertNotIn("a"*64, json.dumps(value))
+        self.assertTrue(C["inventory_events"](row("ADVERTISEMENT_STORE_REJECTED")*400)["ring_at_capacity"])
+        for invalid in (b"", row("ADVERTISEMENT_STORE_REJECTED")*401, row("VALID", 2)+row("VALID", 1), b"not a record", b"\xff"):
+            with self.assertRaises((ValueError, UnicodeError)): C["inventory_events"](invalid)
+        source = (HERE.parents[1] / "crates/volparossa-agent/src/discovery.rs").read_text()
+        for code in C["INVENTORY_EVENT_CODES"]: self.assertIn('"'+code+'"', source)
+
+    def test_diagnostic_capture_refuses_unsafe_files_without_raw_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp); file = work / "capture"
+            parse = lambda raw: {"bytes": len(raw)}
+            self.assertEqual(C["inventory_capture"](file, 4, parse), dict(state="missing", value=None))
+            file.write_bytes(b""); file.chmod(0o600)
+            self.assertEqual(C["inventory_capture"](file, 4, parse), dict(state="invalid", value=None))
+            file.write_bytes(b"ok"); file.chmod(0o600)
+            self.assertEqual(C["inventory_capture"](file, 4, parse), dict(state="valid", value={"bytes": 2}))
+            link = work / "symlink"; link.symlink_to(file)
+            self.assertEqual(C["inventory_capture"](link, 4, parse)["state"], "invalid")
+            os.link(file, work / "hardlink")
+            self.assertEqual(C["inventory_capture"](file, 4, parse)["state"], "invalid")
+            (work / "hardlink").unlink(); file.chmod(0o644)
+            self.assertEqual(C["inventory_capture"](file, 4, parse)["state"], "invalid")
+            file.chmod(0o600); file.write_bytes(b"PRIVATE_SENTINEL")
+            value = C["inventory_capture"](file, 4, parse)
+            self.assertEqual(value, dict(state="invalid", value=None))
+            self.assertNotIn("PRIVATE_SENTINEL", json.dumps(value))
+
+    def test_missing_diagnostic_never_promotes_failure_or_changes_other_report_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            C["finalize"](work, "a"*40, 1, True, 0, C["NAME"]+"-inventory", "CODE_PROPOSAL_INVENTORY_UNAVAILABLE")
+            value = C["read"](work / (C["NAME"]+"-smoke.json"))
+            self.assertIsNone(value["inventory_failure_diagnostic"])
+            self.assertFalse(value["success"]); self.assertEqual(value["runner_exit_status"], 1)
+            (work / (C["NAME"]+"-smoke.json")).unlink()
+            C["finalize"](work, "a"*40, 1, True, 0, "other", "OTHER_FAILURE")
+            value = C["read"](work / (C["NAME"]+"-smoke.json"))
+            self.assertNotIn("inventory_failure_diagnostic", value)
+
     def test_separate_original_discovery_and_exact_worker_execution(self):
         C["check_evidence"](phase_evidence(), "a"*40)
         mutations = (

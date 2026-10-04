@@ -41,9 +41,24 @@ fn parse(input: &Input, raw: &str, id: &str) -> Result<Output> {
             }
         }
     } else {
-        let body = trimmed
-            .strip_prefix("<tool_call>")
-            .and_then(|v| v.strip_suffix("</tool_call>"))
+        // The pinned native template emits optional assistant content, then a
+        // newline and the tagged call. Parse that whole bounded production, not
+        // JSON extracted from prose or a fenced example. The preface grants no
+        // authority; only the exact offered call becomes a proposal.
+        let (preface, tagged_body) = trimmed
+            .split_once("<tool_call>")
+            .ok_or_else(|| anyhow::anyhow!("conversation_native_call"))?;
+        ensure!(
+            preface.is_empty()
+                || (preface.ends_with('\n')
+                    && super::text(preface, 4096, true)
+                    && !["<tool_call", "</tool_call", "```", "~~~"]
+                        .iter()
+                        .any(|marker| preface.contains(marker))),
+            "conversation_native_preface"
+        );
+        let body = tagged_body
+            .strip_suffix("</tool_call>")
             .ok_or_else(|| anyhow::anyhow!("conversation_native_call"))?;
         serde_json::from_str(body)?
     };
@@ -85,6 +100,39 @@ fn parse(input: &Input, raw: &str, id: &str) -> Result<Output> {
     })
 }
 
+fn checked_parse(input: &Input, raw: &str, id: &str) -> Result<Output> {
+    let value = parse(input, raw, id)?;
+    input.validate_output(&value)?;
+    Ok(value)
+}
+
+/// A closed local observation, used only after the complete worker report has
+/// been independently bound to this exact input/output. Never export the parser
+/// error: JSON diagnostics can contain private tool names or argument text.
+pub(super) fn rejection_code(input: &Input, output: &Value, id: &str) -> &'static str {
+    let Some(raw) = output["text"].as_str() else {
+        return "conversation_native_output_other";
+    };
+    let Err(error) = checked_parse(input, raw, id) else {
+        return "conversation_native_output_other";
+    };
+    if error.is::<serde_json::Error>() {
+        return "conversation_native_json";
+    }
+    match error.to_string().as_str() {
+        "conversation_request_id" => "conversation_request_id",
+        "conversation_native_marker" => "conversation_native_marker",
+        "conversation_native_call" => "conversation_native_call",
+        "conversation_native_preface" => "conversation_native_preface",
+        "conversation_unknown_tool" => "conversation_unknown_tool",
+        "conversation_custom_input" => "conversation_custom_input",
+        "conversation_arguments" => "conversation_arguments",
+        "conversation_call_id" => "conversation_call_id",
+        "conversation_empty_answer" => "conversation_empty_answer",
+        _ => "conversation_native_output_other",
+    }
+}
+
 pub(super) fn turn(input: &Input, output: &Value, id: &str) -> Result<Value> {
     let generation = Generation::from_output(output, true)?
         .ok_or_else(|| anyhow::anyhow!("conversation_generation"))?;
@@ -97,8 +145,7 @@ pub(super) fn turn(input: &Input, output: &Value, id: &str) -> Result<Value> {
     }
     match output["text"]
         .as_str()
-        .and_then(|raw| parse(input, raw, id).ok())
-        .filter(|value| input.validate_output(value).is_ok())
+        .and_then(|raw| checked_parse(input, raw, id).ok())
     {
         Some(value) => Ok(serde_json::to_value(value)?),
         None => Ok(incomplete("invalid_output")),

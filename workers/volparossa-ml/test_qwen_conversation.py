@@ -213,6 +213,30 @@ class QwenConversationTests(unittest.TestCase):
             raw = '<tool_call>' + json.dumps({"name": "vp_0", "arguments": arguments}) + '</tool_call>'
             self.assertEqual(NATIVE.decode(data, output(raw), ID)["reason"], "invalid_output")
 
+    def test_native_assistant_preface_preserves_one_exact_proposal(self):
+        data = conversation()
+        raw = '<tool_call>{"name":"vp_0","arguments":{"name":"demo.rs"}}</tool_call>'
+        expected = NATIVE.decode(data, output(raw), ID)
+        for prefix in ("I will inspect the file.\n", "First inspect `demo.rs`.\n\n", "Let me check.\r\n"):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(NATIVE.decode(data, output(prefix + raw), ID), expected)
+        # Literal delimiters inside JSON arguments are data, not extra calls.
+        wrapped = '<tool_call>' + json.dumps({"name": "vp_0", "arguments": {
+            "text": "literal <tool_call> and </tool_call>"}}) + '</tool_call>'
+        self.assertEqual(NATIVE.decode(data, output("Read this literal.\n" + wrapped), ID),
+                         NATIVE.decode(data, output(wrapped), ID))
+        for text in ("no boundary" + raw, "```xml\n" + raw, "~~~xml\n" + raw,
+                     "<tool_call malformed\n" + raw, "</tool_call>\n" + raw,
+                     "bad\0prefix\n" + raw, "x" * 4096 + "\n" + raw,
+                     "First.\n" + raw + "\n" + raw, "First.\n" + raw + " trailing",
+                     "First.\n" + raw.replace('"vp_0"', '"vp_99"'),
+                     "First.\n" + raw.replace('"demo.rs"', '"demo.rs", "name":"other"')):
+            with self.subTest(text=text):
+                self.assertEqual(NATIVE.decode(data, output(text), ID)["reason"], "invalid_output")
+        for incomplete, reason in ((output("First.\n" + raw, "token_limit"), "token_limit"),
+                                   (output("First.\n" + raw, truncated=True), "wire_truncated")):
+            self.assertEqual(NATIVE.decode(data, incomplete, ID)["reason"], reason)
+
     def test_standalone_json_is_exact_offered_proposal_not_prose_extraction(self):
         data = conversation()
         raw = '{"name": "vp_0", "arguments": {"path": "fixture.js"}}'

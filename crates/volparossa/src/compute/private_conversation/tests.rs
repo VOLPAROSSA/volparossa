@@ -430,6 +430,201 @@ fn qwen_custom_wrapper_preserves_namespace_and_rejects_partial_turns() {
 }
 
 #[test]
+fn qwen_native_preface_preserves_exact_call_and_rejects_ambiguous_framing() {
+    let value = input();
+    let id = "ab".repeat(16);
+    let raw = r#"<tool_call>{"name":"vp_0","arguments":{"name":"demo.rs"}}</tool_call>"#;
+    for profile in [ModelProfile::Qwen600, ModelProfile::Qwen4bInstruct2507] {
+        let input = Input::decode_profile(&serde_json::to_vec(&value).unwrap(), profile).unwrap();
+        let expected = qwen::turn(&input, &native_output(raw), &id).unwrap();
+        for prefix in [
+            "I will inspect the file.\n",
+            "First inspect `demo.rs`.\n\n",
+            "Let me check.\r\n",
+        ] {
+            let output = native_output(&format!("{prefix}{raw}"));
+            assert_eq!(qwen::turn(&input, &output, &id).unwrap(), expected);
+            let report = json!({"id":id,"outputs":[output],"conversation":expected,
+                "prompt_tokens":128,"conversation_limits":capabilities(profile)});
+            validate_report(&report, &serde_json::to_vec(&value).unwrap(), profile).unwrap();
+        }
+        let literal = r#"<tool_call>{"name":"vp_0","arguments":{"text":"literal <tool_call> and </tool_call>"}}</tool_call>"#;
+        assert_eq!(
+            qwen::turn(
+                &input,
+                &native_output(&format!("Read this literal.\n{literal}")),
+                &id
+            )
+            .unwrap(),
+            qwen::turn(&input, &native_output(literal), &id).unwrap()
+        );
+        for text in [
+            format!("no boundary{raw}"),
+            format!("```xml\n{raw}"),
+            format!("~~~xml\n{raw}"),
+            format!("<tool_call malformed\n{raw}"),
+            format!("</tool_call>\n{raw}"),
+            format!("bad\0prefix\n{raw}"),
+            format!("{}\n{raw}", "x".repeat(4096)),
+            format!("First.\n{raw}\n{raw}"),
+            format!("First.\n{raw} trailing"),
+            format!("First.\n{}", raw.replace("vp_0", "vp_99")),
+            format!(
+                "First.\n{}",
+                raw.replace("\"demo.rs\"", "\"demo.rs\",\"name\":\"other\"")
+            ),
+        ] {
+            assert_eq!(
+                qwen::turn(&input, &native_output(&text), &id).unwrap()["reason"],
+                "invalid_output"
+            );
+        }
+        let mut partial = native_output(&format!("First.\n{raw}"));
+        partial["generation"]["stop_reason"] = "token_limit".into();
+        partial["generated_tokens"] = 1024.into();
+        assert_eq!(
+            qwen::turn(&input, &partial, &id).unwrap()["reason"],
+            "token_limit"
+        );
+        partial["text_truncated"] = true.into();
+        assert_eq!(
+            qwen::turn(&input, &partial, &id).unwrap()["reason"],
+            "wire_truncated"
+        );
+    }
+}
+
+#[test]
+fn qwen_rejection_diagnostics_are_closed_and_keep_incomplete_wire_output() {
+    let mut value = input();
+    let id = "ab".repeat(16);
+    let input =
+        Input::decode_profile(&serde_json::to_vec(&value).unwrap(), ModelProfile::Qwen600).unwrap();
+    for (raw, code) in [
+        ("<think>PRIVATE_CANARY", "conversation_native_marker"),
+        ("<tool_call>{}", "conversation_native_call"),
+        (
+            "PRIVATE_CANARY<tool_call>{}</tool_call>",
+            "conversation_native_preface",
+        ),
+        (
+            r#"<tool_call>{"PRIVATE_CANARY":0}</tool_call>"#,
+            "conversation_native_json",
+        ),
+        (
+            r#"<tool_call>{"name":"PRIVATE_CANARY","arguments":{}}</tool_call>"#,
+            "conversation_unknown_tool",
+        ),
+        (
+            r#"<tool_call>{"name":"vp_0","arguments":[]}</tool_call>"#,
+            "conversation_arguments",
+        ),
+        (" ", "conversation_empty_answer"),
+    ] {
+        let output = native_output(raw);
+        assert_eq!(
+            qwen::turn(&input, &output, &id).unwrap(),
+            json!({"type":"incomplete","reason":"invalid_output"})
+        );
+        assert_eq!(qwen::rejection_code(&input, &output, &id), code);
+        assert!(!code.contains("PRIVATE_CANARY"));
+    }
+    let call = native_output(r#"<tool_call>{"name":"vp_0","arguments":{}}</tool_call>"#);
+    assert_eq!(
+        qwen::rejection_code(&input, &call, "PRIVATE_CANARY"),
+        "conversation_request_id"
+    );
+    value["history"].as_array_mut().unwrap().extend([
+        json!({"type":"function_call","call_id":format!("vp-{id}"),"name":"read_file","arguments":{}}),
+        json!({"type":"tool_result","call_id":format!("vp-{id}"),"output":"PRIVATE_CANARY"}),
+    ]);
+    let replay =
+        Input::decode_profile(&serde_json::to_vec(&value).unwrap(), ModelProfile::Qwen600).unwrap();
+    assert_eq!(
+        qwen::rejection_code(&replay, &call, &id),
+        "conversation_call_id"
+    );
+    value["history"].as_array_mut().unwrap().truncate(1);
+    value["tools"] = json!([{"type":"custom","name":"patch","description":"PRIVATE_CANARY"}]);
+    let custom =
+        Input::decode_profile(&serde_json::to_vec(&value).unwrap(), ModelProfile::Qwen600).unwrap();
+    assert_eq!(
+        qwen::rejection_code(&custom, &call, &id),
+        "conversation_custom_input"
+    );
+    assert_eq!(
+        qwen::rejection_code(&input, &json!({}), &id),
+        "conversation_native_output_other"
+    );
+}
+
+#[test]
+fn qwen_diagnostic_requires_bound_report_and_explicit_private_debug_target() {
+    use std::sync::{Arc, Mutex};
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let value = input();
+    let raw = serde_json::to_vec(&value).unwrap();
+    let profile = ModelProfile::Qwen4bInstruct2507;
+    let id = "ab".repeat(16);
+    let output = native_output(r#"<tool_call>{"PRIVATE_CANARY":0}</tool_call>"#);
+    let report = json!({"id":id,"outputs":[output],"conversation":{"type":"incomplete","reason":"invalid_output"},
+        "prompt_tokens":128,"conversation_limits":capabilities(profile)});
+    for enabled in [false, true] {
+        let captured = Capture(Arc::new(Mutex::new(Vec::new())));
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(if enabled {
+                "off,volparossa::compute::private_diagnostic=debug"
+            } else {
+                "off"
+            })
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut invalid = report.clone();
+            invalid["conversation"]["reason"] = "token_limit".into();
+            assert!(validate_report(&invalid, &raw, profile).is_err());
+            invalid = report.clone();
+            invalid["prompt_tokens"] = 0.into();
+            assert!(validate_report(&invalid, &raw, profile).is_err());
+            invalid = report.clone();
+            invalid["generation_policy"] = "greedy_v1".into();
+            assert!(validate_report(&invalid, &raw, profile).is_err());
+            assert!(captured.0.lock().unwrap().is_empty());
+            validate_report(&report, &raw, profile).unwrap();
+        });
+        let bytes = captured.0.lock().unwrap();
+        if !enabled {
+            assert!(bytes.is_empty());
+            continue;
+        }
+        let text = std::str::from_utf8(&bytes).unwrap();
+        assert!(
+            !text.contains("PRIVATE_CANARY") && !text.contains(&id) && !text.contains("demo.rs")
+        );
+        assert_eq!(text.lines().count(), 1);
+        let (_, record) = text.split_once("private_execution_diagnostic ").unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(record.trim()).unwrap(),
+            json!({"version":1,"phase":"execution",
+            "detail":{"code":"conversation_native_json","io_kind":"none","exit_code":null,"signal":null,"stderr_class":null}})
+        );
+    }
+}
+
+#[test]
 fn qwen_standalone_json_requires_exact_proposal_and_keeps_owner_authority() {
     let mut value = input();
     let input =

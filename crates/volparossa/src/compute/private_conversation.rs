@@ -418,6 +418,18 @@ pub(super) fn validate_report(report: &Value, raw: &[u8], profile: ModelProfile)
             && report["conversation"] == expected,
         "conversation_report_binding"
     );
+    if profile.is_native_conversation() && expected["reason"] == "invalid_output" {
+        // This target is off by default. Observe a fixed parser category only
+        // after the independently derived turn and all report bindings agree.
+        super::supervise::diagnostic::event(
+            "execution",
+            qwen::rejection_code(
+                &input,
+                &report["outputs"][0],
+                report["id"].as_str().unwrap_or_default(),
+            ),
+        );
+    }
     Ok(())
 }
 

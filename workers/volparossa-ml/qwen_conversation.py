@@ -109,8 +109,14 @@ def decode(value, output, request_id):
                 c.require(c.text(raw, 4096), "EMPTY_ANSWER")
                 return {"type": "assistant", "text": raw}
         else:
-            c.require(trimmed.startswith("<tool_call>") and trimmed.endswith("</tool_call>"), "NATIVE_CALL")
-            parsed = json.loads(trimmed[len("<tool_call>"):-len("</tool_call>")],
+            # The native template permits assistant content followed by a newline
+            # and the exact tagged call. Never extract bare JSON or repair output.
+            preface, separator, tagged_body = trimmed.partition("<tool_call>")
+            c.require(bool(separator) and tagged_body.endswith("</tool_call>"), "NATIVE_CALL")
+            c.require(not preface or (preface.endswith("\n") and c.text(preface, 4096)
+                      and not any(marker in preface for marker in
+                                  ("<tool_call", "</tool_call", "```", "~~~"))), "NATIVE_PREFACE")
+            parsed = json.loads(tagged_body[:-len("</tool_call>")],
                                 object_pairs_hook=c.unique, parse_constant=c.invalid_constant)
         c.fields(parsed, ("name", "arguments"))
         selected = [tool for index, tool in enumerate(value["tools"]) if parsed["name"] == f"vp_{index}"]

@@ -177,6 +177,23 @@ class FixtureTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 FIX['service_diagnostic'](link)
 
+    def test_native_output_subtypes_are_fixed_local_observations_not_raw_errors(self):
+        codes = {code for code in FIX['SERVICE_CODES'] if code.startswith('conversation_')}
+        self.assertEqual(len(codes), 11)
+        events = [dict(version=1, phase='execution', detail=dict(code=code, io_kind='none',
+            exit_code=None, signal=None, stderr_class=None)) for code in sorted(codes)]
+        with tempfile.TemporaryDirectory(prefix='qwen-fixture-test-', dir=HERE) as directory:
+            path = Path(directory) / 'private.log'
+            rejected = dict(events[0], detail=dict(events[0]['detail'], code='PRIVATE_CANARY'))
+            path.write_text(''.join('DEBUG private_execution_diagnostic ' + json.dumps(event) + '\n'
+                for event in [*events, rejected]))
+            path.chmod(0o600)
+            result = FIX['service_diagnostic'](path)
+            self.assertEqual(result['events'], events)
+            self.assertTrue(result['unrecognized_record'])
+            self.assertFalse(result['truncated'])
+            self.assertNotIn('PRIVATE_CANARY', json.dumps(result))
+
     def test_service_diagnostic_vocabulary_matches_source_and_log_is_not_exported(self):
         source = (HERE.parents[1] / 'crates/volparossa/src/compute/supervise/diagnostic.rs').read_text()
         expected = {'unclassified', 'worker_other', 'startup_missing_result', 'result_observed', 'panic', 'join_cancelled'}
