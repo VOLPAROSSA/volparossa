@@ -242,7 +242,7 @@ fn qwen4b_explicit_profile_keeps_native_boundaries_and_truthful_upstream_context
     }
     let mut expected = capabilities(ModelProfile::Qwen600);
     expected["model_profile"] = profile.to_string().into();
-    expected["model_context_tokens"] = 262144.into();
+    expected["model_context_tokens"] = 262_144.into();
     expected["conversation_template"] = "qwen3-tools-instruct-2507-v1".into();
     assert_eq!(capabilities(profile), expected);
     let mut output = native_output("Unforced model output.");

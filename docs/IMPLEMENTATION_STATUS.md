@@ -89,6 +89,17 @@ preserves the proven runtime and owner fixture while retaining main's Cloud,
 Signal, DNS and documentation changes. Local replay of the original checker is
 not a fresh live run of this combined revision.
 
+The first integration [quality run `37223838526`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37223838526)
+on `f38fcbd7` remains **failed** at strict Clippy. Its original log identifies
+five test-code lints: numeric separators, similar helper argument names, a test
+module before a later item, generic default construction and a missing statement
+semicolon. The follow-up changes only those test spellings/layout, with no
+product behavior, assertions, fixture budget or acceptance gate changed. The
+original job `111499330436` log SHA-256 is
+`b0acddfd22b400a18e6a9fb5a77aba464e6d10b5c3c6a7c96e376aeb7b809912`.
+The source-bound public execution result above is a separate passing trial;
+neither result substitutes for the other.
+
 #### Public-purpose implementation and retained development history
 
 The core now has a separate signed v6 `code_proposal` purpose for one whole,

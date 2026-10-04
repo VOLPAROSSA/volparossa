@@ -285,13 +285,13 @@ fn emit(phase: &'static str, detail: &Detail) {
 mod tests {
     use super::*;
 
-    fn progress(stage: &str, state: &str, elapsed_ms: u64) -> Value {
+    fn progress(stage: &str, observation: &str, elapsed_ms: u64) -> Value {
         let index = PRIVATE_STAGES
             .iter()
             .position(|candidate| *candidate == stage)
             .unwrap_or(0);
         serde_json::json!({"phase":if index < 6 {"preparing"} else {"baseline"}, "step":0,
-            "elapsed_ms":elapsed_ms,"private_execution":{"stage":stage,"state":state}})
+            "elapsed_ms":elapsed_ms,"private_execution":{"stage":stage,"state":observation}})
     }
 
     #[test]

@@ -108,7 +108,7 @@ fn code_capability_is_separate_exact_and_never_generic_qa_or_training() {
                 4 => invalid.principle_inference_v4 = true,
                 5 => invalid.successor_activation_v1 = true,
                 6 => invalid.max_rows = 2,
-                7 => invalid.model.adapter_files = Some(Default::default()),
+                7 => invalid.model.adapter_files = Some(std::collections::BTreeMap::default()),
                 _ => invalid.model.base_weights.sha256 = "a".repeat(64),
             }
             invalid.model_fingerprint =
@@ -174,7 +174,7 @@ fn both_agent_boundaries_pin_public_code_source_and_refuse_requester_overrides()
             _ => {
                 submit.binding.task = Some(rpc::PublicTask::AnswerPublicQuestionV1 {
                     question: "Override?".into(),
-                })
+                });
             }
         }
         submit.dataset_json = json.to_string();

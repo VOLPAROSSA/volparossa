@@ -178,56 +178,6 @@ fn publish_signed(
     Ok(source)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::compute::ModelProfile;
-    use std::os::unix::fs::PermissionsExt as _;
-
-    #[test]
-    fn public_code_publication_binds_complete_source_question_and_purpose() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let signer = ed25519_dalek::SigningKey::from_bytes(&[19; 32]);
-        let source = publish_signed(
-            root.path(),
-            ModelProfile::Qwen600,
-            "Add a checked sum.".into(),
-            "pub fn sum() {}\n".into(),
-            "CC0-1.0".into(),
-            &signer,
-        )
-        .unwrap();
-        let (publication, verified) = super::super::source(&source).unwrap();
-        assert!(verified.is_code_proposal());
-        assert_eq!(verified.code_model_profile(), Some(ModelProfile::Qwen600));
-        assert_eq!(verified.derive(&[0]).unwrap(), publication.dataset_json);
-        assert!(verified.derive(&[1]).is_err());
-        let mut changed: Value = serde_json::from_str(&publication.dataset_json).unwrap();
-        changed["inference"][0]["context"] = "private replacement".into();
-        task::write_bytes(&source.dataset, changed.to_string().as_bytes(), true).unwrap();
-        assert!(super::super::source(&source).is_err());
-    }
-
-    #[test]
-    fn public_code_publication_does_not_accept_a_document_model() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let signer = ed25519_dalek::SigningKey::from_bytes(&[20; 32]);
-        assert!(
-            publish_signed(
-                root.path(),
-                ModelProfile::default(),
-                "Change code.".into(),
-                "public source".into(),
-                "CC0-1.0".into(),
-                &signer
-            )
-            .is_err()
-        );
-    }
-}
-
 fn compact(
     config: &public::Config,
     root: &Path,
@@ -291,4 +241,54 @@ fn compact(
         "cleanup_confirmed":true,"private_data_supported":false,"remote_erasure_guaranteed":false,
         "outputs":report["outputs"],"receipt":receipt}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compute::ModelProfile;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn public_code_publication_binds_complete_source_question_and_purpose() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[19; 32]);
+        let source = publish_signed(
+            root.path(),
+            ModelProfile::Qwen600,
+            "Add a checked sum.".into(),
+            "pub fn sum() {}\n".into(),
+            "CC0-1.0".into(),
+            &signer,
+        )
+        .unwrap();
+        let (publication, verified) = super::super::source(&source).unwrap();
+        assert!(verified.is_code_proposal());
+        assert_eq!(verified.code_model_profile(), Some(ModelProfile::Qwen600));
+        assert_eq!(verified.derive(&[0]).unwrap(), publication.dataset_json);
+        assert!(verified.derive(&[1]).is_err());
+        let mut changed: Value = serde_json::from_str(&publication.dataset_json).unwrap();
+        changed["inference"][0]["context"] = "private replacement".into();
+        task::write_bytes(&source.dataset, changed.to_string().as_bytes(), true).unwrap();
+        assert!(super::super::source(&source).is_err());
+    }
+
+    #[test]
+    fn public_code_publication_does_not_accept_a_document_model() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[20; 32]);
+        assert!(
+            publish_signed(
+                root.path(),
+                ModelProfile::default(),
+                "Change code.".into(),
+                "public source".into(),
+                "CC0-1.0".into(),
+                &signer
+            )
+            .is_err()
+        );
+    }
 }
