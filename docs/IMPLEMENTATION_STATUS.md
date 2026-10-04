@@ -82,7 +82,26 @@ unchanged; no model or VM was rerun, and the original failed run remains failed.
 
 ### Cooperative browser execution
 
-The latest exact-source [run `37207405766`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37207405766)
+The latest exact-source [run `37209763534`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37209763534)
+on `434431d897c50ca85706a56fc84b8f76df698c75` remains **failed** before the first
+Connect: `agent-cooperative-browser-inventory` reports
+`COOPERATIVE_BROWSER_INVENTORY_UNAVAILABLE`. No route, model task, retained-result
+join or pre-stop worker cleanup check ran, so this trial neither proves nor
+disproves the observer correction below. The retained 174-record log ring has no
+preselection reason signal; the exact missing inventory condition is not retained.
+Final private cleanup completes, zero owned objects remain, and the disposable
+guest-root network snapshots match; this is not an outer-host unchanged claim.
+Original artifact ZIP SHA-256:
+`ef329591112faefe0c9d57aee15fba6edaed5ccb7889d18e65154b9cd3398afb`;
+original job `111458379570` log SHA-256:
+`fb064e02425548c37b69b17eacd737ead4eeea11813dd6832899a25fd3a740a7`.
+
+The next diagnostic retains only fixed fixture-role presence and bounded inventory
+query outcomes in the smoke report. It preserves the original 60-second deadline,
+all eight required advertisements and the no-Connect-on-failure gate; no raw peer
+reply or stderr is exported. This is not a network fix or a passing new trial.
+
+The preceding exact-source [run `37207405766`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37207405766)
 on `7621087a9f287fdb68bb7b7127f72e029c45f865` passes the inventory gate, connects
 on its first attempt and now passes the exact retained-result join. Seven real
 peer jobs retain the original two-part source, two refinement splits to depth two,

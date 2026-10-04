@@ -357,7 +357,9 @@ class CooperativeInventoryReadiness(unittest.TestCase):
             return subprocess.CompletedProcess(command, code, output)
         globals_ = self.check["await_inventory"].__globals__
         guard = mock.Mock()
+        self.inventory_write = mock.Mock()
         with mock.patch.dict(globals_, read=lambda *_args: self.peers,
+                             write=self.inventory_write,
                              JOBS=dict(self.check["JOBS"], guest_work=guard)), \
              mock.patch.object(self.check["time"], "monotonic", side_effect=lambda: elapsed[0]), \
              mock.patch.object(self.check["time"], "sleep", side_effect=sleep), \
@@ -368,6 +370,12 @@ class CooperativeInventoryReadiness(unittest.TestCase):
             except ValueError as caught:
                 error = caught
         guard.assert_called_once()
+        if discovered:
+            self.inventory_write.assert_called_once()
+            self.assertEqual(self.inventory_write.call_args.args[0],
+                             Path("/opt/va.inventory-unit-test/agent-cooperative-browser-inventory.private"))
+            self.inventory_record = self.inventory_write.call_args.args[1]
+            self.assertIs(self.check["closed_inventory"](self.inventory_record), self.inventory_record)
         return error, elapsed[0], calls
 
     def test_readiness_waits_for_inventory_and_queries_only_client_peers(self):
@@ -376,6 +384,8 @@ class CooperativeInventoryReadiness(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(len(calls), 4)
         self.assertAlmostEqual(elapsed, 0.3)
+        self.assertTrue(self.inventory_record["ready"])
+        self.assertEqual(self.inventory_record["query_nonzero"], 1)
         for command, options in calls:
             self.assertEqual(command, ["/opt/va.inventory-unit-test/bin/volparossa", "--control-socket",
                 "/opt/va.inventory-unit-test/runtime-client/control/agent.sock", "peers"])
@@ -390,6 +400,23 @@ class CooperativeInventoryReadiness(unittest.TestCase):
                 self.assertAlmostEqual(elapsed, 60)
                 self.assertTrue(all(0 < options["timeout"] <= 2 for _, options in calls))
                 self.assertLessEqual(len(calls), 601)
+                self.assertFalse(self.inventory_record["ready"])
+                self.assertEqual(self.inventory_record["attempts"], len(calls))
+
+    def test_closed_inventory_exposes_only_fixed_role_presence_and_query_outcomes(self):
+        incomplete = "\n".join(self.lines[:-1]).encode()
+        error, _, _ = self.run_wait([(0, incomplete, 60)])
+        self.assertIsInstance(error, ValueError)
+        value = self.inventory_record
+        self.assertEqual(value["last_query_outcome"], "partial")
+        self.assertEqual(value["last_valid_presence"], dict.fromkeys(
+            [f"relay{i}" for i in range(6)] + ["exit"], True) | {"exit2": False})
+        encoded = json.dumps(value)
+        self.assertTrue(all(peer not in encoded for peer in self.peers.values()))
+        for change in ({"raw_stderr": "private"}, {"last_query_outcome": "private"},
+                       {"attempts": 602}, {"last_valid_presence": {"unrecognized": True}},
+                       {"last_valid_presence": {name: "private" for name in self.check["INVENTORY_ROLES"]}}):
+            self.assertIsNone(self.check["closed_inventory"](dict(value, **change)))
 
     def test_late_complete_inventory_cannot_pass_and_legacy_does_not_query(self):
         error, elapsed, calls = self.run_wait([(0, self.complete, 60)])
