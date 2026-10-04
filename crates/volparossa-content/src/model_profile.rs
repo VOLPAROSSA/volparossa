@@ -20,6 +20,9 @@ pub enum ModelProfile {
     /// Owner-selected BF16/SDPA private tool conversation; no public training/adapter support.
     #[serde(rename = "qwen3-0.6b-v1")]
     Qwen600,
+    /// Owner-selected sharded BF16 native tool conversation; never public inference.
+    #[serde(rename = "qwen3-4b-instruct-2507-v1")]
+    Qwen4bInstruct2507,
 }
 
 /// Immutable identity and bounds, not values supplied by a remote model provider.
@@ -29,7 +32,7 @@ pub struct ModelSpec {
     pub model_id: &'static str,
     /// Exact upstream source revision.
     pub revision: &'static str,
-    /// Original encoded `model.safetensors` length.
+    /// Original weight byte length: one file, or the explicitly ordered raw shards.
     pub weights_bytes: u64,
     /// Lowercase SHA-256 of those complete original weight bytes.
     pub weights_sha256: &'static str,
@@ -43,7 +46,57 @@ pub struct ModelSpec {
     pub max_rows: u16,
 }
 
+/// A fixed original model asset, not an arbitrary filename from a remote index.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ModelFileSpec {
+    /// Exact basename within the pinned model root.
+    pub name: &'static str,
+    /// Original encoded byte length.
+    pub bytes: u64,
+    /// SHA256 of the complete original file.
+    pub sha256: &'static str,
+}
+
+/// Pinned index first, then weight shards in concatenation order. The index itself
+/// is not included in the model's weight byte count or aggregate weight SHA256.
+const QWEN4B_WEIGHT_FILES: &[ModelFileSpec] = &[
+    ModelFileSpec {
+        name: "model.safetensors.index.json",
+        bytes: 32_819,
+        sha256: "d6c42883a895dfef5b0080ed2116a1bcd764f558406b98923d675978a1abf29c",
+    },
+    ModelFileSpec {
+        name: "model-00001-of-00003.safetensors",
+        bytes: 3_957_900_840,
+        sha256: "75311d91bb08cf0b882913da464a1e722a31fb44db35208663487efb7a3d8ed6",
+    },
+    ModelFileSpec {
+        name: "model-00002-of-00003.safetensors",
+        bytes: 3_987_450_520,
+        sha256: "0b48adbb1f60e901153d91907ba11ce63bd4b8b584482e730f48808d055dfba1",
+    },
+    ModelFileSpec {
+        name: "model-00003-of-00003.safetensors",
+        bytes: 99_630_640,
+        sha256: "7dd39ccca5e4de123c74c14af44c9bf2eb75df33b4614382af0134528e060d5d",
+    },
+];
+
 impl ModelProfile {
+    /// Profiles admitted only to the private native-tool conversation contract.
+    pub const fn is_native_conversation(self) -> bool {
+        matches!(self, Self::Qwen600 | Self::Qwen4bInstruct2507)
+    }
+
+    /// An explicitly sharded profile's index and ordered original shards. Existing
+    /// profiles retain their single `model.safetensors` identity and encoding.
+    pub const fn sharded_weight_files(self) -> Option<&'static [ModelFileSpec]> {
+        match self {
+            Self::Qwen4bInstruct2507 => Some(QWEN4B_WEIGHT_FILES),
+            _ => None,
+        }
+    }
+
     /// Whether serializing this selector may omit the historical default field.
     pub const fn is_default(&self) -> bool {
         matches!(self, Self::Default135)
@@ -97,6 +150,16 @@ impl ModelProfile {
                 max_output_bytes: 4096,
                 max_rows: 1,
             },
+            Self::Qwen4bInstruct2507 => ModelSpec {
+                model_id: "Qwen/Qwen3-4B-Instruct-2507",
+                revision: "cdbee75f17c01a7cc42f958dc650907174af0554",
+                weights_bytes: 8_044_982_000,
+                weights_sha256: "79f6bbc34572c0063d12022f0f93074d90bbcd5dfd82134423bf892f7f8df3cf",
+                prompt_tokens: 12_288,
+                max_new_tokens: 1024,
+                max_output_bytes: 4096,
+                max_rows: 1,
+            },
         }
     }
 
@@ -107,6 +170,7 @@ impl ModelProfile {
             Self::Smol360,
             Self::Smol1700,
             Self::Qwen600,
+            Self::Qwen4bInstruct2507,
         ]
         .into_iter()
         .find(|profile| {
@@ -126,6 +190,7 @@ impl fmt::Display for ModelProfile {
             Self::Smol360 => "smollm2-360m-v1",
             Self::Smol1700 => "smollm2-1.7b-v1",
             Self::Qwen600 => "qwen3-0.6b-v1",
+            Self::Qwen4bInstruct2507 => "qwen3-4b-instruct-2507-v1",
         })
     }
 }
@@ -139,6 +204,7 @@ impl FromStr for ModelProfile {
             "smollm2-360m-v1" => Ok(Self::Smol360),
             "smollm2-1.7b-v1" => Ok(Self::Smol1700),
             "qwen3-0.6b-v1" => Ok(Self::Qwen600),
+            "qwen3-4b-instruct-2507-v1" => Ok(Self::Qwen4bInstruct2507),
             _ => Err("unsupported model profile"),
         }
     }
@@ -156,6 +222,7 @@ mod tests {
             ModelProfile::Smol360,
             ModelProfile::Smol1700,
             ModelProfile::Qwen600,
+            ModelProfile::Qwen4bInstruct2507,
         ] {
             let name = profile.to_string();
             assert_eq!(name.parse::<ModelProfile>().unwrap(), profile);
@@ -192,6 +259,7 @@ mod tests {
             ModelProfile::Smol360,
             ModelProfile::Smol1700,
             ModelProfile::Qwen600,
+            ModelProfile::Qwen4bInstruct2507,
         ] {
             let spec = profile.spec();
             assert_eq!(

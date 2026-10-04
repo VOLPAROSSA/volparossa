@@ -31,16 +31,19 @@ class QwenConversationTests(unittest.TestCase):
     def test_greedy_policy_drives_actual_generate_kwargs_and_report(self):
         self.check_worker_generation_policy("greedy_v1")
 
-    def check_worker_generation_policy(self, policy):
+    def test_four_b_native_dispatch_retains_greedy_policy_and_actual_shard_report(self):
+        self.check_worker_generation_policy("greedy_v1", WORKER.QWEN4B_MODEL_PROFILE)
+
+    def check_worker_generation_policy(self, policy, profile_name=PROFILE):
         # Inert tensor/tokenizer/model doubles exercise dispatch, not inference quality.
         data = conversation()
         if policy is not None:
             data["generation_policy"] = policy
         raw = json.dumps(data).encode()
-        self.assertIs(WORKER.validate_dataset(data, "private_conversation", PROFILE), data)
+        self.assertIs(WORKER.validate_dataset(data, "private_conversation", profile_name), data)
         self.assertEqual(json.dumps(data).encode(), raw, "validation must not rewrite request bytes")
         identity = {"sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw), "visibility": "private_local"}
-        profile = WORKER.model_profile(PROFILE)
+        profile = WORKER.model_profile(profile_name)
         files = {name: {"bytes": size, "sha256": profile["hashes"][name]} for name, size in profile["files"].items()}
         native = '<tool_call>{"name":"vp_0","arguments":{"name":"demo.rs"}}</tool_call>'
         model, tokenizer, torch, transformers = task_planner_doubles(native, generated=[21, 151645])
@@ -49,12 +52,13 @@ class QwenConversationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             job = WORKER.validate_request(dict(request(), mode="private_conversation", steps=1,
-                owner_control=True, model_profile=PROFILE, output_root=str(root)))
+                owner_control=True, model_profile=profile_name, output_root=str(root)))
             with mock.patch.object(WORKER, "prepare_files", return_value=(root/"model", root, data, identity, files)), \
                  mock.patch.object(WORKER, "configure_offline"), \
                  mock.patch.object(WORKER, "load_backend", return_value=(torch, transformers, mock.Mock(), WORKER.BACKENDS)), \
                  mock.patch.object(WORKER, "load_model", return_value=model), \
-                 mock.patch.object(WORKER, "file_hash", return_value=files["model.safetensors"]), \
+                 mock.patch.object(WORKER, "file_hash", return_value=files.get("model.safetensors")), \
+                 mock.patch.object(WORKER, "verify_sharded_weights", return_value=profile.get("weights")), \
                  mock.patch.object(WORKER, "encode_private", side_effect=AssertionError("Q&A branch")), \
                  mock.patch.object(WORKER, "encode_dataset", side_effect=AssertionError("public branch")), \
                  mock.patch.object(WORKER, "evaluate", side_effect=AssertionError("training")):
@@ -62,7 +66,13 @@ class QwenConversationTests(unittest.TestCase):
                 session.elapsed.return_value = 0
                 result = WORKER.execute_job(job, session)
             self.assertEqual(result["conversation"], dict(call(), call_id="vp-" + job["id"]))
-            self.assertEqual(result["conversation_limits"], CONVERSATION.capabilities(PROFILE, profile))
+            self.assertEqual(result["conversation_limits"], CONVERSATION.capabilities(profile_name, profile))
+            self.assertEqual(result["model"]["files"], files)
+            if profile_name == WORKER.QWEN4B_MODEL_PROFILE:
+                self.assertEqual(result["model"]["weights"], profile["weights"])
+                self.assertNotIn("model.safetensors", result["model"]["files"])
+            else:
+                self.assertNotIn("weights", result["model"])
             self.assertEqual(result["model_attention_backend"], "sdpa")
             self.assertEqual(result["model_parameter_dtype"], "bfloat16")
             self.assertEqual(result["dataset"], identity)
@@ -100,7 +110,7 @@ class QwenConversationTests(unittest.TestCase):
             self.assertIs(CONVERSATION.validate(data, profile_name), data)
             self.assertEqual(CONVERSATION.canonical(data), before)
             data["generation_policy"] = "greedy_v1"
-            if profile_name == PROFILE:
+            if profile_name in WORKER.NATIVE_CONVERSATION_PROFILES:
                 self.assertIs(CONVERSATION.validate(data, profile_name), data)
                 self.assertEqual(CONVERSATION.generation_policy(data, profile_name), "greedy_v1")
             else:

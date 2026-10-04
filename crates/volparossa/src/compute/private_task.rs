@@ -115,7 +115,7 @@ pub(super) fn validate_mode_input(mode: Mode, raw: &[u8]) -> Result<()> {
 
 pub(super) fn validate_profile_input(mode: Mode, raw: &[u8], profile: ModelProfile) -> Result<()> {
     ensure!(
-        profile != ModelProfile::Qwen600 || mode == Mode::PrivateConversation,
+        !profile.is_native_conversation() || mode == Mode::PrivateConversation,
         "compute_profile_conversation_only"
     );
     match mode {
@@ -274,12 +274,10 @@ pub(super) fn validate_mode_report(
         "compute_private_result_input"
     );
     ensure!(
-        report["model"]["id"] == spec.model_id
-            && report["model"]["revision"] == spec.revision
-            && report["model"]["files"]["model.safetensors"]
-                == json!({"bytes":spec.weights_bytes,"sha256":spec.weights_sha256}),
+        report["model"]["id"] == spec.model_id && report["model"]["revision"] == spec.revision,
         "compute_private_result_model"
     );
+    validate_model_weights(&report["model"], profile)?;
     let outputs = report["outputs"]
         .as_array()
         .context("compute_private_result_outputs")?;
@@ -296,6 +294,31 @@ pub(super) fn validate_mode_report(
     );
     if mode == Mode::PrivateConversation {
         super::private_conversation::validate_report(report, raw, profile)?;
+    }
+    Ok(())
+}
+
+fn validate_model_weights(model: &Value, profile: ModelProfile) -> Result<()> {
+    let spec = profile.spec();
+    if let Some(files) = profile.sharded_weight_files() {
+        ensure!(
+            model["files"].get("model.safetensors").is_none()
+                && files.iter().all(|file| model["files"][file.name]
+                    == json!({"bytes":file.bytes,"sha256":file.sha256}))
+                && model["weights"]
+                    == json!({
+                        "layout":"safetensors_shards_concat_v1",
+                        "bytes":spec.weights_bytes,"sha256":spec.weights_sha256,
+                        "files":files[1..].iter().map(|file| file.name).collect::<Vec<_>>()
+                    }),
+            "compute_private_result_model_weights"
+        );
+    } else {
+        ensure!(
+            model["files"]["model.safetensors"]
+                == json!({"bytes":spec.weights_bytes,"sha256":spec.weights_sha256}),
+            "compute_private_result_model"
+        );
     }
     Ok(())
 }

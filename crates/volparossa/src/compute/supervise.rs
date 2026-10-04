@@ -378,7 +378,9 @@ fn check_public_contract(value: &Value, options: &Options) -> Result<()> {
 fn check_model_backend(value: &Value, request: &WorkerRequest) -> Result<()> {
     if matches!(
         request.model_profile,
-        super::ModelProfile::Smol1700 | super::ModelProfile::Qwen600
+        super::ModelProfile::Smol1700
+            | super::ModelProfile::Qwen600
+            | super::ModelProfile::Qwen4bInstruct2507
     ) {
         ensure!(
             if request.mode == Mode::PlanDocument {
@@ -389,7 +391,7 @@ fn check_model_backend(value: &Value, request: &WorkerRequest) -> Result<()> {
             "compute_result_model_precision"
         );
     }
-    if request.model_profile == super::ModelProfile::Qwen600 {
+    if request.model_profile.is_native_conversation() {
         ensure!(
             request.mode == Mode::PrivateConversation && value["model_attention_backend"] == "sdpa",
             "compute_result_model_attention"

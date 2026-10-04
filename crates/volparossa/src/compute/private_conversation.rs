@@ -218,7 +218,7 @@ impl Input {
     fn validate_profile(&self, profile: ModelProfile) -> Result<()> {
         let bounds = limits::for_profile(profile);
         ensure!(
-            self.generation_policy.is_none() || profile == ModelProfile::Qwen600,
+            self.generation_policy.is_none() || profile.is_native_conversation(),
             "conversation_generation_policy"
         );
         ensure!(
@@ -246,7 +246,7 @@ impl Input {
                 } => ensure!(
                     pending.is_empty()
                         && text(content, bounds.text, true)
-                        && (profile == ModelProfile::Qwen600
+                        && (profile.is_native_conversation()
                             || matches!(role, Role::User | Role::Assistant)),
                     "conversation_message"
                 ),
@@ -352,14 +352,19 @@ impl Input {
 pub(super) fn capabilities(profile: ModelProfile) -> Value {
     let spec = profile.spec();
     let bounds = limits::for_profile(profile);
-    let native = profile == ModelProfile::Qwen600;
+    let native = profile.is_native_conversation();
+    let template = match profile {
+        ModelProfile::Qwen600 => "qwen3-tools-nonthinking-v1",
+        ModelProfile::Qwen4bInstruct2507 => "qwen3-tools-instruct-2507-v1",
+        _ => "smollm2-json-turn-v1",
+    };
     json!({"version":1,"visibility":"private_local","model_profile":profile,
         "max_input_bytes":bounds.input,"max_history_items":bounds.history,"max_tools":bounds.tools,
         "max_instructions_bytes":bounds.instructions,"max_message_bytes":bounds.text,"max_tool_description_bytes":bounds.description,
         "max_tool_payload_bytes":4096,
         "max_prompt_tokens":spec.prompt_tokens,"max_new_tokens":spec.max_new_tokens,
         "model_context_tokens":bounds.context_tokens,"max_output_bytes":spec.max_output_bytes,
-        "conversation_template":if native { "qwen3-tools-nonthinking-v1" } else { "smollm2-json-turn-v1" },"native_tool_template":native,
+        "conversation_template":template,"native_tool_template":native,
         "local_only":true,"tool_execution":false,"network_access":false,
         "public_cache":false,"training":false,"cloud_fallback":false,
         "model_tool_use_proven":false,"arbitrary_json_schema_validation":false})
@@ -396,7 +401,7 @@ pub(super) fn validate_report(report: &Value, raw: &[u8], profile: ModelProfile)
         report.get("generation_policy") == expected_policy.as_ref(),
         "conversation_generation_policy_binding"
     );
-    let expected = if profile == ModelProfile::Qwen600 {
+    let expected = if profile.is_native_conversation() {
         qwen::turn(
             &input,
             &report["outputs"][0],

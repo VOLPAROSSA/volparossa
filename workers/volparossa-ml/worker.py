@@ -108,12 +108,47 @@ DEFAULT_MODEL_PROFILE = "smollm2-135m-v1"
 LARGE_MODEL_PROFILE = "smollm2-360m-v1"
 REASONING_MODEL_PROFILE = "smollm2-1.7b-v1"
 QWEN_MODEL_PROFILE = "qwen3-0.6b-v1"
+QWEN4B_MODEL_PROFILE = "qwen3-4b-instruct-2507-v1"
+NATIVE_CONVERSATION_PROFILES = (QWEN_MODEL_PROFILE, QWEN4B_MODEL_PROFILE)
 EXTENDED_INFERENCE_PROFILES = (LARGE_MODEL_PROFILE, REASONING_MODEL_PROFILE)
 MODEL_CONFIG = {"architectures": ["LlamaForCausalLM"], "model_type": "llama", "hidden_size": 576,
                 "num_hidden_layers": 30, "num_attention_heads": 9, "num_key_value_heads": 3,
                 "intermediate_size": 1536, "vocab_size": 49152, "max_position_embeddings": 8192,
                 "tie_word_embeddings": True}
 MODEL_PROFILES = {
+    QWEN4B_MODEL_PROFILE: dict(profile_name=QWEN4B_MODEL_PROFILE,
+        id="Qwen/Qwen3-4B-Instruct-2507", revision="cdbee75f17c01a7cc42f958dc650907174af0554",
+        files={"LICENSE": 11343, "README.md": 8168, "config.json": 727, "generation_config.json": 238,
+               "merges.txt": 1671839, "vocab.json": 2776833, "tokenizer.json": 11422654,
+               "tokenizer_config.json": 9377, "model.safetensors.index.json": 32819,
+               "model-00001-of-00003.safetensors": 3957900840,
+               "model-00002-of-00003.safetensors": 3987450520,
+               "model-00003-of-00003.safetensors": 99630640},
+        hashes={
+            "LICENSE": "832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e",
+            "README.md": "8e3dd0c3b5b11897cc71092ccfe517bb7a9783479baa3665aad73c8d1a2041cd",
+            "config.json": "5beea1a4a34c62782bfb2f911c606741a3bab8f92d80a118fa053c28af12e8ba",
+            "generation_config.json": "835fffe355c9438e7a25be099b3fccaa98350b83451f9fd2d99512e74f1ade48",
+            "merges.txt": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+            "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+            "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+            "tokenizer_config.json": "a62ff0a2472a0fa1b8eaabcb57c59b58afa42a22831dc141400b6e0cf2b65ce3",
+            "model.safetensors.index.json": "d6c42883a895dfef5b0080ed2116a1bcd764f558406b98923d675978a1abf29c",
+            "model-00001-of-00003.safetensors": "75311d91bb08cf0b882913da464a1e722a31fb44db35208663487efb7a3d8ed6",
+            "model-00002-of-00003.safetensors": "0b48adbb1f60e901153d91907ba11ce63bd4b8b584482e730f48808d055dfba1",
+            "model-00003-of-00003.safetensors": "7dd39ccca5e4de123c74c14af44c9bf2eb75df33b4614382af0134528e060d5d"},
+        config={"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3", "hidden_size": 2560,
+                "num_hidden_layers": 36, "num_attention_heads": 32, "num_key_value_heads": 8,
+                "head_dim": 128, "intermediate_size": 9728, "vocab_size": 151936,
+                "max_position_embeddings": 262144, "rope_theta": 5000000,
+                "tie_word_embeddings": True, "torch_dtype": "bfloat16"},
+        weight_shards=("model-00001-of-00003.safetensors", "model-00002-of-00003.safetensors",
+                       "model-00003-of-00003.safetensors"),
+        weights={"layout": "safetensors_shards_concat_v1", "bytes": 8044982000,
+                 "sha256": "79f6bbc34572c0063d12022f0f93074d90bbcd5dfd82134423bf892f7f8df3cf",
+                 "files": ["model-00001-of-00003.safetensors", "model-00002-of-00003.safetensors",
+                           "model-00003-of-00003.safetensors"]},
+        prompt_tokens=12288, new_tokens=1024, wire_bytes=4096, max_rows=1, native_tools=True),
     QWEN_MODEL_PROFILE: dict(id="Qwen/Qwen3-0.6B", revision="c1899de289a04d12100db370d81485cdf75e47ca",
         files={"LICENSE": 11343, "README.md": 13965, "config.json": 726, "generation_config.json": 239,
                "merges.txt": 1671853, "vocab.json": 2776833, "model.safetensors": 1503300328,
@@ -228,7 +263,7 @@ def validate_request(value):
     require(value["mode"] in ("infer", "train", "plan_document", "plan_tasks", "private_infer", "private_conversation", "aggregate_adapter"), "INVALID_JOB_MODE")
     profile_name = value.get("model_profile", DEFAULT_MODEL_PROFILE)
     model_profile(profile_name)
-    require(profile_name != QWEN_MODEL_PROFILE or value["mode"] == "private_conversation",
+    require(profile_name not in NATIVE_CONVERSATION_PROFILES or value["mode"] == "private_conversation",
             "MODEL_PROFILE_PRIVATE_CONVERSATION_ONLY")
     require(profile_name == DEFAULT_MODEL_PROFILE or (value["mode"] != "train" and "adapter_root" not in value),
             "MODEL_PROFILE_INFERENCE_ONLY")
@@ -270,7 +305,7 @@ def validate_sample(sample, answered):
 
 def validate_dataset(dataset, mode, profile_name=DEFAULT_MODEL_PROFILE):
     profile = model_profile(profile_name)
-    require(profile_name != QWEN_MODEL_PROFILE or mode == "private_conversation",
+    require(profile_name not in NATIVE_CONVERSATION_PROFILES or mode == "private_conversation",
             "MODEL_PROFILE_PRIVATE_CONVERSATION_ONLY")
     require(profile_name == DEFAULT_MODEL_PROFILE or mode != "train", "MODEL_PROFILE_INFERENCE_ONLY")
     if mode == "private_infer":
@@ -664,7 +699,7 @@ def plain_path(value, directory):
     return path, metadata
 
 
-def file_hash(path, expected_size=None, maximum=None):
+def file_hash(path, expected_size=None, maximum=None, aggregate=None):
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(descriptor, "rb") as source:
         metadata = os.fstat(source.fileno())
@@ -679,6 +714,8 @@ def file_hash(path, expected_size=None, maximum=None):
             length += len(data)
             require(length <= metadata.st_size, "ARTIFACT_CHANGED")
             digest.update(data)
+            if aggregate is not None:
+                aggregate.update(data)
         require(length == metadata.st_size, "ARTIFACT_CHANGED")
         return {"bytes": length, "sha256": digest.hexdigest()}
 
@@ -690,6 +727,35 @@ def read_bounded(path, maximum):
         value = source.read(maximum + 1)
         require(len(value) <= maximum, "ARTIFACT_TOO_LARGE")
         return value
+
+
+def verify_sharded_weights(model_root, profile, verified_files=None):
+    """Hash the original shard bytes in pinned order, never the index as weights.
+
+    The existing identity wire field remains a SHA256 over actual weight bytes.
+    Only the new, fixed sharded profile uses this explicitly tagged layout.
+    """
+    shards = profile["weight_shards"]
+    index_name = "model.safetensors.index.json"
+    index_file = file_hash(model_root / index_name, profile["files"][index_name])
+    require(index_file["sha256"] == profile["hashes"][index_name], "MODEL_FILES_NOT_PINNED")
+    if verified_files is not None:
+        verified_files[index_name] = index_file
+    index = parse_json(read_bounded(model_root / "model.safetensors.index.json", 65536))
+    require(type(index) is dict and type(index.get("weight_map")) is dict
+            and len(index["weight_map"]) == 398
+            and set(index["weight_map"].values()) == set(shards), "INVALID_WEIGHT_SHARD_INDEX")
+    aggregate, total = hashlib.sha256(), 0
+    for name in shards:
+        checked = file_hash(model_root / name, profile["files"][name], aggregate=aggregate)
+        require(checked["sha256"] == profile["hashes"][name], "MODEL_WEIGHTS_CHANGED_ON_DISK")
+        if verified_files is not None:
+            verified_files[name] = checked
+        total += checked["bytes"]
+    identity = {"layout": "safetensors_shards_concat_v1", "bytes": total,
+                "sha256": aggregate.hexdigest(), "files": list(shards)}
+    require(identity == profile["weights"], "MODEL_WEIGHT_SET_NOT_PINNED")
+    return identity
 
 
 def prepare_files(request):
@@ -705,7 +771,13 @@ def prepare_files(request):
     require(not model_root.is_relative_to(output_root) and not output_root.is_relative_to(model_root),
             "MODEL_OUTPUT_PATH_OVERLAP")
     require({path.name for path in model_root.iterdir()} == set(profile["files"]), "UNSUPPORTED_MODEL_FILES")
-    files = {name: file_hash(model_root / name, expected_size=size) for name, size in profile["files"].items()}
+    sharded = set(profile.get("weight_shards", ()))
+    if sharded:
+        sharded.add("model.safetensors.index.json")
+    files = {name: file_hash(model_root / name, expected_size=size)
+             for name, size in profile["files"].items() if name not in sharded}
+    if sharded:
+        verify_sharded_weights(model_root, profile, files)
     require(all(files[name]["sha256"] == expected for name, expected in profile["hashes"].items()),
             "MODEL_FILES_NOT_PINNED")
     config = parse_json(read_bounded(model_root / "config.json", 8192))
@@ -1063,13 +1135,13 @@ def load_backend(threads, session):
 
 
 def load_model(transformers, torch, model_root, profile_name=DEFAULT_MODEL_PROFILE):
-    dtype = torch.bfloat16 if profile_name in (REASONING_MODEL_PROFILE, QWEN_MODEL_PROFILE) else torch.float32
-    attention = "sdpa" if profile_name == QWEN_MODEL_PROFILE else "eager"
+    dtype = torch.bfloat16 if profile_name in (REASONING_MODEL_PROFILE, *NATIVE_CONVERSATION_PROFILES) else torch.float32
+    attention = "sdpa" if profile_name in NATIVE_CONVERSATION_PROFILES else "eager"
     model = transformers.AutoModelForCausalLM.from_pretrained(
         str(model_root), local_files_only=True, trust_remote_code=False, use_safetensors=True,
         dtype=dtype, device_map=None, attn_implementation=attention)
     model.to(torch.device("cpu"))
-    model.config.use_cache = profile_name == QWEN_MODEL_PROFILE
+    model.config.use_cache = profile_name in NATIVE_CONVERSATION_PROFILES
     # Generated public adapter metadata must name the original model, never a local path.
     model.config._name_or_path = model_profile(profile_name)["id"]
     model_dtype_report(profile_name, model, torch)
@@ -1082,7 +1154,7 @@ def model_dtype_report(profile_name, model=None, torch=None):
     Old profiles retain their original report shape and FP32 load. No autocast,
     quantization or silent FP32 retry is used for the BF16 profile.
     """
-    if profile_name not in (REASONING_MODEL_PROFILE, QWEN_MODEL_PROFILE):
+    if profile_name not in (REASONING_MODEL_PROFILE, *NATIVE_CONVERSATION_PROFILES):
         return {}
     if model is None:
         return {"model_parameter_dtype": None}  # Tokenizer-only document planning.
@@ -1093,7 +1165,7 @@ def model_dtype_report(profile_name, model=None, torch=None):
         count += parameter.numel()
     require(count > 0, "EMPTY_PARAMETER_SET")
     report = {"model_parameter_dtype": "bfloat16"}
-    if profile_name == QWEN_MODEL_PROFILE:
+    if profile_name in NATIVE_CONVERSATION_PROFILES:
         require(model.config._attn_implementation == "sdpa", "MODEL_ATTENTION_BACKEND_MISMATCH")
         report["model_attention_backend"] = "sdpa"
     return report
@@ -1729,8 +1801,12 @@ def execute_private_infer(request, session, tokenizer, torch, transformers, vers
     session.progress("baseline")
     outputs = generate(model, samples, tokenizer, torch, session, transformers, profile_name,
                        generation_policy=generation_policy)
-    require(file_hash(model_root / "model.safetensors", profile["files"]["model.safetensors"])["sha256"]
-            == profile["hashes"]["model.safetensors"], "MODEL_WEIGHTS_CHANGED_ON_DISK")
+    if "weight_shards" in profile:
+        weight_identity = verify_sharded_weights(model_root, profile)
+    else:
+        weight_identity = None
+        require(file_hash(model_root / "model.safetensors", profile["files"]["model.safetensors"])["sha256"]
+                == profile["hashes"]["model.safetensors"], "MODEL_WEIGHTS_CHANGED_ON_DISK")
     result = {"version": VERSION, "id": request["id"], "kind": "result", "status": "ok", "mode": request["mode"],
               "backend_versions": versions, "device": "cpu", "threads": request["threads"],
               "model": {"id": profile["id"], "revision": profile["revision"], "files": model_files},
@@ -1738,6 +1814,8 @@ def execute_private_infer(request, session, tokenizer, torch, transformers, vers
               "model_weights_loaded": True, "private_data_supported": True,
               "distributed_execution_claimed": False, "private_training_claimed": False,
               "better_answers_claimed": False, "network_policy_changed": False}
+    if weight_identity is not None:
+        result["model"]["weights"] = weight_identity
     if conversation:
         result.update(conversation=conversation_module().decode(dataset, outputs[0], profile_name, request["id"]), prompt_tokens=len(prompt),
                       conversation_limits=conversation_module().capabilities(profile_name, profile))
@@ -1787,10 +1865,10 @@ def generate(model, samples, tokenizer, torch, session, transformers, profile_na
              generation_policy=None):
     profile = model_profile(profile_name)
     require(1 <= len(samples) <= profile["max_rows"], "INVALID_DATASET_SIZE")
-    require(generation_policy is None or profile_name == QWEN_MODEL_PROFILE,
+    require(generation_policy is None or profile_name in NATIVE_CONVERSATION_PROFILES,
             "CONVERSATION_GENERATION_POLICY")
     generation_options = (conversation_module().native().generation_options(generation_policy)
-                          if profile_name == QWEN_MODEL_PROFILE else {"do_sample": False})
+                          if profile_name in NATIVE_CONVERSATION_PROFILES else {"do_sample": False})
     class OwnerCheckpoint(transformers.StoppingCriteria):
         def __call__(self, _input_ids, _scores, **_kwargs):
             # Service the original owner's controls on this execution thread after
@@ -1812,7 +1890,7 @@ def generate(model, samples, tokenizer, torch, session, transformers, profile_na
             generated = output[0, input_ids.shape[1]:]
             require(generated.numel() <= profile["new_tokens"], "GENERATION_TOKEN_LIMIT_EXCEEDED")
             generation = generation_metadata(generated.tolist(), tokenizer.eos_token_id, profile_name)
-            if profile_name == QWEN_MODEL_PROFILE:
+            if profile_name in NATIVE_CONVERSATION_PROFILES:
                 # Preserve unexpected model-generated control markers for strict
                 # native parsing; remove only the already confirmed terminal EOS.
                 ids = generated.tolist()
@@ -2001,7 +2079,7 @@ def execute_job(request, session):
                                    data_identity, model_files, cohort)
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         str(model_root), local_files_only=True, trust_remote_code=False, use_fast=True)
-    expected_pad, expected_eos = (151643, 151645) if profile_name == QWEN_MODEL_PROFILE else (2, 2)
+    expected_pad, expected_eos = (151643, 151645) if profile_name in NATIVE_CONVERSATION_PROFILES else (2, 2)
     require(tokenizer.pad_token_id == expected_pad and tokenizer.eos_token_id == expected_eos,
             "MODEL_TOKENIZER_MISMATCH")
     session.check()

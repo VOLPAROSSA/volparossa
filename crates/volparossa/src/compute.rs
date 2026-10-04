@@ -384,7 +384,7 @@ fn validate_profile_dataset(
     profile: ModelProfile,
 ) -> Result<()> {
     ensure!(
-        profile != ModelProfile::Qwen600 || mode == Mode::PrivateConversation,
+        !profile.is_native_conversation() || mode == Mode::PrivateConversation,
         "compute_profile_conversation_only"
     );
     ensure!(

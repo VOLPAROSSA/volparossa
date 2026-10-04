@@ -30,14 +30,23 @@ DEFAULT_MODEL_PROFILE = "smollm2-135m-v1"
 LARGE_MODEL_PROFILE = "smollm2-360m-v1"
 REASONING_MODEL_PROFILE = "smollm2-1.7b-v1"
 QWEN_MODEL_PROFILE = "qwen3-0.6b-v1"
+QWEN4B_MODEL_PROFILE = "qwen3-4b-instruct-2507-v1"
 PROFILES = {DEFAULT_MODEL_PROFILE: (MODEL_ID, REVISION),
             LARGE_MODEL_PROFILE: ("HuggingFaceTB/SmolLM2-360M-Instruct", "a10cc1512eabd3dde888204e902eca88bddb4951"),
             REASONING_MODEL_PROFILE: ("HuggingFaceTB/SmolLM2-1.7B-Instruct", "31b70e2e869a7173562077fd711b654946d38674"),
-            QWEN_MODEL_PROFILE: ("Qwen/Qwen3-0.6B", "c1899de289a04d12100db370d81485cdf75e47ca")}
+            QWEN_MODEL_PROFILE: ("Qwen/Qwen3-0.6B", "c1899de289a04d12100db370d81485cdf75e47ca"),
+            QWEN4B_MODEL_PROFILE: ("Qwen/Qwen3-4B-Instruct-2507", "cdbee75f17c01a7cc42f958dc650907174af0554")}
 PROFILE_PINS = {LARGE_MODEL_PROFILE: "model-pins-360m.json", REASONING_MODEL_PROFILE: "model-pins-1.7b.json"}
 PROFILE_WEIGHT_BYTES = {LARGE_MODEL_PROFILE: 723674912, REASONING_MODEL_PROFILE: 3422777952}
 PROFILE_PINS[QWEN_MODEL_PROFILE] = "model-pins-qwen3-0.6b.json"
 PROFILE_WEIGHT_BYTES[QWEN_MODEL_PROFILE] = 1503300328
+PROFILE_PINS[QWEN4B_MODEL_PROFILE] = "model-pins-qwen3-4b-instruct-2507.json"
+QWEN4B_SHARDS = {"model-00001-of-00003.safetensors": 3957900840,
+                 "model-00002-of-00003.safetensors": 3987450520,
+                 "model-00003-of-00003.safetensors": 99630640}
+QWEN4B_WEIGHTS = {"layout": "safetensors_shards_concat_v1", "bytes": 8044982000,
+                  "sha256": "79f6bbc34572c0063d12022f0f93074d90bbcd5dfd82134423bf892f7f8df3cf",
+                  "files": list(QWEN4B_SHARDS)}
 GRAPH_DECODER = {"implementation": "lm-format-enforcer", "version": "0.11.3",
                  "adapter_version": 1, "schema_version": 3,
                  "dependencies": {"interegular": "0.3.3", "pydantic": "1.10.24"}}
@@ -86,7 +95,8 @@ def load_pins(model_profile=DEFAULT_MODEL_PROFILE, task_graph_decoder=False):
             and pins["platform"] == "cpython-3.13-linux-x86_64"
             and pins["model_id"] == model_id and pins["revision"] == revision,
             "unsupported provisioning pin format/model")
-    require(len(pins["files"]) == (9 if model_profile == QWEN_MODEL_PROFILE else 8) and len(pins["wheels"]) == 38,
+    count = 12 if model_profile == QWEN4B_MODEL_PROFILE else 9 if model_profile == QWEN_MODEL_PROFILE else 8
+    require(len(pins["files"]) == count and len(pins["wheels"]) == 38,
             "unexpected artifact set")
     for group in (pins["files"], pins["wheels"]):
         names = set()
@@ -97,6 +107,8 @@ def load_pins(model_profile=DEFAULT_MODEL_PROFILE, task_graph_decoder=False):
             names.add(name)
             maximum = (PROFILE_WEIGHT_BYTES[model_profile]
                        if model_profile in PROFILE_WEIGHT_BYTES and name == "model.safetensors" else 299_999_999)
+            if model_profile == QWEN4B_MODEL_PROFILE and name in QWEN4B_SHARDS:
+                maximum = QWEN4B_SHARDS[name]
             require(type(item["bytes"]) is int and 0 < item["bytes"] <= maximum,
                     "invalid artifact size")
             require(re.fullmatch(r"[0-9a-f]{64}", item["sha256"]), "invalid SHA256")
@@ -111,6 +123,13 @@ def load_pins(model_profile=DEFAULT_MODEL_PROFILE, task_graph_decoder=False):
                     and pins.get("license_provenance"), "separate Apache license provenance missing")
         require(item["url"] == expected_url,
                 "model URL is not revision-pinned")
+    if model_profile == QWEN4B_MODEL_PROFILE:
+        require(pins.get("weights") == QWEN4B_WEIGHTS,
+                "sharded weights identity differs from original raw-byte pins")
+        files = {item["path"]: item for item in pins["files"]}
+        require("model.safetensors" not in files and "model.safetensors.index.json" in files
+                and all(files.get(name, {}).get("bytes") == size for name, size in QWEN4B_SHARDS.items()),
+                "sharded model asset set differs")
     for item in pins["wheels"]:
         require(item["path"].endswith(".whl"), "source distributions are forbidden")
         expected_host = "download.pytorch.org" if item["name"] == "torch" else "files.pythonhosted.org"
@@ -174,6 +193,37 @@ def retained_pin_files(pins):
 
 def download_total(pins):
     return sum(item["bytes"] for group in (pins["files"], pins["wheels"]) for item in group)
+
+
+def verify_weight_set(pins, model_root, deadline):
+    """Verify the concatenation identity on complete original shards before installation."""
+    identity = pins.get("weights")
+    if identity is None:
+        return
+    require(identity == QWEN4B_WEIGHTS, "unsupported sharded weights identity")
+    aggregate, total = hashlib.sha256(), 0
+    files = {item["path"]: item for item in pins["files"]}
+    for name in identity["files"]:
+        item = files[name]
+        digest, length = hashlib.sha256(), 0
+        descriptor = os.open(model_root / name, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as source:
+            metadata = os.fstat(source.fileno())
+            require(stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1
+                    and metadata.st_size == item["bytes"], "shard file changed")
+            while True:
+                require(time.monotonic() < deadline, "provisioning deadline expired")
+                data = source.read(1024 * 1024)
+                if not data:
+                    break
+                length += len(data)
+                require(length <= item["bytes"], "shard file grew")
+                digest.update(data)
+                aggregate.update(data)
+        require(length == item["bytes"] and digest.hexdigest() == item["sha256"], "shard changed")
+        total += length
+    require(total == identity["bytes"] and aggregate.hexdigest() == identity["sha256"],
+            "sharded weights raw concatenation mismatch")
 
 
 def execution_root(args):
@@ -338,6 +388,7 @@ def execute(args, pins):
             for item in group:
                 print(json.dumps({"downloading": item["path"], "bytes": item["bytes"]}), flush=True)
                 download(item, directory / item["path"], opener, deadline)
+        verify_weight_set(pins, model, deadline)
         expanded = sum(wheel_expanded_bytes(wheels / x["path"]) for x in pins["wheels"])
         # Original wheels remain for license/provenance. No bytecode compilation;
         # the reserve covers venv metadata/scripts and bounded pip temporaries.
@@ -383,6 +434,8 @@ def execute(args, pins):
         if pins["model_id"] != MODEL_ID:
             report["model_profile"] = next(profile for profile, identity in PROFILES.items()
                                            if identity == (pins["model_id"], pins["revision"]))
+        if "weights" in pins:
+            report["weights"] = pins["weights"]
         if "task_graph_decoder" in pins:
             report["task_graph_decoder"] = pins["task_graph_decoder"]
         (root / "provision-report.json").write_text(json.dumps(report, indent=2) + "\n")

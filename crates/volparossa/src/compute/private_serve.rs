@@ -83,10 +83,15 @@ impl Options {
             self.runtime_root.join("bin/python3").is_file(),
             "compute_runtime_missing"
         );
-        ensure!(
-            self.model_root.join("model.safetensors").is_file(),
-            "compute_model_missing"
+        let model_present = self.model_profile.sharded_weight_files().map_or_else(
+            || self.model_root.join("model.safetensors").is_file(),
+            |files| {
+                files
+                    .iter()
+                    .all(|file| self.model_root.join(file.name).is_file())
+            },
         );
+        ensure!(model_present, "compute_model_missing");
         Ok(())
     }
 }
@@ -267,7 +272,7 @@ fn respond(
             if *generation_policy_handshake {
                 response["capabilities"]["generation_policy_version"] = 1.into();
                 response["capabilities"]["generation_policies"] =
-                    if config.model_profile == ModelProfile::Qwen600 {
+                    if config.model_profile.is_native_conversation() {
                         json!(["greedy_v1"])
                     } else {
                         json!([])

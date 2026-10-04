@@ -14,10 +14,12 @@ import sys
 MAX_BYTES = 24 * 1024
 IDENTIFIER = re.compile(r"[A-Za-z0-9_.-]{1,64}\Z")
 QWEN = "qwen3-0.6b-v1"
+QWEN4B = "qwen3-4b-instruct-2507-v1"
+NATIVE_PROFILES = (QWEN, QWEN4B)
 
 
 def bounds(profile_name=None):
-    return ((262144, 65536, 128, 32, 65536, 8192) if profile_name == QWEN
+    return ((262144, 65536, 128, 32, 65536, 8192) if profile_name in NATIVE_PROFILES
             else (MAX_BYTES, 4096, 32, 8, 8192, 2048))
 
 
@@ -62,7 +64,7 @@ def generation_policy(value, profile_name=None):
     if "generation_policy" not in value:
         return None
     policy = value["generation_policy"]
-    require(profile_name == QWEN and type(policy) is str and policy == "greedy_v1",
+    require(profile_name in NATIVE_PROFILES and type(policy) is str and policy == "greedy_v1",
             "CONVERSATION_GENERATION_POLICY")
     return policy
 
@@ -104,7 +106,7 @@ def validate(value, profile_name=None):
         kind = item.get("type")
         if kind == "message":
             fields(item, ("type", "role", "text"))
-            roles = ("user", "assistant", "system", "developer") if profile_name == QWEN else ("user", "assistant")
+            roles = ("user", "assistant", "system", "developer") if profile_name in NATIVE_PROFILES else ("user", "assistant")
             require(not pending and item["role"] in roles and text(item["text"], message),
                     "CONVERSATION_MESSAGE")
         elif kind in ("function_call", "custom_tool_call"):
@@ -165,15 +167,16 @@ def encode(tokenizer, value, profile):
 
 def capabilities(profile_name, profile):
     maximum, instructions, history, tools, message, description = bounds(profile_name)
-    qwen = profile_name == QWEN
+    qwen = profile_name in NATIVE_PROFILES
     return {"version": 1, "visibility": "private_local", "model_profile": profile_name,
             "max_input_bytes": maximum, "max_history_items": history, "max_tools": tools,
             "max_instructions_bytes": instructions, "max_message_bytes": message, "max_tool_description_bytes": description,
             "max_tool_payload_bytes": 4096,
             "max_prompt_tokens": profile["prompt_tokens"], "max_new_tokens": profile["new_tokens"],
-            "model_context_tokens": 32768 if qwen else profile["config"]["max_position_embeddings"],
+            "model_context_tokens": 32768 if profile_name == QWEN else profile["config"]["max_position_embeddings"],
             "max_output_bytes": profile["wire_bytes"],
-            "conversation_template": "qwen3-tools-nonthinking-v1" if qwen else "smollm2-json-turn-v1",
+            "conversation_template": ("qwen3-tools-instruct-2507-v1" if profile_name == QWEN4B else
+                                      "qwen3-tools-nonthinking-v1" if qwen else "smollm2-json-turn-v1"),
             "native_tool_template": qwen, "local_only": True, "tool_execution": False,
             "network_access": False, "public_cache": False, "training": False,
             "cloud_fallback": False, "model_tool_use_proven": False, "arbitrary_json_schema_validation": False}
@@ -192,7 +195,7 @@ def invalid_constant(_value):
 
 
 def decode(value, output, profile_name=None, request_id=None):
-    if profile_name == QWEN:
+    if profile_name in NATIVE_PROFILES:
         return native().decode(value, output, request_id)
     if output["text_truncated"]:
         return {"type": "incomplete", "reason": "wire_truncated"}

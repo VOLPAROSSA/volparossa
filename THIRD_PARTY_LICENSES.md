@@ -74,6 +74,7 @@ current Debian package; a later distributable ML package still needs complete no
 | Opt-in SmolLM2-360M-Instruct | [HuggingFaceTB model](https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct/tree/a10cc1512eabd3dde888204e902eca88bddb4951), `a10cc1512eabd3dde888204e902eca88bddb4951` | Apache-2.0 declared by the original model card; this revision has no `LICENSE` file. The explicitly pinned, unchanged Apache-2.0 text from the 135M row is retained separately, not described as a file from the 360M repository. |
 | Opt-in SmolLM2-1.7B-Instruct | [HuggingFaceTB model](https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct/tree/31b70e2e869a7173562077fd711b654946d38674), `31b70e2e869a7173562077fd711b654946d38674` | Apache-2.0 declared by the original model card; this revision has no `LICENSE` file. The unchanged Apache-2.0 text from the pinned 135M repository is retained with separate provenance, not attributed to the 1.7B repository. |
 | Opt-in Qwen3-0.6B private native-tool profile | [Qwen model](https://huggingface.co/Qwen/Qwen3-0.6B/tree/c1899de289a04d12100db370d81485cdf75e47ca), `c1899de289a04d12100db370d81485cdf75e47ca` | Apache-2.0; same-revision original LICENSE, 11,343 bytes, SHA-256 `832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e`. Explicit provisioning retains it unchanged together with the original model card. |
+| Opt-in Qwen3-4B-Instruct-2507 private native-tool profile | [Qwen model](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507/tree/cdbee75f17c01a7cc42f958dc650907174af0554), `cdbee75f17c01a7cc42f958dc650907174af0554` | Apache-2.0; original same-revision LICENSE, 11,343 bytes, SHA-256 `832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e`. Original license, model card, tokenizer, index and shards retained unchanged; no upstream template/model patches. |
 | PyTorch CPU `2.14.0+cpu` | [pytorch/pytorch](https://github.com/pytorch/pytorch/tree/2b3ec34829036a65cd9d1398ea72a0167dc37470), `2b3ec34829036a65cd9d1398ea72a0167dc37470` | Original official CPU wheel; retain its own and bundled dependency notices |
 | Transformers `5.16.1` | [huggingface/transformers](https://github.com/huggingface/transformers/tree/93c8b7b485963a10800c91f55304db6be211c2bd), `93c8b7b485963a10800c91f55304db6be211c2bd` | Apache-2.0; original wheel notices retained |
 | PEFT `0.20.0` | [huggingface/peft](https://github.com/huggingface/peft/tree/a5526d27a9d47d1e8264d5e1b1f96c0fdc79464e), `a5526d27a9d47d1e8264d5e1b1f96c0fdc79464e` | Apache-2.0; original wheel notices retained |
@@ -93,6 +94,21 @@ The worker uses the original pinned native chat template, with an original GPL-3
 adapter for ordered roles, offered-tool aliases and strictly parsed proposals; the
 upstream template/model files are not patched. Metadata verification and offline
 bridge tests do not claim downloaded weights, real model execution or tool-use quality.
+
+The separately owner-selected `qwen3-4b-instruct-2507-v1` profile pins twelve
+original assets in `workers/volparossa-ml/model-pins-qwen3-4b-instruct-2507.json`
+and reuses those same 38 runtime wheels. The complete three original shards were
+read and verified against upstream LFS SHA256/length pins. In filename order their
+raw concatenation is 8,044,982,000 bytes, SHA256
+`79f6bbc34572c0063d12022f0f93074d90bbcd5dfd82134423bf892f7f8df3cf`.
+This is the profile's actual weight identity, not a digest of the index or manifest.
+The original index is separately pinned, SHA256
+`d6c42883a895dfef5b0080ed2116a1bcd764f558406b98923d675978a1abf29c`;
+its upstream tensor-size metadata is not the physical shard byte count. Original
+source capture report SHA256:
+`726ecd894a5b6f2594b980771eafb01448295b5a426f2fd2d778548bfd98ad80`.
+This source check installed no runtime and executed no model. Native tool quality,
+the candidate CPU memory budget and an actual coding task remain unproved.
 
 The optional `smollm2-360m-v1` inference/planning profile adds seven original model assets
 in `workers/volparossa-ml/model-pins-360m.json` and the separately attributed license text;

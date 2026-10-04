@@ -212,6 +212,49 @@ fn native_output(raw: &str) -> Value {
 }
 
 #[test]
+fn qwen4b_explicit_profile_keeps_native_boundaries_and_truthful_upstream_context() {
+    let profile = ModelProfile::Qwen4bInstruct2507;
+    let mut value = input();
+    value["instructions"] = "i".repeat(20_903).into();
+    value["generation_policy"] = "greedy_v1".into();
+    value["history"].as_array_mut().unwrap().insert(
+        0,
+        json!({"type":"message","role":"developer","text":"Keep the owner's instruction."}),
+    );
+    let raw = serde_json::to_vec(&value).unwrap();
+    let decoded = Input::decode_profile(&raw, profile).unwrap();
+    assert!(decoded.requires_generation_policy_handshake());
+    assert_eq!(
+        decoded.bytes_profile(profile).unwrap(),
+        Input::decode_profile(&raw, ModelProfile::Qwen600)
+            .unwrap()
+            .bytes_profile(ModelProfile::Qwen600)
+            .unwrap()
+    );
+    for mode in [
+        super::super::Mode::Infer,
+        super::super::Mode::PrivateInfer,
+        super::super::Mode::Train,
+        super::super::Mode::PlanTasks,
+        super::super::Mode::PlanDocument,
+    ] {
+        assert!(super::super::validate_profile_dataset(mode, false, &raw, profile).is_err());
+    }
+    let mut expected = capabilities(ModelProfile::Qwen600);
+    expected["model_profile"] = profile.to_string().into();
+    expected["model_context_tokens"] = 262144.into();
+    expected["conversation_template"] = "qwen3-tools-instruct-2507-v1".into();
+    assert_eq!(capabilities(profile), expected);
+    let mut output = native_output("Unforced model output.");
+    output["generation"]["model_profile"] = profile.to_string().into();
+    let report = json!({"id":"ab".repeat(16),"outputs":[output],
+        "conversation":{"type":"assistant","text":"Unforced model output."},
+        "generation_policy":"greedy_v1","prompt_tokens":128,"conversation_limits":capabilities(profile)});
+    validate_report(&report, &raw, profile).unwrap();
+    assert!(validate_report(&report, &raw, ModelProfile::Qwen600).is_err());
+}
+
+#[test]
 fn generation_policy_is_explicit_qwen_only_and_preserves_legacy_bytes() {
     let legacy = br#"{"version":1,"visibility":"private_local","instructions":"Review.","history":[{"type":"message","role":"user","text":"Read first."}],"tools":[]}"#;
     for profile in [ModelProfile::Smol360, ModelProfile::Qwen600] {

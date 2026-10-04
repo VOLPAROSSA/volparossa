@@ -59,7 +59,7 @@ impl Request {
 
     pub(super) fn validate_profile(&self, profile: super::super::ModelProfile) -> Result<()> {
         ensure!(
-            profile != super::super::ModelProfile::Qwen600
+            !profile.is_native_conversation()
                 || !matches!(
                     self.operation,
                     Operation::Capabilities { .. } | Operation::Submit { .. }
@@ -84,7 +84,7 @@ impl Request {
         }
         if let Operation::Submit { question, context } = &self.operation {
             ensure!(
-                profile != super::super::ModelProfile::Qwen600,
+                !profile.is_native_conversation(),
                 "private_ipc_unsupported_mode"
             );
             super::super::private_task::validate_input(&input_bytes(question, context)?)?;

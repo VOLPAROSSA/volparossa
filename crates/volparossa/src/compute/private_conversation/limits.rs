@@ -13,7 +13,7 @@ pub(super) struct Limits {
 }
 
 pub(super) const fn for_profile(profile: ModelProfile) -> Limits {
-    if matches!(profile, ModelProfile::Qwen600) {
+    if profile.is_native_conversation() {
         Limits {
             input: 256 * 1024,
             instructions: 64 * 1024,
@@ -21,7 +21,11 @@ pub(super) const fn for_profile(profile: ModelProfile) -> Limits {
             tools: 32,
             text: 64 * 1024,
             description: 8192,
-            context_tokens: 32768,
+            context_tokens: if matches!(profile, ModelProfile::Qwen4bInstruct2507) {
+                262144
+            } else {
+                32768
+            },
             request_frame: 512 * 1024,
         }
     } else {

@@ -28,7 +28,11 @@ fn generation_policy_negotiation_rejects_unknown_null_and_duplicate_versions() {
 
 #[tokio::test]
 async fn generation_policy_handshake_is_opt_in_and_same_connection() {
-    for profile in [ModelProfile::Smol360, ModelProfile::Qwen600] {
+    for profile in [
+        ModelProfile::Smol360,
+        ModelProfile::Qwen600,
+        ModelProfile::Qwen4bInstruct2507,
+    ] {
         let root = tempfile::tempdir().unwrap();
         let mut config = config(root.path());
         config.model_profile = profile;
@@ -69,7 +73,7 @@ async fn generation_policy_handshake_is_opt_in_and_same_connection() {
                         .as_object_mut()
                         .unwrap()
                         .remove("generation_policies"),
-                    Some(if profile == ModelProfile::Qwen600 {
+                    Some(if profile.is_native_conversation() {
                         json!(["greedy_v1"])
                     } else {
                         json!([])
@@ -87,7 +91,7 @@ async fn generation_policy_handshake_is_opt_in_and_same_connection() {
                     serde_json::to_vec(&legacy_capabilities).unwrap()
                 );
             }
-            if profile == ModelProfile::Qwen600 {
+            if profile.is_native_conversation() {
                 wire::write(
                     &mut client,
                     &request(&format!("{:032x}", index + 1), selected.clone()),
@@ -129,6 +133,11 @@ async fn qwen_larger_frames_are_only_for_explicit_conversation_submission() {
         (
             serde_json::to_vec(&conversation).unwrap(),
             ModelProfile::Qwen600,
+            true,
+        ),
+        (
+            serde_json::to_vec(&conversation).unwrap(),
+            ModelProfile::Qwen4bInstruct2507,
             true,
         ),
         (

@@ -2,9 +2,42 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-10-02
+Last updated: 2026-10-04
 
 ## Current integration and active work
+
+### Owner-selected 4B native coding candidate; no new execution claim
+
+`qwen3-4b-instruct-2507-v1` adds the exact original
+`Qwen/Qwen3-4B-Instruct-2507@cdbee75f17c01a7cc42f958dc650907174af0554`
+assets to the private native-conversation worker and explicit guest provisioner.
+The default and existing 0.6B profile stay unchanged. This does not turn the
+previous failed 0.6B coding trial into success or enable public/private peer
+execution, training, adapters or a general coding-quality claim.
+
+All twelve original assets were captured and verified without installing a runtime
+or executing a model. The three safetensors shards total 8,044,982,000 bytes;
+their actual raw-concatenation SHA256 is
+`79f6bbc34572c0063d12022f0f93074d90bbcd5dfd82134423bf892f7f8df3cf`.
+The index is independently pinned and never masquerades as the weights. The
+worker/provisioner verify every shard and the ordered aggregate; the worker checks
+the weights again after generation. Protocol tests cover private-only admission,
+native capability and generation-policy agreement, original shard accounting,
+changed/missing assets and rejection of index-hash substitution.
+
+The candidate retains 12,288 prompt tokens, 1,024 output tokens, 4KiB escaped
+output and 600 seconds per task, with CPU BF16/SDPA. Its distinct original instruct
+template advertises the true 262,144-token upstream context without enlarging the
+task allowance. Resource limits are 10GiB observed RSS, 24GiB address space and
+10.5GiB known spare memory for admission. A planned 12GiB disposable guest uses an
+11GiB core cgroup; adequacy and performance still need a real source-bound trial.
+There is no weakened refusal/cleanup path, injected model answer, forced tool
+sequence or invented EOS. Larger size alone does not prove better coding.
+
+Focused local checks pass: 114 Python worker/provision/conversation tests, two
+Rust model-identity tests, 28 private conversation/service/result tests, four
+resource-budget tests and four sandbox/bootstrap tests, plus scoped formatting.
+These include inert process/protocol probes, not execution of the 4B model.
 
 ### Native editor, core and model integration candidate
 

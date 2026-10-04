@@ -187,3 +187,37 @@ RSS stop threshold is 4GiB, address-space limit 10GiB, maximum two threads. Thes
 checks are not a hard 4GiB cgroup proof or a performance guarantee. Actual weights,
 native tool quality, long-context memory use and an end-to-end coding loop still
 require the disposable, hard-memory-bounded functional run.
+
+### Explicit 4B Instruct candidate
+
+The owner may separately select `qwen3-4b-instruct-2507-v1`, pinned to
+`Qwen/Qwen3-4B-Instruct-2507@cdbee75f17c01a7cc42f958dc650907174af0554`
+(Apache-2.0). It is not a new default and cannot be chosen by an incoming request.
+The same private-conversation-only admission, native proposal parser, owner tool
+authority and optional `greedy_v1` generation contract apply. It has no public
+broker, training, adapter or private remote-execution support.
+
+All native 0.6B limits above remain identical except the truthful upstream
+`model_context_tokens=262144` and distinct
+`conversation_template="qwen3-tools-instruct-2507-v1"`. The actual task still has
+a 12,288-token prompt and 1,024-token output limit, not a 262K task allowance.
+The original instruct template remains unmodified; it does not have the 0.6B
+thinking-mode branch. No generated content, tool choice or EOS is fabricated.
+
+This profile has three original safetensors shards. The existing model identity
+hash is SHA256 of their **complete raw bytes concatenated in filename order**;
+its weight length is 8,044,982,000 bytes. It is not the index's hash, nor the
+index's tensor-size metadata. Worker `model.files` retains the real index and
+shard names. Only this profile adds `model.weights` with layout
+`safetensors_shards_concat_v1`, aggregate `bytes`/`sha256`, and ordered `files`.
+Provisioning and the worker verify every original shard plus the aggregate; the
+worker verifies again after generation and the Rust supervisor checks the exact
+reported asset set/identity. Single-file profile reports remain unchanged.
+
+Candidate resources are CPU BF16/SDPA, at most two threads, 600 seconds per task,
+10GiB observed RSS, 24GiB address space and 10.5GiB known spare memory before
+launch. These are admission/stop limits, not measured adequacy or a no-impact
+guarantee. The planned disposable comparison uses a 12GiB guest with an 11GiB
+core cgroup; actual resource refusal or failure must remain visible. Source pins
+and protocol tests alone do not establish successful model loading, coding
+quality, task completion or privacy on another node.
