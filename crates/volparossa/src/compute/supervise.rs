@@ -154,6 +154,7 @@ pub(super) async fn run(
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut budget = Budget::new();
     let controls = options.spare_capacity.then(Controls::default);
+    let progress = diagnostic::Progress::default();
     let result = async {
         if let Some(lifetimes) = private_lifetimes.as_mut() {
             lifetimes.as_mut().map_err(|_| anyhow::anyhow!("compute_private_process_observation"))?
@@ -171,7 +172,8 @@ pub(super) async fn run(
         let mut control_stdin = if controls.is_some() { Some(stdin) } else { drop(stdin); None };
         let io = async {
             let (result, status) = collect_completion(
-                &mut child, stdout, stderr, &request.id, controls.as_ref()
+                &mut child, stdout, stderr, &request.id, controls.as_ref(),
+                options.mode.is_private().then_some(&progress),
             ).await?;
             check_result(&result, request, status)?;
             check_public_contract(&result, options)?;
@@ -219,6 +221,9 @@ pub(super) async fn run(
             }
         }
     }.await;
+    if options.mode.is_private() && result.is_err() {
+        diagnostic::terminal_state(&progress, &budget, controls.as_ref(), peak_rss);
+    }
     let mut result = confirm_cleanup(&mut child, options.mode, result, private_lifetimes).await?;
     result["supervisor"] = supervisor_report(options, peak_rss, controls.as_ref(), &budget);
     if options.mode == Mode::PlanTasks {
@@ -677,12 +682,13 @@ async fn collect_completion(
     stderr: impl AsyncRead + Unpin,
     id: &str,
     controls: Option<&Controls>,
+    progress: Option<&diagnostic::Progress>,
 ) -> Result<(Value, ExitStatus)> {
     let missing = tokio::sync::Notify::new();
     let finish = async {
         tokio::try_join!(
             async {
-                let result = collect_stdout(stdout, id, controls).await?;
+                let result = collect_stdout_tracked(stdout, id, controls, progress).await?;
                 if result.is_none() {
                     missing.notify_one();
                 }
@@ -704,10 +710,20 @@ async fn collect_completion(
     Ok((required_result(result, status, diagnostics)?, status))
 }
 
+#[cfg(test)]
 async fn collect_stdout(
     stream: impl AsyncRead + Unpin,
     id: &str,
     controls: Option<&Controls>,
+) -> Result<Option<Value>> {
+    collect_stdout_tracked(stream, id, controls, None).await
+}
+
+async fn collect_stdout_tracked(
+    stream: impl AsyncRead + Unpin,
+    id: &str,
+    controls: Option<&Controls>,
+    progress: Option<&diagnostic::Progress>,
 ) -> Result<Option<Value>> {
     let mut reader = BufReader::new(stream);
     let mut result = None;
@@ -753,6 +769,14 @@ async fn collect_stdout(
                 ensure!(
                     value.get("control_sequence").is_none(),
                     "compute_unexpected_control_sequence"
+                );
+            }
+            if let Some(progress) = progress {
+                progress.observe(&value)?;
+            } else {
+                ensure!(
+                    value.get("private_execution").is_none(),
+                    "compute_private_progress"
                 );
             }
             // Only the validated phase label is logged, never raw backend text or data.

@@ -3,6 +3,8 @@
 
 use anyhow::Error;
 use serde::Serialize;
+use serde_json::Value;
+use std::sync::Mutex;
 
 const FIXED_CODES: &[&str] = &[
     "compute_deadline",
@@ -29,6 +31,8 @@ const FIXED_CODES: &[&str] = &[
     "compute_request_write",
     "compute_control_write_deadline",
     "compute_control_write",
+    "compute_control_ack_deadline",
+    "compute_private_progress",
     "compute_memory_pressure",
     "compute_device_reserve",
     "compute_owner_pressure",
@@ -46,6 +50,130 @@ const FIXED_CODES: &[&str] = &[
     "compute_wait",
     "compute_worker_exit",
 ];
+
+const PRIVATE_STAGES: &[&str] = &[
+    "owner_gate",
+    "verify_files",
+    "backend_import",
+    "tokenizer_load",
+    "prompt_encode",
+    "model_load",
+    "generation",
+    "verify_after",
+    "result",
+];
+const PROGRESS_PHASES: &[&str] = &[
+    "preparing",
+    "baseline",
+    "training",
+    "checkpoint",
+    "reload",
+    "complete",
+    "paused",
+    "resumed",
+];
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+struct Substage {
+    stage: &'static str,
+    state: &'static str,
+    elapsed_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+struct ProgressState {
+    last_phase: Option<&'static str>,
+    substage: Option<Substage>,
+}
+
+#[derive(Default)]
+pub(super) struct Progress(Mutex<ProgressState>);
+
+impl Progress {
+    /// Called only after framing/correlation and owner ACK validation. Retain
+    /// closed labels, not the worker's Value or any private request material.
+    pub(super) fn observe(&self, value: &Value) -> anyhow::Result<()> {
+        use anyhow::{Context, ensure};
+        let phase = PROGRESS_PHASES
+            .iter()
+            .copied()
+            .find(|phase| value["phase"].as_str() == Some(*phase))
+            .context("compute_private_progress")?;
+        let mut state = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("compute_private_progress"))?;
+        if let Some(progress) = value.get("private_execution") {
+            ensure!(
+                progress.as_object().is_some_and(|object| object.len() == 2)
+                    && value.get("control_sequence").is_none()
+                    && value.get("planner").is_none()
+                    && value["step"].as_u64() == Some(0),
+                "compute_private_progress"
+            );
+            let index = PRIVATE_STAGES
+                .iter()
+                .position(|stage| progress["stage"].as_str() == Some(*stage))
+                .context("compute_private_progress")?;
+            let next = ["begin", "complete"]
+                .into_iter()
+                .find(|stage| progress["state"].as_str() == Some(*stage))
+                .context("compute_private_progress")?;
+            let elapsed_ms = value["elapsed_ms"]
+                .as_u64()
+                .filter(|elapsed| *elapsed < 600_000)
+                .context("compute_private_progress")?;
+            ensure!(
+                phase == if index < 6 { "preparing" } else { "baseline" },
+                "compute_private_progress"
+            );
+            let expected = match state.substage {
+                None => index == 0 && next == "begin",
+                Some(previous) => {
+                    let previous_index = PRIVATE_STAGES
+                        .iter()
+                        .position(|stage| *stage == previous.stage)
+                        .context("compute_private_progress")?;
+                    elapsed_ms >= previous.elapsed_ms
+                        && ((previous.state == "begin"
+                            && next == "complete"
+                            && index == previous_index)
+                            || (previous.state == "complete"
+                                && next == "begin"
+                                && index == previous_index + 1))
+                }
+            };
+            ensure!(expected, "compute_private_progress");
+            state.substage = Some(Substage {
+                stage: PRIVATE_STAGES[index],
+                state: next,
+                elapsed_ms,
+            });
+        }
+        state.last_phase = Some(phase);
+        Ok(())
+    }
+}
+
+/// Terminal execution observation, before cleanup. This proves neither cleanup
+/// nor successful model loading/inference; an entered stage can wait at a gate.
+pub(super) fn terminal_state(
+    progress: &Progress,
+    budget: &super::Budget,
+    controls: Option<&super::Controls>,
+    peak_rss: u64,
+) {
+    let state = progress.0.lock().map(|state| *state).unwrap_or_default();
+    let observation = budget.observation();
+    let record = serde_json::json!({"version":1,
+        "last_phase":state.last_phase,"substage":state.substage,
+        "capacity":{"decision":budget.current(),"constraint":budget.constraint(),
+            "cpu_some_avg10":observation.cpu_some_avg10,"io_some_avg10":observation.io_some_avg10,
+            "memory_bytes":observation.memory_bytes},
+        "controls":controls.and_then(super::Controls::observation),"peak_rss_bytes":peak_rss});
+    tracing::debug!(target: "volparossa::compute::private_diagnostic",
+        "private_execution_state {record}");
+}
 
 const WORKER_CODES: &[&str] = &[
     "JOB_INPUT_NOT_FOUND",
@@ -146,6 +274,70 @@ fn emit(phase: &'static str, detail: &Detail) {
 mod tests {
     use super::*;
 
+    fn progress(stage: &str, state: &str, elapsed_ms: u64) -> Value {
+        let index = PRIVATE_STAGES
+            .iter()
+            .position(|candidate| *candidate == stage)
+            .unwrap_or(0);
+        serde_json::json!({"phase":if index < 6 {"preparing"} else {"baseline"}, "step":0,
+            "elapsed_ms":elapsed_ms,"private_execution":{"stage":stage,"state":state}})
+    }
+
+    #[test]
+    fn private_stages_are_closed_ordered_observations_not_model_proof() {
+        let observed = Progress::default();
+        for (index, stage) in PRIVATE_STAGES.iter().enumerate() {
+            observed
+                .observe(&progress(stage, "begin", index as u64 * 2))
+                .unwrap();
+            observed
+                .observe(&serde_json::json!({"phase":"paused"}))
+                .unwrap();
+            assert_eq!(observed.0.lock().unwrap().substage.unwrap().state, "begin");
+            observed
+                .observe(&progress(stage, "complete", index as u64 * 2 + 1))
+                .unwrap();
+        }
+        let value = serde_json::to_value(*observed.0.lock().unwrap()).unwrap();
+        assert_eq!(
+            value["substage"],
+            serde_json::json!({"stage":"result","state":"complete","elapsed_ms":17})
+        );
+        assert!(
+            observed
+                .observe(&progress("owner_gate", "begin", 18))
+                .is_err()
+        );
+        for invalid in [
+            progress("private-canary", "begin", 0),
+            progress("owner_gate", "private-canary", 0),
+            progress("owner_gate", "complete", 0),
+            progress("model_load", "begin", 0),
+            progress("owner_gate", "begin", 600_000),
+        ] {
+            let observed = Progress::default();
+            assert!(observed.observe(&invalid).is_err());
+            assert!(observed.0.lock().unwrap().substage.is_none());
+        }
+        for (field, value) in [
+            ("step", serde_json::json!(true)),
+            ("elapsed_ms", serde_json::json!(-1)),
+            ("phase", serde_json::json!("paused")),
+            ("control_sequence", serde_json::json!(1)),
+        ] {
+            let mut invalid = progress("owner_gate", "begin", 0);
+            invalid[field] = value;
+            assert!(Progress::default().observe(&invalid).is_err());
+        }
+        let mut invalid = progress("owner_gate", "begin", 0);
+        invalid["private_execution"]["payload"] = serde_json::json!("PRIVATE_CANARY");
+        assert!(Progress::default().observe(&invalid).is_err());
+        assert_eq!(
+            describe(&anyhow::anyhow!("compute_control_ack_deadline")).code,
+            "compute_control_ack_deadline"
+        );
+    }
+
     #[test]
     fn actual_subscriber_output_passes_the_private_fixture_parser() {
         const CHILD: &str = "VOLPAROSSA_DIAGNOSTIC_BRIDGE_CHILD";
@@ -157,6 +349,26 @@ mod tests {
                 .with_target(false)
                 .finish();
             tracing::subscriber::with_default(subscriber, || {
+                let observed = Progress::default();
+                observed
+                    .observe(&progress("owner_gate", "begin", 0))
+                    .unwrap();
+                observed
+                    .observe(&serde_json::json!({"phase":"paused"}))
+                    .unwrap();
+                let controls = super::super::Controls::default();
+                controls
+                    .issue(super::super::Action::Pause, "PRIVATE_REQUEST_ID")
+                    .unwrap();
+                controls
+                    .acknowledge(&serde_json::json!({"phase":"paused","control_sequence":1}))
+                    .unwrap();
+                terminal_state(
+                    &observed,
+                    &super::super::Budget::new(),
+                    Some(&controls),
+                    1234,
+                );
                 failure(
                     "refresh",
                     &Error::new(std::io::Error::new(
@@ -181,6 +393,7 @@ mod tests {
         assert!(
             !text.contains("PRIVATE_BRIDGE_CANARY")
                 && !text.contains("/private/path")
+                && !text.contains("PRIVATE_REQUEST_ID")
                 && !text.contains('\u{1b}')
         );
         let mut log = tempfile::NamedTempFile::new().unwrap();
@@ -196,7 +409,10 @@ import runpy, sys
 from pathlib import Path
 fixture = runpy.run_path(sys.argv[1])
 result = fixture['service_diagnostic'](Path(sys.argv[2]))
-assert result == dict(version=1, truncated=False, unrecognized_record=False, events=[dict(
+assert result == dict(version=1, truncated=False, unrecognized_record=False, states=[dict(
+    version=1,last_phase='paused',substage=dict(stage='owner_gate',state='begin',elapsed_ms=0),
+    capacity=dict(decision='pause',constraint='memory',cpu_some_avg10=None,io_some_avg10=None,memory_bytes=None),
+    controls=dict(issued=1,acknowledged=1,last_issued='pause',last_acknowledged='pause'),peak_rss_bytes=1234)], events=[dict(
     version=1, phase='refresh', detail=dict(code='compute_private_process_children',
     io_kind='permission_denied', exit_code=None, signal=None, stderr_class=None))])
 ",

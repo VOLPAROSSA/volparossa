@@ -28,7 +28,31 @@ struct State {
     terminal: bool,
 }
 
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(super) struct Observation {
+    issued: usize,
+    acknowledged: usize,
+    last_issued: Option<Action>,
+    last_acknowledged: Option<Action>,
+}
+
 impl Controls {
+    /// Read only the existing owner ledger; this neither issues nor acknowledges
+    /// anything. No request IDs or payloads leave the private control pipe.
+    pub(super) fn observation(&self) -> Option<Observation> {
+        let state = self.0.lock().ok()?;
+        Some(Observation {
+            issued: state.issued.len(),
+            acknowledged: state.acknowledged,
+            last_issued: state.issued.last().copied(),
+            last_acknowledged: state
+                .acknowledged
+                .checked_sub(1)
+                .and_then(|index| state.issued.get(index))
+                .copied(),
+        })
+    }
+
     /// Reserve a bounded record before writing it, so a fast acknowledgement cannot race
     /// ahead of the owner's issuance ledger. Only one unacknowledged command is allowed.
     pub(super) fn issue(&self, action: Action, id: &str) -> Result<Option<Vec<u8>>> {
@@ -134,7 +158,25 @@ mod tests {
     async fn pause_records_are_real_bounded_pipe_bytes_and_acks_cannot_be_invented() {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         let controls = Controls::default();
+        assert_eq!(
+            controls.observation().unwrap(),
+            Observation {
+                issued: 0,
+                acknowledged: 0,
+                last_issued: None,
+                last_acknowledged: None,
+            }
+        );
         let pause = controls.issue(Action::Pause, "a").unwrap().unwrap();
+        assert_eq!(
+            controls.observation().unwrap(),
+            Observation {
+                issued: 1,
+                acknowledged: 0,
+                last_issued: Some(Action::Pause),
+                last_acknowledged: None,
+            }
+        );
         let (mut sender, receiver) = tokio::io::duplex(1024);
         sender.write_all(&pause).await.unwrap();
         let mut line = String::new();
@@ -164,5 +206,14 @@ mod tests {
         controls.check_report(&serde_json::json!({"owner_control":{
             "enabled":true,"records_received":2,"last_sequence":2,"pause_count":1,"resume_count":1,"paused_ms":50
         }})).unwrap();
+        assert_eq!(
+            controls.observation().unwrap(),
+            Observation {
+                issued: 2,
+                acknowledged: 2,
+                last_issued: Some(Action::Resume),
+                last_acknowledged: Some(Action::Resume),
+            }
+        );
     }
 }

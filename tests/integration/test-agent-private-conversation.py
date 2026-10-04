@@ -191,6 +191,57 @@ class FixtureTests(unittest.TestCase):
         self.assertIn('--property=StandardOutput=append:{diagnostic_log}', fixture)
         self.assertIn('--property=StandardError=append:{diagnostic_log}', fixture)
 
+    def test_terminal_execution_state_distinguishes_gate_pause_from_completed_model_load(self):
+        value = dict(version=1, last_phase='paused', substage=dict(stage='owner_gate', state='begin', elapsed_ms=0),
+            capacity=dict(decision='pause', constraint='cpu', cpu_some_avg10=24.5, io_some_avg10=0.0,
+                          memory_bytes=11 * FIX['GIB']),
+            controls=dict(issued=2, acknowledged=1, last_issued='pause', last_acknowledged='resume'), peak_rss_bytes=100)
+        self.assertEqual(FIX['execution_state'](value), value)
+        with tempfile.TemporaryDirectory(prefix='private-stage-test-', dir=HERE) as directory:
+            path = Path(directory) / 'private.log'
+            line = 'DEBUG private_execution_state ' + json.dumps(value) + '\n'
+            path.write_text(line * 17)
+            path.chmod(0o600)
+            result = FIX['service_diagnostic'](path)
+            self.assertEqual(result['states'], [value] * 16)
+            self.assertTrue(result['truncated'])
+            self.assertFalse(result['unrecognized_record'])
+            path.write_text('PRIVATE_CANARY\n')
+            self.assertEqual(FIX['service_diagnostic'](path), dict(version=1, events=[], truncated=False,
+                                                                 unrecognized_record=False))
+            invalid = dict(value, private_payload='PRIVATE_CANARY')
+            path.write_text('DEBUG private_execution_state ' + json.dumps(invalid) + '\n')
+            result = FIX['service_diagnostic'](path)
+            self.assertEqual(result['states'], [])
+            self.assertTrue(result['unrecognized_record'])
+            self.assertNotIn('PRIVATE_CANARY', json.dumps(result))
+
+    def test_terminal_state_rejects_unclosed_fields_types_and_resource_counters(self):
+        value = dict(version=1, last_phase=None, substage=None,
+            capacity=dict(decision='pause', constraint='memory', cpu_some_avg10=None, io_some_avg10=None,
+                          memory_bytes=None), controls=None, peak_rss_bytes=0)
+        self.assertEqual(FIX['execution_state'](value), value)
+        for key, changed in [('version', True), ('last_phase', 'PRIVATE_CANARY'), ('peak_rss_bytes', True),
+                             ('peak_rss_bytes', 10 * FIX['GIB'] + 1), ('peak_rss_bytes', -1),
+                             ('substage', dict(stage='model_load', state='begin', elapsed_ms=600000)),
+                             ('substage', dict(stage='model_load', state='PRIVATE_CANARY', elapsed_ms=0)),
+                             ('substage', dict(stage='PRIVATE_CANARY', state='begin', elapsed_ms=0))]:
+            with self.subTest(key=key, changed=changed), self.assertRaises(ValueError):
+                FIX['execution_state'](dict(value, **{key: changed}))
+        for key, changed in [('decision', 'PRIVATE_CANARY'), ('constraint', 'PRIVATE_CANARY'),
+                ('cpu_some_avg10', float('nan')), ('cpu_some_avg10', True), ('io_some_avg10', 101),
+                ('memory_bytes', -1), ('memory_bytes', True), ('memory_bytes', 2**64)]:
+            changed_value = copy.deepcopy(value)
+            changed_value['capacity'][key] = changed
+            with self.subTest(key=key, changed=changed), self.assertRaises(ValueError):
+                FIX['execution_state'](changed_value)
+        for controls in [dict(issued=129, acknowledged=0, last_issued='pause', last_acknowledged=None),
+                         dict(issued=0, acknowledged=1, last_issued=None, last_acknowledged='resume'),
+                         dict(issued=1, acknowledged=0, last_issued='PRIVATE_CANARY', last_acknowledged=None),
+                         dict(issued=0, acknowledged=0, last_issued='pause', last_acknowledged=None)]:
+            with self.subTest(controls=controls), self.assertRaises(ValueError):
+                FIX['execution_state'](dict(value, controls=controls))
+
     def test_current_pins_and_offline_receipt_contract(self):
         self.assertEqual(FIX['pins']()['revision'], 'fd8513aff6e9322a488570618396ed8a81fcfb12')
         FIX['check_report'](example_receipt(), REVISION)

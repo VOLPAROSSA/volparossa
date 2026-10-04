@@ -212,6 +212,8 @@ ADAPTER_DEFAULTS = {
 HEX32 = re.compile(r"[0-9a-f]{32}\Z")
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 PHASES = {"preparing", "baseline", "training", "checkpoint", "reload", "complete"}
+PRIVATE_STAGES = ("owner_gate", "verify_files", "backend_import", "tokenizer_load",
+                  "prompt_encode", "model_load", "generation", "verify_after", "result")
 STOP_REQUESTED = False
 WIRE_OUTPUT = sys.stdout
 
@@ -1087,6 +1089,22 @@ class Session:
               "phase": "baseline", "step": 0, "elapsed_ms": self.elapsed(),
               "planner": {"stage": stage, "attempt": attempt, "generated_tokens": generated_tokens}})
 
+    def private_progress(self, stage, state):
+        # Observations only: do not add a checkpoint, extend a deadline or expose
+        # any input/token/path. A begin records entry, not completed model work;
+        # owner_gate may remain paused before any input/model file is read.
+        if self.request["mode"] not in ("private_infer", "private_conversation"):
+            return
+        require(stage in PRIVATE_STAGES and state in ("begin", "complete"),
+                "INTERNAL_PRIVATE_PROGRESS")
+        elapsed = self.elapsed()
+        if elapsed >= 600000:
+            return  # The original owner/worker deadlines retain precedence.
+        emit({"version": VERSION, "id": self.request["id"], "kind": "progress",
+              "phase": "preparing" if PRIVATE_STAGES.index(stage) < 6 else "baseline",
+              "step": 0, "elapsed_ms": elapsed,
+              "private_execution": {"stage": stage, "state": state}})
+
 
 def emit(record):
     raw = json.dumps(record, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":"))
@@ -1786,6 +1804,7 @@ def execute_private_infer(request, session, tokenizer, torch, transformers, vers
     profile = model_profile(profile_name)
     conversation = request["mode"] == "private_conversation"
     generation_policy = None
+    session.private_progress("prompt_encode", "begin")
     if conversation:
         try:
             generation_policy = conversation_module().generation_policy(dataset, profile_name)
@@ -1795,18 +1814,25 @@ def execute_private_infer(request, session, tokenizer, torch, transformers, vers
         samples = [torch.tensor([prompt], dtype=torch.long, device="cpu")]
     else:
         samples = encode_private(tokenizer, torch, dataset, profile_name)
+    session.private_progress("prompt_encode", "complete")
     session.check()
+    session.private_progress("model_load", "begin")
     model = load_model(transformers, torch, model_root, profile_name)
+    session.private_progress("model_load", "complete")
     session.check()
     session.progress("baseline")
+    session.private_progress("generation", "begin")
     outputs = generate(model, samples, tokenizer, torch, session, transformers, profile_name,
                        generation_policy=generation_policy)
+    session.private_progress("generation", "complete")
+    session.private_progress("verify_after", "begin")
     if "weight_shards" in profile:
         weight_identity = verify_sharded_weights(model_root, profile)
     else:
         weight_identity = None
         require(file_hash(model_root / "model.safetensors", profile["files"]["model.safetensors"])["sha256"]
                 == profile["hashes"]["model.safetensors"], "MODEL_WEIGHTS_CHANGED_ON_DISK")
+    session.private_progress("verify_after", "complete")
     result = {"version": VERSION, "id": request["id"], "kind": "result", "status": "ok", "mode": request["mode"],
               "backend_versions": versions, "device": "cpu", "threads": request["threads"],
               "model": {"id": profile["id"], "revision": profile["revision"], "files": model_files},
@@ -1822,7 +1848,10 @@ def execute_private_infer(request, session, tokenizer, torch, transformers, vers
     if generation_policy is not None:
         result["generation_policy"] = generation_policy
     result.update(model_dtype_report(profile_name, model, torch))
-    return finish_result(result, output_root, session)
+    session.private_progress("result", "begin")
+    result = finish_result(result, output_root, session)
+    session.private_progress("result", "complete")
+    return result
 
 
 def finite_loss(value):
@@ -2058,8 +2087,12 @@ def save_checkpoint(model, output_root, session):
 def execute_job(request, session):
     profile_name = request.get("model_profile", DEFAULT_MODEL_PROFILE)
     profile = model_profile(profile_name)
+    session.private_progress("owner_gate", "begin")
     session.progress("preparing")
+    session.private_progress("owner_gate", "complete")
+    session.private_progress("verify_files", "begin")
     model_root, output_root, dataset, data_identity, model_files = prepare_files(request)
+    session.private_progress("verify_files", "complete")
     session.check()
     cohort = None
     if request["mode"] == "aggregate_adapter":
@@ -2072,16 +2105,20 @@ def execute_job(request, session):
                         if "adapter_root" in request and cohort is None else None)
     configure_offline()
     session.check()
+    session.private_progress("backend_import", "begin")
     torch, transformers, peft, versions = load_backend(request["threads"], session)
+    session.private_progress("backend_import", "complete")
     session.check()
     if cohort is not None:
         return execute_aggregation(request, session, torch, versions, output_root,
                                    data_identity, model_files, cohort)
+    session.private_progress("tokenizer_load", "begin")
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         str(model_root), local_files_only=True, trust_remote_code=False, use_fast=True)
     expected_pad, expected_eos = (151643, 151645) if profile_name in NATIVE_CONVERSATION_PROFILES else (2, 2)
     require(tokenizer.pad_token_id == expected_pad and tokenizer.eos_token_id == expected_eos,
             "MODEL_TOKENIZER_MISMATCH")
+    session.private_progress("tokenizer_load", "complete")
     session.check()
     if request["mode"] == "plan_document":
         plan = plan_document(tokenizer, dataset, session, profile_name)

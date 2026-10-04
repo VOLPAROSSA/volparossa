@@ -33,6 +33,15 @@ original job-log SHA-256:
 `29b0ccf0deb8272d905a4b5ce7f000901c5966af93a5e51bb6cbd0e70975c9ea`.
 This remains a failed coding trial, not proof of useful 4B inference.
 
+The follow-up candidate retains a closed, opt-in observation on failed private
+worker execution: the last entered/completed operation, spare-capacity decision,
+pressure measurements and issued/acknowledged owner controls. It exports no
+prompt, tokens, paths or request identity and does not change task deadlines,
+resource limits, model selection or admission. An entered operation is not proof
+that it completed; cleanup is still checked separately. Focused Rust supervisor
+and owner-control checks, real worker-pipe checks and the closed fixture parser
+pass. A new actual-model trial is still needed to locate the original stall.
+
 ### Owner-selected 4B native coding candidate; no new execution claim
 
 The first hosted Code trial
