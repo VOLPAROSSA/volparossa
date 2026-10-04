@@ -18,7 +18,7 @@ cache or shared training merely because they traverse VOLPAROSSA.
 
 The confirmed portfolio rule is ROIC times FCF-yield with nonnegative inputs. Portfolio
 weights do not establish prices, legal title or redemption guarantees. The Bank
-[research document](https://github.com/VOLPAROSSA/volparossa-bank/blob/feature/bank-research-foundation/docs/RESEARCH.md)
+[research document](https://github.com/VOLPAROSSA/volparossa-bank/blob/main/docs/RESEARCH.md)
 compares Interledger/Open Payments, GNU Taler and governed BFT ledger protocols,
 and records financial/legal boundaries. Protocol selection remains open; neither
 Kademlia nor signed advertisements supply financial consensus.
