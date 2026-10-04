@@ -441,6 +441,26 @@ mod tests {
         );
     }
 
+    const SUBSCRIBER_PARSER_CHECK: &str = r"
+import runpy, sys
+from pathlib import Path
+fixture = runpy.run_path(sys.argv[1])
+result = fixture['service_diagnostic'](Path(sys.argv[2]))
+generation = result['states'].pop()
+assert generation['last_phase'] == 'baseline'
+assert generation['substage'] == dict(stage='generation',state='begin',elapsed_ms=12)
+assert generation['generation'] == dict(prompt_tokens=100, threads=2, interop_threads=1,
+    cpu=dict(isa=None,avx2=None,avx512_bf16=None,amx_bf16=None,amx_tile=None,mkldnn_available=None,mkldnn_enabled=None),
+    first_forward_started_ms=20, first_forward_completed_ms=20, first_token_ms=20,
+    generated_tokens=1, complete=False, elapsed_ms=20)
+assert result == dict(version=1, truncated=False, unrecognized_record=False, states=[dict(
+    version=1,last_phase='paused',substage=dict(stage='owner_gate',state='begin',elapsed_ms=0),
+    capacity=dict(decision='pause',constraint='memory',cpu_some_avg10=None,io_some_avg10=None,memory_bytes=None),
+    controls=dict(issued=1,acknowledged=1,last_issued='pause',last_acknowledged='pause'),peak_rss_bytes=1234)], events=[dict(
+    version=1, phase='refresh', detail=dict(code='compute_private_process_children',
+    io_kind='permission_denied', exit_code=None, signal=None, stderr_class=None))])
+";
+
     #[test]
     fn actual_subscriber_output_passes_the_private_fixture_parser() {
         const CHILD: &str = "VOLPAROSSA_DIAGNOSTIC_BRIDGE_CHILD";
@@ -516,29 +536,7 @@ mod tests {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/integration/agent-private-conversation.py");
         let result = std::process::Command::new("python3")
-            .args([
-                "-B",
-                "-c",
-                r"
-import runpy, sys
-from pathlib import Path
-fixture = runpy.run_path(sys.argv[1])
-result = fixture['service_diagnostic'](Path(sys.argv[2]))
-generation = result['states'].pop()
-assert generation['last_phase'] == 'baseline'
-assert generation['substage'] == dict(stage='generation',state='begin',elapsed_ms=12)
-assert generation['generation'] == dict(prompt_tokens=100, threads=2, interop_threads=1,
-    cpu=dict(isa=None,avx2=None,avx512_bf16=None,amx_bf16=None,amx_tile=None,mkldnn_available=None,mkldnn_enabled=None),
-    first_forward_started_ms=20, first_forward_completed_ms=20, first_token_ms=20,
-    generated_tokens=1, complete=False, elapsed_ms=20)
-assert result == dict(version=1, truncated=False, unrecognized_record=False, states=[dict(
-    version=1,last_phase='paused',substage=dict(stage='owner_gate',state='begin',elapsed_ms=0),
-    capacity=dict(decision='pause',constraint='memory',cpu_some_avg10=None,io_some_avg10=None,memory_bytes=None),
-    controls=dict(issued=1,acknowledged=1,last_issued='pause',last_acknowledged='pause'),peak_rss_bytes=1234)], events=[dict(
-    version=1, phase='refresh', detail=dict(code='compute_private_process_children',
-    io_kind='permission_denied', exit_code=None, signal=None, stderr_class=None))])
-",
-            ])
+            .args(["-B", "-c", SUBSCRIBER_PARSER_CHECK])
             .arg(fixture)
             .arg(log.path())
             .output()

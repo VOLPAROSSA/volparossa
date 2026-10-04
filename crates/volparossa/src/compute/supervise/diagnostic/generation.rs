@@ -49,16 +49,21 @@ pub(super) struct Observation {
     records: u8,
 }
 
-impl Observation {
-    pub(super) fn observe(previous: Option<Self>, value: &Value, elapsed: u64) -> Result<Self> {
+impl Snapshot {
+    fn parse(value: &Value) -> Result<Self> {
         // Option fields must be explicitly null, not silently omitted.
         ensure!(
             value.as_object().is_some_and(|v| v.len() == 10)
                 && value["cpu"].as_object().is_some_and(|v| v.len() == 7),
             "compute_private_progress"
         );
-        let next: Snapshot =
-            serde_json::from_value(value.clone()).context("compute_private_progress")?;
+        serde_json::from_value(value.clone()).context("compute_private_progress")
+    }
+}
+
+impl Observation {
+    pub(super) fn observe(previous: Option<Self>, value: &Value, elapsed: u64) -> Result<Self> {
+        let next = Snapshot::parse(value)?;
         ensure!(
             elapsed < 600_000
                 && next.elapsed_ms == elapsed

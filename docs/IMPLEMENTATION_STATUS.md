@@ -388,6 +388,15 @@ the original vocabulary. Focused protocol/lifecycle, diagnostic-parser and inert
 worker tests pass. These changes are not a passed replacement model trial, a
 native editor coding loop or confidential remote execution.
 
+The first integrated source check on `a5246942`,
+[Quality run 37225595367](https://github.com/VOLPAROSSA/volparossa/actions/runs/37225595367),
+failed two strict Clippy function-length limits. The follow-up extracts the
+unchanged snapshot-shape parser and Python test script; it does not relax
+validation, assertions, budgets or evidence gates. All eight focused diagnostic
+tests pass. The original failure is retained, with job-log SHA-256
+`1ef3aca56b4052b9b56e2f9a469543e07cfdb1718d5a8706750c286f40f6d41c`.
+New hosted source checks must pass before another live model trial.
+
 The first hosted Code trial
 [`37204436941`](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37204436941)
 on core `39bfc0d14bd45563957c8a41e8183592e7ee7a73` and Code
