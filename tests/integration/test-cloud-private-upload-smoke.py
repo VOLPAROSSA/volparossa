@@ -142,7 +142,7 @@ class UploadContracts(unittest.TestCase):
         module = runpy.run_path(str(HERE / "cloud-private-upload-provision.py"))
         state = module["configured"]()
         pins = state["load_pins"]()
-        self.assertEqual(pins["revision"], "b1a425964d725472e79b6f0f05ce96e5953cadcf")
+        self.assertEqual(pins["revision"], "0d483f5c452eef2e9d1bc555a478b2bff57404c2")
         self.assertEqual(len(pins["files"]), 27)
         self.assertTrue({"src/owner-uploads.mjs", "scripts/upload_lock.py", "scripts/smoke_owner_upload_ui.py"} <= pins["files"].keys())
         self.assertEqual(pins["runtime"]["version"], "24.19.0")

@@ -357,8 +357,8 @@ feature branches are not implied to be integrated into `main`.
   Original ZIP SHA-256: `03ec315aeb2f256db49e53176853a51159c6a5a2a5747eb595872260e9d785c5`;
   original job `111442430475` log SHA-256:
   `be006200a4b6b2be6b3509fd33589aaeebe6c248c9446f3db8057b82404fde66`.
-  The new candidate pins Cloud `b1a425964d725472e79b6f0f05ce96e5953cadcf`
-  and aligns only that fixture condition with the pinned native
+  The fixture revision pinned Cloud `b1a425964d725472e79b6f0f05ce96e5953cadcf`
+  and aligned only that fixture condition with the pinned native
   Uppy fetcher's existing three retries: at most four completed PUTs, exactly one
   final 201, and only status 0 or non-2xx responses before it. A bounded, validated
   status sequence accompanies success; other 2xx, duplicate creation, missing
@@ -366,6 +366,29 @@ feature branches are not implied to be integrated into `main`.
   single logical object, retained manifests/leases, fourteen physical copies,
   actual provider charges, restart/download, retirement and cleanup gates remain
   mandatory. These parser/observer checks do not reclassify either original failure.
+  Its exact-source [run `37206160237`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37206160237)
+  on `e1cb044c7086f97c2a25991a22ac2ae2f7aeef22` remains **failed**. Route selection
+  reaches `CONNECTED` after 59 attempts and 58 retries. The UI observes two completed
+  PUTs with statuses `[0, 201]`, accepts the bounded receipt and sets
+  `upload_201_observed=true`, then reports `condition_timeout` waiting for the live
+  listing (`uploaded_file_listed=false`) at `original_ui_upload`/`upload_commit`.
+  Status 0 does not identify the first transport failure. Independent object/charge
+  checks and restarted downloads were not reached. All private cleanup flags pass;
+  final cleanup has zero owned objects and matching guest-root network hashes
+  `b3f416680272675689a31bd7f6d2bd6c21b1ca614e5fa8393966048b6c51eb7f`.
+  Original ZIP SHA-256: `f3501056fbe9323314d34ba1bfee24ab4682f62c193de40684e19831b00b922c`;
+  original job `111447666985` log SHA-256:
+  `d0e0ecd7b88fafacf0897023ded71b01705f7ecf572d3a29c210bca711a81708`.
+  Pinned original Files awaits Graph `getDrive` before DAV listing refresh. Its
+  generated SDK requests `/graph/v1.0/drives/{id}`, but the adapter only accepted
+  `v1beta1`. A real HTTP/pinned-SDK reproduction confirms this 404; the original
+  browser's Graph response was not retained, so it is not retroactively asserted.
+  The new pin `0d483f5c452eef2e9d1bc555a478b2bff57404c2` aliases only that
+  authenticated v1.0 drive read to the same exact owner-selected root; no v1.0
+  accounts, collections, permissions or writes are added. Actual SDK
+  upload/Graph refresh/listing/read passes against
+  a synthetic storage contract, not real peer recovery. UI criteria, native retries,
+  deadlines, resource budgets and historical read-only pins remain unchanged.
   The candidate keeps the
   preceding read-only proof/pins unchanged and requires an original Files/Uppy
   upload of 262,145 synthetic bytes, actual owner GPG encryption, three 128-KiB

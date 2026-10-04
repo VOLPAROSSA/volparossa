@@ -1,7 +1,7 @@
 {
   "version": 1,
   "repository": "https://github.com/VOLPAROSSA/volparossa-cloud",
-  "revision": "b1a425964d725472e79b6f0f05ce96e5953cadcf",
+  "revision": "0d483f5c452eef2e9d1bc555a478b2bff57404c2",
   "files": {
     "LICENSE": {
       "bytes": 35149,
@@ -84,8 +84,8 @@
       "sha256": "975dd651540b2bacee1193036b2639e9b078f1299dbf453991caee42732dfd65"
     },
     "src/recovery-web-metadata.mjs": {
-      "bytes": 6269,
-      "sha256": "50af3afa2a96b6dc28a1899796ce02444585db70e0874028ed342a5187a9ad48"
+      "bytes": 6565,
+      "sha256": "5a350701d31fc1add78bc0abbd44831157539a53b878041cd66f6d4626345f56"
     },
     "third_party/opencloud-web-sdk.json": {
       "bytes": 837,
