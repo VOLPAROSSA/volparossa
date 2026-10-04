@@ -32,6 +32,7 @@ SCOPE_FALSE = ('independent_failure_domains_proven', 'network_contribution_credi
 STAGE = 'not_started'
 TURN_DIAGNOSTIC = None
 RETIREMENT_DIAGNOSTIC = None
+RETIREMENT_TURNS = []
 SAMPLER_DIAGNOSTIC = {}
 FAILURE_CODES = {
     'maintenance checkpoint scope': 'checkpoint_scope',
@@ -91,10 +92,39 @@ def retirement_counts(value, turn):
         retained_copy_records=bounded_count(value.get('retained_copy_records'), 12))
 
 
+def retirement_turn(value, turn):
+    """Project existing owner checkpoint fields, never the private checkpoint itself."""
+    if type(turn) is not int or not 1 <= turn <= 4 or len(RETIREMENT_TURNS) >= 4:
+        return
+    value = value if isinstance(value, dict) else {}
+    detail = value.get('detail')
+    detail = detail if isinstance(detail, dict) else {}
+    refresh = detail.get('refresh')
+    refresh = refresh if isinstance(refresh, dict) else {}
+    stage = detail.get('repair_stage')
+    maintenance = detail.get('maintenance_stage')
+    RETIREMENT_TURNS.append(dict(turn=turn, cursor=bounded_count(value.get('turns'), 32),
+        maintenance_stage=maintenance if maintenance in (
+            'observed', 'maintained', 'charge_limit', 'grant_refresh_required') else None,
+        repair_stage=stage if stage in ('complete', 'repair_pending', 'pass_limit',
+            'pending_grant_unavailable', 'no_eligible_candidate', 'pending_handoff',
+            'retirement_pending') else None,
+        attempted_handoffs=bounded_count(detail.get('attempted_handoffs'), 1),
+        freshly_verified_replacements=bounded_count(detail.get('freshly_verified_replacements'), 1),
+        pending_retirements=bounded_count(detail.get('pending_retirements'), 4),
+        physical_payload_charge_upper_bound=bounded_count(
+            detail.get('physical_payload_charge_upper_bound'), MAX_CHARGE),
+        refresh=dict(fragment_index=bounded_count(refresh.get('fragment_index'), len(LENGTHS) - 1),
+            renewal=refresh.get('renewal') if type(refresh.get('renewal')) is bool else None,
+            operation_complete=refresh.get('operation_complete')
+                if type(refresh.get('operation_complete')) is bool else None)))
+
+
 def failure_receipt(error):
     return dict(version=1, success=False, kind='private-storage-maintenance-failure', stage=STAGE,
         code='sampler_failure' if isinstance(error, SAMPLER['SamplerFailure']) else failure_code(error),
         turn=TURN_DIAGNOSTIC, retirement=RETIREMENT_DIAGNOSTIC,
+        retirement_turns=RETIREMENT_TURNS,
         sampler=SAMPLER_DIAGNOSTIC or None)
 
 
@@ -377,8 +407,9 @@ def validate_retirement_progress(before, value, detail):
 
 
 def finish(root, binary, client, keys):
-    global STAGE
+    global STAGE, RETIREMENT_TURNS
     STAGE = 'retirement'
+    RETIREMENT_TURNS = []
     turns = 0
     before = status(root, binary, client)
     retirement_counts(before, 0)
@@ -390,6 +421,7 @@ def finish(root, binary, client, keys):
     for _ in range(4):
         turn = run_turn(root, binary, client, keys[1])
         turns += 1
+        retirement_turn(turn, turns)
         value = status(root, binary, client)
         retirement_counts(value, turns)
         validate_retirement_progress(before, value, turn['detail'])

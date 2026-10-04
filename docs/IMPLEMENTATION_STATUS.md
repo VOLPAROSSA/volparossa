@@ -334,6 +334,12 @@ feature branches are not implied to be integrated into `main`.
   No retry, product change or relaxed limit is part of this result. A complete
   context-bound finish, actual provider-store zero-lease accounting and cleanup
   must still pass together on one exact source revision.
+  The next fixture-only candidate projects the already returned repair stage,
+  attempt/readback counts, charge and refresh result for at most four retirement
+  turns. A separate closed first-mismatch code distinguishes the sampler's existing
+  route comparisons without exporting identities or accepting additional states,
+  paths or contexts. Twelve maintenance and fifteen sampler checks pass; these are
+  diagnostic contracts, not a proven cause, product fix or new live result.
   See [private storage maintenance](services/PRIVATE_STORAGE.md#explicit-owner-private-background-maintenance).
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):

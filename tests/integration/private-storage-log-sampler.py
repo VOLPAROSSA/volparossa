@@ -22,6 +22,18 @@ class SamplerFailure(ValueError):
     """Only a fixed observation stage/code; never raw CLI errors or route data."""
 
 
+class RouteMismatch(ValueError):
+    """Closed first failed comparison, without route tokens or peer identities."""
+    def __init__(self, code):
+        super().__init__('private storage route comparison failed')
+        self.code = code
+
+
+def route_require(condition, code):
+    if not condition:
+        raise RouteMismatch(code)
+
+
 def context_id(value):
     require(isinstance(value, str) and re.fullmatch('[0-9a-f]{32}', value) and value != '0' * 32)
     return value
@@ -56,18 +68,26 @@ def validate_route_scope(scope):
 
 
 def selected_context(raw, scope):
-    require(isinstance(raw, bytes) and len(raw) <= 65536)
+    route_require(isinstance(raw, bytes) and len(raw) <= 65536, 'reply_bound')
     if not raw.strip():
         return None  # A retirement gap authorizes/counts no context.
     paths, contexts = [], set()
     for line in raw.splitlines():
         match = re.fullmatch(rb'context=([0-9a-f]{32}) path=([1-8]) relay=([A-Za-z0-9_-]{1,128}) '
-            rb'exit=([A-Za-z0-9_-]{1,128}) state=([1-4]) rtt_us=[0-9]+ bytes=[0-9]+(?: acked_transport_bytes=[0-9]+)?', line)
-        require(match is not None)
+            rb'exit=([A-Za-z0-9_-]{1,128}) state=([0-9]+) rtt_us=[0-9]+ bytes=[0-9]+(?: acked_transport_bytes=[0-9]+)?', line)
+        route_require(match is not None, 'line_format')
+        # The acceptance set is unchanged: recognize other numeric state tokens
+        # only to identify the failed check, never to accept additional states.
+        route_require(match[5] in (b'1', b'2', b'3', b'4'), 'path_state')
+        route_require(match[1] != b'0' * 32, 'zero_context')
         contexts.add(context_id(match[1].decode()))
-        require(match[4].decode() == scope['exit_peer_id'])
+        route_require(match[4].decode() == scope['exit_peer_id'], 'exit_changed')
         paths.append(dict(path_id=int(match[2]), relay_peer_id=match[3].decode()))
-    require(len(contexts) == 1 and sorted(paths, key=lambda p: p['path_id']) == scope['paths'])
+    route_require(len(contexts) == 1, 'context_count')
+    ordered = sorted(paths, key=lambda p: p['path_id'])
+    route_require(len(ordered) == len(scope['paths']), 'path_count')
+    route_require([p['path_id'] for p in ordered] == [p['path_id'] for p in scope['paths']], 'path_ids_changed')
+    route_require(ordered == scope['paths'], 'relays_changed')
     return contexts.pop()
 
 
@@ -106,7 +126,7 @@ class Coverage:
         self.current_context = context
         if context is not None:
             self.observed_contexts.add(context)
-            require(len(self.observed_contexts) <= MAX_CONTEXTS)
+            route_require(len(self.observed_contexts) <= MAX_CONTEXTS, 'context_limit')
 
     def add(self, raw):
         current = records(raw)
@@ -223,10 +243,12 @@ def capture(binary, socket, baseline, minimum, *, client=None, scope=None, diagn
     stopped = threading.Event()
     failures = []
 
-    def failed(phase, operation, code):
+    def failed(phase, operation, code, route_mismatch=None):
         if diagnostic is not None and not diagnostic:
             diagnostic.update(phase=phase, operation=operation, code=code,
                 samples=coverage.samples, completed=coverage.completed, failed=coverage.failed)
+            if route_mismatch is not None:
+                diagnostic['route_mismatch'] = route_mismatch
         return SamplerFailure('private storage sampler failed')
 
     def sample(timeout=3, phase='initial'):
@@ -251,7 +273,8 @@ def capture(binary, socket, baseline, minimum, *, client=None, scope=None, diagn
             code = ('timeout' if isinstance(error, subprocess.TimeoutExpired) else
                     'process' if isinstance(error, subprocess.SubprocessError) else
                     'local_io' if isinstance(error, OSError) else 'invalid')
-            raise failed(phase, operation, code) from None
+            raise failed(phase, operation, code,
+                error.code if isinstance(error, RouteMismatch) else None) from None
 
     sample()  # Establish coverage before starting any owner operation.
 

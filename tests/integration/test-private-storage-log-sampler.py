@@ -33,6 +33,55 @@ def selected(context):
 
 
 class CoveredExitLogs(unittest.TestCase):
+    def test_first_route_mismatch_is_closed_and_preserves_acceptance_bounds(self):
+        a, b = 'a' * 32, 'b' * 32
+        original = paths(a)
+        cases = (
+            (None, 'reply_bound'), (b'x' * 65537, 'reply_bound'),
+            (b'SECRET_PRIVATE_RAW', 'line_format'),
+            (original.replace(b'state=1', b'state=5'), 'path_state'),
+            (paths('0' * 32), 'zero_context'),
+            (original.replace(b'exit=exit', b'exit=SECRET_EXIT'), 'exit_changed'),
+            (original.splitlines(keepends=True)[0] + paths(b).splitlines(keepends=True)[1], 'context_count'),
+            (original.splitlines(keepends=True)[0], 'path_count'),
+            (original.replace(b'path=1', b'path=3'), 'path_ids_changed'),
+            (original.replace(b'relay=one', b'relay=SECRET_RELAY'), 'relays_changed'),
+            (original.replace(b'state=1', b'state=5').replace(b'exit=exit', b'exit=SECRET_EXIT'), 'path_state'),
+        )
+        for raw, code in cases:
+            with self.subTest(code=code):
+                with self.assertRaises(S['RouteMismatch']) as failure:
+                    S['selected_context'](raw, SCOPE)
+                self.assertEqual(failure.exception.code, code)
+                self.assertNotIn('SECRET', str(failure.exception))
+        for state in (b'0', b'5', b'6', b'01', b'99'):
+            with self.assertRaises(S['RouteMismatch']) as failure:
+                S['selected_context'](original.replace(b'state=1', b'state=' + state), SCOPE)
+            self.assertEqual(failure.exception.code, 'path_state')
+        for state in (b'1', b'2', b'3', b'4'):
+            self.assertEqual(S['selected_context'](original.replace(b'state=1', b'state=' + state), SCOPE), a)
+        self.assertIsNone(S['selected_context'](b'\n', SCOPE))
+        coverage = S['Coverage'](10, SCOPE)
+        for index in range(1, 9):
+            coverage.route(paths(f'{index:032x}'))
+        with self.assertRaises(S['RouteMismatch']) as failure:
+            coverage.route(paths('9' * 32))
+        self.assertEqual(failure.exception.code, 'context_limit')
+
+    def test_primary_owner_failure_keeps_separate_first_route_mismatch(self):
+        diagnostic = {}
+        primary = ValueError('synthetic primary owner failure')
+        replies = [paths('a' * 32), event(9), paths('b' * 32).replace(b'relay=one', b'relay=SECRET_RELAY')]
+        with patch.object(S['subprocess'], 'run', side_effect=[SimpleNamespace(stdout=row) for row in replies]):
+            with self.assertRaises(ValueError) as failure:
+                with S['capture']('/synthetic/cli', '/synthetic/exit', 10, 1,
+                        client='/synthetic/client', scope=SCOPE, diagnostic=diagnostic):
+                    raise primary
+        self.assertIs(failure.exception, primary)
+        self.assertEqual(diagnostic, dict(phase='final_drain', operation='route_scope',
+            code='invalid', route_mismatch='relays_changed', samples=1, completed=0, failed=0))
+        self.assertNotIn('SECRET', repr(diagnostic))
+
     def test_sampler_finally_preserves_owner_error_and_separately_records_observation_failure(self):
         diagnostic = {}
         primary = ValueError('synthetic primary owner failure')

@@ -68,6 +68,64 @@ def report(value):
 
 
 class MaintenanceEvidence(unittest.TestCase):
+    def test_retirement_projects_only_existing_bounded_checkpoint_fields(self):
+        namespace = CHECK['retirement_turn'].__globals__
+        with patch.dict(namespace, RETIREMENT_TURNS=[]):
+            invalid = dict(turns=True, detail=dict(maintenance_stage='SECRET_PRIVATE',
+                repair_stage={'SECRET_KEY': 'SECRET_VALUE'}, attempted_handoffs=True,
+                freshly_verified_replacements=2, pending_retirements=-1,
+                physical_payload_charge_upper_bound=CHECK['MAX_CHARGE'] + 1,
+                refresh=dict(fragment_index=len(CHECK['LENGTHS']), renewal='SECRET',
+                    operation_complete=1), extra='SECRET_STDERR'))
+            CHECK['retirement_turn'](invalid, 1)
+            CHECK['retirement_turn'](dict(turns=8, detail=dict(maintenance_stage='observed',
+                refresh=dict(fragment_index=3, renewal=False, operation_complete=True))), 2)
+            CHECK['retirement_turn'](None, 3)
+            CHECK['retirement_turn'](dict(detail='SECRET'), 4)
+            for turn in (5, True, -1, 1):
+                CHECK['retirement_turn'](invalid, turn)
+            result = CHECK['failure_receipt'](ValueError('source retirement unconfirmed'))
+            self.assertEqual(len(result['retirement_turns']), 4)
+            first, observed = result['retirement_turns'][:2]
+            self.assertEqual(first['turn'], 1)
+            self.assertTrue(all(value is None for key, value in first.items() if key not in ('turn', 'refresh')))
+            self.assertTrue(all(value is None for value in first['refresh'].values()))
+            self.assertEqual(observed['maintenance_stage'], 'observed')
+            self.assertIsNone(observed['repair_stage'])
+            self.assertIsNone(observed['attempted_handoffs'])
+            self.assertEqual(observed['refresh'], dict(fragment_index=3, renewal=False, operation_complete=True))
+            self.assertNotIn('SECRET', json.dumps(result))
+
+    def test_four_pending_retirement_turns_fail_with_each_existing_repair_receipt(self):
+        namespace = CHECK['finish'].__globals__
+        before = dict(placement_authorizations=3, retained_copy_records=11, pending_retirements=3)
+        turns = [dict(turns=7 + index, stage='turn_completed', detail=dict(
+            maintenance_stage='maintained', repair_stage='pass_limit' if index == 0 else 'pending_handoff',
+            attempted_handoffs=1, freshly_verified_replacements=1 if index == 0 else 0,
+            pending_retirements=2, physical_payload_charge_upper_bound=CHECK['MAX_CHARGE'],
+            refresh=dict(fragment_index=(6 + index) % 4, renewal=True, operation_complete=index == 0)))
+            for index in range(4)]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'fragment-set').mkdir(mode=0o700)
+            CHECK['create'](root / 'fragment-set/placement-authorizations.json', b'synthetic signed placements')
+            owner, status, invoke = Mock(side_effect=turns), Mock(side_effect=[before] +
+                [dict(before, pending_retirements=2)] * 4), Mock()
+            with patch.dict(namespace, run_turn=owner, status=status, invoke=invoke,
+                    RETIREMENT_TURNS=[], SAMPLER_DIAGNOSTIC={}):
+                with self.assertRaisesRegex(ValueError, 'source retirement unconfirmed') as failure:
+                    CHECK['finish'](root, '/synthetic/cli', '/synthetic/socket', ['a', 'b', 'c'])
+                result = CHECK['failure_receipt'](failure.exception)
+                self.assertEqual(result['code'], 'retirement_pending_or_charge')
+                self.assertEqual(owner.call_count, 4)
+                self.assertEqual(status.call_count, 5)
+                invoke.assert_not_called()  # No deletion before confirmed retirement.
+                self.assertEqual([v['cursor'] for v in result['retirement_turns']], [7, 8, 9, 10])
+                self.assertEqual([v['repair_stage'] for v in result['retirement_turns']],
+                    ['pass_limit', 'pending_handoff', 'pending_handoff', 'pending_handoff'])
+                self.assertEqual([v['freshly_verified_replacements'] for v in result['retirement_turns']], [1, 0, 0, 0])
+                self.assertEqual(result['retirement']['pending_retirements'], 2)
+
     def test_failure_diagnostics_are_closed_and_bound_private_checkpoint_fields(self):
         namespace = CHECK['failure_receipt'].__globals__
         with patch.dict(namespace, TURN_DIAGNOSTIC={}, RETIREMENT_DIAGNOSTIC=None, SAMPLER_DIAGNOSTIC={}):
