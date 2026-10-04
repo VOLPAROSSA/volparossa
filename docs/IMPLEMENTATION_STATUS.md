@@ -321,6 +321,255 @@ feature branches are not implied to be integrated into `main`.
   This proves selected owner-local read-only recovery through the original UI, not
   ordinary OpenCloud account/ACL recovery, writes, sharing, synchronization or
   general server-independent OpenCloud availability.
+- [x] Original owner-private upload and restarted peer recovery now **pass** in
+  [run `37218270756`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37218270756),
+  attempt 1 / job `111483163553`, on core
+  `929c2ff909f4e9704046459e0434006397dc9110` and exact Cloud
+  `ffdcfaa15cdd2a029dae545904b0a58603da4e17`. The original Files/Uppy input uploads
+  262,145 plaintext bytes with one PUT/creation/201, privately encrypted into
+  266,429 bytes across four fragments and eight copies. The source and both local
+  ciphertexts are removed. With provider A stopped, a fresh service/browser
+  performs two baseline restores and two original UI downloads with exact hashes;
+  A supplies no restore payload. Actual stopped-provider store inspection retains
+  2,131,150 charged payload bytes across sixteen baseline/upload copies through
+  nonconsuming reads. Idempotent retirement then leaves all three stores with zero
+  reservations, committed bytes and leases. Incremental overlapping observations
+  verify 88/32/32 completed protected exchanges for upload/restore/finish, with no
+  failed flows or gaps; the upload's final ring alone no longer covers its baseline
+  and is not treated as cumulative evidence. All privacy captures, joined
+  service/browser/private cleanup and zero remaining owned objects pass.
+  Guest-root network snapshots are byte-identical, SHA-256
+  `da3d0280e780e4e5523430ea50e3823d2c79e018aa41b15ccf452f573e89c594`;
+  this is not separate outer-host proof. Exact-source replay reconstructs both
+  aggregates from the 45 original artifacts. Original ZIP SHA-256
+  `0f4da4f71ed7c0ddbf58668c6982f2a0d6e1d510789c21e8293b815c8474e11c`;
+  original job-log SHA-256
+  `ba1108cc84edaff8d01b322b231064c3995c1d9d83ee838823e7b7c90a265209`.
+  This proves the explicit owner-private new-file space, not ordinary OpenCloud
+  accounts/ACL recovery, sharing, writable synchronization, second-device owner
+  recovery or general server-independent availability. Historical failures below
+  remain failed; the original read-only scenario/pins remain unchanged.
+  The separate `cloud-private-upload` acceptance sibling was initially prepared against
+  Cloud `3e3d6587012ed46d200218e4447506300f8a4f18`. Its first exact-source
+  [run `37070505538`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37070505538)
+  on core `4950e1013e074cad60ec3c0ff9cb89dcdd1a4854` failed **before VM startup**:
+  the shared public-training self-test expected two historical README sentences
+  that the documentation rewrite had removed. No upload, model or network trial
+  ran; this is not a Cloud runtime result. Original job `111048578923` log SHA-256:
+  `0e7f67a3009510fca28ecb31a5069f927ba8ab40decf9052de4eeea493d30b0e`.
+  After the fixture-source correction, [run `37072452868`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37072452868)
+  on `3b80003d3ca890abe7a07a1413c4e747ab043cc8` passed preflight but failed during
+  guest UI provisioning: Cloud's patch applied, but its bytes did not equal the
+  builder's required canonical `git diff --binary HEAD`. No UI build, topology,
+  upload or recovery proof completed. The five retained artifacts report cleanup
+  and unchanged host state as **unverified**, not passed. Original ZIP SHA-256:
+  `d925f19d5710aa3e44f26ba08d94dfde2719131c2e0e8bfbe45178a81e98fd2c`;
+  original job-log SHA-256:
+  `7298f3bff7f0a1bceddc5b972e3e6ef7ad5a71eb39b25ed812550aa3db5c7eeb`.
+  That failed run used Cloud `311f6070dc8950a75133567a9eff724e975593b6`.
+  The new pin canonicalizes patch metadata, order and empty context prefixes;
+  all eight resulting upstream files remain byte-identical. Two local tests
+  exercise the unchanged actual builder guard: the canonical patch passes and
+  an applicable noncanonical patch is rejected. This fixes source admission,
+  not proof of the still-uncompleted upload/recovery trial.
+  The subsequent exact-source [run `37074744602`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37074744602)
+  on `0a47980d39b719c24cf702e9f32c0c924c4fce42` passed the original Web-UI
+  build/provisioning but stopped at `FRAGMENTS_ROUTE_UNAVAILABLE` before providers,
+  baseline import or native upload started. There were 24 connect attempts and 23
+  retries; only the last code, `NO_ELIGIBLE_PATHS`, was retained. Private cleanup
+  passed with zero owned objects and identical disposable guest-root network
+  snapshots; there is no separate outer-host proof. ZIP SHA-256:
+  `fd9dc5aef44052eca09c59e3f55caaa850ddf2eb6278c6dc3c3c90aa4e6a6dfa`;
+  original job-log SHA-256:
+  `c57ecadc947baf7e9eda0f2833cc60766d99d2a2dc0a129a31f4b41a39b5c4a5`.
+  The exact preselection rejection is not known; no new Cloud attempt is inferred
+  from this result.
+  The next exact-source [run `37202264396`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37202264396)
+  on `d7ca3d88a350e8a0c83852131d07ffbbec79126e` reaches a connected route after
+  27 attempts and 26 retries (`CONNECTED`), but remains **failed** at
+  `original_ui_upload`, UI stage `upload_commit`, with `FRAGMENTS_UPLOAD_FAILED`.
+  The retained parent report does not identify the underlying UI/transport cause;
+  it proves neither a successful original upload nor subsequent recovery. Final
+  private cleanup reports zero owned objects, and guest-root network snapshot
+  hashes match at `364f454db76523ac5d22042795efd1581e1c47de46549d74d885cfcfe20a84cf`;
+  this is not an outer-host unchanged claim. Original artifact ZIP SHA-256:
+  `a5d061cebc974258e0555aed954f675dc632196eb356ea89128ac29d736e5c99`;
+  original job `111436210673` log SHA-256:
+  `d3e00e77b95e6dfd9f800d66c471a684b45a972c094e096240ee6484f6f515c9`.
+  The diagnostic pinned Cloud `32836543d950081a2b1505ebde117d8f9db35b82` and
+  retained only a closed UI failure class, bounded upload counters
+  and five explicit progress/cleanup booleans. Invalid or missing observations
+  remain unknown; URLs, tokens, paths, payloads and raw exceptions are not exported.
+  This diagnostic does not reinterpret the failed run or relax upload, recovery,
+  resource, timeout or cleanup requirements.
+  The subsequent exact-source [run `37204384631`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37204384631)
+  on `e57102a26c4a1d0bbda8062459f6f31f6b2b2a9c` reaches a route after 23 attempts
+  and 22 retries, but remains **failed** at `original_ui_upload`/`upload_commit`.
+  Its closed observation has two completed PUTs, exactly one creation and final
+  HTTP 201; `boundary_failed` occurs before the upload-201/listing flags. The
+  fixture's single-PUT guard rejected the two observed attempts. The first HTTP
+  status and initial failure cause were not retained. This is not proof of the
+  independent object/charge checks or later recovery. Browser/profile cleanup
+  and final guest cleanup pass with zero owned objects and matching guest-root
+  network hashes `ab634960a3e4e7d4db46208d26ae9fa79a8c45d656b5343fe93ccf5583385522`.
+  Original ZIP SHA-256: `03ec315aeb2f256db49e53176853a51159c6a5a2a5747eb595872260e9d785c5`;
+  original job `111442430475` log SHA-256:
+  `be006200a4b6b2be6b3509fd33589aaeebe6c248c9446f3db8057b82404fde66`.
+  The fixture revision pinned Cloud `b1a425964d725472e79b6f0f05ce96e5953cadcf`
+  and aligned only that fixture condition with the pinned native
+  Uppy fetcher's existing three retries: at most four completed PUTs, exactly one
+  final 201, and only status 0 or non-2xx responses before it. A bounded, validated
+  status sequence accompanies success; other 2xx, duplicate creation, missing
+  completion or overflow rejects. No retries or runtime budgets are added. The
+  single logical object, retained manifests/leases, fourteen physical copies,
+  actual provider charges, restart/download, retirement and cleanup gates remain
+  mandatory. These parser/observer checks do not reclassify either original failure.
+  Its exact-source [run `37206160237`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37206160237)
+  on `e1cb044c7086f97c2a25991a22ac2ae2f7aeef22` remains **failed**. Route selection
+  reaches `CONNECTED` after 59 attempts and 58 retries. The UI observes two completed
+  PUTs with statuses `[0, 201]`, accepts the bounded receipt and sets
+  `upload_201_observed=true`, then reports `condition_timeout` waiting for the live
+  listing (`uploaded_file_listed=false`) at `original_ui_upload`/`upload_commit`.
+  Status 0 does not identify the first transport failure. Independent object/charge
+  checks and restarted downloads were not reached. All private cleanup flags pass;
+  final cleanup has zero owned objects and matching guest-root network hashes
+  `b3f416680272675689a31bd7f6d2bd6c21b1ca614e5fa8393966048b6c51eb7f`.
+  Original ZIP SHA-256: `f3501056fbe9323314d34ba1bfee24ab4682f62c193de40684e19831b00b922c`;
+  original job `111447666985` log SHA-256:
+  `d0e0ecd7b88fafacf0897023ded71b01705f7ecf572d3a29c210bca711a81708`.
+  Pinned original Files awaits Graph `getDrive` before DAV listing refresh. Its
+  generated SDK requests `/graph/v1.0/drives/{id}`, but the adapter only accepted
+  `v1beta1`. A real HTTP/pinned-SDK reproduction confirms this 404; the original
+  browser's Graph response was not retained, so it is not retroactively asserted.
+  Cloud `0d483f5c452eef2e9d1bc555a478b2bff57404c2` aliases only that
+  authenticated v1.0 drive read to the same exact owner-selected root; no v1.0
+  accounts, collections, permissions or writes are added. Actual SDK
+  upload/Graph refresh/listing/read passes against
+  a synthetic storage contract, not real peer recovery. UI criteria, native retries,
+  deadlines, resource budgets and historical read-only pins remain unchanged.
+  Its exact-source [run `37207919255`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37207919255)
+  on `21f5cfc78f3266249fe10544c384371596ef7c13` remains **failed**. Selection
+  reaches `CONNECTED` after 16 attempts and 15 retries; the parent retains
+  `original_ui_upload`, UI stage `cleanup` and no closed UI-failure record.
+  The pinned child sets that stage only after its success/browser/profile-cleanup
+  path, but the full UI receipt and exact subsequent parent failure were not
+  retained. This does not establish independent object/charge checks or recovery.
+  All private cleanup flags pass; final cleanup has zero owned objects and equal
+  guest-root network hashes `c27ed94d831d21b4d47a1aff168f9b9a22d9a153e586ff1c024d56367361be97`.
+  Original ZIP SHA-256: `9995515c4b1120b30b3dd2bc2317ecb6c6018b76c58c97b848cb8728d8d3da49`;
+  original job `111452913742` log SHA-256:
+  `e69ac4cc153cdf2a379c63968c3bd0ba832fab63e441e7d2267a509ff820e403`.
+  A real Node-owner/Python-lock process-group regression then reproduces premature
+  lock termination on group SIGTERM: the owner cannot acknowledge clean shutdown.
+  Cloud candidate `ffdcfaa15cdd2a029dae545904b0a58603da4e17` retains the
+  supervised lock through SIGTERM/SIGINT/SIGHUP until
+  the owner's pipe closes; lock contention before EOF and release afterward are
+  checked, while SIGKILL remains a failed acknowledgement. The original run's
+  exact cleanup result was not retained, so this cause is not retroactively claimed.
+  The parent now selects a closed phase for UI execution/contract, service shutdown
+  and staging cleanup, plus fixed post-UI object/cipher/identity/status stages;
+  unknown values never expose raw errors. Original success, cleanup, resource and
+  deadline gates are unchanged. Focused process/contract checks are not a live
+  UI/peer-storage pass.
+  The original [run `37210057593`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37210057593)
+  on `17e1bf3aa4cf4528dfcc8405db7e6e2c8b5cdfe4` remains **failed** before
+  storage preparation: 24 Connect attempts / 23 transient retries end in
+  `NO_ELIGIBLE_PATHS`, with no path polls, owner encryption or UI execution.
+  Cleanup is complete with zero owned objects and unchanged guest-root network
+  state. ZIP SHA-256 `21fd3819a2e9e4080390fc515c70a42c72e7d5fd67ad6ef1101aa923c73e4519`;
+  original job `111459244322` log SHA-256
+  `7799de27d7a9d7374d3cfcf742cdbbd3d4f336c545b371b15589954933a97236`.
+  The original archive cannot distinguish missing eligible exits from insufficient
+  diverse relays. The initial readiness candidate waits up to the existing 60-second
+  fixture inventory budget for the exact six relay / two exit advertisements,
+  retaining closed query outcomes and role-presence booleans. It also summarizes
+  the existing cleanup log's fixed sampler reasons without exporting raw records.
+  Inventory presence is not usable-route proof; this is not a demonstrated cause
+  or fix of the original failure. Connect refusal/retry policy, application success
+  criteria, worker budgets and cleanup gates remain unchanged.
+  Its original [run `37212170649`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37212170649)
+  on `90ef58bbf001e001057f80f4260a81be1dbfc4d3` remains **failed** before
+  Connect: all 547 inventory replies within 60 seconds are valid, with no query
+  timeouts or nonzero exits. Both exit advertisements and relay0/1/2 are present;
+  relay3/4/5 are absent. This matches the fixture's existing, intentional
+  `content-custody` client-control filter, which blocks UDP 41000 on cr3/cr4/cr5
+  before agents start. Requiring those concealed custody advertisements was an
+  incorrect pre-Connect fixture barrier, not evidence of a failed storage transfer.
+  The corrected Cloud-only barrier requires exact relay0/1/2 and both exits while
+  validating the full fixture identity map. It does not open the custody links,
+  change production selection or reduce required paths. Missing any required route
+  identity still refuses at the original deadline, even if custody peers appear.
+  The ordinary cooperative-browser inventory predicate is unchanged. Focused
+  parser/topology regressions are not a new live route or upload success.
+  Original cleanup is complete, with zero owned objects, all private-removal flags
+  true and equal guest-root network hashes
+  `c2da467502f0874410128f2dac3d38f70cd630bcc7bd1d442d21a474b8523d34`.
+  Original ZIP SHA-256 `7607c546ff4efc38150a5cf1f31beddf745f7e39272627aa18090d39d75584a3`;
+  job `111465403193` log SHA-256
+  `fee1fa885d762e4332677d0998bd27303210cc877f6479ebb8c890834b9d204f`.
+  The next original [run `37214237542`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37214237542)
+  on `b837194e859873e8c59f27fe6d62d326d8a48fba` remains **failed**, now at
+  `upload_status` / `FRAGMENTS_UPLOAD_FAILED`. The route-inventory barrier passes
+  after 215 valid queries; Connect selects a route on its first attempt without
+  retries. The closed parent record has UI stage `cleanup`, parent stage `complete`
+  and no UI failure. In this exact driver, reaching `upload_status` follows its
+  original Files/Uppy UI success checks, joined service shutdown, uploaded-object
+  receipt, ciphertext hash and retained-identity capture. The full UI receipt,
+  actual upload ciphertext length and failing status assertion were not retained;
+  exact charge validation, source removal and restarted recovery remain unproved.
+  Cleanup is complete with zero owned objects, all eight private-removal flags
+  true and matching guest-root network hashes
+  `706638df66225b06c08ce0109d8a5e3f9e5ec076f30d94aec2111bdb71443155`.
+  Original ZIP SHA-256 `cf3839504ff72b0b6a83b70453a34a52d31adfe2eae6f73c6e9011d160d53ddb`;
+  job `111471394933` log SHA-256
+  `93d7f2f8c514c30e9de1d0970859fb1a69c94c27e12979b3b105b24349db345d`.
+  A focused reproduction establishes a fixture contract mismatch: production uses
+  `min(fragment_bytes, ciphertext_bytes / provider_count)` with integer division,
+  not three fixed 128-KiB pieces. For three providers this upload can have three
+  equal pieces or a fourth short remainder. The candidate derives every range,
+  retained identity, physical charge, lease count, uncertain copy, survivor byte
+  and final retirement count from that unchanged production geometry. It retains
+  the original minimum flow gate and additionally requires the exact derived
+  reconstruction minimum. Closed failure categories distinguish geometry,
+  accounting, identity and CLI failures without private status/error export.
+  Targeted parser tests fail before and pass after the correction; they are not
+  a new live upload/recovery pass or proof of the original failing assertion.
+  Original [run `37216378788`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37216378788)
+  on `f4bb38d2dc31310a3857e3d6a8a2419473fae4a5` remains **failed** at
+  `FRAGMENTS_EXIT_LOG_WINDOW_TRUNCATED`. Its retained upload receipt now proves
+  the original Files/Uppy upload and 201 response, 266,429 encrypted bytes,
+  four uploaded fragments/eight copies, exact receipt-based provider charges
+  of 177,620 / 177,620 / 177,618 bytes, retained identities, both local ciphertexts
+  removed and joined source/service/browser cleanup. Provider-store inspection,
+  withdrawal, restarted recovery and final retirement were not reached.
+  The Exit ring contained 1,000 records; its oldest timestamp was 14.158 seconds
+  after the phase baseline. Its 85 completions and one failure are only tail
+  counts, not valid whole-phase evidence. Cleanup completed with zero owned
+  objects, all eight private-removal flags true and matching guest-root network
+  hashes `315a04db62e4e1e873b10cd563e467977343474153ec20b38e61f09edf26e2c6`.
+  Original ZIP SHA-256 `2001402450822d7fd1d1a81507306d9cdf00f177783782eeae678e5222e91eca`;
+  job `111477625117` log SHA-256
+  `296a3087d2226807a88b56c2e7e1ce98a799a47d4aff2be883d8e05f3ae31005`.
+  A Cloud-upload-only fixture candidate samples the unchanged bounded Exit ring
+  before and throughout each real phase. Complete overlapping timestamp groups
+  must agree exactly, including repeated records; missing or ambiguous overlap,
+  clock regression, query failure and insufficient completions still refuse.
+  Only bounded counters/timestamps and closed observation/command status are
+  exported, never raw records. Existing phase commands, deadlines, flow minima,
+  product retention and privacy captures are unchanged. Targeted collector and
+  local subprocess-cleanup tests do not establish a new live Cloud recovery pass.
+  The candidate keeps the
+  preceding read-only proof/pins unchanged and requires an original Files/Uppy
+  upload of 262,145 synthetic bytes, actual owner GPG encryption, three or four
+  canonical fragments bounded by 128 KiB with the core's two-copy target,
+  retained owner catalogs, a stopped
+  and restarted service, removed local ciphertext and provider A offline before
+  two fresh-browser native downloads. The existing imported baseline must also
+  restore twice. All fourteen or sixteen copies, as derived from actual ciphertext
+  geometry, remain charged until confirmed retirement;
+  three existing 1-MiB stores, private cleanup and unchanged guest state are
+  independently checked. Pure fixture checks are not UI execution, peer proof,
+  writable synchronization or a general server-independent service claim.
 - [ ] Cooperative maintenance of current/future VOLPAROSSA organization repositories:
   actual coding jobs, independent immune review and exact-revision scoped GitHub
   publication. [Agreed scope](services/REPOSITORY_MAINTENANCE.md); no autonomous publisher,
