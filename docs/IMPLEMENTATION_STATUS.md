@@ -6,6 +6,14 @@ Last updated: 2026-10-04
 
 ## Current integration and active work
 
+### Requested multimodal compute extension
+
+Audio/image understanding and natural spoken conversation were requested on
+2026-10-04. The current compute contracts remain text-oriented; media transport
+or storage is not multimodal inference. Shared execution, eligible learning and
+adaptive spare-capacity budgets are part of the requested scope, not completed
+functionality. See the [multimodal direction and limits](DECENTRALIZED_AGENTS.md#audio-images-and-natural-conversation).
+
 ### Combined native and cooperative compute source
 
 This branch combines the native-editor/Qwen implementation at `23d9718e` with

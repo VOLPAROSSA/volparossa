@@ -60,6 +60,49 @@ interpretation, evidence-bound decisions and correction remain implementation re
 this clarification changes the design description, not the active destination whitelist or the
 completion status of the automatic governance system.
 
+## Audio, images and natural conversation
+
+Requested on 2026-10-04; **not implemented multimodal inference**. The current
+compute contracts and admitted model profiles are text-oriented. Transporting,
+caching or privately storing an image or recording does not mean that a model
+can interpret it. The requested shared brain should understand images and spoken
+audio, generate spoken responses and eventually support fluid, interruptible
+voice conversations. Video understanding is a further extension with greater
+processing and bandwidth demands; it is not supplied by image storage.
+
+Implement this in useful stages: image interpretation and speech recognition,
+then streamed speech generation and conversational coordination. Reuse suitable
+open models and improve them through eligible training and measured evaluation;
+do not require learning every capability from scratch. These capabilities belong
+in the shared core, available to applications through versioned task contracts,
+not in a separate local-only assistant for each application.
+
+The core should place each task with compatible available workers, accounting
+for model locality, latency, bandwidth, memory, compute and energy costs as well
+as data protection. Reserve interactive capacity; throttle, pause or defer
+background training and media processing when the owner's device needs its
+resources. Bound admitted work, buffering and in-flight transfers, and cancel
+obsolete speech generation when interrupted. Under insufficient capacity, make
+delay or reduced service visible instead of exhausting peers or pretending that
+a task succeeded. Resource budgets reduce interference; they cannot promise
+zero latency, power use or contention.
+
+Keep private media and derived transcripts/results private throughout network
+execution. Existing public-worker operation does not establish confidential
+remote media processing. Do not silently enable microphones/cameras or turn
+recordings, faces, voices or conversations into shared training data. Reuse
+public or otherwise authorized material and suitable privacy-preserving learning
+mechanisms. Immune-system review must not expose private media to arbitrary
+reviewers. A natural-sounding synthetic voice should remain recognizable as AI
+interaction, not a claim that a human is speaking.
+
+Evaluate comprehension, transcription, voice intelligibility, interruption,
+end-to-end latency and resource cost against stable reference tasks. More peers
+can supply capacity and more eligible learning opportunities; neither more peers
+nor additional training alone proves better understanding or a human-quality
+conversation. This section records the requested direction, not a completed
+worker, training loop or real-time speech datapath.
+
 ## Agreed content-policy examples
 
 These historical examples preserve the user's intended outcomes and distinctions. They illustrate
