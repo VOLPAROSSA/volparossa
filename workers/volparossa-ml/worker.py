@@ -257,7 +257,8 @@ def bounded_integer(value, low, high):
 
 def validate_request(value):
     required = {"version", "id", "mode", "model_root", "dataset_path", "output_root"}
-    optional = {"steps", "threads", "max_seconds", "adapter_root", "owner_control", "model_profile"}
+    optional = {"steps", "threads", "max_seconds", "adapter_root", "owner_control", "model_profile",
+                "private_generation_diagnostics"}
     require(type(value) is dict and required <= value.keys()
             and value.keys() <= required | optional, "INVALID_REQUEST_FIELDS")
     require(type(value["version"]) is int and value["version"] == VERSION, "UNSUPPORTED_VERSION")
@@ -265,6 +266,11 @@ def validate_request(value):
     require(value["mode"] in ("infer", "train", "plan_document", "plan_tasks", "private_infer", "private_conversation", "public_code_proposal", "aggregate_adapter"), "INVALID_JOB_MODE")
     profile_name = value.get("model_profile", DEFAULT_MODEL_PROFILE)
     model_profile(profile_name)
+    require("private_generation_diagnostics" not in value or
+            (type(value["private_generation_diagnostics"]) is bool and
+             (not value["private_generation_diagnostics"] or
+              (value["mode"] == "private_conversation" and profile_name in NATIVE_CONVERSATION_PROFILES))),
+            "INVALID_PRIVATE_GENERATION_DIAGNOSTICS")
     require(profile_name not in NATIVE_CONVERSATION_PROFILES or value["mode"] in ("private_conversation", "public_code_proposal"),
             "MODEL_PROFILE_PRIVATE_CONVERSATION_ONLY")
     require(value["mode"] != "public_code_proposal" or
@@ -1177,6 +1183,99 @@ def emit(record):
     WIRE_OUTPUT.flush()
 
 
+class PrivateGenerationObservation:
+    """Opt-in scalar observations, never tensor values, model controls or inference evidence."""
+    def __init__(self, session, torch, prompt_tokens):
+        self.session = session
+        self.records = 0
+        self.last_token_record_ms = None
+        self.value = {"prompt_tokens": prompt_tokens,
+                      "threads": self.read_scalar(lambda: torch.get_num_threads(), integer=True),
+                      "interop_threads": self.read_scalar(lambda: torch.get_num_interop_threads(), integer=True),
+                      "cpu": self.cpu_capabilities(torch),
+                      "first_forward_started_ms": None, "first_forward_completed_ms": None,
+                      "first_token_ms": None, "generated_tokens": 0, "complete": False}
+        self.record()
+
+    @staticmethod
+    def read_scalar(read, integer=False):
+        try:
+            value = read()
+            if integer:
+                return value if type(value) is int and 1 <= value <= 2 else None
+            return value if type(value) is bool else None
+        except Exception:
+            return None  # Unknown is not an unsupported CPU or a false capability.
+
+    @classmethod
+    def cpu_capabilities(cls, torch):
+        try:
+            caps = torch.cpu.get_capabilities()
+        except Exception:
+            caps = {}
+        result = {name: cls.read_scalar(lambda: caps.get(name))
+                  for name in ("avx2", "avx512_bf16", "amx_bf16", "amx_tile")}
+        try:
+            isa = torch.backends.cpu.get_cpu_capability()
+        except Exception:
+            isa = None
+        result["isa"] = isa if isa in ("DEFAULT", "NO AVX", "AVX2", "AVX512") else None
+        result["mkldnn_available"] = cls.read_scalar(lambda: torch.backends.mkldnn.is_available())
+        result["mkldnn_enabled"] = cls.read_scalar(lambda: torch.backends.mkldnn.enabled)
+        return result
+
+    def record(self):
+        elapsed = self.session.elapsed()
+        if elapsed >= 600000 or self.records >= 64:
+            return
+        self.records += 1
+        emit({"version": VERSION, "id": self.session.request["id"], "kind": "progress",
+              "phase": "baseline", "step": 0, "elapsed_ms": elapsed,
+              "private_generation": dict(self.value, elapsed_ms=elapsed)})
+        return elapsed
+
+    def forward_begin(self, _module, _arguments):
+        if self.value["first_forward_started_ms"] is None:
+            self.value["first_forward_started_ms"] = self.session.elapsed()
+            self.record()
+
+    def forward_complete(self, _module, _arguments, _output):
+        if self.value["first_forward_completed_ms"] is None:
+            self.value["first_forward_completed_ms"] = self.session.elapsed()
+            self.record()
+
+    def tokens(self, count):
+        # The existing stopping criterion supplies only its sequence shape. Never
+        # retain/copy/decode token IDs or inspect scores, model inputs or outputs.
+        elapsed = self.session.elapsed()
+        self.value["generated_tokens"] = count
+        if self.value["first_token_ms"] is None:
+            self.value["first_token_ms"] = elapsed
+        if self.last_token_record_ms is None or elapsed - self.last_token_record_ms >= 10000:
+            self.last_token_record_ms = self.record()
+
+    def complete(self):
+        self.value["complete"] = True
+        self.record()
+
+
+@contextlib.contextmanager
+def private_generation_observation(model, torch, session, prompt_tokens):
+    if getattr(session, "request", {}).get("private_generation_diagnostics", False) is not True:
+        yield None
+        return
+    observation = PrivateGenerationObservation(session, torch, prompt_tokens)
+    handles = []
+    try:
+        handles.append(model.register_forward_pre_hook(observation.forward_begin))
+        # Default always_call=False: a failing forward is not a completed one.
+        handles.append(model.register_forward_hook(observation.forward_complete))
+        yield observation
+    finally:
+        for handle in handles:
+            handle.remove()
+
+
 def configure_offline():
     # Local-only flags are defense in depth; the supervisor must deny actual network access.
     for name, value in {
@@ -1995,12 +2094,15 @@ def generate(model, samples, tokenizer, torch, session, transformers, profile_na
             "CONVERSATION_GENERATION_POLICY")
     generation_options = (conversation_module().native().generation_options(generation_policy)
                           if profile_name in NATIVE_CONVERSATION_PROFILES else {"do_sample": False})
+    observation = None
     class OwnerCheckpoint(transformers.StoppingCriteria):
         def __call__(self, _input_ids, _scores, **_kwargs):
             # Service the original owner's controls on this execution thread after
             # each native token step, not from a reader while model work still runs.
             # Pause keeps the generation state; cancel/deadline remains an error.
             session.check()
+            if observation is not None:
+                observation.tokens(int(_input_ids.shape[1]) - input_ids.shape[1])
             return False
 
     model.eval()
@@ -2008,10 +2110,13 @@ def generate(model, samples, tokenizer, torch, session, transformers, profile_na
     with torch.inference_mode():
         for index, input_ids in enumerate(samples):
             session.check()
-            output = model.generate(input_ids=input_ids, attention_mask=torch.ones_like(input_ids),
-                                    max_new_tokens=profile["new_tokens"], use_cache=True, **generation_options,
-                                    stopping_criteria=transformers.StoppingCriteriaList([OwnerCheckpoint()]),
-                                    pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
+            with private_generation_observation(model, torch, session, input_ids.shape[1]) as observation:
+                output = model.generate(input_ids=input_ids, attention_mask=torch.ones_like(input_ids),
+                                        max_new_tokens=profile["new_tokens"], use_cache=True, **generation_options,
+                                        stopping_criteria=transformers.StoppingCriteriaList([OwnerCheckpoint()]),
+                                        pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
+                if observation is not None:
+                    observation.complete()
             session.check()
             generated = output[0, input_ids.shape[1]:]
             require(generated.numel() <= profile["new_tokens"], "GENERATION_TOKEN_LIMIT_EXCEEDED")

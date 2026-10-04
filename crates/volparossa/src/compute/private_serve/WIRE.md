@@ -59,6 +59,21 @@ ID; malformed frames/envelopes receive `id: null`, `event: "error"`,
 - `error`: fixed `code` from `invalid_request`, `handshake_required`, `busy`,
   `no_such_task`, `cancelled`, `execution_failed`, `cleanup_unconfirmed`.
 
+Conversation clients can independently opt into `execution_error_version: 1`
+on `conversation_capabilities`; the reply echoes that field only when requested.
+Absent means the original error vocabulary. Null, duplicate or unknown versions
+are rejected. This negotiation is separate from `generation_policy_version` and
+is captured when each conversation is admitted, not changed by a later handshake.
+Q&A clients remain unchanged.
+
+For opted-in, admitted conversations only, `execution_budget_exceeded` means the
+supervisor deadline or the validated worker deadline elapsed **and cleanup has
+returned successfully**. It is terminal for that attempt, not a temporary network
+failure and not an instruction to retry the same expensive request automatically.
+It does not say whether any useful model output was generated. Cleanup uncertainty
+and explicit cancellation retain precedence; other failures stay `execution_failed`.
+No raw exception, input, partial answer or model diagnostic is included in this error.
+
 There is no task queue, streaming answer, history endpoint or cross-connection
 cancel. There are at most eight connections and one running private task. On
 disconnect/shutdown, cancellation signals the existing sandbox supervisor; it

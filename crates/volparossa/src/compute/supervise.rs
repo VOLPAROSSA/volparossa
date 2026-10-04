@@ -28,6 +28,19 @@ const MIN_FREE_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_OBSERVED_PROCESSES: usize = 64;
 const MAX_OBSERVED_THREADS: usize = 128;
 
+/// The owner's fixed execution budget elapsed. Cleanup must still complete before
+/// this can become a terminal, non-retryable response to an opted-in local client.
+#[derive(Debug)]
+pub(super) struct ExecutionDeadline;
+
+impl fmt::Display for ExecutionDeadline {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("compute_deadline")
+    }
+}
+
+impl std::error::Error for ExecutionDeadline {}
+
 /// A fixed error reply from the exact local worker, exposed only after its cleanup succeeds.
 /// This is local execution evidence, not an independently portable or network-wide verdict.
 #[derive(Debug)]
@@ -158,7 +171,7 @@ pub(super) async fn run(
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut budget = Budget::new();
     let controls = options.spare_capacity.then(Controls::default);
-    let progress = diagnostic::Progress::default();
+    let progress = diagnostic::Progress::with_generation(request.private_generation_diagnostics);
     let result = async {
         if let Some(lifetimes) = private_lifetimes.as_mut() {
             lifetimes.as_mut().map_err(|_| anyhow::anyhow!("compute_private_process_observation"))?
@@ -195,7 +208,7 @@ pub(super) async fn run(
         loop {
             tokio::select! {
                 biased;
-                () = &mut deadline => break Err(anyhow::anyhow!("compute_deadline")),
+                () = &mut deadline => break Err(ExecutionDeadline.into()),
                 changed = owner_idle.changed() => {
                     if changed.is_err() || !*owner_idle.borrow() {
                         break Err(anyhow::anyhow!("compute_owner_busy"));
@@ -790,7 +803,8 @@ async fn collect_stdout_tracked(
                 progress.observe(&value)?;
             } else {
                 ensure!(
-                    value.get("private_execution").is_none(),
+                    value.get("private_execution").is_none()
+                        && value.get("private_generation").is_none(),
                     "compute_private_progress"
                 );
             }
@@ -1251,6 +1265,7 @@ mod tests {
                 threads: 1,
                 max_seconds: 60,
                 owner_control: false,
+                private_generation_diagnostics: false,
             };
             let mut reply = serde_json::json!({"status":"ok","mode":mode,"device":"cpu",
                 "updates_completed":u8::from(mode==Mode::Train),"base_weights_unchanged":true,
@@ -1287,6 +1302,7 @@ mod tests {
             threads: 2,
             max_seconds: 600,
             owner_control: false,
+            private_generation_diagnostics: false,
         };
         let mut reply = serde_json::json!({"status":"ok","mode":"infer","device":"cpu",
             "updates_completed":0,"outputs":[{"sample_index":0,"text":"Inert response",

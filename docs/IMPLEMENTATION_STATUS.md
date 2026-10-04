@@ -255,6 +255,45 @@ coding and protected private peer execution remain incomplete.
 
 ### Owner-selected 4B native coding candidate; no new execution claim
 
+The original [Code run 37218791500](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37218791500),
+job `111484703730`, on Code `693516f8c5f3b7bab10fe83a6462f955af5a8c3e`
+and core `1297f8f1a5d163d802efd066c51a950b95588fa5`, also **failed**.
+Exact 4B provisioning succeeded. Each of the first three requests entered
+generation after roughly 20 seconds but reached the unchanged 600-second
+execution deadline; cleanup was confirmed. A fourth request was cancelled when
+the original 40-minute owner deadline elapsed. No completed model response,
+tool action, approved edit or successful coding task was recorded. There was no
+OOM kill or swap use. The retained state does not distinguish a slow first
+forward from slow token generation, nor prove a model or resource-pressure cause.
+The earlier native-template correction remains without a successful live trial.
+
+Original ZIP SHA-256:
+`56ef70bf28c08458b78ad61539495bcfdf45d990fd9563f366dac65652a768c2`;
+original job-log SHA-256:
+`dbef2bd19983b4c84a3fe5bdf413ea0863984c472c88348b6f09b4923278f8b2`.
+Private state, service, QEMU and scratch cleanup passed. Normalized outer-host
+routes/DNS match, while raw route bytes differ; this is not an unqualified
+host-byte-identity claim. The untouched original failure remains the evidence.
+
+The next candidate adds opt-in scalar generation observations: prompt length,
+actual thread counts or unknown, closed CPU capability flags, first-forward
+begin/end and generated-token counts. At most 64 bounded frames are accepted;
+token progress is emitted at most every ten seconds after the first token. The
+terminal diagnostic retains only the last validated snapshot, not model inputs,
+token IDs, output text, scores, paths or identities. CPU capability flags do not
+prove which kernels ran or a performance improvement. Generation arguments,
+model assets, EOS requirements, owner checkpoints and deadlines are unchanged.
+
+The same candidate corrects a retry classification: private-serve previously
+collapsed a cleaned-up deadline into `execution_failed`, which the Code provider
+mapped to a retried HTTP 503. Conversation clients can explicitly negotiate
+`execution_error_version: 1` to receive a typed, terminal
+`execution_budget_exceeded` instead. Only confirmed cleanup permits that subtype;
+uncertain cleanup and owner cancellation take precedence. Legacy clients keep
+the original vocabulary. Focused protocol/lifecycle, diagnostic-parser and inert
+worker tests pass. These changes are not a passed replacement model trial, a
+native editor coding loop or confidential remote execution.
+
 The first hosted Code trial
 [`37204436941`](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37204436941)
 on core `39bfc0d14bd45563957c8a41e8183592e7ee7a73` and Code

@@ -164,6 +164,7 @@ struct Active {
     activity: watch::Sender<bool>,
     execution: Option<JoinHandle<Result<Value>>>,
     cancelled: bool,
+    budget_error: bool,
 }
 
 impl Active {
@@ -194,6 +195,7 @@ impl Active {
             activity,
             execution: Some(execution),
             cancelled: false,
+            budget_error: false,
         }
     }
 
@@ -239,27 +241,35 @@ enum Incoming {
     Invalid,
 }
 
+#[derive(Default)]
+struct Handshakes {
+    qa: bool,
+    conversation: bool,
+    generation_policy: Option<u8>,
+    execution_error: Option<u8>,
+}
+
 fn respond(
     request: wire::Request,
     config: &Arc<private_task::ExecutionConfig>,
     gate: &Arc<Semaphore>,
     active: &mut Option<Active>,
-    handshake: &mut bool,
-    conversation_handshake: &mut bool,
-    generation_policy_handshake: &mut bool,
+    handshakes: &mut Handshakes,
 ) -> Value {
     match request.operation {
         wire::Operation::Capabilities {} => {
-            *handshake = true;
+            handshakes.qa = true;
             let mut response = wire::response(&request.id, "capabilities");
             response["capabilities"] = capabilities(config, gate);
             response
         }
         wire::Operation::ConversationCapabilities {
             generation_policy_version,
+            execution_error_version,
         } => {
-            *conversation_handshake = true;
-            *generation_policy_handshake = generation_policy_version == Some(1);
+            handshakes.conversation = true;
+            handshakes.generation_policy = generation_policy_version;
+            handshakes.execution_error = execution_error_version;
             let mut response = wire::response(&request.id, "conversation_capabilities");
             response["capabilities"] =
                 super::private_conversation::capabilities(config.model_profile);
@@ -269,7 +279,10 @@ fn respond(
                 super::private_conversation::request_frame(config.model_profile).into();
             response["capabilities"]["max_response_bytes"] = wire::MAX_RESPONSE_BYTES.into();
             response["capabilities"]["quarantined"] = gate.is_closed().into();
-            if *generation_policy_handshake {
+            if handshakes.execution_error == Some(1) {
+                response["capabilities"]["execution_error_version"] = 1.into();
+            }
+            if handshakes.generation_policy == Some(1) {
                 response["capabilities"]["generation_policy_version"] = 1.into();
                 response["capabilities"]["generation_policies"] =
                     if config.model_profile.is_native_conversation() {
@@ -281,9 +294,9 @@ fn respond(
             response
         }
         wire::Operation::SubmitConversation { conversation } => {
-            if !*conversation_handshake
+            if !handshakes.conversation
                 || (conversation.requires_generation_policy_handshake()
-                    && !*generation_policy_handshake)
+                    && handshakes.generation_policy != Some(1))
             {
                 wire::error(Some(&request.id), "handshake_required")
             } else if gate.is_closed() {
@@ -294,20 +307,24 @@ fn respond(
                 let input = conversation
                     .bytes_profile(config.model_profile)
                     .expect("validated conversation serializes");
-                *active = Some(Active::start_mode(
+                let mut task = Active::start_mode(
                     request.id.clone(),
                     config.clone(),
                     input,
                     slot,
                     super::Mode::PrivateConversation,
-                ));
+                );
+                // Snapshot at admission: later capability requests cannot change
+                // the error vocabulary of work already entrusted to the service.
+                task.budget_error = handshakes.execution_error == Some(1);
+                *active = Some(task);
                 wire::response(&request.id, "admitted")
             } else {
                 wire::error(Some(&request.id), "busy")
             }
         }
         wire::Operation::Submit { question, context } => {
-            if !*handshake {
+            if !handshakes.qa {
                 wire::error(Some(&request.id), "handshake_required")
             } else if gate.is_closed() {
                 wire::error(Some(&request.id), "cleanup_unconfirmed")
@@ -340,6 +357,39 @@ fn respond(
     }
 }
 
+fn terminal_response(
+    task: &Active,
+    result: std::result::Result<Result<Value>, tokio::task::JoinError>,
+    gate: &Semaphore,
+) -> Value {
+    if gate.is_closed() {
+        return wire::error(Some(&task.id), "cleanup_unconfirmed");
+    }
+    if task.cancelled {
+        return wire::error(Some(&task.id), "cancelled");
+    }
+    match result {
+        Ok(Ok(answer)) => {
+            let mut response = wire::response(&task.id, "result");
+            response["result"] = answer;
+            response
+        }
+        Ok(Err(error)) if task.budget_error && execution_budget_exceeded(&error) => {
+            wire::error(Some(&task.id), "execution_budget_exceeded")
+        }
+        _ => wire::error(Some(&task.id), "execution_failed"),
+    }
+}
+
+fn execution_budget_exceeded(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<super::supervise::ExecutionDeadline>()
+        .is_some()
+        || error
+            .downcast_ref::<super::supervise::WorkerFailure>()
+            .is_some_and(|failure| failure.code() == "JOB_DEADLINE_EXCEEDED")
+}
+
 async fn connection(
     stream: UnixStream,
     config: Arc<private_task::ExecutionConfig>,
@@ -366,9 +416,7 @@ async fn connection(
             }
         }
     });
-    let mut handshake = false;
-    let mut conversation_handshake = false;
-    let mut generation_policy_handshake = false;
+    let mut handshakes = Handshakes::default();
     let mut seen = BTreeSet::new();
     let mut active: Option<Active> = None;
     loop {
@@ -386,8 +434,7 @@ async fn connection(
                     let _ = wire::write(&mut writer, &wire::error(Some(&request.id), "invalid_request")).await;
                     break;
                 }
-                let response = respond(request, &config, &gate, &mut active, &mut handshake,
-                    &mut conversation_handshake, &mut generation_policy_handshake);
+                let response = respond(request, &config, &gate, &mut active, &mut handshakes);
                 if wire::write(&mut writer, &response).await.is_err() { break; }
             }
             result = async {
@@ -400,16 +447,7 @@ async fn connection(
                     super::supervise::diagnostic::event("task",
                         if error.is_panic() { "panic" } else { "join_cancelled" });
                 }
-                let response = match result {
-                    Ok(Ok(answer)) if !task.cancelled => {
-                        let mut response = wire::response(&task.id, "result");
-                        response["result"] = answer;
-                        response
-                    }
-                    _ if gate.is_closed() => wire::error(Some(&task.id), "cleanup_unconfirmed"),
-                    _ if task.cancelled => wire::error(Some(&task.id), "cancelled"),
-                    _ => wire::error(Some(&task.id), "execution_failed"),
-                };
+                let response = terminal_response(&task, result, &gate);
                 if wire::write(&mut writer, &response).await.is_err() { break; }
             }
         }

@@ -104,6 +104,23 @@ fn owned_snapshot_is_private_and_cleanup_preserves_original_and_sibling() {
 }
 
 #[test]
+fn successful_staging_cleanup_preserves_the_typed_deadline() {
+    let root = directory();
+    let staged = Staged::new(&args(root.path()), &input()).unwrap();
+    let path = staged.directory.path().to_path_buf();
+    let failure = staged
+        .finish(Err(super::super::supervise::ExecutionDeadline.into()))
+        .unwrap_err();
+    assert!(!path.exists());
+    assert!(
+        failure
+            .downcast_ref::<super::super::supervise::ExecutionDeadline>()
+            .is_some()
+    );
+    assert_eq!(failure.to_string(), "compute_deadline");
+}
+
+#[test]
 fn unconfirmed_process_cleanup_keeps_only_the_owned_snapshot_and_never_an_answer() {
     let root = directory();
     let staged = Staged::new(&args(root.path()), &input()).unwrap();

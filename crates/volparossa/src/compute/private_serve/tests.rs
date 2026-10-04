@@ -9,6 +9,158 @@ const SECOND: &str = "02020202020202020202020202020202";
 const THIRD: &str = "03030303030303030303030303030303";
 
 #[test]
+fn execution_error_negotiation_rejects_unknown_null_and_duplicate_versions() {
+    for version in [
+        json!(1),
+        json!(0),
+        json!(2),
+        Value::Null,
+        json!(true),
+        json!("1"),
+    ] {
+        let request = request(
+            FIRST,
+            json!({"type":"conversation_capabilities",
+            "execution_error_version":version}),
+        );
+        let accepted = serde_json::from_value::<wire::Request>(request)
+            .is_ok_and(|request| request.validate_profile(ModelProfile::Qwen600).is_ok());
+        assert_eq!(accepted, version == json!(1));
+    }
+    let duplicate = format!(
+        r#"{{"version":1,"id":"{FIRST}","operation":{{"type":"conversation_capabilities","execution_error_version":1,"execution_error_version":1}}}}"#
+    );
+    assert!(serde_json::from_str::<wire::Request>(&duplicate).is_err());
+}
+
+#[tokio::test]
+async fn execution_error_handshake_preserves_legacy_caps_and_is_connection_local() {
+    let root = tempfile::tempdir().unwrap();
+    let gate = Arc::new(Semaphore::new(1));
+    let config = Arc::new(config(root.path()));
+    for initial_extension in [true, false] {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let (stop, shutdown) = watch::channel(false);
+        let serving = tokio::spawn(connection(server, config.clone(), gate.clone(), shutdown));
+        let mut initial = None;
+        for (index, extended) in [initial_extension, !initial_extension, initial_extension]
+            .into_iter()
+            .enumerate()
+        {
+            let mut operation = json!({"type":"conversation_capabilities"});
+            if extended {
+                operation["execution_error_version"] = 1.into();
+            }
+            wire::write(&mut client, &request(&format!("{index:032x}"), operation))
+                .await
+                .unwrap();
+            let reply: Value = wire::read(&mut client, wire::MAX_RESPONSE_BYTES)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(reply["event"], "conversation_capabilities");
+            let mut caps = reply["capabilities"].clone();
+            assert_eq!(
+                caps.as_object_mut()
+                    .unwrap()
+                    .remove("execution_error_version"),
+                extended.then(|| json!(1))
+            );
+            if let Some(initial) = &initial {
+                assert_eq!(initial, &caps);
+            } else {
+                initial = Some(caps);
+            }
+        }
+        stop.send(true).unwrap();
+        serving.await.unwrap();
+    }
+}
+
+#[test]
+fn terminal_budget_errors_are_typed_opt_in_and_subordinate_to_cleanup_and_cancel() {
+    let (activity, _signal) = watch::channel(true);
+    let mut task = Active {
+        id: FIRST.into(),
+        activity,
+        execution: None,
+        cancelled: false,
+        budget_error: false,
+    };
+    let gate = Semaphore::new(1);
+    let deadline = || Ok(Err(super::super::supervise::ExecutionDeadline.into()));
+    assert_eq!(
+        terminal_response(&task, deadline(), &gate)["code"],
+        "execution_failed"
+    );
+    task.budget_error = true;
+    let reply = terminal_response(&task, deadline(), &gate);
+    assert_eq!(reply, wire::error(Some(FIRST), "execution_budget_exceeded"));
+    let worker_error = super::super::supervise::test_worker_failure("JOB_DEADLINE_EXCEEDED");
+    assert_eq!(
+        terminal_response(&task, Ok(Err(worker_error)), &gate)["code"],
+        "execution_budget_exceeded"
+    );
+    // Raw exception text, an unrelated worker failure or a successful answer
+    // cannot create this privileged observation.
+    assert_eq!(
+        terminal_response(&task, Ok(Err(anyhow::anyhow!("compute_deadline"))), &gate)["code"],
+        "execution_failed"
+    );
+    let invalid = super::super::supervise::test_worker_failure("INVALID_PRIVATE_CONVERSATION");
+    assert_eq!(
+        terminal_response(&task, Ok(Err(invalid)), &gate)["code"],
+        "execution_failed"
+    );
+    assert_eq!(
+        terminal_response(&task, Ok(Ok(json!({"answer":"synthetic"}))), &gate)["event"],
+        "result"
+    );
+    task.cancelled = true;
+    assert_eq!(
+        terminal_response(&task, deadline(), &gate)["code"],
+        "cancelled"
+    );
+    gate.close();
+    assert_eq!(
+        terminal_response(&task, deadline(), &gate)["code"],
+        "cleanup_unconfirmed"
+    );
+    assert_eq!(
+        terminal_response(&task, Ok(Ok(Value::Null)), &gate)["code"],
+        "cleanup_unconfirmed"
+    );
+}
+
+#[test]
+fn later_negotiation_cannot_change_an_admitted_tasks_error_vocabulary() {
+    let root = tempfile::tempdir().unwrap();
+    let config = Arc::new(config(root.path()));
+    let gate = Arc::new(Semaphore::new(1));
+    for admitted_extended in [true, false] {
+        let (activity, _signal) = watch::channel(true);
+        let mut active = Some(Active {
+            id: FIRST.into(),
+            activity,
+            execution: None,
+            cancelled: false,
+            budget_error: admitted_extended,
+        });
+        let mut handshakes = Handshakes::default();
+        for negotiate in [true, false] {
+            let mut operation = json!({"type":"conversation_capabilities"});
+            if negotiate {
+                operation["execution_error_version"] = 1.into();
+            }
+            let request = serde_json::from_value(request(SECOND, operation)).unwrap();
+            respond(request, &config, &gate, &mut active, &mut handshakes);
+            assert_eq!(handshakes.execution_error, negotiate.then_some(1));
+            assert_eq!(active.as_ref().unwrap().budget_error, admitted_extended);
+        }
+    }
+}
+
+#[test]
 fn generation_policy_negotiation_rejects_unknown_null_and_duplicate_versions() {
     for version in [json!(1), json!(2), Value::Null, json!(true), json!("1")] {
         let request = request(
@@ -364,6 +516,7 @@ async fn private_serve_cancel_or_disconnect_keeps_admission_until_execution_retu
             activity,
             execution: Some(execution),
             cancelled: false,
+            budget_error: false,
         };
         if disconnect {
             let execution = task.execution.take().unwrap();
