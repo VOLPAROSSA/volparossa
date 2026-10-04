@@ -27,6 +27,21 @@ See [the native CPU contract](workers/volparossa-ml/native-cpu/README.md) for
 source/build/conversion provenance, instruction requirements and remaining proof.
 Source and inert tests are not claims of successful guest inference or coding.
 
+The explicit native conversion, not the baseline 38-wheel runtime, adds the
+official [SentencePiece 0.2.1 wheel](https://pypi.org/project/sentencepiece/0.2.1/)
+for CPython 3.13 / manylinux 2.27+ x86-64: 1,387,882 bytes, SHA-256
+`c7f0fd2f2693309e6628aeeb2e2faf6edd221134dfccac3308ca0de01f8dab47`.
+Exact origin, metadata hash and optional lock are retained in
+`workers/volparossa-ml/native-converter-pins.json`; it is a pinned published
+binary, not a claim of a locally reproduced source build. Its Apache-2.0 release
+source is [google/sentencepiece at 31646a467d2051eb904e0b45de3a73e91fe1c1e3](https://github.com/google/sentencepiece/tree/31646a467d2051eb904e0b45de3a73e91fe1c1e3)
+(`v0.2.1`). The wheel contains no license files. Original release LICENSE and
+the original bundled absl, darts_clone, esaxx and protobuf-lite licenses from
+that revision are therefore retained unchanged under
+`workers/volparossa-ml/native-cpu/sentencepiece*-LICENSE`, with exact source
+URLs, sizes and hashes in the optional pins. Converted artifacts include all
+five notices; no notice is replaced by this summary.
+
 ## Explicit native editor integration trial
 
 The `agent-native-editor` guest trial uses VOLPAROSSA Code commit

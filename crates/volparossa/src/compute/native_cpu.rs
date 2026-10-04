@@ -156,7 +156,7 @@ impl Options {
                 info.is_file()
                     && info.uid() == nix::unistd::geteuid().as_raw()
                     && info.nlink() == 1
-                    && info.mode() & 0o077 == 0
+                    && info.mode().trailing_zeros() >= 6
                     && info.len() == artifact.bytes,
                 "compute_native_backend_file"
             );

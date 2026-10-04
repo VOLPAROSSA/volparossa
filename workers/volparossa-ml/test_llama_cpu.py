@@ -6,9 +6,13 @@ import json
 import hashlib
 import os
 from pathlib import Path
+import signal
 import struct
 import stat
+import subprocess
+import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -36,6 +40,160 @@ def manifest():
 
 
 class NativeCpuTests(unittest.TestCase):
+    def test_converter_dependency_is_explicit_exact_and_baseline_lock_unchanged(self):
+        provision = conversion.provision
+        baseline = provision.load_pins(native.PROFILE)
+        original = copy.deepcopy(baseline)
+        pins = provision.load_pins(native.PROFILE, native_cpu_converter=True)
+        self.assertEqual(len(baseline["wheels"]), 38)
+        self.assertEqual(len(pins["wheels"]), 39)
+        self.assertEqual(pins["wheels"][:-1], original["wheels"])
+        self.assertEqual(pins["files"], original["files"])
+        self.assertEqual(pins["weights"], original["weights"])
+        self.assertEqual(provision.download_total(pins) - provision.download_total(baseline), 1387882)
+        pin_bytes, lock = provision.retained_pin_files(pins)
+        self.assertEqual(json.loads(pin_bytes)["native_cpu_converter"], provision.NATIVE_CONVERTER)
+        self.assertEqual(lock, (provision.HERE / "requirements.lock").read_bytes()
+                         + (provision.HERE / "native-converter-requirements.lock").read_bytes())
+        self.assertEqual(provision.retained_pin_files(baseline)[1], (provision.HERE / "requirements.lock").read_bytes())
+        self.assertEqual(provision.load_pins(native.PROFILE), original)
+        for profile, graph in ((WORKER.QWEN_MODEL_PROFILE, False), (native.PROFILE, True)):
+            with self.assertRaises(provision.ProvisionError):
+                provision.load_pins(profile, graph, native_cpu_converter=True)
+
+    def test_converter_pin_cannot_override_existing_distribution_or_license_bytes(self):
+        provision = conversion.provision
+        pins = provision.load_pins(native.PROFILE, native_cpu_converter=True)
+        with self.assertRaisesRegex(provision.ProvisionError, "override"):
+            provision.add_native_converter(pins)
+        real_read = Path.read_bytes
+        def changed(path):
+            raw = real_read(path)
+            return raw + b"changed" if path.name == "sentencepiece-LICENSE" else raw
+        with mock.patch.object(Path, "read_bytes", changed), self.assertRaisesRegex(provision.ProvisionError, "notice bytes"):
+            provision.native_converter_pins()
+
+    def test_converter_cancellation_during_successful_wait_or_final_join_is_not_swallowed(self):
+        before = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
+        def cancelled_success(*_args, **_kwargs):
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            return 0
+        for checkpoint in ("wait", "poll"):
+            with self.subTest(checkpoint=checkpoint):
+                process = mock.Mock(pid=os.getpid())
+                process.wait.return_value = process.poll.return_value = 0
+                getattr(process, checkpoint).side_effect = cancelled_success
+                with mock.patch.object(conversion.subprocess, "Popen", return_value=process), \
+                        self.assertRaisesRegex(conversion.ConversionCancelled, "NATIVE_CONVERSION_CANCELLED"):
+                    conversion.run_converter([sys.executable, "-c", "pass"], io.BytesIO(), dict(os.environ), 1)
+                process.terminate.assert_not_called()
+                process.kill.assert_not_called()
+                self.assertEqual({signum: signal.getsignal(signum) for signum in before}, before)
+
+    @staticmethod
+    def child_source(ignore_term=False):
+        return ("import json,os,signal,time;"
+                + ("signal.signal(signal.SIGTERM,signal.SIG_IGN);" if ignore_term else "")
+                + "print(json.dumps({'pid':os.getpid(),'parent':os.getppid(),'group':os.getpgrp()}),flush=True);time.sleep(60)")
+
+    @staticmethod
+    def wait_child(log):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            raw = log.read_text()
+            if raw.endswith("\n"):
+                return json.loads(raw.splitlines()[0])
+            time.sleep(.02)
+        raise AssertionError("harmless child did not report readiness")
+
+    @staticmethod
+    def finish_group(process):
+        # Only the fresh group created by this test. Never the test runner's group.
+        assert process.pid != os.getpgrp()
+        for signum in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(process.pid, signum)
+            except ProcessLookupError:
+                break
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                continue
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(.02)
+        raise AssertionError("owned process group did not disappear")
+
+    def test_converter_timeout_joins_sigterm_ignoring_child_without_killing_sibling(self):
+        sibling = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(60)"], start_new_session=True)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                target = Path(directory) / "child.log"
+                with target.open("xb") as log, mock.patch.object(os, "killpg", side_effect=AssertionError("parent group must not be signaled")):
+                    with self.assertRaises(subprocess.TimeoutExpired):
+                        conversion.run_converter([sys.executable, "-u", "-c", self.child_source(True)], log, dict(os.environ), .5)
+                child = self.wait_child(target)
+                self.assertEqual(child["group"], os.getpgrp())
+                self.assertFalse(Path(f"/proc/{child['pid']}").exists())
+                self.assertIsNone(sibling.poll())
+        finally:
+            self.finish_group(sibling)
+
+    def test_converter_cancellation_joins_child_and_restores_signal_handlers(self):
+        harness = ("import convert_llama_cpu as c,os,sys;\ntry:\n"
+                   " c.run_converter([sys.executable,'-u','-c',sys.argv[1]],sys.stdout,dict(os.environ),60)\n"
+                   "except c.ConversionCancelled:\n sys.exit(77)\n")
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            with self.subTest(signal=signum), tempfile.TemporaryDirectory() as directory:
+                target = Path(directory) / "child.log"
+                with target.open("xb") as log:
+                    process = subprocess.Popen([sys.executable, "-B", "-u", "-c", harness, self.child_source()],
+                                               cwd=conversion.HERE, stdout=log, stderr=log, start_new_session=True)
+                    try:
+                        child = self.wait_child(target)
+                        self.assertEqual(child["group"], process.pid)
+                        process.send_signal(signum)
+                        self.assertEqual(process.wait(timeout=5), 77)
+                        self.assertFalse(Path(f"/proc/{child['pid']}").exists())
+                    finally:
+                        self.finish_group(process)
+        before = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
+        with tempfile.TemporaryFile() as log:
+            conversion.run_converter([sys.executable, "-c", "pass"], log, dict(os.environ), 5)
+        self.assertEqual(before, {sig: signal.getsignal(sig) for sig in before})
+
+    def test_outer_subprocess_timeout_cannot_detach_converter_child_from_fixture_join(self):
+        harness = ("import convert_llama_cpu as c,os,sys;"
+                   "c.run_converter([sys.executable,'-u','-c',sys.argv[1]],sys.stdout,dict(os.environ),60)")
+        real_popen, captured = subprocess.Popen, []
+        def started(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            captured.append(process)
+            return process
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "child.log"
+            try:
+                with target.open("xb") as log, mock.patch.object(subprocess, "Popen", side_effect=started):
+                    # This is the actual subprocess.run timeout/SIGKILL behavior
+                    # used by provision.run_checked, not a simulated cancellation.
+                    with self.assertRaises(subprocess.TimeoutExpired):
+                        subprocess.run([sys.executable, "-B", "-u", "-c", harness, self.child_source()],
+                                       cwd=conversion.HERE, stdout=log, stderr=log,
+                                       start_new_session=True, timeout=.5, check=True)
+                child = self.wait_child(target)
+                self.assertEqual(captured[0].returncode, -signal.SIGKILL)
+                self.assertEqual(child["group"], captured[0].pid)
+                self.assertEqual(os.getpgid(child["pid"]), captured[0].pid)
+                self.finish_group(captured[0])
+                self.assertFalse(Path(f"/proc/{child['pid']}").exists())
+            finally:
+                if captured:
+                    self.finish_group(captured[0])
+
     def test_request_is_atomic_explicit_4b_private_only_and_legacy_unchanged(self):
         self.assertNotIn("inference_backend", WORKER.validate_request(request()))
         WORKER.validate_request(job())

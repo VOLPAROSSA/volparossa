@@ -16,7 +16,9 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import struct
+import subprocess
 import sys
 import time
 
@@ -25,6 +27,64 @@ import llama_cpu as native
 import provision
 
 HERE = Path(__file__).resolve().parent
+
+
+class ConversionCancelled(Exception):
+    """A fixed cancellation reason; no private subprocess command is exported."""
+
+
+def run_converter(command, log, environment, timeout):
+    """Join our direct child; never detach it from the owner's provision group.
+
+    TERM/INT/HUP mark cancellation instead of interrupting Popen construction.
+    Cleanup signals only this known child, never the shared parent group. If an
+    outside timeout SIGKILLs this wrapper, the existing fixture's process-group
+    join still includes the child. The pinned converter starts no subprocesses;
+    native thread cleanup is part of joining its one Python process.
+    """
+    builder.require(timeout > 0, "NATIVE_CONVERSION_DEADLINE")
+    deadline, process, cancelled = time.monotonic() + timeout, None, None
+    previous = {}
+    def stop(signum, _frame):
+        nonlocal cancelled
+        cancelled = signum
+    try:
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            previous[signum] = signal.signal(signum, stop)
+        if cancelled is not None:
+            raise ConversionCancelled("NATIVE_CONVERSION_CANCELLED")
+        process = subprocess.Popen(["nice", "-n", "19", *command], stdin=subprocess.DEVNULL,
+                                   stdout=log, stderr=subprocess.STDOUT, env=environment,
+                                   start_new_session=False)
+        builder.require(os.getpgid(process.pid) == os.getpgrp(), "NATIVE_CONVERTER_GROUP")
+        while True:
+            if cancelled is not None:
+                raise ConversionCancelled("NATIVE_CONVERSION_CANCELLED")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired("native converter", timeout)
+            try:
+                result = process.wait(timeout=min(.1, remaining))
+                if cancelled is not None:
+                    raise ConversionCancelled("NATIVE_CONVERSION_CANCELLED")
+                builder.require(result == 0, "NATIVE_CONVERSION_PROCESS_FAILED")
+                return
+            except subprocess.TimeoutExpired:
+                pass
+    finally:
+        try:
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        finally:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
+        if cancelled is not None:
+            raise ConversionCancelled("NATIVE_CONVERSION_CANCELLED")
 
 
 def tensor_name(name):
@@ -167,12 +227,13 @@ def execute(args):
     root, _ = provision.execution_root(args)
     builder.verify_source(args.source)
     builder.require(1 <= args.timeout_seconds <= 1800, "NATIVE_CONVERSION_DEADLINE")
-    pins = provision.load_pins(provision.QWEN4B_MODEL_PROFILE)
+    pins = provision.load_pins(provision.QWEN4B_MODEL_PROFILE, native_cpu_converter=True)
     started = time.monotonic()
     deadline = started + args.timeout_seconds
     def check():
         builder.require(time.monotonic() < deadline, "NATIVE_CONVERSION_DEADLINE")
-    for name, expected in (("torch", "2.14.0+cpu"), ("transformers", "5.16.1"), ("peft", "0.20.0")):
+    for name, expected in (("torch", "2.14.0+cpu"), ("transformers", "5.16.1"), ("peft", "0.20.0"),
+                           ("sentencepiece", "0.2.1")):
         builder.require(importlib.metadata.version(name) == expected, "NATIVE_CONVERTER_RUNTIME_PIN")
     model = args.model
     builder.require(model.is_absolute() and model == model.resolve() and model.is_dir(), "NATIVE_MODEL_PATH")
@@ -209,8 +270,8 @@ def execute(args):
         if key.startswith("LD_") or key in ("PYTHONPATH", "PYTHONHOME"):
             env.pop(key)
     with (root / "conversion.log").open("xb") as log:
-        builder.run_build([sys.executable, str(args.source / "convert_hf_to_gguf.py"), str(model),
-                           "--outfile", str(output), "--outtype", "bf16"], log, env, deadline - time.monotonic())
+        run_converter([sys.executable, str(args.source / "convert_hf_to_gguf.py"), str(model),
+                       "--outfile", str(output), "--outtype", "bf16"], log, env, deadline - time.monotonic())
     check()
     sys.path.insert(0, str(args.source / "gguf-py"))
     import gguf
@@ -223,6 +284,8 @@ def execute(args):
     shutil.copyfile(build_root / "build.json", root / "build.json")
     shutil.copytree(build_root / "licenses", root / "licenses", symlinks=False)
     shutil.copyfile(model / "LICENSE", root / "licenses" / "Qwen-APACHE-2.0.txt")
+    for notice in provision.native_converter_pins()["notices"]:
+        shutil.copyfile(HERE / notice["path"], root / "licenses" / Path(notice["path"]).name)
     manifest = {"version": 1, "kind": native.KIND, "abi_version": 1, "source_commit": builder.SOURCE,
                 "model_profile": native.PROFILE, "source_weights_sha256": native.WEIGHTS_SHA,
                 "source_weights_bytes": native.WEIGHTS_BYTES,

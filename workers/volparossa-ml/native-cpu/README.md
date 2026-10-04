@@ -78,6 +78,28 @@ is a refusal, not permission to raise limits. The new `native-backend/` artifact
 has owner-private directories (`0700`) and read-only files (`0400`). Existing
 provisioning without these options retains its original behavior/report shape.
 
+Only this explicit conversion adds the official CPython 3.13/Linux x86-64
+`sentencepiece==0.2.1` wheel, making 39 wheels instead of the unchanged baseline
+38. `native-converter-pins.json` and `native-converter-requirements.lock` bind
+its exact URL, 1,387,882-byte size and SHA-256; provisioning retains the combined
+pins/lock and includes the extra bytes in the same budget. This dependency is
+required even for Qwen's non-SentencePiece vocabulary: the pinned upstream
+converter imports SentencePiece before checking for the absent `tokenizer.model`
+and taking its normal vocabulary fallback. No upstream patch is substituted.
+The wheel's metadata was inspected without installing/importing it on the host;
+its version/import check runs only in the existing disposable provision runtime.
+The published wheel is not claimed to be a reproducible local source build.
+Original release and bundled dependency licenses are retained unchanged and
+copied into converted artifacts; the wheel itself contains no license files.
+
+The converter child remains in the existing owned provisioning process group.
+On a local timeout or TERM/INT/HUP, its wrapper joins that exact child before
+returning, without signalling the shared parent group. If an outer timeout
+SIGKILLs the wrapper, its handler cannot run: the child still belongs to the
+original group, which the fixture must terminate and join. Harmless real-process
+tests cover both cases, including a SIGTERM-ignoring child and an unrelated
+surviving sibling. This does not replace the fixture's final group-cleanup check.
+
 ## Execution and trust
 
 The owner explicitly supplies `--native-backend-root` and

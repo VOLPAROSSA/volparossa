@@ -46,8 +46,23 @@ The definitive normal source-only build records library SHA-256
 `4af8d584349d184049c5f6ffea3e5618839c69536676a6bb5c12ef33b03755a7`
 and build-manifest SHA-256
 `d51c06798cae305622cf91089692c323cc31c1af8ff63420b270aaf44830d27c`.
-Nineteen native Python contract checks pass, along with the separately targeted
-existing worker/provision/conversation checks. These tests load no actual model.
+Twenty-five native Python contract checks and thirteen targeted provision/retry
+checks pass. They include the explicitly selected, exact SentencePiece converter
+dependency without changing the original 38-wheel runtime; its native extension
+adds one wheel. Real harmless subprocess tests cover timeout, cancellation,
+cancellation racing a successful wait, and outer SIGKILL followed by the owned
+process-group cleanup. No converter child detaches into a new group. These are
+not actual model-conversion or inference tests.
+
+The first [candidate quality run `37233543544`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37233543544)
+on `d2fe6728` remains failed: strict Clippy rejected the permission-mask spelling
+(`verbose_bit_mask`), after formatting and the nineteen original native Python
+checks passed. The equivalent `trailing_zeros() >= 6` spelling preserves the
+requirement for zero group/other permission bits. All six native Rust tests pass
+again; no assertion or privacy boundary was removed. Retained decoded job
+`111528060483` log SHA-256:
+`80dbe57d6b939c97c41785c4b7473fd2cc218daa197f017b4157b92501399685`.
+Skipped later steps are not passing workspace or datapath evidence.
 
 Native sanitizer evidence is mixed and remains explicit: the owned ABI smoke
 passes, but the unchanged upstream all-type tensor test **fails** under UBSan on

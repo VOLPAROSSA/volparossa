@@ -1,0 +1,61 @@
+{
+  "format_version": 1,
+  "platform": "cpython-3.13-linux-x86_64",
+  "converter": {
+    "implementation": "llama_cpp_bf16_v1",
+    "dependencies": {
+      "sentencepiece": "0.2.1"
+    }
+  },
+  "source_revision": "31646a467d2051eb904e0b45de3a73e91fe1c1e3",
+  "wheel_source_build_claimed": false,
+  "wheels": [
+    {
+      "name": "sentencepiece",
+      "version": "0.2.1",
+      "path": "sentencepiece-0.2.1-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "bytes": 1387882,
+      "sha256": "c7f0fd2f2693309e6628aeeb2e2faf6edd221134dfccac3308ca0de01f8dab47",
+      "url": "https://files.pythonhosted.org/packages/96/df/0cfe748ace5485be740fed9476dee7877f109da32ed0d280312c94ec259f/sentencepiece-0.2.1-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "license": "Apache-2.0",
+      "metadata_sha256": "ce0a2e9c599cd060a7bc3dffb18be5cfc3d5f293533e3ee4e870eaef0a5500fd"
+    }
+  ],
+  "notices": [
+    {
+      "path": "native-cpu/sentencepiece-LICENSE",
+      "source": "LICENSE",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "url": "https://raw.githubusercontent.com/google/sentencepiece/31646a467d2051eb904e0b45de3a73e91fe1c1e3/LICENSE"
+    },
+    {
+      "source": "third_party/absl/LICENSE",
+      "bytes": 11365,
+      "sha256": "d3e2f59e1d71176dfdb555ece6a41f7a5aa0f52ff21211010ace314f57695f6b",
+      "url": "https://raw.githubusercontent.com/google/sentencepiece/31646a467d2051eb904e0b45de3a73e91fe1c1e3/third_party/absl/LICENSE",
+      "path": "native-cpu/sentencepiece-absl-LICENSE"
+    },
+    {
+      "source": "third_party/darts_clone/LICENSE",
+      "bytes": 1481,
+      "sha256": "155f59997298ee336602c49f9c1110f268ac394ca2197eb02647a3555935ad52",
+      "url": "https://raw.githubusercontent.com/google/sentencepiece/31646a467d2051eb904e0b45de3a73e91fe1c1e3/third_party/darts_clone/LICENSE",
+      "path": "native-cpu/sentencepiece-darts_clone-LICENSE"
+    },
+    {
+      "source": "third_party/esaxx/LICENSE",
+      "bytes": 1112,
+      "sha256": "7c28553d1d3312d65fe309f76a22ebaf33a3d76c8c1e3b98a88ee4654ecb53db",
+      "url": "https://raw.githubusercontent.com/google/sentencepiece/31646a467d2051eb904e0b45de3a73e91fe1c1e3/third_party/esaxx/LICENSE",
+      "path": "native-cpu/sentencepiece-esaxx-LICENSE"
+    },
+    {
+      "source": "third_party/protobuf-lite/LICENSE",
+      "bytes": 1732,
+      "sha256": "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d",
+      "url": "https://raw.githubusercontent.com/google/sentencepiece/31646a467d2051eb904e0b45de3a73e91fe1c1e3/third_party/protobuf-lite/LICENSE",
+      "path": "native-cpu/sentencepiece-protobuf-lite-LICENSE"
+    }
+  ]
+}
