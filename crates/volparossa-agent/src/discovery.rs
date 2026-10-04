@@ -25240,12 +25240,16 @@ mod tests {
         assert!(active.contains("terminal_error: Option<ClientPreselectionError>,"));
 
         let begin = braced_item(product, "async fn begin_client_preselection(");
+        let scope = begin
+            .find("let scope = PreselectionSamplingScope::new(")
+            .expect("request-derived sampling scope");
         let snapshot = begin
-            .find("build_route_candidate_snapshot(")
+            .find("build_route_candidate_snapshot_with_scope(")
             .expect("actor snapshot");
         let sampling = begin
             .find("narrow_route_candidate_snapshot(snapshot, scope)")
             .expect("actor sampler");
+        assert!(begin[snapshot..sampling].contains("Some(scope),"));
         let gate = begin.find("gate.begin(").expect("affine gate begin");
         let dispatch = begin
             .find("pending.dispatch(&mut self.service)")
@@ -25254,7 +25258,8 @@ mod tests {
             .find("let Some(request_deadline) = Instant::now()")
             .expect("conservative request deadline");
         assert!(
-            snapshot < sampling
+            scope < snapshot
+                && snapshot < sampling
                 && sampling < request_deadline
                 && request_deadline < gate
                 && gate < dispatch
