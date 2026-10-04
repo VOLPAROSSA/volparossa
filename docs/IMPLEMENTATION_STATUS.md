@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-10-02
+Last updated: 2026-10-04
 
 ## Current integration and active work
 
@@ -82,7 +82,29 @@ unchanged; no model or VM was rerun, and the original failed run remains failed.
 
 ### Cooperative browser execution
 
-The newest exact-source [run `37072548276`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37072548276)
+The latest [run `37075778441`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37075778441)
+on `913fd0c4749efddb278fdc55de59473da3b3a657` remains **failed**, but reaches
+actual cooperative execution: its source route connects after 11 attempts/10 retries,
+and 11 observed workers have 11 confirmed terminal receipts. The original retained
+answers contain one EOS and ten token-limit endings; no refinement or synthesis is
+retained. Execution and task cleanup complete, but the answer is incomplete and the
+browser stops during its first task. This is not successful answer/cancellation proof.
+Final guest cleanup reports zero owned objects and matching guest-root network
+snapshots; it does not establish outer-host state. Original artifact ZIP SHA-256:
+`23e764c7d91b7cec73c7f66a5ffde7397b5e9b9b008deea1c142abbb8ca39dd8`;
+original job `111065243260` log SHA-256:
+`525507c48267165996a56c9ead5a959e7e9f505cf6bec6caeb83499583326fda`.
+
+The dispatch selected the historical `agent-cooperative-browser` fixed-135M contract,
+which does not authorize refinement. The intended multi-level candidate is the
+separate existing `agent-cooperative-browser-discovered` scenario: discovered pinned
+360M peers, its original 4096-byte public source, and up to four owner-enrolled split
+levels. That is the next functional trial, with its existing exact-source, receipt,
+EOS-frontier, synthesis, cancellation and cleanup requirements unchanged. Switching
+to that distinct scenario does not repair or reclassify the failed fixed-135M run,
+and no successful discovered execution is claimed.
+
+The previous exact-source [run `37072548276`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37072548276)
 on `e61a6f6a7b5a905258b3a44388b4f5942887cd9b` remains **failed before compute**.
 This was the original `agent-cooperative-browser` 135M scenario, not the discovered
 360M trial. Source-route setup ended at `JOBS_ROUTE_UNAVAILABLE`: 15 connect attempts,
