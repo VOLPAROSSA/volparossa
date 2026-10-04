@@ -131,6 +131,29 @@ Original ZIP SHA-256:
 job `111485066863` log SHA-256:
 `a7358305bc82d419b39d576d9bc55d175d4e0e99e3e7d1c087c12fb69c2cf2d0`.
 
+The following [Code run37220221345](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37220221345),
+workflow `423c5e2f` / core `81f5f9de` / immutable driver `f27576eb`, also
+**failed overall**, at `CODE_PROPOSAL_OBSERVER_STOP_FAILED`. Original receipts
+show one real Qwen0.6B peer task, EOS after 12 tokens, a 31-byte raw replacement,
+the owner-approved selected-file edit and passing unchanged original tests plus
+the independent check. Driver and worker observer both exited zero. The original
+discovery and task captures separately pass the unchanged path validators, but
+the final control-observer receipt and complete evidence join were not reached;
+this is not a completed coding/privacy/cleanup proof or native OpenCode planner.
+
+The exact shell source rejects `volparossa-alpha-code-control-observer.service`
+before calling `systemctl`: that newly introduced unit was missing from the
+closed stop list. The candidate admits only that exact unit when the explicit
+code-proposal flag is enabled, retaining all load/stop-state, zero-PID and empty
+cgroup checks. Inert tests run the actual helper and reject unknown units,
+missing scope, failed stop, active services, live PIDs and populated cgroups.
+No model, task, privacy requirement or deadline changes. Original inventory was
+complete after 201 queries. Reported network cleanup left zero objects with
+matching guest-root hash
+`e2855ec442db43961030d1747d438dc0525bc9b0055d510ecc2ef5d7a773e3d9`.
+Original ZIP SHA-256: `6459dc4ef5351558f6818cf552b507f57d1b98ccd05148282e27d9ee765ef458`;
+job `111488876530` log SHA-256: `9b0f259e574f7e9399d6751adcb3c7d5130ab36d6725fe3045b6f2ebbdaf10d9`.
+
 ### Autonomous Internet use authorized
 
 The user explicitly authorized autonomous Internet use for tasks, research,

@@ -75,6 +75,56 @@ def phase_evidence():
 
 
 class PublicCodeProposal(unittest.TestCase):
+    def test_actual_observer_stop_scope_preserves_state_pid_and_cgroup_gates(self):
+        source = (HERE / "agent-jobs-smoke.sh").read_text()
+        function = "agent_jobs_stop_unit() {\n" + source.split(
+            "agent_jobs_stop_unit() {\n", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+        # Execute the real cleanup helper with inert service/cgroup observations.
+        # No system service or cgroup is read or changed by this contract test.
+        script = '''unit=$1
+agent_cooperative_code_proposal=$2
+load=$3
+active=$4
+pid=$5
+cgroup=$6
+stop_status=$7
+systemctl() {
+    printf 'service-observation:%s\\n' "$*" >&2
+    case "$1:$2" in
+        show:--property=LoadState) printf '%s\\n' "$load" ;;
+        show:--property=ActiveState) printf '%s\\n' "$active" ;;
+        show:--property=MainPID) printf '%s\\n' "$pid" ;;
+        stop:*) return "$stop_status" ;;
+        reset-failed:*) return 0 ;;
+        *) return 99 ;;
+    esac
+}
+agent_jobs_cgroup_empty() { printf 'cgroup-observation:%s\\n' "$1" >&2; return "$cgroup"; }
+''' + function + 'agent_jobs_stop_unit "$unit"\n'
+        unit = "volparossa-alpha-code-control-observer.service"
+        cases = (
+            (unit, "yes", "loaded", "inactive", "0", "0", "0", 0, True),
+            (unit, "yes", "not-found", "inactive", "0", "0", "0", 0, True),
+            (unit, "no", "loaded", "inactive", "0", "0", "0", 1, False),
+            (unit, "true", "loaded", "inactive", "0", "0", "0", 1, False),
+            ("volparossa-alpha-other-observer.service", "yes", "loaded", "inactive", "0", "0", "0", 1, False),
+            (unit, "yes", "error", "inactive", "0", "0", "0", 1, True),
+            (unit, "yes", "loaded", "active", "0", "0", "0", 1, True),
+            (unit, "yes", "loaded", "inactive", "123", "0", "0", 1, True),
+            (unit, "yes", "loaded", "inactive", "0", "1", "0", 1, True),
+            (unit, "yes", "loaded", "inactive", "0", "0", "1", 1, True),
+            ("volparossa-alpha-public-code.service", "no", "loaded", "inactive", "0", "0", "0", 0, True),
+        )
+        for *arguments, expected, admitted in cases:
+            with self.subTest(arguments=arguments):
+                result = subprocess.run(["/bin/sh", "-c", script, "inert-service-stop", *arguments],
+                    env={"PATH":"/usr/bin:/bin"}, capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, expected)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(bool(result.stderr), admitted)
+                if expected == 0:
+                    self.assertIn("cgroup-observation:/sys/fs/cgroup/system.slice/" + arguments[0], result.stderr)
+
     def test_actual_discovery_capture_guard_accepts_only_explicit_scenarios(self):
         source = (HERE / "kvm-alpha-topology.sh").read_text()
         function = "start_privacy_observers() {\n" + source.split(

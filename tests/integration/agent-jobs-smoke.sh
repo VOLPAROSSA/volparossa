@@ -204,7 +204,12 @@ agent_jobs_cgroup_empty() {
 
 agent_jobs_stop_unit() {
     jobs_stop_unit=$1
-    case $jobs_stop_unit in volparossa-alpha-compute@relay[345].service|volparossa-alpha-policy-authority@relay[345].service|volparossa-alpha-aggregation.service|volparossa-alpha-public-browser.service|volparossa-alpha-cooperative-browser.service|volparossa-alpha-public-code.service|volparossa-alpha-cooperative-code.service) ;; *) return 1 ;; esac
+    case $jobs_stop_unit in
+        volparossa-alpha-code-control-observer.service)
+            [ "${agent_cooperative_code_proposal:-no}" = yes ] || return 1 ;;
+        volparossa-alpha-compute@relay[345].service|volparossa-alpha-policy-authority@relay[345].service|volparossa-alpha-aggregation.service|volparossa-alpha-public-browser.service|volparossa-alpha-cooperative-browser.service|volparossa-alpha-public-code.service|volparossa-alpha-cooperative-code.service) ;;
+        *) return 1 ;;
+    esac
     jobs_load_state=$(systemctl show --property=LoadState --value "$jobs_stop_unit") || return 1
     case $jobs_load_state in
         loaded)
