@@ -83,6 +83,49 @@ def example_receipt():
 
 
 class FixtureTests(unittest.TestCase):
+    def test_generation_state_closed_metadata_unknown_flags_and_forward_token_distinction(self):
+        value = dict(prompt_tokens=12288, threads=2, interop_threads=1,
+            cpu=dict(isa='AVX2', avx2=True, avx512_bf16=False, amx_bf16=None, amx_tile=None,
+                     mkldnn_available=True, mkldnn_enabled=True), first_forward_started_ms=20,
+            first_forward_completed_ms=None, first_token_ms=None, generated_tokens=0,
+            complete=False, elapsed_ms=599999)
+        self.assertEqual(FIX['generation_state'](value), value)
+        for changes in ({'prompt_tokens': 12289}, {'prompt_tokens': True}, {'elapsed_ms': 600000},
+                {'generated_tokens': 1}, {'complete': True}, {'first_forward_completed_ms': 19},
+                {'private_text': 'PRIVATE_CANARY'}, {'threads': 3}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                FIX['generation_state'](dict(value, **changes))
+        for field, changed in [('isa', 'PRIVATE_CANARY'), ('amx_bf16', 'PRIVATE_CANARY'),
+                               ('amx_tile', 1), ('payload', 'PRIVATE_CANARY')]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                FIX['generation_state'](dict(value, cpu=dict(value['cpu'], **{field: changed})))
+        del value['cpu']['amx_tile']
+        with self.assertRaises(ValueError):
+            FIX['generation_state'](value)
+
+    def test_generation_terminal_observation_is_projected_without_raw_input_or_cpu_text(self):
+        observation = dict(prompt_tokens=100, threads=None, interop_threads=1,
+            cpu=dict(isa=None, avx2=None, avx512_bf16=None, amx_bf16=None, amx_tile=None,
+                     mkldnn_available=None, mkldnn_enabled=None), first_forward_started_ms=20,
+            first_forward_completed_ms=40, first_token_ms=41, generated_tokens=12,
+            complete=False, elapsed_ms=11000)
+        state = dict(version=1, last_phase='baseline', substage=dict(stage='generation', state='begin', elapsed_ms=10),
+            capacity=dict(decision='run', constraint='none', cpu_some_avg10=1.0, io_some_avg10=0.0, memory_bytes=None),
+            controls=None, peak_rss_bytes=100, generation=observation)
+        with tempfile.TemporaryDirectory(prefix='generation-state-', dir=HERE) as directory:
+            path = Path(directory) / 'private.log'
+            path.write_text('PRIVATE_CANARY\nDEBUG private_execution_state ' + json.dumps(state) + '\n')
+            path.chmod(0o600)
+            result = FIX['service_diagnostic'](path)
+            self.assertEqual(result['states'], [state])
+            self.assertFalse(result['unrecognized_record'])
+            self.assertNotIn('PRIVATE_CANARY', json.dumps(result))
+            state['generation']['token_ids'] = [123]
+            path.write_text('DEBUG private_execution_state ' + json.dumps(state) + '\n')
+            result = FIX['service_diagnostic'](path)
+            self.assertEqual(result['states'], [])
+            self.assertTrue(result['unrecognized_record'])
+
     def test_synthetic_diagnostic_requires_opt_in_exact_first_input_and_complete_cleanup(self):
         source, response = synthetic_first_input(), assistant_response('Synthetic test answer, not inference.')
         export = FIX['synthetic_first_answer']

@@ -45,6 +45,7 @@ PHASES = {'guard', 'provision-client', 'provision-model', 'service-start', 'clie
 CLIENT_PHASES = {'guard', 'connect', 'turn-1-submit', 'turn-1-result', 'tool-check',
                  'turn-2-submit', 'turn-2-result', 'answer-check'}
 CLIENT_CODES = {'busy', 'invalid_request', 'handshake_required', 'cancelled', 'execution_failed',
+                'execution_budget_exceeded',
                 'cleanup_unconfirmed', 'socket_ownership', 'socket_changed', 'socket_unavailable',
                 'incompatible_capabilities', 'invalid_response', 'invalid_conversation', 'request_bound',
                 'response_bound', 'socket_error', 'disconnected', 'frame_timeout', 'handshake_timeout',
@@ -71,7 +72,7 @@ SERVICE_CODES = {
     'JOB_INPUT_NOT_FOUND', 'JOB_PATH_PERMISSION_DENIED', 'JOB_MEMORY_EXHAUSTED', 'BACKEND_IMPORT_FAILED',
     'BACKEND_EXECUTION_FAILED', 'BACKEND_NOT_INSTALLED', 'BACKEND_VERSION_MISMATCH', 'CPU_BACKEND_REQUIRED',
     'MODEL_PARAMETER_DTYPE_MISMATCH', 'MODEL_WEIGHTS_CHANGED_ON_DISK', 'CONVERSATION_TOKENIZER_SHAPE',
-    'CONVERSATION_TOKEN_LIMIT', 'RESULT_TOO_LARGE', 'CANCELLED', 'DEADLINE_EXCEEDED',
+    'CONVERSATION_TOKEN_LIMIT', 'RESULT_TOO_LARGE', 'JOB_CANCELLED', 'JOB_DEADLINE_EXCEEDED',
 }
 SERVICE_IO_KINDS = {'none', 'not_found', 'permission_denied', 'unexpected_eof', 'broken_pipe',
                     'interrupted', 'invalid_data', 'other'}
@@ -317,9 +318,36 @@ def closed_log(path):
         ('missing_library', b'error while loading shared libraries'))})
 
 
+def generation_state(value):
+    """Scalar, opt-in observations; capabilities are not proof of accelerated kernels."""
+    require(type(value) is dict and set(value) == {'prompt_tokens', 'threads', 'interop_threads', 'cpu',
+        'first_forward_started_ms', 'first_forward_completed_ms', 'first_token_ms',
+        'generated_tokens', 'complete', 'elapsed_ms'}, 'generation fields')
+    for key, low, high in [('prompt_tokens', 1, 12288), ('generated_tokens', 0, 1024), ('elapsed_ms', 0, 599999)]:
+        require(type(value[key]) is int and low <= value[key] <= high, 'generation bound')
+    for key in ('threads', 'interop_threads'):
+        require(value[key] is None or (type(value[key]) is int and 1 <= value[key] <= 2), 'generation threads')
+    cpu = value['cpu']
+    require(type(cpu) is dict and set(cpu) == {'isa', 'avx2', 'avx512_bf16', 'amx_bf16', 'amx_tile',
+        'mkldnn_available', 'mkldnn_enabled'} and cpu['isa'] in {None, 'DEFAULT', 'NO AVX', 'AVX2', 'AVX512'},
+        'generation cpu')
+    for key in set(cpu) - {'isa'}:
+        require(cpu[key] is None or type(cpu[key]) is bool, 'generation cpu flag')
+    start, end, first = [value[key] for key in ('first_forward_started_ms', 'first_forward_completed_ms', 'first_token_ms')]
+    for timestamp in (start, end, first):
+        require(timestamp is None or (type(timestamp) is int and 0 <= timestamp <= value['elapsed_ms']),
+                'generation timestamp')
+    require((end is None or (start is not None and start <= end))
+            and (first is None or (end is not None and end <= first))
+            and ((first is not None) == (value['generated_tokens'] > 0))
+            and type(value['complete']) is bool and (not value['complete'] or value['generated_tokens'] > 0),
+            'generation ordering')
+    return value
+
+
 def execution_state(value):
     """A bounded observation at failure, never a successful operation or cleanup claim."""
-    require(type(value) is dict and set(value) == {'version', 'last_phase', 'substage', 'capacity',
+    require(type(value) is dict and set(value) - {'generation'} == {'version', 'last_phase', 'substage', 'capacity',
                 'controls', 'peak_rss_bytes'} and type(value['version']) is int and value['version'] == 1,
             'execution state fields')
     require(value['last_phase'] in {None, 'preparing', 'baseline', 'training', 'checkpoint', 'reload',
@@ -349,6 +377,9 @@ def execution_state(value):
             require((controls[count] == 0 and controls[action] is None)
                     or (controls[count] > 0 and controls[action] in {'pause', 'resume'}), 'execution control action')
     require(type(value['peak_rss_bytes']) is int and 0 <= value['peak_rss_bytes'] <= 10 * GIB, 'execution peak rss')
+    if 'generation' in value:
+        generation_state(value['generation'])
+        require(stage is not None and stage['stage'] in {'generation', 'verify_after', 'result'}, 'generation scope')
     return value
 
 

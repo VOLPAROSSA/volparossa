@@ -154,6 +154,8 @@ struct WorkerRequest {
     max_seconds: u16,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     owner_control: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    private_generation_diagnostics: bool,
 }
 
 pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
@@ -257,6 +259,9 @@ async fn execute(options: &Options, activity: watch::Receiver<bool>) -> Result<V
         threads: options.threads,
         max_seconds: options.max_seconds,
         owner_control: options.spare_capacity,
+        private_generation_diagnostics: options.mode == Mode::PrivateConversation
+            && options.model_profile.is_native_conversation()
+            && tracing::enabled!(target: "volparossa::compute::private_diagnostic", tracing::Level::DEBUG),
     };
     let child = sandbox::command(options)
         .spawn()

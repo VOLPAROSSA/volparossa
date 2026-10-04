@@ -6,6 +6,8 @@ use serde::Serialize;
 use serde_json::Value;
 use std::sync::Mutex;
 
+mod generation;
+
 const FIXED_CODES: &[&str] = &[
     "compute_deadline",
     "compute_owner_busy",
@@ -95,12 +97,17 @@ struct Substage {
 struct ProgressState {
     last_phase: Option<&'static str>,
     substage: Option<Substage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generation: Option<generation::Observation>,
 }
 
 #[derive(Default)]
-pub(super) struct Progress(Mutex<ProgressState>);
+pub(super) struct Progress(Mutex<ProgressState>, bool);
 
 impl Progress {
+    pub(super) fn with_generation(enabled: bool) -> Self {
+        Self(Mutex::default(), enabled)
+    }
     /// Called only after framing/correlation and owner ACK validation. Retain
     /// closed labels, not the worker's Value or any private request material.
     pub(super) fn observe(&self, value: &Value) -> anyhow::Result<()> {
@@ -114,6 +121,35 @@ impl Progress {
             .0
             .lock()
             .map_err(|_| anyhow::anyhow!("compute_private_progress"))?;
+        if let Some(progress) = value.get("private_generation") {
+            ensure!(
+                self.1
+                    && phase == "baseline"
+                    && value.as_object().is_some_and(|v| v.len() == 7)
+                    && value.get("control_sequence").is_none()
+                    && value.get("planner").is_none()
+                    && value.get("private_execution").is_none()
+                    && value["step"].as_u64() == Some(0)
+                    && state
+                        .substage
+                        .is_some_and(|stage| stage.stage == "generation" && stage.state == "begin"),
+                "compute_private_progress"
+            );
+            let elapsed = value["elapsed_ms"]
+                .as_u64()
+                .context("compute_private_progress")?;
+            ensure!(
+                state
+                    .substage
+                    .is_some_and(|stage| elapsed >= stage.elapsed_ms),
+                "compute_private_progress"
+            );
+            state.generation = Some(generation::Observation::observe(
+                state.generation,
+                progress,
+                elapsed,
+            )?);
+        }
         if let Some(progress) = value.get("private_execution") {
             ensure!(
                 progress.as_object().is_some_and(|object| object.len() == 2)
@@ -176,12 +212,16 @@ pub(super) fn terminal_state(
 ) {
     let state = progress.0.lock().map(|state| *state).unwrap_or_default();
     let observation = budget.observation();
-    let record = serde_json::json!({"version":1,
+    let mut record = serde_json::json!({"version":1,
         "last_phase":state.last_phase,"substage":state.substage,
         "capacity":{"decision":budget.current(),"constraint":budget.constraint(),
             "cpu_some_avg10":observation.cpu_some_avg10,"io_some_avg10":observation.io_some_avg10,
             "memory_bytes":observation.memory_bytes},
         "controls":controls.and_then(super::Controls::observation),"peak_rss_bytes":peak_rss});
+    if let Some(generation) = state.generation {
+        record["generation"] = serde_json::to_value(generation.snapshot)
+            .expect("closed scalar generation observation");
+    }
     tracing::debug!(target: "volparossa::compute::private_diagnostic",
         "private_execution_state {record}");
 }
@@ -200,8 +240,8 @@ const WORKER_CODES: &[&str] = &[
     "CONVERSATION_TOKENIZER_SHAPE",
     "CONVERSATION_TOKEN_LIMIT",
     "RESULT_TOO_LARGE",
-    "CANCELLED",
-    "DEADLINE_EXCEEDED",
+    "JOB_CANCELLED",
+    "JOB_DEADLINE_EXCEEDED",
 ];
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -294,6 +334,58 @@ mod tests {
             "elapsed_ms":elapsed_ms,"private_execution":{"stage":stage,"state":observation}})
     }
 
+    fn generation_frame() -> Value {
+        serde_json::json!({"version":1,"id":"private-request-canary","kind":"progress",
+            "phase":"baseline","step":0,"elapsed_ms":20,"private_generation":{
+                "prompt_tokens":100,"threads":2,"interop_threads":1,
+                "cpu":{"isa":null,"avx2":null,"avx512_bf16":null,"amx_bf16":null,
+                    "amx_tile":null,"mkldnn_available":null,"mkldnn_enabled":null},
+                "first_forward_started_ms":null,"first_forward_completed_ms":null,"first_token_ms":null,
+                "generated_tokens":0,"complete":false,"elapsed_ms":20}})
+    }
+
+    fn enter_generation(observed: &Progress) {
+        for (index, stage) in PRIVATE_STAGES.iter().take(7).enumerate() {
+            observed
+                .observe(&progress(stage, "begin", index as u64 * 2))
+                .unwrap();
+            if *stage != "generation" {
+                observed
+                    .observe(&progress(stage, "complete", index as u64 * 2 + 1))
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn generation_requires_explicit_opt_in_correct_phase_and_closed_frames() {
+        let frame = generation_frame();
+        assert!(Progress::with_generation(true).observe(&frame).is_err());
+        let disabled = Progress::default();
+        enter_generation(&disabled);
+        assert!(disabled.observe(&frame).is_err());
+        for (key, value) in [
+            ("control_sequence", serde_json::json!(1)),
+            (
+                "private_execution",
+                serde_json::json!({"stage":"generation","state":"begin"}),
+            ),
+            ("payload", serde_json::json!("PRIVATE_CANARY")),
+            ("phase", serde_json::json!("paused")),
+        ] {
+            let enabled = Progress::with_generation(true);
+            enter_generation(&enabled);
+            let mut changed = frame.clone();
+            changed[key] = value;
+            assert!(enabled.observe(&changed).is_err());
+            assert!(enabled.0.lock().unwrap().generation.is_none());
+        }
+        let enabled = Progress::with_generation(true);
+        enter_generation(&enabled);
+        enabled.observe(&frame).unwrap();
+        assert!(enabled.0.lock().unwrap().generation.is_some());
+    }
+
     #[test]
     fn private_stages_are_closed_ordered_observations_not_model_proof() {
         let observed = Progress::default();
@@ -349,6 +441,26 @@ mod tests {
         );
     }
 
+    const SUBSCRIBER_PARSER_CHECK: &str = r"
+import runpy, sys
+from pathlib import Path
+fixture = runpy.run_path(sys.argv[1])
+result = fixture['service_diagnostic'](Path(sys.argv[2]))
+generation = result['states'].pop()
+assert generation['last_phase'] == 'baseline'
+assert generation['substage'] == dict(stage='generation',state='begin',elapsed_ms=12)
+assert generation['generation'] == dict(prompt_tokens=100, threads=2, interop_threads=1,
+    cpu=dict(isa=None,avx2=None,avx512_bf16=None,amx_bf16=None,amx_tile=None,mkldnn_available=None,mkldnn_enabled=None),
+    first_forward_started_ms=20, first_forward_completed_ms=20, first_token_ms=20,
+    generated_tokens=1, complete=False, elapsed_ms=20)
+assert result == dict(version=1, truncated=False, unrecognized_record=False, states=[dict(
+    version=1,last_phase='paused',substage=dict(stage='owner_gate',state='begin',elapsed_ms=0),
+    capacity=dict(decision='pause',constraint='memory',cpu_some_avg10=None,io_some_avg10=None,memory_bytes=None),
+    controls=dict(issued=1,acknowledged=1,last_issued='pause',last_acknowledged='pause'),peak_rss_bytes=1234)], events=[dict(
+    version=1, phase='refresh', detail=dict(code='compute_private_process_children',
+    io_kind='permission_denied', exit_code=None, signal=None, stderr_class=None))])
+";
+
     #[test]
     fn actual_subscriber_output_passes_the_private_fixture_parser() {
         const CHILD: &str = "VOLPAROSSA_DIAGNOSTIC_BRIDGE_CHILD";
@@ -388,6 +500,18 @@ mod tests {
                     ))
                     .context("compute_private_process_children"),
                 );
+                let observed = Progress::with_generation(true);
+                enter_generation(&observed);
+                let mut frame = generation_frame();
+                observed.observe(&frame).unwrap();
+                frame["private_generation"]["first_forward_started_ms"] = 20.into();
+                observed.observe(&frame).unwrap();
+                frame["private_generation"]["first_forward_completed_ms"] = 20.into();
+                observed.observe(&frame).unwrap();
+                frame["private_generation"]["first_token_ms"] = 20.into();
+                frame["private_generation"]["generated_tokens"] = 1.into();
+                observed.observe(&frame).unwrap();
+                terminal_state(&observed, &super::super::Budget::new(), None, 456);
             });
             return;
         }
@@ -412,22 +536,7 @@ mod tests {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/integration/agent-private-conversation.py");
         let result = std::process::Command::new("python3")
-            .args([
-                "-B",
-                "-c",
-                r"
-import runpy, sys
-from pathlib import Path
-fixture = runpy.run_path(sys.argv[1])
-result = fixture['service_diagnostic'](Path(sys.argv[2]))
-assert result == dict(version=1, truncated=False, unrecognized_record=False, states=[dict(
-    version=1,last_phase='paused',substage=dict(stage='owner_gate',state='begin',elapsed_ms=0),
-    capacity=dict(decision='pause',constraint='memory',cpu_some_avg10=None,io_some_avg10=None,memory_bytes=None),
-    controls=dict(issued=1,acknowledged=1,last_issued='pause',last_acknowledged='pause'),peak_rss_bytes=1234)], events=[dict(
-    version=1, phase='refresh', detail=dict(code='compute_private_process_children',
-    io_kind='permission_denied', exit_code=None, signal=None, stderr_class=None))])
-",
-            ])
+            .args(["-B", "-c", SUBSCRIBER_PARSER_CHECK])
             .arg(fixture)
             .arg(log.path())
             .output()
@@ -469,6 +578,11 @@ assert result == dict(version=1, truncated=False, unrecognized_record=False, sta
         assert_eq!(
             describe(&failure("BACKEND_IMPORT_FAILED")).code,
             "BACKEND_IMPORT_FAILED"
+        );
+        assert_eq!(describe(&failure("JOB_CANCELLED")).code, "JOB_CANCELLED");
+        assert_eq!(
+            describe(&failure("JOB_DEADLINE_EXCEEDED")).code,
+            "JOB_DEADLINE_EXCEEDED"
         );
         let raw = serde_json::to_string(&describe(&failure("PRIVATE_CANARY"))).unwrap();
         assert!(raw.contains("worker_other"));
