@@ -204,11 +204,13 @@ feature branches are not implied to be integrated into `main`.
   The agent gets no owner private key or archive path. Actual signed-request byte
   admission, shared foreground/resource cancellation, retained retry identities and
   conservative charges are wired; no independent ledger, automatic grant renewal,
-  archive discovery or contribution resizing is introduced. Combined daemon/overlay
-  execution is not yet proven. Twelve targeted maintenance checks pass (five new,
+  archive discovery or contribution resizing is introduced. The complete daemon/overlay
+  lifecycle is not yet proven; the partial live results are recorded below.
+  Twelve targeted maintenance checks pass (five new,
   seven existing), including actual signed SQLite provider renew/repair/restart and
   repeated source-free C/D restore; four focused bridge tests and strict CLI/agent
-  Clippy also pass. Positive live-link idle admission still needs the combined trial.
+  Clippy also pass. The later combined trials prove positive live-link idle admission,
+  not the full retirement/deletion and final-accounting cycle.
   A disposable `private-storage-maintenance` scenario now wires explicit guest `cr0`
   idle budgets, actual CLI enrollment/core turns, renewal, EOF/foreground cancellation,
   A-offline B/C repair and repeated source-free restore, conservative charges and full
@@ -306,9 +308,32 @@ feature branches are not implied to be integrated into `main`.
   joined sampler; Cloud keeps its incremental-overlap collector and strict initial
   route-context check. Original Cloud run `37218270756` still reconstructs exactly
   from its retained evidence under the combined checker, but is not maintenance
-  proof. No new maintenance VM run has been performed for this integration; a
-  complete context-bound finish, actual provider-store zero-lease accounting and
-  cleanup must still pass together on its exact source revision.
+  proof.
+  The integration's original [run37221816826 on `f0e1a68f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37221816826)
+  (job111493517777, attempt 1) remains **failed** at `FRAGMENTS_FINISH_FAILED`.
+  Its primary closed code is `retirement_pending_or_charge`: after four retirement
+  turns, two of three obligations remain pending, with three placement authorizations
+  and eleven retained copy records. The last owner process exits zero, advances its
+  cursor exactly from 9 to 10 and reports `turn_completed`/`maintained`; that state
+  does not assert that every retirement completed. A **separate** sampler failure is
+  retained as `sampling` / `route_scope` / `invalid` (49 samples, 14 completed flows,
+  one failed flow). Neither the remaining obligations nor this rejected route view
+  establishes the underlying cause or a causal relationship between the two failures.
+  Exact-source replay accepts the upload/restore network evidence: 41/54 overlapping
+  samples, 1,026/1,935 records and 74/55 completed protected flows (1/0 failed).
+  Actual renewal, owner EOF/restart, foreground revocation, three replacement
+  readbacks and two source-free B/C restores are retained. Finish flow gates,
+  all-copy deletion and final provider-store zero-lease accounting are absent.
+  All private cleanup checks pass, topology cleanup leaves zero owned objects, and
+  the disposable guest-root network snapshots are byte-identical with SHA-256
+  `d99a822eb1ec36bbb3dd7a85eff7567ca3fd2326e175ecad403c398e20608a33`.
+  Original 38-file ZIP SHA-256:
+  `daab08b7759131405f713b149a5f8d84b59b6c36572eb493b4c2546ef3dc7df8`;
+  original job-log SHA-256:
+  `4aec8d5af9e2bac8efd16561ed0b4808debe8c30ed0b6351b2132e9868521501`.
+  No retry, product change or relaxed limit is part of this result. A complete
+  context-bound finish, actual provider-store zero-lease accounting and cleanup
+  must still pass together on one exact source revision.
   See [private storage maintenance](services/PRIVATE_STORAGE.md#explicit-owner-private-background-maintenance).
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):

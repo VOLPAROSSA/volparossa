@@ -122,9 +122,10 @@ source twice from C/D and finally confirm A's deletion when it returns. Separate
 tests cover owner/UID/token binding, shared leases, byte exhaustion, refusal of an
 ineligible loopback link and foreground/EOF revocation. The wire tests separately
 prove real signed transfer admission and refusal before provider mutation. Strict
-CLI/agent Clippy and formatting pass. A combined running-daemon/protected-overlay
-maintenance trial remains required; earlier fragment and Image proofs do not prove
-this new worker, and the local checks do not establish positive live-link admission.
+CLI/agent Clippy and formatting pass. Complete running-daemon/protected-overlay
+maintenance acceptance remains required. The later trials below provide partial
+live evidence, including positive live-link admission; local checks and earlier
+fragment/Image proofs alone do not prove this worker's complete lifecycle.
 
 The new disposable `private-storage-maintenance` scenario is wired but **not yet
 passing**. It reuses the three protected fragment providers and explicitly enables
@@ -190,6 +191,19 @@ is missing; successful cleanup is not a substitute. The next fixture adds bounde
 closed diagnostics and preserves an owner error separately from a sampler or cleanup
 error, without exporting private output or changing limits. It does not establish a
 cause or turn this failed run into a completed maintenance proof.
+
+The integrated candidate's original [run37221816826 on `f0e1a68f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37221816826)
+also remains **failed**. The primary code `retirement_pending_or_charge` now identifies
+two outstanding retirement obligations after four completed owner turns; the last
+turn exits zero with its exact cursor advance and `turn_completed`/`maintained`.
+A separate sampler failure rejects a route view (`sampling` / `route_scope` / `invalid`).
+The underlying causes and any relationship between these failures remain unproven.
+Renewal, owner EOF/restart, foreground revocation, three replacements, two source-free
+B/C restores and their upload/restore network gates pass exact-source replay.
+Private/topology cleanup passes and the disposable guest-root network state is
+unchanged, but final flow gates, all-copy deletion and provider zero-lease accounting
+are absent. No new retry or relaxed success requirement follows from this result;
+see the [original artifact hashes and precise scope](../IMPLEMENTATION_STATUS.md#additional-application-and-autonomous-maintenance-scope).
 
 Message delivery can acknowledge and consume an inbox item. A backup restore must not
 consume its storage lease. Backup retention, renewal, expiry and owner deletion are
