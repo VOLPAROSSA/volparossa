@@ -142,7 +142,7 @@ class UploadContracts(unittest.TestCase):
         module = runpy.run_path(str(HERE / "cloud-private-upload-provision.py"))
         state = module["configured"]()
         pins = state["load_pins"]()
-        self.assertEqual(pins["revision"], "0d483f5c452eef2e9d1bc555a478b2bff57404c2")
+        self.assertEqual(pins["revision"], "ffdcfaa15cdd2a029dae545904b0a58603da4e17")
         self.assertEqual(len(pins["files"]), 27)
         self.assertTrue({"src/owner-uploads.mjs", "scripts/upload_lock.py", "scripts/smoke_owner_upload_ui.py"} <= pins["files"].keys())
         self.assertEqual(pins["runtime"]["version"], "24.19.0")
@@ -257,8 +257,47 @@ class UploadContracts(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "original UI failed"):
                     serve(Path("/synthetic-owner"), "upload")
                 self.assertEqual(serve.__globals__["UI_STAGE"], "upload_commit")
+                self.assertEqual(serve.__globals__["UI_PARENT_STAGE"], "ui_execution")
                 self.assertEqual(serve.__globals__["UI_FAILURE"], CHECK["closed_ui_failure"](report, "upload"))
                 self.assertNotIn("PRIVATE", json.dumps(serve.__globals__["UI_FAILURE"]))
+
+    def test_parent_phase_distinguishes_ui_contract_service_close_and_staging(self):
+        serve = CHECK["serve_ui"]
+        closed = json.dumps(dict(version=1, kind="volparossa-cloud-private-read", state="closed")).encode()
+        ready = dict(version=1, kind="volparossa-cloud-private-read", state="listening", readOnly=False,
+            loopbackOnly=True, originalServerFallback=False, openCloudAccountService=False,
+            origin="http://127.0.0.1:1234")
+        for phase in ("complete", "ui_contract", "service_shutdown", "staging_cleanup"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); (root / "w").mkdir()
+                if phase == "staging_cleanup": (root / "w" / "private-staging").touch()
+                report = ui("upload")
+                if phase == "ui_contract": report["private_raw"] = "PRIVATE_RAW"
+                service = mock.Mock(returncode=1 if phase == "service_shutdown" else 0)
+                service.stdout = io.BytesIO(json.dumps(ready).encode())
+                service.poll.return_value = service.returncode
+                service.communicate.return_value = (closed, b"PRIVATE_STDERR" if phase == "service_shutdown" else b"")
+                process = mock.Mock(returncode=0)
+                process.poll.return_value = 0
+                process.communicate.return_value = (json.dumps(report).encode(), b"")
+                with mock.patch.dict(serve.__globals__, tools=lambda: (Path("/synthetic-source"), Path("/synthetic-node")),
+                    read=lambda _path: dict(bearerToken="PRIVATE_TOKEN")), \
+                    mock.patch.object(serve.__globals__["subprocess"], "Popen", side_effect=[service, process]), \
+                    mock.patch.object(serve.__globals__["select"], "select", return_value=([service.stdout], [], [])):
+                    if phase == "complete": self.assertEqual(serve(root, "upload"), report)
+                    else:
+                        with self.assertRaises(ValueError): serve(root, "upload")
+                    self.assertEqual(CHECK["closed_ui_parent_stage"](), phase)
+                    self.assertIsNone(serve.__globals__["UI_FAILURE"])
+
+    def test_parent_phase_is_closed_and_never_exports_raw_failure_details(self):
+        select = CHECK["closed_ui_parent_stage"]
+        phases = {"not_started", "service_start", "service_readiness", "ui_execution", "ui_contract",
+            "service_shutdown", "staging_cleanup", "complete", "unreported"}
+        self.assertEqual(CHECK["UI_PARENT_STAGES"], phases)
+        for value in [*phases, None, [], {}, True, "PRIVATE_TOKEN_PATH_ERROR"]:
+            with mock.patch.dict(select.__globals__, UI_PARENT_STAGE=value):
+                self.assertEqual(select(), value if type(value) is str and value in phases else "unreported")
 
 
 if __name__ == "__main__": unittest.main()

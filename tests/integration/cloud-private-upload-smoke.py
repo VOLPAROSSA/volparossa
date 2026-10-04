@@ -38,6 +38,9 @@ UPLOAD_SHA = hashlib.sha256(UPLOAD).hexdigest()
 STAGE = "not_started"
 UI_STAGE = None
 UI_FAILURE = None
+UI_PARENT_STAGE = "not_started"
+UI_PARENT_STAGES = frozenset(("not_started", "service_start", "service_readiness", "ui_execution",
+    "ui_contract", "service_shutdown", "staging_cleanup", "complete", "unreported"))
 EXPORT_NAMES = tuple(name for name in CLOUD["EXPORT_NAMES"] if not name.startswith("cloud-private-file-")) + (
     "cloud-private-upload-smoke.json", "cloud-private-upload-evidence.json",
     "cloud-private-upload-provision.json", "cloud-private-upload-route-diagnostic.json")
@@ -242,8 +245,9 @@ def closed_ui_failure(value, mode):
 
 
 def serve_ui(root, mode):
-    global UI_STAGE, UI_FAILURE
+    global UI_STAGE, UI_FAILURE, UI_PARENT_STAGE
     UI_STAGE, UI_FAILURE = None, None
+    UI_PARENT_STAGE = "service_start"
     source, node = tools()
     config = read(root / "service.json")
     service = subprocess.Popen([node, source / "scripts/cloud-serve.mjs", "--config", root / "service.json"],
@@ -251,6 +255,7 @@ def serve_ui(root, mode):
         env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
     clean = False
     try:
+        UI_PARENT_STAGE = "service_readiness"
         require(bool(select.select([service.stdout], [], [], 60)[0]), "Cloud service readiness timeout")
         record = json.loads(service.stdout.readline(4097))
         require(record["version"] == 1 and record["kind"] == "volparossa-cloud-private-read"
@@ -259,6 +264,7 @@ def serve_ui(root, mode):
             and re.fullmatch(r"http://127\.0\.0\.1:[1-9][0-9]{0,4}", record["origin"]), "owner service not ready")
         command = ["/usr/bin/python3", "-B", source / "scripts/smoke_owner_upload_ui.py", mode, root / "w", "--yes"]
         payload = dict(origin=record["origin"], bearerToken=config["bearerToken"], expectedBytes=len(UPLOAD), expectedSha256=UPLOAD_SHA)
+        UI_PARENT_STAGE = "ui_execution"
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
         try:
@@ -269,6 +275,7 @@ def serve_ui(root, mode):
             UI_STAGE = stage if type(stage) is str and stage in UI_STAGES else "unreported"
             UI_FAILURE = closed_ui_failure(value, mode)
             require(process.returncode == 0, "original UI failed")
+            UI_PARENT_STAGE = "ui_contract"
             result = ui_record(value, mode)
         finally:
             if process.poll() is None:
@@ -279,6 +286,8 @@ def serve_ui(root, mode):
         clean = True
         return result
     finally:
+        failed_at = UI_PARENT_STAGE if sys.exc_info()[0] is not None else None
+        UI_PARENT_STAGE = "service_shutdown"
         if service.poll() is None:
             os.killpg(service.pid, signal.SIGTERM)
         try: stdout, stderr = service.communicate(timeout=20)
@@ -288,8 +297,14 @@ def serve_ui(root, mode):
         require(service.returncode == 0 and len(stdout) <= 4096 and not stderr
             and json.loads(stdout) == dict(version=1, kind="volparossa-cloud-private-read", state="closed"),
             "Cloud service cleanup unconfirmed")
+        UI_PARENT_STAGE = "staging_cleanup"
         if clean:
             require(not list((root / "w").iterdir()), "private service staging remains")
+        UI_PARENT_STAGE = failed_at or "complete"
+
+
+def closed_ui_parent_stage():
+    return UI_PARENT_STAGE if type(UI_PARENT_STAGE) is str and UI_PARENT_STAGE in UI_PARENT_STAGES else "unreported"
 
 
 def upload(root, binary, client, keys):
@@ -314,12 +329,17 @@ def upload(root, binary, client, keys):
         storageConfig=str(root / "upload-storage.json")))).encode())
     STAGE = "original_ui_upload"
     ui = serve_ui(root, "upload")
+    STAGE = "uploaded_object"
     target, receipt = uploaded_object(root)
+    STAGE = "upload_cipher"
     cipher = target / "bundle/file.pgp"
     require(private_file(cipher).st_size == receipt["cipher_bytes"]
         and hashlib.sha256(cipher.read_bytes()).hexdigest() == receipt["cipher_sha256"], "upload cipher differs")
+    STAGE = "upload_identity"
     create(root / "upload-identities.sha256", upload_identity(target))
+    STAGE = "upload_status"
     usage = upload_status(root, binary, client, keys)
+    STAGE = "upload_source_cleanup"
     cipher.unlink()
     require(not (root / "bundle/file.pgp").exists(), "baseline cipher remains")
     return dict(baseline=baseline, ui=ui, upload_ciphertext_bytes=receipt["cipher_bytes"], upload_provider_usage=usage,
@@ -515,5 +535,5 @@ if __name__ == "__main__":
     try: main(sys.argv[1:])
     except (KeyError, TypeError, ValueError, OSError, StopIteration, subprocess.SubprocessError):
         print(json.dumps(dict(success=False, kind="cloud-private-upload-failure", stage=STAGE,
-            ui_stage=UI_STAGE, ui_failure=UI_FAILURE)))
+            ui_stage=UI_STAGE, ui_failure=UI_FAILURE, ui_parent_stage=closed_ui_parent_stage())))
         sys.exit(1)

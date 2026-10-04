@@ -1,7 +1,7 @@
 {
   "version": 1,
   "repository": "https://github.com/VOLPAROSSA/volparossa-cloud",
-  "revision": "0d483f5c452eef2e9d1bc555a478b2bff57404c2",
+  "revision": "ffdcfaa15cdd2a029dae545904b0a58603da4e17",
   "files": {
     "LICENSE": {
       "bytes": 35149,
@@ -56,8 +56,8 @@
       "sha256": "7b496a31c957093d3697ff0893f80e05066e13cf40c6b8d927cbe3c63a9a64b4"
     },
     "scripts/upload_lock.py": {
-      "bytes": 988,
-      "sha256": "2d7b1163c1db319ce7bc042c3309f2e302cdc73e2e0afb210db51777387d5e9e"
+      "bytes": 1487,
+      "sha256": "5eed5defd27e3ff3f644294ff0a53027b613e6334fefe3076a8bcd5982cc31e7"
     },
     "src/opencloud-dav.mjs": {
       "bytes": 9820,

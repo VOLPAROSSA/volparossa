@@ -383,12 +383,36 @@ feature branches are not implied to be integrated into `main`.
   generated SDK requests `/graph/v1.0/drives/{id}`, but the adapter only accepted
   `v1beta1`. A real HTTP/pinned-SDK reproduction confirms this 404; the original
   browser's Graph response was not retained, so it is not retroactively asserted.
-  The new pin `0d483f5c452eef2e9d1bc555a478b2bff57404c2` aliases only that
+  Cloud `0d483f5c452eef2e9d1bc555a478b2bff57404c2` aliases only that
   authenticated v1.0 drive read to the same exact owner-selected root; no v1.0
   accounts, collections, permissions or writes are added. Actual SDK
   upload/Graph refresh/listing/read passes against
   a synthetic storage contract, not real peer recovery. UI criteria, native retries,
   deadlines, resource budgets and historical read-only pins remain unchanged.
+  Its exact-source [run `37207919255`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37207919255)
+  on `21f5cfc78f3266249fe10544c384371596ef7c13` remains **failed**. Selection
+  reaches `CONNECTED` after 16 attempts and 15 retries; the parent retains
+  `original_ui_upload`, UI stage `cleanup` and no closed UI-failure record.
+  The pinned child sets that stage only after its success/browser/profile-cleanup
+  path, but the full UI receipt and exact subsequent parent failure were not
+  retained. This does not establish independent object/charge checks or recovery.
+  All private cleanup flags pass; final cleanup has zero owned objects and equal
+  guest-root network hashes `c27ed94d831d21b4d47a1aff168f9b9a22d9a153e586ff1c024d56367361be97`.
+  Original ZIP SHA-256: `9995515c4b1120b30b3dd2bc2317ecb6c6018b76c58c97b848cb8728d8d3da49`;
+  original job `111452913742` log SHA-256:
+  `e69ac4cc153cdf2a379c63968c3bd0ba832fab63e441e7d2267a509ff820e403`.
+  A real Node-owner/Python-lock process-group regression then reproduces premature
+  lock termination on group SIGTERM: the owner cannot acknowledge clean shutdown.
+  Cloud candidate `ffdcfaa15cdd2a029dae545904b0a58603da4e17` retains the
+  supervised lock through SIGTERM/SIGINT/SIGHUP until
+  the owner's pipe closes; lock contention before EOF and release afterward are
+  checked, while SIGKILL remains a failed acknowledgement. The original run's
+  exact cleanup result was not retained, so this cause is not retroactively claimed.
+  The parent now selects a closed phase for UI execution/contract, service shutdown
+  and staging cleanup, plus fixed post-UI object/cipher/identity/status stages;
+  unknown values never expose raw errors. Original success, cleanup, resource and
+  deadline gates are unchanged. Focused process/contract checks are not a live
+  UI/peer-storage pass.
   The candidate keeps the
   preceding read-only proof/pins unchanged and requires an original Files/Uppy
   upload of 262,145 synthetic bytes, actual owner GPG encryption, three 128-KiB
