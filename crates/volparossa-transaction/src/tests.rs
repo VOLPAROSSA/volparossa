@@ -1,9 +1,11 @@
 //! Real `SQLite` and Ed25519 tests with fictional units and inert child processes.
 use crate::*;
 use ed25519_dalek::SigningKey;
+use rand_core::{OsRng, RngCore as _};
 use std::{
     fs,
-    os::unix::fs::{PermissionsExt as _, symlink},
+    io::{Read as _, Write as _},
+    os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _, symlink},
     process::{Command as Process, Stdio},
     thread,
     time::{Duration, Instant},
@@ -37,6 +39,12 @@ fn store(root: &Path) -> Store {
     .unwrap()
 }
 fn signed(id: u8, action: Action) -> Vec<u8> {
+    signed_with_nonce(id, action, random_nonce())
+}
+fn random_nonce() -> [u8; 32] {
+    std::array::from_fn(|_| OsRng.next_u32().to_le_bytes()[0])
+}
+fn signed_with_nonce(id: u8, action: Action, nonce: [u8; 32]) -> Vec<u8> {
     SignedCommand::sign(
         [9; 32],
         &key(1),
@@ -47,7 +55,7 @@ fn signed(id: u8, action: Action) -> Vec<u8> {
         },
         100,
         200,
-        [id; 32],
+        nonce,
     )
     .unwrap()
     .encode()
@@ -91,7 +99,7 @@ fn inspection_verifies_terms_without_admission_or_mutation() {
     );
     assert!(ledger.operation([1; 32]).unwrap().is_none());
     assert!(ledger.operation([2; 32]).unwrap().is_none());
-    let cross = SignedCommand::sign([8; 32], &key(1), terms, 100, 200, [1; 32])
+    let cross = SignedCommand::sign([8; 32], &key(1), terms, 100, 200, random_nonce())
         .unwrap()
         .encode();
     assert!(matches!(ledger.inspect(&cross), Err(Error::WrongLedger)));
@@ -104,7 +112,7 @@ fn inspection_verifies_terms_without_admission_or_mutation() {
         },
         100,
         200,
-        [1; 32],
+        random_nonce(),
     )
     .unwrap()
     .encode();
@@ -248,7 +256,7 @@ fn forged_signer_wrong_domain_changed_bytes_and_unsupported_encoding_are_rejecte
         },
         100,
         200,
-        [1; 32],
+        random_nonce(),
     )
     .unwrap();
     assert!(matches!(
@@ -268,7 +276,7 @@ fn forged_signer_wrong_domain_changed_bytes_and_unsupported_encoding_are_rejecte
         },
         100,
         200,
-        [1; 32],
+        random_nonce(),
     )
     .unwrap();
     assert!(matches!(
@@ -286,7 +294,15 @@ fn durable_nonce_and_identifier_conflicts_do_not_change_balances() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("ledger");
     let mut ledger = store(&path);
-    let original = reserve(1, 60);
+    let nonce = random_nonce();
+    let original = signed_with_nonce(
+        1,
+        Action::Reserve {
+            recipient: owner(2),
+            units: 60,
+        },
+        nonce,
+    );
     let receipt = ledger.apply(&original, 110).unwrap();
     drop(ledger);
     let mut ledger = Store::open(&path).unwrap();
@@ -305,7 +321,7 @@ fn durable_nonce_and_identifier_conflicts_do_not_change_balances() {
         },
         100,
         200,
-        [1; 32],
+        nonce,
     )
     .unwrap();
     assert!(matches!(
@@ -328,7 +344,7 @@ fn durable_nonce_and_identifier_conflicts_do_not_change_balances() {
         },
         100,
         200,
-        [4; 32],
+        random_nonce(),
     )
     .unwrap();
     assert!(matches!(
@@ -420,7 +436,7 @@ fn exact_integer_supply_and_new_store_bounds_do_not_adopt_existing_data() {
             },
             100,
             200,
-            [1; 32]
+            random_nonce()
         )
         .is_err()
     );
@@ -515,7 +531,7 @@ fn full_operation_budget_keeps_all_admitted_completions_and_expired_replays() {
             },
             100,
             200,
-            identifier(number),
+            random_nonce(),
         )
         .unwrap()
         .encode()
@@ -547,7 +563,9 @@ fn full_operation_budget_keeps_all_admitted_completions_and_expired_replays() {
             },
         )
     };
-    for id in 1..=capacity {
+    let first_bytes = reserve(1);
+    ledger.apply(&first_bytes, 110).unwrap();
+    for id in 2..=capacity {
         ledger.apply(&reserve(id), 110).unwrap();
     }
     assert!(matches!(
@@ -584,7 +602,7 @@ fn full_operation_budget_keeps_all_admitted_completions_and_expired_replays() {
             reserved_units: 0
         }
     );
-    assert_eq!(ledger.apply(&reserve(1), 300).unwrap().sequence, 1);
+    assert_eq!(ledger.apply(&first_bytes, 300).unwrap().sequence, 1);
     assert_eq!(
         ledger
             .operation(identifier(MAX_OPERATIONS))
@@ -610,15 +628,22 @@ fn crash_child() {
     let root = std::path::PathBuf::from(path);
     let mut ledger = Store::open(&root).unwrap();
     let phase = std::env::var("VOLPAROSSA_TEST_TRANSACTION_CRASH_PHASE").unwrap();
+    let mut original = Vec::new();
+    File::open(root.join("original-command.pb"))
+        .unwrap()
+        .take(4097)
+        .read_to_end(&mut original)
+        .unwrap();
+    assert!(!original.is_empty() && original.len() <= 4096);
     if phase == "before" {
         ledger
-            .apply_inner(&reserve(1, 70), 110, || {
+            .apply_inner(&original, 110, || {
                 fs::write(root.join("ready"), b"before").unwrap();
                 thread::sleep(Duration::from_secs(30));
             })
             .unwrap();
     } else {
-        ledger.apply(&reserve(1, 70), 110).unwrap();
+        ledger.apply(&original, 110).unwrap();
         fs::write(root.join("ready"), b"after").unwrap();
         thread::sleep(Duration::from_secs(30));
     }
@@ -630,6 +655,16 @@ fn killed_process_before_and_after_commit_reopens_without_partial_debit_or_dupli
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("ledger");
         drop(store(&path));
+        let original = reserve(1, 70);
+        let mut command_file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path.join("original-command.pb"))
+            .unwrap();
+        command_file.write_all(&original).unwrap();
+        command_file.sync_all().unwrap();
+        drop(command_file);
         let mut child = Process::new(std::env::current_exe().unwrap())
             .args(["--exact", "tests::crash_child", "--ignored", "--nocapture"])
             .env("VOLPAROSSA_TEST_TRANSACTION_CRASH_ROOT", &path)
@@ -667,9 +702,13 @@ fn killed_process_before_and_after_commit_reopens_without_partial_debit_or_dupli
             }
         };
         assert_eq!(ledger.status(owner(1)).unwrap(), expected);
-        let accepted = ledger.apply(&reserve(1, 70), 110).unwrap();
+        assert_eq!(
+            fs::read(path.join("original-command.pb")).unwrap(),
+            original
+        );
+        let accepted = ledger.apply(&original, 110).unwrap();
         assert_eq!(accepted.sequence, 1);
-        assert_eq!(ledger.apply(&reserve(1, 70), 300).unwrap(), accepted);
+        assert_eq!(ledger.apply(&original, 300).unwrap(), accepted);
         assert_eq!(
             ledger.status(owner(1)).unwrap(),
             Balance {

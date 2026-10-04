@@ -69,6 +69,17 @@ errors before workspace tests ran. The original log is retained (SHA-256
 The same documentation spelling is corrected in the test module as well. Full
 source CI is still required for the follow-up; no modern local Clippy pass is claimed.
 
+The same original commit's CodeQL gate reported 23 hard-coded-nonce findings:
+22 originate in synthetic test fixtures and one in an example's zero-initialized
+buffer that was already fully overwritten by `OsRng`. The original annotation
+report is retained (SHA-256
+`9f129b1ea233f1d26e025f8267e8dac5982958a76f6eac908e51231219060889`).
+Tests now generate fresh CSPRNG nonces and explicitly retain the same nonce or
+signed bytes for replay, capacity and subprocess recovery checks. The example
+constructs its random bytes directly. No query is suppressed and no protocol or
+authorization checks are relaxed. All ten targeted tests pass with these fixtures;
+source CI must independently check the resulting candidate.
+
 This durable slice has no network, gateway, encryption at rest, consensus,
 distributed finality, external reconciliation, corrections or AML capability.
 The older isolated experiment's simulated external/correction operations are not

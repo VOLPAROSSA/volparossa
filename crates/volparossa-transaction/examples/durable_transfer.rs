@@ -11,9 +11,7 @@ use volparossa_transaction::{
 };
 
 fn random_id() -> [u8; 32] {
-    let mut id = [0; 32];
-    OsRng.fill_bytes(&mut id);
-    id
+    std::array::from_fn(|_| OsRng.next_u32().to_le_bytes()[0])
 }
 
 fn signed(
