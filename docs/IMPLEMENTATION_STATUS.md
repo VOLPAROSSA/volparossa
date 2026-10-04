@@ -15,6 +15,25 @@ Last updated: 2026-10-04
 
 ## Current integration and active work
 
+### Bank and Transaction layer research
+
+The 2026-10-04 user extension adds VOLPAROSSA Bank and a reusable Transaction-layer.
+The [design](services/TRANSACTION_LAYER.md) separates portfolio construction,
+beneficial ownership, payment authorization, ledger ordering, external settlement
+and authorized corrections. Research prototypes are isolated from the daemon;
+they accept no real funds and provide no distributed or cryptographic settlement.
+Live payments, custody, financial gateway integration, confidential AML review,
+price discovery and recovery of forwarded funds remain unimplemented. Research
+tests do not satisfy these functional requirements.
+
+Nine offline transaction-state tests pass: exact integer conservation, scoped
+simulation authority, reservations, duplicate IDs, external uncertainty, bounded
+append-only corrections, forwarded/split-value shortfalls and resource limits.
+All state and authority are single-process test inputs; restart-safe idempotency,
+distributed consensus and actual recovery are not proved. The separate Bank
+arithmetic prototype has nine passing tests for the confirmed ROIC × FCF-yield
+rule and configured ownership headroom, not investment performance or compliance.
+
 ### Eligible controls in route preselection
 
 New route attempts filter alternative controls for the same signed Exit using the
