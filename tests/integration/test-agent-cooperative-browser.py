@@ -207,7 +207,7 @@ def retained_refinement_fixture(root, helpers=None):
     parent_bytes = save(group / "parents.json", frontier)
     save(group / "group.json", dict(parents_sha256=sha(parent_bytes), source_manifest_id=sha(source_manifest), parent_offset=0, level=1))
     synthesis_data = dict(version=3, visibility="public", license=enrollment["license"], source_manifest_hex=source_manifest.hex(),
-        level=1, claim_scope=check["DOCUMENT"]["SYNTHESIS"]["CLAIM"], inference=rows)
+        level=1, claim_scope=check["DOCUMENT"]["SYNTHESIS"]["CLAIM"], model_profile=profile["name"], inference=rows)
     synthesis_id = publication(group / "package-0000", synthesis_data, "derived-l01-g0000-p0000",
                                 check["DOCUMENT"]["SYNTHESIS"]["PROFILE"])
     final = job(group / "package-0000", synthesis_data, synthesis_id, 5, 0, 0, 0, len(source), level=1)
@@ -296,7 +296,7 @@ def retained_deep_refinement_fixture(root):
     save(group / "group.json", dict(parents_sha256=sha(parent_bytes), source_manifest_id=enrollment["source_manifest_id"],
                                    parent_offset=0, level=1))
     data = dict(version=3, visibility="public", license=enrollment["license"], source_manifest_hex=helper["source_manifest"].hex(),
-        level=1, claim_scope=check["DOCUMENT"]["SYNTHESIS"]["CLAIM"], inference=rows)
+        level=1, claim_scope=check["DOCUMENT"]["SYNTHESIS"]["CLAIM"], model_profile=profile["name"], inference=rows)
     manifest = helper["publication"](group / "package-0000", data, "derived-l01-g0000-p0000", check["DOCUMENT"]["SYNTHESIS"]["PROFILE"])
     final = helper["job"](group / "package-0000", data, manifest, 5, 0, 0, 0, len(source), level=1)
     result.update(synthesized_answer=final, synthesis=dict(levels=[dict(level=1, complete=True, parents=4, answers=[final],
@@ -437,6 +437,29 @@ benchmark_select_route() { printf 'connect\n'; }
 
 
 class CooperativeBrowserProof(unittest.TestCase):
+    def test_discovered_synthesis_requires_exact_nondefault_serialized_profile(self):
+        # DerivedDataset serializes Smol360 explicitly; omission belongs only to
+        # the historical 135M schema. Keep exact equality, not a subset check.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            check, fixture_input, layout, observed, save = retained_refinement_fixture(root)
+            summary = check["retained_result"](root, fixture_input, layout, observed)
+            self.assertTrue(summary["exact_native_receipts_verified"])
+            dataset = root / "synthesis/level-01-group-0000/package-0000/dataset.json"
+            original = json.loads(dataset.read_bytes())
+            self.assertEqual(original["model_profile"], "smollm2-360m-v1")
+            for profile in (None, "smollm2-135m-v1", "smollm2-1700m-v1"):
+                changed = copy.deepcopy(original)
+                if profile is None:
+                    changed.pop("model_profile")
+                else:
+                    changed["model_profile"] = profile
+                save(dataset, changed)
+                with self.subTest(profile=profile), self.assertRaisesRegex(
+                        ValueError, "synthesis published different frontier rows") as caught:
+                    check["retained_result"](root, fixture_input, layout, observed)
+                self.assertEqual(check["observer_invariant_reason"](caught.exception), "synthesis_dataset_binding")
+
     def test_deeper_refinement_requires_each_real_shaped_receipt_and_exact_descendant_intent(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

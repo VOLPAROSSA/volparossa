@@ -82,7 +82,38 @@ unchanged; no model or VM was rerun, and the original failed run remains failed.
 
 ### Cooperative browser execution
 
-The latest exact-source [run `37204198825`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37204198825)
+The latest exact-source [run `37205581731`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37205581731)
+on `05e75021fe195e94b4dd32658ac9636ebde3422b` passes the inventory gate and connects
+its real source route on the first attempt. Under the unchanged discovered-360M
+contract it observes seven native peer workers and confirms seven terminal
+receipts: one of two original answers reaches EOS, the other reaches its token
+limit; two refinement levels preserve that failure and produce an effective
+four-answer EOS frontier, followed by one EOS synthesis. Coordinator execution,
+answer completion and cleanup are confirmed, but the observer fails in
+`result_join` (`invariant_or_unknown`, no retained specific reason). The run is
+**failed**: exact retained provenance, browser display and subsequent cancellation
+proof are not complete, and EOS does not establish semantic answer quality.
+Private cleanup leaves zero owned objects; disposable guest-root network hashes
+match (not an outer-host unchanged claim). Original artifact ZIP SHA-256:
+`84da36736e2fcc0663ffbde865688eb2d49f221f63c6c63d49c7d2067cb0358b`;
+original job `111445972182` log SHA-256:
+`a8a4faa41383ce028619bf1aee2f9da1c696a6a1b6f39aff16ca7e13316ec377`.
+
+Source comparison identifies a verifier schema bug: Rust's signed v3 synthesis
+dataset includes `model_profile` for the non-default 360M model, while the
+observer's exact expected object omitted it. The candidate correction requires
+the selected profile in that equality; it does not ignore extra fields or alter
+model output, source lineage, EOS, resource or cancellation requirements. Both
+synthetic retained-tree fixtures now use the actual serialized field order. A
+regression first reproduced the rejection and then checks that omitted/wrong
+profiles still fail. Future occurrences use the closed `synthesis_dataset_binding`
+diagnostic, never raw exceptions or dataset contents. The private retained tree was cleaned, so the original
+run's first failing predicate cannot be attributed more precisely; this is a
+proven source-contract blocker, not a newly passing VM result. All 32 cooperative
+Python checks and the focused Rust non-default-profile serialization/signature/
+row-derivation test pass; whitespace checks pass. No new VM trial has run.
+
+The earlier exact-source [run `37204198825`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37204198825)
 on `774597444616af465e684dde3ed874b80542971f` remains **failed before compute**
 under the discovered-360M contract. Source-route setup stopped at
 `JOBS_ROUTE_UNAVAILABLE` after 14 attempts/13 retries with final
@@ -98,17 +129,15 @@ network hashes (not an outer-host unchanged claim). Original artifact ZIP SHA-25
 original job `111441866632` log SHA-256:
 `5e66d9e34c645a5b5f90cea357ed189896ea34da798c05115a7ae204c19b149a`.
 
-The fixture candidate now waits up to 60 seconds for the same six relay/two exit
+The fixture waits up to 60 seconds for the same six relay/two exit
 advertisements expected by A01 before the discovered scenario's first Connect.
 The `agent-jobs` shortcut otherwise skips A01's discovery-inventory wait. Each
 read-only client inventory query is bounded to two seconds; no raw peer inventory
 is exported. Inventory presence is **not route readiness**. Production selection,
 Connect retry classifications, capacities, budgets after Connect and all compute
 success criteria are unchanged; legacy fixed-135M and other fixtures do not wait.
-All 31 cooperative fixture checks pass, including seven inventory/gate controls;
-shell syntax and whitespace checks pass. These are local synthetic checks only.
-This is a candidate startup-order correction, not a proven explanation of the
-original missing capability or a successful VM/model result.
+The seven local inventory/gate controls do not identify the original missing
+capability; their successful use in the subsequent run is recorded above.
 
 The previous exact-source [run `37202586461`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37202586461)
 on `95e45ac122347622253e1506f4f02b618de9ec7d` selected the intended

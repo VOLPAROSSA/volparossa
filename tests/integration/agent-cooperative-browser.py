@@ -73,6 +73,7 @@ OBSERVER_INVARIANT_REASONS = {
     "broker is not the unprivileged node owner": "broker_owner",
     "runtime lock is aliased": "worker_runtime_lock",
     "observed worker does not hold its runtime lease": "worker_runtime_lease",
+    "synthesis published different frontier rows": "synthesis_dataset_binding",
 }
 EXECUTION_PHASES = frozenset(('input', 'validation', 'directory', 'source_selection', 'provider_selection',
     'source_retention', 'tokenization', 'publication', 'enrollment_save', 'peer_execution', 'refinement', 'synthesis',
@@ -1059,7 +1060,8 @@ def check_synthesis_frontier(document, enrollment, result, reports, frontier):
                 data = read(package / "dataset.json")
                 require(data == dict(version=3, visibility="public", license=enrollment["license"],
                     source_manifest_hex=exact_bytes(document / "source.manifest", 65536).hex(), level=number,
-                    claim_scope=synthesis["CLAIM"], inference=rows[index * 4:index * 4 + 4]),
+                    claim_scope=synthesis["CLAIM"], model_profile=selected_model()["name"],
+                    inference=rows[index * 4:index * 4 + 4]),
                     "synthesis published different frontier rows")
                 expected_packages[sha(exact_bytes(package / "dataset.manifest", 65536))] = data
         seen = set()
