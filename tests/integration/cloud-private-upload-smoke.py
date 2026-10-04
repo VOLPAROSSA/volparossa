@@ -37,12 +37,17 @@ UPLOAD = bytes(range(256)) * (CHUNK // 256) + b"U"
 UPLOAD_SHA = hashlib.sha256(UPLOAD).hexdigest()
 STAGE = "not_started"
 UI_STAGE = None
+UI_FAILURE = None
 EXPORT_NAMES = tuple(name for name in CLOUD["EXPORT_NAMES"] if not name.startswith("cloud-private-file-")) + (
     "cloud-private-upload-smoke.json", "cloud-private-upload-evidence.json",
     "cloud-private-upload-provision.json", "cloud-private-upload-route-diagnostic.json")
 FALSE_CLAIMS = CLOUD["FALSE_CLAIMS"] + ("general_writable_sync_proven", "independent_device_recovery_proven")
 UI_STAGES = frozenset(("input", "browser_start", "locked_ui", "wrong_token", "unlock", "upload_menu",
     "file_selection", "upload_commit", "reload", "original_download_1", "original_download_2", "logout", "cleanup"))
+UI_FAILURE_KINDS = frozenset(("condition_timeout", "transport_timeout", "transport_error",
+    "browser_command", "subprocess_error", "boundary_failed"))
+UI_FAILURE_FLAGS = ("original_file_input_used", "upload_201_observed", "uploaded_file_listed",
+    "browser_stopped_and_joined", "private_profile_removed")
 
 
 def tools():
@@ -193,8 +198,35 @@ def ui_record(value, mode):
     return value
 
 
+def closed_ui_failure(value, mode):
+    """Select bounded failure metadata only; invalid observations stay unknown."""
+    try:
+        require(type(value) is dict and mode in ("upload", "download")
+            and type(value["version"]) is int and value["version"] == 1
+            and value["kind"] == "cloud-owner-upload-original-ui" and value["mode"] == mode
+            and value["success"] is False and type(value["stage"]) is str
+            and value["stage"] in UI_STAGES, "invalid UI failure envelope")
+        require(type(value["failure_kind"]) is str and value["failure_kind"] in UI_FAILURE_KINDS
+            and all(type(value[key]) is bool for key in UI_FAILURE_FLAGS), "invalid UI failure fields")
+        observation = value["upload_observation"]
+        if observation is not None:
+            require(type(observation) is dict and set(observation) == {"puts", "completed", "created", "last_status"}
+                and all(type(observation[key]) is int and 0 <= observation[key] <= 65535
+                        for key in ("puts", "completed", "created"))
+                and observation["created"] <= observation["completed"] <= observation["puts"]
+                and type(observation["last_status"]) is int
+                and (observation["last_status"] == 0 or 100 <= observation["last_status"] <= 599),
+                "invalid UI upload observation")
+            observation = dict(observation)
+        return dict(failure_kind=value["failure_kind"], upload_observation=observation,
+            **{key: value[key] for key in UI_FAILURE_FLAGS})
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def serve_ui(root, mode):
-    global UI_STAGE
+    global UI_STAGE, UI_FAILURE
+    UI_STAGE, UI_FAILURE = None, None
     source, node = tools()
     config = read(root / "service.json")
     service = subprocess.Popen([node, source / "scripts/cloud-serve.mjs", "--config", root / "service.json"],
@@ -216,7 +248,9 @@ def serve_ui(root, mode):
             stdout, stderr = process.communicate(json.dumps(payload).encode(), timeout=1900)
             require(len(stdout) <= 4096 and len(stderr) <= 16384, "UI output exceeds closed bound")
             value = json.loads(stdout)
-            UI_STAGE = value.get("stage") if value.get("stage") in UI_STAGES else "unreported"
+            stage = value.get("stage") if type(value) is dict else None
+            UI_STAGE = stage if type(stage) is str and stage in UI_STAGES else "unreported"
+            UI_FAILURE = closed_ui_failure(value, mode)
             require(process.returncode == 0, "original UI failed")
             result = ui_record(value, mode)
         finally:
@@ -463,5 +497,6 @@ if __name__ == "__main__":
     for sig in (signal.SIGTERM, signal.SIGINT): signal.signal(sig, interrupted)
     try: main(sys.argv[1:])
     except (KeyError, TypeError, ValueError, OSError, StopIteration, subprocess.SubprocessError):
-        print(json.dumps(dict(success=False, kind="cloud-private-upload-failure", stage=STAGE, ui_stage=UI_STAGE)))
+        print(json.dumps(dict(success=False, kind="cloud-private-upload-failure", stage=STAGE,
+            ui_stage=UI_STAGE, ui_failure=UI_FAILURE)))
         sys.exit(1)

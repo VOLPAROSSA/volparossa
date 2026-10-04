@@ -3,6 +3,7 @@
 """Pure closed/parser contracts. These fixtures are NOT actual UI/peer evidence."""
 import copy
 import hashlib
+import io
 import json
 from pathlib import Path
 import runpy
@@ -26,6 +27,12 @@ def ui(mode):
         sha256="9012cf78cb493db125d4a0f4f761ae8cb021c5ed16b5085bf32cd4252be575f6",
         peer_storage_proven=False, service_restart_owned_by_parent=True,
         source_shutdown_owned_by_parent=True, owner_secrets_exported=False)
+
+
+def ui_failure():
+    return dict(ui("upload"), success=False, stage="upload_commit", upload_201_observed=False,
+        uploaded_file_listed=False, failure_kind="condition_timeout",
+        upload_observation=dict(puts=1, completed=0, created=0, last_status=0))
 
 
 def fixture():
@@ -134,7 +141,7 @@ class UploadContracts(unittest.TestCase):
         module = runpy.run_path(str(HERE / "cloud-private-upload-provision.py"))
         state = module["configured"]()
         pins = state["load_pins"]()
-        self.assertEqual(pins["revision"], "3e3d6587012ed46d200218e4447506300f8a4f18")
+        self.assertEqual(pins["revision"], "32836543d950081a2b1505ebde117d8f9db35b82")
         self.assertEqual(len(pins["files"]), 27)
         self.assertTrue({"src/owner-uploads.mjs", "scripts/upload_lock.py", "scripts/smoke_owner_upload_ui.py"} <= pins["files"].keys())
         self.assertEqual(pins["runtime"]["version"], "24.19.0")
@@ -152,6 +159,80 @@ class UploadContracts(unittest.TestCase):
                 ("peer_storage_proven", True), ("unknown", "private text")):
                 value = ui(mode); value[field] = changed
                 with self.assertRaises(ValueError): CHECK["ui_record"](value, mode)
+
+    def test_failure_selection_keeps_only_closed_codes_counters_and_booleans(self):
+        parse = CHECK["closed_ui_failure"]
+        fields = {"failure_kind", "upload_observation", *CHECK["UI_FAILURE_FLAGS"]}
+        for kind in CHECK["UI_FAILURE_KINDS"]:
+            for observation in (None, dict(puts=1, completed=0, created=0, last_status=0),
+                dict(puts=65535, completed=65535, created=65535, last_status=599)):
+                value = dict(ui_failure(), failure_kind=kind, upload_observation=observation,
+                    raw_error="PRIVATE_URL_TOKEN_PAYLOAD")
+                result = parse(value, "upload")
+                self.assertEqual(set(result), fields)
+                self.assertEqual(result["failure_kind"], kind)
+                self.assertEqual(result["upload_observation"], observation)
+                self.assertNotIn("PRIVATE", json.dumps(result))
+                if observation is not None:
+                    self.assertIsNot(result["upload_observation"], observation)
+        value = ui_failure()
+        for key in CHECK["UI_FAILURE_FLAGS"]:
+            value[key] = False
+        self.assertEqual({key: parse(value, "upload")[key] for key in CHECK["UI_FAILURE_FLAGS"]},
+            dict.fromkeys(CHECK["UI_FAILURE_FLAGS"], False))
+        self.assertIsNone(parse(ui("upload"), "upload"))
+        with self.assertRaises(ValueError): CHECK["ui_record"](ui_failure(), "upload")
+
+    def test_invalid_failure_metadata_is_unknown_not_a_raw_error_or_success(self):
+        parse = CHECK["closed_ui_failure"]
+        for value in (None, [], "PRIVATE_RAW_ERROR", 1):
+            self.assertIsNone(parse(value, "upload"))
+        mutations = [
+            lambda v: v.update(version=True), lambda v: v.update(kind="PRIVATE_RAW_ERROR"),
+            lambda v: v.update(mode="download"), lambda v: v.update(success=True),
+            lambda v: v.update(stage=[]), lambda v: v.update(stage="PRIVATE_STAGE"),
+            lambda v: v.update(failure_kind="PRIVATE_ERROR"), lambda v: v.pop("failure_kind"),
+            lambda v: v.update(upload_observation=[]), lambda v: v.pop("upload_observation"),
+            lambda v: v["upload_observation"].update(raw="PRIVATE_URL"),
+            lambda v: v["upload_observation"].update(puts=-1),
+            lambda v: v["upload_observation"].update(puts=65536),
+            lambda v: v["upload_observation"].update(completed=2),
+            lambda v: v["upload_observation"].update(created=1),
+        ]
+        for key in CHECK["UI_FAILURE_FLAGS"]:
+            mutations.append(lambda v, key=key: v.update({key: 1}))
+        for key in ("puts", "completed", "created", "last_status"):
+            for invalid in (True, "1", 1.0):
+                mutations.append(lambda v, key=key, invalid=invalid: v["upload_observation"].update({key: invalid}))
+        for invalid in (-1, 1, 99, 600):
+            mutations.append(lambda v, invalid=invalid: v["upload_observation"].update(last_status=invalid))
+        for mutate in mutations:
+            value = ui_failure(); mutate(value)
+            self.assertIsNone(parse(value, "upload"))
+
+    def test_parent_keeps_failed_ui_receipt_without_masking_original_failure(self):
+        serve = CHECK["serve_ui"]
+        closed = json.dumps(dict(version=1, kind="volparossa-cloud-private-read", state="closed")).encode()
+        ready = dict(version=1, kind="volparossa-cloud-private-read", state="listening", readOnly=False,
+            loopbackOnly=True, originalServerFallback=False, openCloudAccountService=False,
+            origin="http://127.0.0.1:1234")
+        for report in (ui_failure(), dict(ui_failure(), failure_kind="PRIVATE_RAW_ERROR")):
+            service = mock.Mock(returncode=0)
+            service.stdout = io.BytesIO(json.dumps(ready).encode())
+            service.poll.return_value = 0
+            service.communicate.return_value = (closed, b"")
+            process = mock.Mock(returncode=1)
+            process.poll.return_value = 1
+            process.communicate.return_value = (json.dumps(report).encode(), b"PRIVATE_STDERR")
+            with mock.patch.dict(serve.__globals__, tools=lambda: (Path("/synthetic-source"), Path("/synthetic-node")),
+                read=lambda _path: dict(bearerToken="PRIVATE_TOKEN"), UI_FAILURE={"stale": True}), \
+                mock.patch.object(serve.__globals__["subprocess"], "Popen", side_effect=[service, process]), \
+                mock.patch.object(serve.__globals__["select"], "select", return_value=([service.stdout], [], [])):
+                with self.assertRaisesRegex(ValueError, "original UI failed"):
+                    serve(Path("/synthetic-owner"), "upload")
+                self.assertEqual(serve.__globals__["UI_STAGE"], "upload_commit")
+                self.assertEqual(serve.__globals__["UI_FAILURE"], CHECK["closed_ui_failure"](report, "upload"))
+                self.assertNotIn("PRIVATE", json.dumps(serve.__globals__["UI_FAILURE"]))
 
 
 if __name__ == "__main__": unittest.main()

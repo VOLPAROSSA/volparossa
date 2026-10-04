@@ -1,7 +1,7 @@
 {
   "version": 1,
   "repository": "https://github.com/VOLPAROSSA/volparossa-cloud",
-  "revision": "3e3d6587012ed46d200218e4447506300f8a4f18",
+  "revision": "32836543d950081a2b1505ebde117d8f9db35b82",
   "files": {
     "LICENSE": {
       "bytes": 35149,
@@ -44,8 +44,8 @@
       "sha256": "460c626f54f81a540be05fd8d9e5e05850a784940f109e0e5ddbe6eebeac1101"
     },
     "scripts/smoke_owner_upload_ui.py": {
-      "bytes": 15226,
-      "sha256": "0e0ad73d8dd4539e59be36d1572e43903319b277347b96decb1b4256ce0b3780"
+      "bytes": 17134,
+      "sha256": "e2e6924d8ac309f345557b31a35626cdf220685e93e7aa01906193b743f79e5d"
     },
     "scripts/smoke_web_ui.py": {
       "bytes": 14849,

@@ -291,7 +291,7 @@ feature branches are not implied to be integrated into `main`.
   This proves selected owner-local read-only recovery through the original UI, not
   ordinary OpenCloud account/ACL recovery, writes, sharing, synchronization or
   general server-independent OpenCloud availability.
-- [ ] The separate `cloud-private-upload` acceptance sibling is prepared against
+- [ ] The separate `cloud-private-upload` acceptance sibling was initially prepared against
   Cloud `3e3d6587012ed46d200218e4447506300f8a4f18`. Its first exact-source
   [run `37070505538`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37070505538)
   on core `4950e1013e074cad60ec3c0ff9cb89dcdd1a4854` failed **before VM startup**:
@@ -326,6 +326,24 @@ feature branches are not implied to be integrated into `main`.
   `c57ecadc947baf7e9eda0f2833cc60766d99d2a2dc0a129a31f4b41a39b5c4a5`.
   The exact preselection rejection is not known; no new Cloud attempt is inferred
   from this result.
+  The next exact-source [run `37202264396`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37202264396)
+  on `d7ca3d88a350e8a0c83852131d07ffbbec79126e` reaches a connected route after
+  27 attempts and 26 retries (`CONNECTED`), but remains **failed** at
+  `original_ui_upload`, UI stage `upload_commit`, with `FRAGMENTS_UPLOAD_FAILED`.
+  The retained parent report does not identify the underlying UI/transport cause;
+  it proves neither a successful original upload nor subsequent recovery. Final
+  private cleanup reports zero owned objects, and guest-root network snapshot
+  hashes match at `364f454db76523ac5d22042795efd1581e1c47de46549d74d885cfcfe20a84cf`;
+  this is not an outer-host unchanged claim. Original artifact ZIP SHA-256:
+  `a5d061cebc974258e0555aed954f675dc632196eb356ea89128ac29d736e5c99`;
+  original job `111436210673` log SHA-256:
+  `d3e00e77b95e6dfd9f800d66c471a684b45a972c094e096240ee6484f6f515c9`.
+  The candidate pins Cloud `32836543d950081a2b1505ebde117d8f9db35b82` and
+  retains only a closed UI failure class, bounded upload counters
+  and five explicit progress/cleanup booleans. Invalid or missing observations
+  remain unknown; URLs, tokens, paths, payloads and raw exceptions are not exported.
+  This diagnostic does not reinterpret the failed run or relax upload, recovery,
+  resource, timeout or cleanup requirements.
   The candidate keeps the
   preceding read-only proof/pins unchanged and requires an original Files/Uppy
   upload of 262,145 synthetic bytes, actual owner GPG encryption, three 128-KiB
