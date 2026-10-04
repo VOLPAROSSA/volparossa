@@ -64,7 +64,7 @@ def validation_input(path, revision):
     root = ART["private_root"](path)
     require(len(revision) == 40 and all(char in "0123456789abcdef" for char in revision), "invalid validation revision")
     context = "VOLPAROSSA is an open-source, decentralised user-operated network being built for Debian 13 amd64."
-    require(context in (HERE / "agent-artifact-README.md").read_text(), "public validation source changed")
+    require(context in TRAIN["public_source"](), "public validation source changed")
     dataset = dict(version=1, visibility="public", license="GPL-3.0-only", source_revision=revision, train=[],
         heldout=[dict(question="Which operating system and architecture is VOLPAROSSA being built for?",
                       context=context, answer="Debian 13 amd64.")],

@@ -244,7 +244,7 @@ def cleanup(path):
                 replica_metadata_removed=True, input_and_outputs_removed=True, user_directory_removed=True)
 
 
-def validate_network(phase, peers, layout, name):
+def validate_network(phase, peers, layout, name, minimum_flows=None):
     selected, privacy = phase["selected_route"], phase["privacy"]
     paths, slots, nodes = selected["paths"], selected["benchmark_slots"], layout["provider_nodes"]
     require(selected["transport"] == "mptcp" and selected["route_context_id"] == layout["route_context_id"]
@@ -290,8 +290,11 @@ def validate_network(phase, peers, layout, name):
         require(application[nodes[1]]["response_payload_bytes"] >= BYTES, "surviving copy was not restored after deletion")
     control = next(node for node in NET["PUBLIC_IPS"] if peers[node] == layout["control_relay_peer_id"])
     NET["validate_control"](phase["control_privacy"], control, nodes, True)
-    require(phase["gates"]["event_baseline_unix_ms"] > 0
-            and phase["gates"]["exit_mptcp_tls_completed"] >= {"upload": 18, "failover": 4, "finish": 6}[name],
+    if minimum_flows is None:
+        minimum_flows = {"upload": 18, "failover": 4, "finish": 6}[name]
+    require(type(minimum_flows) is int and minimum_flows > 0
+            and phase["gates"]["event_baseline_unix_ms"] > 0
+            and phase["gates"]["exit_mptcp_tls_completed"] >= minimum_flows,
             "protected operation completions missing")
 
 

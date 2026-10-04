@@ -40,7 +40,7 @@ def workflow(work):
 def source(path, revision):
     root = JOBS["private"](path, "compute-source")
     require(not list(root.iterdir()), "source root already populated")
-    value = JOBS["dataset"](revision, (HERE / "agent-jobs-README.md").read_text())
+    value = JOBS["dataset"](revision, JOBS["TRAIN"]["public_source"]())
     value["inference"].extend([
         dict(question="Does every parallel path have its own relay?", context=value["inference"][0]["context"]),
         dict(question="Is a direct client-to-exit dataplane normal?", context=value["inference"][1]["context"]),

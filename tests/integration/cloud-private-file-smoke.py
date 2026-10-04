@@ -20,7 +20,7 @@ FRAGMENTS = IMAGE["FRAGMENTS"]
 require, read, create = FRAGMENTS["require"], FRAGMENTS["read"], FRAGMENTS["create"]
 private_file, invoke, unlock = FRAGMENTS["private_file"], FRAGMENTS["invoke"], FRAGMENTS["unlock"]
 owner_root, cleanup, process_json = IMAGE["owner_root"], IMAGE["cleanup"], IMAGE["process_json"]
-REVISION = "a67b91fbed42ecd23ba215eb21ef54397fc9f06a"
+REVISION = "63bba5d1163a69e1ee6b4218c9e7462d941f22f7"
 PIN_PATH = Path(__file__).with_name("cloud-private-file-pins.json")
 PINS = json.loads(PIN_PATH.read_text())
 SOURCE_HASHES = {name: record["sha256"] for name, record in PINS["files"].items()}
@@ -39,6 +39,66 @@ EXPORT_NAMES = tuple(name for name in FRAGMENTS["EXPORT_NAMES"] if name not in (
     "cloud-private-file-smoke.json", "cloud-private-file-evidence.json", "cloud-private-file-provision.json",
     "cloud-private-file-route-diagnostic.json")
 STAGE = "not_started"
+SDK_FAILURE = None
+
+
+def closed_sdk_failure(stdout, returncode):
+    """Retain only closed child phase/termination metadata, never raw output."""
+    signals = {name for name in ("SIGTERM", "SIGKILL", "SIGINT", "SIGHUP", "SIGABRT",
+                               "SIGSEGV", "SIGBUS", "SIGILL", "SIGPIPE")}
+    sdk_stages = {"not_started", "catalog_create", "service_start", "sdk_list", "sdk_full_get",
+                  "sdk_range_get", "sdk_auth", "original_files_ui", "service_close"}
+    ui_stages = {"unreported", "input", "browser_start", "locked_ui", "wrong_token", "unlock",
+                 "original_download_1", "original_download_2", "logout"}
+    code = returncode if type(returncode) is int and 0 <= returncode <= 255 else None
+    signum = -returncode if type(returncode) is int and returncode < 0 else None
+    killed = next((name for name in signals if getattr(signal, name) == signum), "UNREPORTED")
+    result = dict(stage="unreported", exit_status=code,
+                  signal=None if code is not None else killed, ui=None)
+    try:
+        require(len(stdout) <= 65536, "child record too large")
+        value = json.loads(stdout)
+        require(type(value) is dict and set(value) == {"success", "kind", "stage", "ui"}
+                and value["success"] is False and value["kind"] == "cloud-private-file-sdk-failure"
+                and value["stage"] in sdk_stages, "child record is not closed")
+        result["stage"] = value["stage"]
+        ui = value["ui"]
+        if ui is not None:
+            require(type(ui) is dict and set(ui) == {"stage", "exit_status", "signal"}
+                    and ui["stage"] in ui_stages
+                    and (ui["exit_status"] is None or type(ui["exit_status"]) is int
+                         and 0 <= ui["exit_status"] <= 255)
+                    and (ui["signal"] is None or ui["signal"] in signals | {"UNREPORTED"}),
+                    "UI record is not closed")
+            result["ui"] = ui
+    except (ValueError, TypeError, KeyError, UnicodeError):
+        pass
+    return result
+
+
+def sdk_process_json(command, deadline=2350):
+    """Same deadline/cleanup as before, but preserve the driver's closed failure."""
+    global SDK_FAILURE
+    process = subprocess.Popen(list(map(str, command)), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               start_new_session=True)
+    stdout, complete = b"", False
+    try:
+        stdout, stderr = process.communicate(timeout=deadline)
+        require(len(stdout) <= 65536 and len(stderr) <= 16384 and process.returncode == 0,
+                "Cloud SDK command failed")
+        value = json.loads(stdout)
+        complete = True
+        return value
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+        if not complete:
+            SDK_FAILURE = closed_sdk_failure(stdout, process.returncode)
 
 
 def tools():
@@ -264,14 +324,23 @@ def restore(root, binary, client, keys):
     STAGE = "existing_output"
     cloud(root, "restore", "--output", root / "restore-1", expected=1)
     verify_plain(root / "restore-1", metadata)
-    STAGE = "cloud_catalog_and_sdk_reads"
+    STAGE = "cloud_catalog_sdk_and_original_ui_reads"
     _, node = tools()
-    sdk = process_json([node, Path(__file__).with_name("cloud-private-file-sdk.mjs"), root], deadline=1250)
+    sdk = sdk_process_json([node, Path(__file__).with_name("cloud-private-file-sdk.mjs"), root])
     raw_status(root, binary, client, keys, "restore")
     FRAGMENTS["check_identity"](root)
     FRAGMENTS["staged_files_absent"](root)
     require(not any(path.name.startswith("receive-") for path in root.iterdir()), "Cloud received ciphertext remains")
     return restore_report(metadata["ciphertext_bytes"], sdk)
+
+
+def ui_report():
+    return dict(version=1, kind="cloud-private-file-original-ui", success=True,
+        original_files_ui=True, actual_owner_service=True, synthetic_backend=False,
+        file_downloads_verified=2, download_bytes=len(CONTENT), download_sha256=CONTENT_SHA,
+        wrong_token_denied=True, logout_relocks=True, token_absent_from_url_and_web_storage=True,
+        private_profile_removed=True, browser_stopped_and_joined=True,
+        browser_version="140.16.0", owner_secrets_exported=False)
 
 
 def sdk_report(receipt_hash):
@@ -280,14 +349,14 @@ def sdk_report(receipt_hash):
         sdk_receipt_sha256=receipt_hash, catalog_verified_full_restore=True, catalog_encrypted=True,
         metadata_list_verified=True, full_get_bytes=len(CONTENT), full_get_sha256=CONTENT_SHA,
         range_get_bytes=12, range_get_sha256=hashlib.sha256(CONTENT[3:15]).hexdigest(),
-        actual_cloud_cli_service=True, actual_published_sdk=True, file_reconstructions=3,
+        actual_cloud_cli_service=True, actual_published_sdk=True, file_reconstructions=5, ui=ui_report(),
         wrong_token_rejected=True, stale_etag_rejected=True, read_service_stopped_and_joined=True,
         temporary_plaintext_removed=True, original_source_fallback=False, local_ciphertext_fallback=False,
-        full_web_ui_proven=False, owner_secrets_exported=False)
+        original_files_ui_reads_proven=True, full_web_ui_proven=False, owner_secrets_exported=False)
 
 
 def restore_report(size, sdk):
-    return dict(actual_cloud_cli=True, restores=4, actual_gpg_decryptions=4, sdk=sdk,
+    return dict(actual_cloud_cli=True, restores=6, actual_gpg_decryptions=6, sdk=sdk,
         plaintext_sha256=[CONTENT_SHA, CONTENT_SHA], source_ciphertext_absent=True, source_service_stopped=True,
         openpgp_integrity_verified=True, manifest_verified=True, private_source_metadata_verified=True,
         whole_archive_sha256_verified=True, reads_nonconsuming=True, existing_output_preserved=True,
@@ -312,7 +381,7 @@ def build_evidence(work):
     value = {name: read(work / f"private-storage-fragments-{name}.json") for name in names}
     for name in ("uploaded_usage", "restored_usage", "deleted_usage"):
         value[name] = FRAGMENTS["read_usage"](work / f"private-storage-fragments-{name}.json")
-    value.update(success=True, archive_encryption_proven=True, web_sdk_read_proven=True,
+    value.update(success=True, archive_encryption_proven=True, web_sdk_read_proven=True, original_files_ui_read_proven=True,
         expected_peers=read(work / "a01-expected-peers.json"),
         provision=read(work / "cloud-private-file-provision.json"), **dict.fromkeys(FALSE_CLAIMS, False))
     value["network"] = {name: dict(selected_route=read(work / f"private-storage-fragments-{name}-live-selection.json"),
@@ -325,6 +394,7 @@ def build_evidence(work):
 
 def validate_evidence(value):
     require(value["success"] is True and value["archive_encryption_proven"] is True and value["web_sdk_read_proven"] is True
+        and value["original_files_ui_read_proven"] is True
         and all(value[field] is False for field in FALSE_CLAIMS), "Cloud scope overstated")
     provision = value["provision"]
     require(provision["version"] == 1 and provision["kind"] == "cloud-private-file-runtime-provision"
@@ -338,6 +408,18 @@ def validate_evidence(value):
         and sdk == dict(pins_sha256=SOURCE_HASHES["third_party/opencloud-web-sdk.json"],
             archive_sha256=SDK_SHA, receipt_sha256=sdk["receipt_sha256"], files_verified=True,
             files=109, source_build_claimed=False, sdk_reads_proven=False), "published SDK provenance absent")
+    ui = provision["ui"]
+    require(re.fullmatch(r"[0-9a-f]{64}", ui["build_report_sha256"])
+        and ui == dict(source_revision="11e699ac82fda4dd113ac3ceb2ecb2dd74574045",
+            source_tree="4f13ceee9b21450659266df69a4fac57f25c3bc9",
+            pins_sha256=SOURCE_HASHES["third_party/opencloud-web-ui.json"],
+            patch_sha256=SOURCE_HASHES["patches/opencloud-web-owner-recovery.patch"],
+            build_report_sha256=ui["build_report_sha256"], source_built=True,
+            files_verified=True, ui_execution_proven=False), "original UI source build absent")
+    require(provision["browser"] == dict(version="140.16.0",
+        source_stamp="d864999404b3032f682d74ccc60d1ce38c9ce609",
+        archive_sha256="e32aeabcab2e74fe112332fad10f7d9630e14cd6f4564a596a71073018d24508",
+        files_verified=True, browser_execution_proven=False), "original guest browser provenance absent")
     require(set(provision["tools"]) == {"gpg", "gpg-agent", "gpgconf", "tar"}, "guest crypto tools absent")
     for tool in provision["tools"].values():
         require(type(tool["bytes"]) is int and tool["bytes"] > 0 and re.fullmatch(r"[0-9a-f]{64}", tool["sha256"])
@@ -377,15 +459,15 @@ def validate_evidence(value):
     for name, phase in value["network"].items():
         FRAGMENTS["validate_network"](phase, value["expected_peers"], value["layout"], name)
     network = value["network"]["restore"]
-    require(network["gates"]["exit_mptcp_tls_completed"] >= 32, "four actual protected reconstructions absent")
+    require(network["gates"]["exit_mptcp_tls_completed"] >= 48, "six actual protected reconstructions absent")
     app = network["privacy"]["exit"]["provider_application"]
-    require(app["relay5"]["response_payload_bytes"] >= 4 * (2 * CHUNK + geometry["LENGTHS"][-1])
-        and app["relay3"]["response_payload_bytes"] >= 4 * CHUNK, "catalog and SDK survivor payload absent")
+    require(app["relay5"]["response_payload_bytes"] >= 6 * (2 * CHUNK + geometry["LENGTHS"][-1])
+        and app["relay3"]["response_payload_bytes"] >= 6 * CHUNK, "catalog, SDK and original UI survivor payload absent")
 
 
 def validate_report(report, revision):
     require(re.fullmatch(r"[0-9a-f]{40}", revision) and report["source_revision"] == revision
-        and report["schema_version"] == 2 and report["report_kind"] == "volparossa-cloud-private-file"
+        and report["schema_version"] == 3 and report["report_kind"] == "volparossa-cloud-private-file"
         and report["success"] is True and report["runner_exit_status"] == 0
         and report["phase"] == "cloud-private-file-complete" and report["observed_blocker"] is None
         and report["cleanup"]["complete"] is True and report["cleanup"]["remaining_owned_objects"] == 0
@@ -423,6 +505,9 @@ if __name__ == "__main__":
     try:
         main(sys.argv[1:])
     except (KeyError, TypeError, ValueError, OSError, StopIteration, subprocess.SubprocessError):
-        print(json.dumps(dict(success=False, kind="cloud-private-file-failure", stage=STAGE)))
+        failure = dict(success=False, kind="cloud-private-file-failure", stage=STAGE)
+        if SDK_FAILURE is not None:
+            failure["child"] = SDK_FAILURE
+        print(json.dumps(failure))
         print("Cloud private-file fixture failed; private diagnostics not exported", file=sys.stderr)
         sys.exit(1)

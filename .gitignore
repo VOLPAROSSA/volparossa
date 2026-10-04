@@ -22,6 +22,7 @@ tests/reports/*.pcap
 native/**/build/
 /build/native-unbound-deps/
 /build/native-editor-*/
+/build/cooperative-code-*/
 
 # Runtime secrets and state must never enter Git.
 *.key

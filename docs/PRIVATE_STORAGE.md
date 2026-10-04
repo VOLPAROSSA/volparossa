@@ -99,6 +99,43 @@ original artifacts reproduces the aggregate; ZIP SHA-256
 Range requests still reconstruct and verify the complete encrypted file before
 selecting plaintext bytes. This is not the full web UI. Accounts, shared permissions,
 writes, peer-distributed catalogs and second-device recovery are not completed.
+The joined original-UI scenario pins Cloud `63bba5d1163a69e1ee6b4218c9e7462d941f22f7` and builds
+the original OpenCloud Web8 Files UI from its exact source in the disposable guest.
+It connects a fresh isolated Firefox profile to the same owner-private read service
+and requires two actual Download actions, in addition to the four preceding SDK/
+catalog/direct reconstructions. The source, local ciphertext and provider A remain
+unavailable. At least 48 completed protected exchanges and the corresponding B/C
+payloads are required; browser profiles, temporary plaintext and all leases must
+be cleaned up. The earlier Cloud-local UI test uses a synthetic backend and is
+not peer-storage evidence.
+The original joined run `36935715873` using Cloud `c81980dd` failed during UI
+unlock, after the preceding recovery/catalog/SDK operations; private cleanup and
+unchanged host state passed. A local original-Web8 synthetic diagnostic reproduced
+the same failure when six idle browser connections exhausted the service's socket
+limit. The new Cloud pin keeps at least eight transport slots only for web mode,
+while private request/restoration concurrency, authentication and all joined-proof
+gates stay unchanged. Focused HTTP and synthetic UI checks pass; a fresh joined
+original-UI/peer-storage result was still required at that stage.
+
+That combined result now **passes** in
+[run36940326270](https://github.com/VOLPAROSSA/volparossa/actions/runs/36940326270)
+on exact core `d7403106837962c66cd0af0e049236785d8053cb`. The original Files UI,
+using the real owner-local service rather than a synthetic backend, completes two
+786,433-byte Downloads with independently checked hash
+`5cb6c6ae54a29c1769e7189e1e6d4457e65afdbf78c48c89beb5780f86593f5c`.
+All six protected B/C reconstructions and actual GPG decryptions succeed with the
+source off, local ciphertext absent and A offline. All 48 restore exchanges finish;
+A contributes zero restore payload. Authentication/ETag checks, listing, logout,
+private browser/service cleanup and unchanged host state pass. Eight retained
+fragment copies keep their 1,598,292-byte charge through nonconsuming reads, then
+all three reopened provider stores reach zero reservations, committed bytes and
+leases after idempotent deletion. The 18 privacy captures have zero drops and no
+direct client/exit traffic. Exact-source replay reconstructs both aggregates from
+44 original files; ZIP SHA-256
+`9815e1ee6435f39a03c9b566008068e471aa4ac2ad405006df530044b65ffbab`.
+This is selected owner-local read-only recovery in the original Files application,
+not general account/permission recovery, writable synchronization, sharing or
+complete server-independent OpenCloud. Earlier failures remain failures.
 Preview with
 `sh tests/integration/run-alpha-topology-vm.sh --preview --scenario cloud-private-file`;
 execution belongs only in the explicitly approved disposable KVM workflow.
@@ -908,7 +945,23 @@ and acknowledged drain/handoff controller above. Demonstrate both a growing targ
 2 GB-to-1 GB target reduction without losing other participants' live data, including the
 pending-drain case when replacement capacity is insufficient.
 
-The Signal bridge must export a completed upstream encrypted snapshot, including its
-referenced encrypted attachments and private metadata, then reconstruct and validate that
-snapshot through Signal's importer. Merely restoring an opaque file is not Signal restore.
-The same core interface should serve other applications without reimplementing storage.
+### Native Signal backup round trip
+
+The [exact native Signal trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/36742201942)
+on core `90dbea789b57efcbc6cab941e54dfb6a5240511e` and chat
+`c897667d76bea8140f0bc5f373404e43cbd54552` passes. Signal exports and encrypts its real snapshot
+and referenced attachments; after the original ciphertext is removed, the connector restores
+through the real protected core and Signal's importer verifies messages, attachment hashes
+and screenshots. The 198,352-byte archive occupies two independently identified provider
+stores (396,704 charged payload bytes). Import consumes neither copy; explicit deletion then
+returns both stores to zero charged bytes and leases. Twelve protected MPTCP/TLS exchanges,
+two selected relay paths carrying data, privacy captures and full private/host cleanup pass.
+
+This is one actual native regression in a disposable guest, not merely opaque-file testing.
+Its local upstream mock server still handles registration/relink, its Electron test launcher
+does not establish Chromium sandboxing, and the provider namespaces are not independent
+hardware failure domains. Production account recovery UX, least-authority app enrollment,
+automatic repair/contribution accounting and decentralized Signal messages/calls remain open.
+The [implementation status](IMPLEMENTATION_STATUS.md) retains the exact artifact hashes and
+earlier failed trials. Other applications can use the same core storage interface without
+reimplementing custody or acquiring Signal's private recovery keys.

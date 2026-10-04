@@ -356,7 +356,7 @@ for name, expected_resumes in (("agent-model-planning", 2), ("agent-ready-dag", 
     assert fresh[0][fresh[0].index("--model-profile") + 1] == "smollm2-360m-v1", name
     assert all("--model-profile" not in args for args in resumed), name
 jobs = (root / "agent-jobs-smoke.sh").read_text()
-profile_gate = 'if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ]; then'
+profile_gate = 'if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ] || [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then'
 assert jobs.count(profile_gate) == 2
 decoder_gate = 'if [ "${agent_model_task_graph:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ]; then'
 assert jobs.count(decoder_gate) == 1
@@ -366,7 +366,7 @@ assert ('if [ "${agent_policy_assessment:-no}" = yes ]; then\n'
         '        set -- "$@" --principle-inference-v4\n    fi') in jobs
 assert jobs.count('--principle-inference-v4') == 1
 guest = (root / "kvm-alpha-topology.sh").read_text()
-assert guest.count('if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agent_policy_assessment" = yes ]; then') == 2
+assert guest.count('if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agent_policy_assessment" = yes ] || [ "$agent_cooperative_browser_discovered" = yes ]; then') == 2
 assert guest.count('if [ "$agent_model_task_graph" = yes ] || [ "$agent_policy_assessment" = yes ]; then') == 2
 dag = (root / "agent-ready-dag-smoke.sh").read_text()
 assert dag.count('"$dag_script" collect-failure "$WORK"') == 2
@@ -513,7 +513,9 @@ assert overrides.get('agent-autonomous-aggregation') == '180' and timeout_line.e
 # Native Codex is built from pinned source before the guest trial; only that
 # scenario gets a 240-minute window. Keep all existing scenario bounds intact.
 assert overrides.get('agent-native-coding') == '240'
-assert all((name, bound) in {('agent-autonomous-aggregation', '180'), ('signal-native-backup', '150'), ('agent-native-coding', '240')}
+# The independent native Signal build may require its existing 150-minute window.
+assert overrides.get('signal-backup') == '150'
+assert all((name, bound) in {('agent-autonomous-aggregation', '180'), ('signal-backup', '150'), ('agent-native-coding', '240')}
            for name, bound in overrides.items())
 host = (root / "run-alpha-topology-vm.sh").read_text()
 assert 'if scenario == "agent-autonomous-aggregation":\n        file_count_limit = 192' in host
@@ -1291,3 +1293,41 @@ assert 'reciprocity-private-dns.py check "$report" "$GITHUB_SHA"' in workflow
 assert "env.VOLPAROSSA_ALPHA_SCENARIO == 'reciprocity' || env.VOLPAROSSA_ALPHA_SCENARIO == 'reciprocity-private-dns'" in workflow
 print("reciprocal private DNS wrapper contract passed (static only)")
 RECIPROCAL_PRIVATE_DNS_CONTRACT
+
+# Execute only the inert guest argument parser and a mocked outer SSH call.
+# Native and cooperative-code hashes must never acquire each other's meaning.
+python3 -B - "$HOST" <<'DISJOINT_RUNTIME_ARGUMENTS'
+from pathlib import Path
+import subprocess
+import sys
+
+host = Path(sys.argv[1]).read_text()
+driver = host.split("<<'GUEST_DRIVER_SCRIPT'\n", 1)[1].split("\nGUEST_DRIVER_SCRIPT\n", 1)[0]
+parser = driver.split('scenario=$5\n', 1)[1].split('\ncd /home/vpci\n', 1)[0]
+outer = host.rsplit('case $scenario in\n    agent-native-coding|agent-native-editor)\n', 1)[1]
+outer = 'case $scenario in\n    agent-native-coding|agent-native-editor)\n' + outer.split('\nesac\n', 1)[0] + '\nesac\n'
+base = ['expected', 'source', 'mpquic', 'package']
+for scenario, extra, hashes in (
+    ('agent-native-coding', ['native'], ['native', 'none', 'none']),
+    ('agent-native-editor', ['native'], ['native', 'none', 'none']),
+    ('agent-cooperative-code', ['code', 'manifest'], ['none', 'code', 'manifest']),
+    ('agent-cooperative-browser-discovered', [], ['none', 'none', 'none']),
+    ('signal-backup', [], ['none', 'none', 'none']),
+):
+    script = 'set -eu\nscenario=$5\n' + parser + '\nprintf "%s\\n" "$native_runtime_sha256" "$code_archive_sha256" "$code_manifest_sha256"\n'
+    result = subprocess.run(['sh', '-c', script, 'test', *base, scenario, *extra],
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0 and result.stdout.splitlines() == hashes, (scenario, result)
+    for invalid in ([*extra, 'unexpected'], extra[:-1] if extra else ['native']):
+        result = subprocess.run(['sh', '-c', script, 'test', *base, scenario, *invalid],
+                                capture_output=True, text=True, timeout=5)
+        assert result.returncode == 64 and not result.stdout, (scenario, invalid, result)
+    harness = '\n'.join(['set -eu', 'scenario=$1', 'driver_time_bound=6000s', 'expected_commit=expected',
+                         'SOURCE_SHA256=source', 'MPQUIC_SHA256=mpquic', 'PACKAGE_SHA256=package',
+                         'NATIVE_RUNTIME_SHA256=native', 'CODE_ARCHIVE_SHA256=code', 'CODE_MANIFEST_SHA256=manifest',
+                         'ssh_bounded() { printf "%s\\n" "$@"; }', outer])
+    sent = subprocess.run(['sh', '-c', harness, 'test', scenario], capture_output=True, text=True, timeout=5)
+    assert sent.returncode == 0 and sent.stdout.splitlines() == [
+        '6000s', '/home/vpci/guest-driver.sh', *base, scenario, *extra], (scenario, sent)
+print('native/cooperative runtime arguments are scenario-disjoint (no VM or SSH executed)')
+DISJOINT_RUNTIME_ARGUMENTS

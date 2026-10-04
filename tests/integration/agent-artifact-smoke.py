@@ -60,7 +60,7 @@ def dataset(revision, source_text):
 def prepare(path, revision):
     root = private_root(path)
     require(not list(root.iterdir()), "artifact user directory not empty")
-    write(root / "dataset.json", dataset(revision, (HERE / "agent-artifact-README.md").read_text()))
+    write(root / "dataset.json", dataset(revision, TRAIN["public_source"]()))
     (root / "passphrase").write_bytes(base64.b64encode(os.urandom(48)) + b"\n")
     (root / "private-canary").write_bytes(b"Public isolation canary, not a private key.\n")
     for name in ("passphrase", "private-canary"):
@@ -598,7 +598,7 @@ def main():
         return
     if args == ["self-test"]:
         control_binding_self_test()
-        source = (HERE.parent.parent / "README.md").read_text()
+        source = TRAIN["public_source"]()
         value = dataset("a" * 40, source)
         require(value["heldout"][0]["question"] != value["train"][0]["question"], "heldout overlap")
         require(SOURCE_NAMES.count("train") == 1 and "provision" not in SOURCE_NAMES, "source removal scope")

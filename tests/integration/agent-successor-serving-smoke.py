@@ -71,7 +71,7 @@ def tree(path):
 def source(path, revision):
     path = JOBS["private"](path, "successor-source")
     require(not list(path.iterdir()), "wrong public source root")
-    write(path / "dataset.json", ART["dataset"](revision, (HERE / "agent-jobs-README.md").read_text()))
+    write(path / "dataset.json", ART["dataset"](revision, TRAIN["public_source"]()))
 
 
 def cache_directory_identity(path):

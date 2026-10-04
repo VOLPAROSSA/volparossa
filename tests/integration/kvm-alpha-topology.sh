@@ -16,6 +16,7 @@ reciprocal_private_dns=no
 private_storage_peer=no
 private_storage_replicas=no
 private_storage_handoff=no
+signal_backup=no
 private_storage_fragments=no
 image_snapshot=no
 cloud_private_file=no
@@ -26,6 +27,9 @@ agent_jobs_ready_queue=no
 agent_jobs_package_queue=no
 agent_public_task=no
 agent_public_document=no
+agent_cooperative_browser=no
+agent_cooperative_browser_discovered=no
+agent_cooperative_code=no
 agent_public_collection=no
 agent_public_network_sources=no
 agent_task_graph=no
@@ -49,6 +53,11 @@ binary_directory=
 mpquic_binary=
 output_directory=
 expected_commit=
+code_bundle=
+code_manifest_sha256=
+# Only explicit scenario arguments may authorize the staged Code inputs.
+COOPERATIVE_CODE_BUNDLE=
+COOPERATIVE_CODE_MANIFEST_SHA256=
 
 usage() {
     printf '%s\n' 'Additional scenario: browser-network (two real app-scoped Firefox HTTPS/MPTCP transfers).'
@@ -56,10 +65,50 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|private-storage-handoff|private-storage-fragments|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
+        '         --scenario signal-backup also runs the exact pinned native Signal backup test' \
+        '         --scenario agent-cooperative-code requires --code-bundle DIRECTORY --code-manifest-sha256 HEX' \
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
 }
 
 print_plan() {
+    if [ "$agent_cooperative_code" = yes ]; then
+        printf '%s\n' \
+            'VOLPAROSSA cooperative Code proof plan:' \
+            '  require an explicitly staged hash-bound source-built OpenCode/Node/Code bundle;' \
+            '  enroll one exact public README snapshot; synthesize only private planning replies;' \
+            '  use the real owner-only public core, two actual peers and protected MPTCP routes;' \
+            '  join the native tool result to observed workers and the unique retained source manifest;' \
+            '  export closed structural receipts; stop owned units and remove runtime, models and task state;' \
+            '  no private peer confidentiality, real model planning, live cancellation or coding-quality claim.'
+        return
+    fi
+    if [ "$agent_cooperative_browser" = yes ]; then
+        if [ "$agent_cooperative_browser_discovered" = yes ]; then
+            printf '%s\n' \
+                '  trial: discovered-360m; discover compatible real peers through core control IPC;' \
+                '  use the existing pinned 360M profile; require two actual peers and complete synthesis;'
+        fi
+        printf '%s\n' \
+            'VOLPAROSSA cooperative browser proof plan:' \
+            '  stage exact-pinned Gecko UI and ESR runtime in the disposable guest;' \
+            '  prefill a known public README excerpt without dispatch, then require explicit rights/consent;' \
+            '  use a separate owner-only public IPC service, two real peers and protected MPTCP routes;' \
+            '  observe actual fragment and hierarchical synthesis workers, then cancel a second live peer task;' \
+            '  export only structural receipts; stop all owned services and remove model/browser/private state;' \
+            '  no private offload, semantic answer-quality, full Firefox build or full-alpha claim.'
+        return
+    fi
+    if [ "$signal_backup" = yes ]; then
+        printf '%s\n' \
+            'VOLPAROSSA Signal native backup protected network smoke plan:' \
+            '  run one exact pinned Electron/Signal export/import test under Xvfb as a capless app UID;' \
+            '  app IP traffic is restricted to IPv4/IPv6 loopback inside Client network namespace;' \
+            '  two real 64MiB storage providers receive only encrypted backup data over protected routes;' \
+            '  native Signal checks messages, attachment hashes and screenshots after original ciphertext removal;' \
+            '  verify retained receipts, delete remote copies, remove private profiles/keys/logs and restore guest state;' \
+            '  registration/relink uses upstream local mock server; no server-free messaging or full-alpha claim.'
+        return
+    fi
     if [ "$cloud_private_file" = yes ]; then
         printf '%s\n' \
             'VOLPAROSSA Cloud private-file protected network smoke plan:' \
@@ -683,6 +732,7 @@ while [ "$#" -gt 0 ]; do
             private_storage_peer=no
             private_storage_replicas=no
             private_storage_handoff=no
+            signal_backup=no
             private_storage_fragments=no
             image_snapshot=no
             cloud_private_file=no
@@ -694,6 +744,9 @@ while [ "$#" -gt 0 ]; do
             agent_jobs_package_queue=no
             agent_public_task=no
             agent_public_document=no
+            agent_cooperative_browser=no
+            agent_cooperative_browser_discovered=no
+            agent_cooperative_code=no
             agent_public_collection=no
             agent_public_network_sources=no
             agent_task_graph=no
@@ -709,6 +762,10 @@ while [ "$#" -gt 0 ]; do
             agent_train_loop=no
             agent_artifact_quarantine=no
             case $2 in
+                agent-cooperative-code) scenario=agent-jobs; agent_cooperative_code=yes; wifi_link=no; uplink_link=no ;;
+                agent-cooperative-browser) scenario=agent-jobs; agent_cooperative_browser=yes; wifi_link=no; uplink_link=no ;;
+                agent-cooperative-browser-discovered) scenario=agent-jobs; agent_cooperative_browser=yes; agent_cooperative_browser_discovered=yes; wifi_link=no; uplink_link=no ;;
+                signal-backup) scenario=content-custody; signal_backup=yes; wifi_link=no; uplink_link=no ;;
                 reciprocity-private-dns) scenario=reciprocity; reciprocal_private_dns=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-peer) scenario=content-custody; private_storage_peer=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-replicas) scenario=content-custody; private_storage_replicas=yes; wifi_link=no; uplink_link=no ;;
@@ -770,6 +827,18 @@ while [ "$#" -gt 0 ]; do
             expected_commit=$2
             shift
             ;;
+        --code-bundle)
+            if [ "$#" -lt 2 ] || [ -n "$code_bundle" ]; then usage >&2; exit 64; fi
+            code_bundle=$2
+            [ -n "$code_bundle" ] || { usage >&2; exit 64; }
+            shift
+            ;;
+        --code-manifest-sha256)
+            if [ "$#" -lt 2 ] || [ -n "$code_manifest_sha256" ]; then usage >&2; exit 64; fi
+            code_manifest_sha256=$2
+            [ -n "$code_manifest_sha256" ] || { usage >&2; exit 64; }
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -784,7 +853,7 @@ done
 
 if [ "$mode" = preview ]; then
     if [ "$approval" != no ] \
-        || [ -n "$source_directory$binary_directory$mpquic_binary$output_directory$expected_commit" ]; then
+        || [ -n "$source_directory$binary_directory$mpquic_binary$output_directory$expected_commit$code_bundle$code_manifest_sha256" ]; then
         usage >&2
         exit 64
     fi
@@ -810,6 +879,17 @@ case $expected_commit in
 esac
 case ${#expected_commit} in 40|64) ;; *) exit 64 ;; esac
 
+if [ "$agent_cooperative_code" = yes ]; then
+    case $code_bundle in /*) ;; *) usage >&2; exit 64 ;; esac
+    case $code_bundle in /|*/|*//*|*/../*|*/./*|*/..|*/.|*[[:cntrl:]]*) usage >&2; exit 64 ;; esac
+    [ "${#code_bundle}" -le 4096 ] || exit 64
+    case $code_manifest_sha256 in ''|*[!0-9a-f]*) usage >&2; exit 64 ;; esac
+    [ "${#code_manifest_sha256}" -eq 64 ] || exit 64
+elif [ -n "$code_bundle$code_manifest_sha256" ]; then
+    printf '%s\n' 'Code bundle arguments require the agent-cooperative-code scenario' >&2
+    exit 64
+fi
+
 [ "$(id -u)" -eq 0 ] || { printf '%s\n' 'execution requires root inside KVM' >&2; exit 77; }
 [ "$(sed -n '1{s/\..*$//;p;}' /etc/debian_version)" = 13 ] \
     || { printf '%s\n' 'execution requires Debian 13' >&2; exit 77; }
@@ -827,6 +907,19 @@ for command_name in awk busctl cat chmod chown cut date find getent grep install
     command -v "$command_name" >/dev/null 2>&1 \
         || { printf 'required guest tool unavailable: %s\n' "$command_name" >&2; exit 69; }
 done
+if [ "$agent_cooperative_code" = yes ]; then
+    if [ -d "$code_bundle" ] && [ ! -L "$code_bundle" ] \
+        && [ "$(readlink -e -- "$code_bundle")" = "$code_bundle" ] \
+        && [ -f "$code_bundle/INPUTS.json" ] && [ ! -L "$code_bundle/INPUTS.json" ] \
+        && [ "$(stat -Lc '%s' "$code_bundle/INPUTS.json")" -le 65536 ] \
+        && [ "$(sha256sum -- "$code_bundle/INPUTS.json" | awk '{ print $1 }')" = "$code_manifest_sha256" ]; then
+        COOPERATIVE_CODE_BUNDLE=$code_bundle
+        COOPERATIVE_CODE_MANIFEST_SHA256=$code_manifest_sha256
+    else
+        printf '%s\n' 'explicit Code bundle manifest unavailable or changed' >&2
+        exit 69
+    fi
+fi
 for executable in volparossa volparossa-agent volparossa-helper; do
     [ -x "$binary_directory/$executable" ] \
         || { printf 'required product executable unavailable: %s\n' "$executable" >&2; exit 69; }
@@ -929,11 +1022,18 @@ if [ "$private_storage_peer" = yes ]; then
             && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
     done
 fi
-if [ "$private_storage_replicas" = yes ]; then
+if [ "$private_storage_replicas" = yes ] || [ "$signal_backup" = yes ]; then
     for storage_fixture in private-storage-replicas-smoke.sh private-storage-replicas-smoke.py private-storage-peer-smoke.py; do
         [ -f "$source_directory/tests/integration/$storage_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
     done
+fi
+if [ "$signal_backup" = yes ]; then
+    for storage_fixture in signal-backup-smoke.sh signal-backup-smoke.py signal-backup-reporter.cjs signal-backup-startup.cjs; do
+        [ -f "$source_directory/tests/integration/$storage_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
+    done
+    for signal_tool in bwrap xvfb-run Xvfb; do command -v "$signal_tool" >/dev/null 2>&1 || exit 69; done
 fi
 if [ "$private_storage_fragments" = yes ]; then
     for storage_fixture in private-storage-fragments-smoke.sh private-storage-fragments-smoke.py \
@@ -943,7 +1043,7 @@ if [ "$private_storage_fragments" = yes ]; then
     done
 fi
 if [ "$cloud_private_file" = yes ]; then
-    for cloud_fixture in cloud-private-file-smoke.sh cloud-private-file-smoke.py cloud-private-file-pins.json cloud-private-file-sdk.mjs \
+    for cloud_fixture in cloud-private-file-smoke.sh cloud-private-file-smoke.py cloud-private-file-pins.json cloud-private-file-sdk.mjs cloud-private-file-ui.py \
         image-snapshot-smoke.py image-snapshot-pins.json; do
         [ -f "$source_directory/tests/integration/$cloud_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$cloud_fixture" ] || exit 69
@@ -981,13 +1081,14 @@ fi
 if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
     for artifact_fixture in tests/integration/agent-artifact-smoke.sh tests/integration/agent-artifact-smoke.py \
         tests/integration/agent-training-smoke.py workers/volparossa-ml/provision.py \
+        tests/integration/agent-training-public-source.txt tests/integration/agent-training-public-source.json \
         workers/volparossa-ml/requirements.lock workers/volparossa-ml/model-pins.json README.md; do
         [ -f "$source_directory/$artifact_fixture" ] && [ ! -L "$source_directory/$artifact_fixture" ] \
             || { printf '%s\n' 'public agent-artifact fixture unavailable' >&2; exit 69; }
     done
     command -v bwrap >/dev/null 2>&1 || exit 69
 fi
-if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agent_policy_assessment" = yes ]; then
+if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agent_policy_assessment" = yes ] || [ "$agent_cooperative_browser_discovered" = yes ]; then
     [ -f "$source_directory/workers/volparossa-ml/model-pins-360m.json" ] \
         && [ ! -L "$source_directory/workers/volparossa-ml/model-pins-360m.json" ] || exit 69
 fi
@@ -1022,9 +1123,24 @@ if [ "$agent_jobs_ready_queue" = yes ]; then
         [ -f "$source_directory/tests/integration/$ready_fixture" ] && [ ! -L "$source_directory/tests/integration/$ready_fixture" ] || exit 69
     done
 fi
-if [ "$agent_public_document" = yes ] || [ "$agent_public_collection" = yes ]; then
+if [ "$agent_public_document" = yes ] || [ "$agent_public_collection" = yes ] \
+    || [ "$agent_cooperative_browser" = yes ] || [ "$agent_cooperative_code" = yes ]; then
     for document_fixture in agent-public-document-smoke.sh agent-public-document-smoke.py agent-document-synthesis.py; do
         [ -f "$source_directory/tests/integration/$document_fixture" ] && [ ! -L "$source_directory/tests/integration/$document_fixture" ] || exit 69
+    done
+fi
+if [ "$agent_cooperative_browser" = yes ]; then
+    for cooperative_fixture in agent-cooperative-browser.py agent-cooperative-browser.sh \
+        agent-cooperative-browser-pins.json agent-private-task-browser-pins.json; do
+        [ -f "$source_directory/tests/integration/$cooperative_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$cooperative_fixture" ] || exit 69
+    done
+fi
+if [ "$agent_cooperative_code" = yes ]; then
+    for code_fixture in agent-cooperative-code.py agent-cooperative-code.sh agent-cooperative-browser.py \
+        agent-private-conversation-pins.json; do
+        [ -f "$source_directory/tests/integration/$code_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$code_fixture" ] || exit 69
     done
 fi
 if [ "$agent_public_collection" = yes ]; then
@@ -1984,6 +2100,9 @@ cleanup() {
     if [ "$scenario" = content-mailbox ] && command -v content_mailbox_cleanup >/dev/null 2>&1; then
         content_mailbox_cleanup || original_status=1
     fi
+    if [ "$signal_backup" = yes ] && command -v signal_backup_cleanup >/dev/null 2>&1; then
+        signal_backup_cleanup || original_status=1
+    fi
     if [ "$private_storage_fragments" = yes ] && command -v private_storage_fragments_cleanup >/dev/null 2>&1; then
         private_storage_fragments_cleanup || original_status=1
     elif [ "$private_storage_handoff" = yes ] && command -v private_storage_handoff_cleanup >/dev/null 2>&1; then
@@ -2267,6 +2386,8 @@ cleanup() {
         content_repair_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-mailbox ]; then
         content_mailbox_finalize_report "$original_status" || original_status=1
+    elif [ "$signal_backup" = yes ]; then
+        signal_backup_finalize_report "$original_status" || original_status=1
     elif [ "$cloud_private_file" = yes ]; then
         cloud_private_file_finalize_report "$original_status" || original_status=1
     elif [ "$image_snapshot" = yes ]; then
@@ -2437,9 +2558,13 @@ if [ "$private_storage_peer" = yes ]; then
     # shellcheck source=tests/integration/private-storage-peer-smoke.sh
     . "$source_directory/tests/integration/private-storage-peer-smoke.sh"
 fi
-if [ "$private_storage_replicas" = yes ] || [ "$private_storage_handoff" = yes ] || [ "$private_storage_fragments" = yes ]; then
+if [ "$private_storage_fragments" = yes ] || [ "$private_storage_replicas" = yes ] || [ "$private_storage_handoff" = yes ] || [ "$signal_backup" = yes ]; then
     # shellcheck source=tests/integration/private-storage-replicas-smoke.sh
     . "$source_directory/tests/integration/private-storage-replicas-smoke.sh"
+fi
+if [ "$signal_backup" = yes ]; then
+    # shellcheck source=tests/integration/signal-backup-smoke.sh
+    . "$source_directory/tests/integration/signal-backup-smoke.sh"
 fi
 if [ "$private_storage_fragments" = yes ]; then
     # shellcheck source=tests/integration/private-storage-fragments-smoke.sh
@@ -2484,6 +2609,14 @@ fi
 if [ "$agent_public_document" = yes ]; then
     # shellcheck source=tests/integration/agent-public-document-smoke.sh
     . "$source_directory/tests/integration/agent-public-document-smoke.sh"
+fi
+if [ "$agent_cooperative_browser" = yes ]; then
+    # shellcheck source=tests/integration/agent-cooperative-browser.sh
+    . "$source_directory/tests/integration/agent-cooperative-browser.sh"
+fi
+if [ "$agent_cooperative_code" = yes ]; then
+    # shellcheck source=tests/integration/agent-cooperative-code.sh
+    . "$source_directory/tests/integration/agent-cooperative-code.sh"
 fi
 if [ "$agent_public_collection" = yes ]; then
     # shellcheck source=tests/integration/agent-public-collection-smoke.sh
@@ -2637,8 +2770,13 @@ if [ "$private_storage_peer" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/private-storage-peer-smoke.py" \
         "$WORK/bin/private-storage-peer-smoke.py"
 fi
-if [ "$private_storage_replicas" = yes ] || [ "$private_storage_handoff" = yes ] || [ "$private_storage_fragments" = yes ]; then
+if [ "$signal_backup" = yes ] || [ "$private_storage_replicas" = yes ] || [ "$private_storage_handoff" = yes ] || [ "$private_storage_fragments" = yes ]; then
     for storage_fixture in private-storage-replicas-smoke.py private-storage-peer-smoke.py; do
+        install -o root -g root -m 0555 "$source_directory/tests/integration/$storage_fixture" "$WORK/bin/$storage_fixture"
+    done
+fi
+if [ "$signal_backup" = yes ]; then
+    for storage_fixture in signal-backup-smoke.py signal-backup-reporter.cjs signal-backup-startup.cjs; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$storage_fixture" "$WORK/bin/$storage_fixture"
     done
 fi
@@ -2657,6 +2795,8 @@ if [ "$cloud_private_file" = yes ]; then
         "$WORK/bin/cloud-private-file-smoke.py"
     install -o root -g root -m 0555 "$source_directory/tests/integration/cloud-private-file-sdk.mjs" \
         "$WORK/bin/cloud-private-file-sdk.mjs"
+    install -o root -g root -m 0555 "$source_directory/tests/integration/cloud-private-file-ui.py" \
+        "$WORK/bin/cloud-private-file-ui.py"
     install -o root -g root -m 0444 "$source_directory/tests/integration/cloud-private-file-pins.json" \
         "$WORK/bin/cloud-private-file-pins.json"
 fi
@@ -2668,11 +2808,14 @@ if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
     for artifact_script in agent-artifact-smoke.py agent-training-smoke.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$artifact_script" "$WORK/bin/$artifact_script"
     done
+    for training_source in agent-training-public-source.txt agent-training-public-source.json; do
+        install -o root -g root -m 0444 "$source_directory/tests/integration/$training_source" "$WORK/bin/$training_source"
+    done
     install -d -o root -g root -m 0555 "$WORK/bin/ml"
     for artifact_pin in provision.py requirements.lock model-pins.json; do
         install -o root -g root -m 0444 "$source_directory/workers/volparossa-ml/$artifact_pin" "$WORK/bin/ml/$artifact_pin"
     done
-    if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agent_policy_assessment" = yes ]; then
+    if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agent_policy_assessment" = yes ] || [ "$agent_cooperative_browser_discovered" = yes ]; then
         install -o root -g root -m 0444 "$source_directory/workers/volparossa-ml/model-pins-360m.json" "$WORK/bin/ml/model-pins-360m.json"
     fi
     if [ "$agent_model_task_graph" = yes ] || [ "$agent_policy_assessment" = yes ]; then
@@ -5843,6 +5986,8 @@ start_privacy_observers() {
             [ "$scenario" = content-mailbox ] || return 1 ;;
         private-storage-peer-privacy)
             [ "$private_storage_peer" = yes ] || return 1 ;;
+        signal-backup-native-privacy)
+            [ "$signal_backup" = yes ] || return 1 ;;
         private-storage-replicas-upload-privacy|private-storage-replicas-failover-privacy|private-storage-replicas-finish-privacy)
             [ "$private_storage_replicas" = yes ] || return 1 ;;
         private-storage-fragments-upload-privacy|private-storage-fragments-restore-privacy|private-storage-fragments-finish-privacy)
@@ -6595,6 +6740,10 @@ if [ "$agent_train_loop" = yes ]; then
 fi
 if [ "$scenario" = agent-artifact ]; then
     agent_artifact_run
+    exit 0
+fi
+if [ "$signal_backup" = yes ]; then
+    signal_backup_run
     exit 0
 fi
 if [ "$cloud_private_file" = yes ]; then

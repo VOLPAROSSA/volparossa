@@ -28,7 +28,7 @@ native-browser candidate `ca37a68a48a352b3e2edf62a24a10cf7aca84cd0`.
 ## Explicit OpenCloud client integration trial
 
 The disposable `cloud-private-file` scenario stages VOLPAROSSA Cloud at
-`a67b91fbed42ecd23ba215eb21ef54397fc9f06a`, with each used source file's exact
+`c81980dd71297b257f1df6aa382c28a18f9c2f57`, with each used source file's exact
 length and SHA-256 in `tests/integration/cloud-private-file-pins.json`. Original
 GPL-3.0-only Cloud integration and its pinned vendor notices remain unchanged.
 
@@ -43,6 +43,21 @@ installer or lifecycle script runs. This is a pinned published artifact, not a
 claim of reproducible SDK source compilation or a bundled core dependency.
 The provision receipt separately binds package inventory and source provenance;
 successful staging alone is not evidence of actual SDK or protected-peer reads.
+
+The original Files UI is built explicitly inside the disposable guest from
+[`opencloud-eu/web`](https://github.com/opencloud-eu/web/tree/11e699ac82fda4dd113ac3ceb2ecb2dd74574045)
+revision `11e699ac82fda4dd113ac3ceb2ecb2dd74574045`, tree
+`4f13ceee9b21450659266df69a4fac57f25c3bc9`, under AGPL-3.0. The pinned Cloud
+source retains its upstream license, frozen dependency lock and separately recorded
+owner-recovery patch (`f7d26672d3a571f7beceb65b3bffffaedcc4191a9f9e59cef30d0dba56cb8064`).
+Its pinned pnpm 11.27.0 package retains the original MIT license and SHA-512
+integrity from `third_party/opencloud-web-ui.json`. Dependency lifecycle scripts
+are disabled; the build itself runs offline as the disposable unprivileged user.
+Every output asset is inventoried before copying into the read-only runtime.
+The guest reuses the separately pinned Firefox ESR 140.16.0 runtime from
+`browser-network-pins.json`, preserving Debian's original copyright notice.
+Neither successful source compilation nor verified browser staging establishes
+that the UI has retrieved a file from protected peers; that requires the joined trial.
 
 ## Explicit development ML inputs
 

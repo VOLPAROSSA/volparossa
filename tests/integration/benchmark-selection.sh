@@ -98,13 +98,26 @@ benchmark_disconnect_route() {
     wait_disconnected
 }
 
-# Image and Cloud keep closed metadata-only archives. Preserve the selection failure
+# These scenarios keep closed metadata-only archives. Preserve the selection failure
 # branch without exporting raw stderr, addresses, identities or owner data.
 # This observation must never change selection, its retry budget or its result.
+benchmark_route_diagnostic_prefix() {
+    benchmark_diagnostic_prefix=
+    if [ "${cloud_private_file:-no}" = yes ]; then
+        benchmark_diagnostic_prefix=cloud-private-file
+    elif [ "${image_snapshot:-no}" = yes ]; then
+        benchmark_diagnostic_prefix=image-snapshot
+    elif [ "${agent_cooperative_code:-no}" = yes ]; then
+        benchmark_diagnostic_prefix=agent-cooperative-code
+    elif [ "${agent_cooperative_browser:-no}" = yes ]; then
+        benchmark_diagnostic_prefix=agent-cooperative-browser
+    else
+        return 1
+    fi
+}
+
 benchmark_image_route_diagnostic() {
-    [ "${image_snapshot:-no}" = yes ] || [ "${cloud_private_file:-no}" = yes ] || return 0
-    benchmark_diagnostic_prefix=image-snapshot
-    if [ "${cloud_private_file:-no}" = yes ]; then benchmark_diagnostic_prefix=cloud-private-file; fi
+    benchmark_route_diagnostic_prefix || return 0
     benchmark_diagnostic_retries=$((benchmark_connect_count - 1))
     [ "$benchmark_diagnostic_retries" -ge 0 ] || benchmark_diagnostic_retries=0
     if jq -cn --arg stage "$1" --arg reason "$2" \
@@ -122,14 +135,28 @@ benchmark_image_route_diagnostic() {
     return 0
 }
 
-# Only these exact already-recognized error codes may leave the guest. Never
-# copy a product error line: unrecognized text may contain private context.
+# Recognize the fixed Connect result codes, including terminal refusals. This is
+# observation only: the narrower transient retry allowlist above is unchanged.
+# Never copy a product error line; unrecognized text may contain private context.
 benchmark_image_connect_reason() {
     benchmark_connect_reason=UNRECOGNIZED
-    for benchmark_reason in PRESELECTION_UNAVAILABLE NATIVE_PERMIT_UNAVAILABLE \
-        NATIVE_RELAY_READY_UNAVAILABLE NATIVE_HELPER_COMMIT_UNAVAILABLE \
-        NATIVE_PROBE_START_UNAVAILABLE NATIVE_PROBE_PROOF_UNAVAILABLE ROUTE_ADMISSION_UNAVAILABLE; do
-        if grep -Fx "Error: agent rejected request: $benchmark_reason (Unavailable)" "$1" >/dev/null; then
+    for benchmark_reason in CLIENT_ROLE_DISABLED POLICY_UNAVAILABLE CLIENT_ROUTE_PROFILE_INVALID \
+        CONNECT_ALREADY_IN_PROGRESS PRESELECTION_UNAVAILABLE NO_ELIGIBLE_PATHS \
+        NATIVE_PERMIT_UNAVAILABLE NATIVE_RELAY_READY_UNAVAILABLE NATIVE_HELPER_PREPARE_UNAVAILABLE \
+        NATIVE_PROBE_AUTHORIZE_UNAVAILABLE NATIVE_HELPER_ACTIVATE_UNAVAILABLE \
+        NATIVE_PROBE_START_UNAVAILABLE NATIVE_HELPER_COMMIT_UNAVAILABLE NATIVE_PROBE_PROOF_UNAVAILABLE \
+        NATIVE_SAMPLER_RETIREMENT_UNAVAILABLE NATIVE_REMOTE_RETIREMENT_UNAVAILABLE \
+        NATIVE_TRANSPORT_IDENTITY_UNAVAILABLE ROUTE_ADMISSION_UNAVAILABLE \
+        MPTCP_EXIT_LISTENER_SIGNAL_UNAVAILABLE TRANSPORT_RUNTIME_UNAVAILABLE \
+        UDP_EXIT_SESSION_SIGNAL_UNAVAILABLE UDP_INGRESS_UNAVAILABLE; do
+        case $benchmark_reason in
+            CLIENT_ROLE_DISABLED|CONNECT_ALREADY_IN_PROGRESS) benchmark_result=InvalidState ;;
+            POLICY_UNAVAILABLE) benchmark_result=Policy ;;
+            CLIENT_ROUTE_PROFILE_INVALID) benchmark_result=InvalidRequest ;;
+            NATIVE_SAMPLER_RETIREMENT_UNAVAILABLE) benchmark_result=Helper ;;
+            *) benchmark_result=Unavailable ;;
+        esac
+        if grep -Fx "Error: agent rejected request: $benchmark_reason ($benchmark_result)" "$1" >/dev/null; then
             benchmark_connect_reason=$benchmark_reason
             break
         fi
@@ -201,7 +228,7 @@ benchmark_select_route() {
             benchmark_draw=$((benchmark_draw + 1))
         else
             benchmark_connect_exit=$?
-            if [ "${image_snapshot:-no}" = yes ] || [ "${cloud_private_file:-no}" = yes ]; then
+            if benchmark_route_diagnostic_prefix; then
                 benchmark_image_connect_reason "$WORK/$benchmark_label-connect.err"
             fi
             if ! a01_transient_connect_unavailable "$WORK/$benchmark_label-connect.err"; then
