@@ -1350,6 +1350,19 @@ and invalid-data controls, pass; they do not establish real browser/peer complet
   targeted agent checks pass, alongside three signed-store maintenance tests and
   thirteen closed receipt tests. This proves bounded lock-contention handling,
   not the cause or resolution of the original live retirement failure.
+  The subsequent original [run37235222420 on `20b80598`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37235222420)
+  **fails before VM creation**: two stale cooperative Browser test expectations
+  reject the changed provision-selector boundary and expanded export gate during
+  source binding. No guest artifact, new retirement result or guest-cleanup proof
+  exists. Original job111532866484 log SHA-256:
+  `8fe7579f95426ee06adc78e3897f93839709c1841bfb49b151cacfa8765db47b`.
+  The test-only follow-up restores bounded selector extraction, refusing missing,
+  duplicate or reversed boundaries before shell execution, and checks the current
+  export gate. All 34 Browser fixture checks and the 27 remaining source-binding
+  syntax/self-test commands pass locally; the opt-in mount reproduction stays
+  skipped. No model, live network, build or VM ran. Production, resource limits,
+  retirement gates and the earlier live failures remain unchanged; complete
+  maintenance still needs a successful source-bound trial.
   See [private storage maintenance](services/PRIVATE_STORAGE.md#explicit-owner-private-background-maintenance).
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):

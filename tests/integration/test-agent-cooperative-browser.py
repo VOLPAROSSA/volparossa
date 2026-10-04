@@ -716,10 +716,25 @@ class CooperativeBrowserProof(unittest.TestCase):
                                   "--trial", "arbitrary-model", "export-names"], capture_output=True, timeout=5)
         self.assertNotEqual(rejected.returncode, 0)
 
+    def test_provision_selector_boundary_changes_refuse_before_shell_execution(self):
+        shell = (HERE / "agent-jobs-smoke.sh").read_text()
+        start, end = '    set -- "$jobs_root"\n', '    jobs_prepare_command=prepare\n'
+        for changed in (shell.replace(start, '', 1), shell.replace(end, '', 1),
+                        shell.replace(start, start + start, 1), shell.replace(end, end + end, 1),
+                        end + shell.replace(end, '', 1)):
+            with self.subTest(source_boundary=changed[:80]), \
+                    mock.patch.object(Path, "read_text", return_value=changed), \
+                    mock.patch.object(subprocess, "run") as execute:
+                with self.assertRaisesRegex(ValueError, "provision selector boundaries changed"):
+                    self.test_real_provision_and_broker_selectors_choose_one_unchanged_model_cohort()
+                execute.assert_not_called()
+
     def test_real_provision_and_broker_selectors_choose_one_unchanged_model_cohort(self):
         shell = (HERE / "agent-jobs-smoke.sh").read_text()
-        prepare = shell.split('    set -- "$jobs_root"\n', 1)[1].split('    agent_jobs_private prepare', 1)[0]
-        prepare = 'set -- "$jobs_root"\n' + prepare
+        start, end = '    set -- "$jobs_root"\n', '    jobs_prepare_command=prepare\n'
+        if shell.count(start) != 1 or shell.count(end) != 1 or shell.index(start) >= shell.index(end):
+            raise ValueError("provision selector boundaries changed")
+        prepare = shell[shell.index(start):shell.index(end)]
         broker = shell.split('agent_jobs_broker() {', 1)[1].split('    set --\n', 1)[1]
         broker = 'set --\n' + broker.split('    if [ "${agent_policy_assessment:-no}" = yes ]; then', 1)[0]
         for flag in ("no", "yes"):
@@ -1291,7 +1306,7 @@ agent_jobs_cgroup_empty() { return 0; }
         driver = source.split("<<'GUEST_DRIVER_SCRIPT'\n", 1)[1].split("\nGUEST_DRIVER_SCRIPT\n", 1)[0]
         subprocess.run(["sh", "-n"], input=driver, text=True, check=True)
         gate = ('if [ "$scenario" = agent-cooperative-browser ] || [ "$scenario" = agent-cooperative-browser-discovered ]'
-                ' || [ "$scenario" = agent-cooperative-code ]; then')
+                ' || [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then')
         self.assertIn(gate, driver)
         selected_export = driver.split(gate, 1)[1].split("\nelif ", 1)[0]
         self.assertIn('"tests/integration/$scenario.py" export-names', selected_export)
