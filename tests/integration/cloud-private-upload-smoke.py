@@ -57,6 +57,46 @@ FIXTURE_ROLES = tuple(f"relay{i}" for i in range(6)) + ("exit", "exit2")
 INVENTORY_ROLES = ("relay0", "relay1", "relay2", "exit", "exit2")
 PRESELECTION_CODES = ("PRESELECTION_SAMPLE_NO_EXIT", "PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS",
     "PRESELECTION_SAMPLE_INVALID_POLICY", "PRESELECTION_SAMPLE_INVALID_SNAPSHOT", "PRESELECTION_SAMPLE_ENTROPY")
+UPLOAD_FAILURE_CODES = {
+    "upload ciphertext geometry invalid": "geometry",
+    "upload fragment count differs": "geometry",
+    "upload range differs": "geometry",
+    "upload confirmed copies differ": "accounting",
+    "upload copy authority or retained charge differs": "copy_receipt",
+    "upload accounting or scope differs": "accounting",
+    "upload physical charge differs": "accounting",
+    "upload fragment operation differs": "identity",
+    "upload identities changed": "identity",
+    "unacknowledged upload lease": "identity",
+    "private replica CLI operation failed": "cli_exit",
+    "replica diagnostics exceeded fixture bound": "cli_output_bound",
+}
+
+
+def closed_upload_failure(error):
+    # No exception text, private CLI response, path, key or receipt is exported.
+    if isinstance(error, subprocess.TimeoutExpired): return "cli_timeout"
+    return UPLOAD_FAILURE_CODES.get(str(error), "unclassified")
+
+
+def upload_geometry(size):
+    require(type(size) is int and 2 * UPLOAD_CHUNK < size <= 3 * UPLOAD_CHUNK,
+        "upload ciphertext geometry invalid")
+    # LockedFragments::create treats fragment_bytes as an upper bound and splits
+    # across all three providers. Its integer division may leave a fourth tail.
+    width = min(UPLOAD_CHUNK, size // 3)
+    lengths = tuple(min(width, size - offset) for offset in range(0, size, width))
+    charges, counts, survivors = [0] * 3, [0] * 3, [0] * 3
+    for index, length in enumerate(lengths):
+        for copy in range(2):
+            provider = (index + copy) % 3
+            charges[provider] += length
+            counts[provider] += 1
+        # Restore tries the first copy; when provider A is stopped, use B.
+        survivors[index % 3 or 1] += length
+    return dict(width=width, lengths=lengths, survivor_bytes=survivors,
+        provider_usage=[dict(reserved_bytes=0, committed_bytes=charge, leases=count)
+                        for charge, count in zip(charges, counts)])
 
 
 def expected_inventory(peers):
@@ -224,11 +264,11 @@ def uploaded_object(root):
     return target, receipt
 
 
-def upload_identity(target):
+def upload_identity(target, size):
     manifest = target / "journal/fragments.json"
     private_file(manifest)
     digest = hashlib.sha256(manifest.read_bytes())
-    for index in range(3):
+    for index in range(len(upload_geometry(size)["lengths"])):
         for copy in range(2):
             path = target / f"journal/fragment-{index:04}/copy-{copy}/archive.json"
             private_file(path)
@@ -240,23 +280,25 @@ def upload_identity(target):
 
 
 def validate_upload_status(value, keys, size, operation, phase):
+    geometry = upload_geometry(size)
+    lengths = geometry["lengths"]
     require(value["operation"] == "private_storage_fragments_" + operation
-        and value["logical_ciphertext_bytes"] == size and value["fragment_count"] == 3
+        and value["logical_ciphertext_bytes"] == size
         and value["copies_per_fragment"] == 2 and value["distinct_provider_identities"] == 3
         and value.get("operation_complete", True) is True and value["owner_signature_verified"] is True
         and value["read_consumes_archive"] is False and value["expired_copies_remain_charged"] is True,
         "upload fragment operation differs")
-    lengths = (UPLOAD_CHUNK, UPLOAD_CHUNK, size - 2 * UPLOAD_CHUNK)
     charges, counts = [0, 0, 0], [0, 0, 0]
     totals, recoverable, redundant = dict(reserved=0, committed=0, uncertain=0), 0, True
-    require(len(value["fragments"]) == 3, "upload fragment count differs")
+    require(value["fragment_count"] == len(lengths) and len(value["fragments"]) == len(lengths),
+        "upload fragment count differs")
     for index, (fragment, length) in enumerate(zip(value["fragments"], lengths)):
-        require(fragment["index"] == index and fragment["offset"] == index * UPLOAD_CHUNK
+        require(fragment["index"] == index and fragment["offset"] == index * geometry["width"]
             and fragment["ciphertext_bytes"] == length and len(fragment["copies"]) == 2, "upload range differs")
         confirmed = 0
         for copy, row in enumerate(fragment["copies"]):
             provider = (index + copy) % 3
-            expected = "deleted" if phase == "deleted" else "uncertain" if phase == "restore" and provider == 0 and index == 0 else "committed"
+            expected = "deleted" if phase == "deleted" else "uncertain" if phase == "restore" and provider == copy == 0 else "committed"
             require(row["provider_key"] == keys[provider] and row["charge"] == expected
                 and row["last_confirmed_stored_bytes"] == (0 if phase == "deleted" else length)
                 and row["last_confirmed_state"] == ("Deleted" if phase == "deleted" else "Committed")
@@ -289,7 +331,8 @@ def upload_status(root, binary, client, keys, operation="status", phase="committ
         args += unlock(root)
     value = invoke(binary, client, args, deadline=900)
     usage = validate_upload_status(value, keys, receipt["cipher_bytes"], operation, phase)
-    require(upload_identity(target) == (root / "upload-identities.sha256").read_bytes(), "upload identities changed")
+    require(upload_identity(target, receipt["cipher_bytes"]) == (root / "upload-identities.sha256").read_bytes(),
+        "upload identities changed")
     return usage
 
 
@@ -440,7 +483,7 @@ def upload(root, binary, client, keys):
     require(private_file(cipher).st_size == receipt["cipher_bytes"]
         and hashlib.sha256(cipher.read_bytes()).hexdigest() == receipt["cipher_sha256"], "upload cipher differs")
     STAGE = "upload_identity"
-    create(root / "upload-identities.sha256", upload_identity(target))
+    create(root / "upload-identities.sha256", upload_identity(target, receipt["cipher_bytes"]))
     STAGE = "upload_status"
     usage = upload_status(root, binary, client, keys)
     STAGE = "upload_source_cleanup"
@@ -448,7 +491,7 @@ def upload(root, binary, client, keys):
     require(not (root / "bundle/file.pgp").exists(), "baseline cipher remains")
     return dict(baseline=baseline, ui=ui, upload_ciphertext_bytes=receipt["cipher_bytes"], upload_provider_usage=usage,
         service_stopped_and_joined=True, both_local_ciphertexts_removed=True, original_source_stopped=True,
-        private_staging_removed=True, committed_fragment_copies=14)
+        private_staging_removed=True, committed_fragment_copies=8 + 2 * len(upload_geometry(receipt["cipher_bytes"])["lengths"]))
 
 
 def restore(root, binary, client, keys):
@@ -483,7 +526,10 @@ def finish(root, binary, client, keys):
     upload_status(root, binary, client, keys, operation="progress")
     for _ in range(2):
         upload_status(root, binary, client, keys, operation="delete", phase="deleted")
-    return dict(baseline=baseline, all_fourteen_copies_deleted=True, delete_retry_idempotent=True, final_payload_charge=0)
+    _, receipt = uploaded_object(root)
+    return dict(baseline=baseline, all_fragment_copies_deleted=True,
+        deleted_fragment_copies=8 + 2 * len(upload_geometry(receipt["cipher_bytes"])["lengths"]),
+        delete_retry_idempotent=True, final_payload_charge=0)
 
 
 def cleanup(path):
@@ -566,14 +612,16 @@ def validate_evidence(value):
     require(deposited["baseline"] == CLOUD["upload_report"](initial["ciphertext_bytes"]), "baseline deposit missing")
     ui_record(deposited["ui"], "upload"); ui_record(restored["ui"], "download")
     size = deposited["upload_ciphertext_bytes"]
-    require(type(size) is int and 2 * UPLOAD_CHUNK < size <= 3 * UPLOAD_CHUNK and restored["upload_ciphertext_bytes"] == size
-        and deposited["committed_fragment_copies"] == 14 and restored["baseline_restores"] == restored["upload_downloads"] == 2,
+    upload_plan = upload_geometry(size)
+    total_copies = 8 + 2 * len(upload_plan["lengths"])
+    require(restored["upload_ciphertext_bytes"] == size
+        and deposited["committed_fragment_copies"] == total_copies and restored["baseline_restores"] == restored["upload_downloads"] == 2,
         "upload/restore counts differ")
     for record, fields in ((deposited, ("service_stopped_and_joined", "both_local_ciphertexts_removed", "original_source_stopped", "private_staging_removed")),
         (restored, ("new_service_and_browser", "all_reads_nonconsuming", "both_local_ciphertexts_absent", "original_source_stopped",
             "service_stopped_and_joined", "private_staging_removed", "retained_identities_unchanged"))):
         require(all(record[k] is True for k in fields), "source-off service lifecycle incomplete")
-    added = [dict(reserved_bytes=0, committed_bytes=n, leases=c) for n, c in zip((size - UPLOAD_CHUNK, 2 * UPLOAD_CHUNK, size - UPLOAD_CHUNK), (2, 2, 2))]
+    added = upload_plan["provider_usage"]
     require(deposited["upload_provider_usage"] == restored["upload_provider_usage"] == added, "upload charge lost")
     combined = [dict(reserved_bytes=0, committed_bytes=n + extra["committed_bytes"], leases=c + extra["leases"])
         for n, c, extra in zip(geometry["PROVIDER_BYTES"], geometry["PROVIDER_LEASES"], added)]
@@ -582,7 +630,8 @@ def validate_evidence(value):
         and value["deleted_usage"] == [dict(reserved_bytes=0, committed_bytes=0, leases=0)] * 3, "actual provider accounting differs")
     require(value["finish"] == dict(baseline=dict(actual_core_cli=True, reopened_copies_confirmed=True,
         all_eight_copies_deleted=True, delete_retry_idempotent=True, final_payload_charge=0),
-        all_fourteen_copies_deleted=True, delete_retry_idempotent=True, final_payload_charge=0), "all-copy retirement missing")
+        all_fragment_copies_deleted=True, deleted_fragment_copies=total_copies,
+        delete_retry_idempotent=True, final_payload_charge=0), "all-copy retirement missing")
     require(value["private_cleanup"] == dict(owner_identity_removed=True, passphrase_removed=True, grants_removed=True,
         recovery_keys_removed=True, private_plaintext_removed=True, ciphertext_removed=True,
         fragment_journal_removed=True, user_directory_removed=True), "private cleanup incomplete")
@@ -598,10 +647,12 @@ def validate_evidence(value):
     for name, phase in value["network"].items():
         F["validate_network"](phase, value["expected_peers"], value["layout"], name)
     phase = value["network"]["restore"]
-    require(phase["gates"]["exit_mptcp_tls_completed"] >= 28, "four protected reconstructions missing")
+    require(phase["gates"]["exit_mptcp_tls_completed"] >= 4 * (4 + len(upload_plan["lengths"])),
+        "four protected reconstructions missing")
     app = phase["privacy"]["exit"]["provider_application"]
-    require(app["relay5"]["response_payload_bytes"] >= 2 * (2 * CHUNK + geometry["LENGTHS"][-1] + 2 * UPLOAD_CHUNK)
-        and app["relay3"]["response_payload_bytes"] >= 2 * (CHUNK + size - 2 * UPLOAD_CHUNK), "baseline/upload survivor bytes missing")
+    require(app["relay5"]["response_payload_bytes"] >= 2 * (2 * CHUNK + geometry["LENGTHS"][-1] + upload_plan["survivor_bytes"][1])
+        and app["relay3"]["response_payload_bytes"] >= 2 * (CHUNK + upload_plan["survivor_bytes"][2]),
+        "baseline/upload survivor bytes missing")
 
 
 def validate_report(value, revision):
@@ -644,7 +695,8 @@ if __name__ == "__main__":
     def interrupted(_signal, _frame): raise ValueError("upload fixture interrupted")
     for sig in (signal.SIGTERM, signal.SIGINT): signal.signal(sig, interrupted)
     try: main(sys.argv[1:])
-    except (KeyError, TypeError, ValueError, OSError, StopIteration, subprocess.SubprocessError):
+    except (KeyError, TypeError, ValueError, OSError, StopIteration, subprocess.SubprocessError) as error:
         print(json.dumps(dict(success=False, kind="cloud-private-upload-failure", stage=STAGE,
+            failure_kind=closed_upload_failure(error),
             ui_stage=UI_STAGE, ui_failure=UI_FAILURE, ui_parent_stage=closed_ui_parent_stage())))
         sys.exit(1)

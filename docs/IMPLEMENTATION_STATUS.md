@@ -449,13 +449,42 @@ feature branches are not implied to be integrated into `main`.
   Original ZIP SHA-256 `7607c546ff4efc38150a5cf1f31beddf745f7e39272627aa18090d39d75584a3`;
   job `111465403193` log SHA-256
   `fee1fa885d762e4332677d0998bd27303210cc877f6479ebb8c890834b9d204f`.
+  The next original [run `37214237542`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37214237542)
+  on `b837194e859873e8c59f27fe6d62d326d8a48fba` remains **failed**, now at
+  `upload_status` / `FRAGMENTS_UPLOAD_FAILED`. The route-inventory barrier passes
+  after 215 valid queries; Connect selects a route on its first attempt without
+  retries. The closed parent record has UI stage `cleanup`, parent stage `complete`
+  and no UI failure. In this exact driver, reaching `upload_status` follows its
+  original Files/Uppy UI success checks, joined service shutdown, uploaded-object
+  receipt, ciphertext hash and retained-identity capture. The full UI receipt,
+  actual upload ciphertext length and failing status assertion were not retained;
+  exact charge validation, source removal and restarted recovery remain unproved.
+  Cleanup is complete with zero owned objects, all eight private-removal flags
+  true and matching guest-root network hashes
+  `706638df66225b06c08ce0109d8a5e3f9e5ec076f30d94aec2111bdb71443155`.
+  Original ZIP SHA-256 `cf3839504ff72b0b6a83b70453a34a52d31adfe2eae6f73c6e9011d160d53ddb`;
+  job `111471394933` log SHA-256
+  `93d7f2f8c514c30e9de1d0970859fb1a69c94c27e12979b3b105b24349db345d`.
+  A focused reproduction establishes a fixture contract mismatch: production uses
+  `min(fragment_bytes, ciphertext_bytes / provider_count)` with integer division,
+  not three fixed 128-KiB pieces. For three providers this upload can have three
+  equal pieces or a fourth short remainder. The candidate derives every range,
+  retained identity, physical charge, lease count, uncertain copy, survivor byte
+  and final retirement count from that unchanged production geometry. It retains
+  the original minimum flow gate and additionally requires the exact derived
+  reconstruction minimum. Closed failure categories distinguish geometry,
+  accounting, identity and CLI failures without private status/error export.
+  Targeted parser tests fail before and pass after the correction; they are not
+  a new live upload/recovery pass or proof of the original failing assertion.
   The candidate keeps the
   preceding read-only proof/pins unchanged and requires an original Files/Uppy
-  upload of 262,145 synthetic bytes, actual owner GPG encryption, three 128-KiB
-  fragments with the core's two-copy target, retained owner catalogs, a stopped
+  upload of 262,145 synthetic bytes, actual owner GPG encryption, three or four
+  canonical fragments bounded by 128 KiB with the core's two-copy target,
+  retained owner catalogs, a stopped
   and restarted service, removed local ciphertext and provider A offline before
   two fresh-browser native downloads. The existing imported baseline must also
-  restore twice. All fourteen copies remain charged until confirmed retirement;
+  restore twice. All fourteen or sixteen copies, as derived from actual ciphertext
+  geometry, remain charged until confirmed retirement;
   three existing 1-MiB stores, private cleanup and unchanged guest state are
   independently checked. Pure fixture checks are not UI execution, peer proof,
   writable synchronization or a general server-independent service claim.

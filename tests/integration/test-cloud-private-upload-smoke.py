@@ -7,6 +7,7 @@ import io
 import json
 from pathlib import Path
 import runpy
+import subprocess
 import tempfile
 import time
 import unittest
@@ -36,7 +37,7 @@ def ui_failure():
         upload_receipt=None, upload_observation=dict(puts=1, completed=0, created=0, last_status=0, statuses=[]))
 
 
-def fixture():
+def fixture(size=270445):
     value = OLD["fixture"]()
     value.update(dict.fromkeys(CHECK["FALSE_CLAIMS"], False))
     pins = CHECK["PINS"]
@@ -47,34 +48,48 @@ def fixture():
     value["prepare"].update(cloud_revision=CHECK["REVISION"], source_sha256=CHECK["HASHES"],
         grant_payload_bytes=[1048576] * 3, grant_max_leases=[8] * 3)
     geometry = CHECK["CLOUD"]["configure"](value["prepare"])
-    size, chunk = 270445, CHECK["UPLOAD_CHUNK"]
-    added = [dict(reserved_bytes=0, committed_bytes=n, leases=2) for n in (size - chunk, 2 * chunk, size - chunk)]
-    combined = [dict(reserved_bytes=0, committed_bytes=n + other["committed_bytes"], leases=c + 2)
+    width = min(CHECK["UPLOAD_CHUNK"], size // 3)
+    lengths = [min(width, size - offset) for offset in range(0, size, width)]
+    charges, leases, survivors = [0] * 3, [0] * 3, [0] * 3
+    for index, length in enumerate(lengths):
+        for copy_index in range(2):
+            provider = (index + copy_index) % 3
+            charges[provider] += length; leases[provider] += 1
+        survivors[index % 3 or 1] += length
+    added = [dict(reserved_bytes=0, committed_bytes=n, leases=c) for n, c in zip(charges, leases)]
+    combined = [dict(reserved_bytes=0, committed_bytes=n + other["committed_bytes"], leases=c + other["leases"])
         for n, c, other in zip(geometry["PROVIDER_BYTES"], geometry["PROVIDER_LEASES"], added)]
     baseline = value["upload"]
     value["upload"] = dict(baseline=baseline, ui=ui("upload"), upload_ciphertext_bytes=size,
         upload_provider_usage=copy.deepcopy(added), service_stopped_and_joined=True,
         both_local_ciphertexts_removed=True, original_source_stopped=True,
-        private_staging_removed=True, committed_fragment_copies=14)
+        private_staging_removed=True, committed_fragment_copies=8 + 2 * len(lengths))
     value["restore"] = dict(ui=ui("download"), upload_ciphertext_bytes=size, upload_provider_usage=copy.deepcopy(added),
         baseline_restores=2, upload_downloads=2, new_service_and_browser=True, all_reads_nonconsuming=True,
         both_local_ciphertexts_absent=True, original_source_stopped=True, service_stopped_and_joined=True,
         private_staging_removed=True, retained_identities_unchanged=True)
-    value["finish"] = dict(baseline=value["finish"], all_fourteen_copies_deleted=True,
-        delete_retry_idempotent=True, final_payload_charge=0)
+    value["finish"] = dict(baseline=value["finish"], all_fragment_copies_deleted=True,
+        deleted_fragment_copies=8 + 2 * len(lengths), delete_retry_idempotent=True, final_payload_charge=0)
     value["uploaded_usage"] = copy.deepcopy(combined)
     value["restored_usage"] = copy.deepcopy(combined)
+    restore = value["network"]["restore"]
+    restore["gates"]["exit_mptcp_tls_completed"] = 4 * (4 + len(lengths))
+    restore["privacy"]["exit"]["provider_application"]["relay5"]["response_payload_bytes"] = (
+        2 * (2 * CHECK["CHUNK"] + geometry["LENGTHS"][-1] + survivors[1]))
+    restore["privacy"]["exit"]["provider_application"]["relay3"]["response_payload_bytes"] = (
+        2 * (CHECK["CHUNK"] + survivors[2]))
     return value
 
 
-def status(phase):
-    keys, size, chunk = [n * 64 for n in "abc"], 270445, CHECK["UPLOAD_CHUNK"]
+def status(phase, size=270445):
+    keys, chunk = [n * 64 for n in "abc"], min(CHECK["UPLOAD_CHUNK"], size // 3)
     totals, charges, fragments = dict(reserved=0, committed=0, uncertain=0), [0, 0, 0], []
-    for index, length in enumerate((chunk, chunk, size - 2 * chunk)):
+    for index, offset in enumerate(range(0, size, chunk)):
+        length = min(chunk, size - offset)
         copies, confirmed = [], 0
         for copy_index in range(2):
             provider = (index + copy_index) % 3
-            charge = "deleted" if phase == "deleted" else "uncertain" if phase == "restore" and index == provider == 0 else "committed"
+            charge = "deleted" if phase == "deleted" else "uncertain" if phase == "restore" and provider == copy_index == 0 else "committed"
             copies.append(dict(provider_key=keys[provider], charge=charge,
                 last_confirmed_stored_bytes=0 if charge == "deleted" else length,
                 last_confirmed_state="Deleted" if charge == "deleted" else "Committed",
@@ -84,7 +99,7 @@ def status(phase):
                 confirmed += int(charge == "committed")
         fragments.append(dict(index=index, offset=index * chunk, ciphertext_bytes=length,
             copies=copies, confirmed_unexpired_copies=confirmed))
-    value = dict(operation="private_storage_fragments_status", logical_ciphertext_bytes=size, fragment_count=3,
+    value = dict(operation="private_storage_fragments_status", logical_ciphertext_bytes=size, fragment_count=len(fragments),
         copies_per_fragment=2, distinct_provider_identities=3, owner_signature_verified=True,
         read_consumes_archive=False, expired_copies_remain_charged=True, fragments=fragments,
         physical_payload_charge_upper_bound=sum(charges),
@@ -99,6 +114,97 @@ def status(phase):
 
 
 class UploadContracts(unittest.TestCase):
+    def test_geometry_uses_core_upper_bound_with_division_remainder_not_three_fixed_chunks(self):
+        # Independent literal expectations for the three-provider production
+        # split, not a generated report pretending to be a live core result.
+        expected = {262145: (87381, 87381, 87381, 2),
+            270444: (90148, 90148, 90148), 270445: (90148, 90148, 90148, 1),
+            270446: (90148, 90148, 90148, 2),
+            393215: (131071, 131071, 131071, 2), 393216: (131072, 131072, 131072)}
+        for size, lengths in expected.items():
+            geometry = CHECK["upload_geometry"](size)
+            self.assertEqual(geometry["lengths"], lengths)
+            self.assertEqual(geometry["width"], lengths[0])
+            self.assertEqual(sum(lengths), size)
+            self.assertEqual(sum(row["committed_bytes"] for row in geometry["provider_usage"]), 2 * size)
+            self.assertEqual(sum(row["leases"] for row in geometry["provider_usage"]), 2 * len(lengths))
+            self.assertEqual(sum(geometry["survivor_bytes"]), size)
+            self.assertEqual(geometry["survivor_bytes"][0], 0)
+        four = CHECK["upload_geometry"](270445)
+        self.assertEqual(four["provider_usage"], [dict(reserved_bytes=0, committed_bytes=n, leases=c)
+            for n, c in ((180297, 3), (180297, 3), (180296, 2))])
+        self.assertEqual(four["survivor_bytes"], [0, 180297, 90148])
+        for size in (None, True, 270444.0, "270444", 0, 262144, 393217):
+            with self.assertRaises(ValueError): CHECK["upload_geometry"](size)
+        core = (HERE.parents[1] / "crates/volparossa/src/storage/fragments_state.rs").read_text()
+        self.assertIn(".min(plan.ciphertext_bytes / grants.len() as u64)", core)
+        self.assertIn("plan.ciphertext_bytes.div_ceil(fragment_bytes)", core)
+
+    def test_three_and_four_fragment_evidence_requires_every_copy_flow_and_survivor_byte(self):
+        for size in (270444, 270445, 270446, 393216):
+            value = fixture(size)
+            CHECK["validate_evidence"](value)
+            for alter in (
+                lambda v: v["upload"].update(committed_fragment_copies=v["upload"]["committed_fragment_copies"] - 2),
+                lambda v: v["finish"].update(deleted_fragment_copies=v["finish"]["deleted_fragment_copies"] - 2),
+                lambda v: v["network"]["restore"]["gates"].update(
+                    exit_mptcp_tls_completed=v["network"]["restore"]["gates"]["exit_mptcp_tls_completed"] - 1),
+                lambda v: v["network"]["restore"]["privacy"]["exit"]["provider_application"]["relay5"].update(response_payload_bytes=0),
+                lambda v: v["network"]["restore"]["privacy"]["exit"]["provider_application"]["relay3"].update(response_payload_bytes=0),
+                lambda v: v["restored_usage"][0].update(leases=0),
+            ):
+                changed = copy.deepcopy(value); alter(changed)
+                with self.assertRaises(ValueError): CHECK["validate_evidence"](changed)
+
+    def test_fourth_fragment_cannot_disappear_or_lose_uncertain_charge_after_provider_a_stops(self):
+        value, keys, size = status("restore", 270445)
+        self.assertEqual(value["fragment_count"], 4)
+        self.assertEqual(value["fragments"][3]["copies"][0]["charge"], "uncertain")
+        self.assertEqual(value["fragments"][2]["copies"][1]["charge"], "committed")
+        self.assertEqual(value["uncertain_payload_bytes"], 90149)
+        for alter in (
+            lambda v: v["fragments"].pop(),
+            lambda v: v.update(fragment_count=3),
+            lambda v: v["fragments"][3].update(ciphertext_bytes=2),
+            lambda v: v["fragments"][3].update(offset=3 * CHECK["UPLOAD_CHUNK"]),
+            lambda v: v["fragments"][3]["copies"][0].update(charge="committed"),
+            lambda v: v["fragments"][3]["copies"][0].update(charge="deleted"),
+            lambda v: v["fragments"][3]["copies"][1].update(provider_key=keys[2]),
+        ):
+            changed = copy.deepcopy(value); alter(changed)
+            with self.assertRaises(ValueError): CHECK["validate_upload_status"](changed, keys, size, "status", "restore")
+
+    def test_identity_covers_every_copy_including_fourth_fragment(self):
+        with tempfile.TemporaryDirectory(prefix="cloud-upload-identity-") as temporary:
+            root = Path(temporary); journal = root / "journal"; journal.mkdir(mode=0o700)
+            manifest = journal / "fragments.json"; manifest.write_bytes(b'{"inert_test_manifest":true}')
+            manifest.chmod(0o600)
+            for index in range(4):
+                for copy_index in range(2):
+                    path = journal / f"fragment-{index:04}/copy-{copy_index}/archive.json"
+                    path.parent.mkdir(parents=True, mode=0o700)
+                    value = dict(provider_key="synthetic", owner_key="synthetic", grant_hex="synthetic",
+                        archive_id=f"synthetic-{index}-{copy_index}", ciphertext_bytes=1 if index == 3 else 90148,
+                        sha256="synthetic", lease="synthetic-lease")
+                    path.write_text(json.dumps(value)); path.chmod(0o600)
+            before = CHECK["upload_identity"](root, 270445)
+            last = journal / "fragment-0003/copy-1/archive.json"
+            value = json.loads(last.read_text()); value["lease"] = "changed-lease"
+            last.write_text(json.dumps(value))
+            self.assertNotEqual(CHECK["upload_identity"](root, 270445), before)
+            last.unlink()
+            with self.assertRaises(FileNotFoundError): CHECK["upload_identity"](root, 270445)
+
+    def test_upload_failure_categories_never_export_private_cli_or_exception_text(self):
+        select = CHECK["closed_upload_failure"]
+        for message, expected in CHECK["UPLOAD_FAILURE_CODES"].items():
+            self.assertEqual(select(ValueError(message)), expected)
+        self.assertEqual(select(subprocess.TimeoutExpired(["PRIVATE_PATH"], 900,
+            output=b"PRIVATE_STDOUT", stderr=b"PRIVATE_STDERR")), "cli_timeout")
+        for error in (ValueError("PRIVATE_URL_TOKEN_PAYLOAD"), KeyError("PRIVATE_RECEIPT"),
+            OSError("PRIVATE_PATH"), json.JSONDecodeError("PRIVATE_ERROR", "PRIVATE_JSON", 0)):
+            self.assertEqual(select(error), "unclassified")
+
     def test_complete_parser_fixture_and_source_bound_report(self):
         value = fixture()
         CHECK["validate_evidence"](value)
@@ -117,7 +223,8 @@ class UploadContracts(unittest.TestCase):
             lambda v: v["restore"].update(new_service_and_browser=False),
             lambda v: v["restore"].update(both_local_ciphertexts_absent=False),
             lambda v: v["restored_usage"][0].update(committed_bytes=0),
-            lambda v: v["finish"].update(all_fourteen_copies_deleted=False),
+            lambda v: v["finish"].update(all_fragment_copies_deleted=False),
+            lambda v: v["finish"].update(deleted_fragment_copies=14),
             lambda v: v["provision"]["ui"].update(patch_sha256="f" * 64),
             lambda v: v["provision"]["browser"].update(browser_execution_proven=True),
             lambda v: v["network"]["restore"]["gates"].update(exit_mptcp_tls_completed=24),
@@ -127,13 +234,14 @@ class UploadContracts(unittest.TestCase):
             value = fixture(); alter(value)
             with self.assertRaises((ValueError, KeyError)): CHECK["validate_evidence"](value)
 
-    def test_three_fragment_signed_status_keeps_all_uncertain_charges(self):
-        for phase in ("committed", "restore", "deleted"):
-            value, keys, size = status(phase)
-            usage = CHECK["validate_upload_status"](value, keys, size, "status", phase)
-            self.assertEqual(sum(row["committed_bytes"] for row in usage), 0 if phase == "deleted" else 2 * size)
-            value["providers"][0]["physical_payload_charge_upper_bound"] += 1
-            with self.assertRaises(ValueError): CHECK["validate_upload_status"](value, keys, size, "status", phase)
+    def test_canonical_three_or_four_fragment_status_keeps_all_uncertain_charges(self):
+        for size in (270444, 270445, 270446, 393216):
+            for phase in ("committed", "restore", "deleted"):
+                value, keys, size = status(phase, size)
+                usage = CHECK["validate_upload_status"](value, keys, size, "status", phase)
+                self.assertEqual(sum(row["committed_bytes"] for row in usage), 0 if phase == "deleted" else 2 * size)
+                value["providers"][0]["physical_payload_charge_upper_bound"] += 1
+                with self.assertRaises(ValueError): CHECK["validate_upload_status"](value, keys, size, "status", phase)
         value, keys, size = status("restore")
         value["fragments"][0]["copies"][0]["charge"] = "deleted"
         with self.assertRaises(ValueError): CHECK["validate_upload_status"](value, keys, size, "status", "restore")
