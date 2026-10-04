@@ -262,12 +262,21 @@ printf '{"draws":%s,"disconnected":%s}\n' "$draws" "$disconnected"
             self.assertEqual(exhausted.returncode, 1)
             self.assertEqual(len(Path(directory, "benchmark-selection-draws.jsonl").read_text().splitlines()), 34)
 
-    def test_image_route_diagnostic_is_typed_and_does_not_change_selection_results(self):
+    def test_closed_route_diagnostic_is_typed_and_does_not_change_selection_results(self):
         # Shell contract only, not evidence that a real route was established.
         script = r'''
 set -eu
 . "$1/benchmark-selection.sh"
-WORK=$2; mode=$3; image_snapshot=$4
+WORK=$2; mode=$3
+case $4 in
+    image-snapshot) image_snapshot=yes ;;
+    cloud-private-file) cloud_private_file=yes ;;
+    cloud-private-upload) cloud_private_upload=yes ;;
+    agent-cooperative-browser) agent_cooperative_browser=yes ;;
+    agent-cooperative-code) agent_cooperative_code=yes ;;
+    no) : ;;
+    *) exit 98 ;;
+esac
 binary_directory=/unused; source_directory=/unused
 date() { printf '0\n'; }
 sleep() { :; }
@@ -306,14 +315,17 @@ printf '%s\n' "$result"
                  ("success", 0, "complete", "SELECTED", 0, 1))
         fields = {"schema_version", "stage", "reason", "last_connect_reason", "connect_exit_status",
                   "attempts", "retries", "redraws", "path_polls", "path_status"}
-        for mode, status, stage, reason, connect_exit, attempts in cases:
-            with self.subTest(mode=mode), tempfile.TemporaryDirectory(
-                    prefix="image-route-diagnostic-", dir=HERE) as directory:
+        scenarios = ("image-snapshot", "cloud-private-file", "cloud-private-upload", "agent-cooperative-browser",
+                     "agent-cooperative-code")
+        for scenario, case in ((scenario, case) for scenario in scenarios for case in cases):
+            mode, status, stage, reason, connect_exit, attempts = case
+            with self.subTest(scenario=scenario, mode=mode), tempfile.TemporaryDirectory(
+                    prefix="closed-route-diagnostic-", dir=HERE) as directory:
                 command = ["sh", "-c", script, "test", str(HERE), directory, mode]
-                outcome = subprocess.run([*command, "yes"], check=True, text=True,
+                outcome = subprocess.run([*command, scenario], check=True, text=True,
                     capture_output=True, timeout=10, env={"PATH": "/usr/bin:/bin"})
                 self.assertEqual(int(outcome.stdout), status)
-                path = Path(directory, "image-snapshot-route-diagnostic.json")
+                path = Path(directory, f"{scenario}-route-diagnostic.json")
                 encoded = path.read_text()
                 record = json.loads(encoded)
                 self.assertEqual(set(record), fields)

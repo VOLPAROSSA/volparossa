@@ -726,6 +726,7 @@ mod tests {
             task_derivation_v1: true,
             document_inference_v2: false,
             principle_inference_v4: false,
+            code_proposal_v6: false,
             derived_inference_v3: false,
             successor_activation_v1: false,
         };

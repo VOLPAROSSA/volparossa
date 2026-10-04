@@ -43,6 +43,19 @@ async fn automatic_peer_preview_is_networkless_and_cannot_reselect_on_resume() {
     assert!(args.provider_key.is_empty());
     run(&args, &root.path().join("absent.sock")).await.unwrap();
     assert!(!directory.exists());
+    let mut refinement = words.clone();
+    refinement.extend(["--synthesize", "--refine-incomplete"]);
+    let refined = Command::try_parse_from(&refinement).unwrap().options;
+    assert!(refined.refine_incomplete && refined.synthesize);
+    run(&refined, &root.path().join("absent.sock"))
+        .await
+        .unwrap();
+    assert!(!directory.exists());
+    for extra in ["--resume", "--batch-barrier", "--replace-peers"] {
+        let mut invalid = refinement.clone();
+        invalid.push(extra);
+        assert!(Command::try_parse_from(invalid).is_err());
+    }
     let mut enrollment = words.clone();
     enrollment.extend(["--enroll-only", "--execute"]);
     assert!(

@@ -18,6 +18,8 @@ authorize conversation submission. Both families share one execution slot.
 
 Operation: `{ "type": "submit_conversation", "conversation": INPUT }`, where INPUT
 has exactly `version:1`, `visibility:"private_local"`, `instructions`, `history`, `tools`.
+The explicitly negotiated generation-policy extension below permits one additional
+`generation_policy` field; omission preserves the legacy request and generation.
 Instructions are text, not commands executed by the worker. History is ordered:
 
 - `{ "type":"message", "role":"user"|"assistant", "text":"..." }`
@@ -48,6 +50,30 @@ object shape/size and offered identity, **not arbitrary JSON Schema semantics**.
 The application/tool harness remains responsible for argument validation, user
 approval, workspace restrictions and execution. Custom tools accept literal input;
 grammar-enforced custom tools are not advertised by this contract.
+
+## Explicit generation-policy negotiation
+
+To select generation behavior, first send
+`{ "type":"conversation_capabilities", "generation_policy_version":1 }`
+on the same connection. Only this extended handshake adds
+`generation_policy_version:1` and `generation_policies` to `capabilities`:
+`["greedy_v1"]` for Qwen, `[]` for every other profile. Unknown versions, null,
+wrong types and duplicate fields are invalid requests. The original handshake
+request/reply remains unchanged; returning to it resets policy negotiation.
+
+After that handshake, Qwen INPUT may include `generation_policy:"greedy_v1"`.
+The worker uses `do_sample:false, num_beams:1`, without changing token budgets,
+model/template, offered tools, output parsing or execution authority. Its report
+and the validated result contain the same top-level `generation_policy` field.
+Rust requires exact presence/value agreement with the request before returning a
+result; missing, null, conflicting or unsolicited policy claims fail binding.
+Worker JSON duplicate keys are rejected before conversion to a generic value.
+
+Omission retains Qwen's existing sampled nonthinking generation, or the existing
+Smol behavior, and adds no field to input serialization, worker report or result.
+No other policy or non-Qwen opt-in is accepted. Negotiation is not model-quality,
+coding-task-completion or cross-hardware reproducibility evidence. All existing
+private-execution, approval, cancellation and cleanup boundaries still apply.
 
 ## Result and cancellation
 
@@ -81,18 +107,36 @@ mapping, payload bounds and fresh owner-assigned call ID. The JSON-only form
 reserves precisely the `name`/`arguments` object; it does not extract a proposal
 from prose, code fences, concatenated objects or malformed JSON. Those unwrapped
 non-proposals remain assistant text and must never be executed as calls. An exact
-proposal for an unknown alias is incomplete. Tagged mixed/partial calls and
-reasoning markers also remain incomplete. No Markdown stripping, JSON repair or
+proposal for an unknown alias is incomplete. The native tagged form may have a
+bounded assistant preface ending in a newline before its one complete call, as
+the pinned upstream template emits. The preface is not execution authority and
+is not returned as a separate assistant result: the typed result remains the
+exact offered proposal. Fenced examples, missing newline boundaries, extra calls,
+trailing prose, partial calls and reasoning markers remain incomplete. Literal
+delimiters inside valid JSON arguments remain data. No Markdown stripping, JSON repair or
 invented tool choice occurs. The worker never executes a proposal; the caller
 must still validate tool arguments and authorize every action within its own
 workspace/permission scope. `turn_complete` means syntactic completion, not correctness or task
 completion. Do not execute an incomplete result or count it as an answer.
+
+Template provenance: [Qwen3-4B-Instruct-2507 tokenizer configuration at the pinned revision](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507/blob/cdbee75f17c01a7cc42f958dc650907174af0554/tokenizer_config.json)
+emits assistant content before tagged tool calls. Its 9,377-byte file has SHA-256
+`a62ff0a2472a0fa1b8eaabcb57c59b58afa42a22831dc141400b6e0cf2b65ce3`,
+already bound by the model pins. Accepting that syntax is adapter compatibility,
+not evidence that a model produced it in a particular failed trial.
 
 Cancel uses the unchanged `{ "type":"cancel", "task_id": SUBMIT_ID }` operation.
 `cancel_requested` is not terminal cleanup. Disconnect, cancellation and shutdown
 retain the existing worker/descendant join and staging cleanup path; uncertain
 cleanup quarantines the slot. Existing closed error events apply. The server does
 not retry a failed generation or disclose raw parser/backend diagnostics.
+
+When explicitly enabled, the `volparossa::compute::private_diagnostic` debug
+target records a fixed native-output rejection category only after the complete
+report binding passes. It never includes raw output, tool names or arguments;
+the wire reply remains `invalid_output`. These events observe report validation,
+not model attempts: validating the same bound report again may repeat its code
+without another execution. Request/result counters track actual attempts.
 
 ## Explicit limits
 
@@ -161,3 +205,37 @@ RSS stop threshold is 4GiB, address-space limit 10GiB, maximum two threads. Thes
 checks are not a hard 4GiB cgroup proof or a performance guarantee. Actual weights,
 native tool quality, long-context memory use and an end-to-end coding loop still
 require the disposable, hard-memory-bounded functional run.
+
+### Explicit 4B Instruct candidate
+
+The owner may separately select `qwen3-4b-instruct-2507-v1`, pinned to
+`Qwen/Qwen3-4B-Instruct-2507@cdbee75f17c01a7cc42f958dc650907174af0554`
+(Apache-2.0). It is not a new default and cannot be chosen by an incoming request.
+The same private-conversation-only admission, native proposal parser, owner tool
+authority and optional `greedy_v1` generation contract apply. It has no public
+broker, training, adapter or private remote-execution support.
+
+All native 0.6B limits above remain identical except the truthful upstream
+`model_context_tokens=262144` and distinct
+`conversation_template="qwen3-tools-instruct-2507-v1"`. The actual task still has
+a 12,288-token prompt and 1,024-token output limit, not a 262K task allowance.
+The original instruct template remains unmodified; it does not have the 0.6B
+thinking-mode branch. No generated content, tool choice or EOS is fabricated.
+
+This profile has three original safetensors shards. The existing model identity
+hash is SHA256 of their **complete raw bytes concatenated in filename order**;
+its weight length is 8,044,982,000 bytes. It is not the index's hash, nor the
+index's tensor-size metadata. Worker `model.files` retains the real index and
+shard names. Only this profile adds `model.weights` with layout
+`safetensors_shards_concat_v1`, aggregate `bytes`/`sha256`, and ordered `files`.
+Provisioning and the worker verify every original shard plus the aggregate; the
+worker verifies again after generation and the Rust supervisor checks the exact
+reported asset set/identity. Single-file profile reports remain unchanged.
+
+Candidate resources are CPU BF16/SDPA, at most two threads, 600 seconds per task,
+10GiB observed RSS, 24GiB address space and 10.5GiB known spare memory before
+launch. These are admission/stop limits, not measured adequacy or a no-impact
+guarantee. The planned disposable comparison uses a 12GiB guest with an 11GiB
+core cgroup; actual resource refusal or failure must remain visible. Source pins
+and protocol tests alone do not establish successful model loading, coding
+quality, task completion or privacy on another node.

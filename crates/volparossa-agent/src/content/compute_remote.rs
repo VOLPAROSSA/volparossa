@@ -396,6 +396,7 @@ mod tests {
                 require_document_inference_v2: true,
                 require_derived_inference_v3: false,
                 require_principle_inference_v4: false,
+                require_code_proposal_v6: false,
             }),
             compute::Operation::Submit(compute::Submit {
                 binding: binding(),

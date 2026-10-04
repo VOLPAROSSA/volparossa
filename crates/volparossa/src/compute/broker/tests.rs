@@ -4,6 +4,65 @@ use super::*;
 use tokio::io::AsyncWriteExt as _;
 
 #[test]
+fn public_code_broker_purpose_is_explicit_and_excludes_ordinary_tasks() {
+    let root = tempfile::tempdir().unwrap();
+    let mut broker = broker(root.path());
+    let mut submit = Submit {
+        binding: binding(),
+        dataset_json: "{\"version\":6}".into(),
+        publication: publication(),
+    };
+    assert!(!broker.accepts_task(&submit));
+    broker.capabilities.code_proposal_v6 = true;
+    assert!(broker.accepts_task(&submit));
+    submit.binding.task = Some(compute::PublicTask::SummarizeContextsV1 {});
+    assert!(!broker.accepts_task(&submit));
+    submit.binding.task = None;
+    for version in [1, 2, 3, 4, 5] {
+        submit.dataset_json = serde_json::json!({"version":version}).to_string();
+        assert!(!broker.accepts_task(&submit));
+    }
+}
+
+#[test]
+fn public_code_weight_accumulator_hashes_bytes_not_file_identifiers() {
+    let root = tempfile::tempdir().unwrap();
+    let a = root.path().join("a");
+    let b = root.path().join("b");
+    fs::write(&a, b"first").unwrap();
+    fs::write(&b, b"second").unwrap();
+    fs::set_permissions(&a, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(&b, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut aggregate = Sha256::new();
+    assert_eq!(
+        identity_accum(&a, 5, Some(&mut aggregate)).unwrap().sha256,
+        sha(b"first")
+    );
+    assert_eq!(
+        identity_accum(&b, 6, Some(&mut aggregate)).unwrap().sha256,
+        sha(b"second")
+    );
+    assert_eq!(hex::encode(aggregate.finalize()), sha(b"firstsecond"));
+}
+
+#[test]
+fn public_code_broker_keeps_qwen_opt_in_and_no_adapters() {
+    let root = tempfile::tempdir().unwrap();
+    let mut broker = broker(root.path());
+    broker.options.model_profile = ModelProfile::Qwen600;
+    assert_eq!(
+        validate_roots(&broker.options).unwrap_err().to_string(),
+        "compute_profile_private_conversation_only"
+    );
+    broker.options.code_proposal_v6 = true;
+    broker.options.adapter_root = Some(root.path().join("adapter"));
+    assert_eq!(
+        validate_roots(&broker.options).unwrap_err().to_string(),
+        "compute_code_proposal_scope"
+    );
+}
+
+#[test]
 fn execution_failure_diagnostic_preserves_known_typed_and_supervisor_classes() {
     let worker = super::super::supervise::test_worker_failure("BACKEND_IMPORT_FAILED");
     assert_eq!(
@@ -142,6 +201,7 @@ pub(super) fn broker(root: &Path) -> Broker {
         options: Serve {
             model_profile: ModelProfile::default(),
             principle_inference_v4: false,
+            code_proposal_v6: false,
             runtime_root: root.join("runtime"),
             model_root: root.join("model"),
             adapter_root: None,
@@ -172,6 +232,7 @@ pub(super) fn broker(root: &Path) -> Broker {
             document_inference_v2: false,
             principle_inference_v4: false,
             derived_inference_v3: false,
+            code_proposal_v6: false,
             successor_activation_v1: false,
         },
         jobs: VecDeque::new(),

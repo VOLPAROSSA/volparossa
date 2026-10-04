@@ -21,23 +21,28 @@ const PARENTS_PER_GROUP: usize = 64;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Answer {
-    text: String,
-    provider_key: String,
-    job_id: String,
-    report_sha256: String,
-    package_manifest_id: String,
-    model_fingerprint: String,
-    output_index: u16,
-    source_start: u64,
-    source_end: u64,
-    generated_tokens: u16,
-    text_truncated: bool,
+    pub(super) text: String,
+    pub(super) provider_key: String,
+    pub(super) job_id: String,
+    pub(super) report_sha256: String,
+    pub(super) package_manifest_id: String,
+    pub(super) model_fingerprint: String,
+    pub(super) output_index: u16,
+    pub(super) source_start: u64,
+    pub(super) source_end: u64,
+    pub(super) generated_tokens: u16,
+    pub(super) text_truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    generation: Option<Generation>,
+    pub(super) generation: Option<Generation>,
 }
 
 impl Answer {
-    fn from_output(output: &Value, manifest: &str, start: u64, end: u64) -> Result<Self> {
+    pub(super) fn from_output(
+        output: &Value,
+        manifest: &str,
+        start: u64,
+        end: u64,
+    ) -> Result<Self> {
         let mut answer: Self = serde_json::from_value(json!({
             "text":output["text"],"provider_key":output["provider_key"],
             "job_id":output["job_id"],"report_sha256":output["report_sha256"],
@@ -71,7 +76,7 @@ impl Answer {
     }
 }
 
-fn leaf_answers(
+pub(super) fn leaf_answers(
     root: &Path,
     enrollment: &document_storage::Enrollment,
     input: &super::Input,

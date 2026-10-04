@@ -86,6 +86,46 @@ impl ContentCommand {
 }
 
 impl DiscoveryControlHandle {
+    /// Exercise the real bounded actor queue with explicit registration outcomes only.
+    #[cfg(test)]
+    pub(crate) fn content_refresh_for_test(
+        provider: Libp2pPeerId,
+        outcomes: Vec<Result<(), ContentDiscoveryError>>,
+    ) -> (
+        Self,
+        tokio::sync::mpsc::Receiver<usize>,
+        tokio::task::JoinHandle<usize>,
+    ) {
+        let (sender, mut commands) = tokio::sync::mpsc::channel(4);
+        let (observed, receiver) = tokio::sync::mpsc::channel(16);
+        let task = tokio::spawn(async move {
+            let mut outcomes = outcomes.into_iter();
+            let mut registrations = 0;
+            while let Some(command) = commands.recv().await {
+                match command {
+                    DiscoveryCommand::Content(ContentCommand::Register { offer, reply }) => {
+                        let verified = verify_provider(provider, &offer.encode(), unix_seconds())
+                            .expect("actual signed fixture offer");
+                        let result = outcomes.next().unwrap_or(Ok(())).map(|()| verified);
+                        reply.send(result).expect("active registration caller");
+                        registrations += 1;
+                        observed
+                            .send(registrations)
+                            .await
+                            .expect("live test observer");
+                    }
+                    DiscoveryCommand::Content(ContentCommand::Withdraw { reply }) => {
+                        reply.send(Ok(())).expect("active withdrawal caller");
+                        break;
+                    }
+                    _ => panic!("unexpected command in registration-only test actor"),
+                }
+            }
+            registrations
+        });
+        (Self { sender }, receiver, task)
+    }
+
     /// Refresh one or two enrolled providers through the carrying route's control Relay.
     pub(crate) async fn lookup_content_providers(
         &self,
@@ -795,9 +835,17 @@ impl DiscoveryRuntime {
                         self.service
                             .set_local_content_offer(Some(offer.encode()))
                             .map_err(|_| ContentDiscoveryError::Unavailable)?;
-                        if self.service.provide(capability::CONTENT).is_err() {
+                        if let Err(error) = self.service.provide(capability::CONTENT) {
                             self.withdraw_content_registration();
-                            return Err(ContentDiscoveryError::Unavailable);
+                            return Err(match error {
+                                // The fixed, validated CONTENT key reached Kademlia but its
+                                // provider store could not currently accept the announcement.
+                                // Do not confuse this with missing policy or invalid authority.
+                                volparossa_discovery::DiscoveryError::Swarm(_) => {
+                                    ContentDiscoveryError::Busy
+                                }
+                                _ => ContentDiscoveryError::Unavailable,
+                            });
                         }
                         self.content.local = Some(LocalOffer {
                             deadline: Instant::now()

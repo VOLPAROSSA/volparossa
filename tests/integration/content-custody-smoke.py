@@ -218,9 +218,28 @@ def validate_operation(result, keys, publication, layout, operation, complete):
     return bindings
 
 
-def validate_path(phase, peers, layout, name, payload_minimum=UNIQUE_BYTES):
+def validate_path(phase, peers, layout, name, payload_minimum=UNIQUE_BYTES, *,
+                  control_provider_nodes=None, discovery_minimum_flows=2):
     selected, privacy = phase["selected_route"], phase["privacy"]
     paths, slots, providers = selected["paths"], selected["benchmark_slots"], layout["provider_nodes"]
+    # Physical control contacts are not necessarily selected task executors.
+    # The opt-in override binds both actual cp0/cp1 links, in their original order;
+    # it cannot add application providers or exempt unselected fetch traffic.
+    control_providers = providers
+    if control_provider_nodes is not None:
+        require(isinstance(control_provider_nodes, (list, tuple))
+                and all(isinstance(node, str) and node in CANDIDATES for node in control_provider_nodes)
+                and len(control_provider_nodes) == len(set(control_provider_nodes)) == 2
+                and set(providers).issubset(control_provider_nodes),
+                "invalid physical control-provider scope")
+        control_providers = control_provider_nodes
+    # A separately captured single-executor eligibility query needs one actual
+    # protected TLS completion. Historical two-executor discovery stays at two;
+    # execution/fetch gates can never opt into this discovery-only minimum.
+    require(type(discovery_minimum_flows) is int and discovery_minimum_flows in (1, 2)
+            and (discovery_minimum_flows == 2
+                 or (name == "executor-discovery" and len(providers) == 1)),
+            "invalid executor-discovery completion scope")
     require(selected["transport"] == "mptcp" and len(paths) == len(slots) == 2
             and selected["route_context_id"] == layout["route_context_id"]
             and re.fullmatch(r"[0-9a-f]{32}", selected["route_context_id"])
@@ -278,10 +297,11 @@ def validate_path(phase, peers, layout, name, payload_minimum=UNIQUE_BYTES):
         require(payload_minimum > 0 and payload_bytes >= payload_minimum,
                 "normal provider retrieval did not carry the unique object bytes")
     control = next(node for node in SHARED["PUBLIC_IPS"] if peers[node] == layout["control_relay_peer_id"])
-    SHARED["validate_control"](phase["control_privacy"], control, providers, False,
+    SHARED["validate_control"](phase["control_privacy"], control, control_providers, False,
                                require_contacts=name != "fetch")
     require(phase["gates"]["event_baseline_unix_ms"] > 0
-            and phase["gates"]["exit_mptcp_tls_completed"] >= {"deposit": 4, "inspect": 2, "fetch": 1, "executor-discovery": 2}[name],
+            and phase["gates"]["exit_mptcp_tls_completed"] >= {
+                "deposit": 4, "inspect": 2, "fetch": 1, "executor-discovery": discovery_minimum_flows}[name],
             "fresh production MPTCP/TLS completions missing")
 
 

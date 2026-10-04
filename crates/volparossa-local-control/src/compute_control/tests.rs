@@ -84,6 +84,7 @@ fn discovery() -> ComputeDiscoverRequest {
         require_document_inference_v2: true,
         require_derived_inference_v3: true,
         require_principle_inference_v4: false,
+        require_code_proposal_v6: false,
         maximum: 4,
         minimum: 0,
     }
@@ -195,6 +196,21 @@ fn principle_requirement_tag_nine_preserves_legacy_frames_and_reaches_eligibilit
             .unwrap()
             .require_principle_inference_v4
     );
+}
+
+#[test]
+fn public_code_requirement_tag_ten_is_absent_on_old_frames_and_reaches_eligibility() {
+    let mut request = discovery();
+    let mut expected = request.encode_to_vec();
+    let legacy = ComputeDiscoverRequest::decode(expected.as_slice()).unwrap();
+    assert!(!legacy.require_code_proposal_v6);
+    assert!(!legacy.eligibility().unwrap().require_code_proposal_v6);
+    request.require_code_proposal_v6 = true;
+    expected.extend_from_slice(&[0x50, 0x01]);
+    assert_eq!(request.encode_to_vec(), expected);
+    let decoded = ComputeDiscoverRequest::decode(expected.as_slice()).unwrap();
+    assert_eq!(decoded, request);
+    assert!(decoded.eligibility().unwrap().require_code_proposal_v6);
 }
 
 #[test]

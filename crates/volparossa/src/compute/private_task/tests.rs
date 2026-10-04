@@ -133,6 +133,56 @@ fn report(raw: &[u8]) -> Value {
 }
 
 #[test]
+fn sharded_weight_report_binds_original_assets_and_never_substitutes_index_digest() {
+    let profile = ModelProfile::Qwen4bInstruct2507;
+    let spec = profile.spec();
+    let files = profile.sharded_weight_files().unwrap();
+    let mut model = json!({"files":{},"weights":{
+        "layout":"safetensors_shards_concat_v1","bytes":spec.weights_bytes,
+        "sha256":spec.weights_sha256,"files":files[1..].iter().map(|file|file.name).collect::<Vec<_>>()}});
+    for file in files {
+        model["files"][file.name] = json!({"bytes":file.bytes,"sha256":file.sha256});
+    }
+    validate_model_weights(&model, profile).unwrap();
+    for invalid in [
+        {
+            let mut bad = model.clone();
+            bad["weights"]["sha256"] = files[0].sha256.into();
+            bad
+        },
+        {
+            let mut bad = model.clone();
+            bad["weights"]["files"].as_array_mut().unwrap().reverse();
+            bad
+        },
+        {
+            let mut bad = model.clone();
+            bad["files"][files[1].name]["bytes"] = 1.into();
+            bad
+        },
+        {
+            let mut bad = model.clone();
+            bad["files"].as_object_mut().unwrap().remove(files[2].name);
+            bad
+        },
+        {
+            let mut bad = model.clone();
+            bad["files"]["model.safetensors"] =
+                json!({"bytes":spec.weights_bytes,"sha256":spec.weights_sha256});
+            bad
+        },
+        {
+            let mut bad = model.clone();
+            bad["weights"]["layout"] = "manifest_sha256".into();
+            bad
+        },
+    ] {
+        assert!(validate_model_weights(&invalid, profile).is_err());
+    }
+    assert!(validate_model_weights(&model, ModelProfile::Qwen600).is_err());
+}
+
+#[test]
 fn private_report_binds_input_model_and_distinguishes_incomplete_answers() {
     let raw = input();
     let complete = report(&raw);

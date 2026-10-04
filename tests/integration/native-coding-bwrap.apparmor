@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Derived from AppArmor v4.0.1 b0eb95457bc2de401920308869d016e696c73664.
+# Changed 2026-10-01: unique CI names; omit host-local policy includes.
+# Original license: ../../third_party/apparmor-ci/LICENSE (unchanged).
+# This profile allows almost everything and only exists to allow
+# bwrap to work on a system with user namespace restrictions
+# being enforced.
+# bwrap is allowed access to user namespaces and capabilities
+# within the user namespace, but its children do not have
+# capabilities, blocking bwrap from being able to be used to
+# arbitrarily by-pass the user namespace restrictions.
+#
+# Note: the bwrap child is stacked against the bwrap profile due to
+# bwraps use of no-new-privs
+
+# disabled by default as it can break some use cases on a system that
+# doesn't have or has disable user namespace restrictions for unconfined
+# use aa-enforce to enable it
+
+abi <abi/4.0>,
+
+include <tunables/global>
+
+profile volparossa_ci_native_bwrap /usr/bin/bwrap flags=(attach_disconnected) {
+  allow capability,
+  # not allow all, to allow for pix stack
+  # sadly we have to allow  m every where to allow children to work under
+  # stacking.
+  allow file rwlkm /{**,},
+  allow network,
+  allow unix,
+  allow ptrace,
+  allow signal,
+  allow mqueue,
+  allow io_uring,
+  allow userns,
+  allow mount,
+  allow umount,
+  allow pivot_root,
+  allow dbus,
+  allow px /** -> volparossa_ci_native_bwrap//&volparossa_ci_native_child,
+
+  # the local include should not be used without understanding the userns
+  # restriction.
+  # Site-specific additions and overrides. See local/README for details.
+}
+
+profile volparossa_ci_native_child flags=(attach_disconnected) {
+  # not allow all, to allow for pix stack
+  allow file rwlkm /{**,},
+  allow network,
+  allow unix,
+  allow ptrace,
+  allow signal,
+  allow mqueue,
+  allow io_uring,
+  allow userns,
+  allow mount,
+  allow umount,
+  allow pivot_root,
+  allow dbus,
+
+  allow pix /** -> &volparossa_ci_native_child,
+
+  audit deny capability,
+
+  # the local include should not be used without understanding the userns
+  # restriction.
+  # Site-specific additions and overrides. See local/README for details.
+}

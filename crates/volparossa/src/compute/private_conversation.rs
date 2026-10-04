@@ -22,6 +22,32 @@ pub(super) struct Input {
     instructions: String,
     history: Vec<Item>,
     tools: Vec<Tool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_generation_policy"
+    )]
+    generation_policy: Option<GenerationPolicy>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum GenerationPolicy {
+    GreedyV1,
+}
+
+fn present_generation_policy<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<GenerationPolicy>, D::Error> {
+    // Omission means legacy generation. Explicit null is not a policy selection.
+    GenerationPolicy::deserialize(deserializer).map(Some)
+}
+
+/// The supervisor must not bind a result after silently accepting duplicate keys.
+pub(super) fn decode_worker_message(raw: &[u8]) -> Result<Value> {
+    #[derive(Deserialize)]
+    struct Message(#[serde(deserialize_with = "strict_json::value")] Value);
+    Ok(serde_json::from_slice::<Message>(raw)?.0)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -154,6 +180,10 @@ impl Tool {
 }
 
 impl Input {
+    pub(super) fn requires_generation_policy_handshake(&self) -> bool {
+        self.generation_policy.is_some()
+    }
+
     #[cfg(test)]
     pub(super) fn decode(raw: &[u8]) -> Result<Self> {
         Self::decode_profile(raw, ModelProfile::Smol360)
@@ -188,6 +218,10 @@ impl Input {
     fn validate_profile(&self, profile: ModelProfile) -> Result<()> {
         let bounds = limits::for_profile(profile);
         ensure!(
+            self.generation_policy.is_none() || profile.is_native_conversation(),
+            "conversation_generation_policy"
+        );
+        ensure!(
             self.version == 1 && self.visibility == "private_local",
             "conversation_scope"
         );
@@ -212,7 +246,7 @@ impl Input {
                 } => ensure!(
                     pending.is_empty()
                         && text(content, bounds.text, true)
-                        && (profile == ModelProfile::Qwen600
+                        && (profile.is_native_conversation()
                             || matches!(role, Role::User | Role::Assistant)),
                     "conversation_message"
                 ),
@@ -318,14 +352,19 @@ impl Input {
 pub(super) fn capabilities(profile: ModelProfile) -> Value {
     let spec = profile.spec();
     let bounds = limits::for_profile(profile);
-    let native = profile == ModelProfile::Qwen600;
+    let native = profile.is_native_conversation();
+    let template = match profile {
+        ModelProfile::Qwen600 => "qwen3-tools-nonthinking-v1",
+        ModelProfile::Qwen4bInstruct2507 => "qwen3-tools-instruct-2507-v1",
+        _ => "smollm2-json-turn-v1",
+    };
     json!({"version":1,"visibility":"private_local","model_profile":profile,
         "max_input_bytes":bounds.input,"max_history_items":bounds.history,"max_tools":bounds.tools,
         "max_instructions_bytes":bounds.instructions,"max_message_bytes":bounds.text,"max_tool_description_bytes":bounds.description,
         "max_tool_payload_bytes":4096,
         "max_prompt_tokens":spec.prompt_tokens,"max_new_tokens":spec.max_new_tokens,
         "model_context_tokens":bounds.context_tokens,"max_output_bytes":spec.max_output_bytes,
-        "conversation_template":if native { "qwen3-tools-nonthinking-v1" } else { "smollm2-json-turn-v1" },"native_tool_template":native,
+        "conversation_template":template,"native_tool_template":native,
         "local_only":true,"tool_execution":false,"network_access":false,
         "public_cache":false,"training":false,"cloud_fallback":false,
         "model_tool_use_proven":false,"arbitrary_json_schema_validation":false})
@@ -357,7 +396,12 @@ pub(super) fn turn(input: &Input, output: &Value) -> Result<Value> {
 
 pub(super) fn validate_report(report: &Value, raw: &[u8], profile: ModelProfile) -> Result<()> {
     let input = Input::decode_profile(raw, profile)?;
-    let expected = if profile == ModelProfile::Qwen600 {
+    let expected_policy = input.generation_policy.map(|policy| json!(policy));
+    ensure!(
+        report.get("generation_policy") == expected_policy.as_ref(),
+        "conversation_generation_policy_binding"
+    );
+    let expected = if profile.is_native_conversation() {
         qwen::turn(
             &input,
             &report["outputs"][0],
@@ -374,18 +418,34 @@ pub(super) fn validate_report(report: &Value, raw: &[u8], profile: ModelProfile)
             && report["conversation"] == expected,
         "conversation_report_binding"
     );
+    if profile.is_native_conversation() && expected["reason"] == "invalid_output" {
+        // This target is off by default. Observe a fixed parser category only
+        // after the independently derived turn and all report bindings agree.
+        super::supervise::diagnostic::event(
+            "execution",
+            qwen::rejection_code(
+                &input,
+                &report["outputs"][0],
+                report["id"].as_str().unwrap_or_default(),
+            ),
+        );
+    }
     Ok(())
 }
 
 pub(super) fn summary(report: &Value, profile: ModelProfile) -> Value {
-    json!({"version":1,"operation":"compute_private_conversation","model_profile":profile,
+    let mut result = json!({"version":1,"operation":"compute_private_conversation","model_profile":profile,
         "execution_complete":true,"turn_complete":report["conversation"]["type"] != "incomplete",
         "output":report["conversation"],"prompt_tokens":report["prompt_tokens"],
         "generated_tokens":report["outputs"][0]["generated_tokens"],"limits":report["conversation_limits"],
         "local_only":true,"private_data_supported":true,"tool_execution":false,
         "distributed_execution_claimed":false,"private_training_claimed":false,
         "model_answer_correctness_proven":false,
-        "cleanup":{"complete":true,"retained_input":false,"retained_report":false}})
+        "cleanup":{"complete":true,"retained_input":false,"retained_report":false}});
+    if let Some(policy) = report.get("generation_policy") {
+        result["generation_policy"] = policy.clone();
+    }
+    result
 }
 
 #[cfg(test)]
