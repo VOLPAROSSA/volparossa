@@ -388,6 +388,42 @@ def run_checked(command, environment, root, deadline):
     subprocess.run(command, env=environment, cwd=root, check=True, timeout=remaining)
 
 
+def native_cpu_options(args):
+    source = getattr(args, "native_cpu_source", None)
+    build = getattr(args, "native_cpu_build", None)
+    if source is None and build is None:
+        return None
+    require(source is not None and build is not None and args.model_profile == QWEN4B_MODEL_PROFILE,
+            "native CPU conversion requires both local source/build paths and the exact 4B profile")
+    require(all(Path(path).is_absolute() for path in (source, build)), "native CPU input paths must be absolute")
+    return {"source": str(source), "build": str(build), "kind": "llama_cpp_bf16_v1"}
+
+
+def provision_native_cpu(args, root, python, environment, deadline, used_bytes):
+    selection = native_cpu_options(args)
+    if selection is None:
+        return None
+    remaining_budget = args.budget_bytes - used_bytes
+    require(remaining_budget >= QWEN4B_WEIGHTS["bytes"] + 256 * 1024 * 1024,
+            "same provisioning budget cannot hold additional verified BF16 GGUF")
+    remaining_seconds = min(1800, int(deadline - time.monotonic()))
+    require(remaining_seconds >= 1, "native conversion has no remaining original provisioning deadline")
+    target = root / "native-backend"
+    # The existing pinned venv executes only the fixed local conversion tool.
+    # No model inference, package installation or extra download is added here.
+    run_checked([python, "-B", str(HERE / "convert_llama_cpu.py"),
+                 "--source", selection["source"], "--build", selection["build"],
+                 "--model", str(root / "model"), "--root", str(target),
+                 "--budget-bytes", str(remaining_budget), "--timeout-seconds", str(remaining_seconds),
+                 "--execute", "--yes", "--disposable-guest"], environment, root, deadline)
+    manifest = target / "backend.json"
+    info = manifest.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_size <= 65536 and info.st_mode & 0o077 == 0,
+            "native conversion did not produce private bounded manifest")
+    return {"kind": selection["kind"], "root": str(target),
+            "backend_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest()}
+
+
 def execute(args, pins):
     root, guest_kind = execution_root(args)
     total = download_total(pins)
@@ -444,6 +480,8 @@ def execute(args, pins):
                      "print('OFFLINE_CPU_RUNTIME_IMPORT_OK')"], environment, root, deadline)
         if "task_graph_decoder" in pins:
             run_checked([python, "-I", "-B", "-c", CHECK_GRAPH_DECODER], environment, root, deadline)
+        native_backend = provision_native_cpu(args, root, python, environment, deadline,
+                                             total + expanded + RESERVE_BYTES)
         report = {
             "format_version": 1, "success": True, "guest": guest_kind,
             "runtime_root": str(runtime), "model_root": str(model),
@@ -461,6 +499,8 @@ def execute(args, pins):
             report["weights"] = pins["weights"]
         if "task_graph_decoder" in pins:
             report["task_graph_decoder"] = pins["task_graph_decoder"]
+        if native_backend is not None:
+            report["native_backend"] = native_backend
         (root / "provision-report.json").write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report), flush=True)
     except BaseException:
@@ -483,10 +523,13 @@ def main(argv=None):
     parser.add_argument("--model-profile", choices=PROFILES, default=DEFAULT_MODEL_PROFILE)
     parser.add_argument("--task-graph-decoder", action="store_true",
                         help="explicitly add the three pinned optional constrained-graph decoder wheels")
+    parser.add_argument("--native-cpu-source", help="explicit clean pinned local llama.cpp source for offline BF16 conversion")
+    parser.add_argument("--native-cpu-build", help="explicit local source-built CPU adapter; no automatic source download")
     args = parser.parse_args(argv)
     try:
         require(1 <= args.timeout_seconds <= 3600, "timeout must be 1..3600 seconds")
         pins = load_pins(args.model_profile, args.task_graph_decoder)
+        native_backend = native_cpu_options(args)
         plan = {
             "mode": "execute" if args.execute else "preview", "root": args.root,
             "model_id": pins["model_id"], "revision": pins["revision"], "wheel_count": len(pins["wheels"]),
@@ -500,6 +543,9 @@ def main(argv=None):
             plan["model_profile"] = args.model_profile
         if args.task_graph_decoder:
             plan["task_graph_decoder"] = pins["task_graph_decoder"]
+        if native_backend is not None:
+            plan["native_backend"] = dict(native_backend, conversion="offline_exact_bf16_values",
+                                           shared_original_deadline=True, shared_original_disk_budget=True)
         print(json.dumps(plan, indent=2), flush=True)
         if args.execute:
             execute(args, pins)

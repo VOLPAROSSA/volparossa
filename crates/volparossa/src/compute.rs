@@ -4,6 +4,7 @@ mod broker;
 mod device_capacity;
 mod document_plan;
 mod inference_output;
+mod native_cpu;
 mod owner_control;
 mod peer;
 mod policy_assessment;
@@ -111,6 +112,8 @@ pub(crate) struct Options {
     /// Explicit pinned inference/planning profile; the default also supports training/adapters.
     #[arg(long, default_value_t = ModelProfile::default())]
     model_profile: ModelProfile,
+    #[command(flatten)]
+    native_backend: native_cpu::Options,
     /// Explicit verified adapter directory; cache storage alone never activates an adapter.
     #[arg(long)]
     adapter_root: Option<PathBuf>,
@@ -139,6 +142,8 @@ pub(crate) struct Options {
 
 #[derive(Serialize)]
 struct WorkerRequest {
+    #[serde(flatten)]
+    native_backend: native_cpu::Request,
     version: u8,
     id: String,
     mode: Mode,
@@ -247,6 +252,7 @@ async fn execute(options: &Options, activity: watch::Receiver<bool>) -> Result<V
     // This job ID only correlates the local isolated process; it is not a network identity.
     getrandom::fill(&mut nonce).map_err(|_| anyhow::anyhow!("compute_randomness"))?;
     let request = WorkerRequest {
+        native_backend: options.native_backend.request(options.model_profile)?,
         version: 1,
         id: hex::encode(nonce),
         mode: options.mode,
@@ -296,6 +302,7 @@ impl Options {
         ensure!((1..=600).contains(&self.max_seconds), "compute_deadline");
         private_directory(&self.runtime_root)?;
         private_directory(&self.model_root)?;
+        self.native_backend.validate(self.model_profile)?;
         if let Some(adapter) = &self.adapter_root {
             private_directory(adapter)?;
         }
@@ -321,6 +328,8 @@ impl Options {
             &dataset,
             self.model_profile,
         )?;
+        self.native_backend
+            .validate_input(self.mode, &dataset, self.model_profile)?;
         for file in [
             "/usr/bin/bwrap",
             "/usr/bin/prlimit",

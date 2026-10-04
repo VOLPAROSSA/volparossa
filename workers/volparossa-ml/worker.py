@@ -25,6 +25,7 @@ import stat
 import struct
 import sys
 import time
+from types import SimpleNamespace
 
 VERSION = 1
 MAX_REQUEST = 65536
@@ -258,7 +259,7 @@ def bounded_integer(value, low, high):
 def validate_request(value):
     required = {"version", "id", "mode", "model_root", "dataset_path", "output_root"}
     optional = {"steps", "threads", "max_seconds", "adapter_root", "owner_control", "model_profile",
-                "private_generation_diagnostics"}
+                "private_generation_diagnostics", "inference_backend", "native_backend_root", "native_backend_sha256"}
     require(type(value) is dict and required <= value.keys()
             and value.keys() <= required | optional, "INVALID_REQUEST_FIELDS")
     require(type(value["version"]) is int and value["version"] == VERSION, "UNSUPPORTED_VERSION")
@@ -266,6 +267,12 @@ def validate_request(value):
     require(value["mode"] in ("infer", "train", "plan_document", "plan_tasks", "private_infer", "private_conversation", "public_code_proposal", "aggregate_adapter"), "INVALID_JOB_MODE")
     profile_name = value.get("model_profile", DEFAULT_MODEL_PROFILE)
     model_profile(profile_name)
+    native_fields = {"inference_backend", "native_backend_root", "native_backend_sha256"}
+    if native_fields & value.keys():
+        require(native_fields <= value.keys() and value["inference_backend"] == "llama_cpp_bf16_v1"
+                and profile_name == QWEN4B_MODEL_PROFILE and value["mode"] == "private_conversation"
+                and type(value["native_backend_sha256"]) is str
+                and re.fullmatch(r"[0-9a-f]{64}", value["native_backend_sha256"]), "INVALID_NATIVE_BACKEND_SCOPE")
     require("private_generation_diagnostics" not in value or
             (type(value["private_generation_diagnostics"]) is bool and
              (not value["private_generation_diagnostics"] or
@@ -291,8 +298,8 @@ def validate_request(value):
             "AGGREGATION_EXECUTION_SCOPE")
     require("owner_control" not in value or type(value["owner_control"]) is bool,
             "INVALID_OWNER_CONTROL")
-    for field in ("model_root", "dataset_path", "output_root", "adapter_root"):
-        if field == "adapter_root" and field not in value:
+    for field in ("model_root", "dataset_path", "output_root", "adapter_root", "native_backend_root"):
+        if field in ("adapter_root", "native_backend_root") and field not in value:
             continue
         path = value[field]
         require(type(path) is str and 1 < len(path.encode("utf-8")) <= 4096
@@ -2322,6 +2329,11 @@ def execute_job(request, session):
             "MODEL_TOKENIZER_MISMATCH")
     session.private_progress("tokenizer_load", "complete")
     session.check()
+    if request.get("inference_backend") == "llama_cpp_bf16_v1":
+        native_backend = sys.modules.get("volparossa_llama_cpu")
+        require(native_backend is not None, "NATIVE_BACKEND_MODULE_UNAVAILABLE")
+        return native_backend.execute(request, session, tokenizer, torch, versions, model_root, output_root,
+                                      dataset, data_identity, model_files, SimpleNamespace(**globals()))
     if request["mode"] == "plan_document":
         plan = plan_document(tokenizer, dataset, session, profile_name)
         raw = json.dumps(plan, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("ascii")

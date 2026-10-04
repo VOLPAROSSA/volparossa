@@ -4,6 +4,29 @@ Original VOLPAROSSA source in this repository is licensed under GPL-3.0-only. De
 vendored components retain their own licenses. This file is a provenance record, not a substitute
 for the license text shipped by each upstream project.
 
+## Explicit llama.cpp CPU inference candidate
+
+The opt-in CPU backend uses [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)
+at exact commit `7fe450e19305b828c199d602c23a8337aaa1f03b` (resolved release tag
+`v0.5.0`; MIT). The tag is unsigned. No prebuilt upstream executable, server,
+GPU backend or implicit artifact download is used. Original code is unpatched;
+the GPL-3.0-only adapter exposes a fixed owned C ABI and source-build flags.
+The builder preserves tracked upstream licenses/notices, including ggml and
+the Mozilla tinyBLAS notice, unchanged in the generated artifact.
+Static GCC runtime archives retain measured hashes and the original Debian GCC
+copyright/runtime-exception notice; compiler versions are recorded, not silently
+treated as upstream llama.cpp source or reproducible-build proof.
+
+The separate offline conversion candidate starts only from the existing pinned
+Apache-2.0 `Qwen/Qwen3-4B-Instruct-2507` revision
+`cdbee75f17c01a7cc42f958dc650907174af0554`. It compares every original BF16 tensor
+value, allowing only exact F32 promotion for norm/one-dimensional tensors; it
+does not quantize weights. Original shard identity and the measured GGUF digest
+are distinct. The original Qwen license accompanies converted artifacts.
+See [the native CPU contract](workers/volparossa-ml/native-cpu/README.md) for
+source/build/conversion provenance, instruction requirements and remaining proof.
+Source and inert tests are not claims of successful guest inference or coding.
+
 ## Explicit native editor integration trial
 
 The `agent-native-editor` guest trial uses VOLPAROSSA Code commit

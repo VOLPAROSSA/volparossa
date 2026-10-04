@@ -15,6 +15,52 @@ Last updated: 2026-10-04
 
 ## Current integration and active work
 
+### Explicit native CPU inference candidate
+
+- [ ] An owner-selected `llama_cpp_bf16_v1` backend is being connected to the
+  existing isolated private-conversation worker. The source-only build of pinned
+  llama.cpp `7fe450e19305b828c199d602c23a8337aaa1f03b` passes. This is **not yet
+  an actual model-conversion, generation-speed or successful OpenCode trial**.
+  The original timed-out 4B result remains failed in the evidence below.
+  This first backend accepts only the original Qwen3-4B-Instruct-2507 profile and
+  explicitly negotiated `greedy_v1`; public jobs, training and other profiles
+  retain their existing backend. It does not establish confidential peer execution.
+
+The fixed owned native ABI receives the complete original tokenizer-rendered
+prompt in bounded prefill batches, not a shortened prompt or smaller/quantized
+model. Conversion must compare every original tensor value; BF16 matrices stay
+BF16, while required norm tensors are exactly promoted to F32 and reported as
+`bf16_with_exact_f32_norms`. AVX2, FMA and F16C are explicit CPU requirements.
+An owner-supplied manifest digest binds the native library and converted model;
+peer data cannot choose executable code. Artifact verification precedes loading
+inside the unchanged network-isolated sandbox. Deadlines, owner-priority controls,
+cleanup confirmation and original model-result checks remain required.
+
+Six inert Rust authorization/result-binding checks, fifteen private-service tests
+and five sandbox tests pass. They cover absent legacy fields, restricted native
+admission and cancellation/cleanup contracts, not real model performance. Actual
+conversion, complete inference and the unchanged native OpenCode coding scenario
+must pass before this path is described as working end to end.
+
+The definitive normal source-only build records library SHA-256
+`4af8d584349d184049c5f6ffea3e5618839c69536676a6bb5c12ef33b03755a7`
+and build-manifest SHA-256
+`d51c06798cae305622cf91089692c323cc31c1af8ff63420b270aaf44830d27c`.
+Nineteen native Python contract checks pass, along with the separately targeted
+existing worker/provision/conversation checks. These tests load no actual model.
+
+Native sanitizer evidence is mixed and remains explicit: the owned ABI smoke
+passes, but the unchanged upstream all-type tensor test **fails** under UBSan on
+an unaligned `uint32_t` load in the Q1_0/Q8_0 dot product. That quantized path is
+outside this BF16-only candidate, but the full test is not waived or relabeled.
+Its original log SHA-256 is
+`37e07701e4f9a7fadbee0876f77d7eb034192e951a4cd2da572606255bf84f08`.
+A separate ASan/UBSan target reuses unchanged upstream F32/BF16 test functions
+and tolerances; its 18 F32 vector cases and three BF16 checks pass (log SHA-256
+`6fac1d1773ae750583092ed00014e40983d319811a67afea385cc014fe514e46`).
+This is scoped kernel evidence, not a passing complete upstream suite or model
+inference. Sanitized build artifacts cannot be provisioned as production models.
+
 ### Bank and Transaction layer research
 
 The 2026-10-04 user extension adds VOLPAROSSA Bank and a reusable Transaction-layer.
