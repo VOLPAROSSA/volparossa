@@ -64,6 +64,25 @@ again; no assertion or privacy boundary was removed. Retained decoded job
 `80dbe57d6b939c97c41785c4b7473fd2cc218daa197f017b4157b92501399685`.
 Skipped later steps are not passing workspace or datapath evidence.
 
+The subsequent [quality run `37235233676`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37235233676)
+on `f7e2c3b9` passes strict Clippy, but **fails** four full-command-tree tests:
+the flattened native argument structure and its parent both use Clap's default
+`Options` group name. The other 578 binary tests pass; later namespace/integration
+steps are skipped. All four CodeQL analyses pass separately. Original job
+`111532896805` log SHA-256:
+`227fc42e300b3515506ebed4f3abab453222bb70659dadef9ef53772b9e35126`.
+No native model trial was dispatched on that failed candidate. Correcting the
+argument-group identity must retain the paired owner options and all existing
+admission rules; source-only CLI checks are not model-execution evidence.
+
+The follow-up gives only the flattened native options an explicit, unique Clap
+group identity. Nine targeted native tests pass, including full-command-tree
+validation, both-or-neither owner flags on `run` and `private-serve`, unchanged
+explicit execution, and rejection of native flags on `private-task`. The four
+original failing command-tree tests also pass locally. The new command-tree test
+was observed failing before the correction. These checks do not replace the
+next exact-source CI run or the still-pending disposable native model trial.
+
 Native sanitizer evidence is mixed and remains explicit: the owned ABI smoke
 passes, but the unchanged upstream all-type tensor test **fails** under UBSan on
 an unaligned `uint32_t` load in the Q1_0/Q8_0 dot product. That quantized path is

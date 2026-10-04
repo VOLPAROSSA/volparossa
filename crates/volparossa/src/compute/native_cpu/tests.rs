@@ -1,7 +1,118 @@
 //! Inert admission/binding fixtures only: no executable library or model is loaded.
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 
+use clap::{CommandFactory as _, error::ErrorKind};
+
 use super::*;
+
+#[test]
+fn native_flattened_options_keep_full_cli_argument_groups_unique() {
+    crate::Cli::command().debug_assert();
+}
+
+fn cli_arguments(operation: &str) -> Vec<&str> {
+    let mut arguments = vec![
+        "volparossa",
+        "compute",
+        operation,
+        "--runtime-root",
+        "/runtime",
+        "--model-root",
+        "/model",
+        "--model-profile",
+        "qwen3-4b-instruct-2507-v1",
+    ];
+    arguments.extend(match operation {
+        "run" => vec![
+            "--mode",
+            "infer",
+            "--dataset",
+            "/dataset",
+            "--output",
+            "/output",
+        ],
+        "private-serve" => vec!["--work-parent", "/work", "--socket", "/private.sock"],
+        "private-task" => vec!["--input", "/input", "--work-parent", "/work"],
+        _ => panic!("unexpected inert CLI fixture"),
+    });
+    arguments
+}
+
+#[test]
+fn native_cli_pair_requires_both_owner_flags_without_implicit_execution() {
+    // Parsing only: no path validation, library loading or model admission.
+    let hash = "a".repeat(64);
+    for operation in ["run", "private-serve"] {
+        let original = cli_arguments(operation);
+        for enabled in [false, true] {
+            let mut arguments = original.clone();
+            if enabled {
+                arguments.extend([
+                    "--native-backend-root",
+                    "/native",
+                    "--native-backend-sha256",
+                    &hash,
+                ]);
+            }
+            let parsed = crate::Cli::command()
+                .try_get_matches_from(arguments)
+                .unwrap();
+            let options = parsed
+                .subcommand_matches("compute")
+                .unwrap()
+                .subcommand_matches(operation)
+                .unwrap();
+            assert!(!options.get_flag("execute"));
+            assert_eq!(
+                options.get_one::<PathBuf>("native_backend_root"),
+                enabled.then(|| PathBuf::from("/native")).as_ref()
+            );
+            assert_eq!(
+                options.get_one::<String>("native_backend_sha256"),
+                enabled.then_some(&hash)
+            );
+        }
+        for half in [
+            ["--native-backend-root", "/native"],
+            ["--native-backend-sha256", &hash],
+        ] {
+            let mut arguments = original.clone();
+            arguments.extend(half);
+            let error = crate::Cli::command()
+                .try_get_matches_from(arguments)
+                .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+        }
+    }
+}
+
+#[test]
+fn private_task_keeps_native_backend_flags_unavailable() {
+    let original = cli_arguments("private-task");
+    assert!(
+        crate::Cli::command()
+            .try_get_matches_from(original.clone())
+            .is_ok()
+    );
+    let hash = "a".repeat(64);
+    for added in [
+        vec!["--native-backend-root", "/native"],
+        vec!["--native-backend-sha256", &hash],
+        vec![
+            "--native-backend-root",
+            "/native",
+            "--native-backend-sha256",
+            &hash,
+        ],
+    ] {
+        let mut arguments = original.clone();
+        arguments.extend(added);
+        let error = crate::Cli::command()
+            .try_get_matches_from(arguments)
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+    }
+}
 
 fn manifest() -> Value {
     json!({"version":1,"kind":KIND,"abi_version":1,"source_commit":SOURCE,

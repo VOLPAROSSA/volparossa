@@ -16,6 +16,7 @@ const SOURCE: &str = "7fe450e19305b828c199d602c23a8337aaa1f03b";
 const WEIGHTS: &str = "79f6bbc34572c0063d12022f0f93074d90bbcd5dfd82134423bf892f7f8df3cf";
 
 #[derive(Clone, Debug, Default, Args)]
+#[group(id = "NativeCpuBackendOptions")]
 pub(super) struct Options {
     /// Private owner-provisioned CPU backend; never a path supplied by a peer.
     #[arg(long, requires = "native_backend_sha256")]
