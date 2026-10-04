@@ -26,8 +26,9 @@ cloud_private_upload_run() {
         fail CLOUD_PROVISION_MISSING
     fi
     install -o root -g root -m 0600 "$CLOUD_SOURCE/provision.json" "$WORK/cloud-private-upload-provision.json"
-    # This sibling skips A01's discovery barrier. Wait for its exact signed
-    # advertisement inventory before the unchanged real route-selection attempt.
+    # This sibling skips A01's discovery barrier. Await exact relay0/1/2 + both
+    # exit advertisements before unchanged route selection; content-custody's
+    # client-control filter deliberately conceals custody peers relay3/4/5.
     PHASE=cloud-private-upload-inventory
     python3 -B "$source_directory/tests/integration/cloud-private-upload-smoke.py" \
         await-inventory "$WORK" "$binary_directory/volparossa" \

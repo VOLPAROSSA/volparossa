@@ -3,6 +3,7 @@
 """Closed readiness/parser regressions; no route or model execution claim."""
 import json
 from pathlib import Path
+import re
 import runpy
 import subprocess
 import tempfile
@@ -15,7 +16,7 @@ CHECK = runpy.run_path(str(HERE / "cloud-private-upload-smoke.py"))
 
 
 def peers():
-    names = ("client", "bootstrap1", "bootstrap2", *CHECK["INVENTORY_ROLES"])
+    names = ("client", "bootstrap1", "bootstrap2", *CHECK["FIXTURE_ROLES"])
     return {name: "1" * 31 + "ABCDEFGHJKLMNPQRSTUVWXYZ"[i] for i, name in enumerate(names)}
 
 
@@ -31,10 +32,32 @@ class Readiness(unittest.TestCase):
         changed[next(iter(changed))] = "0b100"
         self.assertNotEqual(CHECK["parse_inventory"](inventory(changed)), expected)
         changed = dict(expected); changed["2" * 32] = changed.pop(next(iter(changed)))
-        self.assertEqual(len(changed), 8)
+        self.assertEqual(len(changed), 5)
         self.assertNotEqual(CHECK["parse_inventory"](inventory(changed)), expected)
         wrong = peers(); wrong["exit2"] = wrong["exit"]
         with self.assertRaises(ValueError): CHECK["expected_inventory"](wrong)
+        wrong = peers(); wrong["relay5"] = wrong["relay0"]
+        with self.assertRaises(ValueError): CHECK["expected_inventory"](wrong)
+        wrong = peers(); wrong.pop("relay3")
+        with self.assertRaises(ValueError): CHECK["expected_inventory"](wrong)
+
+    def test_inventory_matches_cloud_route_scope_and_unchanged_privacy_filter(self):
+        self.assertEqual(CHECK["FIXTURE_ROLES"], tuple(f"relay{i}" for i in range(6)) + ("exit", "exit2"))
+        self.assertEqual(CHECK["INVENTORY_ROLES"], ("relay0", "relay1", "relay2", "exit", "exit2"))
+        source = (HERE / "kvm-alpha-topology.sh").read_text()
+        self.assertIn("cloud-private-upload) scenario=content-custody;", source)
+        gate = source.split("if [ \"$scenario\" = content-provider ] || [ \"$scenario\" = content-custody ] ||", 1)[1]
+        filtered = gate.split("<<'CONTENT_ADAPTIVE_FILTER'\n", 1)[1].split("\nCONTENT_ADAPTIVE_FILTER", 1)[0]
+        rules = re.findall(r'(iifname|oifname) \{ ([^}]+) \} udp (sport|dport) (\d+) counter drop', filtered)
+        self.assertEqual(len(rules), 4)
+        self.assertEqual({(direction, port) for direction, _, port, _ in rules},
+                         {(direction, port) for direction in ("iifname", "oifname") for port in ("sport", "dport")})
+        for _, interfaces, _, port in rules:
+            self.assertEqual(re.findall(r'"([^"]+)"', interfaces), ["cr3", "cr4", "cr5"])
+            self.assertEqual(port, "41000")
+        # No guessed number of providers, changed sampler, or direct provider path
+        # is substituted for the unchanged original storage route and later proof.
+        self.assertLess(source.index("<<'CONTENT_ADAPTIVE_FILTER'"), source.index("launch_agent relay3"))
 
     def test_malformed_duplicate_and_oversized_inventory_rejected(self):
         raw = inventory(CHECK["expected_inventory"](peers()))
@@ -74,6 +97,7 @@ class Readiness(unittest.TestCase):
         self.assertTrue(value["ready"])
         self.assertEqual((value["attempts"], value["query_timeouts"], value["query_nonzero"], value["invalid_replies"]), (4, 1, 1, 1))
         self.assertEqual(set(value["last_valid_presence"]), set(CHECK["INVENTORY_ROLES"]))
+        self.assertEqual(value["inventory_scope"], "client_control_route_advertisements")
         encoded = json.dumps(value)
         self.assertNotIn("PRIVATE_SENTINEL", encoded)
         for peer in peers().values(): self.assertNotIn(peer, encoded)
@@ -84,6 +108,18 @@ class Readiness(unittest.TestCase):
         self.assertFalse(value["ready"])
         self.assertEqual(value["deadline_seconds"], 60)
         self.assertFalse(value["last_valid_presence"]["exit"])
+
+    def test_custody_advertisements_cannot_replace_any_required_route_identity(self):
+        expected = CHECK["expected_inventory"](peers())
+        for missing in CHECK["INVENTORY_ROLES"]:
+            with self.subTest(missing=missing):
+                partial = dict(expected)
+                partial.pop(peers()[missing])
+                partial.update({peers()[name]: "0b010" for name in ("relay3", "relay4", "relay5")})
+                value = self.run_wait([SimpleNamespace(returncode=0, stdout=inventory(partial))], deadline=True)
+                self.assertFalse(value["ready"])
+                self.assertFalse(value["last_valid_presence"][missing])
+                self.assertEqual(value["deadline_seconds"], 60)
 
     def test_retained_sampler_counts_never_export_raw_records(self):
         with tempfile.TemporaryDirectory() as directory:

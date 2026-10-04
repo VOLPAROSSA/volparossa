@@ -53,15 +53,18 @@ UI_FAILURE_KINDS = frozenset(("condition_timeout", "transport_timeout", "transpo
 UI_FAILURE_FLAGS = ("original_file_input_used", "upload_201_observed", "uploaded_file_listed",
     "browser_stopped_and_joined", "private_profile_removed")
 
-INVENTORY_ROLES = tuple(f"relay{i}" for i in range(6)) + ("exit", "exit2")
+FIXTURE_ROLES = tuple(f"relay{i}" for i in range(6)) + ("exit", "exit2")
+INVENTORY_ROLES = ("relay0", "relay1", "relay2", "exit", "exit2")
 PRESELECTION_CODES = ("PRESELECTION_SAMPLE_NO_EXIT", "PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS",
     "PRESELECTION_SAMPLE_INVALID_POLICY", "PRESELECTION_SAMPLE_INVALID_SNAPSHOT", "PRESELECTION_SAMPLE_ENTROPY")
 
 
 def expected_inventory(peers):
-    # Identical predicate to the discovered cooperative fixture: exact fixture
-    # identities and roles, never an arbitrary count of unknown peers.
-    names = ("client", "bootstrap1", "bootstrap2", *INVENTORY_ROLES)
+    # Cloud aliases content-custody: its pre-existing client-control filter blocks
+    # direct advertisements from custody peers relay3/4/5. Require the exact route
+    # inventory, not those deliberately concealed providers. Validate the complete
+    # fixture identity map nevertheless; unknown peers cannot replace a required one.
+    names = ("client", "bootstrap1", "bootstrap2", *FIXTURE_ROLES)
     require(set(peers) == set(names) and all(isinstance(peers[name], str)
         and re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,128}", peers[name]) for name in names)
         and len(set(peers.values())) == len(names), "invalid expected fixture identities")
@@ -92,7 +95,8 @@ def await_inventory(work, binary):
     expected = expected_inventory(peers)
     command = [binary, "--control-socket", str(work / "runtime-client/control/agent.sock"), "peers"]
     deadline = time.monotonic() + 60
-    record = dict(version=1, scope="last_valid_inventory_not_route_readiness", deadline_seconds=60,
+    record = dict(version=1, scope="last_valid_inventory_not_route_readiness",
+        inventory_scope="client_control_route_advertisements", deadline_seconds=60,
         attempts=0, query_timeouts=0, query_nonzero=0, invalid_replies=0,
         last_query_outcome="none", last_valid_presence=None, ready=False)
     while (remaining := deadline - time.monotonic()) > 0:

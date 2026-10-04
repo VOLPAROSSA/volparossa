@@ -422,13 +422,33 @@ feature branches are not implied to be integrated into `main`.
   original job `111459244322` log SHA-256
   `7799de27d7a9d7374d3cfcf742cdbbd3d4f336c545b371b15589954933a97236`.
   The original archive cannot distinguish missing eligible exits from insufficient
-  diverse relays. The next readiness candidate waits up to the existing 60-second
+  diverse relays. The initial readiness candidate waits up to the existing 60-second
   fixture inventory budget for the exact six relay / two exit advertisements,
   retaining closed query outcomes and role-presence booleans. It also summarizes
   the existing cleanup log's fixed sampler reasons without exporting raw records.
   Inventory presence is not usable-route proof; this is not a demonstrated cause
   or fix of the original failure. Connect refusal/retry policy, application success
   criteria, worker budgets and cleanup gates remain unchanged.
+  Its original [run `37212170649`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37212170649)
+  on `90ef58bbf001e001057f80f4260a81be1dbfc4d3` remains **failed** before
+  Connect: all 547 inventory replies within 60 seconds are valid, with no query
+  timeouts or nonzero exits. Both exit advertisements and relay0/1/2 are present;
+  relay3/4/5 are absent. This matches the fixture's existing, intentional
+  `content-custody` client-control filter, which blocks UDP 41000 on cr3/cr4/cr5
+  before agents start. Requiring those concealed custody advertisements was an
+  incorrect pre-Connect fixture barrier, not evidence of a failed storage transfer.
+  The corrected Cloud-only barrier requires exact relay0/1/2 and both exits while
+  validating the full fixture identity map. It does not open the custody links,
+  change production selection or reduce required paths. Missing any required route
+  identity still refuses at the original deadline, even if custody peers appear.
+  The ordinary cooperative-browser inventory predicate is unchanged. Focused
+  parser/topology regressions are not a new live route or upload success.
+  Original cleanup is complete, with zero owned objects, all private-removal flags
+  true and equal guest-root network hashes
+  `c2da467502f0874410128f2dac3d38f70cd630bcc7bd1d442d21a474b8523d34`.
+  Original ZIP SHA-256 `7607c546ff4efc38150a5cf1f31beddf745f7e39272627aa18090d39d75584a3`;
+  job `111465403193` log SHA-256
+  `fee1fa885d762e4332677d0998bd27303210cc877f6479ebb8c890834b9d204f`.
   The candidate keeps the
   preceding read-only proof/pins unchanged and requires an original Files/Uppy
   upload of 262,145 synthetic bytes, actual owner GPG encryption, three 128-KiB
