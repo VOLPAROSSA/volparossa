@@ -75,6 +75,42 @@ def phase_evidence():
 
 
 class PublicCodeProposal(unittest.TestCase):
+    def test_actual_discovery_capture_guard_accepts_only_explicit_scenarios(self):
+        source = (HERE / "kvm-alpha-topology.sh").read_text()
+        function = "start_privacy_observers() {\n" + source.split(
+            "start_privacy_observers() {\n", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+        # Execute the actual shell function, not a copied predicate. Both external
+        # commands at its first capture boundary are inert failures: no network,
+        # namespace, packet capture or model is used, even for an admitted scope.
+        script = '''scenario=$1
+agent_public_document=$2
+agent_cooperative_code_proposal=$3
+WORK=$4
+CLIENT=inert-fixture
+ip() { printf 'capture-boundary\\n' >&2; return 83; }
+jq() { return 83; }
+''' + function + 'start_privacy_observers "$5"\n'
+        discovery = "content-custody-executor-discovery-privacy"
+        cases = (
+            ("agent-jobs", "yes", "no", discovery, True),
+            ("agent-jobs", "no", "yes", discovery, True),
+            ("agent-jobs", "no", "no", discovery, False),
+            ("agent-jobs", "no", "true", discovery, False),
+            ("content-custody", "yes", "yes", discovery, False),
+            ("agent-artifact", "no", "yes", discovery, False),
+            ("agent-jobs", "yes", "yes", "unknown-discovery-privacy", False),
+            ("agent-jobs", "no", "no", "content-custody-fetch-privacy", True),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            for scenario, document, proposal, prefix, admitted in cases:
+                with self.subTest(scenario=scenario, document=document, proposal=proposal, prefix=prefix):
+                    result = subprocess.run(["/bin/sh", "-c", script, "inert-capture-guard",
+                        scenario, document, proposal, tmp, prefix], cwd=tmp,
+                        env={"PATH":"/usr/bin:/bin"}, capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(result.stderr, "capture-boundary\n" if admitted else "")
+
     def test_inventory_scope_preserves_all_eight_roles_and_original_privacy(self):
         source = (HERE / "kvm-alpha-topology.sh").read_text()
         self.assertIn("agent-cooperative-code-proposal) scenario=agent-jobs;", source)

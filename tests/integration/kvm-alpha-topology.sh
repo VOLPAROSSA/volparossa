@@ -6025,7 +6025,9 @@ start_privacy_observers() {
         content-custody-initial-privacy|content-custody-replacement-privacy)
             [ "$scenario" = content-custody ] || return 1 ;;
         content-custody-executor-discovery-privacy)
-            [ "$scenario" = agent-jobs ] && [ "$agent_public_document" = yes ] || return 1 ;;
+            [ "$scenario" = agent-jobs ] \
+                && { [ "$agent_public_document" = yes ] || [ "$agent_cooperative_code_proposal" = yes ]; } \
+                || return 1 ;;
         content-custody-peer-initial-privacy|content-custody-peer-replacement-privacy)
             [ "$scenario" = agent-jobs ] && [ "$agent_jobs_peer_recovery" = yes ] || return 1 ;;
         *) return 1 ;;

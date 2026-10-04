@@ -101,6 +101,36 @@ Empty redirected captures also stay unknown: cleanup does not retain each CLI
 exit status, so an empty file cannot prove a successfully queried empty inventory
 or zero retained events.
 
+The next [Code run37218917021](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37218917021),
+workflow `693516f8` / core `1297f8f1` / unchanged driver `f27576eb`, **failed** at
+`CUSTODY_CAPTURE_UNAVAILABLE` in the executor-discovery phase. Its original
+inventory report is complete after 215 queries: all six relays and both exits
+are present, without malformed replies, query timeouts or nonzero exits. This
+single successful barrier does not establish the cause or repair of the prior
+inventory failure. Provisioning, route selection and owner-service setup were
+reached, but the owner driver and model task were not started; no functional
+proposal or phase-separated packet proof is claimed.
+
+The exact source reproduces a fixture scope mismatch: the executor-discovery
+capture prefix only permits `agent_public_document=yes`, while this scenario
+sets `agent_cooperative_code_proposal=yes` and leaves the document flag off.
+The guard rejects it before the first capture command. The candidate change
+admits that explicit code-proposal flag only under the existing `agent-jobs`
+scenario; ordinary jobs, unrelated scenarios and unknown prefixes remain denied.
+An inert test executes the actual shell function and checks both admitted and
+rejected scopes. This is a capture-instrumentation fix, not a product or live
+datapath success; original task, privacy gates and deadlines are unchanged.
+The subsequent content-control capture already accepts this exact prefix and
+retains its existing physical-link and single-observer checks.
+
+The original run reports complete disposable-network cleanup with zero objects
+and matching guest-root hashes
+`f5099041cf1411360e97df2bfcddba92916f6ea9185e379bcba6da2c7c721df4`.
+Original ZIP SHA-256:
+`2b415caf44bc7e98b6eb40d1a6d00e66a57ba21f3f42e33b68a9885f923b76d8`;
+job `111485066863` log SHA-256:
+`a7358305bc82d419b39d576d9bc55d175d4e0e99e3e7d1c087c12fb69c2cf2d0`.
+
 ### Autonomous Internet use authorized
 
 The user explicitly authorized autonomous Internet use for tasks, research,
