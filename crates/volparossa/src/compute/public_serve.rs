@@ -291,6 +291,10 @@ enum Incoming {
     Invalid,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep same-connection handshake, purpose admission, cancellation and cleanup in one state machine"
+)]
 async fn connection(
     stream: UnixStream,
     config: Arc<Config>,

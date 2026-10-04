@@ -7,8 +7,12 @@ use volparossa_content::provider::compute::dataset::CodeProposalDataset;
 
 use super::{ModelProfile, inference_output::Generation};
 
-pub(super) fn validate_report(report: &Value, raw: &[u8], profile: ModelProfile) -> Result<()> {
-    let input: CodeProposalDataset = serde_json::from_slice(raw)?;
+pub(super) fn validate_report(
+    report: &Value,
+    dataset_bytes: &[u8],
+    profile: ModelProfile,
+) -> Result<()> {
+    let input: CodeProposalDataset = serde_json::from_slice(dataset_bytes)?;
     input.validate_shape()?;
     ensure!(
         input.model_profile == profile && profile.is_native_conversation(),
@@ -37,7 +41,7 @@ pub(super) fn validate_report(report: &Value, raw: &[u8], profile: ModelProfile)
     ensure!(
         report["dataset"]
             == json!({
-        "sha256":hex::encode(Sha256::digest(raw)),"bytes":raw.len(),"visibility":"public",
+        "sha256":hex::encode(Sha256::digest(dataset_bytes)),"bytes":dataset_bytes.len(),"visibility":"public",
         "license":input.license,"version":6,"purpose":"code_proposal",
         "output_contract":"single_file_replacement_v1",
         "source_manifest_sha256":hex::encode(Sha256::digest(hex::decode(&input.source_manifest_hex)?)),

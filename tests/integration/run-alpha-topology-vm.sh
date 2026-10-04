@@ -26,7 +26,7 @@ guest_memory_for_scenario() {
     # These fixtures co-locate two 360M providers in one guest. Production
     # per-worker limits and the owner's spare-memory reserve stay unchanged.
     case $scenario in
-        agent-reasoning|agent-private-conversation|agent-native-coding|agent-native-editor) printf '8192\n' ;;
+        agent-reasoning|agent-private-conversation|agent-native-coding|agent-native-editor|agent-cooperative-code-proposal) printf '8192\n' ;;
         signal-backup) printf '6144\n' ;;
         agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-policy-assessment|cloud-private-file|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code) printf '6144\n' ;;
         *) printf '4096\n' ;;
@@ -38,7 +38,7 @@ usage() {
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment]' \
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment]' \
         '       --package is required only for alpha; --mpquic is unnecessary for standalone Wi-Fi/model/private-browser proofs.' \
         '       agent-cooperative-code also requires --code-bundle DIRECTORY --code-manifest-sha256 SHA256.' \
         '       --native-runtime PATH is required for agent-native-coding or agent-native-editor (exact verified bundle).' \
@@ -83,6 +83,12 @@ print_plan() {
             '  guest-only pinned Qwen, genuine model-chosen read/edit/test loop in a synthetic workspace;' \
             '  private 5GiB service, 2700s lifetime, unchanged 600s per-request limit and closed evidence;' \
             '  no OpenAI fallback, devhost model, remote-private compute or general coding-quality claim.'
+    elif [ "$scenario" = agent-cooperative-code-proposal ]; then
+        printf '%s\n' \
+            'Public-code-proposal: exact committed Node-only owner driver, no local model planner;' \
+            '  one real core-discovered Qwen3-0.6B executor, public v6 source and unchanged original tests;' \
+            '  original EOS output, owner-approved edit/test, closed receipts and complete guest cleanup;' \
+            '  no synthetic model response, private offload or general coding-quality claim.'
     elif [ "$scenario" = agent-cooperative-code ]; then
         printf '%s\n' \
             'Cooperative-code: capture an explicit hash-bound source-built OpenCode/Node bundle;' \
@@ -475,7 +481,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --code-bundle)
@@ -559,7 +565,7 @@ if [ "$scenario" = alpha ] && [ -z "$package_path" ]; then usage >&2; exit 64; f
 if [ "$scenario" != wifi-mesh ] && [ "$scenario" != agent-training ] && [ "$scenario" != agent-owner-priority ] && [ "$scenario" != agent-owner-cancel ] && [ "$scenario" != agent-private-task ] && [ "$scenario" != agent-private-code ] && [ "$scenario" != agent-private-conversation ] && [ "$scenario" != agent-native-coding ] && [ "$scenario" != agent-native-editor ] && [ "$scenario" != agent-private-browser ] && [ "$scenario" != agent-reasoning ] && [ -z "$mpquic_path" ]; then usage >&2; exit 64; fi
 case $mpquic_path in ''|/*) ;; *) exit 64 ;; esac
 case $package_path in ''|/*) ;; *) exit 64 ;; esac
-if [ "$scenario" = agent-cooperative-code ]; then
+if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then
     case $code_bundle in /*) ;; *) exit 64 ;; esac
     case $code_manifest_sha256 in ''|*[!0-9a-f]*) exit 64 ;; esac
     [ "${#code_manifest_sha256}" -eq 64 ] || exit 64
@@ -571,7 +577,7 @@ case ${#expected_commit} in 40|64) ;; *) exit 64 ;; esac
 [ "$(id -u)" -ne 0 ] || { printf '%s\n' 'VM runner must remain unprivileged' >&2; exit 77; }
 
 if [ -n "$host_tools_directory" ]; then
-    case $scenario in agent-native-editor|agent-cooperative-code) ;; *) exit 64 ;; esac
+    case $scenario in agent-native-editor|agent-cooperative-code|agent-cooperative-code-proposal) ;; *) exit 64 ;; esac
     case $host_tools_directory in /*) ;; *) exit 64 ;; esac
     python3 -B "$(dirname -- "$0")/browser-native-tools.py" --verify --output "$host_tools_directory"
     PATH=$host_tools_directory/bin:$PATH
@@ -665,7 +671,7 @@ if [ "$scenario" = agent-native-editor ]; then
     [ "$(readlink -f -- "$output_directory")" = "$output_directory" ] || exit 64
     RUN_DIRECTORY_PARENT=$(dirname -- "$output_directory")
     RUN_DIRECTORY_PREFIX=native-editor-kvm
-elif [ "$scenario" = agent-cooperative-code ]; then
+elif [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then
     # Avoid a RAM-backed /tmp overlay competing with the model VM. Scratch is
     # beside the operator-selected evidence, never inside its export surface.
     [ "$(readlink -f -- "$output_directory")" = "$output_directory" ] || exit 64
@@ -732,8 +738,8 @@ SOURCE_SHA256=$(sha256sum "$SOURCE_ARCHIVE" | awk '{ print $1 }')
 CODE_ARCHIVE=$RUN_DIRECTORY/cooperative-code.tar
 CODE_ARCHIVE_SHA256=none
 CODE_MANIFEST_SHA256=none
-if [ "$scenario" = agent-cooperative-code ]; then
-    python3 -B "$HERE/cooperative-code-bundle.py" capture "$code_bundle" "$CODE_ARCHIVE" "$code_manifest_sha256"
+if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then
+    python3 -B "$HERE/cooperative-code-bundle.py" capture "$code_bundle" "$CODE_ARCHIVE" "$code_manifest_sha256" "$scenario"
     CODE_ARCHIVE_SHA256=$(sha256sum "$CODE_ARCHIVE" | awk '{ print $1 }')
     CODE_MANIFEST_SHA256=$code_manifest_sha256
 fi
@@ -967,6 +973,9 @@ COOPERATIVE_BROWSER_NAMES = {f"agent-cooperative-browser-{name}.json" for name i
 COOPERATIVE_CODE_NAMES = {name.replace("agent-cooperative-browser-", "agent-cooperative-code-")
                           for name in COOPERATIVE_BROWSER_NAMES
                           if name != "agent-cooperative-browser-panel.json"} | {"agent-cooperative-code-driver.json"}
+COOPERATIVE_CODE_PROPOSAL_NAMES = {f"agent-cooperative-code-proposal-{name}.json" for name in (
+    "smoke", "evidence", "provision", "driver", "observation", "result", "diagnostic", "capacity")
+} | {name for name in COOPERATIVE_BROWSER_NAMES if not name.startswith("agent-cooperative-browser-")}
 
 
 def read_tail(path, limit=FILE_LIMIT):
@@ -1047,7 +1056,7 @@ def collect(home, opt, revision, scenario, guest_status,
     candidates = [(home / name, f"driver/{name}") for name in
                   ("guest-phase.txt", "cargo-build.log", "egress-netns-test.log",
                    "package-lifecycle.stdout", "package-lifecycle.stderr")]
-    if scenario in ("agent-cooperative-browser", "agent-cooperative-browser-discovered", "agent-cooperative-code"):
+    if scenario in ("agent-cooperative-browser", "agent-cooperative-browser-discovered", "agent-cooperative-code", "agent-cooperative-code-proposal"):
         candidates = [(home / "guest-phase.txt", "driver/guest-phase.txt")]
     if scenario == "signal-backup":
         # Never collect raw native/runner/build logs or arbitrary content-* files.
@@ -1070,8 +1079,10 @@ def collect(home, opt, revision, scenario, guest_status,
     for root, label in roots:
         if root.is_symlink() or not root.is_dir():
             continue
-        if scenario in ("agent-cooperative-browser", "agent-cooperative-browser-discovered", "agent-cooperative-code"):
+        if scenario in ("agent-cooperative-browser", "agent-cooperative-browser-discovered", "agent-cooperative-code", "agent-cooperative-code-proposal"):
             names = COOPERATIVE_CODE_NAMES if scenario == "agent-cooperative-code" else COOPERATIVE_BROWSER_NAMES
+            if scenario == "agent-cooperative-code-proposal":
+                names = COOPERATIVE_CODE_PROPOSAL_NAMES
             candidates.extend((root / name, f"{label}/{name}") for name in sorted(names))
             continue
         if scenario == "signal-backup":
@@ -1263,7 +1274,7 @@ if __name__ == "__main__":
     if len(sys.argv) != 4 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sys.argv[1]):
         raise SystemExit(64)
     if sys.argv[2] not in ("alpha", "datapath", "reciprocity", "reciprocity-private-dns", "local-link", "mixed-link", "mpquic-growth", "mptcp-growth", "mptcp-refill",
-                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "private-storage-peer", "private-storage-replicas", "signal-backup", "private-storage-handoff", "private-storage-fragments", "image-snapshot", "cloud-private-file", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel", "agent-private-task", "agent-private-code", "agent-private-conversation", "agent-native-coding", "agent-native-editor", "agent-private-browser", "browser-network", "agent-reasoning", "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-artifact-quarantine", "agent-jobs", "agent-jobs-loss", "agent-jobs-follow", "agent-jobs-peer-recovery", "agent-jobs-ready-queue", "agent-jobs-package-queue", "agent-public-task", "agent-public-document", "agent-cooperative-browser", "agent-cooperative-browser-discovered", "agent-cooperative-code", "agent-public-collection", "agent-public-network-sources", "agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation", "agent-policy-assessment"):
+                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "private-storage-peer", "private-storage-replicas", "signal-backup", "private-storage-handoff", "private-storage-fragments", "image-snapshot", "cloud-private-file", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel", "agent-private-task", "agent-private-code", "agent-private-conversation", "agent-native-coding", "agent-native-editor", "agent-private-browser", "browser-network", "agent-reasoning", "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-artifact-quarantine", "agent-jobs", "agent-jobs-loss", "agent-jobs-follow", "agent-jobs-peer-recovery", "agent-jobs-ready-queue", "agent-jobs-package-queue", "agent-public-task", "agent-public-document", "agent-cooperative-browser", "agent-cooperative-browser-discovered", "agent-cooperative-code", "agent-cooperative-code-proposal", "agent-public-collection", "agent-public-network-sources", "agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation", "agent-policy-assessment"):
         raise SystemExit(64)
     status_code = int(sys.argv[3])
     if not 0 <= status_code <= 255 or socket.gethostname() != "volparossa-alpha" or os.geteuid() != 0:
@@ -1299,14 +1310,14 @@ case $scenario in
         [ "$#" -eq 6 ] || exit 64
         native_runtime_sha256=${6:-none}
         ;;
-    agent-cooperative-code)
+    agent-cooperative-code|agent-cooperative-code-proposal)
         [ "$#" -eq 7 ] || exit 64
         code_archive_sha256=${6:-none}
         code_manifest_sha256=${7:-none}
         ;;
     *) [ "$#" -eq 5 ] || exit 64 ;;
 esac
-case $scenario in alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) exit 64 ;; esac
+case $scenario in alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
 guest_phase verify-source
@@ -1414,7 +1425,7 @@ if [ "$scenario" = signal-backup ]; then
         libx11-6 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libxcb1 \
         libxkbcommon0 libdrm2 libxshmfence1 fonts-dejavu-core
 fi
-if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-train-cycle ] || [ "$scenario" = agent-train-loop ] || [ "$scenario" = agent-artifact-quarantine ] || [ "$scenario" = agent-jobs ] || [ "$scenario" = agent-jobs-loss ] || [ "$scenario" = agent-jobs-follow ] || [ "$scenario" = agent-jobs-peer-recovery ] || [ "$scenario" = agent-jobs-ready-queue ] || [ "$scenario" = agent-jobs-package-queue ] || [ "$scenario" = agent-public-task ] || [ "$scenario" = agent-public-document ] || [ "$scenario" = agent-cooperative-browser ] || [ "$scenario" = agent-cooperative-browser-discovered ] || [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-public-collection ] || [ "$scenario" = agent-public-network-sources ] || [ "$scenario" = agent-task-graph ] || [ "$scenario" = agent-ready-dag ] || [ "$scenario" = agent-model-planning ] || [ "$scenario" = agent-model-task-graph ] || [ "$scenario" = agent-successor-serving ] || [ "$scenario" = agent-active-recovery ] || [ "$scenario" = agent-adapter-aggregation ] || [ "$scenario" = agent-autonomous-aggregation ] || [ "$scenario" = agent-policy-assessment ]; then
+if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-train-cycle ] || [ "$scenario" = agent-train-loop ] || [ "$scenario" = agent-artifact-quarantine ] || [ "$scenario" = agent-jobs ] || [ "$scenario" = agent-jobs-loss ] || [ "$scenario" = agent-jobs-follow ] || [ "$scenario" = agent-jobs-peer-recovery ] || [ "$scenario" = agent-jobs-ready-queue ] || [ "$scenario" = agent-jobs-package-queue ] || [ "$scenario" = agent-public-task ] || [ "$scenario" = agent-public-document ] || [ "$scenario" = agent-cooperative-browser ] || [ "$scenario" = agent-cooperative-browser-discovered ] || [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ] || [ "$scenario" = agent-public-collection ] || [ "$scenario" = agent-public-network-sources ] || [ "$scenario" = agent-task-graph ] || [ "$scenario" = agent-ready-dag ] || [ "$scenario" = agent-model-planning ] || [ "$scenario" = agent-model-task-graph ] || [ "$scenario" = agent-successor-serving ] || [ "$scenario" = agent-active-recovery ] || [ "$scenario" = agent-adapter-aggregation ] || [ "$scenario" = agent-autonomous-aggregation ] || [ "$scenario" = agent-policy-assessment ]; then
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends python3-venv bubblewrap
 fi
 if [ "$scenario" = agent-public-network-sources ]; then
@@ -1452,13 +1463,13 @@ fi
 tar -xzf source.tar.gz
 cd source
 test -x tests/integration/kvm-alpha-topology.sh
-if [ "$scenario" = agent-cooperative-code ]; then
+if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then
     guest_phase code-inputs
     case $code_archive_sha256:$code_manifest_sha256 in *[!0-9a-f:]*) exit 64 ;; esac
     [ "${#code_archive_sha256}" -eq 64 ] && [ "${#code_manifest_sha256}" -eq 64 ] || exit 64
     printf '%s  /home/vpci/cooperative-code.tar\n' "$code_archive_sha256" | sha256sum --check --strict -
     python3 -B tests/integration/cooperative-code-bundle.py unpack \
-        /home/vpci/cooperative-code.tar /home/vpci/cooperative-code-inputs "$code_manifest_sha256"
+        /home/vpci/cooperative-code.tar /home/vpci/cooperative-code-inputs "$code_manifest_sha256" "$scenario"
 fi
 test -x tests/packaging/debian13-package-lifecycle.sh
 if [ "$scenario" = signal-backup ]; then
@@ -1567,7 +1578,7 @@ printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-stat
 fi
 
 topology_scenario=alpha
-case $scenario in reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) topology_scenario=$scenario ;; esac
+case $scenario in reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) topology_scenario=$scenario ;; esac
 guest_phase topology
 set --
 if [ "$scenario" = image-snapshot ]; then
@@ -1578,7 +1589,7 @@ elif [ "$scenario" = cloud-private-file ]; then
         CLOUD_REVISION=63bba5d1163a69e1ee6b4218c9e7462d941f22f7
 fi
 set +e
-if [ "$scenario" = agent-cooperative-code ]; then
+if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then
     set -- ./tests/integration/kvm-alpha-topology.sh --code-bundle /home/vpci/cooperative-code-inputs \
         --code-manifest-sha256 "$code_manifest_sha256"
 else
@@ -1614,7 +1625,7 @@ printf '%s\n' "$topology_status" >/home/vpci/alpha-output/guest-exit-status
 sudo -n chown -R vpci:vpci /home/vpci/alpha-output
 find /home/vpci/alpha-output -type d -exec chmod 0700 {} +
 find /home/vpci/alpha-output -type f -exec chmod 0600 {} +
-if [ "$scenario" = agent-cooperative-browser ] || [ "$scenario" = agent-cooperative-browser-discovered ] || [ "$scenario" = agent-cooperative-code ]; then
+if [ "$scenario" = agent-cooperative-browser ] || [ "$scenario" = agent-cooperative-browser-discovered ] || [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then
     if [ "$scenario" = agent-cooperative-browser-discovered ]; then
         python3 -B tests/integration/agent-cooperative-browser.py --trial discovered-360m \
             export-names >/home/vpci/cooperative-export.list
@@ -1701,7 +1712,7 @@ if [ -n "$host_tools_directory" ]; then
     # The verified Debian tools receipt includes this separate ROM package.
     qemu_vga_device=$qemu_vga_device,romfile=$host_tools_directory/root/usr/share/seabios/vgabios-stdvga.bin
 fi
-[ "$scenario" != agent-cooperative-code ] || print_plan
+{ [ "$scenario" != agent-cooperative-code ] && [ "$scenario" != agent-cooperative-code-proposal ]; } || print_plan
 qemu-system-x86_64 \
     -name volparossa-alpha-topology \
     -no-user-config -nodefaults \
@@ -1797,7 +1808,7 @@ done
 ssh_base sudo -n cloud-init status --wait >/dev/null
 scp_to "$SOURCE_ARCHIVE" /home/vpci/source.tar.gz
 if [ -n "$native_runtime_path" ]; then scp_to "$native_runtime_path" /home/vpci/native-runtime.tar.gz; fi
-if [ "$scenario" = agent-cooperative-code ]; then scp_to "$CODE_ARCHIVE" /home/vpci/cooperative-code.tar; fi
+if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then scp_to "$CODE_ARCHIVE" /home/vpci/cooperative-code.tar; fi
 if [ -n "$mpquic_path" ]; then scp_to "$mpquic_path" /home/vpci/volparossa-mpquic; fi
 if [ -n "$package_path" ]; then scp_to "$package_path" /home/vpci/volparossa.deb; fi
 scp_to "$GUEST_DRIVER" /home/vpci/guest-driver.sh
@@ -1832,7 +1843,7 @@ driver_time_bound=2400s
 [ "$scenario" != agent-private-browser ] || driver_time_bound=4200s
 [ "$scenario" != agent-cooperative-browser ] || driver_time_bound=4800s
 [ "$scenario" != agent-cooperative-browser-discovered ] || driver_time_bound=4800s
-[ "$scenario" != agent-cooperative-code ] || driver_time_bound=4800s
+{ [ "$scenario" != agent-cooperative-code ] && [ "$scenario" != agent-cooperative-code-proposal ]; } || driver_time_bound=4800s
 [ "$scenario" != agent-reasoning ] || driver_time_bound=4200s
 [ "$scenario" != agent-policy-assessment ] || driver_time_bound=3600s
 [ "$scenario" != signal-backup ] || driver_time_bound=7200s
@@ -1841,7 +1852,7 @@ case $scenario in
         ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
             "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" "$NATIVE_RUNTIME_SHA256"
         ;;
-    agent-cooperative-code)
+    agent-cooperative-code|agent-cooperative-code-proposal)
         ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
             "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" "$CODE_ARCHIVE_SHA256" "$CODE_MANIFEST_SHA256"
         ;;

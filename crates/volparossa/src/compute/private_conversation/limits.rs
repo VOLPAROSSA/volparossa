@@ -22,7 +22,7 @@ pub(super) const fn for_profile(profile: ModelProfile) -> Limits {
             text: 64 * 1024,
             description: 8192,
             context_tokens: if matches!(profile, ModelProfile::Qwen4bInstruct2507) {
-                262144
+                262_144
             } else {
                 32768
             },

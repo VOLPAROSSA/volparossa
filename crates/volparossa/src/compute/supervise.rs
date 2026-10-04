@@ -127,6 +127,10 @@ pub(super) fn test_worker_failure_with_diagnostic(
     reaped_failure(worker_failure(&reply, &id, ExitStatus::from_raw(1 << 8)))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "One ownership scope joins worker progress, original deadline, closed diagnostics and unconditional process cleanup"
+)]
 pub(super) async fn run(
     mut child: Child,
     request: &WorkerRequest,

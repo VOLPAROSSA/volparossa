@@ -34,7 +34,11 @@ agent_jobs_prepare() {
     if [ "${agent_model_task_graph:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ]; then
         set -- "$@" --task-graph-decoder
     fi
-    agent_jobs_private prepare "$@" >"$WORK/agent-jobs-provision.log" \
+    jobs_prepare_command=prepare
+    if [ "${agent_cooperative_code_proposal:-no}" = yes ]; then
+        jobs_prepare_command=prepare-code-proposal
+    fi
+    agent_jobs_private "$jobs_prepare_command" "$@" >"$WORK/agent-jobs-provision.log" \
         2>"$WORK/agent-jobs-provision.err" || fail JOBS_PROVISION_FAILED
     install -m 0600 "$jobs_root/provision/provision-report.json" "$WORK/agent-jobs-provision.json"
 }
@@ -96,6 +100,14 @@ agent_jobs_broker_startup() {
         >"$WORK/agent-jobs-$jobs_node-broker-startup.json"
 }
 
+agent_jobs_broker_service() {
+    if [ "${agent_cooperative_code_proposal:-no}" = yes ]; then
+        systemd-run --property=MemoryMax=7516192768 --property=MemorySwapMax=0 "$@"
+    else
+        systemd-run "$@"
+    fi
+}
+
 agent_jobs_broker() {
     jobs_node=$1
     content_provider_node "$jobs_node" || return 1
@@ -117,6 +129,9 @@ agent_jobs_broker() {
     jobs_attempt=0
     jobs_started=$(python3 -c 'import time; print(time.monotonic_ns())') || return 1
     set --
+    if [ "${agent_cooperative_code_proposal:-no}" = yes ]; then
+        set -- --model-profile qwen3-0.6b-v1 --code-proposal-v6
+    fi
     if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ] || [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
         set -- --model-profile smollm2-360m-v1
     fi
@@ -136,7 +151,7 @@ agent_jobs_broker() {
     if [ "${agent_ready_dag:-no}" = yes ]; then
         jobs_mount_flags=private
     fi
-    systemd-run --no-block --unit="$jobs_unit" --slice=system.slice --service-type=exec \
+    agent_jobs_broker_service --no-block --unit="$jobs_unit" --slice=system.slice --service-type=exec \
         --property=CollectMode=inactive --property=Restart=no \
         --property=User=volparossa --property=Group=volparossa --property=UMask=0077 \
         --property=NoNewPrivileges=yes --property=CapabilityBoundingSet= --property=AmbientCapabilities= \
@@ -307,6 +322,11 @@ agent_jobs_setup() {
         PHASE=agent-cooperative-browser-inventory
         agent_cooperative_browser_python await-inventory "$WORK" || fail COOPERATIVE_BROWSER_INVENTORY_UNAVAILABLE
         PHASE=agent-jobs-source
+    elif [ "${agent_cooperative_code_proposal:-no}" = yes ]; then
+        PHASE=agent-cooperative-code-proposal-inventory
+        python3 -B "$source_directory/tests/integration/agent-cooperative-code-proposal.py" await-inventory "$WORK" \
+            || fail CODE_PROPOSAL_INVENTORY_UNAVAILABLE
+        PHASE=agent-jobs-source
     fi
     benchmark_select_route agent-jobs mptcp || fail JOBS_ROUTE_UNAVAILABLE
     benchmark_bind_slots "$WORK/agent-jobs-selection.json" || fail JOBS_ROUTE_INVALID
@@ -338,7 +358,9 @@ agent_jobs_setup() {
             -- "$binary_directory/volparossa" content recipient-key --identity "$WORK/state-$jobs_node/identity.key" \
             --passphrase-file "$WORK/credential-$jobs_node/identity-passphrase" \
             >"$WORK/agent-jobs-$jobs_node-public.json" || fail JOBS_PEER_KEY_FAILED
-        agent_jobs_broker "$jobs_node" || fail JOBS_BROKER_UNAVAILABLE
+        if [ "${agent_cooperative_code_proposal:-no}" != yes ] || [ "$jobs_node" = "$provider_node_a" ]; then
+            agent_jobs_broker "$jobs_node" || fail JOBS_BROKER_UNAVAILABLE
+        fi
     done
     jobs_key_a=$(jq -er '.identity_public_key_hex' "$WORK/agent-jobs-$provider_node_a-public.json")
     jobs_key_b=$(jq -er '.identity_public_key_hex' "$WORK/agent-jobs-$provider_node_b-public.json")
@@ -349,14 +371,21 @@ agent_jobs_setup() {
             --arg ka "$jobs_key_a" --arg kb "$jobs_key_b" \
             '[{node:$a,key:$ka},{node:$b,key:$kb}] | sort_by(.key) | map(.node)')
     fi
+    if [ "${agent_cooperative_code_proposal:-no}" = yes ]; then
+        provider_nodes=$(printf '%s\n' "$provider_nodes" | jq -ce '.[0:1]') || fail JOBS_PEERS_INVALID
+    fi
     jq -n --argjson nodes "$provider_nodes" --arg context "$custody_context" --arg control "$provider_control_peer" \
         --arg a "$provider_node_a" --arg b "$provider_node_b" --arg ka "$jobs_key_a" --arg kb "$jobs_key_b" \
         '{provider_nodes:$nodes,route_context_id:$context,control_relay_peer_id:$control,
-          provider_keys:{($a):$ka,($b):$kb}}' >"$WORK/agent-jobs-layout.json"
+          provider_keys:({($a):$ka,($b):$kb} | with_entries(select(.key as $k | $nodes | index($k))))}' >"$WORK/agent-jobs-layout.json"
 }
 
 agent_jobs_run() {
     agent_jobs_setup
+    if [ "${agent_cooperative_code_proposal:-no}" = yes ]; then
+        agent_cooperative_code_proposal_run
+        return
+    fi
     if [ "${agent_cooperative_code:-no}" = yes ]; then
         agent_cooperative_code_run
         return
@@ -489,6 +518,10 @@ agent_jobs_resume_failed() {
 agent_jobs_finalize_report() {
     jobs_status=$1
     # This app integration publishes only its closed structural receipt set.
+    if [ "${agent_cooperative_code_proposal:-no}" = yes ]; then
+        agent_cooperative_code_proposal_finalize_report "$jobs_status"
+        return
+    fi
     if [ "${agent_cooperative_code:-no}" = yes ]; then
         agent_cooperative_code_finalize_report "$jobs_status"
         return

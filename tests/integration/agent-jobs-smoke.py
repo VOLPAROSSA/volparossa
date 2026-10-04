@@ -174,6 +174,15 @@ def source(path, revision):
     (root / "passphrase").chmod(0o600)
 
 
+def prepare_code_proposal(path):
+    """Separate explicit fixture purpose; legacy inference profiles stay unchanged."""
+    root = private(path, "agent-jobs-user")
+    require(not list(root.iterdir()), "provision root already populated")
+    subprocess.run([sys.executable, "-B", str(HERE / "ml/provision.py"), "--execute", "--yes",
+        "--disposable-guest", "--root", str(root / "provision"), "--model-profile", "qwen3-0.6b-v1",
+        "--budget-bytes", str(5 * 1024 ** 3)], check=True, timeout=1850)
+
+
 def publication(path):
     root = private(path, "compute-source")
     return {"dataset": read(root / "dataset.json"), "dataset_file": file_hash(root / "dataset.json", 1048576),
@@ -956,6 +965,8 @@ def main():
         loss_self_test()
     elif len(args) in (2, 3, 4) and args[0] == "prepare":
         prepare(*args[1:])
+    elif len(args) == 2 and args[0] == "prepare-code-proposal":
+        prepare_code_proposal(args[1])
     elif len(args) == 3 and args[0] == "source":
         source(args[1], args[2])
     elif len(args) == 2 and args[0] == "publication":

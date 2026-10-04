@@ -101,8 +101,13 @@ def unpack(archive, root, expected):
 
 
 def main():
-    require(len(sys.argv) == 5 and sys.argv[1] in ("capture", "unpack"), "explicit transfer arguments required")
-    action, first, second, expected = sys.argv[1:]
+    global CHECK
+    require(len(sys.argv) in (5, 6) and sys.argv[1] in ("capture", "unpack"), "explicit transfer arguments required")
+    if len(sys.argv) == 6:
+        require(sys.argv[5] in ("agent-cooperative-code", "agent-cooperative-code-proposal"), "explicit bundle purpose")
+        if sys.argv[5] == "agent-cooperative-code-proposal":
+            CHECK = runpy.run_path(str(Path(__file__).with_name("agent-cooperative-code-proposal.py")))
+    action, first, second, expected = sys.argv[1:5]
     (capture if action == "capture" else unpack)(Path(first), Path(second), expected)
     print(json.dumps(dict(version=1, transferred=True, action=action, manifest_sha256=expected,
                          runtime_executed=False, peer_execution_proven=False)))

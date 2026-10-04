@@ -2,10 +2,11 @@
 
 This separate same-UID Unix socket is not the private-local compute service and
 does not change that protocol. The operator fixes the agent control socket,
-publisher identity, peer-selection mode, model/runtime and state directory at launch.
+publisher identity, peer-selection mode, model profile and state directory at launch.
 Requests never select commands, paths, keys, models, providers or Internet URLs.
 
-The operator can supply two to four fixed `--provider-key` values, or select
+In the default document mode, the operator supplies the local planning runtime/model
+and two to four fixed `--provider-key` values, or selects
 `--discover-peers` instead. Discovery reuses the core's protected-route capability
 selection for each new task, requiring two to four distinct eligible providers
 in one exact model cohort before enrollment. `--model-profile` remains an
@@ -69,6 +70,42 @@ The source and every signed workflow/synthesis receipt remain under the
 operator's owner-only state directory for reconciliation; no paths or handles
 are sent to the browser. Selected providers alone do not prove multi-peer work.
 
+## Explicit public code mode
+
+`--code-proposal-v6` selects a separate code-only service. It requires a pinned
+Qwen model profile, one fixed provider or `--discover-peers`, and **no local
+model/runtime**. The provider broker must independently enable the same code
+capability and trust the publisher. This mode advertises `code_proposal_v6:true`
+and `output_contract:"single_file_replacement_v1"`; those fields are omitted
+entirely from legacy document capabilities. A client must check capabilities
+before choosing the operation.
+
+Use `operation.type:"public_code_proposal"` with the same question, context,
+license and two explicit consent fields shown above. Context is the complete
+selected source file, not a private conversation or an arbitrary local path.
+The coordinator signs both the original source and its v6 task, selects a
+compatible peer and submits one immutable job. A document-mode service rejects
+code requests, and a code-mode service rejects ordinary `submit`, with
+`unsupported_operation`. Neither mode silently switches to the other.
+
+The code result is separate from the document result: it binds `source_sha256`,
+`source_bytes`, `source_manifest_id`, `dataset_sha256`, `dataset_manifest_id`,
+`provider_keys`, `model_profile`, `model_fingerprint` and the original local
+`receipt` containing handle and status. It carries one unchanged `outputs` entry,
+`execution_complete`, `proposal_complete` and `cleanup_confirmed`. A receipt
+records the result checked over authenticated peer RPC, not a portable hardware
+attestation or proof that a hostile provider actually ran a model.
+
+`proposal_complete` requires nonempty, non-truncated output with observed EOS;
+it does not establish correctness. The application must separately approve a
+write, bind it to the unchanged local source and authorize any test execution.
+No model-generated path or command grants that authority. Terminal receipts can
+be read after their original execution lease expires; observation does not
+extend the lease or authorize another job. Public disclosure, retention and
+cancellation limits above also apply to this mode.
+
+## Cancellation and errors
+
 ```json
 {"version":1,"id":"33333333333333333333333333333333","operation":{"type":"cancel","task_id":"22222222222222222222222222222222"}}
 ```
@@ -77,7 +114,7 @@ are sent to the browser. Selected providers alone do not prove multi-peer work.
 coordinator sends ordinary exact-handle cancellation and joins its existing
 workers. Terminal `error` codes are closed: `invalid_request`,
 `handshake_required`, `busy`, `no_such_task`, `cancelled`, `deadline_exceeded`,
-`execution_failed`, `storage_bound`, `cleanup_unconfirmed`. Unconfirmed remote
+`execution_failed`, `storage_bound`, `cleanup_unconfirmed`, `unsupported_operation`. Unconfirmed remote
 cleanup quarantines new admission and retains original handles. EOF and service
 shutdown follow the same cancellation/join path. A deadline starts cancellation;
 it is not a promise that all remote acknowledgements arrive by that instant.

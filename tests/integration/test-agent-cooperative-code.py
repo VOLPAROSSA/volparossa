@@ -105,7 +105,9 @@ class CooperativeCode(unittest.TestCase):
         self.assertIn('COOPERATIVE_CODE_BUNDLE=$code_bundle', topology)
         self.assertIn('COOPERATIVE_CODE_MANIFEST_SHA256=$code_manifest_sha256', topology)
         self.assertIn('agent_cooperative_code_account_home_cleanup || return 1', jobs)
-        self.assertIn('agent_jobs_setup\n    if [ "${agent_cooperative_code:-no}" = yes ]; then\n        agent_cooperative_code_run', jobs)
+        self.assertIn('agent_jobs_setup\n    if [ "${agent_cooperative_code_proposal:-no}" = yes ]; then\n'
+            '        agent_cooperative_code_proposal_run\n        return\n    fi\n'
+            '    if [ "${agent_cooperative_code:-no}" = yes ]; then\n        agent_cooperative_code_run', jobs)
         self.assertIn('agent_cooperative_code_finalize_report "$jobs_status"\n        return', jobs)
         # Source only function definitions and replace all system access. This
         # exercises the exact production allowlist without touching a real unit.

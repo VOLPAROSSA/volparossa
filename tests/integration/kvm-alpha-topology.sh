@@ -30,6 +30,7 @@ agent_public_document=no
 agent_cooperative_browser=no
 agent_cooperative_browser_discovered=no
 agent_cooperative_code=no
+agent_cooperative_code_proposal=no
 agent_public_collection=no
 agent_public_network_sources=no
 agent_task_graph=no
@@ -71,6 +72,15 @@ usage() {
 }
 
 print_plan() {
+    if [ "$agent_cooperative_code_proposal" = yes ]; then
+        printf '%s\n' \
+            'VOLPAROSSA public code proposal proof plan:' \
+            '  exact committed Node-only owner driver; no local model or synthetic answer;' \
+            '  one real discovered Qwen3-0.6B code-purpose peer over protected MPTCP;' \
+            '  original EOS replacement, explicit owner edit/test approval and unchanged three tests;' \
+            '  closed source/receipt/worker proof and full guest cleanup; no private-peer claim.'
+        return
+    fi
     if [ "$agent_cooperative_code" = yes ]; then
         printf '%s\n' \
             'VOLPAROSSA cooperative Code proof plan:' \
@@ -747,6 +757,7 @@ while [ "$#" -gt 0 ]; do
             agent_cooperative_browser=no
             agent_cooperative_browser_discovered=no
             agent_cooperative_code=no
+            agent_cooperative_code_proposal=no
             agent_public_collection=no
             agent_public_network_sources=no
             agent_task_graph=no
@@ -763,6 +774,7 @@ while [ "$#" -gt 0 ]; do
             agent_artifact_quarantine=no
             case $2 in
                 agent-cooperative-code) scenario=agent-jobs; agent_cooperative_code=yes; wifi_link=no; uplink_link=no ;;
+                agent-cooperative-code-proposal) scenario=agent-jobs; agent_cooperative_code=yes; agent_cooperative_code_proposal=yes; wifi_link=no; uplink_link=no ;;
                 agent-cooperative-browser) scenario=agent-jobs; agent_cooperative_browser=yes; wifi_link=no; uplink_link=no ;;
                 agent-cooperative-browser-discovered) scenario=agent-jobs; agent_cooperative_browser=yes; agent_cooperative_browser_discovered=yes; wifi_link=no; uplink_link=no ;;
                 signal-backup) scenario=content-custody; signal_backup=yes; wifi_link=no; uplink_link=no ;;
@@ -1141,6 +1153,12 @@ if [ "$agent_cooperative_code" = yes ]; then
         agent-private-conversation-pins.json; do
         [ -f "$source_directory/tests/integration/$code_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$code_fixture" ] || exit 69
+    done
+fi
+if [ "$agent_cooperative_code_proposal" = yes ]; then
+    for proposal_fixture in agent-cooperative-code-proposal.py agent-cooperative-code-proposal.sh; do
+        [ -f "$source_directory/tests/integration/$proposal_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$proposal_fixture" ] || exit 69
     done
 fi
 if [ "$agent_public_collection" = yes ]; then
@@ -2618,6 +2636,10 @@ if [ "$agent_cooperative_code" = yes ]; then
     # shellcheck source=tests/integration/agent-cooperative-code.sh
     . "$source_directory/tests/integration/agent-cooperative-code.sh"
 fi
+if [ "$agent_cooperative_code_proposal" = yes ]; then
+    # shellcheck source=tests/integration/agent-cooperative-code-proposal.sh
+    . "$source_directory/tests/integration/agent-cooperative-code-proposal.sh"
+fi
 if [ "$agent_public_collection" = yes ]; then
     # shellcheck source=tests/integration/agent-public-collection-smoke.sh
     . "$source_directory/tests/integration/agent-public-collection-smoke.sh"
@@ -2815,6 +2837,10 @@ if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
     for artifact_pin in provision.py requirements.lock model-pins.json; do
         install -o root -g root -m 0444 "$source_directory/workers/volparossa-ml/$artifact_pin" "$WORK/bin/ml/$artifact_pin"
     done
+    if [ "$agent_cooperative_code_proposal" = yes ]; then
+        install -o root -g root -m 0444 "$source_directory/workers/volparossa-ml/model-pins-qwen3-0.6b.json" \
+            "$WORK/bin/ml/model-pins-qwen3-0.6b.json"
+    fi
     if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agent_policy_assessment" = yes ] || [ "$agent_cooperative_browser_discovered" = yes ]; then
         install -o root -g root -m 0444 "$source_directory/workers/volparossa-ml/model-pins-360m.json" "$WORK/bin/ml/model-pins-360m.json"
     fi

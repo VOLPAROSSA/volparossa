@@ -25,10 +25,15 @@ executing a proposal requires separate local application authority.
 
 Targeted checks pass: three content-source tests, eighteen local-control tests,
 two agent-boundary tests, eleven code-purpose/report tests and the existing
-broker/public-service/document-reconciliation checks. Worker protocol/template
-checks use inert data, not model execution. The separate real peer/model/editor
-trial remains pending. This does not establish useful coding quality, complete
-immune review or protected execution of private code on another node.
+broker/public-service/document-reconciliation checks; targeted strict CLI Clippy
+also passes. Worker protocol/template checks use inert data, not model execution.
+The separate `agent-cooperative-code-proposal` trial binds the immutable Code
+driver `f27576eb` to one real Qwen 0.6B peer, an explicitly public source file,
+owner-approved replacement and unchanged tests. Its owner has no local model;
+the raw peer output must complete at EOS and pass the original checks without
+output repair. Live execution remains pending. This is an owner-helper trial,
+not proof of the native editor UI, OpenCode planner, useful general coding
+quality, complete immune review or protected private execution on another node.
 
 ### Autonomous Internet use authorized
 
