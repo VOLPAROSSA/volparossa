@@ -92,6 +92,8 @@ RPC_EVENT_CODES = frozenset(("COMPUTE_RPC_LOCAL_REQUEST_FAILED", "COMPUTE_RPC_LO
     "COMPUTE_RPC_FINAL_POLICY_FAILED"))
 PRESELECTION_REASON_CODES = (
     "PRESELECTION_SAMPLE_NO_EXIT", "PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS",
+    "PRESELECTION_SAMPLE_INVALID_POLICY", "PRESELECTION_SAMPLE_INVALID_SNAPSHOT",
+    "PRESELECTION_SAMPLE_ENTROPY",
 )
 # Preserve fixed discovery rejection reasons, not arbitrary event names or raw errors.
 # These are event counts, not distinct failed exchanges; one exchange may emit several.

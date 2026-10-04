@@ -613,6 +613,17 @@ class CooperativeBrowserProof(unittest.TestCase):
         self.assertEqual(CHECK["closed_observer"](Path(temporary) / "absent"), dict(state="absent"))
         self.assertNotIn("agent-cooperative-browser-observer-status.private", CHECK["EXPORT_NAMES"])
 
+    def test_preselection_allowlist_matches_exactly_five_existing_emitter_codes(self):
+        source = (HERE.parents[1] / 'crates/volparossa-agent/src/discovery.rs').read_text()
+        expected = {
+            'PRESELECTION_SAMPLE_NO_EXIT', 'PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS',
+            'PRESELECTION_SAMPLE_INVALID_POLICY', 'PRESELECTION_SAMPLE_INVALID_SNAPSHOT',
+            'PRESELECTION_SAMPLE_ENTROPY',
+        }
+        self.assertEqual(set(re.findall(r'"(PRESELECTION_SAMPLE_[A-Z_]+)"', source)), expected)
+        self.assertEqual(set(CHECK['PRESELECTION_REASON_CODES']), expected)
+        self.assertEqual(len(CHECK['PRESELECTION_REASON_CODES']), 5)
+
     def test_preselection_capture_is_closed_bounded_and_never_promotes_a_failed_run(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -621,7 +632,7 @@ class CooperativeBrowserProof(unittest.TestCase):
             self.assertEqual(parse()['uncertainty'], 'absent')
             def event(code):
                 return f'101\tlevel=1\tevent={code}\tsession={"a" * 64}\tpath=2\n'
-            no_exit, relays = CHECK['PRESELECTION_REASON_CODES']
+            no_exit, relays = 'PRESELECTION_SAMPLE_NO_EXIT', 'PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS'
             path.write_text(event(no_exit) * 2 + event('UNRELATED_PRIVATE_SENTINEL'))
             path.chmod(0o600)
             value = parse()
@@ -630,13 +641,26 @@ class CooperativeBrowserProof(unittest.TestCase):
             self.assertEqual(value['state'], 'known')
             self.assertEqual(value['observed_reason'], no_exit)
             self.assertEqual(value['records'], 3)
-            self.assertEqual(value['counts'], {no_exit: 2, relays: 0})
+            self.assertEqual(value['counts'], dict.fromkeys(CHECK['PRESELECTION_REASON_CODES'], 0) | {no_exit: 2})
+            self.assertEqual(value['unrecognized_reason_records'], 0)
             self.assertEqual(value['scope'], 'retained_client_log_ring_not_last_attempt_proof')
             self.assertNotIn('PRIVATE_SENTINEL', json.dumps(value))
             self.assertNotIn('a' * 64, json.dumps(value))
+            for code in CHECK['PRESELECTION_REASON_CODES']:
+                with self.subTest(reason=code):
+                    path.write_text(event(code))
+                    value = parse()
+                    self.assertEqual(value['state'], 'known')
+                    self.assertEqual(value['observed_reason'], code)
+                    self.assertIsNone(value['uncertainty'])
+                    self.assertEqual(value['counts'], dict.fromkeys(CHECK['PRESELECTION_REASON_CODES'], 0) | {code: 1})
+                    self.assertEqual(value['unrecognized_reason_records'], 0)
+                    self.assertEqual(value['scope'], 'retained_client_log_ring_not_last_attempt_proof')
+                    self.assertNotIn('a' * 64, json.dumps(value))
             for content, uncertainty in (
                 ('', 'no_signal'),
                 (event(no_exit) + event(relays), 'ambiguous'),
+                (event(no_exit) + event('PRESELECTION_SAMPLE_INVALID_SNAPSHOT'), 'ambiguous'),
                 (event(no_exit) + event('PRESELECTION_SAMPLE_PRIVATE_SENTINEL'), 'unrecognized'),
                 (event(no_exit) * 400, 'ring_at_capacity'),
                 (event(no_exit) * 401, 'invalid'),

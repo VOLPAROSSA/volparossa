@@ -82,7 +82,34 @@ unchanged; no model or VM was rerun, and the original failed run remains failed.
 
 ### Cooperative browser execution
 
-The latest [run `37075778441`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37075778441)
+The latest exact-source [run `37202586461`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37202586461)
+on `95e45ac122347622253e1506f4f02b618de9ec7d` selected the intended
+`agent-cooperative-browser-discovered` 360M contract, but remains **failed before
+compute**. Source-route setup ended at `JOBS_ROUTE_UNAVAILABLE`: 26 connect attempts,
+25 retries and final `NO_ELIGIBLE_PATHS`, without a connected route. Its retained
+107-event ring reports one `PRESELECTION_SAMPLE_NO_EXIT`, zero recognized
+`PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS` and 25 unrecognized reason records;
+diagnostic state remains `unknown` with uncertainty `unrecognized`. This ring is
+not proof of the last attempt or coverage of every attempt. Neither the original
+job log nor VM console retains the missing reasons, so they cannot identify the
+underlying product cause. Model provisioning completed; no browser task, peer
+inference, refinement or synthesis is proved. Private cleanup completed, final
+guest cleanup reports zero owned objects, and guest-root network snapshot hashes
+match (not an outer-host unchanged claim). Original artifact ZIP SHA-256:
+`62b9e1980ee22c7fc9a839eedaa32676929f8dc83a7035643a5fb2289af1c1d3`;
+original job `111437123368` log SHA-256:
+`64a0a2c9054974bc47f1e365fcce4a216aa6523d4078079c79dab24e16e278cf`.
+
+The diagnostic candidate now recognizes all five existing fixed sampler reason
+codes, adding `PRESELECTION_SAMPLE_INVALID_POLICY`,
+`PRESELECTION_SAMPLE_INVALID_SNAPSHOT` and `PRESELECTION_SAMPLE_ENTROPY`.
+An exact-source emitter-set check and bounded parser controls cover these codes
+without exporting raw logs, session IDs or payloads. Unknown, ambiguous and
+capacity-filled observations retain their uncertainty and limited ring scope.
+This does not recover the deleted reasons from the original run, change route
+selection, retries, timeouts or success criteria, or establish compute success.
+
+The earlier [run `37075778441`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37075778441)
 on `913fd0c4749efddb278fdc55de59473da3b3a657` remains **failed**, but reaches
 actual cooperative execution: its source route connects after 11 attempts/10 retries,
 and 11 observed workers have 11 confirmed terminal receipts. The original retained
@@ -99,8 +126,8 @@ The dispatch selected the historical `agent-cooperative-browser` fixed-135M cont
 which does not authorize refinement. The intended multi-level candidate is the
 separate existing `agent-cooperative-browser-discovered` scenario: discovered pinned
 360M peers, its original 4096-byte public source, and up to four owner-enrolled split
-levels. That is the next functional trial, with its existing exact-source, receipt,
-EOS-frontier, synthesis, cancellation and cleanup requirements unchanged. Switching
+levels. The later run above selected that contract, with its existing exact-source,
+receipt, EOS-frontier, synthesis, cancellation and cleanup requirements unchanged. Switching
 to that distinct scenario does not repair or reclassify the failed fixed-135M run,
 and no successful discovered execution is claimed.
 
