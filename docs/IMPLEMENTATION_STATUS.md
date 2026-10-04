@@ -57,7 +57,24 @@ prompt, tokens, paths or request identity and does not change task deadlines,
 resource limits, model selection or admission. An entered operation is not proof
 that it completed; cleanup is still checked separately. Focused Rust supervisor
 and owner-control checks, real worker-pipe checks and the closed fixture parser
-pass. A new actual-model trial is still needed to locate the original stall.
+pass. The follow-up Code [run 37209881216](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37209881216)
+on Code `37ba1c7c76d306ce873e71f7138d18507a6bc60b` and core
+`1fba2a322252eeec9efb7ccdca9e04359a486889` failed earlier, during provision:
+`network_timeout`, 49 ordered download starts, final artifact index 48. The runtime
+import, model and coding task were not reached, so this attempt does not locate
+the previous execution stall. Guest/outer-host routes and DNS matched, and private
+state, owned processes, QEMU and scratch cleanup passed. Original artifact ZIP
+SHA-256: `5c47a4f973fa2897566d2c8b3369cbbc517163f52cfd5062c226d2b7f55421d8`;
+original job-log SHA-256:
+`cea6e83287d4422f08846ed288c0dcec97dc296ccd917abdf651b55635cb3955`.
+
+The provisioner now retries a transient download timeout at most twice within
+the original whole-provision deadline. Each attempt starts the pinned file again,
+removes only its own failed partial file, and still checks the original size,
+hash, HTTPS endpoint and redirect policy. HTTP refusals, TLS failures and invalid
+bytes are not retried; existing files are not replaced. Thirteen targeted,
+offline provision tests pass. This is bounded recovery, not a successful model
+download or a completed coding trial; a new actual-model run is still required.
 
 ### Owner-selected 4B native coding candidate; no new execution claim
 

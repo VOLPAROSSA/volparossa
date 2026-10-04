@@ -17,6 +17,7 @@ import stat
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import venv
@@ -256,6 +257,26 @@ def execution_root(args):
 
 
 def download(item, target, opener, deadline):
+    """Retry only transient timeouts, within the original whole-provision deadline.
+
+    Each attempt restarts the pinned file from byte zero. A failed partial file
+    is removed by download_once; hashes, size, TLS/redirect rules and exclusive
+    destination creation are unchanged. No retry of bad bytes or HTTP refusals.
+    """
+    for attempt in range(3):
+        try:
+            return download_once(item, target, opener, deadline)
+        except (TimeoutError, urllib.error.URLError) as error:
+            timed_out = isinstance(error, TimeoutError) or (
+                not isinstance(error, urllib.error.HTTPError)
+                and isinstance(getattr(error, "reason", None), TimeoutError))
+            delay = attempt + 1
+            if not timed_out or attempt == 2 or deadline - time.monotonic() <= delay:
+                raise
+            time.sleep(delay)
+
+
+def download_once(item, target, opener, deadline):
     """Only the pinned bytes may reach disk; no weight/wheel import happens here."""
     digest = hashlib.sha256()
     remaining = item["bytes"]
@@ -264,7 +285,9 @@ def download(item, target, opener, deadline):
     request = urllib.request.Request(official_url(item["url"]),
                                      headers={"User-Agent": "VOLPAROSSA-explicit-provision/1"})
     try:
-        with opener.open(request, timeout=30) as response, target.open("xb") as output:
+        available = deadline - time.monotonic()
+        require(available > 0, "provisioning deadline expired")
+        with opener.open(request, timeout=min(30, available)) as response, target.open("xb") as output:
             created = True
             official_url(response.url)
             length = response.headers.get("Content-Length")
