@@ -92,6 +92,37 @@ def retirement_counts(value, turn):
         retained_copy_records=bounded_count(value.get('retained_copy_records'), 12))
 
 
+def renewal_outcomes(value):
+    """Only fixed engine outcomes; at most three retained copies in this fixture."""
+    if not isinstance(value, list) or len(value) > 3:
+        return None
+    return [item if item in ('retiring_not_renewed', 'explicitly_deleted',
+        'unavailable_or_grant_invalid', 'unknown_reservation_use_deposit_retry',
+        'unconfirmed_retained', 'renewal_outside_original_grant',
+        'existing_retention_sufficient', 'confirmed') else None for item in value]
+
+
+def handoff_outcomes(value):
+    """One admitted handoff per turn, without keys, archive IDs or free-form errors."""
+    if not isinstance(value, list) or len(value) > 1:
+        return None
+    result = []
+    for item in value:
+        item = item if isinstance(item, dict) else {}
+        stage = item.get('handoff_stage')
+        result.append(dict(index=bounded_count(item.get('index'), len(LENGTHS) - 1),
+            handoff_stage=stage if stage in ('complete', 'survivor_unavailable',
+                'replacement_upload_pending', 'replacement_verification_pending',
+                'replacement_retention_insufficient', 'source_delete_unconfirmed') else None,
+            resumed_signed_intent=item.get('resumed_signed_intent')
+                if type(item.get('resumed_signed_intent')) is bool else None,
+            replacement_verified_this_pass=item.get('replacement_verified_this_pass')
+                if type(item.get('replacement_verified_this_pass')) is bool else None,
+            operation_complete=item.get('operation_complete')
+                if type(item.get('operation_complete')) is bool else None))
+    return result
+
+
 def retirement_turn(value, turn):
     """Project existing owner checkpoint fields, never the private checkpoint itself."""
     if type(turn) is not int or not 1 <= turn <= 4 or len(RETIREMENT_TURNS) >= 4:
@@ -114,10 +145,12 @@ def retirement_turn(value, turn):
         pending_retirements=bounded_count(detail.get('pending_retirements'), 4),
         physical_payload_charge_upper_bound=bounded_count(
             detail.get('physical_payload_charge_upper_bound'), MAX_CHARGE),
+        fragment_outcomes=handoff_outcomes(detail.get('fragment_outcomes')),
         refresh=dict(fragment_index=bounded_count(refresh.get('fragment_index'), len(LENGTHS) - 1),
             renewal=refresh.get('renewal') if type(refresh.get('renewal')) is bool else None,
             operation_complete=refresh.get('operation_complete')
-                if type(refresh.get('operation_complete')) is bool else None)))
+                if type(refresh.get('operation_complete')) is bool else None,
+            copy_outcomes=renewal_outcomes(refresh.get('copy_outcomes')))))
 
 
 def failure_receipt(error):

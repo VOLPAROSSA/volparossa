@@ -204,6 +204,10 @@ async fn owner_maintenance_renews_repairs_one_copy_and_retains_uncertain_charge_
             .unwrap();
         assert_eq!(renewed["maintenance_stage"], "observed");
         assert_eq!(renewed["refresh"]["renewal"], true);
+        assert_eq!(
+            renewed["refresh"]["copy_outcomes"],
+            serde_json::json!(["confirmed", "confirmed"])
+        );
         let set = LockedFragments::open(&path).unwrap();
         assert!(
             set.fragment(0)
@@ -228,6 +232,12 @@ async fn owner_maintenance_renews_repairs_one_copy_and_retains_uncertain_charge_
                 .unwrap();
             assert_eq!(result["attempted_handoffs"], 1);
             assert_eq!(result["freshly_verified_replacements"], 1);
+            let outcomes = result["fragment_outcomes"].as_array().unwrap();
+            assert_eq!(outcomes.len(), 1);
+            assert_eq!(outcomes[0]["handoff_stage"], "source_delete_unconfirmed");
+            assert_eq!(outcomes[0]["operation_complete"], false);
+            assert_eq!(outcomes[0]["replacement_verified_this_pass"], true);
+            assert!(outcomes[0].get("provider_key").is_none());
         }
         let set = LockedFragments::open(&path).unwrap();
         let before = set.report("status").unwrap();
@@ -289,6 +299,132 @@ async fn owner_maintenance_renews_repairs_one_copy_and_retains_uncertain_charge_
                 .await
                 .unwrap()["maintenance_stage"],
             "grant_refresh_required"
+        );
+        peers.stop().await;
+    }))
+    .await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "One three-provider local lifecycle isolates the actual overlay fixture's retained retirement geometry without claiming route recovery."
+)]
+async fn three_provider_maintenance_retires_all_originals_with_exact_candidate_grants() {
+    Box::pin(transfer::with_maintenance_turn(vec![8; 32], async {
+        let temp = tempfile::tempdir().unwrap();
+        let (owner, providers, _) = keys_and_grants(4);
+        let bytes = vec![31; 3 * CHUNK_BYTES + 73];
+        let length = bytes.len() as u64;
+        let now = crate::storage::now().unwrap();
+        let grants: Vec<_> = providers
+            .iter()
+            .map(|provider| {
+                SignedStorageGrant::issue(
+                    provider,
+                    &owner.verifying_key(),
+                    GrantLimits {
+                        max_payload_bytes: length,
+                        max_leases: 4,
+                        rights: StorageRights::ALL,
+                        max_retention_seconds: 7200,
+                    },
+                    Validity {
+                        created: now,
+                        expires: now + 7200,
+                    },
+                )
+                .unwrap()
+                .verify(&provider.verifying_key(), now)
+                .unwrap()
+            })
+            .collect();
+        let source = temp.path().join("ciphertext");
+        fs::write(&source, &bytes).unwrap();
+        let (mut input, _) = transfer::checked_input(&source, plan(&bytes).sha256).unwrap();
+        let archive = temp.path().join("fragments");
+        let set =
+            LockedFragments::create(&archive, &owner, &mut input, plan(&bytes), &grants, 1800)
+                .unwrap();
+        let peers = LocalProviders::start(temp.path(), &providers, &grants, true);
+        assert_eq!(
+            operations::deposit(&set, &peers.socket, &owner, &mut input)
+                .await
+                .unwrap()["operation_complete"],
+            true
+        );
+        assert_eq!(
+            operations::refresh(&set, &peers.socket, &owner, Some(3600))
+                .await
+                .unwrap()["operation_complete"],
+            true
+        );
+        let mut enrollment = enrollment(&set, archive.clone(), &owner, &providers, &grants[1]);
+        enrollment.providers = providers[1..]
+            .iter()
+            .map(|key| key.verifying_key().to_bytes())
+            .collect();
+        enrollment.grants = grants[1..]
+            .iter()
+            .map(|grant| hex::encode(grant.signed().encode()))
+            .collect();
+        enrollment.expires = now + 6000;
+        enrollment.lifetime = 5400;
+        enrollment.renew_before = 7200;
+        enrollment.maximum_charged = 2 * length + 2 * CHUNK_BYTES as u64 + 73;
+        enrollment.maximum_turn = 8 * 1024 * 1024;
+        drop((set, input));
+        fs::remove_file(&source).unwrap();
+        assert_eq!(
+            maintain(&enrollment, &peers.socket, &owner, 0)
+                .await
+                .unwrap()["refresh"]["operation_complete"],
+            true
+        );
+        peers.online[0].store(false, Ordering::SeqCst);
+        for scan in 3..6 {
+            let result = maintain(&enrollment, &peers.socket, &owner, scan)
+                .await
+                .unwrap();
+            assert_eq!(result["freshly_verified_replacements"], 1, "{result}");
+        }
+        let set = LockedFragments::open(&archive).unwrap();
+        assert_eq!(set.report("status").unwrap()["pending_retirements"], 3);
+        for name in ["restore-first", "restore-again"] {
+            let output = temp.path().join(name);
+            assert_eq!(
+                operations::restore(&set, &peers.socket, &owner, &output)
+                    .await
+                    .unwrap()["operation_complete"],
+                true
+            );
+            assert_eq!(fs::read(output).unwrap(), bytes);
+        }
+        drop(set);
+        peers.stop().await;
+        let peers = LocalProviders::start(temp.path(), &providers, &grants, false);
+        for scan in 6..10 {
+            let result = maintain(&enrollment, &peers.socket, &owner, scan)
+                .await
+                .unwrap();
+            assert_eq!(result["refresh"]["operation_complete"], true, "{result}");
+        }
+        let set = LockedFragments::open(&archive).unwrap();
+        let status = set.report("status").unwrap();
+        assert_eq!(status["pending_retirements"], 0, "{status}");
+        assert_eq!(status["placement_authorizations"], 3);
+        assert_eq!(status["physical_payload_charge_upper_bound"], 2 * length);
+        for _ in 0..2 {
+            assert_eq!(
+                operations::delete(&set, &peers.socket, &owner)
+                    .await
+                    .unwrap()["operation_complete"],
+                true
+            );
+        }
+        assert_eq!(
+            set.report("status").unwrap()["physical_payload_charge_upper_bound"],
+            0
         );
         peers.stop().await;
     }))

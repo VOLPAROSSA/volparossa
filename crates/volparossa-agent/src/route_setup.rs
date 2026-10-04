@@ -1160,6 +1160,11 @@ pub(crate) enum ClientRouteConnectError {
 
 impl ClientRouteControl {
     #[cfg(test)]
+    pub(crate) async fn hold_owner_for_test(&self) -> impl Drop + '_ {
+        self.state.lock().await
+    }
+
+    #[cfg(test)]
     pub(crate) async fn admission_closed_for_test(&self) -> bool {
         self.bootstrap.lock().await.is_closed()
     }
@@ -2591,13 +2596,18 @@ impl ClientRouteControl {
 
     /// Force one exact-owner MPQUIC observation for an explicit local Paths query.
     ///
-    /// No owner or a different transport is a no-op. Observation errors do not reconnect or
-    /// destroy a route, and the owner lock remains held through publication so a delayed old
-    /// snapshot cannot overwrite a newly established route's display.
+    /// Refuse a busy owner immediately, without inferring its transport from cached display
+    /// data or waiting behind network/helper I/O. With the owner acquired, no owner or a
+    /// different transport is a no-op. Observation errors do not reconnect or destroy a route,
+    /// and the owner lock remains held through fresh observation and publication so a delayed
+    /// old snapshot cannot overwrite a newly established route's display.
     pub(crate) async fn refresh_mpquic_path_summaries(
         &self,
     ) -> Result<(), ClientRouteConnectError> {
-        let mut state = self.state.lock().await;
+        let mut state = self
+            .state
+            .try_lock()
+            .map_err(|_| ClientRouteConnectError::Busy)?;
         let ClientRouteControlState::Established(established) = &mut *state else {
             return Ok(());
         };

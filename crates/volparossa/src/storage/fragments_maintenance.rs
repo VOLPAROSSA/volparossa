@@ -364,7 +364,9 @@ async fn maintain(
     };
     let refreshed =
         operations::refresh_fragment(&set, index, socket, signer, renewal, true).await?;
-    let refresh = serde_json::json!({"fragment_index":index,"renewal":renewal.is_some(),"operation_complete":refreshed["operation_complete"]});
+    // Keep the lower engine's closed outcomes, not its owner/provider identifiers or journal.
+    let refresh = serde_json::json!({"fragment_index":index,"renewal":renewal.is_some(),
+        "operation_complete":refreshed["operation_complete"],"copy_outcomes":refreshed["copy_outcomes"]});
     let mut needs_repair = false;
     for index in 0..set.data.fragments.len() {
         let copies = set.fragment(index)?;
@@ -402,6 +404,7 @@ async fn maintain(
     Ok(
         serde_json::json!({"maintenance_stage":"maintained","refresh":refresh,
         "repair_stage":repaired["repair_stage"],"attempted_handoffs":repaired["attempted_handoffs"],
+        "fragment_outcomes":repaired["fragment_outcomes"],
         "freshly_verified_replacements":repaired["freshly_verified_replacements"],
         "pending_retirements":repaired["pending_retirements"],
         "physical_payload_charge_upper_bound":repaired["physical_payload_charge_upper_bound"]}),

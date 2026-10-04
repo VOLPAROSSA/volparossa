@@ -93,8 +93,35 @@ class MaintenanceEvidence(unittest.TestCase):
             self.assertEqual(observed['maintenance_stage'], 'observed')
             self.assertIsNone(observed['repair_stage'])
             self.assertIsNone(observed['attempted_handoffs'])
-            self.assertEqual(observed['refresh'], dict(fragment_index=3, renewal=False, operation_complete=True))
+            self.assertEqual(observed['refresh'], dict(fragment_index=3, renewal=False,
+                operation_complete=True, copy_outcomes=None))
             self.assertNotIn('SECRET', json.dumps(result))
+
+    def test_lower_handoff_and_renewal_outcomes_are_closed_and_bounded(self):
+        stage = CHECK['handoff_outcomes']
+        renew = CHECK['renewal_outcomes']
+        for name in ('complete', 'survivor_unavailable', 'replacement_upload_pending',
+                'replacement_verification_pending', 'replacement_retention_insufficient',
+                'source_delete_unconfirmed'):
+            value = stage([dict(index=2, handoff_stage=name, resumed_signed_intent=True,
+                replacement_verified_this_pass=False, operation_complete=False,
+                provider_key='SECRET', error='SECRET')])
+            self.assertEqual(value, [dict(index=2, handoff_stage=name, resumed_signed_intent=True,
+                replacement_verified_this_pass=False, operation_complete=False)])
+        invalid = stage([dict(index=True, handoff_stage={'SECRET': 'SECRET'},
+            resumed_signed_intent=1, replacement_verified_this_pass='SECRET', operation_complete=0)])
+        self.assertTrue(all(v is None for v in invalid[0].values()))
+        self.assertIsNone(stage([{}, {}]))
+        self.assertIsNone(stage('SECRET'))
+        self.assertEqual(stage([]), [])
+        names = ('retiring_not_renewed', 'explicitly_deleted', 'unavailable_or_grant_invalid',
+            'unknown_reservation_use_deposit_retry', 'unconfirmed_retained',
+            'renewal_outside_original_grant', 'existing_retention_sufficient', 'confirmed')
+        for name in names:
+            self.assertEqual(renew([name]), [name])
+        self.assertEqual(renew(['SECRET', {'SECRET': 'SECRET'}, True]), [None] * 3)
+        self.assertIsNone(renew(['confirmed'] * 4))
+        self.assertIsNone(renew('SECRET'))
 
     def test_four_pending_retirement_turns_fail_with_each_existing_repair_receipt(self):
         namespace = CHECK['finish'].__globals__
@@ -103,7 +130,11 @@ class MaintenanceEvidence(unittest.TestCase):
             maintenance_stage='maintained', repair_stage='pass_limit' if index == 0 else 'pending_handoff',
             attempted_handoffs=1, freshly_verified_replacements=1 if index == 0 else 0,
             pending_retirements=2, physical_payload_charge_upper_bound=CHECK['MAX_CHARGE'],
-            refresh=dict(fragment_index=(6 + index) % 4, renewal=True, operation_complete=index == 0)))
+            fragment_outcomes=[dict(index=1, resumed_signed_intent=True,
+                handoff_stage='complete' if index == 0 else 'survivor_unavailable',
+                operation_complete=index == 0, replacement_verified_this_pass=index == 0)],
+            refresh=dict(fragment_index=(6 + index) % 4, renewal=True, operation_complete=index == 0,
+                copy_outcomes=['confirmed'] if index == 0 else ['unconfirmed_retained'])))
             for index in range(4)]
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -124,6 +155,10 @@ class MaintenanceEvidence(unittest.TestCase):
                 self.assertEqual([v['repair_stage'] for v in result['retirement_turns']],
                     ['pass_limit', 'pending_handoff', 'pending_handoff', 'pending_handoff'])
                 self.assertEqual([v['freshly_verified_replacements'] for v in result['retirement_turns']], [1, 0, 0, 0])
+                self.assertEqual([v['fragment_outcomes'][0]['handoff_stage'] for v in result['retirement_turns']],
+                    ['complete'] + ['survivor_unavailable'] * 3)
+                self.assertEqual([v['refresh']['copy_outcomes'] for v in result['retirement_turns']],
+                    [['confirmed']] + [['unconfirmed_retained']] * 3)
                 self.assertEqual(result['retirement']['pending_retirements'], 2)
 
     def test_failure_diagnostics_are_closed_and_bound_private_checkpoint_fields(self):

@@ -340,6 +340,32 @@ feature branches are not implied to be integrated into `main`.
   route comparisons without exporting identities or accepting additional states,
   paths or contexts. Twelve maintenance and fifteen sampler checks pass; these are
   diagnostic contracts, not a proven cause, product fix or new live result.
+  The next original [run37227036781 on `e48faaa9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37227036781)
+  also **fails** at retirement. The first turn freshly verifies one replacement;
+  three subsequent turns report `pending_handoff`, no fresh readback and two
+  remaining obligations. Their fragment renewals are also unconfirmed. The
+  separate sampler reports `route_query` / `timeout`, not the previous run's
+  `route_scope` mismatch; neither is established as the cause of the other.
+  Exact-source validation again accepts upload and both source-free restores.
+  All nine private cleanup checks pass, no topology objects remain, and guest-root
+  state is byte-identical (`13ae2c9e8772f775732701fce4c7cc8fe2a88df2a5cb4005fdcb1562b2a8805d`).
+  Original ZIP SHA-256: `746c7bf2fd18a9c91b2b4d97a0d776468afe26c03eaf017be1bb66f4df462ca7`;
+  job111508724674 log SHA-256: `a09806e06e8d5d0157cca14aad4c2954d265257ad0aeb8553c1a3ed1a803d19b`.
+  A targeted three-provider signed-store lifecycle passes the same B/C candidate
+  geometry, restart, retirement and idempotent deletion; it does not reproduce
+  the live retirement failure or sampler timeout. Owner checkpoints now retain the lower engine's
+  fixed handoff and per-copy renewal outcomes; the fixture exports only bounded
+  enums, indices and booleans, never provider identities or private journals.
+  These observations do not change deadlines, custody, charge accounting or
+  acceptance gates. Retirement/deletion and final zero accounting remain open.
+  Separately, a held route-owner mutex reproduced an unresponsive `Paths` query:
+  both MPTCP and MPQUIC display fixtures fail before the fix and pass afterward.
+  The query now immediately returns `Unavailable` / `CLIENT_ROUTE_BUSY` rather
+  than waiting behind owner I/O or inferring authority from cached display data.
+  Fresh MPQUIC observation/publication still holds the actual owner lock. Twelve
+  targeted agent checks pass, alongside three signed-store maintenance tests and
+  thirteen closed receipt tests. This proves bounded lock-contention handling,
+  not the cause or resolution of the original live retirement failure.
   See [private storage maintenance](services/PRIVATE_STORAGE.md#explicit-owner-private-background-maintenance).
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
