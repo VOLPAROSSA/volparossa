@@ -8,6 +8,17 @@ Last updated: 2026-10-04
 
 ### Owner-selected 4B native coding candidate; no new execution claim
 
+The first hosted Code trial
+[`37204436941`](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37204436941)
+on core `39bfc0d14bd45563957c8a41e8183592e7ee7a73` and Code
+`0295710c6e93bcdf989f5b1527f4ffde746ab16e` failed at `model-provision` before
+model execution or any coding task. The original closed report does not identify
+the provisioning substep. Guest cleanup and its network snapshot passed; the
+outer CI host IPv6-route hash changed, so unchanged outer host state is not proved.
+Artifact ZIP SHA-256:
+`41e48432b0b36f409517895b3fbf47b0832d222c369187a797fdd9e77539ad98`.
+This remains a candidate, not a demonstrated 4B coding loop.
+
 `qwen3-4b-instruct-2507-v1` adds the exact original
 `Qwen/Qwen3-4B-Instruct-2507@cdbee75f17c01a7cc42f958dc650907174af0554`
 assets to the private native-conversation worker and explicit guest provisioner.
