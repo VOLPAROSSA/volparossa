@@ -77,6 +77,9 @@ are not interchangeable**, and private data is not automatically training materi
 | Storage | Retain encrypted private files with recovery copies and reciprocal capacity. |
 | Compute | Share suitable work, models and learning across participating devices. |
 
+A fifth **Transaction-layer is being researched**, separately from these services.
+It is not yet an operational payment or banking facility.
+
 <a id="one-network-many-paths"></a>
 
 ## Network-layer: One network, many paths
@@ -242,9 +245,25 @@ These are not powers automatically granted to model output.
 [Training, peer tasks and model profiles](docs/services/DECENTRALIZED_AGENTS.md) ·
 [Software maintenance and updates](docs/services/REPOSITORY_MAINTENANCE.md)
 
+## Transaction-layer: Ownership, payments and settlement
+
+The new [VOLPAROSSA Bank](https://github.com/VOLPAROSSA/volparossa-bank) research
+application proposes participant-owned portfolios weighted by nonnegative
+`ROIC × FCF-yield`, internal payments and connections to existing financial systems.
+Reusable authorization, reservations, settlement status and dispute handling
+belong in the core; investment methodology and presentation belong in Bank.
+
+Only isolated arithmetic and transaction-state research are being developed.
+There is no live bank, trading service or financial gateway. The immune system
+should help detect abuse without exposing everyone's finances, but cannot
+guarantee lawful transactions or recover money after every external transfer.
+Financial participation remains separate from contributing network resources.
+
+[Transaction-layer design and limits](docs/services/TRANSACTION_LAYER.md)
+
 ## One core, multiple applications
 
-These are **integration targets with different completed milestones**, not eight finished
+These are **integration targets with different completed milestones**, not finished
 products. Each keeps its own repository and upstream identity; reusable network, storage
 and compute coordination belongs in the core.
 
@@ -258,6 +277,7 @@ and compute coordination belongs in the core.
 | [Map](https://github.com/VOLPAROSSA/volparossa-map) | Organic Maps | Offline maps, shared distribution and traffic information. |
 | [Weather](https://github.com/VOLPAROSSA/volparossa-weather) | Direct public model data | Shared weather processing and measured forecast improvement. |
 | [Cloud](https://github.com/VOLPAROSSA/volparossa-cloud) | OpenCloud | Private files, synchronization and server-independent access. |
+| [Bank](https://github.com/VOLPAROSSA/volparossa-bank) | Financial protocol research | Participant-owned portfolios, payments and auditable corrections; no real-money service. |
 
 [Application scope and current boundaries](docs/applications/APPLICATIONS.md)
 

@@ -29,6 +29,7 @@ These instructions apply to the entire repository and must remain in force in fu
 - General UDP: datagrams over a protected single-path QUIC MASQUE CONNECT-IP/CONNECT-UDP association through exactly one relay; destination tuple is pinned.
 - Browser QUIC/HTTP/3: original QUIC datagrams inside MASQUE CONNECT-IP over genuine Multipath QUIC with at least two active WireGuard relay paths. Default is fail closed when multipath is required and unavailable.
 - Do not add v1 cover traffic, cells, artificial delay, batching, packet duplication, FEC, erasure coding, adaptive path equalisation, payments, tokens, blockchain, automatic exit enablement, or a GUI. Keep scheduler interfaces extensible for later policies.
+- User extension 2026-10-04: research a separate reusable Transaction-layer for VOLPAROSSA Bank. Isolated simulations and protocol research are authorized; they do not enable real-money services, introduce fees/tokens into overlay participation, or grant model workers financial authority. Keep securities ownership, payment authorization, internal accounting and external settlement distinct. Do not represent reversible simulations as distributed settlement, legal ownership or guaranteed recovery of externally transferred funds.
 
 ## Architecture and implementation choices
 

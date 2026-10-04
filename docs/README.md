@@ -74,6 +74,7 @@ or go directly to a topic when you already know what you need.
 | --- | --- |
 | [Content network](services/CONTENT_NETWORK_PROPOSAL.md) | Cache chunks, publishing, HTTPS authority and offline delivery. |
 | [Private storage](services/PRIVATE_STORAGE.md) | Encrypted fragments, redundancy, retention, usage and recovery. |
+| [Transaction layer](services/TRANSACTION_LAYER.md) | New financial research scope, settlement boundaries and correction design. |
 | [Mailbox import confirmation](services/MAILBOX_IMPORT_CONFIRMATION.md) | When an application may confirm message import. |
 | [Unbound fallback](network/UNBOUND_FALLBACK.md) | Resolver lifecycle and bounded DNS-cache misses. |
 | [Decentralized agents](services/DECENTRALIZED_AGENTS.md) | Training, public peer tasks, models, privacy and mutual review. |
@@ -85,7 +86,7 @@ or go directly to a topic when you already know what you need.
 - [Operations](development/OPERATIONS.md): configuration, commands, packaging and removal.
 - [Testing](development/TESTING.md): focused checks, disposable topologies and acceptance requirements.
 - [Implementation status](IMPLEMENTATION_STATUS.md): detailed evidence ledger, including failed trials.
-- [Applications](applications/APPLICATIONS.md): boundaries and links for the eight application repositories.
+- [Applications](applications/APPLICATIONS.md): boundaries and links for the application repositories.
 - [Contributing](../CONTRIBUTING.md): how to propose and verify a useful change.
 - [Security policy](../SECURITY.md): private vulnerability reporting.
 - [License](../LICENSE) and [third-party notices](../THIRD_PARTY_LICENSES.md): reuse and provenance.
