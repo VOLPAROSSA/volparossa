@@ -20,6 +20,8 @@ mod object_policy;
 mod parallel;
 mod private_storage;
 mod recent;
+#[cfg(test)]
+mod refresh_tests;
 mod replication;
 mod replication_budget;
 #[cfg(test)]
@@ -407,6 +409,10 @@ impl ContentRuntime {
     }
 
     async fn serve_loop_inner(server: ServingLoop) {
+        Self::serve_loop_with_refresh(server, interval(Duration::from_secs(60))).await;
+    }
+
+    async fn serve_loop_with_refresh(server: ServingLoop, mut refresh: tokio::time::Interval) {
         let ServingLoop {
             listener,
             tls,
@@ -419,8 +425,8 @@ impl ContentRuntime {
             events,
         } = server;
         let mut sessions = JoinSet::new();
-        let mut refresh = interval(Duration::from_secs(60));
         refresh.tick().await;
+        let mut registration_pending = false;
         loop {
             tokio::select! {
                 changed = stop.changed() => {
@@ -441,7 +447,26 @@ impl ContentRuntime {
                         }
                     }
                     let Ok(offer) = make_offer(&signer, endpoint.clone()) else { break; };
-                    if discovery.register_content_offer(offer).await.is_err() { break; }
+                    match discovery.register_content_offer(offer).await {
+                        Ok(_) => {
+                            if registration_pending {
+                                provider_event(events.as_ref(), "CONTENT_PROVIDER_REGISTRATION_RECOVERED").await;
+                            }
+                            registration_pending = false;
+                        }
+                        Err(DiscoveryError::Busy | DiscoveryError::Timeout) => {
+                            // Keep the exact bound listener/registry, not the old advertisement's
+                            // authority. Discovery still expires/withdraws unrefreshed offers;
+                            // clients still verify their independently signed offer's TTL.
+                            // Retry only on the next existing tick, never by restarting work.
+                            registration_pending = true;
+                            provider_event(events.as_ref(), "CONTENT_PROVIDER_REGISTRATION_RETRY_PENDING").await;
+                        }
+                        Err(_) => {
+                            provider_event(events.as_ref(), "CONTENT_PROVIDER_REGISTRATION_FAILED").await;
+                            break;
+                        }
+                    }
                 }
                 accepted = listener.accept(), if sessions.len() < 4 => {
                     let Ok((stream, _source)) = accepted else { break; };

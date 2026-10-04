@@ -118,6 +118,49 @@ interpretation, evidence-bound decisions and correction remain implementation re
 this clarification changes the design description, not the active destination whitelist or the
 completion status of the automatic governance system.
 
+## Audio, images and natural conversation
+
+Requested on 2026-10-04; **not implemented multimodal inference**. The current
+compute contracts and admitted model profiles are text-oriented. Transporting,
+caching or privately storing an image or recording does not mean that a model
+can interpret it. The requested shared brain should understand images and spoken
+audio, generate spoken responses and eventually support fluid, interruptible
+voice conversations. Video understanding is a further extension with greater
+processing and bandwidth demands; it is not supplied by image storage.
+
+Implement this in useful stages: image interpretation and speech recognition,
+then streamed speech generation and conversational coordination. Reuse suitable
+open models and improve them through eligible training and measured evaluation;
+do not require learning every capability from scratch. These capabilities belong
+in the shared core, available to applications through versioned task contracts,
+not in a separate local-only assistant for each application.
+
+The core should place each task with compatible available workers, accounting
+for model locality, latency, bandwidth, memory, compute and energy costs as well
+as data protection. Reserve interactive capacity; throttle, pause or defer
+background training and media processing when the owner's device needs its
+resources. Bound admitted work, buffering and in-flight transfers, and cancel
+obsolete speech generation when interrupted. Under insufficient capacity, make
+delay or reduced service visible instead of exhausting peers or pretending that
+a task succeeded. Resource budgets reduce interference; they cannot promise
+zero latency, power use or contention.
+
+Keep private media and derived transcripts/results private throughout network
+execution. Existing public-worker operation does not establish confidential
+remote media processing. Do not silently enable microphones/cameras or turn
+recordings, faces, voices or conversations into shared training data. Reuse
+public or otherwise authorized material and suitable privacy-preserving learning
+mechanisms. Immune-system review must not expose private media to arbitrary
+reviewers. A natural-sounding synthetic voice should remain recognizable as AI
+interaction, not a claim that a human is speaking.
+
+Evaluate comprehension, transcription, voice intelligibility, interruption,
+end-to-end latency and resource cost against stable reference tasks. More peers
+can supply capacity and more eligible learning opportunities; neither more peers
+nor additional training alone proves better understanding or a human-quality
+conversation. This section records the requested direction, not a completed
+worker, training loop or real-time speech datapath.
+
 ## Agreed content-policy examples
 
 These historical examples preserve the user's intended outcomes and distinctions. They illustrate
@@ -221,6 +264,40 @@ default. A future selector must measure coverage and sample less-represented eli
 cache locality may influence execution placement, not whether a relevant source is considered.
 Origin fallback alone does not prove freedom from selection bias. This selector and generalized
 external-dataset ingestion are still required work, not implemented by the initial adapter codec.
+
+### Autonomous Internet use
+
+On 2026-10-04 the user explicitly authorized autonomous Internet use for user
+tasks, research, improvement, maintenance and learning. It is a normal shared
+core capability, not limited to explicit search questions or cache misses. Agents
+should be able to select relevant permitted external sources and obtain missing
+or newer information without requiring approval for each read within the granted
+scope. Internet access is a source/tool capability, not unrestricted worker
+network access or authority to change the network's exit policy.
+
+Source acquisition belongs in the core's mediated tool path: preserve the
+protected route and destination policy, access rights, provenance, freshness,
+size/time budgets and cancellation. Prefer eligible cached content when useful,
+deduplicate shared retrieval and respect source rate limits; do not evade limits
+by spreading requests over participants. Foreground work takes priority over
+background research and training. Selecting a source for reading does not grant
+redistribution or training rights. Private task context, credentials and records
+must not be included in searches or uploads merely because Internet access is
+available.
+
+Treat pages, retrieved code and documents as untrusted data, not instructions
+that can change the task, grant permissions or trigger software installation.
+External changes, account actions, publication and releases continue to use
+their separately scoped capabilities. The shared immune system assesses source
+and result quality without substituting for access controls or granting agents
+authority to approve their own changes.
+
+Existing selected-source collection and protected content retrieval are useful
+building blocks. General autonomous web research, source discovery and external
+training-corpus ingestion remain unfinished; this authorization does not claim
+that the current network-isolated model workers can browse the Internet.
+
+### Shared artifacts and execution boundaries
 
 - Reuse content-addressed chunks, original signed manifests, protected peer retrieval and
   custody for public model weights, compatible updates and evaluation artifacts. Caching an

@@ -98,14 +98,28 @@ benchmark_disconnect_route() {
     wait_disconnected
 }
 
-# Image and Cloud keep closed metadata-only archives. Preserve the selection failure
+# These scenarios keep closed metadata-only archives. Preserve the selection failure
 # branch without exporting raw stderr, addresses, identities or owner data.
 # This observation must never change selection, its retry budget or its result.
+benchmark_route_diagnostic_prefix() {
+    benchmark_diagnostic_prefix=
+    if [ "${cloud_private_upload:-no}" = yes ]; then
+        benchmark_diagnostic_prefix=cloud-private-upload
+    elif [ "${cloud_private_file:-no}" = yes ]; then
+        benchmark_diagnostic_prefix=cloud-private-file
+    elif [ "${image_snapshot:-no}" = yes ]; then
+        benchmark_diagnostic_prefix=image-snapshot
+    elif [ "${agent_cooperative_code:-no}" = yes ]; then
+        benchmark_diagnostic_prefix=agent-cooperative-code
+    elif [ "${agent_cooperative_browser:-no}" = yes ]; then
+        benchmark_diagnostic_prefix=agent-cooperative-browser
+    else
+        return 1
+    fi
+}
+
 benchmark_image_route_diagnostic() {
-    [ "${image_snapshot:-no}" = yes ] || [ "${cloud_private_file:-no}" = yes ] || [ "${cloud_private_upload:-no}" = yes ] || return 0
-    benchmark_diagnostic_prefix=image-snapshot
-    if [ "${cloud_private_file:-no}" = yes ]; then benchmark_diagnostic_prefix=cloud-private-file; fi
-    if [ "${cloud_private_upload:-no}" = yes ]; then benchmark_diagnostic_prefix=cloud-private-upload; fi
+    benchmark_route_diagnostic_prefix || return 0
     benchmark_diagnostic_retries=$((benchmark_connect_count - 1))
     [ "$benchmark_diagnostic_retries" -ge 0 ] || benchmark_diagnostic_retries=0
     if jq -cn --arg stage "$1" --arg reason "$2" \
@@ -216,7 +230,7 @@ benchmark_select_route() {
             benchmark_draw=$((benchmark_draw + 1))
         else
             benchmark_connect_exit=$?
-            if [ "${image_snapshot:-no}" = yes ] || [ "${cloud_private_file:-no}" = yes ] || [ "${cloud_private_upload:-no}" = yes ]; then
+            if benchmark_route_diagnostic_prefix; then
                 benchmark_image_connect_reason "$WORK/$benchmark_label-connect.err"
             fi
             if ! a01_transient_connect_unavailable "$WORK/$benchmark_label-connect.err"; then

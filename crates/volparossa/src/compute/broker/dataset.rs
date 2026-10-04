@@ -34,6 +34,10 @@ struct Question {
 
 pub(super) fn validate(json: &str, rows: usize) -> Result<()> {
     let header: serde_json::Value = serde_json::from_str(json)?;
+    if header["version"] == 6 {
+        volparossa_content::provider::compute::dataset::validate_code_proposal_json(json, rows)?;
+        return Ok(());
+    }
     if header["version"] == 4 {
         volparossa_content::provider::compute::dataset::validate_principle_json(json, rows)?;
         return Ok(());

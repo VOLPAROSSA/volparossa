@@ -30,6 +30,13 @@ pub(super) struct Enrollment {
     pub(super) scheduling: workflow::Scheduling,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) synthesize: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) refine_incomplete: bool,
+    #[serde(
+        default = "one_refinement_level",
+        skip_serializing_if = "is_one_refinement_level"
+    )]
+    pub(super) refinement_levels: u8,
     /// Exact canonical ledger for an owner-published multi-document compilation.
     /// Its labels/hashes/ranges are also embedded in the signed original text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -60,6 +67,18 @@ pub(super) struct Package {
     dataset_sha256: String,
     pub(super) first_part: usize,
     pub(super) rows: usize,
+}
+
+const fn one_refinement_level() -> u8 {
+    1
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "Serde skip_serializing_if requires a borrowed field"
+)]
+fn is_one_refinement_level(value: &u8) -> bool {
+    *value == 1
 }
 
 fn sha(bytes: &[u8]) -> String {
@@ -368,6 +387,8 @@ fn publish_internal(
         scheduling: workflow::Scheduling::BatchBarrierV1,
         version: 1,
         synthesize,
+        refine_incomplete: false,
+        refinement_levels: 1,
         source_manifest_id: sha(&source_bytes),
         source_sha256: plan.source_sha256.clone(),
         source_bytes: plan.source_bytes,
@@ -466,6 +487,18 @@ pub(super) fn load(root: &Path) -> Result<(Enrollment, Input, Plan)> {
     ensure!(
         !enrollment.replace_peers || enrollment.model_fingerprint.is_some(),
         "compute_executor_replacement_requires_pinned_model"
+    );
+    ensure!(
+        !enrollment.refine_incomplete
+            || (enrollment.synthesize
+                && enrollment.scheduling == workflow::Scheduling::ReadyRowsV1
+                && !enrollment.replace_peers),
+        "compute_document_refinement_enrollment"
+    );
+    ensure!(
+        (1..=4).contains(&enrollment.refinement_levels)
+            && (enrollment.refinement_levels == 1 || enrollment.refine_incomplete),
+        "compute_document_refinement_levels"
     );
     if let Some(fingerprint) = &enrollment.model_fingerprint {
         super::discovery::parse_fingerprint(fingerprint).map_err(anyhow::Error::msg)?;

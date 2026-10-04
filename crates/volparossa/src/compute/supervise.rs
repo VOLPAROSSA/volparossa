@@ -127,6 +127,10 @@ pub(super) fn test_worker_failure_with_diagnostic(
     reaped_failure(worker_failure(&reply, &id, ExitStatus::from_raw(1 << 8)))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "One ownership scope joins worker progress, original deadline, closed diagnostics and unconditional process cleanup"
+)]
 pub(super) async fn run(
     mut child: Child,
     request: &WorkerRequest,
@@ -154,6 +158,7 @@ pub(super) async fn run(
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut budget = Budget::new();
     let controls = options.spare_capacity.then(Controls::default);
+    let progress = diagnostic::Progress::default();
     let result = async {
         if let Some(lifetimes) = private_lifetimes.as_mut() {
             lifetimes.as_mut().map_err(|_| anyhow::anyhow!("compute_private_process_observation"))?
@@ -171,7 +176,8 @@ pub(super) async fn run(
         let mut control_stdin = if controls.is_some() { Some(stdin) } else { drop(stdin); None };
         let io = async {
             let (result, status) = collect_completion(
-                &mut child, stdout, stderr, &request.id, controls.as_ref()
+                &mut child, stdout, stderr, &request.id, controls.as_ref(),
+                options.mode.is_private().then_some(&progress),
             ).await?;
             check_result(&result, request, status)?;
             check_public_contract(&result, options)?;
@@ -219,6 +225,9 @@ pub(super) async fn run(
             }
         }
     }.await;
+    if options.mode.is_private() && result.is_err() {
+        diagnostic::terminal_state(&progress, &budget, controls.as_ref(), peak_rss);
+    }
     let mut result = confirm_cleanup(&mut child, options.mode, result, private_lifetimes).await?;
     result["supervisor"] = supervisor_report(options, peak_rss, controls.as_ref(), &budget);
     if options.mode == Mode::PlanTasks {
@@ -368,7 +377,10 @@ fn pressure_action(budget: &mut Budget) -> Result<Action> {
 }
 
 fn check_public_contract(value: &Value, options: &Options) -> Result<()> {
-    if options.mode == Mode::Infer {
+    if options.mode == Mode::PublicCodeProposal {
+        let dataset = super::read_file(&options.dataset, super::MAX_DATASET_BYTES)?;
+        super::public_code::validate_report(value, &dataset, options.model_profile)?;
+    } else if options.mode == Mode::Infer {
         let dataset = super::read_file(&options.dataset, super::MAX_DATASET_BYTES)?;
         super::inference_output::check_dataset_contract(value, &dataset)?;
     }
@@ -378,7 +390,9 @@ fn check_public_contract(value: &Value, options: &Options) -> Result<()> {
 fn check_model_backend(value: &Value, request: &WorkerRequest) -> Result<()> {
     if matches!(
         request.model_profile,
-        super::ModelProfile::Smol1700 | super::ModelProfile::Qwen600
+        super::ModelProfile::Smol1700
+            | super::ModelProfile::Qwen600
+            | super::ModelProfile::Qwen4bInstruct2507
     ) {
         ensure!(
             if request.mode == Mode::PlanDocument {
@@ -389,9 +403,12 @@ fn check_model_backend(value: &Value, request: &WorkerRequest) -> Result<()> {
             "compute_result_model_precision"
         );
     }
-    if request.model_profile == super::ModelProfile::Qwen600 {
+    if request.model_profile.is_native_conversation() {
         ensure!(
-            request.mode == Mode::PrivateConversation && value["model_attention_backend"] == "sdpa",
+            matches!(
+                request.mode,
+                Mode::PrivateConversation | Mode::PublicCodeProposal
+            ) && value["model_attention_backend"] == "sdpa",
             "compute_result_model_attention"
         );
     }
@@ -418,6 +435,7 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
     let updates = value.get("updates_completed").and_then(Value::as_u64);
     match request.mode {
         Mode::Infer
+        | Mode::PublicCodeProposal
         | Mode::PrivateInfer
         | Mode::PrivateConversation
         | Mode::PlanDocument
@@ -467,7 +485,11 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
     }
     if matches!(
         request.mode,
-        Mode::Infer | Mode::PrivateInfer | Mode::PrivateConversation | Mode::Train
+        Mode::Infer
+            | Mode::PublicCodeProposal
+            | Mode::PrivateInfer
+            | Mode::PrivateConversation
+            | Mode::Train
     ) {
         let outputs = value["outputs"]
             .as_array()
@@ -531,7 +553,7 @@ fn check_artifacts(value: &Value, mode: Mode, output: &Path) -> Result<()> {
         .context("compute_artifacts")?;
     if matches!(
         mode,
-        Mode::Infer | Mode::PrivateInfer | Mode::PrivateConversation
+        Mode::Infer | Mode::PublicCodeProposal | Mode::PrivateInfer | Mode::PrivateConversation
     ) {
         ensure!(artifacts.is_empty(), "compute_inference_artifacts");
         return Ok(());
@@ -675,12 +697,13 @@ async fn collect_completion(
     stderr: impl AsyncRead + Unpin,
     id: &str,
     controls: Option<&Controls>,
+    progress: Option<&diagnostic::Progress>,
 ) -> Result<(Value, ExitStatus)> {
     let missing = tokio::sync::Notify::new();
     let finish = async {
         tokio::try_join!(
             async {
-                let result = collect_stdout(stdout, id, controls).await?;
+                let result = collect_stdout_tracked(stdout, id, controls, progress).await?;
                 if result.is_none() {
                     missing.notify_one();
                 }
@@ -702,10 +725,20 @@ async fn collect_completion(
     Ok((required_result(result, status, diagnostics)?, status))
 }
 
+#[cfg(test)]
 async fn collect_stdout(
     stream: impl AsyncRead + Unpin,
     id: &str,
     controls: Option<&Controls>,
+) -> Result<Option<Value>> {
+    collect_stdout_tracked(stream, id, controls, None).await
+}
+
+async fn collect_stdout_tracked(
+    stream: impl AsyncRead + Unpin,
+    id: &str,
+    controls: Option<&Controls>,
+    progress: Option<&diagnostic::Progress>,
 ) -> Result<Option<Value>> {
     let mut reader = BufReader::new(stream);
     let mut result = None;
@@ -751,6 +784,14 @@ async fn collect_stdout(
                 ensure!(
                     value.get("control_sequence").is_none(),
                     "compute_unexpected_control_sequence"
+                );
+            }
+            if let Some(progress) = progress {
+                progress.observe(&value)?;
+            } else {
+                ensure!(
+                    value.get("private_execution").is_none(),
+                    "compute_private_progress"
                 );
             }
             // Only the validated phase label is logged, never raw backend text or data.

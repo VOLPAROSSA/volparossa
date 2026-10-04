@@ -1,5 +1,6 @@
 //! Real signed provider framing and protected Unix I/O; no model execution is simulated.
 
+mod code_proposal;
 mod derived;
 mod eligibility;
 mod principle;
@@ -44,6 +45,7 @@ fn capabilities() -> Capabilities {
         document_inference_v2: false,
         derived_inference_v3: false,
         principle_inference_v4: false,
+        code_proposal_v6: false,
         successor_activation_v1: false,
     }
 }
@@ -262,10 +264,12 @@ fn attachment(
         endpoint: ProviderEndpoint::new("provider.example", 18080).unwrap(),
         trusted_publishers: BTreeSet::from([publisher.verifying_key().to_bytes()]),
         model_fingerprint: capabilities().model_fingerprint,
+        code_model_profile: None,
         task_derivation_v1: true,
         document_inference_v2: false,
         derived_inference_v3: false,
         principle_inference_v4: false,
+        code_proposal_v6: false,
         successor_activation_v1: false,
         enabled: AtomicBool::new(true),
     });

@@ -78,6 +78,8 @@ or go directly to a topic when you already know what you need.
 | [Mailbox import confirmation](services/MAILBOX_IMPORT_CONFIRMATION.md) | When an application may confirm message import. |
 | [Unbound fallback](network/UNBOUND_FALLBACK.md) | Resolver lifecycle and bounded DNS-cache misses. |
 | [Decentralized agents](services/DECENTRALIZED_AGENTS.md) | Training, public peer tasks, models, privacy and mutual review. |
+| [Cooperative Code evidence](COOPERATIVE_CODE.md) | Passed bounded public code repair and the separate incomplete native OpenCode trial. |
+| [Cooperative browser evidence](COOPERATIVE_BROWSER.md) | Public peer execution, source-bound trials and remaining answer-completion limits. |
 | [Whitelist](privacy/WHITELIST.md) | Current destination-policy authority and enforcement. |
 | [Repository maintenance](services/REPOSITORY_MAINTENANCE.md) | Autonomous maintenance and authorized client-update design. |
 

@@ -19,6 +19,7 @@ fn query() -> rpc::EligibilityQuery {
         require_document_inference_v2: true,
         require_derived_inference_v3: true,
         require_principle_inference_v4: false,
+        require_code_proposal_v6: false,
     }
 }
 
@@ -68,6 +69,7 @@ fn observation(seed: u8, adapter: bool) -> ([u8; 32], rpc::Eligibility) {
                 document_inference_v2: true,
                 derived_inference_v3: true,
                 principle_inference_v4: false,
+                code_proposal_v6: false,
                 successor_activation_v1: false,
             },
         },

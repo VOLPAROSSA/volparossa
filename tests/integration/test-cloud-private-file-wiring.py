@@ -65,7 +65,11 @@ class CloudSnapshotWiring(unittest.TestCase):
         for value in ("CLOUD_SOURCE=/opt/volparossa-cloud", "CLOUD_NODE=/opt/volparossa-node/bin/node",
                       "CLOUD_REVISION=63bba5d1163a69e1ee6b4218c9e7462d941f22f7"):
             self.assertIn(value, guest)
-        self.assertIn('sudo -n -- env "$@" ./tests/integration/kvm-alpha-topology.sh', guest)
+        selector = runpy.run_path(str(HERE / "test-cooperative-code-vm-contract.py"))
+        self.assertEqual(selector["selected_topology_argv"](SCENARIO),
+            ["-n", "--", "env", "CLOUD_SOURCE=/opt/volparossa-cloud", "CLOUD_NODE=/opt/volparossa-node/bin/node",
+             "CLOUD_REVISION=63bba5d1163a69e1ee6b4218c9e7462d941f22f7", "./tests/integration/kvm-alpha-topology.sh",
+             *selector["common_topology_args"](SCENARIO)])
         self.assertIn('"tests/integration/$scenario-smoke.py" export-names', guest)
 
     def test_exact_export_list_and_timeout_exclude_private_owner_data(self):
