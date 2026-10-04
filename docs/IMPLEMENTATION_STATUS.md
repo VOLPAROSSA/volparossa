@@ -395,7 +395,23 @@ unchanged snapshot-shape parser and Python test script; it does not relax
 validation, assertions, budgets or evidence gates. All eight focused diagnostic
 tests pass. The original failure is retained, with job-log SHA-256
 `1ef3aca56b4052b9b56e2f9a469543e07cfdb1718d5a8706750c286f40f6d41c`.
-New hosted source checks must pass before another live model trial.
+The corrected `6a517b57` source passes Quality and all four CodeQL analyses.
+The subsequent original [Code run37228603308](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37228603308)
+on Code `714904a3ec452b8e10d8b40be6ac85107606ca3b` and that core remains
+**failed** as a coding trial. Actual provisioning succeeds, but the 4,572-token
+prompt's first forward begins at 19,672 ms and does not complete before the
+unchanged 600-second deadline. No token, tool call, edit or coding-test success is
+recorded. AVX2 is reported, while AVX512-BF16 and AMX-BF16 are not; these flags do
+not establish the executed kernel or the cause of the delay.
+
+The terminal-error correction is exercised by the real worker: exactly one
+request returns `execution_budget_exceeded` after confirmed cleanup, with no
+automatic retry. This narrower behavior passes; native coding remains incomplete.
+Private/service/QEMU/scratch cleanup passes and normalized outer routes/DNS match,
+not raw-byte identity. Original 11-file ZIP SHA-256:
+`fabcc8ba08f47f28f85614b645679654b70f83f02c85c4f8be8722c0d1d5978c`;
+job111513342870 log SHA-256:
+`6de3c4d41e1346582dc045248b25bbbf353125691f7c4e2ec191be8a8bb0e27f`.
 
 The first hosted Code trial
 [`37204436941`](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37204436941)
