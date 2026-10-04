@@ -11,11 +11,11 @@ detailed evidence ledger, including historical failures—not an installation gu
 [Original v1 scorecard](#fixed-alpha-v1-scorecard) ·
 [Completion requirements](#definition-of-done)
 
-Last updated: 2026-10-04
+Last updated: 2026-10-05
 
 ## Current integration and active work
 
-### Bank and Transaction layer research
+### Bank and Transaction layer implementation
 
 The 2026-10-04 user extension adds VOLPAROSSA Bank and a reusable Transaction-layer.
 The [design](services/TRANSACTION_LAYER.md) separates portfolio construction,
@@ -24,7 +24,9 @@ and authorized corrections. Research prototypes are isolated from the daemon;
 they accept no real funds and provide no distributed or cryptographic settlement.
 Live payments, custody, financial gateway integration, confidential AML review,
 price discovery and recovery of forwarded funds remain unimplemented. Research
-tests do not satisfy these functional requirements.
+tests do not satisfy these functional requirements. Research is a first stage,
+not the requested endpoint: the core is required to provide working reusable
+transaction infrastructure and the Bank application must connect to it.
 
 Nine offline transaction-state tests pass: exact integer conservation, scoped
 simulation authority, reservations, duplicate IDs, external uncertainty, bounded
@@ -33,6 +35,33 @@ All state and authority are single-process test inputs; restart-safe idempotency
 distributed consensus and actual recovery are not proved. The separate Bank
 arithmetic prototype has nine passing tests for the confirmed ROIC × FCF-yield
 rule and configured ownership headroom, not investment performance or compliance.
+
+The new `volparossa-transaction` workspace crate implements owner-local durable
+accounting with separately enrolled Ed25519 financial test keys, canonical signed
+commands, exact integer TEST units, reserve/commit/cancel and historical receipts.
+The accepted original bytes, permanent operation ID/nonce, balances and receipt
+are committed atomically in SQLite. Exact retries after reopening return the
+original receipt without another debit, including after the command expires.
+Completion slots are reserved so exhausting the journal cannot strand already
+accepted reservations. No production daemon endpoint or real-asset adapter is
+enabled; a local database and signatures are not distributed consensus.
+
+Nine targeted tests pass, independently repeated by root: two conflicting local
+writers; invalid signature/payer/domain/encoding; durable ID/nonce conflicts;
+maximum integer supply; private files/sidecars; 512 reserves followed by all 512
+completions; and actual subprocess kills both before and after SQLite commit,
+with reopen and exact retry. The one marked-ignored test is the child entrypoint
+actually invoked by the crash test, not a skipped functional requirement.
+The locked/offline all-target compile passes. The real offline example separately
+passes reserve, commit, cancel and two reopens, ending with 30/70 available units
+and zero reserved; reusing its directory is refused without changing the database.
+Directory/database modes are 0700/0600. Independent bounded source review found
+no blocker. Full source CI is still required; no modern local Clippy pass is claimed.
+
+This durable slice has no network, gateway, encryption at rest, consensus,
+distributed finality, external reconciliation, corrections or AML capability.
+The older isolated experiment's simulated external/correction operations are not
+features of the durable API. See the [executable core example](services/TRANSACTION_LAYER.md#durable-test-unit-core).
 
 ### Eligible controls in route preselection
 

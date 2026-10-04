@@ -1,11 +1,12 @@
-# Transaction layer research
+# Transaction layer: implementation and research
 
 [Documentation](../README.md) · [Bank application](https://github.com/VOLPAROSSA/volparossa-bank)
 
-Requested on 2026-10-04. The Transaction-layer is a proposed reusable financial
-service for the core, not a payment requirement for network participation. Current
-work is isolated research. No daemon endpoint, real-money ledger, licensed
-financial service or external financial adapter is active.
+Requested on 2026-10-04. The Transaction-layer is required reusable functionality
+for the core, not a payment requirement for network participation. Research and
+test-value trials are implementation stages, not the final deliverable. No daemon
+endpoint, real-money ledger, licensed financial service or external financial
+adapter is active.
 
 ## Responsibility boundaries
 
@@ -86,7 +87,7 @@ need gateway/legal recovery or compensation; a shortfall remains visible until
 funds actually return. Privacy, recoverability, availability and finality impose
 real trade-offs, not a guarantee that every illegal payment can be unwound.
 
-## Isolated prototype and next proof
+## Isolated prototype and implementation sequence
 
 `research/transaction-layer` is a standalone, dependency-free Rust state-machine
 experiment. It is deliberately outside the production Cargo workspace and has no
@@ -99,9 +100,56 @@ bounded compensating corrections. It is not a functioning distributed ledger.
 cargo test --offline --manifest-path research/transaction-layer/Cargo.toml
 ```
 
-The next executable milestone is a disposable multi-peer test against a selected
-existing settlement protocol: conflicting spends, restart, partition and dishonest
-validator behavior, exact balance conservation and independently authorized
-correction. Gateway sandboxes and paper portfolios follow. Real money remains
+The first durable core slice replaces caller-supplied authority markers and volatile state
+with signed, explicitly fictitious-unit commands and durable local accounting:
+reserve, commit, cancel, inspect and safely retry after restart. A local store is
+one building block, **not financial consensus**. It must not let two independent
+copies of the database each claim authority over the same spendable balance.
+
+### Durable test-unit core
+
+`crates/volparossa-transaction` provides the local `Store` and `SignedCommand` API.
+Accounts are explicitly initialized with separate financial test public keys and
+an immutable initial supply. The unit is fixed to `volparossa.test.unit.v1`;
+there is no configurable currency, security, later mint or financial adapter.
+
+Each canonical signed command binds its ledger, payer, exact operation, amount
+or reservation, validity interval and nonce. Reserving removes available units;
+committing credits the original recipient; cancelling returns only an uncommitted
+reservation. SQLite records the change, original signed bytes and historical
+receipt in the same durable transaction. An identical accepted retry returns its
+original receipt, including after expiry; it does not debit again or imply that
+the receipt's historical reservation state is still current.
+
+This is **owner-local** storage and authorization, with a private directory and
+database. File permissions are not encryption at rest or protection from the
+device administrator. Neither a copied database nor a signature establishes
+distributed finality. No network service, ordinary participation setting or
+agent request activates these accounts. Corrections, external outcomes and
+private financial review are not yet implemented in this durable API.
+
+The offline example exercises signed reserve/commit/cancel, reopening the store,
+expired exact retries and rejection of cancellation after commit. Supply a new
+absolute directory whose parent already exists; existing stores are never adopted:
+
+```sh
+cargo test --locked --offline -p volparossa-transaction
+cargo run --locked --offline -p volparossa-transaction --example durable_transfer -- /absolute/path/to/new-test-ledger
+```
+
+The example retains only its private test database. Its ephemeral test keys are
+not saved, so it is not a wallet setup or a way to continue making transfers.
+Process-crash checks are separate tests; ordinary close/reopen is not crash proof.
+
+### Distributed milestone still required
+
+The subsequent distributed milestone uses a selected existing settlement/order
+protocol in a disposable multi-peer test: conflicting spends, restart, partition
+and dishonest validator behavior, exact balance conservation and independently
+authorized correction. Signed commands and local serialization alone do not pass
+that milestone. ILPv4 can connect ledgers, but does not supply their underlying
+settlement or membership: [ILPv4 specification](https://interledger.org/developers/rfcs/interledger-protocol/).
+
+Gateway sandboxes, paper portfolios and Bank integration follow. Real money remains
 disabled until legal classification, custody, gateway authority and safeguards
 are established. General network membership never activates financial services.
