@@ -43,7 +43,8 @@ UI_PARENT_STAGES = frozenset(("not_started", "service_start", "service_readiness
     "ui_contract", "service_shutdown", "staging_cleanup", "complete", "unreported"))
 EXPORT_NAMES = tuple(name for name in CLOUD["EXPORT_NAMES"] if not name.startswith("cloud-private-file-")) + (
     "cloud-private-upload-smoke.json", "cloud-private-upload-evidence.json",
-    "cloud-private-upload-provision.json", "cloud-private-upload-route-diagnostic.json")
+    "cloud-private-upload-provision.json", "cloud-private-upload-route-diagnostic.json",
+    "cloud-private-upload-readiness.json")
 FALSE_CLAIMS = CLOUD["FALSE_CLAIMS"] + ("general_writable_sync_proven", "independent_device_recovery_proven")
 UI_STAGES = frozenset(("input", "browser_start", "locked_ui", "wrong_token", "unlock", "upload_menu",
     "file_selection", "upload_commit", "reload", "original_download_1", "original_download_2", "logout", "cleanup"))
@@ -51,6 +52,105 @@ UI_FAILURE_KINDS = frozenset(("condition_timeout", "transport_timeout", "transpo
     "browser_command", "subprocess_error", "boundary_failed"))
 UI_FAILURE_FLAGS = ("original_file_input_used", "upload_201_observed", "uploaded_file_listed",
     "browser_stopped_and_joined", "private_profile_removed")
+
+INVENTORY_ROLES = tuple(f"relay{i}" for i in range(6)) + ("exit", "exit2")
+PRESELECTION_CODES = ("PRESELECTION_SAMPLE_NO_EXIT", "PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS",
+    "PRESELECTION_SAMPLE_INVALID_POLICY", "PRESELECTION_SAMPLE_INVALID_SNAPSHOT", "PRESELECTION_SAMPLE_ENTROPY")
+
+
+def expected_inventory(peers):
+    # Identical predicate to the discovered cooperative fixture: exact fixture
+    # identities and roles, never an arbitrary count of unknown peers.
+    names = ("client", "bootstrap1", "bootstrap2", *INVENTORY_ROLES)
+    require(set(peers) == set(names) and all(isinstance(peers[name], str)
+        and re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,128}", peers[name]) for name in names)
+        and len(set(peers.values())) == len(names), "invalid expected fixture identities")
+    return {peers[name]: "0b010" if name.startswith("relay") else "0b100" for name in INVENTORY_ROLES}
+
+
+def parse_inventory(raw):
+    if not isinstance(raw, bytes) or len(raw) > 1048576:
+        return None
+    try:
+        lines = raw.decode("ascii").splitlines()
+    except UnicodeError:
+        return None
+    if len(lines) > 4096:
+        return None
+    observed = {}
+    for line in lines:
+        match = re.fullmatch(r"([1-9A-HJ-NP-Za-km-z]{32,128})\troles=(0b[01]{3})\treachability=([0-3])", line)
+        if match is None or match[1] in observed:
+            return None
+        observed[match[1]] = match[2]
+    return observed
+
+
+def await_inventory(work, binary):
+    require(work.is_absolute() and work.resolve() == work and work.is_dir(), "invalid guest work directory")
+    peers = read(work / "a01-expected-peers.json")
+    expected = expected_inventory(peers)
+    command = [binary, "--control-socket", str(work / "runtime-client/control/agent.sock"), "peers"]
+    deadline = time.monotonic() + 60
+    record = dict(version=1, scope="last_valid_inventory_not_route_readiness", deadline_seconds=60,
+        attempts=0, query_timeouts=0, query_nonzero=0, invalid_replies=0,
+        last_query_outcome="none", last_valid_presence=None, ready=False)
+    while (remaining := deadline - time.monotonic()) > 0:
+        record["attempts"] += 1
+        try:
+            # The actual CLI bounds its RPC frame/IDs/entry count before printing.
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    check=False, timeout=min(2, remaining))
+            observed = parse_inventory(result.stdout) if result.returncode == 0 else None
+            if result.returncode != 0:
+                record["query_nonzero"] += 1
+                record["last_query_outcome"] = "nonzero"
+            elif observed is None:
+                record["invalid_replies"] += 1
+                record["last_query_outcome"] = "invalid_reply"
+            else:
+                record["last_valid_presence"] = {name: observed.get(peers[name]) == expected[peers[name]]
+                    for name in INVENTORY_ROLES}
+                record["last_query_outcome"] = "complete" if all(record["last_valid_presence"].values()) else "partial"
+            if time.monotonic() < deadline and record["last_query_outcome"] == "complete":
+                record["ready"] = True
+                return record
+        except subprocess.TimeoutExpired:
+            record["query_timeouts"] += 1
+            record["last_query_outcome"] = "timeout"
+        except OSError:
+            record["last_query_outcome"] = "os_error"
+            return record
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(0.1, remaining))
+    return record
+
+
+def preselection_events(path):
+    # Read only the existing private cleanup capture. Do not export IDs, timestamps
+    # or arbitrary event strings, or attribute a retained ring to the last attempt.
+    value = dict(version=1, scope="retained_client_log_ring_not_last_attempt_proof",
+        state="absent", limit=400, records=None, counts=None, unrecognized_reason_records=None)
+    try:
+        info = path.lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= 131072
+            and stat.S_IMODE(info.st_mode) == 0o600 and info.st_uid == os.geteuid(), "invalid event capture")
+        lines = path.read_text(encoding="ascii").splitlines()
+        require(len(lines) <= 400, "event ring exceeded")
+        counts, unknown, previous = dict.fromkeys(PRESELECTION_CODES, 0), 0, 0
+        for line in lines:
+            match = re.fullmatch(r"([0-9]{1,20})\tlevel=([0-9])\tevent=([A-Z0-9_]{1,96})\tsession=[0-9a-f]{0,64}\tpath=(?:-|[0-9]{1,10})", line)
+            require(match is not None and int(match[1]) > 0 and int(match[1]) >= previous, "invalid event record")
+            previous = int(match[1])
+            if match[3] in counts: counts[match[3]] += 1
+            elif match[3].startswith("PRESELECTION_SAMPLE_"): unknown += 1
+        value.update(state="valid", records=len(lines), counts=counts, unrecognized_reason_records=unknown)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, UnicodeError):
+        value["state"] = "invalid"
+    return value
 
 
 def tools():
@@ -511,6 +611,13 @@ def validate_report(value, revision):
 
 
 def main(args):
+    if len(args) == 3 and args[0] == "await-inventory":
+        value = await_inventory(Path(args[1]), args[2])
+        print(json.dumps(value, sort_keys=True))
+        if not value["ready"]: raise SystemExit(1)
+        return
+    if len(args) == 2 and args[0] == "preselection-events":
+        print(json.dumps(preselection_events(Path(args[1])), sort_keys=True)); return
     if args == ["export-names"]:
         print("\n".join(EXPORT_NAMES)); return
     if len(args) == 10 and args[0] == "prepare":

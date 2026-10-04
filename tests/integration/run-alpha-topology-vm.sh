@@ -867,6 +867,7 @@ CLOUD_NAMES = (FRAGMENTS_NAMES - {"private-storage-fragments-smoke.json", "priva
 UPLOAD_NAMES = (FRAGMENTS_NAMES - {"private-storage-fragments-smoke.json", "private-storage-fragments-evidence.json"}) | {
     "cloud-private-upload-smoke.json", "cloud-private-upload-evidence.json", "cloud-private-upload-provision.json",
     "cloud-private-upload-route-diagnostic.json",
+    "cloud-private-upload-readiness.json",
 }
 
 

@@ -26,6 +26,12 @@ cloud_private_upload_run() {
         fail CLOUD_PROVISION_MISSING
     fi
     install -o root -g root -m 0600 "$CLOUD_SOURCE/provision.json" "$WORK/cloud-private-upload-provision.json"
+    # This sibling skips A01's discovery barrier. Wait for its exact signed
+    # advertisement inventory before the unchanged real route-selection attempt.
+    PHASE=cloud-private-upload-inventory
+    python3 -B "$source_directory/tests/integration/cloud-private-upload-smoke.py" \
+        await-inventory "$WORK" "$binary_directory/volparossa" \
+        >"$WORK/cloud-private-upload-readiness.json" || fail CLOUD_INVENTORY_UNAVAILABLE
     private_storage_fragments_run
     # The worker has proved private cleanup; root removes only the empty parent.
     rmdir "$storage_owner_parent" || fail CLOUD_OWNER_PARENT_CLEANUP_FAILED
@@ -35,14 +41,16 @@ cloud_private_upload_finalize_report() {
     cloud_status=$1
     optional_json_evidence "$WORK/cloud-private-upload-evidence.json" >"$WORK/handoff-report-evidence.part"
     optional_json_evidence "$WORK/a15-evidence.json" >"$WORK/handoff-report-host.part"
+    python3 -B "$source_directory/tests/integration/cloud-private-upload-smoke.py" \
+        preselection-events "$WORK/logs-client.txt" >"$WORK/cloud-preselection.part" || return 1
     jq -cn --arg revision "$expected_commit" --arg run "$RUN_ID" --arg phase "$PHASE" --arg blocker "$OBSERVED_BLOCKER" \
         --argjson status "$cloud_status" --slurpfile evidence "$WORK/handoff-report-evidence.part" \
         --slurpfile host "$WORK/handoff-report-host.part" --argjson complete "$CLEANUP_COMPLETE" \
-        --argjson remaining "$REMAINING_OWNED_OBJECTS" '
+        --argjson remaining "$REMAINING_OWNED_OBJECTS" --slurpfile selection "$WORK/cloud-preselection.part" '
       {schema_version:1,report_kind:"volparossa-cloud-private-upload",source_revision:$revision,run_id:$run,
        phase:$phase,runner_exit_status:$status,cloud:$evidence[0],
        success:($status == 0 and $evidence[0].success == true and $complete and $remaining == 0 and $host[0].unchanged == true),
-       observed_blocker:(if $blocker == "NONE" then null else $blocker end),
+       observed_blocker:(if $blocker == "NONE" then null else $blocker end),preselection_events:$selection[0],
        cleanup:{complete:$complete,remaining_owned_objects:$remaining},host_state:($host[0] | del(.acceptance_id)),
        scope:"Pinned Cloud original Files/Uppy upload through real owner encryption and protected fragments. Authenticated synthetic DAV baseline source stopped; both local ciphertexts removed; service stopped and restarted; provider A offline; two baseline restores and two original UI downloads. Exact retained physical charges, all-copy retirement and joined private service/browser cleanup. No full OpenCloud accounts, sharing, writable synchronization or general server-independent availability proof."}' \
         >"$WORK/cloud-private-upload-smoke.json" || return 1

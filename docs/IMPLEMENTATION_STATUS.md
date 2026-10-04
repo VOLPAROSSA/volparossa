@@ -413,6 +413,22 @@ feature branches are not implied to be integrated into `main`.
   unknown values never expose raw errors. Original success, cleanup, resource and
   deadline gates are unchanged. Focused process/contract checks are not a live
   UI/peer-storage pass.
+  The original [run `37210057593`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37210057593)
+  on `17e1bf3aa4cf4528dfcc8405db7e6e2c8b5cdfe4` remains **failed** before
+  storage preparation: 24 Connect attempts / 23 transient retries end in
+  `NO_ELIGIBLE_PATHS`, with no path polls, owner encryption or UI execution.
+  Cleanup is complete with zero owned objects and unchanged guest-root network
+  state. ZIP SHA-256 `21fd3819a2e9e4080390fc515c70a42c72e7d5fd67ad6ef1101aa923c73e4519`;
+  original job `111459244322` log SHA-256
+  `7799de27d7a9d7374d3cfcf742cdbbd3d4f336c545b371b15589954933a97236`.
+  The original archive cannot distinguish missing eligible exits from insufficient
+  diverse relays. The next readiness candidate waits up to the existing 60-second
+  fixture inventory budget for the exact six relay / two exit advertisements,
+  retaining closed query outcomes and role-presence booleans. It also summarizes
+  the existing cleanup log's fixed sampler reasons without exporting raw records.
+  Inventory presence is not usable-route proof; this is not a demonstrated cause
+  or fix of the original failure. Connect refusal/retry policy, application success
+  criteria, worker budgets and cleanup gates remain unchanged.
   The candidate keeps the
   preceding read-only proof/pins unchanged and requires an original Files/Uppy
   upload of 262,145 synthetic bytes, actual owner GPG encryption, three 128-KiB

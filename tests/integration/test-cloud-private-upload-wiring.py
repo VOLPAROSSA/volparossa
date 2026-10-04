@@ -48,7 +48,7 @@ class UploadWiring(unittest.TestCase):
         module = OLD["diagnostics"]()
         names = set(CHECK["EXPORT_NAMES"])
         self.assertEqual(names, module["UPLOAD_NAMES"])
-        self.assertEqual(len(names), 40)
+        self.assertEqual(len(names), 41)
         self.assertNotIn("cloud-private-file-smoke.json", names)
         with tempfile.TemporaryDirectory(prefix="cloud-upload-export-") as temporary:
             base = Path(temporary)
