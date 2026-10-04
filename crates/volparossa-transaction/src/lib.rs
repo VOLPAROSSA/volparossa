@@ -3,7 +3,7 @@
 //! This is a reusable core store, not distributed settlement, money, securities,
 //! a financial gateway or a daemon endpoint. Separate financial test keys sign
 //! exact commands; network identity and model output provide no authorization.
-//! SQLite serializes local transitions. A future reviewed ordering protocol must
+//! `SQLite` serializes local transitions. A future reviewed ordering protocol must
 //! supply its own membership/finality proof rather than call this local order
 //! distributed consensus. Owner-private files are not encrypted-at-rest storage.
 
@@ -27,7 +27,7 @@ pub type AccountId = [u8; 32];
 pub type OperationId = [u8; 32];
 /// Only supported unit; this cannot be configured to a currency or security.
 pub const TEST_UNIT: &str = "volparossa.test.unit.v1";
-/// Exact integer/SQLite bound, including the entire initial supply.
+/// Exact integer/`SQLite` bound, including the entire initial supply.
 pub const MAX_UNITS: u64 = i64::MAX.unsigned_abs();
 /// Hard bound on explicitly initialized accounts.
 pub const MAX_ACCOUNTS: usize = 64;
@@ -172,7 +172,7 @@ pub struct Balance {
     pub reserved_units: u64,
 }
 
-/// A private SQLite-backed local transition executor. No background work occurs.
+/// A private `SQLite`-backed local transition executor. No background work occurs.
 pub struct Store {
     connection: Connection,
     _directory: File,
@@ -198,6 +198,25 @@ impl Store {
     /// Rejects unsafe files, wrong schema, corrupted accounting or database failure.
     pub fn open(path: &Path) -> Result<Self, Error> {
         disk::open(path)
+    }
+
+    /// Domain of this opened local ledger; not an account or execution authority.
+    pub fn ledger_id(&self) -> LedgerId {
+        self.ledger_id
+    }
+
+    /// Inspect signed terms without applying them or duplicating the wire parser.
+    /// Verifies canonical encoding, signature, ledger domain and payer enrollment.
+    /// This is not admission: validity at execution time, balances, replay and
+    /// reservation state are checked independently by `apply`. Expired historical
+    /// commands remain inspectable. No receipt is created and no nonce consumed.
+    ///
+    /// # Errors
+    /// Rejects malformed, unauthenticated, cross-ledger or unenrolled commands.
+    pub fn inspect(&self, bytes: &[u8]) -> Result<Command, Error> {
+        let verified = wire::verify(bytes, self.ledger_id)?;
+        account(&self.connection, &verified.command.payer)?;
+        Ok(verified.command)
     }
 
     /// Apply one independently authenticated command and atomically store its receipt.

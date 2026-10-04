@@ -1,4 +1,4 @@
-//! Real SQLite and Ed25519 tests with fictional units and inert child processes.
+//! Real `SQLite` and Ed25519 tests with fictional units and inert child processes.
 use crate::*;
 use ed25519_dalek::SigningKey;
 use std::{
@@ -60,6 +60,60 @@ fn reserve(id: u8, units: u64) -> Vec<u8> {
             units,
         },
     )
+}
+
+#[test]
+fn inspection_verifies_terms_without_admission_or_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut ledger = store(&temp.path().join("ledger"));
+    assert_eq!(ledger.ledger_id(), [9; 32]);
+    let input = reserve(1, 70);
+    let terms = ledger.inspect(&input).unwrap();
+    assert_eq!(terms.operation_id, [1; 32]);
+    assert_eq!(terms.payer, owner(1));
+    assert_eq!(
+        terms.action,
+        Action::Reserve {
+            recipient: owner(2),
+            units: 70
+        }
+    );
+    // Inspection is deliberately not a quote, live authorization or reservation.
+    assert!(ledger.inspect(&reserve(2, 101)).is_ok());
+    assert!(matches!(ledger.apply(&input, 300), Err(Error::NotLive)));
+    assert_eq!(ledger.inspect(&input).unwrap(), terms);
+    assert_eq!(
+        ledger.status(owner(1)).unwrap(),
+        Balance {
+            available_units: 100,
+            reserved_units: 0
+        }
+    );
+    assert!(ledger.operation([1; 32]).unwrap().is_none());
+    assert!(ledger.operation([2; 32]).unwrap().is_none());
+    let cross = SignedCommand::sign([8; 32], &key(1), terms, 100, 200, [1; 32])
+        .unwrap()
+        .encode();
+    assert!(matches!(ledger.inspect(&cross), Err(Error::WrongLedger)));
+    let foreign = SignedCommand::sign(
+        [9; 32],
+        &key(4),
+        Command {
+            payer: owner(4),
+            ..terms
+        },
+        100,
+        200,
+        [1; 32],
+    )
+    .unwrap()
+    .encode();
+    assert!(matches!(ledger.inspect(&foreign), Err(Error::NotFound)));
+    let mut forged = input.clone();
+    *forged.last_mut().unwrap() ^= 1;
+    assert!(ledger.inspect(&forged).is_err());
+    assert_eq!(ledger.apply(&input, 110).unwrap().sequence, 1);
+    assert_eq!(ledger.inspect(&input).unwrap(), terms);
 }
 
 #[test]

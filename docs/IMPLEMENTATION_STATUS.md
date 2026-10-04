@@ -46,7 +46,7 @@ Completion slots are reserved so exhausting the journal cannot strand already
 accepted reservations. No production daemon endpoint or real-asset adapter is
 enabled; a local database and signatures are not distributed consensus.
 
-Nine targeted tests pass, independently repeated by root: two conflicting local
+Ten targeted tests pass, independently repeated by root: two conflicting local
 writers; invalid signature/payer/domain/encoding; durable ID/nonce conflicts;
 maximum integer supply; private files/sidecars; 512 reserves followed by all 512
 completions; and actual subprocess kills both before and after SQLite commit,
@@ -56,7 +56,18 @@ The locked/offline all-target compile passes. The real offline example separatel
 passes reserve, commit, cancel and two reopens, ending with 30/70 available units
 and zero reserved; reusing its directory is refused without changing the database.
 Directory/database modes are 0700/0600. Independent bounded source review found
-no blocker. Full source CI is still required; no modern local Clippy pass is claimed.
+no blocker. A read-only `Store::inspect` API verifies signed command terms and
+payer enrollment for application retry journals without duplicating the wire
+parser. It does not admit a command, consume a nonce or bypass `apply` checks.
+Its test covers wrong-ledger/unenrolled/forged commands, unchanged balances and
+expired but inspectable terms; `ledger_id` exposes the exact local store domain.
+
+The original source CI at `62aafe025151894b4f37ca23962028fd339ba6b0`
+(`37238682954`, job `111542803602`) stopped on two Clippy documentation-format
+errors before workspace tests ran. The original log is retained (SHA-256
+`03a9d0da90c958841ff03d49a6974ce4221f38abc94189fbc355bb47a294b550`).
+The same documentation spelling is corrected in the test module as well. Full
+source CI is still required for the follow-up; no modern local Clippy pass is claimed.
 
 This durable slice has no network, gateway, encryption at rest, consensus,
 distributed finality, external reconciliation, corrections or AML capability.

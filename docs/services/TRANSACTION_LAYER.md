@@ -121,6 +121,13 @@ receipt in the same durable transaction. An identical accepted retry returns its
 original receipt, including after expiry; it does not debit again or imply that
 the receipt's historical reservation state is still current.
 
+Applications can use `Store::inspect` to verify stored signed command terms and
+payer enrollment before retrying, and `ledger_id` to bind their private intent
+record to the opened ledger. Inspection does not check execution-time validity,
+balances or reservation state and cannot authorize a mutation; `apply` still
+performs those checks. This also lets an application inspect an expired original
+command while reconciling its historical receipt.
+
 This is **owner-local** storage and authorization, with a private directory and
 database. File permissions are not encryption at rest or protection from the
 device administrator. Neither a copied database nor a signature establishes

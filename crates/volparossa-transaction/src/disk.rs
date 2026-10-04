@@ -1,4 +1,4 @@
-//! Private files and SQLite atomicity, following private-storage's existing patterns.
+//! Private files and `SQLite` atomicity, following private-storage's existing patterns.
 use crate::{
     Error, GenesisAccount, LedgerId, MAX_ACCOUNTS, MAX_OPERATIONS, MAX_UNITS, Store, TEST_UNIT,
 };
