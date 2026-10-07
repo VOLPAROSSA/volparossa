@@ -6,7 +6,6 @@ use proto::{
     google::protobuf::Timestamp,
     tendermint::abci::{self, request::Value as Q, response::Value as R},
 };
-use rand_core::{OsRng, RngCore as _};
 use std::{
     fs,
     os::unix::fs::{MetadataExt as _, PermissionsExt as _},
@@ -88,7 +87,7 @@ fn ledger(app: &mut Application) -> [u8; 32] {
 }
 fn signed(ledger: [u8; 32], id: u8, action: Action) -> Vec<u8> {
     let mut nonce = [0; 32];
-    OsRng.fill_bytes(&mut nonce);
+    getrandom::fill(&mut nonce).expect("operating-system randomness unavailable");
     SignedCommand::sign_ordered(
         ledger,
         &key(1),

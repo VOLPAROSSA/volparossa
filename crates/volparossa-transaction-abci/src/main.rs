@@ -2,7 +2,6 @@
 #![forbid(unsafe_code)]
 use clap::{Parser, Subcommand};
 use ed25519_dalek::SigningKey;
-use rand_core::{OsRng, RngCore as _};
 use std::{
     fs::File,
     io::Read as _,
@@ -116,9 +115,7 @@ fn sign(args: &SigningArgs, action: Action) -> Result<(), Error> {
     let key = SigningKey::from_bytes(&seed);
     seed.fill(0);
     let mut nonce = [0; 32];
-    OsRng
-        .try_fill_bytes(&mut nonce)
-        .map_err(|_| Error::Configuration)?;
+    getrandom::fill(&mut nonce).map_err(|_| Error::Configuration)?;
     let bytes = SignedCommand::sign_ordered(
         decode_id(&args.ledger)?,
         &key,

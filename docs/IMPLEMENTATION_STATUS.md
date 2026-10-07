@@ -134,6 +134,29 @@ verbatim schema/license inputs pass offline digest and closed-import verificatio
 A guest-only four-validator fixture is being integrated; no actual Comet/Rust
 interoperability, partition or distributed recovery result is claimed yet.
 
+The initial adapter source checks remain recorded as failures: `ac3e6632`
+failed a statement-order lint and `97aeaddc` a test semicolon lint. After those
+narrow corrections, [Quality 37633299184](https://github.com/VOLPAROSSA/volparossa/actions/runs/37633299184)
+on `311a91bf` passed compilation/Clippy and executable tests, then failed nine
+generated documentation examples: Protobuf's C, Java and Python examples for
+Timestamp and Duration were interpreted as Rust. Original job `112832869946`
+log SHA-256:
+`4a3788e96036408a611fb4b5082479a19e71dd2b0889e6e3252ec5742ff503d0`.
+The same source's CodeQL aggregate check `112833145423` reported two hard-coded
+nonce findings. Both buffers were already overwritten with OS randomness before
+use; the production path propagated entropy errors before signing. Original
+annotations are retained, not dismissed.
+
+The follow-up uses the existing pinned `getrandom::fill` API directly, whose
+fallible entropy flow is recognized by the analyzer. No nonce constant, fallback,
+new dependency version or suppressed query is introduced. Generation omits only
+the two imported types' foreign-language comments and links their pinned original
+documentation instead. All thirteen upstream inputs remain byte-identical; no
+owned Rust test or crate-wide documentation gate is disabled. Full package tests
+(thirteen executable tests and the documentation phase), strict package Clippy
+and the five vendor-verification tests pass on the checked local toolchains.
+Exact-source hosted checks and the first actual validator trial remain pending.
+
 The [next distributed milestone](services/TRANSACTION_LAYER.md#distributed-test-execution)
 selects source-pinned CometBFT with four fixed TEST validators. Ordered local
 execution does not itself establish consensus: actual conflicting spends,
