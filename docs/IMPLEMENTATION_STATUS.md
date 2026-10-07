@@ -81,6 +81,30 @@ independent publication approval and regression-based
 rollback remain open. A valid publisher signature is not by itself permission to
 change browser policy; the current command requires that authorization separately.
 
+The explicit `content filter-serve` foreground broker now reuses that same verifier
+for one owner-configured publisher/name/exact manifest. Its private same-UID Unix
+socket exposes only capabilities, status and fetch; requests cannot select paths,
+URLs, publishers or control operations. It requires an existing cache and an
+independently provisioned private authority file, whose changed or missing bytes
+terminally revoke the running instance. Original signed expiry and an earlier
+owner deadline remain binding across in-memory reuse, including suspend-aware
+process-local clock checks. No listener or retrieval starts without explicit
+execution, and no browser configuration or network participation is enabled.
+
+Sixteen new broker tests and the eleven unchanged snapshot tests pass on Rust
+1.85.0. These include private-socket framing, a complete synthetic local transfer
+through the existing named downloader, mid-fetch revocation, serialization-time
+revocation, expiry, input rejection, immutable reuse and owned socket cleanup.
+A paused-clock socket test bounds an unresponsive agent to the broker's 55-second
+retrieval deadline and checks removal of the temporary download.
+Cache ownership remains checked by the existing agent, which can run under a
+different account; the broker never opens or changes that cache directly.
+They are not an additional protected-peer or combined browser test. The
+[local wire contract](../crates/volparossa/src/content/filter_serve/WIRE.md) describes
+same-account trust, source binding and expiry responsibilities; it does not claim
+extension identity, cross-restart trusted time, publication governance or the
+unfinished Firefox startup/resume filtering barrier.
+
 ### Bank and Transaction layer implementation
 
 The 2026-10-04 user extension adds VOLPAROSSA Bank and a reusable Transaction-layer.

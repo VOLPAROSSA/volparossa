@@ -21,6 +21,7 @@ use zeroize::Zeroizing;
 pub(crate) mod agent_artifact;
 mod browser_download;
 mod custody;
+mod filter_serve;
 mod filter_snapshot;
 mod handoff;
 mod https_download;
@@ -81,6 +82,8 @@ pub(crate) enum Command {
     /// [Adblock Plus 2.0] header, at most 1 MiB and 4096 rules. No comments, options,
     /// exceptions, scriptlets, remote includes or preprocessing directives are supported.
     FilterSnapshot(Box<filter_snapshot::Options>),
+    /// Explicit same-owner read-only broker for one independently authorized public filter snapshot.
+    FilterServe(Box<filter_serve::Options>),
     /// Authenticate HTTPS origin metadata, fetch peer chunks and fill missing ranges via origin.
     FetchHttps(FetchHttps),
     /// Offer one verified HTTPS object as a short-lived localhost browser download.
@@ -559,6 +562,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         }
         Command::FetchName(args) => return named_download::run(&args, socket).await,
         Command::FilterSnapshot(args) => filter_snapshot::run(&args, socket).await?,
+        Command::FilterServe(args) => return filter_serve::run(&args, socket).await,
         Command::FetchHttps(args) => {
             if let Some(output) = &args.local_output {
                 return https_download::run(&args, socket, output).await;
