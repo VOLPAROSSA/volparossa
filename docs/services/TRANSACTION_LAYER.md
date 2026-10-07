@@ -21,7 +21,8 @@ The confirmed portfolio rule is ROIC times FCF-yield with nonnegative inputs. Po
 weights do not establish prices, legal title or redemption guarantees. The Bank
 [research document](https://github.com/VOLPAROSSA/volparossa-bank/blob/main/docs/RESEARCH.md)
 compares Interledger/Open Payments, GNU Taler and governed BFT ledger protocols,
-and records financial/legal boundaries. Protocol selection remains open; neither
+and records financial/legal boundaries. The next TEST-unit milestone selects
+CometBFT for ordering, not for payment gateways or securities ownership. Neither
 Kademlia nor signed advertisements supply financial consensus.
 
 ## Intended versioned interface
@@ -148,15 +149,91 @@ The example retains only its private test database. Its ephemeral test keys are
 not saved, so it is not a wallet setup or a way to continue making transfers.
 Process-crash checks are separate tests; ordinary close/reopen is not crash proof.
 
-### Distributed milestone still required
+### Ordered application foundation
 
-The subsequent distributed milestone uses a selected existing settlement/order
-protocol in a disposable multi-peer test: conflicting spends, restart, partition
-and dishonest validator behavior, exact balance conservation and independently
-authorized correction. Signed commands and local serialization alone do not pass
-that milestone. ILPv4 can connect ledgers, but does not supply their underlying
-settlement or membership: [ILPv4 specification](https://interledger.org/developers/rfcs/interledger-protocol/).
+The new `OrderedStore` API prepares the Rust application for replicated execution;
+it is not a network service or consensus engine. Its database mode and versioned
+signature domain are separate from owner-local `Store`. Genesis binds an explicit
+authority identifier, sorted initial accounts and agreed time into the ledger ID.
+The existing local API and Bank integration remain compatible.
 
-Gateway sandboxes, paper portfolios and Bank integration follow. Real money remains
-disabled until legal classification, custody, gateway authority and safeguards
-are established. General network membership never activates financial services.
+`stage` executes up to 64 commands and 64 KiB of command bytes in memory. It
+returns provisional results and a logical state hash without changing the durable
+database, balances or historical receipts. Ordinary command rejections roll back
+their individual changes; storage failures abort execution. `commit` rechecks the
+unchanged base, reruns the same commands at the agreed timestamp and atomically
+persists the transitions and checkpoint only if results and hash match. A stale
+writer cannot overwrite another committed block. `info` exposes committed state.
+
+Twelve ordered-executor tests and all ten existing local-store tests pass. They
+include real process kills at staging, before commit and after commit; rollback
+of a two-command block when the second command encounters a database error;
+exact replay; mode/domain isolation; timestamp bounds; and detection of altered
+checkpoints, balances and old replay records. Two independent local stores agree
+when given the same input order. That test supplies the order itself and therefore
+does not prove distributed agreement. These application-level checks do not
+replace the multi-validator fixture below.
+
+### Distributed TEST execution
+
+The next implementation target is four independently persisted validators using
+**CometBFT v0.40.0**, pinned to
+`0880b4d378f347ab16e54ec677ff50d803f37d62`, as a separate ordering process.
+The Rust application retains VOLPAROSSA's signed TEST-unit rules. This does not
+introduce a participation token, fees, Cosmos SDK or a new consensus algorithm.
+CometBFT's [Apache-2.0 license](https://github.com/cometbft/cometbft/blob/0880b4d378f347ab16e54ec677ff50d803f37d62/LICENSE)
+and [Go 1.25 toolchain declaration](https://github.com/cometbft/cometbft/blob/0880b4d378f347ab16e54ec677ff50d803f37d62/go.mod)
+must accompany the guest-only source build; no unchecked binary is substituted.
+
+The integration boundary is the official
+[ABCI Protobuf socket interface](https://github.com/cometbft/cometbft/blob/0880b4d378f347ab16e54ec677ff50d803f37d62/proto/tendermint/abci/types.proto),
+with private local sockets and bounded frames. ABCI is the interface between the
+ordering process and the transaction application. Proposal checks must not change
+committed balances. `FinalizeBlock` stages execution and returns deterministic
+results; only `Commit` persists state. After restart, `Info` reports the last
+committed height and application hash. These boundaries are required for
+[CometBFT crash recovery](https://github.com/cometbft/cometbft/blob/0880b4d378f347ab16e54ec677ff50d803f37d62/spec/abci/abci%2B%2B_app_requirements.md#crash-recovery).
+
+Ordered execution must use the agreed block timestamp, not each validator's wall
+clock. Its state hash must cover sorted logical accounts, reservations, permanent
+replay records and the chain/genesis binding, not SQLite file bytes. Local I/O
+failure stops execution; it must not turn into a different transaction decision
+on one validator. Owner-local `Store::apply` must not bypass ordered mode.
+
+The disposable fixture must demonstrate:
+
+- Competing spends submitted to different validators cannot both succeed; honest
+  replicas converge and conserve the original supply.
+- A three-node majority can progress during a 3–1 partition; an isolated validator
+  cannot. A 2–2 split cannot finalize new transactions, and healing restores convergence.
+- Retrying the same signed bytes through another validator, including after expiry,
+  cannot produce another debit.
+- Crashes before and after application commit preserve identical results on replay.
+- A validator that actively equivocates cannot cause conflicting honest outcomes.
+  Adapt the existing [upstream Byzantine harness](https://github.com/cometbft/cometbft/blob/0880b4d378f347ab16e54ec677ff50d803f37d62/consensus/byzantine_test.go)
+  to the real Rust application; a killed process or upstream KVStore test alone is
+  not this evidence.
+
+Use fixed, explicitly configured TEST membership and synthetic data. Validators
+can read replicated commands and account relationships; this fixture does not
+prove confidential financial processing, open membership or protected overlay
+transport. A response from one RPC endpoint is not independently verified finality.
+The client still needs trusted validator membership and verified commit/header
+binding. The four-node service and these distributed acceptance results remain
+unimplemented; deterministic local staging is only their application foundation.
+
+### Bank integration and remaining financial functions
+
+Bank's [first core integration](https://github.com/VOLPAROSSA/volparossa-bank/pull/4)
+retains an immutable signed TEST intent before execution, reconciles the core's
+receipt and safely retries after a crash. It uses the owner-local core, not a
+second Bank ledger or distributed settlement. Ordered submission and verified
+finality must extend this same intent lifecycle.
+
+Gateway sandboxes, private financial review, decentrally established prices and
+independently authorized corrections remain separate implementation work.
+ILPv4 can connect ledgers but does not supply their underlying settlement or
+membership: [ILPv4 specification](https://interledger.org/developers/rfcs/interledger-protocol/).
+Real money remains disabled until legal classification, custody, gateway authority
+and safeguards are established. General network membership never activates
+financial services.

@@ -85,6 +85,47 @@ including the workspace source gates, and all four
 The routine KVM job was skipped; these checks add no distributed settlement or
 network-datapath evidence. The original failed runs remain failure evidence.
 
+The documentation follow-up at `a59eeb581de6a28cb934d7371342e0a01b4bed8c`
+also passed [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/37613205641/job/112765210806)
+and all four [CodeQL analyses](https://github.com/VOLPAROSSA/volparossa/actions/runs/37613200789),
+including the aggregate gate. [PR213](https://github.com/VOLPAROSSA/volparossa/pull/213)
+merged that reviewed slice into main at `d46290d8cb4374d830b11fb70144ebb030c26e33`.
+Its fully integrated remote branch was removed; commit history and the local
+worktree remain intact.
+
+Bank's [PR4](https://github.com/VOLPAROSSA/volparossa-bank/pull/4) is also merged.
+Its separate payment adapter preserves the exact signed intent before executing
+the pinned core, verifies the returned historical receipt and retries without
+re-signing after a crash. It does not duplicate the core ledger. Seven focused
+adapter tests, including actual child-process crashes, and the nine original
+portfolio tests pass in [Bank CI](https://github.com/VOLPAROSSA/volparossa-bank/actions/runs/37613003079/job/112764538873).
+These remain fictitious, owner-local transfers, not peer settlement.
+
+The new [ordered application foundation](services/TRANSACTION_LAYER.md#ordered-application-foundation)
+adds a separate `OrderedStore`, signature domain and genesis-derived ledger ID.
+Memory-only staging and atomic commit preserve agreed block time, permanent
+replay state and a canonical logical hash. Stale writers and owner-local bypass
+are refused. Twelve new tests and all ten original tests pass, independently
+repeated by root, including actual process kills at three commit boundaries and
+rollback of both commands when the second command fails. The two ignored tests
+are child entrypoints actually exercised by their parent crash tests. The example
+compiles; formatting/diff checks pass. An independent full-diff review found no
+blocker. The original [Quality run37620052454](https://github.com/VOLPAROSSA/volparossa/actions/runs/37620052454/job/112787731672)
+on `c5dabd13` failed strict Clippy on two potentially truncating `u64 as usize`
+snapshot-bound conversions; subsequent hosted tests were skipped, not passed.
+The original job log is retained with SHA-256
+`4e542c134b1799920fcd9eeffa2ba7e6a27e29efd50112176d75a1405a1d546a`.
+The follow-up derives both operation-table bounds from one checked conversion,
+returning a store error if the bound cannot fit. It changes no bound, state hash,
+signature domain or ledger transition and suppresses no lint. Hosted checks must
+pass on that follow-up; modern Clippy was not available locally and is not claimed.
+
+The [next distributed milestone](services/TRANSACTION_LAYER.md#distributed-test-execution)
+selects source-pinned CometBFT with four fixed TEST validators. Ordered local
+execution does not itself establish consensus: actual conflicting spends,
+partitions, crash replay, malicious validators and client finality verification
+remain required before distributed execution is complete.
+
 This durable slice has no network, gateway, encryption at rest, consensus,
 distributed finality, external reconciliation, corrections or AML capability.
 The older isolated experiment's simulated external/correction operations are not
