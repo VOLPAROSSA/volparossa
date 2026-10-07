@@ -1283,6 +1283,7 @@ if [ "$scenario" = content-provider ]; then
     for provider_fixture in content-provider-smoke.sh content-provider-smoke.py content-network-smoke.py \
         content-provider-https-smoke.sh content-provider-https-smoke.py content-publication-smoke.sh content-named-smoke.sh \
         content-provider-site-smoke.sh content-provider-site-smoke.py \
+        content-provider-filter-smoke.sh content-provider-filter-smoke.py \
         content-provider-adaptive-smoke.sh content-provider-adaptive-smoke.py content-cancellation-smoke.py; do
         if [ ! -f "$source_directory/tests/integration/$provider_fixture" ] \
             || [ -L "$source_directory/tests/integration/$provider_fixture" ]; then
@@ -2195,6 +2196,9 @@ cleanup() {
     if [ "$scenario" = content-provider ] && command -v content_provider_site_cleanup >/dev/null 2>&1; then
         content_provider_site_cleanup || original_status=1
     fi
+    if [ "$scenario" = content-provider ] && command -v content_provider_filter_cleanup >/dev/null 2>&1; then
+        content_provider_filter_cleanup || original_status=1
+    fi
     if [ "$scenario" = mpquic-growth ] && command -v mpquic_growth_cleanup >/dev/null 2>&1; then
         mpquic_growth_cleanup || original_status=1
     fi
@@ -2593,6 +2597,8 @@ if [ "$scenario" = content-provider ]; then
     . "$source_directory/tests/integration/content-publication-smoke.sh"
     # shellcheck source=tests/integration/content-provider-site-smoke.sh
     . "$source_directory/tests/integration/content-provider-site-smoke.sh"
+    # shellcheck source=tests/integration/content-provider-filter-smoke.sh
+    . "$source_directory/tests/integration/content-provider-filter-smoke.sh"
     # shellcheck source=tests/integration/content-provider-adaptive-smoke.sh
     . "$source_directory/tests/integration/content-provider-adaptive-smoke.sh"
 fi
@@ -6066,7 +6072,7 @@ start_privacy_observers() {
             [ "$scenario" = content ] || [ "$scenario" = content-message ] || return 1 ;;
         content-https-complete-privacy|content-https-missing-privacy)
             [ "$scenario" = content-https ] || return 1 ;;
-        content-provider-privacy|content-provider-adaptive-privacy|content-provider-adaptive-https-privacy|content-provider-https-complete-privacy|content-provider-https-missing-privacy|content-provider-https-baseline-privacy|content-provider-https-origin-only-privacy|content-provider-https-auto-privacy|content-provider-https-digest-origin-only-privacy|content-provider-https-digest-peers-first-privacy|content-provider-https-limited-origin-only-privacy|content-provider-https-limited-peers-first-privacy|content-provider-https-limited-auto-privacy|content-provider-https-checksum-origin-only-privacy|content-provider-https-checksum-peers-first-privacy|content-provider-https-checksum-mismatch-privacy|content-provider-user-privacy|content-provider-named-privacy|content-provider-site-privacy|content-provider-site-cache-only-privacy)
+        content-provider-privacy|content-provider-adaptive-privacy|content-provider-adaptive-https-privacy|content-provider-https-complete-privacy|content-provider-https-missing-privacy|content-provider-https-baseline-privacy|content-provider-https-origin-only-privacy|content-provider-https-auto-privacy|content-provider-https-digest-origin-only-privacy|content-provider-https-digest-peers-first-privacy|content-provider-https-limited-origin-only-privacy|content-provider-https-limited-peers-first-privacy|content-provider-https-limited-auto-privacy|content-provider-https-checksum-origin-only-privacy|content-provider-https-checksum-peers-first-privacy|content-provider-https-checksum-mismatch-privacy|content-provider-user-privacy|content-provider-named-privacy|content-provider-site-privacy|content-provider-site-cache-only-privacy|content-provider-filter-cold-privacy|content-provider-filter-warm-privacy)
             [ "$scenario" = content-provider ] || return 1 ;;
         content-message-publication-privacy)
             [ "$scenario" = content-message ] || return 1 ;;

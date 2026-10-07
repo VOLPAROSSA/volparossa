@@ -688,6 +688,52 @@ make public discovery a user's URL/history index. Without a suitable proof or co
 witness, use the origin. This keeps unsupported sites working without pretending all HTTPS
 resources, authenticated streaming services or DRM media are publicly reusable.
 
+## Explicit public browser filter snapshots
+
+`content filter-snapshot` retrieves one explicitly authorized, immutable public
+filter publication through the existing signed named-content path. The caller
+selects the publisher key, name and exact manifest hash before retrieval; a peer
+cannot choose a replacement publisher or authorize browser-policy changes.
+
+The first supported grammar is deliberately narrow: optional `[Adblock Plus 2.0]`
+on the first line, blank lines and lowercase `||domain.example^` blocking rules.
+The limit is 1 MiB, 4,096 rules and 8,192 lines. Other syntax—including comments,
+includes, exceptions, scriptlets and rule options—is rejected, never silently
+rewritten. This is not a general uBO parser or a completed shared filter service.
+
+```sh
+volparossa --control-socket /path/to/agent.sock content filter-snapshot \
+  --publisher-key <independently-authorized-publisher-key> \
+  --name <immutable-public-snapshot-name> \
+  --manifest-id <exact-signed-manifest-hash> \
+  --authorize-filter-publisher --public-content \
+  --cache /path/to/agent-owned-cache \
+  --output /path/to/owned-directory/new-snapshot
+```
+
+The new output directory contains `filters.txt`, `manifest.pb`,
+`delivery-receipt.json` and `snapshot.json`, with directory/file permissions
+0700/0600. Existing outputs and unsafe or symlinked parents are refused.
+`--reuse-cache` explicitly reopens an existing cache without resetting its revision
+floors; cached bytes do not extend the publisher's expiry. The delivery receipt
+describes the fetch but is not a portable signed transport attestation.
+
+The `content-provider` fixture now exercises an independently selected two-rule
+snapshot before and after its existing route disconnect. Its acceptance checks
+require exact exported bytes, original manifest and expiry, real cold peer traffic,
+isolated caches and zero peer/discovery work on warm reuse. Existing static-site
+and bulk multipath evidence remains mandatory. The actual disposable
+[trial 37648508917](https://github.com/VOLPAROSSA/volparossa/actions/runs/37648508917)
+passes on exact source `d95e10cb`: 63 cold peer bytes from one provider, then zero
+peer/discovery work after disconnect, with unchanged manifest and expiry.
+Original receipts and captures reconstruct the complete successful report;
+owned cleanup and enumerated guest-root network state checks also pass.
+
+The command does not register a browser subscription or make uBO recheck expiry.
+Protected peer delivery and actual browser consumption still need a combined
+functional trial. Standard removable registration, independent review of discovered
+rules and expiry/rollback handling during active use remain separate requirements.
+
 ## Primary references
 
 - [TLS 1.3, RFC 8446](https://www.rfc-editor.org/rfc/rfc8446.html)

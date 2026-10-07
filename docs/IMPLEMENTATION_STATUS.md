@@ -15,6 +15,72 @@ Last updated: 2026-10-07
 
 ## Current integration and active work
 
+### Browser consent cooperation and public filter snapshots
+
+Browser [PR8](https://github.com/VOLPAROSSA/volparossa-browser/pull/8) and
+[PR9](https://github.com/VOLPAROSSA/volparossa-browser/pull/9) are merged.
+Consent-O-Matic is the fourth pinned, unmodified signed extension. Actual isolated
+ESR tests verify recorded refusal in a synthetic consent dialog, uBlock Origin
+probe blocking, preserved essential resources, user choices and persistent
+extension disable/removal. An ordinary supplementary list can be added and
+removed across restarts without replacing uBO's ten original selections.
+The [browser evidence](https://github.com/VOLPAROSSA/volparossa-browser/blob/main/docs/BUNDLED_EXTENSIONS.md#isolated-consent-and-user-control-proof)
+does not establish arbitrary-site coverage or VOLPAROSSA delivery of that list.
+Browser [PR10](https://github.com/VOLPAROSSA/volparossa-browser/pull/10) adds an
+actual-upstream-source regression for Consent-O-Matic's navigation-status reset:
+the original source fails and a one-character in-memory correction passes. The
+signed extension is unchanged; no upstream contribution has yet been submitted.
+
+The new `content filter-snapshot` command reuses the existing protected public-text
+fetch path with an independently selected publisher, name and exact manifest hash.
+Explicit filter-authority and public-content acknowledgments are required. It
+validates bounded domain-block rules and atomically exports their original bytes,
+signed manifest and delivery receipt to a new private directory. No browser setting
+is changed and no browsing context is collected. Eleven focused tests verify
+signed-data rejection, bounds, unchanged expiry, CLI authority requirements and
+non-overwriting output/cleanup. These are component tests, not a peer-transfer
+or installed subscription demonstration.
+
+The protected-provider fixture now includes cold filter export and warm reuse
+after the existing route disconnect. It requires a separately selected publisher
+and exact signed manifest, removed publisher source files, isolated agent caches,
+actual peer-byte accounting, complete drained captures and the unchanged expiry.
+Warm reuse must show zero peer bytes, no provider discovery and no protected or
+provider data packets. The existing site and bulk two-path tests remain mandatory;
+the tiny filter payload does not establish two-subflow throughput. Six new fixture
+tests, sixteen provider checks, ten cancellation checks and four site checks pass.
+These validate the fixture and its rejection paths. The subsequent actual
+[trial 37648508917/job112885441559](https://github.com/VOLPAROSSA/volparossa/actions/runs/37648508917/job/112885441559),
+attempt 1 on exact source `d95e10cb25b9869f75f9fc4a4a4001b6ce194c12`, passes.
+Reconstruction from the original raw receipts and drained captures matches the
+complete provider report: the cold consumer retrieves all 63 bytes from one
+actual peer with zero origin bytes; warm reuse after disconnect uses zero peers,
+peer bytes, provider discovery or protected data. Both exports retain the same
+manifest and original expiry. This proves this bounded snapshot delivery and
+reuse, not an installed browser subscription or network-wide publication policy.
+
+Exact owned cleanup completes with zero remaining objects; the enumerated guest
+root-network state is unchanged (both hashes
+`6b7773451fb3b22bf6b9a88f32f8772c0217e0a2fb5c0699d0fcebeac2c2ae8d`).
+Original artifact `11495524475` ZIP SHA-256:
+`93c7d2ba5d8a2bed750520ff5c5fe68cf76e5e81ef758209380f3d0cae7cbc84`;
+original decoded job log SHA-256:
+`bef355e7b54eefec308883ac49963e7a8e3dd6b3c30bd82ccdc67ba493da945f`.
+The once-only dispatch remains consumed; no repeat is needed for this result.
+
+Before dispatch, the shared cooperative-browser source-binding test is corrected:
+a separate ABCI trial exposed its stale shell delimiter and incomplete four-cohort
+expectation. The test now accepts only bounded argument-selection statements,
+rejects changed boundaries or executable commands before running them, and checks
+all four existing cohorts. Thirty-four shared tests and the six filter-fixture
+tests pass. This correction changes no provider runtime gate or resource limit;
+the successful trial above uses this exact corrected source.
+
+Default removable subscription integration, cooperative rule discovery,
+independent publication approval and regression-based
+rollback remain open. A valid publisher signature is not by itself permission to
+change browser policy; the current command requires that authorization separately.
+
 ### Bank and Transaction layer implementation
 
 The 2026-10-04 user extension adds VOLPAROSSA Bank and a reusable Transaction-layer.

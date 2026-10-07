@@ -159,12 +159,15 @@ content_provider_site_run() {
     if setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$site_control_gid" \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- test -r "$site_client_cache"; then fail CONTENT_SITE_CONSUMER_CACHE_EXPOSED; fi
+    # Preserve the two-publication site proof above before adding a third tiny publication.
+    content_provider_filter_cold_run
     site_cache_before=$(stat -Lc '%d:%i' "$site_client_cache") || fail CONTENT_SITE_CACHE_IDENTITY_UNAVAILABLE
     content_provider_site_cache_only_run
     site_cache_after=$(stat -Lc '%d:%i' "$site_client_cache") || fail CONTENT_SITE_CACHE_IDENTITY_UNAVAILABLE
     [ "$site_cache_before" = "$site_cache_after" ] || fail CONTENT_SITE_CACHE_REPLACED
     [ "$(stat -Lc '%a:%u:%g' "$site_client_cache")" = "700:$AGENT_UID:$AGENT_GID" ] \
         || fail CONTENT_SITE_CACHE_OWNERSHIP_CHANGED
+    content_provider_filter_warm_run
     jq -n --arg context "$provider_context" --argjson user "$WORKER_UID" --argjson user_gid "$WORKER_GID" \
         --argjson agent "$AGENT_UID" --argjson agent_gid "$AGENT_GID" --argjson control "$site_control_gid" \
         --arg cache "$site_client_cache" --arg before "$site_cache_before" --arg after "$site_cache_after" \
