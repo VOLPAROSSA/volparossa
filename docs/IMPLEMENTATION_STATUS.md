@@ -131,9 +131,11 @@ adapter/socket/CLI tests and all twenty-two existing core tests pass, independen
 repeated by root. Unsupported proof queries and snapshot adoption are refused;
 query results explicitly do not claim a consensus certificate. The thirteen
 verbatim schema/license inputs pass offline digest and closed-import verification.
-A guest-only four-validator fixture now has partial actual Comet/Rust evidence,
-but its isolated trial remains failed; partition and distributed recovery are
-not yet proved. The original result and limits are recorded below.
+A guest-only four-validator fixture now has actual Comet/Rust transfer, partition,
+rejoin and post-commit crash/retry evidence. Its overall trial remains failed at
+the separate guest-parent state-observation gate. This is a bounded inner
+functional result, not complete distributed acceptance; the original result and
+remaining limits are recorded below.
 
 The initial adapter source checks remain recorded as failures: `ac3e6632`
 failed a statement-order lint and `97aeaddc` a test semicolon lint. After those
@@ -201,14 +203,55 @@ without exporting addresses or raw snapshots. Raw snapshot hashes and their
 unchanged-state acceptance gate remain intact, even for lifetime-only changes.
 Twenty-five inert contract and twelve wiring tests pass, independently repeated
 by root; no acceptance requirement, command scope, resource limit or deadline was
-relaxed. Fresh source CI and another separately reviewed trial remain required.
+relaxed. That source was used for the subsequent trial recorded next.
+
+The next exact-source `66cf3670d79e550bf8db50b4a9888ce83fa60ee1`
+[trial 37659526190](https://github.com/VOLPAROSSA/volparossa/actions/runs/37659526190/job/112923185107)
+also **failed overall**, but its inner functional receipt passed all nine
+checkpoints. Four actual Comet validators and Rust stores rejected one of two
+competing 70-of-100 TEST reserves (codes `[7,0]`), then conserved 100 while moving 70.
+The 3–1 partition recorded both-direction packet drops, a stationary isolated
+validator and majority progress from height 7 to 11; 2–2 recorded drops and no
+progress at height 15. Both healed. After a post-commit node restart, the two
+byte-identical original commands were executed again in new block 24 with codes
+`[0,0]`; all four stores retained the original sequence 1/2 receipts and balances,
+then converged at height 25. All eight processes were reaped, owned namespaces
+removed and synthetic private keys deleted.
+
+Outer acceptance remained false because raw address and IPv6-route snapshots
+differed. Bounded diagnostics found only lifetime-field values changed (10 address
+fields and 2 route fields); every other parent-state digest matched. The old
+receipt contains no measured lifetime deltas/read windows, so natural timer
+countdown is **not retrospectively established**, and the run cannot be relabelled
+as passing. Original ZIP SHA-256:
+`1fecd4fc9f8cb9bcb9db13aa7bbbb1ab4388238d1423cb88b2c6815d903c238f`.
+Exact decoded job log SHA-256:
+`b45a16ca1060b700c4d5ff842dec914013d3b05778930dde4f994a1b24e6927f`.
+The separately retained first log copy has one extra final line feed; its digest
+is not substituted for that exact decoded evidence.
+
+The following observer-only correction preserves raw hashes and
+`parent_unchanged`, and adds a separate `parent_semantically_unchanged` result.
+For changed address/IPv6-route bytes, it checks every finite lifetime's actual
+decrement against monotonic windows surrounding the corresponding reads, with
+explicit integer-second rounding tolerance. It refuses increases, out-of-window
+decay, finite/forever transitions, missing fields, unknown structural changes and
+unbounded timing. All other raw digests must still match. Closed source-bound
+counts, hashes and elapsed windows are exported, not addresses or lifetime values;
+this is an observation check, not a cryptographic history proof. Raw-identical
+snapshots retain endpoint-equality semantics and cannot exclude an invisible
+refresh or mutate-and-restore between reads. Neither can a within-window change
+be attributed uniquely to natural expiry. Cleanup and all functional/exit gates
+remain mandatory. Thirty-four inert contract and fourteen wiring/evidence tests
+pass; no new runtime has yet tested this correction. The original failed trial,
+source, logs and consumed dispatch receipts remain unchanged.
 
 The [next distributed milestone](services/TRANSACTION_LAYER.md#distributed-test-execution)
 selects source-pinned CometBFT with four fixed TEST validators. Ordered local
-execution does not itself establish consensus. The actual conflicting-spend
-checkpoint above is only partial evidence; partitions, crash replay, malicious
-validators and client finality verification remain required before distributed
-execution is complete.
+execution does not itself establish consensus. The actual inner checkpoints above
+do not waive the failed outer gate. Byzantine equivocation, distributed pre-commit
+crashes, protected overlay transport and independent client finality verification
+remain unproved.
 
 This durable slice has no network, gateway, encryption at rest, consensus,
 distributed finality, external reconciliation, corrections or AML capability.

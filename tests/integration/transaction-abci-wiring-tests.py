@@ -23,7 +23,7 @@ SPEC.loader.exec_module(EVIDENCE)
 FIXTURE = EVIDENCE.FIXTURE
 
 
-def inert_receipts():
+def inert_receipts(*, countdown=False):
     """Artificial parser inputs only; never exported as runtime evidence."""
     def convergence(height):
         return {"height": height, "block_hash": "a" * 64, "header_app_hash": "b" * 64}
@@ -58,10 +58,19 @@ def inert_receipts():
              "children_before_cleanup": [{"node": node, "kind": kind, "exit_status": None}
                                          for node in range(4) for kind in ("app", "comet")]}
     before = {key: "3" * 64 for key in EVIDENCE.PARENT_FIELDS}
+    after, fields = before.copy(), {}
+    for label in ("addresses", "routes6"):
+        raw = b'[{"expires":900}]' if label == "routes6" else b'[{"addr_info":[{"valid_life_time":900}]}]'
+        later = raw.replace(b"900", b"890") if countdown else raw
+        left = FIXTURE.timed_parent_read(label, raw, 100_000_000_000, 100_010_000_000)
+        right = FIXTURE.timed_parent_read(label, later, 110_000_000_000, 110_010_000_000)
+        fields[label] = FIXTURE.parent_countdown_evidence(left, right)
+        before[label], after[label] = left["raw_sha256"], right["raw_sha256"]
     outer = {"schema": 1, "source_commit": "c" * 40, "comet_source": FIXTURE.COMET_COMMIT,
-             "acceptance": True, "parent_unchanged": True, "owned_namespaces_removed": True,
+             "acceptance": True, "parent_unchanged": not countdown, "owned_namespaces_removed": True,
              "private_keys_removed": True, "failure": None, "scope": scope,
-             "parent_before": before, "parent_after": before.copy()}
+             "parent_before": before, "parent_after": after, "parent_semantically_unchanged": True,
+             "parent_observation": {"schema": 1, "policy": FIXTURE.COUNTDOWN_POLICY, "fields": fields}}
     return build, inner, outer
 
 
@@ -123,6 +132,9 @@ class TransactionWiring(unittest.TestCase):
         self.assertIn('--driver-exit-code "$TOPOLOGY_EXIT_CODE"', gate)
         self.assertIn('--expected-commit "$GITHUB_SHA"', gate)
         self.assertNotIn("continue-on-error", gate)
+        summary = workflow_step("Summarise exact reached point")
+        self.assertIn("parent raw snapshots equal: \\(.parent_unchanged)", summary)
+        self.assertIn("parent bounded observer accepted: \\(.parent_semantically_unchanged // false)", summary)
 
     def test_export_is_an_explicit_receipt_allowlist(self):
         step = workflow_step("Upload closed transaction TEST evidence")
@@ -181,6 +193,7 @@ class TransactionWiring(unittest.TestCase):
         for section, key, bad in ((0, "source_built_engine", False), (0, "compiler_auto_upgrade", True),
                                   (0, "compiler_archive_sha256", "f" * 64), (1, "acceptance", False),
                                   (1, "processes_reaped", False), (2, "parent_unchanged", False),
+                                  (2, "parent_semantically_unchanged", False),
                                   (2, "owned_namespaces_removed", False), (2, "private_keys_removed", False),
                                   (2, "failure", "interrupted")):
             values = inert_receipts()
@@ -210,6 +223,56 @@ class TransactionWiring(unittest.TestCase):
             changed[2]["acceptance"] = False
             with self.assertRaises(ValueError):
                 self.validate(changed)
+
+    def test_countdown_acceptance_retains_raw_difference_and_all_cleanup_gates(self):
+        values = inert_receipts(countdown=True)
+        self.assertFalse(values[2]["parent_unchanged"])
+        self.assertNotEqual(values[2]["parent_before"], values[2]["parent_after"])
+        self.validate(values)
+        for key in ("parent_semantically_unchanged", "owned_namespaces_removed", "private_keys_removed"):
+            changed = copy.deepcopy(values)
+            changed[2][key] = False
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                self.validate(changed)
+        for options in ({"driver_exit": "1"}, {"guest_exit": "1"}, {"phase": "real-consensus-trial"}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                self.validate(values, **options)
+        for key, bad in (("parent_unchanged", True), ("parent_unchanged", 0), ("acceptance", False)):
+            changed = copy.deepcopy(values)
+            changed[2][key] = bad
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                self.validate(changed)
+
+    def test_countdown_receipt_is_closed_bound_and_not_a_diagnostics_override(self):
+        for countdown in (False, True):
+            original = inert_receipts(countdown=countdown)
+            for bad in (None, {}, {"parsed": True, "structure_equal": True}):
+                values = copy.deepcopy(original)
+                values[2]["parent_observation"] = bad
+                with self.subTest(bad=bad), self.assertRaises(ValueError):
+                    self.validate(values)
+            for key, bad in (("schema", True), ("policy", "mask-only"), ("unexpected", True)):
+                values = copy.deepcopy(original)
+                values[2]["parent_observation"][key] = bad
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    self.validate(values)
+            for key, bad in (("status", "structure_equal"), ("status", "future_policy"),
+                             ("before_sha256", "f" * 64), ("after_sha256", "f" * 64),
+                             ("structure_after_sha256", "f" * 64), ("fields_before", True),
+                             ("fields_after", 1025), ("checked_finite", 0), ("checked_forever", 1),
+                             ("elapsed_min_ns", -1), ("elapsed_max_ns", 0),
+                             ("before_read_ns", FIXTURE.PARENT_READ_NS + 1), ("unexpected", True),
+                             ("changed_finite", 0 if countdown else 1)):
+                values = copy.deepcopy(original)
+                values[2]["parent_observation"]["fields"]["routes6"][key] = bad
+                with self.subTest(countdown=countdown, key=key), self.assertRaises(ValueError):
+                    self.validate(values)
+            for key in EVIDENCE.PARENT_FIELDS - {"addresses", "routes6"}:
+                values = copy.deepcopy(original)
+                values[2]["parent_after"][key] = "f" * 64
+                values[2]["parent_unchanged"] = False
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    self.validate(values)
 
     def test_no_consensus_claim_from_absent_counters_progress_or_coverage(self):
         for phase, field, bad in (("partition_3_1", "drop_packets", [0, 1]),

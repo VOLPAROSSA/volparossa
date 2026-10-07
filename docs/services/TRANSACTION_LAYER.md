@@ -200,7 +200,7 @@ no schema at build time. Debian development prerequisites already include `proto
 
 ### Distributed TEST execution
 
-The next implementation target is four independently persisted validators using
+The bounded implementation fixture uses four independently persisted validators with
 **CometBFT v0.40.0**, pinned to
 `0880b4d378f347ab16e54ec677ff50d803f37d62`, as a separate ordering process.
 The Rust application retains VOLPAROSSA's signed TEST-unit rules. This does not
@@ -258,7 +258,34 @@ Its processes/namespaces/keys were cleaned up, but the separate guest-parent
 unchanged-state check also failed. It is not distributed acceptance or recovery
 proof. The source correction fixes a missing nft chain separator and adds closed
 diagnostics without relaxing the original state-comparison or runtime gates.
-See the [original trial and remaining evidence](../IMPLEMENTATION_STATUS.md).
+The later exact-source `66cf3670` trial passed all inner functional checkpoints:
+competing signed reserves, conserved transfer, observed 3–1 majority progress and
+2–2 halt, healing, and a post-commit restart followed by both original commands
+executing again in a new block without changing historical receipts or balances.
+It still **failed overall**: address and IPv6-route lifetime fields changed in
+the separate parent-state comparison. All processes/namespaces/keys were cleaned
+up. That old receipt lacks the actual deltas and read timing needed to establish
+natural countdown; it remains failed and is not complete acceptance.
+
+The follow-up observer keeps raw equality separate from bounded expiry semantics.
+Each address/IPv6-route read has its own monotonic start/end window, at most 20s;
+before-to-after spans may not exceed the existing 600s guest trial-service bound.
+For changed raw snapshots, every finite lifetime decrement must fit the minimum
+and maximum possible elapsed seconds, allowing one additional integer second
+around outward rounding. Saturation at zero is allowed; increases, refresh-like
+insufficient decay, finite/forever transitions and any structural difference are
+refused. Field presence, ordering and unknown fields are retained; no broad
+field-masking pass is accepted. DNS, firewall, routes4, rules, namespaces and
+sysctls still require exact raw equality. Closed counts, hashes and elapsed windows
+bind the observation to the source and raw receipt; no raw network values are
+exported. The offline gate checks that binding plus every original execution and
+cleanup condition. Raw-identical snapshots remain endpoint-equality evidence,
+not proof that no refresh or transient mutation occurred between reads. Even a
+bounded accepted decrement cannot prove its cause; this is neither cryptographic
+attestation nor continuous monitoring. The change has inert positive/negative
+tests only, not a new VM result or a retrospective upgrade of the failed run.
+
+See the [original trials and remaining evidence](../IMPLEMENTATION_STATUS.md).
 Post-commit restart is not a pre-commit crash or actively equivocating validator;
 those cases and independent client finality verification remain separate work.
 

@@ -22,6 +22,116 @@ SPEC.loader.exec_module(FIXTURE)
 
 
 class FixtureContracts(unittest.TestCase):
+    def countdown(self, before, after, *, label="routes6", times=(100_000_000_000, 100_010_000_000,
+                                                                110_000_000_000, 110_010_000_000)):
+        left = FIXTURE.timed_parent_read(label, json.dumps(before).encode(), *times[:2])
+        right = FIXTURE.timed_parent_read(label, json.dumps(after).encode(), *times[2:])
+        return FIXTURE.parent_countdown_evidence(left, right)
+
+    def test_bounded_parent_countdown_keeps_raw_mismatch_but_proves_separate_semantics(self):
+        before = b'[{"expires":900}]'
+        after = b'[{"expires":890}]'
+        left = FIXTURE.timed_parent_read("routes6", before, 100_000_000_000, 100_010_000_000)
+        right = FIXTURE.timed_parent_read("routes6", after, 110_000_000_000, 110_010_000_000)
+        result = FIXTURE.parent_countdown_evidence(left, right)
+        self.assertEqual(result["status"], "countdown")
+        self.assertEqual(result["checked_finite"], 1)
+        self.assertEqual(result["changed_finite"], 1)
+        self.assertNotEqual(result["before_sha256"], result["after_sha256"])
+        self.assertEqual(result["structure_before_sha256"], result["structure_after_sha256"])
+
+    def test_countdown_checks_every_finite_slot_and_preserves_forever(self):
+        before = [{"addr_info": [{"valid_life_time": 900, "preferred_life_time": 600},
+                                 {"valid_life_time": 4294967295, "preferred_life_time": 5}]}]
+        after = copy.deepcopy(before)
+        after[0]["addr_info"][0].update(valid_life_time=890, preferred_life_time=590)
+        after[0]["addr_info"][1]["preferred_life_time"] = 0
+        value = self.countdown(before, after, label="addresses")
+        self.assertEqual(value["status"], "countdown")
+        self.assertEqual((value["fields_before"], value["checked_finite"], value["checked_forever"],
+                          value["changed_finite"]), (4, 3, 1, 3))
+        after[0]["addr_info"][0]["preferred_life_time"] = 599
+        self.assertEqual(self.countdown(before, after, label="addresses")["status"], "countdown_out_of_window")
+
+    def test_raw_equality_is_preserved_without_inventing_timer_progress(self):
+        for value in ([], [{"expires": 4294967295}], [{"expires": 0}], [{"expires": 900}]):
+            result = self.countdown(value, value)
+            self.assertEqual(result["status"], "raw_equal")
+            self.assertEqual(result["changed_finite"], 0)
+            self.assertEqual(result["before_sha256"], result["after_sha256"])
+
+    def test_countdown_rejects_increases_refresh_timing_and_infinity_changes(self):
+        for before, after, status in ((900, 901, "lifetime_increased"), (900, 899, "countdown_out_of_window"),
+                                     (900, 800, "countdown_out_of_window"), (5, 1, "countdown_out_of_window"),
+                                     (900, 4294967295, "infinity_changed"),
+                                     (4294967295, 900, "infinity_changed")):
+            with self.subTest(before=before, after=after):
+                self.assertEqual(self.countdown([{"expires": before}], [{"expires": after}])["status"], status)
+        # An unchanged finite slot cannot hide among other changing slots.
+        result = self.countdown([{"expires": 900}, {"expires": 600}], [{"expires": 890}, {"expires": 600}])
+        self.assertEqual(result["status"], "countdown_out_of_window")
+
+    def test_countdown_quantization_window_has_explicit_small_bounds(self):
+        times = (100_000_000_000, 100_000_000_000, 110_000_000_000, 110_000_000_000)
+        for decrement in (9, 10, 11):
+            self.assertEqual(self.countdown([{"expires": 900}], [{"expires": 900-decrement}],
+                                           times=times)["status"], "countdown")
+        for decrement in (8, 12):
+            self.assertEqual(self.countdown([{"expires": 900}], [{"expires": 900-decrement}],
+                                           times=times)["status"], "countdown_out_of_window")
+
+    def test_countdown_refuses_clock_overlap_unbounded_or_invalid_read_windows(self):
+        invalid = ((True, 1, 2, 3), (-1, 1, 2, 3), (0, 2, 1, 3), (1, 0, 2, 3),
+                   (0, 0, 3, 2), (0, 0, 2**63, 2**63),
+                   (0, FIXTURE.PARENT_READ_NS+1, 30_000_000_000, 30_000_000_000),
+                   (0, 0, 1, FIXTURE.PARENT_READ_NS+2), (0, 0, 0, FIXTURE.PARENT_SPAN_NS+1),
+                   (0, 0, FIXTURE.PARENT_SPAN_NS+1, FIXTURE.PARENT_SPAN_NS+1))
+        for times in invalid:
+            with self.subTest(times=times):
+                self.assertEqual(self.countdown([{"expires": 900}], [{"expires": 890}], times=times)["status"],
+                                 "invalid_clock")
+
+    def test_countdown_rejects_unknown_structure_removed_fields_and_slot_reordering(self):
+        original = [{"dst": "inert-a", "expires": 900, "unknown": 1}, {"dst": "inert-b", "expires": 600}]
+        valid = [{"dst": "inert-a", "expires": 890, "unknown": 1}, {"dst": "inert-b", "expires": 590}]
+        for changed in ([valid[1], valid[0]], valid[:1], [{"dst": "inert-a", "unknown": 1}, valid[1]],
+                        [{"dst": "inert-a", "expires": 890, "unknown": 2}, valid[1]],
+                        [{"dst": "inert-c", "expires": 890, "unknown": 1}, valid[1]]):
+            self.assertEqual(self.countdown(original, changed)["status"], "structure_changed")
+        for bad in (None, True, "forever", -1, 4294967296):
+            self.assertEqual(self.countdown([{"expires": 900}], [{"expires": bad}])["status"], "unclassified")
+        # Whitespace or ordering-only byte changes are not a lifetime countdown.
+        left = FIXTURE.timed_parent_read("routes6", b'[{"expires":900}]', 0, 0)
+        right = FIXTURE.timed_parent_read("routes6", b'[ {"expires":900} ]', 0, 0)
+        self.assertEqual(FIXTURE.parent_countdown_evidence(left, right)["status"], "no_countdown")
+
+    def test_countdown_closed_output_contains_no_network_values_or_absolute_times(self):
+        original = [{"dst": "private-route", "expires": 938}]
+        later = [{"dst": "private-route", "expires": 928}]
+        value = self.countdown(original, later)
+        self.assertEqual(set(value), FIXTURE.COUNTDOWN_FIELDS)
+        self.assertEqual(value["before_read_ns"], 10_000_000)
+        self.assertEqual(value["elapsed_min_ns"], 9_990_000_000)
+        self.assertEqual(value["elapsed_max_ns"], 10_010_000_000)
+        self.assertNotIn("private-route", json.dumps(value))
+        self.assertNotIn("summary", value)
+        self.assertNotIn("start_ns", value)
+        self.assertNotIn("end_ns", value)
+
+    def test_snapshot_binds_each_observation_to_its_own_monotonic_command_window(self):
+        observations = {}
+        # 7 commands, each with its own start/end pair, not one trial-wide estimate.
+        ticks = iter(range(14))
+        with patch.object(FIXTURE.time, "monotonic_ns", side_effect=lambda: next(ticks)), \
+                patch.object(FIXTURE, "checked", return_value=b"[]"), \
+                patch.object(Path, "read_bytes", return_value=b"inert"):
+            snapshot = FIXTURE.parent_snapshot(observations=observations)
+        self.assertEqual(set(observations), {"addresses", "routes6"})
+        self.assertEqual((observations["addresses"]["start_ns"], observations["addresses"]["end_ns"]), (0, 1))
+        self.assertEqual((observations["routes6"]["start_ns"], observations["routes6"]["end_ns"]), (4, 5))
+        for label in observations:
+            self.assertEqual(observations[label]["raw_sha256"], snapshot[label])
+
     def test_preview_is_inert(self):
         with patch.object(FIXTURE, "parse_args", return_value=argparse.Namespace(inside=False, execute=False)), \
                 patch.object(FIXTURE.subprocess, "Popen", side_effect=AssertionError("no child")), \

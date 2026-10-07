@@ -445,7 +445,8 @@ jobs:
                 "source revision: \(.source_commit)", "failure: \(.failure // "none")",
                 "owned namespaces removed: \(.owned_namespaces_removed)",
                 "private TEST keys removed: \(.private_keys_removed)",
-                "parent network unchanged: \(.parent_unchanged)"' "$report" >>"$GITHUB_STEP_SUMMARY"
+                "parent raw snapshots equal: \(.parent_unchanged)",
+                "parent bounded observer accepted: \(.parent_semantically_unchanged // false)"' "$report" >>"$GITHUB_STEP_SUMMARY"
             else
               printf '%s\n' 'No complete transaction TEST acceptance report was produced.' >>"$GITHUB_STEP_SUMMARY"
             fi

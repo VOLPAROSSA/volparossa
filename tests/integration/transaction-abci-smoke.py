@@ -33,6 +33,16 @@ GO_SHA256 = "63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445"
 GO_LICENSE_SHA256 = "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
 TEST_UNIT = "volparossa.test.unit.v1"
 TRIAL_SECONDS = 480
+NANOSECOND = 1_000_000_000
+PARENT_READ_NS = 20 * NANOSECOND
+PARENT_SPAN_NS = 600 * NANOSECOND  # Existing guest trial service bound, not a new timeout.
+PARENT_FIELDS = {"addresses", "routes4", "routes6", "rules4", "rules6", "firewall", "namespaces", "dns", "sysctls"}
+COUNTDOWN_POLICY = "bounded-expiry-countdown-v1"
+COUNTDOWN_FIELDS = {
+    "status", "before_sha256", "after_sha256", "structure_before_sha256", "structure_after_sha256",
+    "fields_before", "fields_after", "checked_finite", "checked_forever", "changed_finite",
+    "before_read_ns", "after_read_ns", "elapsed_min_ns", "elapsed_max_ns",
+}
 RPC_LIMIT = 262144
 NODE_COUNT = 4
 NODES = tuple(f"10.77.0.{10 + n}" for n in range(NODE_COUNT))
@@ -151,7 +161,7 @@ def network_plan(prefix):
 
 
 def parent_lifetime_summary(label, raw):
-    """In-memory diagnostics only: never substitute for the raw snapshot hashes."""
+    """Bounded in-memory parse: a matching structure alone never proves safety."""
     if label not in {"addresses", "routes6"} or len(raw) > RPC_LIMIT:
         return None
     try:
@@ -162,19 +172,19 @@ def parent_lifetime_summary(label, raw):
         value = json.loads(raw, object_pairs_hook=unique_object)
         require(isinstance(value, list) and len(value) <= 256, "parent_json_shape")
         lifetimes = []
-        for row in value:
+        for row_index, row in enumerate(value):
             require(isinstance(row, dict), "parent_json_shape")
             entries = row.get("addr_info") if label == "addresses" else [row]
             require(isinstance(entries, list) and len(entries) <= 256, "parent_json_shape")
             fields = ("valid_life_time", "preferred_life_time") if label == "addresses" else ("expires",)
-            for entry in entries:
+            for entry_index, entry in enumerate(entries):
                 require(isinstance(entry, dict), "parent_json_shape")
                 for field in fields:
                     if field in entry:
                         seconds = entry[field]
                         require(type(seconds) is int and 0 <= seconds <= 4294967295,
                                 "parent_json_lifetime")
-                        lifetimes.append([field, seconds])
+                        lifetimes.append([row_index, entry_index, field, seconds])
                         require(len(lifetimes) <= 1024, "parent_json_lifetime_bound")
                         # Keep the field's presence and every other value, including
                         # unknown fields. This is not a configuration-field allowlist.
@@ -182,7 +192,7 @@ def parent_lifetime_summary(label, raw):
         def digest(value):
             return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
                                              allow_nan=False).encode()).hexdigest()
-        return (digest(value), digest(lifetimes), len(lifetimes))
+        return (digest(value), digest(lifetimes), len(lifetimes), lifetimes)
     except (TrialFailure, ValueError, TypeError, RecursionError):
         return None
 
@@ -205,7 +215,110 @@ def parent_lifetime_diagnostics(before, after):
     return result
 
 
-def parent_snapshot(diagnostics=None):
+def timed_parent_read(label, raw, started_ns, ended_ns):
+    """Private in-memory observation; raw values/timestamps are never exported."""
+    return {"summary": parent_lifetime_summary(label, raw), "start_ns": started_ns, "end_ns": ended_ns,
+            "raw_sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def parent_countdown_evidence(left, right):
+    """Check actual finite deltas against measured windows, not masked JSON alone."""
+    result = {key: 0 for key in COUNTDOWN_FIELDS}
+    result.update(status="unclassified", before_sha256=left["raw_sha256"], after_sha256=right["raw_sha256"],
+                  structure_before_sha256=None, structure_after_sha256=None)
+    a, b = left["summary"], right["summary"]
+    if a is None or b is None:
+        return result
+    result.update(structure_before_sha256=a[0], structure_after_sha256=b[0],
+                  fields_before=a[2], fields_after=b[2])
+    times = (left["start_ns"], left["end_ns"], right["start_ns"], right["end_ns"])
+    if not all(type(t) is int and 0 <= t < 2**63 for t in times) or not times[0] <= times[1] <= times[2] <= times[3]:
+        result["status"] = "invalid_clock"
+        return result
+    first, last = times[1] - times[0], times[3] - times[2]
+    lower_ns, upper_ns = times[2] - times[1], times[3] - times[0]
+    if first > PARENT_READ_NS or last > PARENT_READ_NS or upper_ns > PARENT_SPAN_NS:
+        result["status"] = "invalid_clock"
+        return result
+    result.update(before_read_ns=first, after_read_ns=last, elapsed_min_ns=lower_ns, elapsed_max_ns=upper_ns)
+    if a[0] != b[0] or a[2] != b[2]:
+        result["status"] = "structure_changed"
+        return result
+    raw_equal = left["raw_sha256"] == right["raw_sha256"]
+    # One explicit second for integer/kernel timer quantization, not a refresh allowance.
+    lower = max(0, lower_ns // NANOSECOND - 1)
+    upper = (upper_ns + NANOSECOND - 1) // NANOSECOND + 1
+    for old, new in zip(a[3], b[3]):
+        if old[:3] != new[:3]:
+            result["status"] = "slots_changed"
+            return result
+        previous, current = old[3], new[3]
+        if 4294967295 in (previous, current):
+            if previous != current:
+                result["status"] = "infinity_changed"
+                return result
+            result["checked_forever"] += 1
+        else:
+            if current > previous:
+                result["status"] = "lifetime_increased"
+                return result
+            # Saturation at zero is permitted, disappearance or replacement is not.
+            decrement = previous - current
+            if not raw_equal and not min(previous, lower) <= decrement <= min(previous, upper):
+                result["status"] = "countdown_out_of_window"
+                return result
+            result["checked_finite"] += 1
+            result["changed_finite"] += int(decrement > 0)
+    if raw_equal:
+        result["status"] = "raw_equal"
+    elif result["changed_finite"] > 0:
+        result["status"] = "countdown"
+    else:
+        result["status"] = "no_countdown"
+    return result
+
+
+def parent_observation_accepts(before, after, observation):
+    """Validate the closed source-bound observer receipt, not a cryptographic proof."""
+    def digest(value):
+        return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+    if (type(before) is not dict or type(after) is not dict or set(before) != PARENT_FIELDS or set(after) != PARENT_FIELDS
+            or not all(digest(v) for v in [*before.values(), *after.values()])
+            or type(observation) is not dict or set(observation) != {"schema", "policy", "fields"}
+            or type(observation["schema"]) is not int or observation["schema"] != 1
+            or observation["policy"] != COUNTDOWN_POLICY or type(observation["fields"]) is not dict
+            or set(observation["fields"]) != {"addresses", "routes6"}):
+        return False
+    if any(before[key] != after[key] for key in PARENT_FIELDS - {"addresses", "routes6"}):
+        return False
+    for label, value in observation["fields"].items():
+        if (type(value) is not dict or set(value) != COUNTDOWN_FIELDS
+                or value["before_sha256"] != before[label] or value["after_sha256"] != after[label]
+                or not digest(value["structure_before_sha256"])
+                or value["structure_before_sha256"] != value["structure_after_sha256"]):
+            return False
+        counts = ("fields_before", "fields_after", "checked_finite", "checked_forever", "changed_finite")
+        if not all(type(value[key]) is int and 0 <= value[key] <= 1024 for key in counts):
+            return False
+        if (value["fields_before"] != value["fields_after"]
+                or value["checked_finite"] + value["checked_forever"] != value["fields_before"]
+                or value["changed_finite"] > value["checked_finite"]):
+            return False
+        windows = ("before_read_ns", "after_read_ns", "elapsed_min_ns", "elapsed_max_ns")
+        if not all(type(value[key]) is int and 0 <= value[key] <= PARENT_SPAN_NS for key in windows):
+            return False
+        if (value["before_read_ns"] > PARENT_READ_NS or value["after_read_ns"] > PARENT_READ_NS
+                or value["elapsed_max_ns"] != value["elapsed_min_ns"] + value["before_read_ns"] + value["after_read_ns"]):
+            return False
+        raw_equal = before[label] == after[label]
+        if value["status"] != ("raw_equal" if raw_equal else "countdown"):
+            return False
+        if (raw_equal and value["changed_finite"] != 0) or (not raw_equal and value["changed_finite"] < 1):
+            return False
+    return True
+
+
+def parent_snapshot(diagnostics=None, observations=None):
     values = {}
     for label, command in (
         ("addresses", ["ip", "-j", "address"]),
@@ -216,10 +329,14 @@ def parent_snapshot(diagnostics=None):
         ("firewall", ["nft", "-j", "list", "ruleset"]),
         ("namespaces", ["ip", "netns", "list"]),
     ):
+        started_ns = time.monotonic_ns()
         raw = checked(command)
+        ended_ns = time.monotonic_ns()
         values[label] = hashlib.sha256(raw).hexdigest()
         if diagnostics is not None and label in {"addresses", "routes6"}:
             diagnostics[label] = parent_lifetime_summary(label, raw)
+        if observations is not None and label in {"addresses", "routes6"}:
+            observations[label] = timed_parent_read(label, raw, started_ns, ended_ns)
     values["dns"] = hashlib.sha256(Path("/etc/resolv.conf").read_bytes()).hexdigest()
     values["sysctls"] = hashlib.sha256(b"".join(Path(p).read_bytes() for p in (
         "/proc/sys/net/ipv4/ip_forward", "/proc/sys/net/ipv6/conf/all/forwarding"))).hexdigest()
@@ -710,7 +827,8 @@ def execute(args):
     output = Path(args.output)
     require(output.is_dir() and not output.is_symlink() and not list(output.iterdir()), "output_directory")
     before_diagnostics, after_diagnostics = {}, {}
-    before = parent_snapshot(before_diagnostics)
+    before_observations, after_observations = {}, {}
+    before = parent_snapshot(before_diagnostics, before_observations)
     prefix = "vptx-" + secrets.token_hex(6)
     work = Path(tempfile.mkdtemp(prefix="vptx-", dir="/var/tmp"))
     process = None
@@ -787,12 +905,17 @@ def execute(args):
                 and not work.is_symlink(), "cleanup_work_target")
         if work.exists():
             shutil.rmtree(work)
-    after = parent_snapshot(after_diagnostics)
+    after = parent_snapshot(after_diagnostics, after_observations)
+    observation = {"schema": 1, "policy": COUNTDOWN_POLICY, "fields": {
+        label: parent_countdown_evidence(before_observations[label], after_observations[label])
+        for label in ("addresses", "routes6")}}
+    semantic_unchanged = parent_observation_accepts(before, after, observation)
     receipt_path = output / "transaction-abci-inner.json"
     inner = json.loads(receipt_path.read_text()) if receipt_path.is_file() else {"acceptance": False}
     receipt = {"schema": 1, "source_commit": args.expected_commit, "comet_source": COMET_COMMIT,
-               "acceptance": failure is None and inner_complete(inner) and cleanup_ok and before == after,
+               "acceptance": failure is None and inner_complete(inner) and cleanup_ok and not work.exists() and semantic_unchanged,
                "parent_before": before, "parent_after": after, "parent_unchanged": before == after,
+               "parent_semantically_unchanged": semantic_unchanged, "parent_observation": observation,
                "parent_lifetime_diagnostics": parent_lifetime_diagnostics(before_diagnostics, after_diagnostics),
                "owned_namespaces_removed": cleanup_ok, "private_keys_removed": not work.exists(),
                "failure": failure, "scope": plan()["does_not_prove"]}

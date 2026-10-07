@@ -107,12 +107,12 @@ def validate(build, inner, outer, *, revision, driver_exit, guest_exit, phase):
             and all(natural(sequence, 1) for sequence in sequences) and sequences[1] > sequences[0])
     require(isinstance(outer, dict) and outer.get("schema") == 1 and outer.get("source_commit") == revision
             and outer.get("comet_source") == FIXTURE.COMET_COMMIT and outer.get("acceptance") is True
-            and outer.get("parent_unchanged") is True and outer.get("owned_namespaces_removed") is True
+            and outer.get("parent_semantically_unchanged") is True and outer.get("owned_namespaces_removed") is True
             and outer.get("private_keys_removed") is True and outer.get("failure") is None
             and outer.get("scope") == FIXTURE.plan()["does_not_prove"])
     before, after = outer.get("parent_before"), outer.get("parent_after")
-    require(isinstance(before, dict) and isinstance(after, dict) and set(before) == PARENT_FIELDS
-            and before == after and all(digest(value) for value in before.values()))
+    require(type(outer.get("parent_unchanged")) is bool and outer["parent_unchanged"] == (before == after))
+    require(FIXTURE.parent_observation_accepts(before, after, outer.get("parent_observation")))
 
 
 def read_file(path, maximum=32768):
