@@ -227,6 +227,20 @@ cover those boundaries, including child timeout and cleanup; they do not turn th
 original failed run into a passing distributed-maintenance result. See the
 [preserved original hashes and checkpoint details](../IMPLEMENTATION_STATUS.md#additional-application-and-autonomous-maintenance-scope).
 
+The original diagnostic [run37631444231 on `53d281ac`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37631444231)
+failed even earlier, during route preparation: 16 temporary preselection failures
+followed by `NO_ELIGIBLE_PATHS`. No maintenance or Paths observation ran. Cleanup
+completed with no owned objects remaining and unchanged guest-root network state.
+The retained preselection counts do not prove the final attempt's specific cause.
+The test scenario skips an initial advertisement-readiness barrier despite having
+deliberately ineligible peers; a readiness correction must preserve actual route
+eligibility and the existing limits. This is not yet a proven storage repair.
+Stored signed advertisements alone cannot prove readiness: current forwarded
+relay-to-exit capabilities are held and revalidated by the running discovery
+actor. The proposed read-only readiness check must use that same live eligibility
+state; a role-only or cached-signature barrier would not establish it. No such
+new interface or runtime correction is implemented by this evidence update.
+
 Message delivery can acknowledge and consume an inbox item. A backup restore must not
 consume its storage lease. Backup retention, renewal, expiry and owner deletion are
 separate operations with separate authorization. They may share protected network

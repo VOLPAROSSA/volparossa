@@ -1433,6 +1433,28 @@ and invalid-data controls, pass; they do not establish real browser/peer complet
   owner-error precedence and a separate healthy observation. Seventeen maintenance
   and five wiring checks also pass. These are diagnostic tests, not a runtime fix
   or a new passing maintenance trial.
+  The next original [run37631444231 on `53d281ac`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37631444231),
+  attempt 1 / job112826467792, also **fails**, this time before provider preparation:
+  `private-storage-fragments-prepare` / `FRAGMENTS_ROUTE_UNAVAILABLE`. Its 17 Connect
+  attempts comprise 16 `PRESELECTION_UNAVAILABLE` results and one final
+  `NO_ELIGIBLE_PATHS`; no Paths poll or maintenance operation was reached. The
+  bounded selection window includes 16 `INVALID_SNAPSHOT` and one `NO_EXIT`
+  preselection record, but does not uniquely bind a reason to the last attempt.
+  The newer Paths diagnostic therefore has no actual runtime observation in this
+  trial. All nine private cleanup flags pass, owned objects remaining is zero, and
+  guest-root network snapshots match at SHA-256
+  `ef16f80d26e79e603cb84c10415f9e474fdea3434a5079eb0116e8cf2b041f05`.
+  Original ZIP SHA-256:
+  `e390c0fb2155a42752964d70a4bb442c6fbabad3145eb0e14591cfe94c5681db`;
+  original job log SHA-256:
+  `529267b43440518dcdcc022fe5a5f1525469cd586e253f28f39c5fee0f4c695f`.
+  This source changed only sampler diagnostics and documentation relative to
+  `71876933`; selection behavior was unchanged. Source inspection identifies a
+  separate fixture readiness gap: this scenario bypasses the initial signed
+  advertisement barrier, although the topology deliberately contains ineligible
+  low-capacity peers. This is a candidate explanation, not a uniquely proved cause
+  of the observed final rejection. Route eligibility, privacy and evidence gates
+  remain requirements, not errors to ignore.
   See [private storage maintenance](services/PRIVATE_STORAGE.md#explicit-owner-private-background-maintenance).
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
