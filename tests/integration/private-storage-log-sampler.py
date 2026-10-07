@@ -7,6 +7,7 @@ but unlike its diagnostic lower bounds, missing/changed overlap is fatal here.
 """
 from contextlib import contextmanager
 import json
+import os
 import re
 import subprocess
 import threading
@@ -16,6 +17,58 @@ LIMIT = 1000
 MAX_SAMPLES = 512
 MAX_BYTES = 262144
 MAX_CONTEXTS = 8
+PATHS_STDERR_LIMIT = 4096
+PATHS_REJECTIONS = {
+    f'Error: agent rejected request: {code} (Unavailable)\n'.encode(): code
+    for code in ('CLIENT_ROUTE_BUSY', 'MPQUIC_PATH_STATUS_UNAVAILABLE')
+}
+
+
+@contextmanager
+def paths_stderr():
+    """Drain the exact CLI child's stderr, retaining only a private bounded prefix.
+
+    This leaves subprocess.run's timeout/kill/wait behavior intact. Overflow is
+    discarded rather than allowed to block the child or change its result. No raw
+    bytes are written to disk; the caller can export only the closed projection.
+    """
+    reader, writer = os.pipe()
+    retained, result = bytearray(), {}
+
+    def drain():
+        try:
+            with os.fdopen(reader, 'rb', buffering=0) as stream:
+                while chunk := stream.read(4096):
+                    retained.extend(chunk[:max(0, PATHS_STDERR_LIMIT + 1 - len(retained))])
+            result['data'] = bytes(retained)
+        except OSError:
+            result['data'] = None
+
+    thread = threading.Thread(target=drain, name='private-storage-paths-stderr')
+    try:
+        thread.start()
+    except BaseException:
+        os.close(reader)
+        os.close(writer)
+        raise
+    try:
+        yield writer, result
+    finally:
+        # Paths does not spawn descendants. run() has reaped its exact child,
+        # including on timeout; closing our write end gives the reader EOF.
+        os.close(writer)
+        thread.join()
+
+
+def paths_process_diagnostic(status, stdout, stderr):
+    """Only exact Paths rejection pairs from the core CLI's anyhow error contract."""
+    state = ('unavailable' if not isinstance(stderr, bytes) else
+        'oversize' if len(stderr) > PATHS_STDERR_LIMIT else 'bounded')
+    value = dict(exit_status=status if type(status) is int and -128 <= status <= 255 else None,
+        diagnostic='UNRECOGNIZED', stderr_state=state)
+    if type(status) is int and status == 1 and stdout == b'' and state == 'bounded':
+        value['diagnostic'] = PATHS_REJECTIONS.get(stderr, 'UNRECOGNIZED')
+    return value
 
 
 class SamplerFailure(ValueError):
@@ -243,22 +296,26 @@ def capture(binary, socket, baseline, minimum, *, client=None, scope=None, diagn
     stopped = threading.Event()
     failures = []
 
-    def failed(phase, operation, code, route_mismatch=None):
+    def failed(phase, operation, code, route_mismatch=None, paths_process=None):
         if diagnostic is not None and not diagnostic:
             diagnostic.update(phase=phase, operation=operation, code=code,
                 samples=coverage.samples, completed=coverage.completed, failed=coverage.failed)
             if route_mismatch is not None:
                 diagnostic['route_mismatch'] = route_mismatch
+            if paths_process is not None:
+                diagnostic['paths_process'] = paths_process
         return SamplerFailure('private storage sampler failed')
 
     def sample(timeout=3, phase='initial'):
         operation = 'route_query' if client is not None else 'exit_log_query'
+        captured_stderr = {}
         try:
             deadline = time.monotonic() + timeout
             if client is not None:
-                snapshot = subprocess.run([str(binary), '--control-socket', str(client), 'paths'],
-                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                    check=True, timeout=timeout)
+                with paths_stderr() as (stderr, captured_stderr):
+                    snapshot = subprocess.run([str(binary), '--control-socket', str(client), 'paths'],
+                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=stderr,
+                        check=True, timeout=timeout)
                 operation = 'route_scope'
                 coverage.route(snapshot.stdout)
             operation = 'exit_log_query'
@@ -274,7 +331,10 @@ def capture(binary, socket, baseline, minimum, *, client=None, scope=None, diagn
                     'process' if isinstance(error, subprocess.SubprocessError) else
                     'local_io' if isinstance(error, OSError) else 'invalid')
             raise failed(phase, operation, code,
-                error.code if isinstance(error, RouteMismatch) else None) from None
+                error.code if isinstance(error, RouteMismatch) else None,
+                paths_process_diagnostic(error.returncode, error.output, captured_stderr.get('data'))
+                    if operation == 'route_query' and isinstance(error, subprocess.CalledProcessError)
+                    else None) from None
 
     sample()  # Establish coverage before starting any owner operation.
 

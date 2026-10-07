@@ -3,8 +3,12 @@
 """Pure coverage/counter contracts, not real core or protected-flow evidence."""
 from pathlib import Path
 import copy
+import os
 import runpy
 import subprocess
+import sys
+import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -33,6 +37,186 @@ def selected(context):
 
 
 class CoveredExitLogs(unittest.TestCase):
+    def test_paths_process_failure_is_closed_and_never_retried(self):
+        busy = b'Error: agent rejected request: CLIENT_ROUTE_BUSY (Unavailable)\n'
+        unavailable = b'Error: agent rejected request: MPQUIC_PATH_STATUS_UNAVAILABLE (Unavailable)\n'
+        cases = (
+            (1, b'', busy, 'CLIENT_ROUTE_BUSY', 'bounded'),
+            (1, b'', unavailable, 'MPQUIC_PATH_STATUS_UNAVAILABLE', 'bounded'),
+            (2, b'', busy, 'UNRECOGNIZED', 'bounded'),
+            (-9, b'', busy, 'UNRECOGNIZED', 'bounded'),
+            (1, b'SECRET_STDOUT', busy, 'UNRECOGNIZED', 'bounded'),
+            (1, b'', b'Error: agent rejected request: SECRET_CODE (Unavailable)\n', 'UNRECOGNIZED', 'bounded'),
+            (1, b'', busy.replace(b'Unavailable', b'Policy'), 'UNRECOGNIZED', 'bounded'),
+            (1, b'', b'SECRET_PREFIX\n' + busy, 'UNRECOGNIZED', 'bounded'),
+            (1, b'', busy + b'SECRET_SUFFIX', 'UNRECOGNIZED', 'bounded'),
+            (1, b'', busy + busy, 'UNRECOGNIZED', 'bounded'),
+            (1, b'', b'\xffSECRET_PRIVATE', 'UNRECOGNIZED', 'bounded'),
+            (1, b'', b'', 'UNRECOGNIZED', 'bounded'),
+            (1, b'', busy + b'SECRET_PRIVATE' * 1000, 'UNRECOGNIZED', 'oversize'),
+        )
+        for status, stdout, stderr, reason, state in cases:
+            diagnostic = {}
+
+            def rejected(command, **options):
+                # Exercise the actual pipe capture/parser, not a fabricated parsed code.
+                if options['stderr'] != subprocess.DEVNULL:
+                    os.write(options['stderr'], stderr)
+                raise subprocess.CalledProcessError(status, ['SECRET_COMMAND'], output=stdout)
+
+            with self.subTest(reason=reason, status=status, state=state), \
+                    patch.object(S['subprocess'], 'run', side_effect=rejected) as command:
+                with self.assertRaises(S['SamplerFailure']) as failure:
+                    with S['capture']('/synthetic/cli', '/synthetic/exit', 10, 1,
+                            client='/synthetic/client', scope=SCOPE, diagnostic=diagnostic):
+                        self.fail('failed Paths must not admit owner work')
+                self.assertEqual(command.call_count, 1)
+                self.assertEqual(command.call_args.kwargs['timeout'], 3)
+                self.assertEqual(diagnostic, dict(phase='initial', operation='route_query', code='process',
+                    samples=0, completed=0, failed=0,
+                    paths_process=dict(exit_status=status, diagnostic=reason, stderr_state=state)))
+                self.assertNotIn('SECRET', repr(diagnostic) + str(failure.exception))
+
+    def test_paths_failure_capture_is_bounded_with_a_real_inert_subprocess(self):
+        run = subprocess.run
+        diagnostic = {}
+
+        def rejected(command, **options):
+            # No agent, socket, network or model: exercise child output/EOF and draining.
+            return run([sys.executable, '-c',
+                "import os,sys; os.write(2, b'SECRET_PRIVATE' * 20000); sys.exit(1)"], **options)
+
+        with patch.object(S['subprocess'], 'run', side_effect=rejected) as command:
+            with self.assertRaises(S['SamplerFailure']):
+                with S['capture']('/synthetic/cli', '/synthetic/exit', 10, 1,
+                        client='/synthetic/client', scope=SCOPE, diagnostic=diagnostic):
+                    self.fail('oversize rejection remains failed')
+        self.assertEqual(command.call_count, 1)
+        self.assertEqual(diagnostic['paths_process'],
+            dict(exit_status=1, diagnostic='UNRECOGNIZED', stderr_state='oversize'))
+        self.assertNotIn('SECRET', repr(diagnostic))
+        # A distinct, healthy observation still follows the unchanged real route parser.
+        a = 'a' * 32
+        replies = [paths(a), event(9), paths(a), event(9) + event(11, context=a)]
+        restored = {}
+        with patch.object(S['subprocess'], 'run', side_effect=[SimpleNamespace(stdout=row) for row in replies]):
+            with S['capture']('/synthetic/cli', '/synthetic/exit', 10, 1,
+                    client='/synthetic/client', scope=SCOPE, diagnostic=restored) as coverage:
+                pass
+        S['validate_phase_route'](SCOPE, selected(a), coverage.report(True))
+        self.assertEqual(restored, {})
+
+    def test_paths_process_status_bounds_and_capture_absence_are_not_guessed(self):
+        diagnostic = S['paths_process_diagnostic']
+        busy = b'Error: agent rejected request: CLIENT_ROUTE_BUSY (Unavailable)\n'
+        for status in (None, True, -129, 256, '1'):
+            self.assertEqual(diagnostic(status, b'', busy),
+                dict(exit_status=None, diagnostic='UNRECOGNIZED', stderr_state='bounded'))
+        for raw in (None, 'SECRET_STRING'):
+            self.assertEqual(diagnostic(1, b'', raw),
+                dict(exit_status=1, diagnostic='UNRECOGNIZED', stderr_state='unavailable'))
+
+    def test_paths_stderr_live_retention_bound_and_success_are_unchanged(self):
+        run = subprocess.run
+        with S['paths_stderr']() as (descriptor, captured):
+            run([sys.executable, '-c', "import os; os.write(2, b'x' * 262144)"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=descriptor, check=True, timeout=3)
+        self.assertEqual(captured['data'], b'x' * (S['PATHS_STDERR_LIMIT'] + 1))
+        a = 'a' * 32
+        replies = iter([paths(a), event(9), paths(a), event(9) + event(11, context=a)])
+
+        def success(command, **options):
+            if command[-1] == 'paths':
+                os.write(options['stderr'], b'Error: agent rejected request: CLIENT_ROUTE_BUSY (Unavailable)\n')
+            return SimpleNamespace(stdout=next(replies))
+
+        diagnostic = {}
+        with patch.object(S['subprocess'], 'run', side_effect=success):
+            with S['capture']('/synthetic/cli', '/synthetic/exit', 10, 1,
+                    client='/synthetic/client', scope=SCOPE, diagnostic=diagnostic) as coverage:
+                pass
+        self.assertEqual(diagnostic, {})
+        S['validate_phase_route'](SCOPE, selected(a), coverage.report(True))
+
+    def test_paths_error_cannot_replace_owner_failure_or_weaken_final_coverage(self):
+        busy = b'Error: agent rejected request: CLIENT_ROUTE_BUSY (Unavailable)\n'
+        for owner_fails in (False, True):
+            primary = ValueError('owner operation failed')
+            diagnostic, count = {}, [0]
+
+            def invoke(command, **options):
+                count[0] += 1
+                if count[0] <= 2:
+                    return SimpleNamespace(stdout=paths('a' * 32) if count[0] == 1 else event(9))
+                os.write(options['stderr'], busy)
+                raise subprocess.CalledProcessError(1, ['SECRET_ARGS'], output=b'')
+
+            with self.subTest(owner_fails=owner_fails), patch.object(S['subprocess'], 'run', side_effect=invoke):
+                with self.assertRaises(ValueError) as failure:
+                    with S['capture']('/synthetic/cli', '/synthetic/exit', 10, 1,
+                            client='/synthetic/client', scope=SCOPE, diagnostic=diagnostic):
+                        if owner_fails:
+                            raise primary
+            self.assertEqual(count[0], 3)
+            if owner_fails:
+                self.assertIs(failure.exception, primary)
+            else:
+                self.assertIsInstance(failure.exception, S['SamplerFailure'])
+            self.assertEqual(diagnostic, dict(phase='final_drain', operation='route_query', code='process',
+                samples=1, completed=0, failed=0, paths_process=dict(exit_status=1,
+                    diagnostic='CLIENT_ROUTE_BUSY', stderr_state='bounded')))
+            self.assertNotIn('SECRET', repr(diagnostic))
+
+    def test_partial_busy_stderr_never_reclassifies_paths_timeout(self):
+        diagnostic = {}
+
+        def timeout(command, **options):
+            os.write(options['stderr'], b'Error: agent rejected request: CLIENT_ROUTE_BUSY (Unavailable)\n')
+            raise subprocess.TimeoutExpired(['SECRET_ARGS'], options['timeout'])
+
+        with patch.object(S['subprocess'], 'run', side_effect=timeout) as command:
+            with self.assertRaises(S['SamplerFailure']):
+                with S['capture']('/synthetic/cli', '/synthetic/exit', 10, 1,
+                        client='/synthetic/client', scope=SCOPE, diagnostic=diagnostic):
+                    self.fail('timeout must not admit owner work')
+        self.assertEqual(command.call_count, 1)
+        self.assertEqual(diagnostic, dict(phase='initial', operation='route_query', code='timeout',
+            samples=0, completed=0, failed=0))
+
+    def test_real_paths_timeout_reaps_child_and_joins_stderr_reader(self):
+        run, popen = subprocess.run, subprocess.Popen
+        children, diagnostic = [], {}
+        threads_before = set(threading.enumerate())
+
+        def start(*args, **options):
+            child = popen(*args, **options)
+            children.append(child)
+            return child
+
+        def stalled(command, **options):
+            self.assertEqual(options['timeout'], 3)
+            return run([sys.executable, '-c',
+                "import os,time; os.write(2, b'SECRET_PRIVATE' * 20000); time.sleep(30)"], **options)
+
+        started = time.monotonic()
+        with patch.object(S['subprocess'], 'run', side_effect=stalled) as command, \
+                patch.object(S['subprocess'], 'Popen', side_effect=start):
+            with self.assertRaises(S['SamplerFailure']) as failure:
+                with S['capture']('/synthetic/cli', '/synthetic/exit', 10, 1,
+                        client='/synthetic/client', scope=SCOPE, diagnostic=diagnostic):
+                    self.fail('timed-out child must not admit owner work')
+        self.assertLess(time.monotonic() - started, 6)
+        self.assertEqual(command.call_count, 1)
+        self.assertEqual(len(children), 1)
+        self.assertLess(children[0].returncode, 0)
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(children[0].pid, os.WNOHANG)
+        self.assertFalse(any(thread not in threads_before and thread.is_alive()
+            and thread.name == 'private-storage-paths-stderr' for thread in threading.enumerate()))
+        self.assertEqual(diagnostic, dict(phase='initial', operation='route_query', code='timeout',
+            samples=0, completed=0, failed=0))
+        self.assertNotIn('SECRET', repr(diagnostic) + str(failure.exception))
+
     def test_first_route_mismatch_is_closed_and_preserves_acceptance_bounds(self):
         a, b = 'a' * 32, 'b' * 32
         original = paths(a)

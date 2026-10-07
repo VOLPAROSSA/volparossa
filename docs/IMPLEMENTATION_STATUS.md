@@ -1399,6 +1399,40 @@ and invalid-data controls, pass; they do not establish real browser/peer complet
   including the real sourced finalizer with an inert Connect failure. The failed
   outcome, eligibility, retry policy, deadlines and cleanup requirements are unchanged.
   This remains diagnostic coverage, not a product routing fix or completed maintenance.
+  The original [run37617163499 on `71876933`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37617163499),
+  attempt 1 / job112778194708, selects its route on Connect attempt 53: 52
+  `PRESELECTION_UNAVAILABLE` results followed by `CONNECTED`. At cleanup the
+  400-record client ring contains only events later than selection, so its
+  preselection projection correctly remains `unknown` / `ring_at_capacity`.
+  The trial remains **failed**, with outer phase `private-storage-fragments-upload`
+  and blocker `FRAGMENTS_UPLOAD_FAILED`. Its actual failure is the joined observer's
+  `sampling` / `route_query` / `process`, after 9 covered samples and 27 completed,
+  zero failed flows observed. These are partial counts, not the phase's flow proof.
+  The retained owner checkpoint has cursor 2 -> 3, worker exit 0 and
+  `core_turn_revoked`. Exact-source control flow shows that renewal, owner EOF,
+  foreground revocation and reconciliation returned before the stored sampler
+  failure was raised at context exit; no accepted upload receipt was published.
+  Withdrawal, restoration, retirement, all-copy deletion and final provider-zero
+  accounting were not reached. All nine private cleanup flags are true, owned
+  objects remaining is zero, and disposable guest-root network snapshots both have
+  SHA-256 `762b3bf232cc9113e8cc55f450ae39c60dccc1aa22f22805e9ac082d9076fc1d`.
+  Original ZIP SHA-256:
+  `fa62763e5a980fe953692b1318b5ffb1075e5ffd5bac580265e5e12b45781cb8`;
+  original job log SHA-256:
+  `5ccafb3962bdbb8a7fe0924a57e8ae28293cc6398fde8901b1f032d8f28ab2fa`.
+  The failing Paths process's stderr was discarded, so its specific cause remains
+  unknown. `CLIENT_ROUTE_BUSY` is possible in the inspected handler even for
+  MPTCP, but is not demonstrated by this run. The follow-up retains only a bounded
+  exit status and exact full-message allowlist for `CLIENT_ROUTE_BUSY` and
+  `MPQUIC_PATH_STATUS_UNAVAILABLE`, both with result `Unavailable`, exit 1 and no
+  stdout. Other or oversized diagnostics remain `UNRECOGNIZED`; raw stderr is
+  bounded in memory, drained and never persisted or exported. No failed observation
+  is ignored or retried; deadlines, route freshness, continuous coverage and flow
+  minima are unchanged. Twenty-two focused sampler checks include fail-before
+  diagnostics, bounded real inert child output, actual timeout/reap/reader joining,
+  owner-error precedence and a separate healthy observation. Seventeen maintenance
+  and five wiring checks also pass. These are diagnostic tests, not a runtime fix
+  or a new passing maintenance trial.
   See [private storage maintenance](services/PRIVATE_STORAGE.md#explicit-owner-private-background-maintenance).
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):

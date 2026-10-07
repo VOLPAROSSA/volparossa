@@ -205,6 +205,28 @@ unchanged, but final flow gates, all-copy deletion and provider zero-lease accou
 are absent. No new retry or relaxed success requirement follows from this result;
 see the [original artifact hashes and precise scope](../IMPLEMENTATION_STATUS.md#additional-application-and-autonomous-maintenance-scope).
 
+The later original [run37617163499 on `71876933`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37617163499)
+selects a route after 52 temporary preselection failures, but remains **failed** in
+the upload phase. Its joined observer records a nonzero Paths-process exit after
+9 samples and 27 completed flows; this is incomplete network coverage, not accepted
+upload proof. The last owner checkpoint records cursor 2 -> 3 and foreground
+revocation. Exact-source control flow shows that owner renewal, EOF/restart,
+foreground revocation and reconciliation returned before the stored observation
+failure was raised. Restore, retirement and final provider-zero accounting were
+not reached. Private/topology cleanup completes and guest-root network state is
+unchanged; these do not establish the missing storage lifecycle.
+
+That run discarded the failing Paths stderr, so it cannot establish whether the
+request was temporarily busy or failed for another reason. The diagnostic follow-up
+keeps a bounded exit status and recognizes only the two exact source-defined Paths
+rejection messages; unknown, mixed or oversized output remains unrecognized. Raw
+stderr stays bounded in memory and is never retained in artifacts. Every process
+failure still fails the observer: there are no new retries, relaxed deadlines,
+stale-path allowances or gaps accepted in the flow evidence. Targeted inert tests
+cover those boundaries, including child timeout and cleanup; they do not turn the
+original failed run into a passing distributed-maintenance result. See the
+[preserved original hashes and checkpoint details](../IMPLEMENTATION_STATUS.md#additional-application-and-autonomous-maintenance-scope).
+
 Message delivery can acknowledge and consume an inbox item. A backup restore must not
 consume its storage lease. Backup retention, renewal, expiry and owner deletion are
 separate operations with separate authorization. They may share protected network
