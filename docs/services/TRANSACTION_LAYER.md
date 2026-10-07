@@ -21,8 +21,8 @@ The confirmed portfolio rule is ROIC times FCF-yield with nonnegative inputs. Po
 weights do not establish prices, legal title or redemption guarantees. The Bank
 [research document](https://github.com/VOLPAROSSA/volparossa-bank/blob/main/docs/RESEARCH.md)
 compares Interledger/Open Payments, GNU Taler and governed BFT ledger protocols,
-and records financial/legal boundaries. The next TEST-unit milestone selects
-CometBFT for ordering, not for payment gateways or securities ownership. Neither
+and records financial/legal boundaries. The bounded TEST-unit ordering slice uses
+CometBFT, not payment gateways or securities ownership. Neither
 Kademlia nor signed advertisements supply financial consensus.
 
 ## Intended versioned interface
@@ -243,7 +243,7 @@ can read replicated commands and account relationships; this fixture does not
 prove confidential financial processing, open membership or protected overlay
 transport. A response from one RPC endpoint is not independently verified finality.
 The client still needs trusted validator membership and verified commit/header
-binding. The `transaction-abci` disposable VM scenario now prepares this
+binding. The `transaction-abci` disposable VM scenario runs this
 four-validator interoperability trial within the existing four-CPU, 4 GiB RAM,
 16 GiB disk envelope. It source-builds exact CometBFT with a separately hash-checked
 Go compiler; no engine binary or private keys are exported. Five isolated guest
@@ -282,8 +282,26 @@ exported. The offline gate checks that binding plus every original execution and
 cleanup condition. Raw-identical snapshots remain endpoint-equality evidence,
 not proof that no refresh or transient mutation occurred between reads. Even a
 bounded accepted decrement cannot prove its cause; this is neither cryptographic
-attestation nor continuous monitoring. The change has inert positive/negative
-tests only, not a new VM result or a retrospective upgrade of the failed run.
+attestation nor continuous monitoring. Positive/negative component tests and the
+new successful trial below support this observer; the old failed runs are not
+retrospectively upgraded.
+
+The exact-source `2ea504e399eb08b7d67d64e5087f6dad596db65a`
+[trial 37669796654, attempt 1](https://github.com/VOLPAROSSA/volparossa/actions/runs/37669796654/job/112958337820)
+passed on 2026-10-07: all nine setup/startup, signed-conflict, commit, partition,
+rejoin and crash/replay checkpoints, plus the outer acceptance and cleanup gates.
+One conflicting reserve was rejected; 70 TEST units moved while total supply
+remained 100. A 3–1 split permitted majority progress and a 2–2 split halted all
+four live validators. Both healed. After the post-commit restart, both original
+signed commands executed again in block 21 without changing balances or original
+receipts; all stores converged at height 22. Driver and guest exits were 0.
+
+All eight processes were reaped and owned namespaces/private keys removed.
+Raw parent address/IPv6-route hashes still differed: the separate observer
+accepted six finite lifetime countdowns over approximately 43.06s, preserving six
+forever values, structure and all other raw hashes. This scoped guest-parent
+result is not raw equality or a whole-runner audit. The original ZIP/log and
+independently repeated offline gate are recorded in the implementation status.
 
 See the [original trials and remaining evidence](../IMPLEMENTATION_STATUS.md).
 Post-commit restart is not a pre-commit crash or actively equivocating validator;

@@ -132,10 +132,10 @@ repeated by root. Unsupported proof queries and snapshot adoption are refused;
 query results explicitly do not claim a consensus certificate. The thirteen
 verbatim schema/license inputs pass offline digest and closed-import verification.
 A guest-only four-validator fixture now has actual Comet/Rust transfer, partition,
-rejoin and post-commit crash/retry evidence. Its overall trial remains failed at
-the separate guest-parent state-observation gate. This is a bounded inner
-functional result, not complete distributed acceptance; the original result and
-remaining limits are recorded below.
+rejoin and post-commit crash/retry evidence, with a successful exact-source trial
+including the separate guest-parent state-observation and cleanup gates. This is
+bounded four-validator TEST interoperability, not a complete transaction service;
+the earlier failures, successful trial and remaining limits are recorded below.
 
 The initial adapter source checks remain recorded as failures: `ac3e6632`
 failed a statement-order lint and `97aeaddc` a test semicolon lint. After those
@@ -243,18 +243,54 @@ snapshots retain endpoint-equality semantics and cannot exclude an invisible
 refresh or mutate-and-restore between reads. Neither can a within-window change
 be attributed uniquely to natural expiry. Cleanup and all functional/exit gates
 remain mandatory. Thirty-four inert contract and fourteen wiring/evidence tests
-pass; no new runtime has yet tested this correction. The original failed trial,
-source, logs and consumed dispatch receipts remain unchanged.
+pass. The original failed trial, source, logs and consumed dispatch receipts
+remain unchanged; the correction's new runtime result follows separately.
 
-The [next distributed milestone](services/TRANSACTION_LAYER.md#distributed-test-execution)
-selects source-pinned CometBFT with four fixed TEST validators. Ordered local
-execution does not itself establish consensus. The actual inner checkpoints above
-do not waive the failed outer gate. Byzantine equivocation, distributed pre-commit
-crashes, protected overlay transport and independent client finality verification
-remain unproved.
+Exact source `2ea504e399eb08b7d67d64e5087f6dad596db65a` passed
+[trial 37669796654, attempt 1](https://github.com/VOLPAROSSA/volparossa/actions/runs/37669796654/job/112958337820)
+on 2026-10-07. The original artifact and decoded job log were retained, all five
+artifact members were checked byte-for-byte, and the exact-source offline gate
+was independently repeated successfully. Driver and guest exits were both 0,
+guest phase was `complete`, and both inner and outer acceptance were true.
 
-This durable slice has no network, gateway, encryption at rest, consensus,
-distributed finality, external reconciliation, corrections or AML capability.
+All nine functional checkpoints passed:
+
+- `setup` created four independent stores and private sockets; `startup`
+  converged at height 2. `signed_conflict` rejected one of two competing 70-of-100
+  TEST reserves with codes `[7,0]` and converged at height 4. `commit` moved 70,
+  conserved 100 and converged at height 6.
+- `partition_3_1` kept the isolated validator at height 6 for 31 samples over
+  8.006s while the majority advanced from 8 to 12; both-direction drop counters
+  were `[38,21]`. `rejoin_3_1` converged at 14. `partition_2_2` held all four at
+  16 for 30 samples over 8.264s, with drops `[28,39]`; `rejoin_2_2` converged at 18.
+- `crash_replay` restarted node 3 after commit. Both original signed byte strings
+  executed again in new block 21 with codes `[0,0]`; all four stores preserved
+  original sequence 1/2 receipts and balances, then converged at height 22.
+
+All eight child processes were reaped, owned guest namespaces removed and
+synthetic private keys deleted. **Raw parent snapshots were not equal**:
+addresses and IPv6 routes differed. The separate `bounded-expiry-countdown-v1`
+observer accepted four finite address lifetimes and two finite route lifetimes
+decreasing within their measured approximately 43.06s windows; six forever
+address lifetimes, both structures and all seven other raw state hashes remained
+equal. This is source-bound endpoint observation, not proof of a unique cause or
+continuous absence of changes. It covers the guest parent namespace, not a
+whole-runner/development-host audit. Driver exit 0 includes its cleanup path;
+the artifact has no separate per-object QEMU/scratch cleanup receipt.
+
+Original ZIP SHA-256:
+`43e00358b5567c831df0363bc3f98fba2482921d8a2107df303e4769235e4687`.
+Exact decoded job log SHA-256:
+`51a6847626ce069f786eee4265114c188d108e3640baa78f4e91191d90cf1a79`.
+
+This completes the [bounded four-validator TEST milestone](services/TRANSACTION_LAYER.md#distributed-test-execution),
+not the Bank goal. Byzantine equivocation, distributed pre-commit crashes,
+independent devices, protected overlay transport, confidential validators and
+independently verified client finality remain unproved. Earlier failed outer
+gates remain failed; this new result does not relabel them.
+
+The owner-local `Store` API still has no network, gateway, encryption at rest,
+consensus, distributed finality, external reconciliation, corrections or AML capability.
 The older isolated experiment's simulated external/correction operations are not
 features of the durable API. See the [executable core example](services/TRANSACTION_LAYER.md#durable-test-unit-core).
 
