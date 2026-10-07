@@ -52,7 +52,7 @@ pub enum WireError {
     /// A frame or separately transferred payload violates the original bounded scope.
     #[error("invalid private storage frame or payload")]
     Invalid,
-    /// Another admitted disk operation still owns the one provider execution slot.
+    /// The provider disk slot or the caller's transfer budget refuses admission.
     #[error("private storage provider busy")]
     Busy,
     /// The actual owned durable store could not complete the operation.
@@ -325,6 +325,30 @@ where
     L: AsyncRead + AsyncWrite + Unpin,
     R: AsyncRead + AsyncWrite + Unpin,
 {
+    bridge_admitted(local, remote, grant, challenge, |_| async { true }).await
+}
+
+/// Bridge the same authenticated request, admitting its validated byte demand before
+/// forwarding any operation. The caller owns cancellation and shared resource accounting.
+/// The charge is the signed read-range length or verified append payload length, plus
+/// 8192 bytes for bounded protocol metadata/framing; it is not measured transport overhead.
+/// A rejected admission writes nothing to the remote stream and creates no provider state.
+///
+/// # Errors
+/// Returns the ordinary bridge errors, or `Busy` when the resource admission declines.
+pub async fn bridge_admitted<L, R, A, F>(
+    local: &mut L,
+    remote: &mut R,
+    grant: &VerifiedStorageGrant,
+    challenge: &StorageChallenge,
+    admit: A,
+) -> Result<StorageBridgeReceipt, WireError>
+where
+    L: AsyncRead + AsyncWrite + Unpin,
+    R: AsyncRead + AsyncWrite + Unpin,
+    A: FnOnce(u64) -> F,
+    F: Future<Output = bool>,
+{
     timeout(IO_TIMEOUT, async {
         let request = SignedStorageRequest::decode_and_verify(
             &read_frame(local, MAX_REQUEST_BYTES).await?,
@@ -338,6 +362,17 @@ where
             Vec::new()
         };
         validate_append(&request, &payload)?;
+        let incoming = match request.operation() {
+            StorageOperation::ReadRange { length, .. } => length,
+            _ => 0,
+        };
+        // Exact authenticated payload lengths plus conservative bounded metadata/framing.
+        let charged = incoming
+            .saturating_add(payload.len() as u64)
+            .saturating_add(8192);
+        if !admit(charged).await {
+            return Err(WireError::Busy);
+        }
         let transfer = finish(remote, grant, challenge, request.signed(), &payload).await?;
         let ciphertext_bytes =
             u64::try_from(transfer.ciphertext.len()).map_err(|_| WireError::Invalid)?;

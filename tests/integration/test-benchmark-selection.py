@@ -22,6 +22,40 @@ def row(relay, path=1, context="11" * 16, state=1):
     return f"context={context} path={path} relay={relay} exit=X state={state} rtt_us=0 bytes=0 acked_transport_bytes=0\n"
 
 
+def readiness_cli(directory, mode="eligible"):
+    """Synthetic actor CLI; exercise the real observer/parser, never a real route."""
+    source = Path(directory, "volparossa")
+    source.write_text('''#!/usr/bin/python3
+import json
+from pathlib import Path
+import sys
+import time
+
+assert len(sys.argv) == 6 and sys.argv[1] == '--control-socket'
+assert sys.argv[3:] == ['route-readiness', '--transport', 'mptcp']
+with Path(__file__).with_name('readiness-calls').open('a') as calls:
+    calls.write('observe\\n')
+''' + f"mode = {mode!r}\n" + '''
+if mode == 'rejected':
+    sys.stderr.write('PRIVATE token=secret 192.0.2.99 prompt=private')
+    sys.exit(1)
+if mode == 'oversize':
+    print('x' * 2049)
+    sys.exit(0)
+print(json.dumps(dict(schema_version=1, scope='advertisement_preselection',
+    transport='mptcp', captured_at_unix_ms=1 if mode == 'stale' else int(time.time() * 1000),
+    outcome='eligible_advertisement_slate', eligible_slate_observed=True,
+    dataplane_verified=False, route_selected=False)))
+''')
+    source.chmod(0o700)
+
+
+def eligible_observation():
+    return dict(schema_version=1, scope="advertisement_preselection", polls=1,
+        last_outcome="eligible_advertisement_slate", eligible_slate_observed=True,
+        dataplane_verified=False, route_selected=False, result="eligible_slate_observed")
+
+
 class SelectionTests(unittest.TestCase):
     def parse(self, text, transport="mptcp"):
         return paths_module.selected_paths(text, "R0", "R1", "R2", "X", transport)
@@ -274,11 +308,11 @@ case $4 in
     cloud-private-upload) cloud_private_upload=yes ;;
     agent-cooperative-browser) agent_cooperative_browser=yes ;;
     agent-cooperative-code) agent_cooperative_code=yes ;;
+    private-storage-maintenance) private_storage_maintenance=yes ;;
     no) : ;;
     *) exit 98 ;;
 esac
-binary_directory=/unused; source_directory=/unused
-date() { printf '0\n'; }
+binary_directory=$WORK; source_directory=$1/../..
 sleep() { :; }
 timeout() {
     case "$mode" in
@@ -316,11 +350,12 @@ printf '%s\n' "$result"
         fields = {"schema_version", "stage", "reason", "last_connect_reason", "connect_exit_status",
                   "attempts", "retries", "redraws", "path_polls", "path_status"}
         scenarios = ("image-snapshot", "cloud-private-file", "cloud-private-upload", "agent-cooperative-browser",
-                     "agent-cooperative-code")
+                     "agent-cooperative-code", "private-storage-maintenance")
         for scenario, case in ((scenario, case) for scenario in scenarios for case in cases):
             mode, status, stage, reason, connect_exit, attempts = case
             with self.subTest(scenario=scenario, mode=mode), tempfile.TemporaryDirectory(
                     prefix="closed-route-diagnostic-", dir=HERE) as directory:
+                readiness_cli(directory)
                 command = ["sh", "-c", script, "test", str(HERE), directory, mode]
                 outcome = subprocess.run([*command, scenario], check=True, text=True,
                     capture_output=True, timeout=10, env={"PATH": "/usr/bin:/bin"})
@@ -328,7 +363,24 @@ printf '%s\n' "$result"
                 path = Path(directory, f"{scenario}-route-diagnostic.json")
                 encoded = path.read_text()
                 record = json.loads(encoded)
-                self.assertEqual(set(record), fields)
+                maintenance_fields = {"connect_reason_counts", "connect_counts_complete",
+                                      "preselection_diagnostic", "advertisement_observation"}
+                self.assertEqual(set(record), fields | maintenance_fields
+                    if scenario == "private-storage-maintenance" else fields)
+                if scenario == "private-storage-maintenance":
+                    self.assertEqual(record["schema_version"], 2)
+                    self.assertEqual(record["advertisement_observation"], eligible_observation())
+                    self.assertEqual(Path(directory, "readiness-calls").read_text(), "observe\n")
+                    self.assertTrue(record["connect_counts_complete"])
+                    self.assertEqual(sum(record["connect_reason_counts"].values()), attempts)
+                    if mode == "retry":
+                        self.assertEqual(record["connect_reason_counts"],
+                            {"NATIVE_PERMIT_UNAVAILABLE": 1, "CONNECTED": 1})
+                    if mode == "unknown":
+                        self.assertEqual(record["connect_reason_counts"], {"UNRECOGNIZED": 1})
+                else:
+                    self.assertEqual(record["schema_version"], 1)
+                    self.assertFalse(Path(directory, "readiness-calls").exists())
                 self.assertEqual(record["stage"], stage)
                 self.assertEqual(record["reason"], reason)
                 self.assertEqual(record["connect_exit_status"], connect_exit)
@@ -347,6 +399,8 @@ printf '%s\n' "$result"
                     capture_output=True, timeout=10, env={"PATH": "/usr/bin:/bin"})
                 self.assertEqual(int(ordinary.stdout), status)
                 self.assertFalse(path.exists())
+                if scenario == "private-storage-maintenance":
+                    self.assertEqual(Path(directory, "readiness-calls").read_text(), "observe\n")
 
     def test_image_connect_diagnostic_keeps_only_allowlisted_native_reason(self):
         script = r'''
@@ -376,6 +430,88 @@ printf '%s\n' "$benchmark_connect_reason"
                 result = subprocess.run(["sh", "-c", script, "test", str(HERE), str(source)],
                     check=True, text=True, capture_output=True, timeout=10)
                 self.assertEqual(result.stdout.strip(), expected)
+
+    def test_maintenance_counts_every_connect_once_without_retrying_terminal_refusal(self):
+        script = r'''
+set -eu
+. "$1/benchmark-selection.sh"
+WORK=$2; binary_directory=$WORK; source_directory=$1/../..
+private_storage_maintenance=yes
+date() { if [ "$1" = '+%s%3N' ]; then printf '1000\n'; else command date "$@"; fi; }
+sleep() { :; }
+timeout() {
+    case $benchmark_connect_count in
+        1|2) code=NATIVE_PERMIT_UNAVAILABLE ;;
+        3) code=PRESELECTION_UNAVAILABLE ;;
+        *) code=NO_ELIGIBLE_PATHS ;;
+    esac
+    printf 'Error: agent rejected request: %s (Unavailable)\n' "$code" >&2
+    return 1
+}
+benchmark_capture_paths() { exit 99; }
+status=0
+benchmark_select_route private-storage-fragments mptcp || status=$?
+printf '%s\n' "$status"
+'''
+        with tempfile.TemporaryDirectory(prefix="maintenance-route-counts-", dir=HERE) as directory:
+            readiness_cli(directory)
+            result = subprocess.run(["sh", "-c", script, "test", str(HERE), directory],
+                capture_output=True, text=True, check=True, timeout=10)
+            self.assertEqual(result.stdout.strip(), "1")
+            evidence = json.loads(Path(directory, "private-storage-maintenance-route-diagnostic.json").read_text())
+            self.assertEqual(evidence["advertisement_observation"], eligible_observation())
+            self.assertEqual(Path(directory, "readiness-calls").read_text(), "observe\n")
+            self.assertEqual(evidence["attempts"], 4)
+            self.assertEqual(evidence["connect_reason_counts"], dict(NATIVE_PERMIT_UNAVAILABLE=2,
+                PRESELECTION_UNAVAILABLE=1, NO_ELIGIBLE_PATHS=1))
+            self.assertTrue(evidence["connect_counts_complete"])
+            self.assertEqual(sum(evidence["connect_reason_counts"].values()), evidence["attempts"])
+            self.assertEqual(evidence["preselection_diagnostic"]["uncertainty"], "not_captured")
+            baseline = Path(directory, "private-storage-maintenance-selection-start.private")
+            self.assertEqual(baseline.read_text(), "1000\n")
+            self.assertEqual(baseline.stat().st_mode & 0o777, 0o600)
+            end = Path(directory, "private-storage-maintenance-selection-end.private")
+            self.assertEqual(end.read_text(), "1000\n")
+            self.assertEqual(end.stat().st_mode & 0o777, 0o600)
+
+    def test_maintenance_observation_failure_stops_before_connect_and_closes_diagnostic(self):
+        script = r'''
+set -eu
+. "$1/benchmark-selection.sh"
+WORK=$2; binary_directory=$WORK; source_directory=$1/../..
+private_storage_maintenance=yes
+timeout() { printf 'unexpected-connect\n' >"$WORK/connect-called"; return 99; }
+status=0
+benchmark_select_route private-storage-fragments mptcp || status=$?
+printf '%s\n' "$status"
+'''
+        for mode, result in (("missing", "observation_failed"), ("rejected", "query_rejected"),
+                             ("stale", "invalid_observation"), ("oversize", "reply_oversize")):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(
+                    prefix="maintenance-observation-refusal-", dir=HERE) as directory:
+                if mode != "missing":
+                    readiness_cli(directory, mode)
+                outcome = subprocess.run(["sh", "-c", script, "test", str(HERE), directory],
+                    capture_output=True, text=True, check=True, timeout=5,
+                    env={"PATH": "/usr/bin:/bin"})
+                self.assertEqual(outcome.stdout.strip(), "1")
+                self.assertFalse(Path(directory, "connect-called").exists())
+                encoded = Path(directory, "private-storage-maintenance-route-diagnostic.json").read_text()
+                evidence = json.loads(encoded)
+                self.assertEqual(evidence["stage"], "readiness")
+                self.assertEqual(evidence["reason"], "READINESS_NOT_OBSERVED")
+                self.assertEqual(evidence["attempts"], 0)
+                self.assertEqual(evidence["connect_reason_counts"], {})
+                self.assertTrue(evidence["connect_counts_complete"])
+                observation = evidence["advertisement_observation"]
+                self.assertEqual(observation["result"], result)
+                self.assertEqual(observation["polls"], 0 if mode == "missing" else 1)
+                self.assertFalse(observation["eligible_slate_observed"])
+                self.assertFalse(observation["route_selected"])
+                self.assertFalse(observation["dataplane_verified"])
+                self.assertLess(len(encoded), 1024)
+                for private in ("PRIVATE", "token", "secret", "192.0.2.99", "prompt", directory):
+                    self.assertNotIn(private, encoded)
 
 
 class A07FreshRouteTests(unittest.TestCase):

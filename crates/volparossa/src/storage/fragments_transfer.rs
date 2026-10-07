@@ -98,17 +98,7 @@ pub(super) async fn refresh(
     let mut complete = true;
     let mut outcomes = Vec::new();
     for index in 0..set.data.fragments.len() {
-        let mut copies = set.fragment(index)?;
-        let mut retiring = super::placement::retired(set, index);
-        if let Some(intent) = &copies.data.handoff {
-            // While replacement is still copying, the original remains a useful
-            // retention obligation. Only verified readback advances to DeletePending.
-            if intent.phase == super::super::retained::HandoffPhase::Copying {
-                retiring.remove(&intent.from);
-            }
-        }
-        let result =
-            replicas::refresh_selected(&mut copies, socket, signer, renewal, &retiring).await?;
+        let result = refresh_fragment(set, index, socket, signer, renewal, false).await?;
         complete &= result["operation_complete"] == true;
         outcomes.push(
             serde_json::json!({"index": index, "operation_complete": result["operation_complete"],
@@ -125,6 +115,30 @@ pub(super) async fn refresh(
         outcomes,
         complete,
     )
+}
+
+/// One bounded maintenance unit using exactly the same signed renewal/reconciliation engine.
+pub(super) async fn refresh_fragment(
+    set: &LockedFragments,
+    index: usize,
+    socket: &Path,
+    signer: &SigningKey,
+    renewal: Option<u64>,
+    maintenance: bool,
+) -> Result<serde_json::Value> {
+    set.check_owner(signer)?;
+    let mut copies = set.fragment(index)?;
+    let mut retiring = super::placement::retired(set, index);
+    if let Some(intent) = &copies.data.handoff {
+        if intent.phase == super::super::retained::HandoffPhase::Copying {
+            retiring.remove(&intent.from);
+        }
+    }
+    if maintenance {
+        replicas::refresh_maintenance(&mut copies, socket, signer, renewal, &retiring).await
+    } else {
+        replicas::refresh_selected(&mut copies, socket, signer, renewal, &retiring).await
+    }
 }
 
 pub(super) async fn restore(

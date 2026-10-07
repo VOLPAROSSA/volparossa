@@ -38,7 +38,7 @@ usage() {
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment]' \
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|private-storage-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment]' \
         '       --package is required only for alpha; --mpquic is unnecessary for standalone Wi-Fi/model/private-browser proofs.' \
         '       agent-cooperative-code also requires --code-bundle DIRECTORY --code-manifest-sha256 SHA256.' \
         '       --native-runtime PATH is required for agent-native-coding or agent-native-editor (exact verified bundle).' \
@@ -354,6 +354,11 @@ print_plan() {
             '  encrypt synthetic quiesced snapshot, spread signed fragments across protected MPTCP providers;' \
             '  lose one provider, restore twice, decrypt into new directories and verify original bytes;' \
             '  owner keys never go to peers; no running Immich/database restore or mobile/web service claim.'
+    elif [ "$scenario" = private-storage-maintenance ]; then
+        printf '%s\n' \
+            'Private-storage-maintenance scenario: actual owner-private upkeep through protected fragment providers;' \
+            '  real sharing admission, signed renewal and repair after source removal and provider loss;' \
+            '  pending physical charges remain counted; complete restores and exact private/host cleanup.'
     elif [ "$scenario" = private-storage-fragments ]; then
         printf '%s\n' \
             'Private-storage-fragments scenario: four signed fragments, two copies across three protected MPTCP providers;' \
@@ -492,7 +497,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|private-storage-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --code-bundle)
@@ -976,6 +981,11 @@ SIGNAL_FRAGMENT_NAMES = {"a01-expected-peers.json", "signal-backup-provision.jso
 )}
 
 
+MAINTENANCE_NAMES = (FRAGMENTS_NAMES - {"private-storage-fragments-smoke.json", "private-storage-fragments-evidence.json"}) | {
+    "private-storage-maintenance-smoke.json", "private-storage-maintenance-evidence.json",
+    "private-storage-maintenance-route-diagnostic.json",
+}
+
 IMAGE_NAMES = (FRAGMENTS_NAMES - {"private-storage-fragments-smoke.json", "private-storage-fragments-evidence.json"}) | {
     "image-snapshot-smoke.json", "image-snapshot-evidence.json", "image-snapshot-provision.json",
     "image-snapshot-route-diagnostic.json",
@@ -1086,7 +1096,7 @@ def collect(home, opt, revision, scenario, guest_status,
     file_count_limit = 128 if scenario in ("agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation", "agent-policy-assessment") else FILE_COUNT_LIMIT
     if scenario == "agent-autonomous-aggregation":
         file_count_limit = 192
-    if scenario in ("reciprocity-private-dns", "private-storage-handoff", "private-storage-fragments", "image-snapshot", "cloud-private-file", "cloud-private-upload"):
+    if scenario in ("reciprocity-private-dns", "private-storage-handoff", "private-storage-fragments", "private-storage-maintenance", "image-snapshot", "cloud-private-file", "cloud-private-upload"):
         # Bounded DNS and six-phase custody evidence exceed the default file count.
         file_count_limit = 128
     candidates = [(home / name, f"driver/{name}") for name in
@@ -1100,7 +1110,7 @@ def collect(home, opt, revision, scenario, guest_status,
                       (home / "signal-backup-runtime/provision.json", "driver/signal-backup-provision.json")]
     if scenario in ("agent-private-conversation", "agent-native-coding", "agent-native-editor"):
         candidates = [(home / name, f"driver/{name}") for name in ("guest-phase.txt", "cargo-build.log")]
-    if scenario in ("private-storage-fragments", "image-snapshot", "cloud-private-file", "cloud-private-upload"):
+    if scenario in ("private-storage-fragments", "private-storage-maintenance", "image-snapshot", "cloud-private-file", "cloud-private-upload"):
         candidates = [(home / "guest-phase.txt", "driver/guest-phase.txt")]
         if scenario == "image-snapshot":
             candidates.append((opt / "volparossa-image/provision.json", "driver/image-snapshot-provision.json"))
@@ -1139,8 +1149,8 @@ def collect(home, opt, revision, scenario, guest_status,
                                         "host-state-before.json", "host-state-after.json"}
             candidates.extend((root / name, f"{label}/{name}") for name in sorted(selected))
             continue
-        if scenario in ("private-storage-fragments", "image-snapshot", "cloud-private-file", "cloud-private-upload"):
-            names = UPLOAD_NAMES if scenario == "cloud-private-upload" else CLOUD_NAMES if scenario == "cloud-private-file" else IMAGE_NAMES if scenario == "image-snapshot" else FRAGMENTS_NAMES
+        if scenario in ("private-storage-fragments", "private-storage-maintenance", "image-snapshot", "cloud-private-file", "cloud-private-upload"):
+            names = MAINTENANCE_NAMES if scenario == "private-storage-maintenance" else UPLOAD_NAMES if scenario == "cloud-private-upload" else CLOUD_NAMES if scenario == "cloud-private-file" else IMAGE_NAMES if scenario == "image-snapshot" else FRAGMENTS_NAMES
             candidates.extend((root / name, f"{label}/{name}") for name in sorted(names))
             candidates.extend((root / name, f"{label}/{name}") for name in
                               ("host-state-before.json", "host-state-after.json", "guest-exit-status"))
@@ -1313,7 +1323,7 @@ if __name__ == "__main__":
     if len(sys.argv) != 4 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sys.argv[1]):
         raise SystemExit(64)
     if sys.argv[2] not in ("alpha", "datapath", "reciprocity", "reciprocity-private-dns", "local-link", "mixed-link", "mpquic-growth", "mptcp-growth", "mptcp-refill",
-                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "private-storage-peer", "private-storage-replicas", "signal-backup", "signal-backup-fragments", "private-storage-handoff", "private-storage-fragments", "image-snapshot", "cloud-private-file", "cloud-private-upload", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel", "agent-private-task", "agent-private-code", "agent-private-conversation", "agent-native-coding", "agent-native-editor", "agent-private-browser", "browser-network", "agent-reasoning", "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-artifact-quarantine", "agent-jobs", "agent-jobs-loss", "agent-jobs-follow", "agent-jobs-peer-recovery", "agent-jobs-ready-queue", "agent-jobs-package-queue", "agent-public-task", "agent-public-document", "agent-cooperative-browser", "agent-cooperative-browser-discovered", "agent-cooperative-code", "agent-cooperative-code-proposal", "agent-public-collection", "agent-public-network-sources", "agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation", "agent-policy-assessment"):
+                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "private-storage-peer", "private-storage-replicas", "signal-backup", "signal-backup-fragments", "private-storage-handoff", "private-storage-fragments", "private-storage-maintenance", "image-snapshot", "cloud-private-file", "cloud-private-upload", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel", "agent-private-task", "agent-private-code", "agent-private-conversation", "agent-native-coding", "agent-native-editor", "agent-private-browser", "browser-network", "agent-reasoning", "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-artifact-quarantine", "agent-jobs", "agent-jobs-loss", "agent-jobs-follow", "agent-jobs-peer-recovery", "agent-jobs-ready-queue", "agent-jobs-package-queue", "agent-public-task", "agent-public-document", "agent-cooperative-browser", "agent-cooperative-browser-discovered", "agent-cooperative-code", "agent-cooperative-code-proposal", "agent-public-collection", "agent-public-network-sources", "agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation", "agent-policy-assessment"):
         raise SystemExit(64)
     status_code = int(sys.argv[3])
     if not 0 <= status_code <= 255 or socket.gethostname() != "volparossa-alpha" or os.geteuid() != 0:
@@ -1356,7 +1366,7 @@ case $scenario in
         ;;
     *) [ "$#" -eq 5 ] || exit 64 ;;
 esac
-case $scenario in alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) exit 64 ;; esac
+case $scenario in alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|private-storage-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
 guest_phase verify-source
@@ -1622,7 +1632,7 @@ printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-stat
 fi
 
 topology_scenario=alpha
-case $scenario in reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) topology_scenario=$scenario ;; esac
+case $scenario in reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|private-storage-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) topology_scenario=$scenario ;; esac
 guest_phase topology
 set --
 if [ "$scenario" = image-snapshot ]; then
@@ -1707,7 +1717,7 @@ elif [ "$scenario" = signal-backup ] || [ "$scenario" = signal-backup-fragments 
         fi
     done >/home/vpci/signal-backup-export.list
     tar -C /home/vpci/alpha-output -czf /home/vpci/alpha-output.tar.gz -T /home/vpci/signal-backup-export.list
-elif [ "$scenario" = private-storage-fragments ] || [ "$scenario" = image-snapshot ] || [ "$scenario" = cloud-private-file ] || [ "$scenario" = cloud-private-upload ]; then
+elif [ "$scenario" = private-storage-fragments ] || [ "$scenario" = private-storage-maintenance ] || [ "$scenario" = image-snapshot ] || [ "$scenario" = cloud-private-file ] || [ "$scenario" = cloud-private-upload ]; then
     {
         python3 -B "tests/integration/$scenario-smoke.py" export-names
         printf '%s\n' host-state-before.json host-state-after.json guest-exit-status
@@ -1870,6 +1880,9 @@ driver_time_bound=2400s
 # Application exchange/lease bounds remain unchanged.
 [ "$scenario" != cloud-private-file ] || driver_time_bound=3600s
 [ "$scenario" != cloud-private-upload ] || driver_time_bound=3600s
+# Only this enclosing runner allowance changes; maintenance's signed service
+# deadlines and admission bounds remain enforced by the ordinary core.
+[ "$scenario" != private-storage-maintenance ] || driver_time_bound=3600s
 # This scenario has a 1800s owner bound plus actual isolated guest provisioning/build.
 # Only the enclosing VM-driver window changes, never worker or source authorization.
 [ "$scenario" != agent-jobs-peer-recovery ] || driver_time_bound=3600s

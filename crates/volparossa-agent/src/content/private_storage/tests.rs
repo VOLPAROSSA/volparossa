@@ -53,6 +53,7 @@ fn private_storage_remote_binds_independent_provider_before_discovery() {
     let mut request = PrivateStorageRemoteRequest {
         provider_key: issued.provider_key,
         grant: issued.grant,
+        maintenance_turn: Vec::new(),
     };
     let checked = validate_remote(&request).unwrap();
     assert_eq!(checked.grant.owner_key(), &owner.verifying_key());

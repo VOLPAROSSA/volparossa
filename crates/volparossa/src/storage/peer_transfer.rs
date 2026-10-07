@@ -32,6 +32,24 @@ use super::{
     state::{self, Journal, LockedJournal},
 };
 
+tokio::task_local! {
+    static MAINTENANCE_TURN: Vec<u8>;
+}
+
+/// Background reads grant at most one upload-sized chunk; ordinary range reads are unchanged.
+pub(super) fn range_bytes() -> u64 {
+    if MAINTENANCE_TURN.try_with(|_| ()).is_ok() {
+        CHUNK_BYTES as u64
+    } else {
+        MAX_RANGE_BYTES
+    }
+}
+
+/// One core-admitted owner operation, without changing the foreground CLI's transport.
+pub(super) async fn with_maintenance_turn<F: Future>(token: Vec<u8>, work: F) -> F::Output {
+    MAINTENANCE_TURN.scope(token, work).await
+}
+
 pub(super) async fn deposit(args: Deposit, socket: &Path) -> Result<serde_json::Value> {
     ensure!(
         args.already_encrypted,
@@ -236,7 +254,7 @@ pub(super) async fn restore_retained(
     let mut hash = Sha256::new();
     let mut offset = 0;
     while offset < retained.journal.ciphertext_bytes {
-        let length = (retained.journal.ciphertext_bytes - offset).min(MAX_RANGE_BYTES);
+        let length = (retained.journal.ciphertext_bytes - offset).min(range_bytes());
         let reply = remote(
             socket,
             grant,
@@ -361,6 +379,7 @@ pub(super) async fn remote(
         let request = PrivateStorageRemoteRequest {
             provider_key: grant.provider_key().to_bytes().to_vec(),
             grant: grant.signed().encode(),
+            maintenance_turn: MAINTENANCE_TURN.try_with(Clone::clone).unwrap_or_default(),
         };
         let (mut stream, request_id, response) =
             crate::control::begin_request(socket, Operation::PrivateStorageRemote(request)).await?;

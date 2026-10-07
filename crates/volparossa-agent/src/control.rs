@@ -1,6 +1,7 @@
 //! Protected local CLI socket and typed operation dispatch.
 
 mod content_transfer;
+mod route_readiness;
 
 use std::{
     fs,
@@ -205,6 +206,7 @@ async fn process_connection(
                 | control_request::Operation::ContentLocalFetchName(_)
                 | control_request::Operation::MailboxRemote(_)
                 | control_request::Operation::PrivateStorageRemote(_)
+                | control_request::Operation::PrivateStorageMaintenance(_)
                 | control_request::Operation::ContentCustody(_)
                 | control_request::Operation::ComputeRemote(_)
         )
@@ -254,6 +256,16 @@ async fn process_connection(
             Some(control_request::Operation::PrivateStorageRemote(remote)) => {
                 Box::pin(context.content.private_storage_remote(
                     remote.clone(),
+                    &context,
+                    &mut stream,
+                    &request.request_id,
+                    &mut ready_sent,
+                ))
+                .await
+            }
+            Some(control_request::Operation::PrivateStorageMaintenance(maintenance)) => {
+                Box::pin(context.content.private_storage_maintenance(
+                    maintenance,
                     &context,
                     &mut stream,
                     &request.request_id,
@@ -362,6 +374,7 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
         | control_request::Operation::ContentLocalFetchName(_)
         | control_request::Operation::MailboxRemote(_)
         | control_request::Operation::PrivateStorageRemote(_)
+        | control_request::Operation::PrivateStorageMaintenance(_)
         | control_request::Operation::ContentCustody(_)
         | control_request::Operation::ContentCustodyDiscover(_)
         | control_request::Operation::ComputeRemote(_)
@@ -486,6 +499,9 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
         }
         control_request::Operation::Paths(_) => {
             paths_response(request_id, &context.routes, &context.state).await
+        }
+        control_request::Operation::RouteReadiness(request) => {
+            route_readiness::respond(request_id, request, context).await
         }
         control_request::Operation::Sessions(_) => {
             let sessions = context.state.read().await.session_list();
@@ -816,11 +832,15 @@ async fn paths_response(
     routes: &ClientRouteControl,
     state: &Arc<RwLock<AgentState>>,
 ) -> ControlResponse {
-    if routes.refresh_mpquic_path_summaries().await.is_err() {
+    if let Err(error) = routes.refresh_mpquic_path_summaries().await {
+        let diagnostic = match error {
+            ClientRouteConnectError::Busy => "CLIENT_ROUTE_BUSY",
+            _ => "MPQUIC_PATH_STATUS_UNAVAILABLE",
+        };
         return response(
             request_id,
             ControlResult::Unavailable,
-            "MPQUIC_PATH_STATUS_UNAVAILABLE",
+            diagnostic,
             control_response::Payload::Ack(Empty {}),
         );
     }
@@ -1112,6 +1132,68 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    async fn assert_busy_paths_does_not_infer_owner_from_display(mpquic: bool) {
+        use std::{
+            future::Future as _,
+            task::{Context, Poll, Waker},
+        };
+
+        let config = Config::default();
+        let mut state = AgentState::new(
+            &config,
+            config.roles,
+            None,
+            volparossa_metrics::MetricsRegistry::new(),
+        )
+        .unwrap();
+        let paths = (1..=2)
+            .map(|path_id| volparossa_local_control::PathSummary {
+                route_context_id: vec![2; 16],
+                path_id,
+                relay_peer_id: format!("relay-{path_id}"),
+                exit_peer_id: "exit".to_owned(),
+                state: volparossa_local_control::PathState::Reachable as i32,
+                ..Default::default()
+            })
+            .collect();
+        if mpquic {
+            state.replace_mpquic_paths(paths).unwrap();
+        } else {
+            state.replace_mptcp_paths(paths).unwrap();
+        }
+        let state = Arc::new(RwLock::new(state));
+        let before = state.read().await.path_list();
+        let routes = ClientRouteControl::default();
+        // Reproduce contention directly: an MPTCP reconciliation/control transaction can
+        // retain this same affine owner lock across network/helper I/O. The display cannot
+        // establish which transport the unavailable owner currently holds.
+        let owner = routes.hold_owner_for_test().await;
+        let mut query = Box::pin(paths_response(vec![1; 16], &routes, &state));
+        let result = match query.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(result) => result,
+            Poll::Pending => panic!("Paths must report contention without waiting on owner I/O"),
+        };
+        assert_eq!(result.result, ControlResult::Unavailable as i32);
+        assert_eq!(result.diagnostic_code, "CLIENT_ROUTE_BUSY");
+        assert!(matches!(
+            result.payload,
+            Some(control_response::Payload::Ack(_))
+        ));
+        assert_eq!(state.read().await.path_list(), before);
+        drop(query);
+        drop(owner);
+    }
+
+    #[tokio::test]
+    async fn paths_query_returns_busy_without_guessing_from_mptcp_display() {
+        assert_busy_paths_does_not_infer_owner_from_display(false).await;
+    }
+
+    #[tokio::test]
+    async fn paths_query_returns_busy_without_guessing_from_mpquic_display() {
+        assert_busy_paths_does_not_infer_owner_from_display(true).await;
+    }
 
     #[tokio::test]
     async fn paths_query_without_native_owner_preserves_non_mpquic_display() {
