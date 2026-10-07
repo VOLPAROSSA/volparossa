@@ -4,9 +4,10 @@ use prost::Message;
 use sha2::{Digest as _, Sha256};
 use volparossa_protocol::{decode_canonical, encode_canonical};
 
-use crate::{Action, Command, Error, LedgerId, MAX_UNITS, TEST_UNIT};
+use crate::{Action, Command, Error, LedgerId, MAX_UNITS, Mode, TEST_UNIT};
 
 const DOMAIN: &[u8] = b"volparossa/transaction/test-unit-command/v1\0";
+const ORDERED_DOMAIN: &[u8] = b"volparossa/transaction/ordered-test-unit-command/v2\0";
 const MAX_BYTES: usize = 4096;
 const MAX_LIFETIME: u64 = 3600;
 
@@ -69,13 +70,59 @@ impl SignedCommand {
         expires: u64,
         nonce: [u8; 32],
     ) -> Result<Self, Error> {
+        Self::sign_mode(
+            ledger,
+            key,
+            command,
+            valid_from,
+            expires,
+            nonce,
+            Mode::Local,
+        )
+    }
+
+    /// Sign for an ordered TEST store only, using its derived ledger identifier.
+    /// This distinct signature domain cannot be applied by an owner-local store.
+    /// The signature authorizes terms, not consensus or a block's finality.
+    ///
+    /// # Errors
+    /// Rejects invalid identifiers, signer, bounds or validity interval.
+    pub fn sign_ordered(
+        ledger: LedgerId,
+        key: &SigningKey,
+        command: Command,
+        valid_from: u64,
+        expires: u64,
+        nonce: [u8; 32],
+    ) -> Result<Self, Error> {
+        Self::sign_mode(
+            ledger,
+            key,
+            command,
+            valid_from,
+            expires,
+            nonce,
+            Mode::Ordered,
+        )
+    }
+
+    fn sign_mode(
+        ledger: LedgerId,
+        key: &SigningKey,
+        command: Command,
+        valid_from: u64,
+        expires: u64,
+        nonce: [u8; 32],
+        mode: Mode,
+    ) -> Result<Self, Error> {
+        let version = if mode == Mode::Local { 1 } else { 2 };
         let (kind, target, units) = match command.action {
             Action::Reserve { recipient, units } => (1, recipient, units),
             Action::Commit { reservation_id } => (2, reservation_id, 0),
             Action::Cancel { reservation_id } => (3, reservation_id, 0),
         };
         let body = Body {
-            version: 1,
+            version,
             unit: TEST_UNIT.to_owned(),
             ledger: ledger.to_vec(),
             operation: command.operation_id.to_vec(),
@@ -86,7 +133,7 @@ impl SignedCommand {
         };
         let payload = encode_canonical(&body, MAX_BYTES).map_err(|_| Error::Invalid)?;
         let mut envelope = Envelope {
-            version: 1,
+            version,
             sender: key.verifying_key().to_bytes().to_vec(),
             valid_from,
             expires,
@@ -97,7 +144,7 @@ impl SignedCommand {
         };
         envelope.signature = key.sign(&signing_bytes(&envelope)?).to_bytes().to_vec();
         let bytes = encode_canonical(&envelope, MAX_BYTES).map_err(|_| Error::Invalid)?;
-        verify(&bytes, ledger)?;
+        verify_mode(&bytes, ledger, mode)?;
         Ok(Self(bytes))
     }
 
@@ -118,7 +165,12 @@ pub(super) struct Verified {
 fn signing_bytes(value: &Envelope) -> Result<Vec<u8>, Error> {
     let mut unsigned = value.clone();
     unsigned.signature.clear();
-    let mut bytes = DOMAIN.to_vec();
+    let mut bytes = if value.version == 2 {
+        ORDERED_DOMAIN
+    } else {
+        DOMAIN
+    }
+    .to_vec();
     bytes.extend(encode_canonical(&unsigned, MAX_BYTES).map_err(|_| Error::Invalid)?);
     Ok(bytes)
 }
@@ -132,10 +184,15 @@ fn identifier(bytes: &[u8]) -> Result<[u8; 32], Error> {
 }
 
 pub(super) fn verify(bytes: &[u8], ledger: LedgerId) -> Result<Verified, Error> {
+    verify_mode(bytes, ledger, Mode::Local)
+}
+
+pub(super) fn verify_mode(bytes: &[u8], ledger: LedgerId, mode: Mode) -> Result<Verified, Error> {
     let envelope: Envelope = decode_canonical(bytes, MAX_BYTES).map_err(|_| Error::Invalid)?;
     let body: Body = decode_canonical(&envelope.payload, MAX_BYTES).map_err(|_| Error::Invalid)?;
-    if envelope.version != 1
-        || body.version != 1
+    let version = if mode == Mode::Local { 1 } else { 2 };
+    if envelope.version != version
+        || body.version != version
         || body.unit != TEST_UNIT
         || envelope
             .expires
