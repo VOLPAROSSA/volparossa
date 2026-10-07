@@ -11,7 +11,9 @@ mod preselection_observation;
 mod preselection_sampler;
 mod route_extension;
 mod route_extension_relay;
+mod route_readiness;
 mod route_retire;
+pub(crate) use route_readiness::RouteReadinessError;
 
 pub(crate) use content::ContentDiscoveryError;
 
@@ -568,6 +570,12 @@ enum DiscoveryCommand {
     RouteCandidateSnapshot {
         requested_candidates: usize,
         reply: oneshot::Sender<Result<RouteCandidateSnapshot, RouteCandidateSnapshotError>>,
+    },
+    ObserveRouteReadiness {
+        parameters: ClientPreselectionParameters,
+        reply: oneshot::Sender<
+            Result<volparossa_local_control::RouteReadinessObservation, RouteReadinessError>,
+        >,
     },
     BeginClientPreselection {
         parameters: ClientPreselectionParameters,
@@ -2310,6 +2318,12 @@ impl DiscoveryRuntime {
                 self.begin_client_preselection(parameters, reply, state)
                     .await;
             }
+            DiscoveryCommand::ObserveRouteReadiness { parameters, reply } => {
+                if !reply.is_closed() {
+                    let guard = state.read().await;
+                    self.reply_route_readiness(&parameters, reply, &guard);
+                }
+            }
             DiscoveryCommand::ResolveEndpointTraversalHints { bindings, reply } => {
                 let _ = reply.send(self.exact_endpoint_traversal_hints(bindings));
             }
@@ -3686,6 +3700,9 @@ impl DiscoveryRuntime {
                 }
                 DiscoveryCommand::BeginClientPreselection { reply, .. } => {
                     let _ = reply.send(Err(ClientPreselectionError::Closed));
+                }
+                DiscoveryCommand::ObserveRouteReadiness { reply, .. } => {
+                    let _ = reply.send(Err(RouteReadinessError::Closed));
                 }
                 DiscoveryCommand::SetRoles { .. } | DiscoveryCommand::ApplyPolicy { .. } => {}
             }
@@ -17017,6 +17034,8 @@ mod tests {
 
     static NEXT_MEMORY_ADDRESS: AtomicU64 = AtomicU64::new(90_000);
 
+    include!("discovery/route_readiness/tests.rs");
+
     #[test]
     fn route_retire_failure_diagnostics_are_fixed_classes_without_private_error_text() {
         use request_response::OutboundFailure;
@@ -23876,7 +23895,7 @@ mod tests {
         );
         assert!(matches!(
             apply_received.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            Err(oneshot::error::TryRecvError::Empty)
         ));
         barrier_release.send(()).expect("release pre-reply barrier");
         timeout(Duration::from_secs(1), &mut apply)
@@ -24277,7 +24296,7 @@ mod tests {
         assert_eq!(barrier_snapshot.direct_relays, 0);
         assert!(matches!(
             apply_received.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            Err(oneshot::error::TryRecvError::Empty)
         ));
         barrier_release.send(()).expect("release pre-reply barrier");
         timeout(Duration::from_secs(1), &mut apply)
@@ -24828,7 +24847,7 @@ mod tests {
         );
         assert!(matches!(
             response.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            Err(oneshot::error::TryRecvError::Empty)
         ));
 
         let foreign_service = std::mem::replace(&mut fixture.runtime.service, originating_service);

@@ -140,11 +140,13 @@ benchmark_image_route_diagnostic() {
         --arg maintenance "${private_storage_maintenance:-no}" \
         --argjson connect_counts "$benchmark_connect_reason_counts" \
         --argjson counts_complete "$benchmark_connect_counts_complete" \
+        --argjson advertisement_observation "$benchmark_readiness_observation" \
         '{schema_version:1,stage:$stage,reason:$reason,last_connect_reason:$last_connect_reason,
           connect_exit_status:$connect_exit_status,attempts:$attempts,retries:$retries,
           redraws:$redraws,path_polls:$path_polls,path_status:$path_status}
           + (if $maintenance == "yes" then {schema_version:2,
                connect_reason_counts:$connect_counts,connect_counts_complete:$counts_complete,
+               advertisement_observation:$advertisement_observation,
                preselection_diagnostic:{state:"unknown",uncertainty:"not_captured"}}
              else {} end)' \
         >"$WORK/$benchmark_diagnostic_prefix-route-diagnostic.part"; then
@@ -208,13 +210,26 @@ benchmark_select_route() {
     benchmark_poll=0
     benchmark_connect_reason_counts='{}'
     benchmark_connect_counts_complete=true
+    benchmark_readiness_observation=null
     if [ "${private_storage_maintenance:-no}" = yes ]; then
-        # Private freshness bound only, never exported. No sleep or readiness query
-        # is added; an absent/invalid clock remains explicitly unknown at cleanup.
+        # Private selection-window bound, never exported. Advertisement observation
+        # below consumes this same existing deadline before the first Connect.
         (umask 077; date +%s%3N >"$WORK/private-storage-maintenance-selection-start.private") \
             2>/dev/null || true
     fi
     benchmark_image_route_diagnostic initialize STARTED
+    if [ "${private_storage_maintenance:-no}" = yes ]; then
+        benchmark_readiness_status=0
+        benchmark_readiness_observation=$(python3 -B \
+            "$source_directory/tests/integration/storage-route-readiness.py" \
+            "$binary_directory/volparossa" "$WORK/runtime-${BENCHMARK_NODE:-client}/control/agent.sock" \
+            "$benchmark_deadline") || benchmark_readiness_status=$?
+        [ -n "$benchmark_readiness_observation" ] || benchmark_readiness_observation=null
+        if [ "$benchmark_readiness_status" -ne 0 ]; then
+            benchmark_image_route_diagnostic readiness READINESS_NOT_OBSERVED
+            return 1
+        fi
+    fi
     while [ "$benchmark_attempt" -lt 360 ] && [ "$benchmark_draw" -lt 32 ]; do
         benchmark_remaining=$((benchmark_deadline - $(date +%s)))
         if [ "$benchmark_remaining" -le 0 ]; then

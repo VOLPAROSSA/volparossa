@@ -1455,6 +1455,18 @@ and invalid-data controls, pass; they do not establish real browser/peer complet
   low-capacity peers. This is a candidate explanation, not a uniquely proved cause
   of the observed final rejection. Route eligibility, privacy and evidence gates
   remain requirements, not errors to ignore.
+  A new read-only actor observation now uses the same signed/live capability
+  projection, Connect profile and unchanged sampler before the fixture's first
+  Connect. It exports a closed timestamped result, not peer IDs or route authority,
+  and changes no store, dispatch ownership, reservation or helper state. The
+  maintenance barrier consumes the original 600-second deadline; query failures
+  stay terminal and all Connect/path/cleanup gates remain intact. Nine actor,
+  two wire, two CLI, seven observation, five wiring and seventeen maintenance
+  tests pass, independently repeated by root; independent source review found no
+  blocker. Targeted strict Clippy also passes on CI's Rust 1.85 after fixing only
+  new-code import/borrowing style and boxing the large test-fixture futures;
+  no lint was suppressed. An eligible advertisement slate is not a working route, and Connect
+  performs a separate fresh selection. No new maintenance runtime trial has run.
   See [private storage maintenance](services/PRIVATE_STORAGE.md#explicit-owner-private-background-maintenance).
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):

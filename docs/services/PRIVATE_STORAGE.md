@@ -232,14 +232,29 @@ failed even earlier, during route preparation: 16 temporary preselection failure
 followed by `NO_ELIGIBLE_PATHS`. No maintenance or Paths observation ran. Cleanup
 completed with no owned objects remaining and unchanged guest-root network state.
 The retained preselection counts do not prove the final attempt's specific cause.
-The test scenario skips an initial advertisement-readiness barrier despite having
-deliberately ineligible peers; a readiness correction must preserve actual route
-eligibility and the existing limits. This is not yet a proven storage repair.
+That test scenario skipped an initial advertisement-readiness barrier despite having
+deliberately ineligible peers. This is not yet a proven explanation or storage repair.
 Stored signed advertisements alone cannot prove readiness: current forwarded
 relay-to-exit capabilities are held and revalidated by the running discovery
-actor. The proposed read-only readiness check must use that same live eligibility
-state; a role-only or cached-signature barrier would not establish it. No such
-new interface or runtime correction is implemented by this evidence update.
+actor; a role-only or cached-signature barrier would not establish eligibility.
+
+The new `route-readiness --transport mptcp` command observes the actor's current
+signed advertisements and exact live forwarding capabilities with Connect's existing
+profile and unchanged sampler. It reports only a fresh, closed eligibility outcome,
+without peer identities. It never selects or reserves a route, purges capabilities,
+starts probes, invokes the helper or acquires the dispatch owner. A successful
+observation is **not a working route**: a later Connect draws and checks independently.
+
+The maintenance fixture waits for an eligible observation before its first Connect,
+consuming the original 600-second selection window rather than adding another one.
+Completed negative observations may wait within that window; query rejection,
+malformed output and timeout remain terminal. Connect attempt/redraw limits and
+all real path/privacy/cleanup gates are unchanged. Nine actor tests, two wire tests,
+two CLI tests, seven observation tests, five wiring tests and seventeen maintenance
+tests pass, independently repeated by root. The actor tests include genuine signed
+low-capacity refusal, usable-capacity acceptance, stale/missing lineage refusal and
+unchanged actor/store/dispatch state. An independent source review found no blocker.
+No new distributed maintenance trial has run; this remains component evidence.
 
 Message delivery can acknowledge and consume an inbox item. A backup restore must not
 consume its storage lease. Backup retention, renewal, expiry and owner deletion are

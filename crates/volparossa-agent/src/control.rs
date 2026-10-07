@@ -1,6 +1,7 @@
 //! Protected local CLI socket and typed operation dispatch.
 
 mod content_transfer;
+mod route_readiness;
 
 use std::{
     fs,
@@ -498,6 +499,9 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
         }
         control_request::Operation::Paths(_) => {
             paths_response(request_id, &context.routes, &context.state).await
+        }
+        control_request::Operation::RouteReadiness(request) => {
+            route_readiness::respond(request_id, request, context).await
         }
         control_request::Operation::Sessions(_) => {
             let sessions = context.state.read().await.session_list();

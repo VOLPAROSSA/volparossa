@@ -19,6 +19,7 @@ pub use compute_control::{
 mod custody;
 mod mailbox;
 mod private_storage;
+mod route_readiness;
 pub use content::{
     ContentCacheLimits, ContentExportRequest, ContentFetchNameRequest, ContentFetchRequest,
     ContentImportRequest, ContentLocalFetchNameRequest, ContentPolicyApplyRequest,
@@ -35,6 +36,9 @@ pub use private_storage::{
     PrivateStorageAdmission, PrivateStorageAdmissionRequest, PrivateStorageGrant,
     PrivateStorageGrantRequest, PrivateStorageMaintenanceReady, PrivateStorageMaintenanceRequest,
     PrivateStorageReady, PrivateStorageRemoteRequest, PrivateStorageServeRequest,
+};
+pub use route_readiness::{
+    RouteReadinessObservation, RouteReadinessOutcome, RouteReadinessRequest,
 };
 
 use prost::Message;
@@ -64,7 +68,7 @@ pub struct ControlRequest {
     /// One allowlisted operation.
     #[prost(
         oneof = "control_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44"
     )]
     pub operation: Option<control_request::Operation>,
 }
@@ -81,7 +85,7 @@ pub mod control_request {
         HttpsContentFetchRequest, LogQuery, MailboxRemoteRequest, MailboxServeRequest,
         PrivateStorageAdmissionRequest, PrivateStorageGrantRequest,
         PrivateStorageMaintenanceRequest, PrivateStorageRemoteRequest, PrivateStorageServeRequest,
-        RoleChange,
+        RoleChange, RouteReadinessRequest,
     };
 
     /// Exactly one supported CLI-to-agent operation.
@@ -189,6 +193,9 @@ pub mod control_request {
         /// Request one supervised owner-private maintenance turn, retaining this connection.
         #[prost(message, tag = "43")]
         PrivateStorageMaintenance(PrivateStorageMaintenanceRequest),
+        /// Observe current signed advertisement eligibility without route or dispatch authority.
+        #[prost(message, tag = "44")]
+        RouteReadiness(RouteReadinessRequest),
     }
 }
 
@@ -274,7 +281,7 @@ pub struct ControlResponse {
     /// Typed response body.
     #[prost(
         oneof = "control_response::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34"
     )]
     pub payload: Option<control_response::Payload>,
 }
@@ -289,7 +296,7 @@ pub mod control_response {
         ContentTransferReady, Empty, HttpsContentTransferReady, LogList, MailboxReady,
         NamedContentTransferReady, PathList, PeerList, PolicySnapshot, PrivateStorageAdmission,
         PrivateStorageGrant, PrivateStorageMaintenanceReady, PrivateStorageReady, RoleSnapshot,
-        SessionList, StatusSnapshot,
+        RouteReadinessObservation, SessionList, StatusSnapshot,
     };
 
     /// Exactly one response body.
@@ -367,6 +374,9 @@ pub mod control_response {
         /// Connection-owned background resource allowance, not signing or custody authority.
         #[prost(message, tag = "33")]
         PrivateStorageMaintenanceReady(PrivateStorageMaintenanceReady),
+        /// Ephemeral advertisement observation; never dataplane or reservation authority.
+        #[prost(message, tag = "34")]
+        RouteReadiness(RouteReadinessObservation),
     }
 }
 
@@ -768,6 +778,7 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
             }
         }
         control_request::Operation::ContentServe(request) => request.validate()?,
+        control_request::Operation::RouteReadiness(request) => request.validate()?,
         control_request::Operation::ContentPolicyApply(request) => request.validate()?,
         control_request::Operation::ComputeAttach(request) => request.validate()?,
         control_request::Operation::ComputeRemote(request) => request.validate()?,
@@ -882,6 +893,7 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
             }
         }
         control_response::Payload::Content(receipt) => validate_content_receipt(receipt)?,
+        control_response::Payload::RouteReadiness(observation) => observation.validate()?,
         control_response::Payload::ContentPolicy(receipt) => receipt.validate()?,
         control_response::Payload::ContentTransferReady(ready) => ready.validate()?,
         control_response::Payload::HttpsContentTransferReady(ready) => ready.validate()?,

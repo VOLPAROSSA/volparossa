@@ -3537,7 +3537,7 @@ fn client_route_admission_profile(
     ))
 }
 
-fn client_preselection_parameters(
+pub(crate) fn client_preselection_parameters(
     config: &Config,
 ) -> Result<ClientPreselectionParameters, ClientRouteConnectError> {
     client_preselection_plan(config).map(|(parameters, _required_native_paths)| parameters)

@@ -1094,7 +1094,7 @@ if [ "$private_storage_fragments" = yes ]; then
     done
 fi
 if [ "$private_storage_maintenance" = yes ]; then
-    for storage_fixture in private-storage-maintenance-smoke.sh private-storage-maintenance-smoke.py private-storage-log-sampler.py; do
+    for storage_fixture in private-storage-maintenance-smoke.sh private-storage-maintenance-smoke.py private-storage-log-sampler.py storage-route-readiness.py; do
         [ -f "$source_directory/tests/integration/$storage_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
     done

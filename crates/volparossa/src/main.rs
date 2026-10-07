@@ -6,6 +6,7 @@ mod content;
 mod control;
 mod doctor;
 mod policy_bootstrap;
+mod route_readiness;
 mod secret;
 mod storage;
 
@@ -110,6 +111,12 @@ enum CliCommand {
         /// Product transport or protected DNS purpose; DNS preserves the active main route.
         #[arg(long, value_enum, default_value = "single-path-udp")]
         transport: ConnectTransport,
+    },
+    /// Observe signed advertisement eligibility without creating or proving a route.
+    RouteReadiness {
+        /// Explicit currently supported observation profile.
+        #[arg(long, value_enum)]
+        transport: route_readiness::Transport,
     },
     /// Drain and remove all route contexts.
     Disconnect,
@@ -297,6 +304,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 control::request(&cli.control_socket, Operation::Connect(transport.request()))
                     .await?;
             print_response(response)
+        }
+        CliCommand::RouteReadiness { transport } => {
+            route_readiness::run(&cli.control_socket, transport).await
         }
         CliCommand::Disconnect => {
             let response =
@@ -782,6 +792,9 @@ fn print_response(response: ControlResponse) -> Result<()> {
                         .map_or_else(|| "-".to_owned(), |id| id.to_string())
                 );
             }
+        }
+        Payload::RouteReadiness(_) => {
+            bail!("readiness observation requires its dedicated checked command")
         }
     }
     Ok(())

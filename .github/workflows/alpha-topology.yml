@@ -162,6 +162,7 @@ jobs:
           python3 -B tests/integration/test-private-storage-maintenance-smoke.py
           python3 -B tests/integration/test-private-storage-log-sampler.py
           python3 -B tests/integration/test-private-storage-maintenance-wiring.py
+          python3 -B tests/integration/test-storage-route-readiness.py
           python3 -B tests/integration/test-image-snapshot-provision.py
           python3 -B tests/integration/test-image-snapshot-wiring.py
           sh -n tests/integration/image-snapshot-smoke.sh

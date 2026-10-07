@@ -46,6 +46,7 @@ class PrivateStorageMaintenanceWiring(unittest.TestCase):
         self.assertIn("private_storage_maintenance=no", guest)
         self.assertIn("private-storage-maintenance) scenario=content-custody; private_storage_fragments=yes; private_storage_maintenance=yes;", guest)
         for dependency in ("private-storage-maintenance-smoke.py", "private-storage-maintenance-smoke.sh",
+                           "storage-route-readiness.py",
                            "private-storage-fragments-smoke.py", "private-storage-replicas-smoke.py",
                            "private-storage-peer-smoke.py", "content-provider-https-smoke.py",
                            "content-network-smoke.py"):
@@ -155,6 +156,12 @@ date() {
     else printf '1\n'; fi
 }
 timeout() { printf '%s\n' 'Error: agent rejected request: NO_ELIGIBLE_PATHS (Unavailable)' >&2; return 1; }
+python3() {
+    case "$*" in
+        *storage-route-readiness.py*) printf '%s\n' '{"eligible_slate_observed":true,"dataplane_verified":false,"route_selected":false}'; return 0 ;;
+    esac
+    command python3 "$@"
+}
 benchmark_capture_paths() { exit 99; }
 optional_json_evidence() { printf 'null\n'; }
 selection_status=0
