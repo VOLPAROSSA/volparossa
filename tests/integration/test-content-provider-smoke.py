@@ -90,6 +90,7 @@ def fixture(control_node="relay2"):
     evidence["ordinary_publication"] = user_fixture(evidence)
     evidence["named_publication"] = named_fixture(evidence)
     evidence["site_publication"] = runpy.run_path(str(HERE / "test-content-provider-site-smoke.py"))["fixture"](control_node)
+    evidence["filter_snapshot"] = runpy.run_path(str(HERE / "test-content-provider-filter-smoke.py"))["fixture"](control_node)
     evidence["adaptive_workers"] = runpy.run_path(str(HERE / "test-content-provider-adaptive-smoke.py"))["fixture"]()
     cancellation = runpy.run_path(str(HERE / "content-cancellation-smoke.py"))
     component, _, _ = cancellation["sample"]()
@@ -206,6 +207,9 @@ class ContentProviderContract(unittest.TestCase):
             lambda item: item["site_publication"]["input"].update(bundle_sha256="f"*64),
             lambda item: item["site_publication"]["application"]["ready"].update(peer_bytes=0),
             lambda item: item["site_publication"]["cleanup"].update(user_directory_removed=False),
+            lambda item: item.pop("filter_snapshot"),
+            lambda item: item["filter_snapshot"]["warm"]["application"]["receipt"].update(peer_bytes=1),
+            lambda item: item["filter_snapshot"]["input"].update(publisher_key=item["publication"]["publisher_hex"]),
         ):
             changed = copy.deepcopy(evidence)
             mutate(changed)
@@ -359,12 +363,15 @@ class ContentProviderContract(unittest.TestCase):
             "https": "https-evidence", "selected_route": "live-selection",
             "ordinary_publication": "user-publication",
             "site_publication": "site-evidence",
+            "filter_snapshot": "filter-evidence",
             "adaptive_workers": "adaptive-evidence",
             "requester_cancellation": "cancellation",
         }
         files = {f"content-provider-{suffix}.json": evidence[key] for key, suffix in names.items()}
         files["a01-expected-peers.json"] = evidence["expected_peers"]
         files.update(site_raw_files(evidence["site_publication"]))
+        files.update(runpy.run_path(str(HERE / "test-content-provider-filter-smoke.py"))["raw_files"](
+            evidence["filter_snapshot"]))
         adaptive_raw = runpy.run_path(str(HERE / "test-content-provider-adaptive-smoke.py"))["raw_files"](
             evidence["adaptive_workers"])
         for name, value in adaptive_raw.items():
@@ -401,6 +408,13 @@ class ContentProviderContract(unittest.TestCase):
             with self.assertRaises(ValueError):
                 CHECK["build_evidence"](work)
             site_report.write_text(json.dumps(evidence["site_publication"]), encoding="ascii")
+            filter_report = work / "content-provider-filter-evidence.json"
+            substituted = copy.deepcopy(evidence["filter_snapshot"])
+            substituted["warm"]["application"]["elapsed_ns"] += 1
+            filter_report.write_text(json.dumps(substituted), encoding="ascii")
+            with self.assertRaises(ValueError):
+                CHECK["build_evidence"](work)
+            filter_report.write_text(json.dumps(evidence["filter_snapshot"]), encoding="ascii")
             adaptive_report = work / "content-provider-adaptive-evidence.json"
             adaptive_report.unlink()
             with self.assertRaises(OSError):
@@ -445,7 +459,7 @@ class ContentProviderContract(unittest.TestCase):
     def test_exact_scoped_report(self):
         report = dict(report_kind="volparossa-native-content-providers", source_revision="a" * 40,
                       explicit_origin_authenticated_https=True, normal_user_publication=True, native_name_retrieval=True,
-                      native_static_site=True,
+                      native_static_site=True, public_filter_snapshot=True,
                       adaptive_provider_workers=True, requester_cancellation=True,
                       success=True, runner_exit_status=0, cleanup=dict(complete=True, remaining_owned_objects=0),
                       host_state=dict(unchanged=True, before_sha256="b" * 64, after_sha256="b" * 64),
@@ -456,6 +470,7 @@ class ContentProviderContract(unittest.TestCase):
             lambda item: item.update(full_c02_claimed=True),
             lambda item: item.update(explicit_origin_authenticated_https=False),
             lambda item: item.update(native_static_site=False),
+            lambda item: item.update(public_filter_snapshot=False),
             lambda item: item.update(adaptive_provider_workers=False),
             lambda item: item.update(requester_cancellation=False),
             lambda item: (item.pop("requester_cancellation"), item["transfer"].pop("requester_cancellation")),

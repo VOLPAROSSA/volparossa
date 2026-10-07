@@ -19,6 +19,27 @@ BASE = runpy.run_path(str(HERE / "test-private-storage-replicas-smoke.py"))
 REVISION = "a" * 40
 
 
+def bounded_selector(source, start, stop):
+    """Reject changed boundaries/commands before executing argument selection."""
+    if source.count(start) != 1 or source.count(stop) != 1:
+        raise AssertionError("argument selector boundaries changed")
+    _before, _start, tail = source.partition(start)
+    body, found, _after = tail.partition(stop)
+    if not found:
+        raise AssertionError("argument selector boundaries reversed")
+    selector = start + body
+    condition = r'\[ "\$\{agent_[a-z_]+:-no\}" = yes \]'
+    allowed = re.compile(
+        r'set --(?: "\$(?:@|jobs_root)"| [a-z0-9.-]+)*'
+        r'|if ' + condition + r'(?: \|\| ' + condition + r')*; then'
+        r'|fi|jobs_prepare_command=prepare(?:-code-proposal)?')
+    if len(selector) > 4096 or any(not allowed.fullmatch(line.strip())
+                                  for line in selector.splitlines()):
+        raise AssertionError("argument selector contains non-selection commands")
+    subprocess.run(["sh", "-n"], input=selector, text=True, timeout=3, check=True)
+    return selector
+
+
 def fixture():
     base = BASE["fixture"]()
     layout = base["layout"]
@@ -718,21 +739,43 @@ class CooperativeBrowserProof(unittest.TestCase):
 
     def test_real_provision_and_broker_selectors_choose_one_unchanged_model_cohort(self):
         shell = (HERE / "agent-jobs-smoke.sh").read_text()
-        prepare = shell.split('    set -- "$jobs_root"\n', 1)[1].split('    agent_jobs_private prepare', 1)[0]
-        prepare = 'set -- "$jobs_root"\n' + prepare
-        broker = shell.split('agent_jobs_broker() {', 1)[1].split('    set --\n', 1)[1]
-        broker = 'set --\n' + broker.split('    if [ "${agent_policy_assessment:-no}" = yes ]; then', 1)[0]
-        for flag in ("no", "yes"):
-            initial = 'jobs_root=/fixture/jobs\nagent_cooperative_browser_discovered="$1"\n'
-            expected = (["/fixture/jobs", "smollm2-360m-v1"] if flag == "yes" else ["/fixture/jobs"])
-            for selector, wanted in ((prepare, expected),
-                    (broker, ["--model-profile", "smollm2-360m-v1"] if flag == "yes" else [])):
+        prepare = bounded_selector(shell, '    set -- "$jobs_root"\n',
+                                   '    agent_jobs_private "$jobs_prepare_command" "$@"')
+        broker_body = shell.split('agent_jobs_broker() {', 1)[1].split('\n}\n', 1)[0]
+        broker = bounded_selector(broker_body, '    set --\n',
+                                  '    if [ "${agent_policy_assessment:-no}" = yes ]; then')
+        for scenario in ("agent-cooperative-browser", "agent-cooperative-browser-discovered",
+                         "agent-cooperative-code", "agent-cooperative-code-proposal"):
+            discovered = scenario == "agent-cooperative-browser-discovered"
+            proposal = scenario == "agent-cooperative-code-proposal"
+            initial = ('jobs_root=/fixture/jobs\nagent_cooperative_browser_discovered="$1"\n'
+                       'agent_cooperative_code_proposal="$2"\n')
+            expected = ["prepare-code-proposal" if proposal else "prepare", "/fixture/jobs"]
+            if discovered:
+                expected.append("smollm2-360m-v1")
+            broker_expected = (["--model-profile", "smollm2-360m-v1"] if discovered else
+                               ["--model-profile", "qwen3-0.6b-v1", "--code-proposal-v6"] if proposal else [])
+            for selector, wanted in ((prepare + '\nprintf "%s\\0" "$jobs_prepare_command"\n', expected),
+                                     (broker, broker_expected)):
                 # Only execute actual argument-selection text, never install/systemd/model commands.
                 command = initial + selector + '\nfor value do printf "%s\\0" "$value"; done\n'
-                result = subprocess.run(["sh", "-c", command, "test", flag], env={"PATH": os.defpath},
+                result = subprocess.run(["sh", "-c", command, "test", "yes" if discovered else "no",
+                                         "yes" if proposal else "no"], env={"PATH": os.defpath},
                                         capture_output=True, timeout=3, check=True)
                 got = result.stdout.decode().split("\0")[:-1] if result.stdout else []
                 self.assertEqual(got, wanted)
+
+    def test_argument_selector_rejects_missing_duplicate_and_executable_boundaries(self):
+        start, stop = '    set -- "$jobs_root"\n', '    agent_jobs_private "$jobs_prepare_command" "$@"'
+        source = (HERE / "agent-jobs-smoke.sh").read_text()
+        for bad in (source.replace(start, ''), source.replace(stop, ''), source + start,
+                    source + stop, stop + '\n' + start,
+                    source.replace(start, start + '    install -d /must-not-run\n'),
+                    source.replace(start, start + '    set -- "$(must-not-run)"\n')):
+            with self.subTest(source=bad[:80]), mock.patch.object(subprocess, "run") as run:
+                with self.assertRaises(AssertionError):
+                    bounded_selector(bad, start, stop)
+                run.assert_not_called()
 
     def test_observer_failure_is_retained_before_driver_interrupt_without_private_details(self):
         self.assertEqual(CHECK["observer_invariant_reason"](ValueError("actual worker mounts not isolated")),
@@ -1290,10 +1333,23 @@ agent_jobs_cgroup_empty() { return 0; }
         source = (HERE / "run-alpha-topology-vm.sh").read_text()
         driver = source.split("<<'GUEST_DRIVER_SCRIPT'\n", 1)[1].split("\nGUEST_DRIVER_SCRIPT\n", 1)[0]
         subprocess.run(["sh", "-n"], input=driver, text=True, check=True)
-        gate = ('if [ "$scenario" = agent-cooperative-browser ] || [ "$scenario" = agent-cooperative-browser-discovered ]'
-                ' || [ "$scenario" = agent-cooperative-code ]; then')
-        self.assertIn(gate, driver)
-        selected_export = driver.split(gate, 1)[1].split("\nelif ", 1)[0]
+        export_blocks = re.findall(r'^(if [^\n]+; then)\n(.*?)(?=^elif |^fi$)', driver,
+                                   re.MULTILINE | re.DOTALL)
+        matching = [(gate, body) for gate, body in export_blocks if 'cooperative-export.list' in body]
+        self.assertEqual(len(matching), 1)
+        gate, selected_export = matching[0]
+        condition = r'\[ "\$scenario" = [a-z-]+ \]'
+        self.assertRegex(gate, r'^if ' + condition + r'(?: \|\| ' + condition + r')*; then$')
+        cohorts = {"agent-cooperative-browser", "agent-cooperative-browser-discovered",
+                   "agent-cooperative-code", "agent-cooperative-code-proposal"}
+        selected_cohorts = re.findall(r'= ([a-z-]+) \]', gate)
+        self.assertEqual(len(selected_cohorts), 4)
+        self.assertEqual(set(selected_cohorts), cohorts)
+        for scenario in sorted(cohorts) + ["transaction-abci", "agent-public-document", "agent-jobs", "unknown", ""]:
+            script = 'set -eu\nscenario=$1\n' + gate + '\n printf selected\nelse\n printf rejected\nfi\n'
+            result = subprocess.run(["sh", "-c", script, "test", scenario], env={"PATH": os.defpath},
+                                    capture_output=True, text=True, timeout=3, check=True)
+            self.assertEqual(result.stdout, "selected" if scenario in cohorts else "rejected")
         self.assertIn('"tests/integration/$scenario.py" export-names', selected_export)
         self.assertIn('agent-cooperative-browser.py --trial discovered-360m', selected_export)
         self.assertIn("libgtk-3-0t64", driver)

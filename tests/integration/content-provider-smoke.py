@@ -288,6 +288,14 @@ def validate_transfer(evidence):
             and site["input"]["bundle_bytes"] == site_check["BUNDLE_BYTES"]
             and site["input"]["bundle_sha256"] == site_check["BUNDLE_SHA256"],
             "site proof substituted the topology, fixture authority or full canonical bundle")
+    filter_check = runpy.run_path(str(Path(__file__).with_name("content-provider-filter-smoke.py")))
+    filters = evidence["filter_snapshot"]
+    filter_check["validate"](filters)
+    require(filters["expected_peers"] == peers and filters["layout"] == layout
+            and filters["selected_route"]["route_context_id"] == selected["route_context_id"]
+            and filters["input"]["publisher_key"] not in {
+                publication["publisher_hex"], site["input"]["publisher_key"]},
+            "filter proof substituted the topology or reused another publication authority")
     adaptive_check = runpy.run_path(str(Path(__file__).with_name("content-provider-adaptive-smoke.py")))
     adaptive = evidence["adaptive_workers"]
     adaptive_check["validate"](adaptive)
@@ -321,6 +329,14 @@ def build_adaptive_workers(work):
     return rebuilt
 
 
+def build_filter_snapshot(work):
+    checker = runpy.run_path(str(Path(__file__).with_name("content-provider-filter-smoke.py")))
+    rebuilt = checker["build_evidence"](work)
+    require(rebuilt == read(work / "content-provider-filter-evidence.json"),
+            "filter component differs from its raw receipts, captures or cleanup")
+    return rebuilt
+
+
 def build_evidence(work):
     layout = read(work / "content-provider-layout.json")
     evidence = dict(success=True, publication=read(work / "content-provider-publication.json"),
@@ -338,6 +354,7 @@ def build_evidence(work):
                     ordinary_publication=read(work / "content-provider-user-publication.json"),
                     named_publication=build_named_publication(work, layout["provider_nodes"]),
                     site_publication=build_site_publication(work),
+                    filter_snapshot=build_filter_snapshot(work),
                     adaptive_workers=build_adaptive_workers(work),
                     requester_cancellation=read(work / "content-provider-cancellation.json"),
                     expected_peers=read(work / "a01-expected-peers.json"),
@@ -396,6 +413,7 @@ def validate_report(report, revision):
             and report["normal_user_publication"] is True
             and report["native_name_retrieval"] is True
             and report["native_static_site"] is True
+            and report.get("public_filter_snapshot") is True
             and report["adaptive_provider_workers"] is True
             and report.get("requester_cancellation") is True
             and report["transfer"].get("requester_cancellation", {}).get("success") is True
