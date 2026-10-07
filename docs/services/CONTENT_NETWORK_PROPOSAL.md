@@ -718,6 +718,13 @@ The new output directory contains `filters.txt`, `manifest.pb`,
 floors; cached bytes do not extend the publisher's expiry. The delivery receipt
 describes the fetch but is not a portable signed transport attestation.
 
+The `content-provider` fixture now exercises an independently selected two-rule
+snapshot before and after its existing route disconnect. Its acceptance checks
+require exact exported bytes, original manifest and expiry, real cold peer traffic,
+isolated caches and zero peer/discovery work on warm reuse. Existing static-site
+and bulk multipath evidence remains mandatory. This fixture has passed its inert
+acceptance and wiring tests, not an actual distributed run.
+
 The command does not register a browser subscription or make uBO recheck expiry.
 Actual protected peer delivery and browser consumption still need a combined
 functional trial. Standard removable registration, independent review of discovered

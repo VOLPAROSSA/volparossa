@@ -26,6 +26,10 @@ extension disable/removal. An ordinary supplementary list can be added and
 removed across restarts without replacing uBO's ten original selections.
 The [browser evidence](https://github.com/VOLPAROSSA/volparossa-browser/blob/main/docs/BUNDLED_EXTENSIONS.md#isolated-consent-and-user-control-proof)
 does not establish arbitrary-site coverage or VOLPAROSSA delivery of that list.
+Browser [PR10](https://github.com/VOLPAROSSA/volparossa-browser/pull/10) adds an
+actual-upstream-source regression for Consent-O-Matic's navigation-status reset:
+the original source fails and a one-character in-memory correction passes. The
+signed extension is unchanged; no upstream contribution has yet been submitted.
 
 The new `content filter-snapshot` command reuses the existing protected public-text
 fetch path with an independently selected publisher, name and exact manifest hash.
@@ -37,7 +41,18 @@ signed-data rejection, bounds, unchanged expiry, CLI authority requirements and
 non-overwriting output/cleanup. These are component tests, not a peer-transfer
 or installed subscription demonstration.
 
-Cold peer delivery, warm reuse, default removable subscription integration,
+The protected-provider fixture now includes cold filter export and warm reuse
+after the existing route disconnect. It requires a separately selected publisher
+and exact signed manifest, removed publisher source files, isolated agent caches,
+actual peer-byte accounting, complete drained captures and the unchanged expiry.
+Warm reuse must show zero peer bytes, no provider discovery and no protected or
+provider data packets. The existing site and bulk two-path tests remain mandatory;
+the tiny filter payload does not establish two-subflow throughput. Six new fixture
+tests, sixteen provider checks, ten cancellation checks and four site checks pass.
+These validate the fixture and its rejection paths; the new distributed trial has
+not run and cold/warm network functionality is not yet demonstrated.
+
+Proven cold peer delivery and warm reuse, default removable subscription integration,
 cooperative rule discovery, independent publication approval and regression-based
 rollback remain open. A valid publisher signature is not by itself permission to
 change browser policy; the current command requires that authorization separately.
