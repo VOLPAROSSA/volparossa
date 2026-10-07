@@ -1466,7 +1466,18 @@ and invalid-data controls, pass; they do not establish real browser/peer complet
   blocker. Targeted strict Clippy also passes on CI's Rust 1.85 after fixing only
   new-code import/borrowing style and boxing the large test-fixture futures;
   no lint was suppressed. An eligible advertisement slate is not a working route, and Connect
-  performs a separate fresh selection. No new maintenance runtime trial has run.
+  performs a separate fresh selection. Source Quality run37648285532/job112884663178
+  on `418807b4` passed strict Clippy and the workspace Rust tests, then failed eight
+  subcases in two old benchmark-selection test methods: their inert fixtures
+  still used an absent readiness CLI/source and obsolete timestamps. The corrected
+  fixtures exercise the unchanged real observer/parser using a synthetic CLI,
+  retain the Connect/count/refusal assertions, and add missing/rejected/stale/
+  oversized-observation checks proving zero Connect calls and no private output.
+  Root repeated all seventeen benchmark-selection, seven observation and five
+  wiring tests successfully. Only the test fixture changed; no production gate,
+  deadline or retry allowance was relaxed. The original failed job log is retained
+  at SHA-256 `503bf362de7d13685e45a8b0d4805a30ff4320f6667ed861a32edd8a808f8a6b`.
+  Fresh hosted source checks are pending. No new maintenance runtime trial has run.
   See [private storage maintenance](services/PRIVATE_STORAGE.md#explicit-owner-private-background-maintenance).
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):
