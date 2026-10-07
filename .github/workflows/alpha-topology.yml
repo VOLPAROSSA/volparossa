@@ -433,6 +433,10 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          if test -z "${VOLPAROSSA_ALPHA_OUTPUT:-}"; then
+            printf '%s\n' 'Stopped before VM output initialization; no runtime evidence. See the original failed step.' >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if test "$VOLPAROSSA_ALPHA_SCENARIO" = transaction-abci; then
             report="$VOLPAROSSA_ALPHA_OUTPUT/transaction-abci-acceptance.json"
             inner="$VOLPAROSSA_ALPHA_OUTPUT/transaction-abci-inner.json"
@@ -2088,12 +2092,16 @@ jobs:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
           set -euo pipefail
+          if test -z "${VOLPAROSSA_ALPHA_OUTPUT:-}" || test -z "${TOPOLOGY_EXIT_CODE:-}"; then
+            printf '%s\n' 'Transaction TEST runtime evidence is absent: output or driver exit receipt was not produced. The original failure remains authoritative.' >&2
+            exit 1
+          fi
           python3 -B tests/integration/transaction-abci-evidence.py \
             --output "$VOLPAROSSA_ALPHA_OUTPUT" --expected-commit "$GITHUB_SHA" \
             --driver-exit-code "$TOPOLOGY_EXIT_CODE"
 
       - name: Upload closed transaction TEST evidence
-        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'transaction-abci'
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'transaction-abci' && env.VOLPAROSSA_ALPHA_OUTPUT != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: alpha-production-helper-topology-${{ github.run_id }}

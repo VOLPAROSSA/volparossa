@@ -4,10 +4,13 @@
 
 import copy
 import importlib.util
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
+import textwrap
 import unittest
 
 HERE = Path(__file__).resolve().parent
@@ -123,6 +126,7 @@ class TransactionWiring(unittest.TestCase):
 
     def test_export_is_an_explicit_receipt_allowlist(self):
         step = workflow_step("Upload closed transaction TEST evidence")
+        self.assertIn("env.VOLPAROSSA_ALPHA_OUTPUT != ''", step)
         self.assertNotIn("*", step)
         self.assertNotIn(".seed", step)
         self.assertNotIn("node0", step)
@@ -135,6 +139,36 @@ class TransactionWiring(unittest.TestCase):
         self.assertIn('if label == "published":', collector)
         self.assertNotIn("glob", collector)
         self.assertIn("continue", collector)
+
+    def test_early_failure_reporting_preserves_missing_runtime_evidence(self):
+        summary = textwrap.dedent(workflow_step("Summarise exact reached point").split("run: |\n", 1)[1])
+        gate = textwrap.dedent(workflow_step("Require real isolated four-validator TEST evidence").split("run: |\n", 1)[1])
+        # Execute only reporting prefixes, never the runtime evidence commands.
+        summary_stop = 'if test "$VOLPAROSSA_ALPHA_SCENARIO" = transaction-abci; then'
+        gate_stop = 'python3 -B tests/integration/transaction-abci-evidence.py'
+        self.assertEqual(summary.count(summary_stop), 1)
+        self.assertEqual(gate.count(gate_stop), 1)
+        summary = summary.split(summary_stop, 1)[0]
+        gate = gate.split(gate_stop, 1)[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "summary"
+            env = {"PATH": os.defpath, "VOLPAROSSA_ALPHA_SCENARIO": "transaction-abci",
+                   "GITHUB_STEP_SUMMARY": str(destination), "GITHUB_SHA": "a" * 40}
+            result = subprocess.run(["bash", "-c", summary], env=env, capture_output=True,
+                                    text=True, timeout=3)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Stopped before VM output initialization; no runtime evidence", destination.read_text())
+            self.assertNotIn("unbound variable", result.stderr)
+            for extra in ({}, {"VOLPAROSSA_ALPHA_OUTPUT": ""},
+                          {"VOLPAROSSA_ALPHA_OUTPUT": str(Path(temporary) / "absent")},
+                          {"TOPOLOGY_EXIT_CODE": "0"}):
+                with self.subTest(extra=extra):
+                    result = subprocess.run(["bash", "-c", gate], env={**env, **extra},
+                                            capture_output=True, text=True, timeout=3)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn("runtime evidence is absent", result.stderr)
+                    self.assertNotIn("unbound variable", result.stderr)
+            self.assertEqual(sorted(path.name for path in Path(temporary).iterdir()), ["summary"])
 
     def test_complete_parser_fixture_passes_but_every_exit_failure_is_preserved(self):
         self.validate(inert_receipts())

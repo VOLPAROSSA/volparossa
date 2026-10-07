@@ -155,7 +155,28 @@ documentation instead. All thirteen upstream inputs remain byte-identical; no
 owned Rust test or crate-wide documentation gate is disabled. Full package tests
 (thirteen executable tests and the documentation phase), strict package Clippy
 and the five vendor-verification tests pass on the checked local toolchains.
-Exact-source hosted checks and the first actual validator trial remain pending.
+Exact source `4255acfcd186b16637c9d4a1b3f47d0b40d25964` passed
+[Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/37638201321)
+and all four [CodeQL analyses](https://github.com/VOLPAROSSA/volparossa/actions/runs/37638195394).
+The first manually dispatched [validator trial 37642984011](https://github.com/VOLPAROSSA/volparossa/actions/runs/37642984011/job/112866268585)
+failed during source binding, before the VM, Go build or Comet validators started.
+The original job log is retained with SHA-256
+`dc619a01991d4724f7753cce70a8c22f2632672a1be18efa083895b140150a5a`;
+the run produced no artifact. It provides no validator or distributed-transfer proof.
+
+The failing pre-existing cooperative-browser test used a stale shell delimiter,
+extracting more than the intended argument selector, and omitted the fourth code
+cohort from its expected export guard. The correction requires unique, ordered,
+size-bounded selectors, accepts only argument-selection statements and checks shell
+syntax before execution. Negative controls reject changed delimiters and executable
+statements before invoking a subprocess. All four real cohorts remain covered;
+no source gate or runtime requirement is skipped. Early-failure reporting now
+explicitly records absent runtime evidence instead of searching root paths for
+uninitialized artifact locations. Thirty-four cooperative-browser tests, eleven
+ABCI wiring tests and eighteen fixture contract tests pass, independently repeated
+by root. The original log does not establish whether the overlong old fragment
+attempted runner file changes; it must not be cited as host-cleanup evidence.
+A new exact-source CI pass and actual isolated validator trial are still required.
 
 The [next distributed milestone](services/TRANSACTION_LAYER.md#distributed-test-execution)
 selects source-pinned CometBFT with four fixed TEST validators. Ordered local
