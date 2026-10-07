@@ -198,6 +198,33 @@ def compare_tensor(stream, offset, source, target, check):
                         "NATIVE_TENSOR_VALUE_CHANGED")
 
 
+def verify_model_parameters(reader, config):
+    """Verify effective parameters of the exact pinned Qwen3 loader.
+
+    The pinned converter omits rope.dimension_count for Qwen3. Its loader
+    defaults that one optional value to attention.key_length; Qwen3 requires
+    key, value and rotary dimensions to agree. Missing required fields still
+    fail, and an explicit rotary override must match the original head_dim.
+    """
+    def field(name):
+        builder.require(name in reader.fields, "NATIVE_GGUF_METADATA")
+        return reader.fields[name].contents()
+    parameters = {"context_length": config["max_position_embeddings"], "embedding_length": config["hidden_size"],
+                  "block_count": config["num_hidden_layers"], "feed_forward_length": config["intermediate_size"],
+                  "attention.head_count": config["num_attention_heads"], "attention.head_count_kv": config["num_key_value_heads"],
+                  "attention.key_length": config["head_dim"], "attention.value_length": config["head_dim"],
+                  "rope.freq_base": config["rope_theta"],
+                  "attention.layer_norm_rms_epsilon": config["rms_norm_eps"]}
+    for key, expected in parameters.items():
+        if key in ("rope.freq_base", "attention.layer_norm_rms_epsilon"):
+            expected = struct.unpack("<f", struct.pack("<f", expected))[0]
+        builder.require(field("qwen3." + key) == expected, "NATIVE_GGUF_PARAMETER")
+    rotary = (field("qwen3.rope.dimension_count") if "qwen3.rope.dimension_count" in reader.fields
+              else field("qwen3.attention.key_length"))
+    builder.require(rotary == config["head_dim"] == field("qwen3.attention.key_length")
+                    == field("qwen3.attention.value_length"), "NATIVE_GGUF_PARAMETER")
+
+
 def verify_conversion(reader, model, tokenizer, check):
     builder.require(sys.byteorder == "little", "NATIVE_ENDIAN_UNSUPPORTED")
     tensors = {entry.name: entry for entry in reader.tensors}
@@ -221,16 +248,7 @@ def verify_conversion(reader, model, tokenizer, check):
     builder.require(field("general.architecture") == "qwen3" and field("general.file_type") == 32,
                     "NATIVE_GGUF_ARCHITECTURE")
     config = json.loads((model / "config.json").read_bytes())
-    parameters = {"context_length": config["max_position_embeddings"], "embedding_length": config["hidden_size"],
-                  "block_count": config["num_hidden_layers"], "feed_forward_length": config["intermediate_size"],
-                  "attention.head_count": config["num_attention_heads"], "attention.head_count_kv": config["num_key_value_heads"],
-                  "attention.key_length": config["head_dim"], "attention.value_length": config["head_dim"],
-                  "rope.dimension_count": config["head_dim"], "rope.freq_base": config["rope_theta"],
-                  "attention.layer_norm_rms_epsilon": config["rms_norm_eps"]}
-    for key, expected in parameters.items():
-        if key in ("rope.freq_base", "attention.layer_norm_rms_epsilon"):
-            expected = struct.unpack("<f", struct.pack("<f", expected))[0]
-        builder.require(field("qwen3." + key) == expected, "NATIVE_GGUF_PARAMETER")
+    verify_model_parameters(reader, config)
     vocab = tokenizer.get_vocab()
     tokens = field("tokenizer.ggml.tokens")
     reverse = {token_id: token for token, token_id in vocab.items()}

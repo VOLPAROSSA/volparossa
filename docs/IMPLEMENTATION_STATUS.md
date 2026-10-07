@@ -111,6 +111,27 @@ and child failure, timeout and cancellation. Quality runs the new tests as part
 of the existing native contract step. This is diagnostic coverage, not a model
 conversion fix or permission to rerun the same failed attempt.
 
+The exact diagnostic follow-up on core `7739206361aa0aeb7cf0b20d9f8cf1cc9da5c81b`
+and Code `61d2c0c52468eee7728cf6f32a107baca5bae240` also remains **failed**:
+[trial37623495917](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37623495917)
+reached verification after the converter exited with status zero. Its closed
+diagnostic reports `stage=verify`, `failure=contract`; it does not identify the
+first rejected assertion. No model was admitted and inference did not run.
+Reported process/unit/private-data and QEMU/scratch cleanup passed; the scoped
+route/DNS comparison was unchanged. Original artifact ZIP SHA-256:
+`50ad3ba19fe9811e132f2dad7ee3c49407d5fcecc86a65a816d7a0637eab996e`;
+job `112799334236` log SHA-256:
+`24bcefeb3279b24e011008fecca2037a0808dac2af82587527c1d378759c86a3`.
+
+Independent source review found a verifier incompatibility: the pinned Qwen3
+converter omits `rope.dimension_count`, while its loader defaults that value to
+the explicit attention key length. The follow-up checks that effective rotary
+dimension, key length and value length all equal the original model's head
+dimension. Wrong explicit overrides and every missing required field still fail.
+Tensor values, model pins, tokenizer checks and resource limits are unchanged.
+This is a source-proven correction, not proof that it was the first failing check
+in the original trial or that full model conversion now succeeds.
+
 Native sanitizer evidence is mixed and remains explicit: the owned ABI smoke
 passes, but the unchanged upstream all-type tensor test **fails** under UBSan on
 an unaligned `uint32_t` load in the Q1_0/Q8_0 dot product. That quantized path is

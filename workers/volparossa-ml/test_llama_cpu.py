@@ -40,6 +40,36 @@ def manifest():
 
 
 class NativeCpuTests(unittest.TestCase):
+    def test_effective_qwen3_rotary_dimension_matches_pinned_loader_without_weakening_required_fields(self):
+        config = dict(max_position_embeddings=262144, hidden_size=2560, num_hidden_layers=36,
+                      intermediate_size=9728, num_attention_heads=32, num_key_value_heads=8,
+                      head_dim=128, rope_theta=5000000, rms_norm_eps=1e-6)
+        values = dict(context_length=262144, embedding_length=2560, block_count=36,
+                      feed_forward_length=9728)
+        values.update({"attention.head_count": 32, "attention.head_count_kv": 8,
+                       "attention.key_length": 128, "attention.value_length": 128,
+                       "rope.freq_base": 5000000.0,
+                       "attention.layer_norm_rms_epsilon": struct.unpack("<f", struct.pack("<f", 1e-6))[0]})
+        def reader(fields):
+            return SimpleNamespace(fields={"qwen3." + key: SimpleNamespace(contents=lambda value=value: value)
+                                           for key, value in fields.items()})
+        # The actual pinned converter omits the optional dimension. The loader
+        # uses explicit key_length, not hidden_size / num_attention_heads (80).
+        conversion.verify_model_parameters(reader(values), config)
+        conversion.verify_model_parameters(reader(dict(values, **{"rope.dimension_count": 128})), config)
+        for rotary in (0, 64, 80, 256, None, "128"):
+            with self.subTest(rotary=rotary), self.assertRaisesRegex(ValueError, "NATIVE_GGUF_PARAMETER"):
+                conversion.verify_model_parameters(reader(dict(values, **{"rope.dimension_count": rotary})), config)
+        for key in values:
+            missing = dict(values)
+            del missing[key]
+            with self.subTest(missing=key), self.assertRaisesRegex(ValueError, "NATIVE_GGUF_METADATA"):
+                conversion.verify_model_parameters(reader(missing), config)
+            changed = dict(values)
+            changed[key] += 1
+            with self.subTest(changed=key), self.assertRaisesRegex(ValueError, "NATIVE_GGUF_PARAMETER"):
+                conversion.verify_model_parameters(reader(changed), config)
+
     def test_converter_dependency_is_explicit_exact_and_baseline_lock_unchanged(self):
         provision = conversion.provision
         baseline = provision.load_pins(native.PROFILE)
