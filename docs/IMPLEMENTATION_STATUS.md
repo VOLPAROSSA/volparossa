@@ -52,6 +52,14 @@ tests, sixteen provider checks, ten cancellation checks and four site checks pas
 These validate the fixture and its rejection paths; the new distributed trial has
 not run and cold/warm network functionality is not yet demonstrated.
 
+Before dispatch, the shared cooperative-browser source-binding test is corrected:
+a separate ABCI trial exposed its stale shell delimiter and incomplete four-cohort
+expectation. The test now accepts only bounded argument-selection statements,
+rejects changed boundaries or executable commands before running them, and checks
+all four existing cohorts. Thirty-four shared tests and the six filter-fixture
+tests pass. This correction changes no provider runtime gate or resource limit;
+the filter trial remains unrun.
+
 Proven cold peer delivery and warm reuse, default removable subscription integration,
 cooperative rule discovery, independent publication approval and regression-based
 rollback remain open. A valid publisher signature is not by itself permission to
