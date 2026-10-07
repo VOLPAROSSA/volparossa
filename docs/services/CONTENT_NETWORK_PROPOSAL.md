@@ -722,11 +722,15 @@ The `content-provider` fixture now exercises an independently selected two-rule
 snapshot before and after its existing route disconnect. Its acceptance checks
 require exact exported bytes, original manifest and expiry, real cold peer traffic,
 isolated caches and zero peer/discovery work on warm reuse. Existing static-site
-and bulk multipath evidence remains mandatory. This fixture has passed its inert
-acceptance and wiring tests, not an actual distributed run.
+and bulk multipath evidence remains mandatory. The actual disposable
+[trial 37648508917](https://github.com/VOLPAROSSA/volparossa/actions/runs/37648508917)
+passes on exact source `d95e10cb`: 63 cold peer bytes from one provider, then zero
+peer/discovery work after disconnect, with unchanged manifest and expiry.
+Original receipts and captures reconstruct the complete successful report;
+owned cleanup and enumerated guest-root network state checks also pass.
 
 The command does not register a browser subscription or make uBO recheck expiry.
-Actual protected peer delivery and browser consumption still need a combined
+Protected peer delivery and actual browser consumption still need a combined
 functional trial. Standard removable registration, independent review of discovered
 rules and expiry/rollback handling during active use remain separate requirements.
 

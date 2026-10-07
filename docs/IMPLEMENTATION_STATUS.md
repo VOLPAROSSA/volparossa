@@ -49,8 +49,24 @@ Warm reuse must show zero peer bytes, no provider discovery and no protected or
 provider data packets. The existing site and bulk two-path tests remain mandatory;
 the tiny filter payload does not establish two-subflow throughput. Six new fixture
 tests, sixteen provider checks, ten cancellation checks and four site checks pass.
-These validate the fixture and its rejection paths; the new distributed trial has
-not run and cold/warm network functionality is not yet demonstrated.
+These validate the fixture and its rejection paths. The subsequent actual
+[trial 37648508917/job112885441559](https://github.com/VOLPAROSSA/volparossa/actions/runs/37648508917/job/112885441559),
+attempt 1 on exact source `d95e10cb25b9869f75f9fc4a4a4001b6ce194c12`, passes.
+Reconstruction from the original raw receipts and drained captures matches the
+complete provider report: the cold consumer retrieves all 63 bytes from one
+actual peer with zero origin bytes; warm reuse after disconnect uses zero peers,
+peer bytes, provider discovery or protected data. Both exports retain the same
+manifest and original expiry. This proves this bounded snapshot delivery and
+reuse, not an installed browser subscription or network-wide publication policy.
+
+Exact owned cleanup completes with zero remaining objects; the enumerated guest
+root-network state is unchanged (both hashes
+`6b7773451fb3b22bf6b9a88f32f8772c0217e0a2fb5c0699d0fcebeac2c2ae8d`).
+Original artifact `11495524475` ZIP SHA-256:
+`93c7d2ba5d8a2bed750520ff5c5fe68cf76e5e81ef758209380f3d0cae7cbc84`;
+original decoded job log SHA-256:
+`bef355e7b54eefec308883ac49963e7a8e3dd6b3c30bd82ccdc67ba493da945f`.
+The once-only dispatch remains consumed; no repeat is needed for this result.
 
 Before dispatch, the shared cooperative-browser source-binding test is corrected:
 a separate ABCI trial exposed its stale shell delimiter and incomplete four-cohort
@@ -58,10 +74,10 @@ expectation. The test now accepts only bounded argument-selection statements,
 rejects changed boundaries or executable commands before running them, and checks
 all four existing cohorts. Thirty-four shared tests and the six filter-fixture
 tests pass. This correction changes no provider runtime gate or resource limit;
-the filter trial remains unrun.
+the successful trial above uses this exact corrected source.
 
-Proven cold peer delivery and warm reuse, default removable subscription integration,
-cooperative rule discovery, independent publication approval and regression-based
+Default removable subscription integration, cooperative rule discovery,
+independent publication approval and regression-based
 rollback remain open. A valid publisher signature is not by itself permission to
 change browser policy; the current command requires that authorization separately.
 
