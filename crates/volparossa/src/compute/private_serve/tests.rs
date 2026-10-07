@@ -9,6 +9,48 @@ const SECOND: &str = "02020202020202020202020202020202";
 const THIRD: &str = "03030303030303030303030303030303";
 
 #[test]
+fn native_backend_advertises_restriction_and_rejects_unselected_policy_before_start() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = config(root.path());
+    config.model_profile = ModelProfile::Qwen4bInstruct2507;
+    // Admission-only fixture: no executable backend or model exists here.
+    config.native_backend.native_backend_root = Some(root.path().join("unused-native"));
+    config.native_backend.native_backend_sha256 = Some("a".repeat(64));
+    let config = Arc::new(config);
+    let gate = Arc::new(Semaphore::new(1));
+    let mut active = None;
+    let mut handshakes = Handshakes::default();
+    for (operation, field, expected) in [
+        (json!({"type":"capabilities"}), "qa_supported", json!(false)),
+        (
+            json!({"type":"conversation_capabilities","generation_policy_version":1}),
+            "required_generation_policy",
+            json!("greedy_v1"),
+        ),
+    ] {
+        let request = serde_json::from_value(request(FIRST, operation)).unwrap();
+        let reply = respond(request, &config, &gate, &mut active, &mut handshakes);
+        assert_eq!(reply["capabilities"][field], expected);
+        assert_eq!(
+            reply["capabilities"]["inference_backend"],
+            "llama_cpp_bf16_v1"
+        );
+    }
+    for operation in [
+        json!({"type":"submit","question":"Hello?","context":"Context"}),
+        json!({"type":"submit_conversation","conversation":{"version":1,
+            "visibility":"private_local","instructions":"Reply.","history":[
+                {"type":"message","role":"user","text":"Hello"}],"tools":[]}}),
+    ] {
+        let request = serde_json::from_value(request(SECOND, operation)).unwrap();
+        let reply = respond(request, &config, &gate, &mut active, &mut handshakes);
+        assert_eq!(reply, wire::error(Some(SECOND), "invalid_request"));
+        assert!(active.is_none());
+        assert_eq!(gate.available_permits(), 1);
+    }
+}
+
+#[test]
 fn execution_error_negotiation_rejects_unknown_null_and_duplicate_versions() {
     for version in [
         json!(1),
@@ -325,6 +367,7 @@ fn request(id: &str, operation: Value) -> Value {
 
 fn config(root: &std::path::Path) -> private_task::ExecutionConfig {
     private_task::ExecutionConfig {
+        native_backend: crate::compute::native_cpu::Options::default(),
         runtime_root: root.join("runtime"),
         model_root: root.join("model"),
         work_parent: root.join("work"),

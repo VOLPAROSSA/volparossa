@@ -55,7 +55,12 @@ const FIXED_CODES: &[&str] = &[
     "conversation_native_marker",
     "conversation_native_call",
     "conversation_native_preface",
+    // Retained for original receipts; new JSON rejections use closed categories.
     "conversation_native_json",
+    "conversation_native_json_syntax",
+    "conversation_native_json_data",
+    "conversation_native_json_eof",
+    "conversation_native_json_io",
     "conversation_unknown_tool",
     "conversation_custom_input",
     "conversation_arguments",
@@ -242,6 +247,19 @@ const WORKER_CODES: &[&str] = &[
     "RESULT_TOO_LARGE",
     "JOB_CANCELLED",
     "JOB_DEADLINE_EXCEEDED",
+    "NATIVE_ABI_MISMATCH",
+    "NATIVE_BUILD_PATCH_BINDING",
+    "NATIVE_OPEN_DIAGNOSTIC_INVALID",
+    "NATIVE_OPEN_INVALID_ARGUMENT",
+    "NATIVE_CPU_UNSUPPORTED",
+    "NATIVE_BACKEND_INITIALIZATION_FAILED",
+    "NATIVE_MODEL_INITIALIZATION_FAILED",
+    "NATIVE_VOCABULARY_MISMATCH",
+    "NATIVE_CONTEXT_INITIALIZATION_FAILED",
+    "NATIVE_SAMPLER_INITIALIZATION_FAILED",
+    "NATIVE_MODEL_LOAD_FAILED",
+    "NATIVE_OWNER_CONTROL_FAILED",
+    "INVALID_NATIVE_CONTROL",
 ];
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -580,6 +598,9 @@ assert result == dict(version=1, truncated=False, unrecognized_record=False, sta
             "BACKEND_IMPORT_FAILED"
         );
         assert_eq!(describe(&failure("JOB_CANCELLED")).code, "JOB_CANCELLED");
+        for code in WORKER_CODES.iter().filter(|code| code.contains("NATIVE")) {
+            assert_eq!(describe(&failure(code)).code, *code);
+        }
         assert_eq!(
             describe(&failure("JOB_DEADLINE_EXCEEDED")).code,
             "JOB_DEADLINE_EXCEEDED"

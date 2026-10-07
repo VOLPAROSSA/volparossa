@@ -255,7 +255,8 @@ class ModelProfileTests(unittest.TestCase):
             source.write_text(json.dumps(dict(task_plan_input(), model_profile=WORKER.LARGE_MODEL_PROFILE)))
             value = WORKER.validate_request(dict(request(), mode="plan_tasks", model_profile=WORKER.LARGE_MODEL_PROFILE,
                 model_root=str(model), output_root=str(output), dataset_path=str(source)))
-            def file_hash(path, expected_size=None):
+            def file_hash(path, expected_size=None, *, session=None):
+                self.assertIsNone(session)
                 self.assertEqual(expected_size, profile["files"][path.name])
                 return dict(bytes=expected_size, sha256=profile["hashes"][path.name])
             with mock.patch.object(WORKER, "file_hash", side_effect=file_hash):
@@ -436,7 +437,8 @@ class WorkerProtocolTests(unittest.TestCase):
             source.write_bytes(raw)
             value = WORKER.validate_request(dict(request(), mode="private_infer", model_profile=WORKER.LARGE_MODEL_PROFILE,
                 model_root=str(model), output_root=str(output), dataset_path=str(source)))
-            def file_hash(path, expected_size=None):
+            def file_hash(path, expected_size=None, *, session=None):
+                self.assertIsNone(session)
                 self.assertEqual(expected_size, profile["files"][path.name])
                 return dict(bytes=expected_size, sha256=profile["hashes"][path.name])
             with mock.patch.object(WORKER, "file_hash", side_effect=file_hash):
@@ -485,7 +487,7 @@ class WorkerProtocolTests(unittest.TestCase):
                     tokens = [21, 2] if stop == "eos" else [21] * profile["new_tokens"]
                     model, tokenizer, torch, transformers = task_planner_doubles(text, generated=tokens)
                     value = WORKER.validate_request(dict(request(), mode="private_infer", model_profile=profile_name, output_root=str(root)))
-                    with mock.patch.object(WORKER, "prepare_files", return_value=(root/"model", root, source, identity, files)), \
+                    with mock.patch.object(WORKER, "prepare_files", return_value=(root/"model", root, source, identity, files)) as prepared, \
                          mock.patch.object(WORKER, "configure_offline"), \
                          mock.patch.object(WORKER, "load_backend", return_value=(torch, transformers, mock.Mock(), WORKER.BACKENDS)) as backend, \
                          mock.patch.object(WORKER, "load_model", return_value=model) as loader, \
@@ -496,9 +498,11 @@ class WorkerProtocolTests(unittest.TestCase):
                          mock.patch.object(WORKER, "WIRE_OUTPUT", io.StringIO()):
                         session = WORKER.Session(value)
                         result = WORKER.execute_job(value, session)
+                    prepared.assert_called_once_with(value, session=session)
                     backend.assert_called_once_with(value["threads"], session)
                     loader.assert_called_once_with(transformers, torch, root/"model", profile_name)
-                    weights.assert_called_once_with(root/"model/model.safetensors", profile["files"]["model.safetensors"])
+                    weights.assert_called_once_with(root/"model/model.safetensors", profile["files"]["model.safetensors"],
+                                                    session=session)
                     self.assertEqual(result["mode"], "private_infer")
                     self.assertEqual(result["dataset"], identity)
                     self.assertEqual(result["model"], dict(id=profile["id"], revision=profile["revision"], files=files))

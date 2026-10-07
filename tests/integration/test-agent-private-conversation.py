@@ -222,7 +222,7 @@ class FixtureTests(unittest.TestCase):
 
     def test_native_output_subtypes_are_fixed_local_observations_not_raw_errors(self):
         codes = {code for code in FIX['SERVICE_CODES'] if code.startswith('conversation_')}
-        self.assertEqual(len(codes), 11)
+        self.assertEqual(len(codes), 15)
         events = [dict(version=1, phase='execution', detail=dict(code=code, io_kind='none',
             exit_code=None, signal=None, stderr_class=None)) for code in sorted(codes)]
         with tempfile.TemporaryDirectory(prefix='qwen-fixture-test-', dir=HERE) as directory:
@@ -250,6 +250,43 @@ class FixtureTests(unittest.TestCase):
         self.assertIn('--setenv=NO_COLOR=1', fixture)
         self.assertIn('--property=StandardOutput=append:{diagnostic_log}', fixture)
         self.assertIn('--property=StandardError=append:{diagnostic_log}', fixture)
+
+    def test_native_json_diagnostics_keep_old_code_and_only_four_closed_categories(self):
+        codes = {'conversation_native_json', 'conversation_native_json_syntax', 'conversation_native_json_data',
+                 'conversation_native_json_eof', 'conversation_native_json_io'}
+        self.assertEqual({code for code in FIX['SERVICE_CODES'] if code.startswith('conversation_native_json')}, codes)
+        events = [dict(version=1, phase='execution', detail=dict(code=code, io_kind='none',
+            exit_code=None, signal=None, stderr_class=None)) for code in sorted(codes)]
+        with tempfile.TemporaryDirectory(prefix='native-json-diagnostic-test-', dir=HERE) as directory:
+            path = Path(directory) / 'private.log'
+            unknown = dict(events[0], detail=dict(events[0]['detail'], code='conversation_native_json_PRIVATE_CANARY'))
+            leaked = dict(events[0], detail=dict(events[0]['detail'], message='/PRIVATE_CANARY/secret', line=2, column=4))
+            path.write_text(''.join('DEBUG private_execution_diagnostic ' + json.dumps(event) + '\n'
+                for event in [*events, unknown, leaked]))
+            path.chmod(0o600)
+            result = FIX['service_diagnostic'](path)
+            self.assertEqual(result['events'], events)
+            self.assertTrue(result['unrecognized_record'])
+            self.assertFalse(result['truncated'])
+            self.assertNotIn('CANARY', json.dumps(result))
+            self.assertNotIn('column', json.dumps(result))
+
+    def test_native_load_diagnostics_preserve_only_closed_phases(self):
+        codes = {code for code in FIX['SERVICE_CODES'] if 'NATIVE' in code}
+        self.assertEqual(len(codes), 13)
+        events = [dict(version=1, phase='execution', detail=dict(code=code, io_kind='none',
+            exit_code=None, signal=None, stderr_class=None)) for code in sorted(codes)]
+        with tempfile.TemporaryDirectory(prefix='native-diagnostic-test-', dir=HERE) as directory:
+            path = Path(directory) / 'private.log'
+            unknown = dict(events[0], detail=dict(events[0]['detail'], code='NATIVE_PRIVATE_CANARY'))
+            path.write_text(''.join('DEBUG private_execution_diagnostic ' + json.dumps(event) + '\n'
+                for event in [*events, unknown]))
+            path.chmod(0o600)
+            result = FIX['service_diagnostic'](path)
+            self.assertEqual(result['events'], events)
+            self.assertTrue(result['unrecognized_record'])
+            self.assertFalse(result['truncated'])
+            self.assertNotIn('CANARY', json.dumps(result))
 
     def test_terminal_execution_state_distinguishes_gate_pause_from_completed_model_load(self):
         value = dict(version=1, last_phase='paused', substage=dict(stage='owner_gate', state='begin', elapsed_ms=0),

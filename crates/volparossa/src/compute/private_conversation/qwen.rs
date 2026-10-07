@@ -106,6 +106,18 @@ fn checked_parse(input: &Input, raw: &str, id: &str) -> Result<Output> {
     Ok(value)
 }
 
+fn json_rejection_code(error: &serde_json::Error) -> &'static str {
+    // Never format the error: it may contain private field names or values.
+    // The current string parser cannot produce I/O errors, but keep the
+    // exhaustive category closed without treating that case as success.
+    match error.classify() {
+        serde_json::error::Category::Syntax => "conversation_native_json_syntax",
+        serde_json::error::Category::Data => "conversation_native_json_data",
+        serde_json::error::Category::Eof => "conversation_native_json_eof",
+        serde_json::error::Category::Io => "conversation_native_json_io",
+    }
+}
+
 /// A closed local observation, used only after the complete worker report has
 /// been independently bound to this exact input/output. Never export the parser
 /// error: JSON diagnostics can contain private tool names or argument text.
@@ -116,8 +128,8 @@ pub(super) fn rejection_code(input: &Input, output: &Value, id: &str) -> &'stati
     let Err(error) = checked_parse(input, raw, id) else {
         return "conversation_native_output_other";
     };
-    if error.is::<serde_json::Error>() {
-        return "conversation_native_json";
+    if let Some(error) = error.downcast_ref::<serde_json::Error>() {
+        return json_rejection_code(error);
     }
     match error.to_string().as_str() {
         "conversation_request_id" => "conversation_request_id",
@@ -149,5 +161,18 @@ pub(super) fn turn(input: &Input, output: &Value, id: &str) -> Result<Value> {
     {
         Some(value) => Ok(serde_json::to_value(value)?),
         None => Ok(incomplete("invalid_output")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn json_io_category_does_not_format_private_error_text() {
+        // Inert classification only; the production from_str path performs no I/O.
+        let error = serde_json::Error::io(std::io::Error::other("/PRIVATE_CANARY/field"));
+        assert_eq!(
+            super::json_rejection_code(&error),
+            "conversation_native_json_io"
+        );
     }
 }

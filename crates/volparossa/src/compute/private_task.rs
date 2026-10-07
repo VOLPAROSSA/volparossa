@@ -49,6 +49,7 @@ pub(super) struct ExecutionConfig {
     pub model_root: PathBuf,
     pub work_parent: PathBuf,
     pub model_profile: ModelProfile,
+    pub native_backend: super::native_cpu::Options,
     pub threads: u16,
     pub max_seconds: u16,
 }
@@ -60,6 +61,7 @@ impl From<&Options> for ExecutionConfig {
             model_root: args.model_root.clone(),
             work_parent: args.work_parent.clone(),
             model_profile: args.model_profile,
+            native_backend: super::native_cpu::Options::default(),
             threads: args.threads,
             max_seconds: args.max_seconds,
         }
@@ -75,6 +77,13 @@ impl ExecutionConfig {
         super::private_directory(&self.runtime_root)?;
         super::private_directory(&self.model_root)?;
         super::private_directory(&self.work_parent)?;
+        self.native_backend.validate(self.model_profile)?;
+        if let Some(root) = &self.native_backend.native_backend_root {
+            ensure!(
+                !self.work_parent.starts_with(root) && !root.starts_with(&self.work_parent),
+                "compute_native_backend_work_overlap"
+            );
+        }
         Ok(())
     }
 }
@@ -181,6 +190,8 @@ impl Staged {
     }
 
     fn from_mode(args: &ExecutionConfig, input: &[u8], mode: Mode) -> Result<Self> {
+        args.native_backend
+            .validate_input(mode, input, args.model_profile)?;
         super::private_directory(&args.work_parent)?;
         let directory = tempfile::Builder::new()
             .prefix("private-task-")
@@ -200,6 +211,7 @@ impl Staged {
             runtime_root: args.runtime_root.clone(),
             model_root: args.model_root.clone(),
             model_profile: args.model_profile,
+            native_backend: args.native_backend.clone(),
             adapter_root: None,
             dataset,
             output: directory.path().join("output"),

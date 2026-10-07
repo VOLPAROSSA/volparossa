@@ -1,0 +1,32 @@
+--- a/src/llama-model-loader.cpp
++++ b/src/llama-model-loader.cpp
+@@ -1648,7 +1648,7 @@
+             uint8_t * data = (uint8_t *) mapping->addr() + weight->offs;
+ 
+             if (check_tensors) {
+-                validation_result.emplace_back(std::async(std::launch::async, [cur, data, n_size] {
++                validation_result.emplace_back(std::async(std::launch::deferred, [cur, data, n_size] {
+                     return std::make_pair(cur, ggml_validate_row_data(cur->type, data, n_size));
+                 }));
+             }
+@@ -1676,7 +1676,7 @@
+                 file->seek(weight->offs, SEEK_SET);
+                 file->read_raw(cur->data, n_size);
+                 if (check_tensors) {
+-                    validation_result.emplace_back(std::async(std::launch::async, [cur, n_size] {
++                    validation_result.emplace_back(std::async(std::launch::deferred, [cur, n_size] {
+                         return std::make_pair(cur, ggml_validate_row_data(cur->type, cur->data, n_size));
+                     }));
+                 }
+@@ -1763,6 +1763,11 @@
+     // check validation results
+     bool validation_failed = false;
+     for (auto & future : validation_result) {
++        // Complete validation stays on this execution thread; poll owner cancellation
++        // between tensors without exposing data or acknowledging pause while loading.
++        if (progress_callback && !progress_callback((float) size_done / size_data, progress_callback_user_data)) {
++            return false;
++        }
+         auto result = future.get();
+         if (!result.second) {
+             LLAMA_LOG_ERROR("%s: tensor '%s' has invalid data\n", __func__, ggml_get_name(result.first));

@@ -76,6 +76,10 @@ jobs:
           cargo fmt --all -- --check
           ./scripts/check-shell.sh
 
+      - name: Check native CPU contracts without loading models
+        working-directory: workers/volparossa-ml
+        run: python3 -B -m unittest test_llama_cpu test_conversion_diagnostic
+
       - name: Install pinned dependency-audit tools
         run: |
           tool_root="${RUNNER_TEMP}/cargo-tools"

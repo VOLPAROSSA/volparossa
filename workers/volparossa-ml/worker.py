@@ -25,6 +25,7 @@ import stat
 import struct
 import sys
 import time
+from types import SimpleNamespace
 
 VERSION = 1
 MAX_REQUEST = 65536
@@ -258,7 +259,7 @@ def bounded_integer(value, low, high):
 def validate_request(value):
     required = {"version", "id", "mode", "model_root", "dataset_path", "output_root"}
     optional = {"steps", "threads", "max_seconds", "adapter_root", "owner_control", "model_profile",
-                "private_generation_diagnostics"}
+                "private_generation_diagnostics", "inference_backend", "native_backend_root", "native_backend_sha256"}
     require(type(value) is dict and required <= value.keys()
             and value.keys() <= required | optional, "INVALID_REQUEST_FIELDS")
     require(type(value["version"]) is int and value["version"] == VERSION, "UNSUPPORTED_VERSION")
@@ -266,6 +267,12 @@ def validate_request(value):
     require(value["mode"] in ("infer", "train", "plan_document", "plan_tasks", "private_infer", "private_conversation", "public_code_proposal", "aggregate_adapter"), "INVALID_JOB_MODE")
     profile_name = value.get("model_profile", DEFAULT_MODEL_PROFILE)
     model_profile(profile_name)
+    native_fields = {"inference_backend", "native_backend_root", "native_backend_sha256"}
+    if native_fields & value.keys():
+        require(native_fields <= value.keys() and value["inference_backend"] == "llama_cpp_bf16_v1"
+                and profile_name == QWEN4B_MODEL_PROFILE and value["mode"] == "private_conversation"
+                and type(value["native_backend_sha256"]) is str
+                and re.fullmatch(r"[0-9a-f]{64}", value["native_backend_sha256"]), "INVALID_NATIVE_BACKEND_SCOPE")
     require("private_generation_diagnostics" not in value or
             (type(value["private_generation_diagnostics"]) is bool and
              (not value["private_generation_diagnostics"] or
@@ -291,8 +298,8 @@ def validate_request(value):
             "AGGREGATION_EXECUTION_SCOPE")
     require("owner_control" not in value or type(value["owner_control"]) is bool,
             "INVALID_OWNER_CONTROL")
-    for field in ("model_root", "dataset_path", "output_root", "adapter_root"):
-        if field == "adapter_root" and field not in value:
+    for field in ("model_root", "dataset_path", "output_root", "adapter_root", "native_backend_root"):
+        if field in ("adapter_root", "native_backend_root") and field not in value:
             continue
         path = value[field]
         require(type(path) is str and 1 < len(path.encode("utf-8")) <= 4096
@@ -769,7 +776,12 @@ def plain_path(value, directory):
     return path, metadata
 
 
-def file_hash(path, expected_size=None, maximum=None, aggregate=None):
+def file_hash(path, expected_size=None, maximum=None, aggregate=None, *, session=None):
+    # Hash every original byte, but service owner controls on this execution
+    # thread between bounded reads. A pause is never acknowledged while a read
+    # or digest update is running, and does not reset the original job deadline.
+    if session is not None:
+        session.check()
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(descriptor, "rb") as source:
         metadata = os.fstat(source.fileno())
@@ -778,6 +790,8 @@ def file_hash(path, expected_size=None, maximum=None, aggregate=None):
         require(maximum is None or metadata.st_size <= maximum, "ARTIFACT_TOO_LARGE")
         digest, length = hashlib.sha256(), 0
         while True:
+            if session is not None:
+                session.check()
             data = source.read(1024 * 1024)
             if not data:
                 break
@@ -786,6 +800,8 @@ def file_hash(path, expected_size=None, maximum=None, aggregate=None):
             digest.update(data)
             if aggregate is not None:
                 aggregate.update(data)
+        if session is not None:
+            session.check()
         require(length == metadata.st_size, "ARTIFACT_CHANGED")
         return {"bytes": length, "sha256": digest.hexdigest()}
 
@@ -799,7 +815,7 @@ def read_bounded(path, maximum):
         return value
 
 
-def verify_sharded_weights(model_root, profile, verified_files=None):
+def verify_sharded_weights(model_root, profile, verified_files=None, *, session=None):
     """Hash the original shard bytes in pinned order, never the index as weights.
 
     The existing identity wire field remains a SHA256 over actual weight bytes.
@@ -807,7 +823,7 @@ def verify_sharded_weights(model_root, profile, verified_files=None):
     """
     shards = profile["weight_shards"]
     index_name = "model.safetensors.index.json"
-    index_file = file_hash(model_root / index_name, profile["files"][index_name])
+    index_file = file_hash(model_root / index_name, profile["files"][index_name], session=session)
     require(index_file["sha256"] == profile["hashes"][index_name], "MODEL_FILES_NOT_PINNED")
     if verified_files is not None:
         verified_files[index_name] = index_file
@@ -817,7 +833,7 @@ def verify_sharded_weights(model_root, profile, verified_files=None):
             and set(index["weight_map"].values()) == set(shards), "INVALID_WEIGHT_SHARD_INDEX")
     aggregate, total = hashlib.sha256(), 0
     for name in shards:
-        checked = file_hash(model_root / name, profile["files"][name], aggregate=aggregate)
+        checked = file_hash(model_root / name, profile["files"][name], aggregate=aggregate, session=session)
         require(checked["sha256"] == profile["hashes"][name], "MODEL_WEIGHTS_CHANGED_ON_DISK")
         if verified_files is not None:
             verified_files[name] = checked
@@ -828,7 +844,15 @@ def verify_sharded_weights(model_root, profile, verified_files=None):
     return identity
 
 
-def prepare_files(request):
+def prepare_files(request, session=None, *, initial_source=None):
+    # Native inference consumes a converted GGUF, not these source shards. Keep
+    # their actually measured initial identity without changing the existing
+    # five-value API or the ordinary PyTorch before/after verification path.
+    if initial_source is not None:
+        require(type(initial_source) is dict and not initial_source
+                and request.get("inference_backend") == "llama_cpp_bf16_v1"
+                and request.get("model_profile") == QWEN4B_MODEL_PROFILE
+                and request.get("mode") == "private_conversation", "NATIVE_SOURCE_PROVENANCE")
     profile_name = request.get("model_profile", DEFAULT_MODEL_PROFILE)
     profile = model_profile(profile_name)
     model_root, model_metadata = plain_path(request["model_root"], True)
@@ -844,10 +868,12 @@ def prepare_files(request):
     sharded = set(profile.get("weight_shards", ()))
     if sharded:
         sharded.add("model.safetensors.index.json")
-    files = {name: file_hash(model_root / name, expected_size=size)
+    files = {name: file_hash(model_root / name, expected_size=size, session=session)
              for name, size in profile["files"].items() if name not in sharded}
     if sharded:
-        verify_sharded_weights(model_root, profile, files)
+        measured_weights = verify_sharded_weights(model_root, profile, files, session=session)
+        if initial_source is not None:
+            initial_source["weights"] = dict(measured_weights, files=list(measured_weights["files"]))
     require(all(files[name]["sha256"] == expected for name, expected in profile["hashes"].items()),
             "MODEL_FILES_NOT_PINNED")
     config = parse_json(read_bounded(model_root / "config.json", 8192))
@@ -1990,10 +2016,10 @@ def execute_private_infer(request, session, tokenizer, torch, transformers, vers
     session.private_progress("generation", "complete")
     session.private_progress("verify_after", "begin")
     if "weight_shards" in profile:
-        weight_identity = verify_sharded_weights(model_root, profile)
+        weight_identity = verify_sharded_weights(model_root, profile, session=session)
     else:
         weight_identity = None
-        require(file_hash(model_root / "model.safetensors", profile["files"]["model.safetensors"])["sha256"]
+        require(file_hash(model_root / "model.safetensors", profile["files"]["model.safetensors"], session=session)["sha256"]
                 == profile["hashes"]["model.safetensors"], "MODEL_WEIGHTS_CHANGED_ON_DISK")
     session.private_progress("verify_after", "complete")
     result = {"version": VERSION, "id": request["id"], "kind": "result", "status": "ok", "mode": request["mode"],
@@ -2030,10 +2056,10 @@ def execute_code_proposal(request, session, tokenizer, torch, transformers, vers
     outputs = generate(model, samples, tokenizer, torch, session, transformers, profile_name,
                        generation_policy="greedy_v1")
     if "weight_shards" in profile:
-        weight_identity = verify_sharded_weights(model_root, profile)
+        weight_identity = verify_sharded_weights(model_root, profile, session=session)
     else:
         weight_identity = None
-        require(file_hash(model_root / "model.safetensors", profile["files"]["model.safetensors"])["sha256"]
+        require(file_hash(model_root / "model.safetensors", profile["files"]["model.safetensors"], session=session)["sha256"]
                 == profile["hashes"]["model.safetensors"], "MODEL_WEIGHTS_CHANGED_ON_DISK")
     result = {"version": VERSION, "id": request["id"], "kind": "result", "status": "ok",
               "mode": "public_code_proposal", "purpose": "code_proposal",
@@ -2293,7 +2319,10 @@ def execute_job(request, session):
     session.progress("preparing")
     session.private_progress("owner_gate", "complete")
     session.private_progress("verify_files", "begin")
-    model_root, output_root, dataset, data_identity, model_files = prepare_files(request)
+    initial_source = {}
+    preparation = ({"initial_source": initial_source}
+                   if request.get("inference_backend") == "llama_cpp_bf16_v1" else {})
+    model_root, output_root, dataset, data_identity, model_files = prepare_files(request, session=session, **preparation)
     session.private_progress("verify_files", "complete")
     session.check()
     cohort = None
@@ -2322,6 +2351,12 @@ def execute_job(request, session):
             "MODEL_TOKENIZER_MISMATCH")
     session.private_progress("tokenizer_load", "complete")
     session.check()
+    if request.get("inference_backend") == "llama_cpp_bf16_v1":
+        native_backend = sys.modules.get("volparossa_llama_cpu")
+        require(native_backend is not None, "NATIVE_BACKEND_MODULE_UNAVAILABLE")
+        return native_backend.execute(request, session, tokenizer, torch, versions, model_root, output_root,
+                                      dataset, data_identity, model_files, SimpleNamespace(**globals()),
+                                      initial_source_weights=initial_source.get("weights"))
     if request["mode"] == "plan_document":
         plan = plan_document(tokenizer, dataset, session, profile_name)
         raw = json.dumps(plan, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("ascii")

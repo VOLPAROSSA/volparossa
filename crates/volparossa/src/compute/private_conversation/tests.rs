@@ -495,6 +495,68 @@ fn qwen_native_preface_preserves_exact_call_and_rejects_ambiguous_framing() {
 }
 
 #[test]
+fn qwen_json_categories_preserve_strict_turns_and_literal_argument_delimiters() {
+    let value = input();
+    let id = "ab".repeat(16);
+    for profile in [ModelProfile::Qwen600, ModelProfile::Qwen4bInstruct2507] {
+        let input = Input::decode_profile(&serde_json::to_vec(&value).unwrap(), profile).unwrap();
+        for (body, code) in [
+            (
+                r#"{"name":"vp_0","arguments":{"PRIVATE_CANARY":!}}"#,
+                "conversation_native_json_syntax",
+            ),
+            (
+                r#"{"name":false,"arguments":{"PRIVATE_CANARY":0}}"#,
+                "conversation_native_json_data",
+            ),
+            (
+                r#"{"name":"vp_0","arguments":{},"PRIVATE_CANARY":0}"#,
+                "conversation_native_json_data",
+            ),
+            (
+                r#"{"name":"vp_0","arguments":{"PRIVATE_CANARY":0,"PRIVATE_CANARY":1}}"#,
+                "conversation_native_json_data",
+            ),
+            (
+                r#"{"name":"vp_0","arguments":{"PRIVATE_CANARY":"unfinished"#,
+                "conversation_native_json_eof",
+            ),
+        ] {
+            let output = native_output(&format!("<tool_call>{body}</tool_call>"));
+            let turn = qwen::turn(&input, &output, &id).unwrap();
+            assert_eq!(turn, json!({"type":"incomplete","reason":"invalid_output"}));
+            assert_eq!(qwen::rejection_code(&input, &output, &id), code);
+            assert!(!code.contains("PRIVATE_CANARY"));
+            let report = json!({"id":id,"outputs":[output],"conversation":turn,
+                "prompt_tokens":128,"conversation_limits":capabilities(profile)});
+            validate_report(&report, &serde_json::to_vec(&value).unwrap(), profile).unwrap();
+        }
+        let literal = r#"<tool_call>{"name":"vp_0","arguments":{"text":"PRIVATE_CANARY <tool_call> and </tool_call>"}}</tool_call>"#;
+        let output = native_output(literal);
+        assert_eq!(
+            qwen::turn(&input, &output, &id).unwrap()["arguments"],
+            json!({"text":"PRIVATE_CANARY <tool_call> and </tool_call>"})
+        );
+        assert_eq!(
+            qwen::rejection_code(&input, &output, &id),
+            "conversation_native_output_other"
+        );
+        let mut partial = native_output("<tool_call>{</tool_call>");
+        partial["generation"]["stop_reason"] = "token_limit".into();
+        partial["generated_tokens"] = 1024.into();
+        assert_eq!(
+            qwen::turn(&input, &partial, &id).unwrap()["reason"],
+            "token_limit"
+        );
+        partial["text_truncated"] = true.into();
+        assert_eq!(
+            qwen::turn(&input, &partial, &id).unwrap()["reason"],
+            "wire_truncated"
+        );
+    }
+}
+
+#[test]
 fn qwen_rejection_diagnostics_are_closed_and_keep_incomplete_wire_output() {
     let mut value = input();
     let id = "ab".repeat(16);
@@ -509,7 +571,7 @@ fn qwen_rejection_diagnostics_are_closed_and_keep_incomplete_wire_output() {
         ),
         (
             r#"<tool_call>{"PRIVATE_CANARY":0}</tool_call>"#,
-            "conversation_native_json",
+            "conversation_native_json_data",
         ),
         (
             r#"<tool_call>{"name":"PRIVATE_CANARY","arguments":{}}</tool_call>"#,
@@ -619,7 +681,7 @@ fn qwen_diagnostic_requires_bound_report_and_explicit_private_debug_target() {
         assert_eq!(
             serde_json::from_str::<Value>(record.trim()).unwrap(),
             json!({"version":1,"phase":"execution",
-            "detail":{"code":"conversation_native_json","io_kind":"none","exit_code":null,"signal":null,"stderr_class":null}})
+            "detail":{"code":"conversation_native_json_data","io_kind":"none","exit_code":null,"signal":null,"stderr_class":null}})
         );
     }
 }

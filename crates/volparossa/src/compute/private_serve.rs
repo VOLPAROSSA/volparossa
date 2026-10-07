@@ -40,6 +40,8 @@ pub(crate) struct Options {
     work_parent: PathBuf,
     #[arg(long, default_value_t = ModelProfile::Smol360)]
     model_profile: ModelProfile,
+    #[command(flatten)]
+    native_backend: super::native_cpu::Options,
     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u16).range(1..=2))]
     threads: u16,
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u16).range(1..=600))]
@@ -59,6 +61,7 @@ impl Options {
             model_root: self.model_root.clone(),
             work_parent: self.work_parent.clone(),
             model_profile: self.model_profile,
+            native_backend: self.native_backend.clone(),
             threads: self.threads,
             max_seconds: self.max_seconds,
         }
@@ -249,6 +252,36 @@ struct Handshakes {
     execution_error: Option<u8>,
 }
 
+fn conversation_capabilities(
+    config: &private_task::ExecutionConfig,
+    gate: &Semaphore,
+    handshakes: &Handshakes,
+) -> Value {
+    let mut caps = super::private_conversation::capabilities(config.model_profile);
+    caps["execution_slots"] = 1.into();
+    caps["max_seconds"] = config.max_seconds.into();
+    caps["max_request_bytes"] =
+        super::private_conversation::request_frame(config.model_profile).into();
+    caps["max_response_bytes"] = wire::MAX_RESPONSE_BYTES.into();
+    caps["quarantined"] = gate.is_closed().into();
+    if handshakes.execution_error == Some(1) {
+        caps["execution_error_version"] = 1.into();
+    }
+    if handshakes.generation_policy == Some(1) {
+        caps["generation_policy_version"] = 1.into();
+        caps["generation_policies"] = if config.model_profile.is_native_conversation() {
+            json!(["greedy_v1"])
+        } else {
+            json!([])
+        };
+    }
+    if config.native_backend.enabled() {
+        caps["inference_backend"] = super::native_cpu::KIND.into();
+        caps["required_generation_policy"] = "greedy_v1".into();
+    }
+    caps
+}
+
 fn respond(
     request: wire::Request,
     config: &Arc<private_task::ExecutionConfig>,
@@ -261,6 +294,10 @@ fn respond(
             handshakes.qa = true;
             let mut response = wire::response(&request.id, "capabilities");
             response["capabilities"] = capabilities(config, gate);
+            if config.native_backend.enabled() {
+                response["capabilities"]["qa_supported"] = false.into();
+                response["capabilities"]["inference_backend"] = super::native_cpu::KIND.into();
+            }
             response
         }
         wire::Operation::ConversationCapabilities {
@@ -271,26 +308,7 @@ fn respond(
             handshakes.generation_policy = generation_policy_version;
             handshakes.execution_error = execution_error_version;
             let mut response = wire::response(&request.id, "conversation_capabilities");
-            response["capabilities"] =
-                super::private_conversation::capabilities(config.model_profile);
-            response["capabilities"]["execution_slots"] = 1.into();
-            response["capabilities"]["max_seconds"] = config.max_seconds.into();
-            response["capabilities"]["max_request_bytes"] =
-                super::private_conversation::request_frame(config.model_profile).into();
-            response["capabilities"]["max_response_bytes"] = wire::MAX_RESPONSE_BYTES.into();
-            response["capabilities"]["quarantined"] = gate.is_closed().into();
-            if handshakes.execution_error == Some(1) {
-                response["capabilities"]["execution_error_version"] = 1.into();
-            }
-            if handshakes.generation_policy == Some(1) {
-                response["capabilities"]["generation_policy_version"] = 1.into();
-                response["capabilities"]["generation_policies"] =
-                    if config.model_profile.is_native_conversation() {
-                        json!(["greedy_v1"])
-                    } else {
-                        json!([])
-                    };
-            }
+            response["capabilities"] = conversation_capabilities(config, gate, handshakes);
             response
         }
         wire::Operation::SubmitConversation { conversation } => {
@@ -303,6 +321,10 @@ fn respond(
                 wire::error(Some(&request.id), "cleanup_unconfirmed")
             } else if active.is_some() {
                 wire::error(Some(&request.id), "busy")
+            } else if config.native_backend.enabled()
+                && !conversation.requires_generation_policy_handshake()
+            {
+                wire::error(Some(&request.id), "invalid_request")
             } else if let Some(slot) = ExecutionSlot::admit(gate) {
                 let input = conversation
                     .bytes_profile(config.model_profile)
@@ -326,6 +348,8 @@ fn respond(
         wire::Operation::Submit { question, context } => {
             if !handshakes.qa {
                 wire::error(Some(&request.id), "handshake_required")
+            } else if config.native_backend.enabled() {
+                wire::error(Some(&request.id), "invalid_request")
             } else if gate.is_closed() {
                 wire::error(Some(&request.id), "cleanup_unconfirmed")
             } else if active.is_some() {
