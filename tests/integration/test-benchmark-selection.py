@@ -329,7 +329,20 @@ printf '%s\n' "$result"
                 path = Path(directory, f"{scenario}-route-diagnostic.json")
                 encoded = path.read_text()
                 record = json.loads(encoded)
-                self.assertEqual(set(record), fields)
+                maintenance_fields = {"connect_reason_counts", "connect_counts_complete", "preselection_diagnostic"}
+                self.assertEqual(set(record), fields | maintenance_fields
+                    if scenario == "private-storage-maintenance" else fields)
+                if scenario == "private-storage-maintenance":
+                    self.assertEqual(record["schema_version"], 2)
+                    self.assertTrue(record["connect_counts_complete"])
+                    self.assertEqual(sum(record["connect_reason_counts"].values()), attempts)
+                    if mode == "retry":
+                        self.assertEqual(record["connect_reason_counts"],
+                            {"NATIVE_PERMIT_UNAVAILABLE": 1, "CONNECTED": 1})
+                    if mode == "unknown":
+                        self.assertEqual(record["connect_reason_counts"], {"UNRECOGNIZED": 1})
+                else:
+                    self.assertEqual(record["schema_version"], 1)
                 self.assertEqual(record["stage"], stage)
                 self.assertEqual(record["reason"], reason)
                 self.assertEqual(record["connect_exit_status"], connect_exit)
@@ -377,6 +390,46 @@ printf '%s\n' "$benchmark_connect_reason"
                 result = subprocess.run(["sh", "-c", script, "test", str(HERE), str(source)],
                     check=True, text=True, capture_output=True, timeout=10)
                 self.assertEqual(result.stdout.strip(), expected)
+
+    def test_maintenance_counts_every_connect_once_without_retrying_terminal_refusal(self):
+        script = r'''
+set -eu
+. "$1/benchmark-selection.sh"
+WORK=$2; binary_directory=/unused; source_directory=/unused
+private_storage_maintenance=yes
+date() { if [ "$1" = '+%s%3N' ]; then printf '1000\n'; else printf '1\n'; fi; }
+sleep() { :; }
+timeout() {
+    case $benchmark_connect_count in
+        1|2) code=NATIVE_PERMIT_UNAVAILABLE ;;
+        3) code=PRESELECTION_UNAVAILABLE ;;
+        *) code=NO_ELIGIBLE_PATHS ;;
+    esac
+    printf 'Error: agent rejected request: %s (Unavailable)\n' "$code" >&2
+    return 1
+}
+benchmark_capture_paths() { exit 99; }
+status=0
+benchmark_select_route private-storage-fragments mptcp || status=$?
+printf '%s\n' "$status"
+'''
+        with tempfile.TemporaryDirectory(prefix="maintenance-route-counts-", dir=HERE) as directory:
+            result = subprocess.run(["sh", "-c", script, "test", str(HERE), directory],
+                capture_output=True, text=True, check=True, timeout=10)
+            self.assertEqual(result.stdout.strip(), "1")
+            evidence = json.loads(Path(directory, "private-storage-maintenance-route-diagnostic.json").read_text())
+            self.assertEqual(evidence["attempts"], 4)
+            self.assertEqual(evidence["connect_reason_counts"], dict(NATIVE_PERMIT_UNAVAILABLE=2,
+                PRESELECTION_UNAVAILABLE=1, NO_ELIGIBLE_PATHS=1))
+            self.assertTrue(evidence["connect_counts_complete"])
+            self.assertEqual(sum(evidence["connect_reason_counts"].values()), evidence["attempts"])
+            self.assertEqual(evidence["preselection_diagnostic"]["uncertainty"], "not_captured")
+            baseline = Path(directory, "private-storage-maintenance-selection-start.private")
+            self.assertEqual(baseline.read_text(), "1000\n")
+            self.assertEqual(baseline.stat().st_mode & 0o777, 0o600)
+            end = Path(directory, "private-storage-maintenance-selection-end.private")
+            self.assertEqual(end.read_text(), "1000\n")
+            self.assertEqual(end.stat().st_mode & 0o777, 0o600)
 
 
 class A07FreshRouteTests(unittest.TestCase):

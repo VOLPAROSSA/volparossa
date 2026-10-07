@@ -1378,6 +1378,27 @@ and invalid-data controls, pass; they do not establish real browser/peer complet
   fail before and pass after; private stderr, paths and product logs remain
   excluded. Route policy, retries, budgets, storage proofs and cleanup gates
   are unchanged. This is diagnostic coverage, not a routing or retirement fix.
+  The next original [run37239936453 on `17032ca7`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37239936453)
+  also fails before owner/provider preparation. Its closed diagnostic now shows
+  `CONNECT_REJECTED` / `NO_ELIGIBLE_PATHS` after 52 Connect attempts and 51 retries,
+  with no Paths poll or maintenance operation. It does not identify whether
+  preselection lacked an eligible exit or enough diverse relays. Earlier retry
+  reasons were not retained. All nine private cleanup checks pass, owned objects
+  remaining is zero, and guest-root network snapshots match at SHA-256
+  `fd5a8a96c0eb54818b8a886e92c15f39bb472b36a8ca26c7d7044cf2bffd4d4d`;
+  this is not separate outer-host or storage-lifecycle proof. Original ZIP SHA-256:
+  `506cee080fd915fd7f99ac225c02a984ccd117eea71a57f6920561dca49b8992`;
+  job111546461704 log SHA-256:
+  `2314103bd4a7b216526e743d9db606bcd1ca5edfb382a144bb508d503dc098fc`.
+  The follow-up counts each completed Connect result once and projects only fixed
+  preselection reason counts from the already captured client event ring, bounded
+  by private selection-start/end times. Missing, ambiguous, invalid, stale or full-ring
+  evidence remains unknown; a reason observed within the selection window is not
+  proof of the last attempt's cause. Raw logs, timestamps and identifiers are not
+  exported. Sixteen selector, seventeen maintenance and five wiring tests pass,
+  including the real sourced finalizer with an inert Connect failure. The failed
+  outcome, eligibility, retry policy, deadlines and cleanup requirements are unchanged.
+  This remains diagnostic coverage, not a product routing fix or completed maintenance.
   See [private storage maintenance](services/PRIVATE_STORAGE.md#explicit-owner-private-background-maintenance).
 
 - [ ] OpenCloud integration in `VOLPAROSSA/volparossa-cloud` (requested 2026-10-01):

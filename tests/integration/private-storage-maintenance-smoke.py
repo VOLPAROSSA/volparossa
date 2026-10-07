@@ -54,6 +54,104 @@ FAILURE_CODES = {
     'private replica CLI operation failed': 'cli_exit',
     'replica diagnostics exceeded fixture bound': 'cli_output_bound',
 }
+PRESELECTION_REASON_CODES = (
+    'PRESELECTION_SAMPLE_NO_EXIT', 'PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS',
+    'PRESELECTION_SAMPLE_INVALID_POLICY', 'PRESELECTION_SAMPLE_INVALID_SNAPSHOT',
+    'PRESELECTION_SAMPLE_ENTROPY',
+)
+
+
+def closed_diagnostic_text(path, maximum):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= maximum
+            and stat.S_IMODE(info.st_mode) == 0o600 and info.st_uid == os.geteuid(),
+            'invalid private diagnostic file')
+        data = stream.read(maximum + 1)
+        require(len(data) <= maximum, 'private diagnostic size')
+    return data.decode('ascii')
+
+
+def closed_preselection_events(path, baseline_path, end_path):
+    # Reuse the closed cooperative-browser event-ring grammar, but exclude all
+    # records outside this selection's private start/end wall-clock bounds. These
+    # are event counts in a selection window, not attribution to its final attempt.
+    value = dict(version=1, state='unknown', observed_reason='unknown', uncertainty='absent_baseline',
+        scope='selection_window_not_last_attempt_proof', limit=400, records=None,
+        fresh_records=None, stale_records=None, later_records=None, counts=None, unrecognized_reason_records=None,
+        window_covers_baseline=None)
+    captured_at_ms = time.time_ns() // 1_000_000
+    try:
+        raw_baseline = closed_diagnostic_text(baseline_path, 32)
+        require(re.fullmatch(r'[0-9]{1,20}\n', raw_baseline) is not None, 'invalid selection baseline')
+        baseline = int(raw_baseline)
+        require(0 < baseline <= captured_at_ms, 'invalid selection clock')
+    except FileNotFoundError:
+        return value
+    except (OSError, ValueError, UnicodeError):
+        value['uncertainty'] = 'invalid_baseline'
+        return value
+    value['uncertainty'] = 'absent_window_end'
+    try:
+        raw_end = closed_diagnostic_text(end_path, 32)
+        require(re.fullmatch(r'[0-9]{1,20}\n', raw_end) is not None, 'invalid selection end')
+        selection_end = int(raw_end)
+        require(baseline <= selection_end <= captured_at_ms, 'invalid selection clock')
+    except FileNotFoundError:
+        return value
+    except (OSError, ValueError, UnicodeError):
+        value['uncertainty'] = 'invalid_window_end'
+        return value
+    value['uncertainty'] = 'absent'
+    try:
+        lines = closed_diagnostic_text(path, 131072).splitlines()
+        require(len(lines) <= 400, 'preselection event ring exceeded')
+        counts = dict.fromkeys(PRESELECTION_REASON_CODES, 0)
+        fresh, stale, later, unrecognized, previous = 0, 0, 0, 0, 0
+        first = None
+        for line in lines:
+            match = re.fullmatch(r'([0-9]{1,20})\tlevel=([0-9])\tevent=([A-Z0-9_]{1,96})'
+                r'\tsession=[0-9a-f]{0,64}\tpath=(?:-|[0-9]{1,10})', line)
+            require(match is not None, 'invalid bounded preselection event record')
+            timestamp = int(match[1])
+            require(timestamp > 0, 'invalid event clock')
+            if timestamp < previous or timestamp > captured_at_ms:
+                value['uncertainty'] = 'clock_regression'
+                return value
+            previous = timestamp
+            if first is None:
+                first = timestamp
+            if timestamp <= baseline:
+                stale += 1
+                continue
+            if timestamp > selection_end:
+                later += 1
+                continue
+            fresh += 1
+            if match[3] in counts:
+                counts[match[3]] += 1
+            elif match[3].startswith('PRESELECTION_SAMPLE_'):
+                unrecognized += 1
+        value.update(records=len(lines), fresh_records=fresh, stale_records=stale, later_records=later, counts=counts,
+            unrecognized_reason_records=unrecognized,
+            window_covers_baseline=first is not None and first <= baseline)
+        observed = [code for code, count in counts.items() if count]
+        if len(lines) == 400:
+            value['uncertainty'] = 'ring_at_capacity'
+        elif unrecognized:
+            value['uncertainty'] = 'unrecognized'
+        elif len(observed) > 1:
+            value['uncertainty'] = 'ambiguous'
+        elif not observed:
+            value['uncertainty'] = 'no_fresh_signal'
+        else:
+            value.update(state='known', observed_reason=observed[0], uncertainty=None)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, UnicodeError):
+        value['uncertainty'] = 'invalid'
+    return value
 
 
 def failure_code(error):
@@ -614,6 +712,12 @@ def validate_report(report, revision):
 def main(args):
     if args == ['export-names']:
         print('\n'.join(EXPORT_NAMES)); return
+    if len(args) == 2 and args[0] == 'preselection-diagnostic':
+        work = Path(args[1])
+        print(json.dumps(closed_preselection_events(work / 'logs-client.txt',
+            work / 'private-storage-maintenance-selection-start.private',
+            work / 'private-storage-maintenance-selection-end.private'), sort_keys=True))
+        return
     if len(args) == 3 and args[0] == 'report':
         validate_report(read(Path(args[1])), args[2]); return
     if len(args) == 3 and args[0] == 'evidence':

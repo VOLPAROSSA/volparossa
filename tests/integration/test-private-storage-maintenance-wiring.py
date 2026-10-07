@@ -115,6 +115,9 @@ class PrivateStorageMaintenanceWiring(unittest.TestCase):
                 "content-private-owner.json", "content-private-request.json",
                 "private-storage-fragments-connect.err", "private-storage-fragments-connect.out",
                 "private-storage-fragments-paths.txt", "logs-client.txt",
+                "private-storage-maintenance-selection-start.private",
+                "private-storage-maintenance-selection-end.private",
+                "private-storage-maintenance-preselection.part",
             )
             for name in forbidden:
                 (published / name).write_text("PRIVATE_SENTINEL_DO_NOT_EXPORT\n")
@@ -132,6 +135,60 @@ class PrivateStorageMaintenanceWiring(unittest.TestCase):
             self.assertFalse(report["cleanup"]["verified"])
             self.assertIsNone(report["host_state"]["unchanged"])
             self.assertLessEqual(report["diagnostics"]["captured_bytes"], module["TOTAL_LIMIT"])
+
+    def test_actual_finalizer_exports_fresh_projection_without_changing_failed_outcome(self):
+        # Run only the sourced selector/finalizer with a failing Connect double.
+        # No binary, network namespace, peer or service is started here.
+        script = r'''
+set -eu
+source_directory=$1; WORK=$2; output_directory=$3
+OUTPUT_UID=$(id -u); OUTPUT_GID=$(id -g)
+binary_directory=/unused; private_storage_maintenance=yes
+expected_commit=1111111111111111111111111111111111111111
+RUN_ID=synthetic; PHASE=private-storage-fragments-prepare
+OBSERVED_BLOCKER=FRAGMENTS_ROUTE_UNAVAILABLE; CLEANUP_COMPLETE=true; REMAINING_OWNED_OBJECTS=0
+. "$source_directory/tests/integration/benchmark-selection.sh"
+. "$source_directory/tests/integration/private-storage-maintenance-smoke.sh"
+date() {
+    if [ "$1" = '+%s%3N' ]; then
+        if [ "$benchmark_connect_count" -eq 0 ]; then printf '1000\n'; else printf '1010\n'; fi
+    else printf '1\n'; fi
+}
+timeout() { printf '%s\n' 'Error: agent rejected request: NO_ELIGIBLE_PATHS (Unavailable)' >&2; return 1; }
+benchmark_capture_paths() { exit 99; }
+optional_json_evidence() { printf 'null\n'; }
+selection_status=0
+benchmark_select_route private-storage-fragments mptcp || selection_status=$?
+final_status=0
+private_storage_maintenance_finalize_report "$selection_status" || final_status=$?
+printf 'closed_status=%s:%s\n' "$selection_status" "$final_status"
+'''
+        with tempfile.TemporaryDirectory(prefix="maintenance-finalize-", dir=HERE) as temporary:
+            work = Path(temporary)
+            output = work / 'published'
+            output.mkdir()
+            raw = work / 'logs-client.txt'
+            raw.write_text('999\tlevel=1\tevent=PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS\tsession=\tpath=-\n'
+                '1005\tlevel=1\tevent=PRESELECTION_SAMPLE_NO_EXIT\tsession=abcdef\tpath=12345\n'
+                '1020\tlevel=1\tevent=PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS\tsession=\tpath=-\n')
+            raw.chmod(0o600)
+            result = subprocess.run(['sh', '-c', script, 'test', str(HERE.parents[1]), str(work), str(output)],
+                capture_output=True, text=True, check=True, timeout=10)
+            self.assertIn('closed_status=1:1', result.stdout)
+            record = json.loads((output / 'private-storage-maintenance-route-diagnostic.json').read_text())
+            self.assertEqual(record['connect_reason_counts'], {'NO_ELIGIBLE_PATHS': 1})
+            projection = record['preselection_diagnostic']
+            self.assertEqual(projection['state'], 'known')
+            self.assertEqual(projection['observed_reason'], 'PRESELECTION_SAMPLE_NO_EXIT')
+            self.assertEqual((projection['fresh_records'], projection['stale_records'], projection['later_records']),
+                (1, 1, 1))
+            self.assertNotIn('abcdef', json.dumps(record))
+            self.assertNotIn('12345', json.dumps(record))
+            self.assertEqual({path.name for path in output.iterdir()}, {
+                'private-storage-maintenance-route-diagnostic.json', 'private-storage-maintenance-smoke.json'})
+        guest = (HERE / 'kvm-alpha-topology.sh').read_text()
+        self.assertLess(guest.index('logs --limit 400 >"$WORK/logs-$cleanup_node.txt"'),
+            guest.index('        private_storage_maintenance_finalize_report'))
 
 
 if __name__ == "__main__":

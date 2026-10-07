@@ -112,6 +112,116 @@ class MaintenanceEvidence(unittest.TestCase):
                     probe(dict(expected, **{key: value}), False)
         probe(dict(expected, unexpected='not part of the closed receipt'), False)
 
+    def test_preselection_projection_requires_fresh_closed_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            baseline, events, end = self.preselection_files(work)
+            events.write_text(self.event(99, 'PRESELECTION_SAMPLE_NO_EXIT')
+                + self.event(100, 'PRESELECTION_SAMPLE_NO_EXIT')
+                + self.event(101, 'PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS')
+                + self.event(111, 'PRESELECTION_SAMPLE_NO_EXIT'))
+            result = CHECK['closed_preselection_events'](events, baseline, end)
+            self.assertEqual(result['state'], 'known')
+            self.assertEqual(result['observed_reason'], 'PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS')
+            self.assertEqual(result['records'], 4)
+            self.assertEqual(result['fresh_records'], 1)
+            self.assertEqual(result['stale_records'], 2)
+            self.assertEqual(result['later_records'], 1)
+            self.assertEqual(result['counts']['PRESELECTION_SAMPLE_NO_EXIT'], 0)
+            self.assertTrue(result['window_covers_baseline'])
+            self.assertIsNone(result['uncertainty'])
+            for private in (str(work), '12345', 'session=', 'path=', 'baseline_unix_ms'):
+                self.assertNotIn(private, json.dumps(result))
+
+    @staticmethod
+    def event(timestamp, code):
+        return f'{timestamp}\tlevel=1\tevent={code}\tsession={"a" * 64}\tpath=12345\n'
+
+    @staticmethod
+    def preselection_files(work):
+        baseline = work / 'selection-start.private'
+        events = work / 'logs-client.txt'
+        end = work / 'selection-end.private'
+        baseline.write_text('100\n')
+        events.write_text('')
+        end.write_text('110\n')
+        baseline.chmod(0o600)
+        events.chmod(0o600)
+        end.chmod(0o600)
+        return baseline, events, end
+
+    def test_preselection_missing_ambiguous_truncated_and_stale_are_not_known(self):
+        cases = (
+            ('no_signal', '', 'no_fresh_signal'),
+            ('stale', self.event(99, 'PRESELECTION_SAMPLE_NO_EXIT'), 'no_fresh_signal'),
+            ('later', self.event(111, 'PRESELECTION_SAMPLE_NO_EXIT'), 'no_fresh_signal'),
+            ('ambiguous', self.event(101, 'PRESELECTION_SAMPLE_NO_EXIT')
+                + self.event(102, 'PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS'), 'ambiguous'),
+            ('full_ring', self.event(101, 'PRESELECTION_SAMPLE_NO_EXIT') * 400, 'ring_at_capacity'),
+            ('unknown', self.event(101, 'PRESELECTION_SAMPLE_PRIVATE_TOKEN'), 'unrecognized'),
+            ('regression', self.event(101, 'PRESELECTION_SAMPLE_NO_EXIT')
+                + self.event(99, 'PRESELECTION_SAMPLE_NO_EXIT'), 'clock_regression'),
+            ('future', self.event(18446744073709551615, 'PRESELECTION_SAMPLE_NO_EXIT'), 'clock_regression'),
+            ('raw_private', 'PRIVATE token=secret 192.0.2.99\n', 'invalid'),
+        )
+        for label, raw, uncertainty in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as temporary:
+                baseline, events, end = self.preselection_files(Path(temporary))
+                events.write_text(raw)
+                result = CHECK['closed_preselection_events'](events, baseline, end)
+                self.assertEqual(result['state'], 'unknown')
+                self.assertEqual(result['observed_reason'], 'unknown')
+                self.assertEqual(result['uncertainty'], uncertainty)
+                for private in ('PRIVATE', 'token', 'secret', '192.0.2.99'):
+                    self.assertNotIn(private, json.dumps(result))
+        with tempfile.TemporaryDirectory() as temporary:
+            baseline, events, end = self.preselection_files(Path(temporary))
+            events.unlink()
+            self.assertEqual(CHECK['closed_preselection_events'](events, baseline, end)['uncertainty'], 'absent')
+            end.unlink()
+            self.assertEqual(CHECK['closed_preselection_events'](events, baseline, end)['uncertainty'], 'absent_window_end')
+            baseline.unlink()
+            self.assertEqual(CHECK['closed_preselection_events'](events, baseline, end)['uncertainty'], 'absent_baseline')
+
+    def test_preselection_rejects_unsafe_baseline_and_logs(self):
+        for kind in ('baseline_mode', 'baseline_invalid', 'baseline_zero', 'baseline_future',
+                     'end_mode', 'end_before_start', 'end_future', 'log_mode', 'log_symlink',
+                     'baseline_symlink', 'oversize', 'too_many_records'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                baseline, events, end = self.preselection_files(Path(temporary))
+                events.write_text(self.event(101, 'PRESELECTION_SAMPLE_NO_EXIT'))
+                if kind == 'baseline_mode':
+                    baseline.chmod(0o644)
+                elif kind == 'baseline_invalid':
+                    baseline.write_text('PRIVATE_BASELINE\n')
+                elif kind == 'baseline_zero':
+                    baseline.write_text('0\n')
+                elif kind == 'baseline_future':
+                    baseline.write_text('18446744073709551615\n')
+                elif kind == 'end_mode':
+                    end.chmod(0o644)
+                elif kind == 'end_before_start':
+                    end.write_text('99\n')
+                elif kind == 'end_future':
+                    end.write_text('18446744073709551615\n')
+                elif kind == 'log_mode':
+                    events.chmod(0o644)
+                elif kind.endswith('_symlink'):
+                    target = baseline if kind.startswith('baseline') else events
+                    replacement = target.with_suffix('.copy')
+                    target.rename(replacement)
+                    target.symlink_to(replacement)
+                elif kind == 'oversize':
+                    events.write_text('a' * 131073)
+                else:
+                    events.write_text(self.event(101, 'PRESELECTION_SAMPLE_NO_EXIT') * 401)
+                result = CHECK['closed_preselection_events'](events, baseline, end)
+                self.assertEqual(result['state'], 'unknown')
+                self.assertEqual(result['uncertainty'],
+                    'invalid_baseline' if kind.startswith('baseline')
+                    else 'invalid_window_end' if kind.startswith('end') else 'invalid')
+                self.assertIsNone(result['counts'])
+
     def test_retirement_projects_only_existing_bounded_checkpoint_fields(self):
         namespace = CHECK['retirement_turn'].__globals__
         with patch.dict(namespace, RETIREMENT_TURNS=[]):

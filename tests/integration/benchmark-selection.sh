@@ -122,6 +122,13 @@ benchmark_route_diagnostic_prefix() {
 
 benchmark_image_route_diagnostic() {
     benchmark_route_diagnostic_prefix || return 0
+    if [ "${private_storage_maintenance:-no}" = yes ]; then
+        case "$1:$2" in
+            initialize:*|connect:CONNECT_TRANSIENT) : ;;
+            *) (umask 077; date +%s%3N >"$WORK/private-storage-maintenance-selection-end.private") \
+                2>/dev/null || true ;;
+        esac
+    fi
     benchmark_diagnostic_retries=$((benchmark_connect_count - 1))
     [ "$benchmark_diagnostic_retries" -ge 0 ] || benchmark_diagnostic_retries=0
     if jq -cn --arg stage "$1" --arg reason "$2" \
@@ -130,11 +137,32 @@ benchmark_image_route_diagnostic() {
         --argjson attempts "$benchmark_connect_count" --argjson retries "$benchmark_diagnostic_retries" \
         --argjson redraws "$benchmark_draw" --argjson path_polls "$benchmark_poll" \
         --argjson path_status "$benchmark_snapshot_status" \
+        --arg maintenance "${private_storage_maintenance:-no}" \
+        --argjson connect_counts "$benchmark_connect_reason_counts" \
+        --argjson counts_complete "$benchmark_connect_counts_complete" \
         '{schema_version:1,stage:$stage,reason:$reason,last_connect_reason:$last_connect_reason,
           connect_exit_status:$connect_exit_status,attempts:$attempts,retries:$retries,
-          redraws:$redraws,path_polls:$path_polls,path_status:$path_status}' \
+          redraws:$redraws,path_polls:$path_polls,path_status:$path_status}
+          + (if $maintenance == "yes" then {schema_version:2,
+               connect_reason_counts:$connect_counts,connect_counts_complete:$counts_complete,
+               preselection_diagnostic:{state:"unknown",uncertainty:"not_captured"}}
+             else {} end)' \
         >"$WORK/$benchmark_diagnostic_prefix-route-diagnostic.part"; then
         mv -- "$WORK/$benchmark_diagnostic_prefix-route-diagnostic.part" "$WORK/$benchmark_diagnostic_prefix-route-diagnostic.json" || true
+    fi
+    return 0
+}
+
+# One fixed code per completed Connect invocation, not per diagnostic rewrite.
+# Unknown stderr is counted only as UNRECOGNIZED; it never becomes a JSON key.
+benchmark_maintenance_connect_count() {
+    [ "${private_storage_maintenance:-no}" = yes ] || return 0
+    if benchmark_updated_counts=$(jq -cn --arg reason "$benchmark_connect_reason" \
+        --argjson counts "$benchmark_connect_reason_counts" \
+        '$counts | .[$reason] = ((.[$reason] // 0) + 1)'); then
+        benchmark_connect_reason_counts=$benchmark_updated_counts
+    else
+        benchmark_connect_counts_complete=false
     fi
     return 0
 }
@@ -178,6 +206,14 @@ benchmark_select_route() {
     benchmark_connect_reason=NOT_STARTED
     benchmark_snapshot_status=null
     benchmark_poll=0
+    benchmark_connect_reason_counts='{}'
+    benchmark_connect_counts_complete=true
+    if [ "${private_storage_maintenance:-no}" = yes ]; then
+        # Private freshness bound only, never exported. No sleep or readiness query
+        # is added; an absent/invalid clock remains explicitly unknown at cleanup.
+        (umask 077; date +%s%3N >"$WORK/private-storage-maintenance-selection-start.private") \
+            2>/dev/null || true
+    fi
     benchmark_image_route_diagnostic initialize STARTED
     while [ "$benchmark_attempt" -lt 360 ] && [ "$benchmark_draw" -lt 32 ]; do
         benchmark_remaining=$((benchmark_deadline - $(date +%s)))
@@ -195,6 +231,7 @@ benchmark_select_route() {
             2>"$WORK/$benchmark_label-connect.err"; then
             benchmark_connect_exit=0
             benchmark_connect_reason=CONNECTED
+            benchmark_maintenance_connect_count
             while [ "$benchmark_poll" -lt 100 ]; do
                 benchmark_snapshot_status=0
                 benchmark_capture_paths "$benchmark_label" "$benchmark_transport" \
@@ -235,6 +272,7 @@ benchmark_select_route() {
             if benchmark_route_diagnostic_prefix; then
                 benchmark_image_connect_reason "$WORK/$benchmark_label-connect.err"
             fi
+            benchmark_maintenance_connect_count
             if ! a01_transient_connect_unavailable "$WORK/$benchmark_label-connect.err"; then
                 case $benchmark_connect_exit in
                     124|137) benchmark_image_route_diagnostic connect CONNECT_TIMEOUT ;;

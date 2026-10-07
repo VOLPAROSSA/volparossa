@@ -15,6 +15,21 @@ private_storage_maintenance_run() {
 
 private_storage_maintenance_finalize_report() {
     maintenance_status=$1
+    # Cleanup has already captured the bounded client ring while its service was
+    # live. Export only fixed fresh reason counts, never the raw ring or baseline.
+    # A projection failure leaves the prior unknown marker and original result.
+    if [ -f "$WORK/private-storage-maintenance-route-diagnostic.json" ] \
+        && [ ! -L "$WORK/private-storage-maintenance-route-diagnostic.json" ]; then
+        if python3 -B "$source_directory/tests/integration/private-storage-maintenance-smoke.py" \
+            preselection-diagnostic "$WORK" >"$WORK/private-storage-maintenance-preselection.part" \
+            && jq -c --slurpfile preselection "$WORK/private-storage-maintenance-preselection.part" \
+                '. + {preselection_diagnostic:$preselection[0]}' \
+                "$WORK/private-storage-maintenance-route-diagnostic.json" \
+                >"$WORK/private-storage-maintenance-route-diagnostic.part"; then
+            mv -- "$WORK/private-storage-maintenance-route-diagnostic.part" \
+                "$WORK/private-storage-maintenance-route-diagnostic.json" || true
+        fi
+    fi
     optional_json_evidence "$WORK/private-storage-maintenance-evidence.json" >"$WORK/handoff-report-evidence.part"
     optional_json_evidence "$WORK/a15-evidence.json" >"$WORK/handoff-report-host.part"
     jq -cn --arg revision "$expected_commit" --arg run "$RUN_ID" --arg phase "$PHASE" --arg blocker "$OBSERVED_BLOCKER" \
