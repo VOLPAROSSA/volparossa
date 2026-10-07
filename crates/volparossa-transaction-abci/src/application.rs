@@ -73,10 +73,11 @@ impl Application {
     }
 
     fn handle_inner(&mut self, request: abci::Request) -> Result<abci::Response, Error> {
+        use abci::{request::Value as Q, response::Value as R};
+
         if request.encoded_len() > MAX_FRAME_BYTES {
             return Err(Error::Protocol);
         }
-        use abci::{request::Value as Q, response::Value as R};
         let response = match request.value.ok_or(Error::Protocol)? {
             Q::Echo(value) => R::Echo(abci::ResponseEcho {
                 message: value.message,
