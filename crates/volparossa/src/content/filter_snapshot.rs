@@ -16,7 +16,7 @@ use volparossa_content::{SignedManifest, VerifiedManifest};
 
 use super::{Limits, ensure_new_output, now_seconds, output_parent, public_text};
 
-const MAX_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_BYTES: usize = 1024 * 1024;
 const MAX_RULES: usize = 4096;
 const MAX_LINES: usize = 8192;
 const HEADER: &str = "[Adblock Plus 2.0]";
@@ -160,11 +160,28 @@ fn check_download(
     download: &public_text::TextDownload,
     now: u64,
 ) -> Result<(VerifiedManifest, usize)> {
-    let manifest =
-        SignedManifest::decode(&download.signed_manifest)?.verify(&args.publisher_key, now)?;
+    validate_download(
+        &args.publisher_key,
+        &args.name,
+        &args.manifest_id,
+        download,
+        now,
+    )
+}
+
+/// Shared export/broker boundary: original signed bytes, exact owner selection and
+/// the same restricted grammar. A transport receipt never grants filter authority.
+pub(super) fn validate_download(
+    publisher_key: &VerifyingKey,
+    name: &str,
+    manifest_id: &[u8; 32],
+    download: &public_text::TextDownload,
+    now: u64,
+) -> Result<(VerifiedManifest, usize)> {
+    let manifest = SignedManifest::decode(&download.signed_manifest)?.verify(publisher_key, now)?;
     ensure!(
-        manifest.metadata().name == args.name
-            && manifest.manifest_id() == &args.manifest_id
+        manifest.metadata().name == name
+            && manifest.manifest_id() == manifest_id
             && manifest.metadata().content_type == "text/plain"
             && manifest.length() == u64::try_from(download.text.len())?
             && manifest.validity().expires == download.expires
