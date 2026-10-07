@@ -131,8 +131,9 @@ adapter/socket/CLI tests and all twenty-two existing core tests pass, independen
 repeated by root. Unsupported proof queries and snapshot adoption are refused;
 query results explicitly do not claim a consensus certificate. The thirteen
 verbatim schema/license inputs pass offline digest and closed-import verification.
-A guest-only four-validator fixture is being integrated; no actual Comet/Rust
-interoperability, partition or distributed recovery result is claimed yet.
+A guest-only four-validator fixture now has partial actual Comet/Rust evidence,
+but its isolated trial remains failed; partition and distributed recovery are
+not yet proved. The original result and limits are recorded below.
 
 The initial adapter source checks remain recorded as failures: `ac3e6632`
 failed a statement-order lint and `97aeaddc` a test semicolon lint. After those
@@ -176,13 +177,38 @@ uninitialized artifact locations. Thirty-four cooperative-browser tests, eleven
 ABCI wiring tests and eighteen fixture contract tests pass, independently repeated
 by root. The original log does not establish whether the overlong old fragment
 attempted runner file changes; it must not be cited as host-cleanup evidence.
-A new exact-source CI pass and actual isolated validator trial are still required.
+Exact `2dc4e8cf` passed Quality37645623095 and CodeQL37645472983. Its one
+[isolated validator trial37651982154](https://github.com/VOLPAROSSA/volparossa/actions/runs/37651982154/job/112897358952)
+then **failed** at `partition_3_1` / `command_failed`. Source builds succeeded,
+four independent stores/private sockets started, conflicting signed TEST reserves
+returned codes `[0,7]` at height4, and a height6 commit debited/credited70 while
+conserving100 TEST. Partition, rejoin and crash/replay checkpoints were not reached.
+All eight child processes were reaped; owned namespaces and private keys were
+removed. The separate guest-parent unchanged gate was **false**: address and
+IPv6 route hashes differed. Only hashes survived, so lifetime countdowns are a
+possible explanation, not an established cause or unchanged-state evidence.
+Original artifact ZIP SHA-256:
+`84b921b7b532c3a4ec7f0d74fe4d612bc12362db65f5d3f182336e96301372ca`;
+original job log SHA-256:
+`f6313aae833aa169a9d47578bb17e7fefa4d2adfbb3c9d40b24687a5535af719`.
+
+Source review found the generated nft table lacked the separator required after
+the nested chain by the guest's nftables1.1.3 grammar. The narrow correction adds
+that separator and fixed install/list/remove failure tags; discarded stderr does
+not retrospectively prove the exact runtime error. New bounded in-memory parent
+diagnostics distinguish known lifetime-field changes from structural differences
+without exporting addresses or raw snapshots. Raw snapshot hashes and their
+unchanged-state acceptance gate remain intact, even for lifetime-only changes.
+Twenty-five inert contract and twelve wiring tests pass, independently repeated
+by root; no acceptance requirement, command scope, resource limit or deadline was
+relaxed. Fresh source CI and another separately reviewed trial remain required.
 
 The [next distributed milestone](services/TRANSACTION_LAYER.md#distributed-test-execution)
 selects source-pinned CometBFT with four fixed TEST validators. Ordered local
-execution does not itself establish consensus: actual conflicting spends,
-partitions, crash replay, malicious validators and client finality verification
-remain required before distributed execution is complete.
+execution does not itself establish consensus. The actual conflicting-spend
+checkpoint above is only partial evidence; partitions, crash replay, malicious
+validators and client finality verification remain required before distributed
+execution is complete.
 
 This durable slice has no network, gateway, encryption at rest, consensus,
 distributed finality, external reconciliation, corrections or AML capability.

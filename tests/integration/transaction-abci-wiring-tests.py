@@ -193,6 +193,24 @@ class TransactionWiring(unittest.TestCase):
             with self.subTest(phase=phase), self.assertRaises(ValueError):
                 self.validate(values)
 
+    def test_lifetime_diagnostics_cannot_override_raw_parent_mismatch(self):
+        values = inert_receipts()
+        values[2]["parent_lifetime_diagnostics"] = {
+            label: {"parsed": True, "structure_equal": True, "lifetime_values_equal": False,
+                    "lifetime_fields_only_changed": True, "lifetime_fields_before": 2, "lifetime_fields_after": 2}
+            for label in ("addresses", "routes6")
+        }
+        self.validate(values)
+        for label in ("addresses", "routes6"):
+            changed = copy.deepcopy(values)
+            changed[2]["parent_after"][label] = "f" * 64
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                self.validate(changed)
+            changed[2]["parent_unchanged"] = False
+            changed[2]["acceptance"] = False
+            with self.assertRaises(ValueError):
+                self.validate(changed)
+
     def test_no_consensus_claim_from_absent_counters_progress_or_coverage(self):
         for phase, field, bad in (("partition_3_1", "drop_packets", [0, 1]),
                                   ("partition_3_1", "majority_heights_after", [7, 7, 7]),

@@ -4,6 +4,7 @@
 
 import argparse
 import base64
+import copy
 import hashlib
 import importlib.util
 import json
@@ -72,6 +73,140 @@ class FixtureContracts(unittest.TestCase):
         for left, right in (([], [0, 1, 2, 3]), ([0], [1, 2]), ([0, 1], [1, 2, 3]), ([0, 1], [2, 4])):
             with self.subTest(left=left, right=right), self.assertRaises(FIXTURE.TrialFailure):
                 FIXTURE.partition_rules(left, right)
+
+    def test_nested_chain_has_required_nft_statement_separator(self):
+        # nftables 1.1.3 parser_bison.y: a nested chain's closing brace must
+        # be followed by NEWLINE or SEMICOLON before the table closes.
+        for left, right in (([0, 1, 2], [3]), ([0, 1], [2, 3])):
+            rules = FIXTURE.partition_rules(left, right)
+            self.assertEqual(rules.splitlines()[-2:], [b"}", b"}"])
+            self.assertTrue(rules.endswith(b"}\n}\n"))
+            self.assertNotIn(b"} }", rules)
+
+    def test_partition_operations_are_fixed_and_fail_with_closed_tags(self):
+        commands = {
+            "install": ["nft", "-f", "-"],
+            "list": ["nft", "-j", "list", "table", "bridge", "vptx"],
+            "remove": ["nft", "delete", "table", "bridge", "vptx"],
+        }
+        for operation, command in commands.items():
+            data = b"inert rules" if operation == "install" else None
+            with patch.object(FIXTURE, "checked", return_value=b"inert") as checked:
+                self.assertEqual(FIXTURE.partition_command(operation, data), b"inert")
+                checked.assert_called_once_with(command, input_bytes=data)
+            for error in (FIXTURE.TrialFailure("command_failed"), OSError("private path"),
+                          subprocess.TimeoutExpired("private argv", 15)):
+                with self.subTest(operation=operation, error=type(error)), \
+                        patch.object(FIXTURE, "checked", side_effect=error):
+                    with self.assertRaises(FIXTURE.TrialFailure) as raised:
+                        FIXTURE.partition_command(operation, data)
+                    self.assertEqual(str(raised.exception), "partition_" + operation + "_failed")
+        for operation, data in (("flush", None), ("install", None), ("list", b"private"),
+                                ("remove", b"private")):
+            with patch.object(FIXTURE, "checked", side_effect=AssertionError("no command")), \
+                    self.assertRaisesRegex(FIXTURE.TrialFailure, "partition_command_contract"):
+                FIXTURE.partition_command(operation, data)
+
+    def test_cut_and_heal_preserve_two_positive_packet_counters(self):
+        trial = FIXTURE.Trial(argparse.Namespace(work="/var/tmp/inert-not-created"))
+        with patch.object(FIXTURE, "partition_command") as command:
+            trial.cut([0, 1, 2], [3])
+            command.assert_called_once_with("install", FIXTURE.partition_rules([0, 1, 2], [3]))
+        for counts in ([3, 4], [0, 4], [3], [True, 4]):
+            value = {"nftables": [{"rule": {"expr": [{"counter": {"packets": n}}]}} for n in counts]}
+            with patch.object(FIXTURE, "partition_command", return_value=json.dumps(value).encode()) as command:
+                if counts == [3, 4]:
+                    self.assertEqual(trial.heal(), counts)
+                    self.assertEqual([call.args[0] for call in command.call_args_list], ["list", "remove"])
+                else:
+                    with self.assertRaisesRegex(FIXTURE.TrialFailure, "partition_no_packet_evidence"):
+                        trial.heal()
+                    command.assert_called_once_with("list")
+
+    def test_lifetime_diagnostics_do_not_export_values_or_change_raw_hashes(self):
+        address = [{"ifname": "inert-private-name", "addr_info": [{"local": "2001:db8::1",
+                    "prefixlen": 64, "valid_life_time": 900, "preferred_life_time": 600}]}]
+        route = [{"dst": "2001:db8::/64", "gateway": "fe80::1", "expires": 900, "metric": 1024}]
+        before, after = {}, {}
+        for label, value in (("addresses", address), ("routes6", route)):
+            changed = copy.deepcopy(value)
+            entry = changed[0]["addr_info"][0] if label == "addresses" else changed[0]
+            entry["valid_life_time" if label == "addresses" else "expires"] -= 10
+            raw, later = json.dumps(value).encode(), json.dumps(changed).encode()
+            before[label] = FIXTURE.parent_lifetime_summary(label, raw)
+            after[label] = FIXTURE.parent_lifetime_summary(label, later)
+            self.assertNotEqual(hashlib.sha256(raw).hexdigest(), hashlib.sha256(later).hexdigest())
+        diagnostic = FIXTURE.parent_lifetime_diagnostics(before, after)
+        for value in diagnostic.values():
+            self.assertTrue(value["parsed"])
+            self.assertTrue(value["structure_equal"])
+            self.assertTrue(value["lifetime_fields_only_changed"])
+            self.assertFalse(value["lifetime_values_equal"])
+            self.assertEqual(set(value), {"parsed", "structure_equal", "lifetime_values_equal",
+                             "lifetime_fields_only_changed", "lifetime_fields_before", "lifetime_fields_after"})
+            self.assertTrue(all(type(field) in (bool, int) for field in value.values()))
+        encoded = json.dumps(diagnostic)
+        for private in ("2001:db8", "fe80", "inert-private-name", "900", "600"):
+            self.assertNotIn(private, encoded)
+
+    def test_lifetime_diagnostics_preserve_all_other_fields_and_field_presence(self):
+        originals = {
+            "addresses": [{"ifname": "inert", "addr_info": [{"local": "2001:db8::1", "prefixlen": 64,
+                "valid_life_time": 900, "preferred_life_time": 600, "unknown_future_field": 1}]}],
+            "routes6": [{"dst": "2001:db8::/64", "gateway": "fe80::1", "expires": 900, "metric": 1024}],
+        }
+        for label, original in originals.items():
+            left = FIXTURE.parent_lifetime_summary(label, json.dumps(original).encode())
+            modifications = ({"local": "2001:db8::2"}, {"prefixlen": 48}, {"unknown_future_field": 2}) \
+                if label == "addresses" else ({"gateway": "fe80::2"}, {"metric": 1025}, {"unknown": True})
+            for fields in modifications:
+                changed = copy.deepcopy(original)
+                entry = changed[0]["addr_info"][0] if label == "addresses" else changed[0]
+                entry.update(fields)
+                right = FIXTURE.parent_lifetime_summary(label, json.dumps(changed).encode())
+                value = FIXTURE.parent_lifetime_diagnostics({label: left}, {label: right})[label]
+                self.assertTrue(value["parsed"])
+                self.assertFalse(value["structure_equal"])
+                self.assertFalse(value["lifetime_fields_only_changed"])
+            changed = copy.deepcopy(original)
+            entry = changed[0]["addr_info"][0] if label == "addresses" else changed[0]
+            del entry["valid_life_time" if label == "addresses" else "expires"]
+            right = FIXTURE.parent_lifetime_summary(label, json.dumps(changed).encode())
+            self.assertFalse(FIXTURE.parent_lifetime_diagnostics({label: left}, {label: right})[label]["structure_equal"])
+            self.assertTrue(FIXTURE.parent_lifetime_diagnostics({label: left}, {label: left})[label]["lifetime_values_equal"])
+
+    def test_lifetime_parser_is_bounded_and_malformed_data_is_unclassified(self):
+        invalid = (b"{", b"{}", b"[1]", b"[{\"addr_info\":1}]", b"[{\"addr_info\":[],\"addr_info\":[]}]",
+                   b"[" * 2000, b" " * (FIXTURE.RPC_LIMIT + 1), json.dumps([{}] * 257).encode(),
+                   json.dumps([{"addr_info": [{}] * 257}]).encode(),
+                   json.dumps([{"addr_info": [{"valid_life_time": 1, "preferred_life_time": 1}] * 256}] * 3).encode())
+        for raw in invalid:
+            with self.subTest(raw_size=len(raw)):
+                self.assertIsNone(FIXTURE.parent_lifetime_summary("addresses", raw))
+        for bad in (-1, True, 1.5, 4294967296, "private", None):
+            self.assertIsNone(FIXTURE.parent_lifetime_summary("routes6", json.dumps([{"expires": bad}]).encode()))
+        self.assertIsNone(FIXTURE.parent_lifetime_summary("routes6", b'[{"unrelated":NaN}]'))
+        self.assertIsNone(FIXTURE.parent_lifetime_summary("unknown", b"[]"))
+        diagnostic = FIXTURE.parent_lifetime_diagnostics({"addresses": None}, {})
+        self.assertTrue(all(value["parsed"] is False and value["lifetime_fields_only_changed"] is False
+                            for value in diagnostic.values()))
+
+    def test_parent_snapshot_retains_exact_raw_hashes_with_optional_diagnostics(self):
+        def observed(command):
+            if command == ["ip", "-j", "address"]:
+                return b'[{"addr_info":[{"valid_life_time":900}]}]\n'
+            if command == ["ip", "-j", "-6", "route", "show", "table", "all"]:
+                return b'[{"expires":900}]\n'
+            return b"inert unchanged snapshot bytes\n"
+        diagnostic = {}
+        with patch.object(FIXTURE, "checked", side_effect=observed), \
+                patch.object(FIXTURE.Path, "read_bytes", return_value=b"inert file bytes"):
+            raw_only = FIXTURE.parent_snapshot()
+            with_diagnostics = FIXTURE.parent_snapshot(diagnostic)
+        self.assertEqual(raw_only, with_diagnostics)
+        self.assertEqual(raw_only["addresses"], hashlib.sha256(observed(["ip", "-j", "address"])).hexdigest())
+        self.assertEqual(set(diagnostic), {"addresses", "routes6"})
+        self.assertTrue(all(value is not None for value in diagnostic.values()))
 
     def test_toml_only_exact_section_key_is_replaced(self):
         text = 'laddr = "base"\n[rpc]\nladdr = "rpc"\n[p2p]\nladdr = "p2p"\n'

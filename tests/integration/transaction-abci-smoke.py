@@ -150,7 +150,62 @@ def network_plan(prefix):
     return commands
 
 
-def parent_snapshot():
+def parent_lifetime_summary(label, raw):
+    """In-memory diagnostics only: never substitute for the raw snapshot hashes."""
+    if label not in {"addresses", "routes6"} or len(raw) > RPC_LIMIT:
+        return None
+    try:
+        def unique_object(pairs):
+            value = dict(pairs)
+            require(len(value) == len(pairs), "parent_json_duplicate")
+            return value
+        value = json.loads(raw, object_pairs_hook=unique_object)
+        require(isinstance(value, list) and len(value) <= 256, "parent_json_shape")
+        lifetimes = []
+        for row in value:
+            require(isinstance(row, dict), "parent_json_shape")
+            entries = row.get("addr_info") if label == "addresses" else [row]
+            require(isinstance(entries, list) and len(entries) <= 256, "parent_json_shape")
+            fields = ("valid_life_time", "preferred_life_time") if label == "addresses" else ("expires",)
+            for entry in entries:
+                require(isinstance(entry, dict), "parent_json_shape")
+                for field in fields:
+                    if field in entry:
+                        seconds = entry[field]
+                        require(type(seconds) is int and 0 <= seconds <= 4294967295,
+                                "parent_json_lifetime")
+                        lifetimes.append([field, seconds])
+                        require(len(lifetimes) <= 1024, "parent_json_lifetime_bound")
+                        # Keep the field's presence and every other value, including
+                        # unknown fields. This is not a configuration-field allowlist.
+                        entry[field] = None
+        def digest(value):
+            return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                             allow_nan=False).encode()).hexdigest()
+        return (digest(value), digest(lifetimes), len(lifetimes))
+    except (TrialFailure, ValueError, TypeError, RecursionError):
+        return None
+
+
+def parent_lifetime_diagnostics(before, after):
+    """Export only closed flags/counts; no addresses, JSON or lifetime values."""
+    result = {}
+    for label in ("addresses", "routes6"):
+        left, right = before.get(label), after.get(label)
+        parsed = left is not None and right is not None
+        structure_equal = parsed and left[0] == right[0]
+        lifetime_equal = parsed and left[1] == right[1]
+        result[label] = {
+            "parsed": parsed, "structure_equal": structure_equal,
+            "lifetime_values_equal": lifetime_equal,
+            "lifetime_fields_only_changed": structure_equal and not lifetime_equal,
+            "lifetime_fields_before": left[2] if left is not None else 0,
+            "lifetime_fields_after": right[2] if right is not None else 0,
+        }
+    return result
+
+
+def parent_snapshot(diagnostics=None):
     values = {}
     for label, command in (
         ("addresses", ["ip", "-j", "address"]),
@@ -161,7 +216,10 @@ def parent_snapshot():
         ("firewall", ["nft", "-j", "list", "ruleset"]),
         ("namespaces", ["ip", "netns", "list"]),
     ):
-        values[label] = hashlib.sha256(checked(command)).hexdigest()
+        raw = checked(command)
+        values[label] = hashlib.sha256(raw).hexdigest()
+        if diagnostics is not None and label in {"addresses", "routes6"}:
+            diagnostics[label] = parent_lifetime_summary(label, raw)
     values["dns"] = hashlib.sha256(Path("/etc/resolv.conf").read_bytes()).hexdigest()
     values["sysctls"] = hashlib.sha256(b"".join(Path(p).read_bytes() for p in (
         "/proc/sys/net/ipv4/ip_forward", "/proc/sys/net/ipv6/conf/all/forwarding"))).hexdigest()
@@ -192,7 +250,23 @@ def partition_rules(left, right):
     return ("table bridge vptx { chain cut { type filter hook forward priority -200; policy accept;\n"
             f"ip saddr {addresses(left)} ip daddr {addresses(right)} counter drop\n"
             f"ip saddr {addresses(right)} ip daddr {addresses(left)} counter drop\n"
-            "} }\n").encode()
+            # nftables requires a statement separator after the nested chain.
+            "}\n}\n").encode()
+
+
+def partition_command(operation, input_bytes=None):
+    commands = {
+        "install": ["nft", "-f", "-"],
+        "list": ["nft", "-j", "list", "table", "bridge", "vptx"],
+        "remove": ["nft", "delete", "table", "bridge", "vptx"],
+    }
+    require(operation in commands and ((operation == "install" and isinstance(input_bytes, bytes))
+            or (operation != "install" and input_bytes is None)), "partition_command_contract")
+    try:
+        return checked(commands[operation], input_bytes=input_bytes)
+    except (TrialFailure, OSError, subprocess.SubprocessError) as error:
+        # Keep stderr/private paths suppressed, but identify the exact operation.
+        raise TrialFailure("partition_" + operation + "_failed") from error
 
 
 def rpc(node, method, params=None):
@@ -466,15 +540,15 @@ class Trial:
         return self.wait(observe)
 
     def cut(self, left, right):
-        checked(["nft", "-f", "-"], input_bytes=partition_rules(left, right))
+        partition_command("install", partition_rules(left, right))
 
     def heal(self):
-        data = json.loads(checked(["nft", "-j", "list", "table", "bridge", "vptx"]))
+        data = json.loads(partition_command("list"))
         counters = [expr["counter"]["packets"] for item in data["nftables"]
                     for expr in item.get("rule", {}).get("expr", []) if "counter" in expr]
         require(len(counters) == 2 and all(type(count) is int and count > 0 for count in counters),
                 "partition_no_packet_evidence")
-        checked(["nft", "delete", "table", "bridge", "vptx"])
+        partition_command("remove")
         return counters
 
     def observe_stable(self, members, seconds=8):
@@ -635,7 +709,8 @@ def execute(args):
     verify_build(build, args.expected_commit, Path(args.comet), Path(args.adapter))
     output = Path(args.output)
     require(output.is_dir() and not output.is_symlink() and not list(output.iterdir()), "output_directory")
-    before = parent_snapshot()
+    before_diagnostics, after_diagnostics = {}, {}
+    before = parent_snapshot(before_diagnostics)
     prefix = "vptx-" + secrets.token_hex(6)
     work = Path(tempfile.mkdtemp(prefix="vptx-", dir="/var/tmp"))
     process = None
@@ -712,12 +787,13 @@ def execute(args):
                 and not work.is_symlink(), "cleanup_work_target")
         if work.exists():
             shutil.rmtree(work)
-    after = parent_snapshot()
+    after = parent_snapshot(after_diagnostics)
     receipt_path = output / "transaction-abci-inner.json"
     inner = json.loads(receipt_path.read_text()) if receipt_path.is_file() else {"acceptance": False}
     receipt = {"schema": 1, "source_commit": args.expected_commit, "comet_source": COMET_COMMIT,
                "acceptance": failure is None and inner_complete(inner) and cleanup_ok and before == after,
                "parent_before": before, "parent_after": after, "parent_unchanged": before == after,
+               "parent_lifetime_diagnostics": parent_lifetime_diagnostics(before_diagnostics, after_diagnostics),
                "owned_namespaces_removed": cleanup_ok, "private_keys_removed": not work.exists(),
                "failure": failure, "scope": plan()["does_not_prove"]}
     atomic_json(output / "transaction-abci-acceptance.json", receipt)

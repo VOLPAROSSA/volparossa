@@ -252,7 +252,13 @@ routes, DNS or firewall. Acceptance requires live packet-drop observations,
 rejoined state, original receipts, byte-identical retries in newly committed
 blocks and complete owned-resource cleanup. Only bounded receipts are exported.
 
-No distributed acceptance result is yet established: the fixture has not run.
+The first actual four-validator run reached startup, conflicting signed TEST
+reserves and a conserved transfer, then failed at the first partition command.
+Its processes/namespaces/keys were cleaned up, but the separate guest-parent
+unchanged-state check also failed. It is not distributed acceptance or recovery
+proof. The source correction fixes a missing nft chain separator and adds closed
+diagnostics without relaxing the original state-comparison or runtime gates.
+See the [original trial and remaining evidence](../IMPLEMENTATION_STATUS.md).
 Post-commit restart is not a pre-commit crash or actively equivocating validator;
 those cases and independent client finality verification remain separate work.
 
