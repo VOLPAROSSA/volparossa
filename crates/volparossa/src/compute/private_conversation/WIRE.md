@@ -236,9 +236,28 @@ its weight length is 8,044,982,000 bytes. It is not the index's hash, nor the
 index's tensor-size metadata. Worker `model.files` retains the real index and
 shard names. Only this profile adds `model.weights` with layout
 `safetensors_shards_concat_v1`, aggregate `bytes`/`sha256`, and ordered `files`.
-Provisioning and the worker verify every original shard plus the aggregate; the
-worker verifies again after generation and the Rust supervisor checks the exact
-reported asset set/identity. Single-file profile reports remain unchanged.
+Provisioning and the worker verify every original shard plus the aggregate. The
+PyTorch backend verifies those execution weights again after generation; its
+behavior and single-file profile reports remain unchanged. The Rust supervisor
+checks the exact reported asset set/identity for both backends.
+
+For the explicit `llama_cpp_bf16_v1` backend, the original shards are conversion
+source provenance, not the weights read by native inference. The worker carries
+the actual complete initial shard/aggregate measurement into `model.weights`;
+it does not reconstruct that measurement from expected constants or claim a
+second source-shard verification at the end. The owner-bound converted GGUF is
+fully hashed both before native loading and after the native handle is closed.
+Converter tensor-value equality, original model identity, native complete tensor
+validation and library/build/manifest authorization remain required.
+
+The internal native `inference_backend` report must now include exactly
+`verification_scope: {"version":1,"source_weights":"initial_complete_bytes_only",
+"execution_weights":"gguf_complete_bytes_before_and_after"}`. The core rejects
+missing, unknown or different scope, including old worker reports without this
+field; there is no permissive interpretation or fallback. This intentionally
+changes the internal native verification contract, not the public conversation
+schema. It does not attest continuous filesystem immutability against the local
+owner, successful inference, or private execution on other nodes.
 
 Candidate resources are CPU BF16/SDPA, at most two threads, 600 seconds per task,
 10GiB observed RSS, 24GiB address space and 10.5GiB known spare memory before

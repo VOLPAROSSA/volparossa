@@ -23,6 +23,7 @@ import convert_llama_cpu as conversion
 import llama_cpu as native
 from test_worker_protocol import WORKER, request, controlled_pipe, control, dataset
 from test_qwen4b_weights import synthetic_shards
+from test_conversation import conversation
 
 
 def job():
@@ -39,6 +40,92 @@ def manifest():
             "gguf": {"path": "model.gguf", "sha256": "c" * 64, "bytes": 20},
             "verification": {"tensor_count": 398, "tensor_values_equal": True, "tokenizer_equal": True,
                              "chat_template_sha256": "d" * 64}, "build_manifest_sha256": "e" * 64}
+
+
+def source_fixture(root):
+    model, output = root / "source", root / "output"
+    model.mkdir(mode=0o700)
+    output.mkdir(mode=0o700)
+    profile, _ = synthetic_shards(model)
+    config = b"{}"
+    (model / "config.json").write_bytes(config)
+    profile.update(config={}, new_tokens=1, id="inert-source", revision="inert-revision")
+    profile["files"]["config.json"] = len(config)
+    profile["hashes"]["config.json"] = hashlib.sha256(config).hexdigest()
+    data = root / "input.json"
+    data.write_text(json.dumps(dict(conversation(), generation_policy="greedy_v1")))
+    selected = WORKER.validate_request(dict(job(), model_root=str(model), output_root=str(output),
+                                            dataset_path=str(data)))
+    return selected, profile
+
+
+class NativeSourceProvenanceTests(unittest.TestCase):
+    def test_initial_measurement_is_retained_without_changing_prepared_tuple(self):
+        with tempfile.TemporaryDirectory() as directory:
+            selected, profile = source_fixture(Path(directory))
+            measured, collector = [], {}
+            original = WORKER.verify_sharded_weights
+
+            def verify(*args, **kwargs):
+                result = original(*args, **kwargs)
+                measured.append(result)
+                # Distinguish carrying the completed measurement from silently
+                # copying the mutable expected profile after it was verified.
+                profile["weights"]["sha256"] = "0" * 64
+                return result
+
+            with mock.patch.object(WORKER, "model_profile", return_value=profile), \
+                    mock.patch.object(WORKER, "verify_sharded_weights", side_effect=verify):
+                prepared = WORKER.prepare_files(selected, initial_source=collector)
+                self.assertEqual(len(prepared), 5)
+                self.assertEqual(len(measured), 1)
+                self.assertEqual(collector, {"weights": measured[0]})
+                self.assertIsNot(collector["weights"], measured[0])
+                self.assertIsNot(collector["weights"]["files"], measured[0]["files"])
+                self.assertNotEqual(collector["weights"], profile["weights"])
+                self.assertEqual(collector["weights"]["sha256"], hashlib.sha256(
+                    b"".join((prepared[0] / name).read_bytes() for name in profile["weight_shards"])).hexdigest())
+                profile["weights"] = copy.deepcopy(measured[0])
+                damaged = prepared[0] / profile["weight_shards"][-1]
+                damaged.write_bytes(b"x" * damaged.stat().st_size)
+                rejected = {}
+                with self.assertRaisesRegex(WORKER.JobError, "MODEL_WEIGHTS_CHANGED_ON_DISK"):
+                    WORKER.prepare_files(selected, initial_source=rejected)
+                self.assertEqual(rejected, {}, "failed initial verification cannot create provenance")
+
+    def test_collector_is_private_native_only_and_must_start_empty(self):
+        for change, collector in (({}, []), ({}, {"weights": {}}),
+                                  ({"inference_backend": None}, {}),
+                                  ({"model_profile": WORKER.QWEN_MODEL_PROFILE}, {}),
+                                  ({"mode": "private_infer"}, {})):
+            with self.subTest(change=change, collector=collector), \
+                    mock.patch.object(WORKER, "plain_path", side_effect=AssertionError("must fail before file access")), \
+                    self.assertRaisesRegex(WORKER.JobError, "NATIVE_SOURCE_PROVENANCE"):
+                WORKER.prepare_files(dict(job(), **change), initial_source=collector)
+
+    def test_actual_worker_dispatch_forwards_the_measured_source_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            selected, profile = source_fixture(Path(directory))
+            tokenizer = SimpleNamespace(pad_token_id=151643, eos_token_id=151645)
+            transformers = SimpleNamespace(AutoTokenizer=SimpleNamespace(from_pretrained=lambda *a, **k: tokenizer))
+            backend = mock.Mock()
+            backend.execute.return_value = "inert native dispatch"
+            original = WORKER.verify_sharded_weights
+            measured = []
+
+            def verify(*args, **kwargs):
+                value = original(*args, **kwargs)
+                measured.append(value)
+                return value
+
+            with mock.patch.object(WORKER, "model_profile", return_value=profile), \
+                    mock.patch.object(WORKER, "verify_sharded_weights", side_effect=verify), \
+                    mock.patch.object(WORKER, "configure_offline"), \
+                    mock.patch.object(WORKER, "load_backend", return_value=(mock.Mock(), transformers, mock.Mock(), {})), \
+                    mock.patch.dict(WORKER.sys.modules, {"volparossa_llama_cpu": backend}):
+                self.assertEqual(WORKER.execute_job(selected, mock.Mock()), "inert native dispatch")
+            self.assertEqual(len(measured), 1)
+            self.assertEqual(backend.execute.call_args.kwargs, {"initial_source_weights": measured[0]})
 
 
 class HashOwnerControlTests(unittest.TestCase):
@@ -412,6 +499,9 @@ class NativeCpuTests(unittest.TestCase):
                     mock.patch.object(WORKER, "file_hash", wraps=WORKER.file_hash) as hashed:
                 _, _, identity = native.verified_bundle(selected, WORKER, SimpleNamespace(chat_template=template), session)
                 self.assertEqual(identity["gguf_sha256"], value["gguf"]["sha256"])
+                self.assertEqual(identity["verification_scope"], {
+                    "version": 1, "source_weights": "initial_complete_bytes_only",
+                    "execution_weights": "gguf_complete_bytes_before_and_after"})
                 self.assertEqual(len(hashed.call_args_list), 2)
                 self.assertTrue(all(call.kwargs.get("session") is session for call in hashed.call_args_list))
                 with self.assertRaisesRegex(WORKER.JobError, "MANIFEST_DIGEST"):
@@ -427,7 +517,7 @@ class NativeCpuTests(unittest.TestCase):
             value = manifest(); value["library"]["path"] = name
             with self.assertRaises(WORKER.JobError): native.validate_manifest(value, WORKER.require)
 
-    def test_native_verify_after_checks_original_shards_and_gguf_with_same_session(self):
+    def test_native_verify_after_checks_only_used_gguf_and_retains_initial_source(self):
         # Inert native doubles reach the actual post-execution hashing path;
         # these tests do not load a model or claim successful inference.
         with tempfile.TemporaryDirectory() as directory, controlled_pipe() as (session, writer, _):
@@ -445,6 +535,8 @@ class NativeCpuTests(unittest.TestCase):
             bridge.encode.return_value = [1]
             selected = WORKER.validate_request(job())
             os.write(writer, control(1))
+            files = {}
+            initial = WORKER.verify_sharded_weights(model_root, profile, files, session=session)
             original_hash = WORKER.file_hash
             hashed = []
 
@@ -463,14 +555,55 @@ class NativeCpuTests(unittest.TestCase):
                     mock.patch.object(native, "generate", return_value={}):
                 with self.assertRaisesRegex(WORKER.JobError, "POST_HASH_REACHED"):
                     native.execute(selected, session, mock.Mock(), mock.Mock(), {}, model_root, root,
-                                   {}, {}, {}, WORKER)
+                                   {}, {}, files, WORKER, initial_source_weights=initial)
                 self.assertIs(bundle.call_args.args[-1], session)
-                self.assertEqual(set(hashed), set(profile["files"]) | {"model.gguf"})
+                self.assertEqual(hashed, ["model.gguf"])
+                result = WORKER.finish_result.call_args.args[0]
+                self.assertEqual(result["model"]["weights"], initial)
+                self.assertIsNot(result["model"]["weights"], initial)
+                self.assertIsNot(result["model"]["weights"]["files"], initial["files"])
+                # Changing now-unused source bytes does not change the measured
+                # initial provenance or silently claim an end-of-run source check.
+                for name in profile["weight_shards"]:
+                    (model_root / name).write_bytes(b"x" * profile["files"][name])
+                model.reset_mock()
+                hashed.clear()
+                with self.assertRaisesRegex(WORKER.JobError, "POST_HASH_REACHED"):
+                    native.execute(selected, session, mock.Mock(), mock.Mock(), {}, model_root, root,
+                                   {}, {}, files, WORKER, initial_source_weights=initial)
+                self.assertEqual(hashed, ["model.gguf"])
+                self.assertEqual(WORKER.finish_result.call_args.args[0]["model"]["weights"], initial)
                 model.reset_mock()
                 (root / "model.gguf").write_bytes(b"x" * len(data))
                 with self.assertRaisesRegex(WORKER.JobError, "NATIVE_GGUF_CHANGED"):
                     native.execute(selected, session, mock.Mock(), mock.Mock(), {}, model_root, root,
-                                   {}, {}, {}, WORKER)
+                                   {}, {}, files, WORKER, initial_source_weights=initial)
+                # The remaining post-GGUF check still services the same actual
+                # owner pipe after the native handle closes; cancel cannot emit
+                # a successful report or reuse the earlier source measurement
+                # as a substitute for finishing execution-weight verification.
+                model.reset_mock()
+                (root / "model.gguf").write_bytes(data)
+                completed_before_cancel = WORKER.finish_result.call_count
+                model.close.side_effect = lambda: os.write(writer, control(2, "cancel"))
+                with self.assertRaisesRegex(WORKER.JobError, "JOB_CANCELLED"):
+                    native.execute(selected, session, mock.Mock(), mock.Mock(), {}, model_root, root,
+                                   {}, {}, files, WORKER, initial_source_weights=initial)
+                self.assertEqual(WORKER.finish_result.call_count, completed_before_cancel)
+
+    def test_native_rejects_missing_or_changed_initial_provenance_before_loading(self):
+        profile = WORKER.model_profile(native.PROFILE)
+        files = {name: {"bytes": size, "sha256": profile["hashes"][name]}
+                 for name, size in profile["files"].items()}
+        wrong = copy.deepcopy(profile["weights"])
+        wrong["sha256"] = "0" * 64
+        for initial, selected_files in ((None, files), ({}, files), (wrong, files), (profile["weights"], {})):
+            with self.subTest(initial=initial), \
+                    mock.patch.object(native, "verified_bundle", side_effect=AssertionError("must not load")), \
+                    mock.patch.object(WORKER, "conversation_module", return_value=SimpleNamespace(generation_policy=lambda *a: "greedy_v1")), \
+                    self.assertRaisesRegex(WORKER.JobError, "NATIVE_SOURCE_PROVENANCE"):
+                native.execute(job(), mock.Mock(), mock.Mock(), mock.Mock(), {}, None, None,
+                               {}, {}, selected_files, WORKER, initial_source_weights=initial)
 
     def test_pause_and_resume_are_not_acknowledged_until_native_has_joined(self):
         with controlled_pipe() as (session, writer, wire):
@@ -688,7 +821,8 @@ class NativeCpuTests(unittest.TestCase):
         with mock.patch.object(WORKER, "conversation_module", return_value=bridge), \
                 mock.patch.object(native, "NativeModel", side_effect=AssertionError("must not load")), \
                 self.assertRaisesRegex(WORKER.JobError, "NATIVE_GREEDY_POLICY_REQUIRED"):
-            native.execute(job(), mock.Mock(), mock.Mock(), mock.Mock(), {}, None, None, {}, {}, {}, WORKER)
+            native.execute(job(), mock.Mock(), mock.Mock(), mock.Mock(), {}, None, None, {}, {}, {}, WORKER,
+                           initial_source_weights=None)
 
     def test_tensor_mapping_is_complete_for_exact_qwen_layers_not_arbitrary_names(self):
         self.assertEqual(conversion.tensor_name("model.layers.35.self_attn.q_norm.weight"), "blk.35.attn_q_norm.weight")

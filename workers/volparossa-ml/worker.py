@@ -844,7 +844,15 @@ def verify_sharded_weights(model_root, profile, verified_files=None, *, session=
     return identity
 
 
-def prepare_files(request, session=None):
+def prepare_files(request, session=None, *, initial_source=None):
+    # Native inference consumes a converted GGUF, not these source shards. Keep
+    # their actually measured initial identity without changing the existing
+    # five-value API or the ordinary PyTorch before/after verification path.
+    if initial_source is not None:
+        require(type(initial_source) is dict and not initial_source
+                and request.get("inference_backend") == "llama_cpp_bf16_v1"
+                and request.get("model_profile") == QWEN4B_MODEL_PROFILE
+                and request.get("mode") == "private_conversation", "NATIVE_SOURCE_PROVENANCE")
     profile_name = request.get("model_profile", DEFAULT_MODEL_PROFILE)
     profile = model_profile(profile_name)
     model_root, model_metadata = plain_path(request["model_root"], True)
@@ -863,7 +871,9 @@ def prepare_files(request, session=None):
     files = {name: file_hash(model_root / name, expected_size=size, session=session)
              for name, size in profile["files"].items() if name not in sharded}
     if sharded:
-        verify_sharded_weights(model_root, profile, files, session=session)
+        measured_weights = verify_sharded_weights(model_root, profile, files, session=session)
+        if initial_source is not None:
+            initial_source["weights"] = dict(measured_weights, files=list(measured_weights["files"]))
     require(all(files[name]["sha256"] == expected for name, expected in profile["hashes"].items()),
             "MODEL_FILES_NOT_PINNED")
     config = parse_json(read_bounded(model_root / "config.json", 8192))
@@ -2309,7 +2319,10 @@ def execute_job(request, session):
     session.progress("preparing")
     session.private_progress("owner_gate", "complete")
     session.private_progress("verify_files", "begin")
-    model_root, output_root, dataset, data_identity, model_files = prepare_files(request, session=session)
+    initial_source = {}
+    preparation = ({"initial_source": initial_source}
+                   if request.get("inference_backend") == "llama_cpp_bf16_v1" else {})
+    model_root, output_root, dataset, data_identity, model_files = prepare_files(request, session=session, **preparation)
     session.private_progress("verify_files", "complete")
     session.check()
     cohort = None
@@ -2342,7 +2355,8 @@ def execute_job(request, session):
         native_backend = sys.modules.get("volparossa_llama_cpu")
         require(native_backend is not None, "NATIVE_BACKEND_MODULE_UNAVAILABLE")
         return native_backend.execute(request, session, tokenizer, torch, versions, model_root, output_root,
-                                      dataset, data_identity, model_files, SimpleNamespace(**globals()))
+                                      dataset, data_identity, model_files, SimpleNamespace(**globals()),
+                                      initial_source_weights=initial_source.get("weights"))
     if request["mode"] == "plan_document":
         plan = plan_document(tokenizer, dataset, session, profile_name)
         raw = json.dumps(plan, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("ascii")

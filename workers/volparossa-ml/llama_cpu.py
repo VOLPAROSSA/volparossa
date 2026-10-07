@@ -29,6 +29,11 @@ HEX = re.compile(r"[0-9a-f]{64}\Z")
 ABORT = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.c_void_p)
 
 
+def verification_scope():
+    return dict(version=1, source_weights="initial_complete_bytes_only",
+                execution_weights="gguf_complete_bytes_before_and_after")
+
+
 def loader_provenance():
     return dict(kind="serial_complete_tensor_validation_v1", original_path="src/llama-model-loader.cpp",
                 original_sha256=LOADER_ORIGINAL_SHA, effective_sha256=LOADER_EFFECTIVE_SHA,
@@ -107,7 +112,8 @@ def verified_bundle(request, worker, tokenizer, session):
             == value["verification"]["chat_template_sha256"], "NATIVE_TEMPLATE_BINDING")
     identity = dict(kind=KIND, abi_version=1, source_commit=SOURCE, manifest_sha256=expected,
                     library_sha256=value["library"]["sha256"], gguf_sha256=value["gguf"]["sha256"],
-                    gguf_bytes=value["gguf"]["bytes"], source_weights_sha256=WEIGHTS_SHA)
+                    gguf_bytes=value["gguf"]["bytes"], source_weights_sha256=WEIGHTS_SHA,
+                    verification_scope=verification_scope())
     return root, value, identity
 
 
@@ -265,10 +271,18 @@ def generate(model, prompt, tokenizer, profile, session, worker, observation=Non
 
 
 def execute(request, session, tokenizer, torch, versions, model_root, output_root,
-            dataset, data_identity, model_files, worker):
+            dataset, data_identity, model_files, worker, *, initial_source_weights):
     worker.require(worker.conversation_module().generation_policy(dataset, PROFILE) == "greedy_v1",
                    "NATIVE_GREEDY_POLICY_REQUIRED")
     profile = worker.model_profile(PROFILE)
+    worker.require(type(initial_source_weights) is dict and initial_source_weights == profile["weights"]
+                   and all(model_files.get(name) == {"bytes": profile["files"][name],
+                            "sha256": profile["hashes"][name]} for name in initial_source_weights["files"]),
+                   "NATIVE_SOURCE_PROVENANCE")
+    # Carry measured provenance, not a digest reconstructed from expected pins.
+    # Only the GGUF below is used by NativeModel. The original source files are
+    # not claimed to have been checked again at the end of this execution.
+    weight_identity = dict(initial_source_weights, files=list(initial_source_weights["files"]))
     root, manifest, identity = verified_bundle(request, worker, tokenizer, session)
     session.private_progress("prompt_encode", "begin")
     prompt = worker.conversation_module().encode(tokenizer, dataset, profile)
@@ -288,7 +302,6 @@ def execute(request, session, tokenizer, torch, versions, model_root, output_roo
     finally:
         model.close()
     session.private_progress("verify_after", "begin")
-    weight_identity = worker.verify_sharded_weights(model_root, profile, session=session)
     worker.require(worker.file_hash(root / "model.gguf", expected_size=manifest["gguf"]["bytes"], session=session)["sha256"]
                    == manifest["gguf"]["sha256"], "NATIVE_GGUF_CHANGED")
     session.private_progress("verify_after", "complete")

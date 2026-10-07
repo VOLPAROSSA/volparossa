@@ -99,7 +99,10 @@ impl Manifest {
         json!({"kind":KIND,"abi_version":1,"source_commit":SOURCE,
             "manifest_sha256":hash,"library_sha256":self.library.sha256,
             "gguf_sha256":self.gguf.sha256,"gguf_bytes":self.gguf.bytes,
-            "source_weights_sha256":WEIGHTS})
+            "source_weights_sha256":WEIGHTS,
+            "verification_scope":{"version":1,
+                "source_weights":"initial_complete_bytes_only",
+                "execution_weights":"gguf_complete_bytes_before_and_after"}})
     }
 }
 

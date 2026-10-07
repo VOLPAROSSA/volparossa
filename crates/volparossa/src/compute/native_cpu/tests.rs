@@ -232,6 +232,16 @@ fn result_must_bind_authorized_native_identity_and_honest_precision() {
         ("/inference_backend/manifest_sha256", json!("0".repeat(64))),
         ("/inference_backend/library_sha256", json!("0".repeat(64))),
         ("/inference_backend/gguf_sha256", json!("0".repeat(64))),
+        ("/inference_backend/verification_scope/version", json!(true)),
+        ("/inference_backend/verification_scope/version", json!(2)),
+        (
+            "/inference_backend/verification_scope/source_weights",
+            json!("before_and_after"),
+        ),
+        (
+            "/inference_backend/verification_scope/execution_weights",
+            json!("initial_only"),
+        ),
         ("/model_parameter_dtype", json!("bfloat16")),
         ("/model_attention_backend", json!("sdpa")),
     ] {
@@ -239,6 +249,15 @@ fn result_must_bind_authorized_native_identity_and_honest_precision() {
         *bad.pointer_mut(pointer).unwrap() = replacement;
         assert!(request.check_report(&bad).is_err());
     }
+    let mut old = good.clone();
+    old["inference_backend"]
+        .as_object_mut()
+        .unwrap()
+        .remove("verification_scope");
+    assert!(request.check_report(&old).is_err());
+    let mut extra = good;
+    extra["inference_backend"]["verification_scope"]["unverified"] = json!(true);
+    assert!(request.check_report(&extra).is_err());
 }
 
 #[test]

@@ -20,9 +20,10 @@ Last updated: 2026-10-07
 - [ ] An owner-selected `llama_cpp_bf16_v1` backend is being connected to the
   existing isolated private-conversation worker. The source-only build of pinned
   llama.cpp `7fe450e19305b828c199d602c23a8337aaa1f03b` passes. Actual conversion
-  and provisioning now pass, but the latest trial's model result is incomplete
-  (`invalid_output`): **no usable native turn or successful OpenCode coding task
-  is proved**. All original failed results remain in the evidence below.
+  and provisioning now pass, but the latest trial ends at `compute_deadline`
+  during post-generation verification: **no usable native turn or successful
+  OpenCode coding task is proved**. The earlier `invalid_output` result and all
+  original failed trials remain in the evidence below.
   This first backend accepts only the original Qwen3-4B-Instruct-2507 profile and
   explicitly negotiated `greedy_v1`; public jobs, training and other profiles
   retain their existing backend. It does not establish confidential peer execution.
@@ -253,7 +254,52 @@ generic codes remain readable. It exports no parser message, field name, source
 position or output fragment and leaves `invalid_output`, single-call acceptance,
 the complete prompt/model and every resource/deadline bound unchanged. This is
 source-level diagnostic coverage, not a repaired model result or passing coding
-trial; no new model execution has been performed for this follow-up.
+trial. No new model execution had run at that checkpoint; its subsequent actual
+trial is recorded below.
+
+The diagnostic follow-up [trial 37671030306](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37671030306),
+attempt 1 on Code `2b2687fec5376b6e49f8266dff71cc7935845e99` / core
+`36d616fb6d79a36fe7c8ee95c4ad84bd56b561ae`, **fails at the execution
+deadline**, not at the earlier JSON rejection. Build, conversion and provisioning
+complete. The worker records 44 generated tokens and an internal generation
+completion at 518,788 ms, then `verify_after/begin` at 519,120 ms. Its last state
+is paused under `quiet_hold`, with all 31 issued controls acknowledged and pause
+as the last acknowledgement. Core reports `compute_deadline`; the provider
+records one cleanup-confirmed `execution_budget_exceeded` request. Internal
+generation completion is not a verified result delivered to OpenCode.
+
+The task ends after 603,331 ms with zero completed native turns, observed tool
+calls, approved reads/edits/tests or completed commands. The fixture is unchanged
+and independent verification is not reached. Core cgroup peak is 9,466,974,208
+bytes within 11 GiB, with zero OOM kills and swap. These checkpoints do not measure
+total pause time or establish a unique cause of the deadline overrun. Reported
+runtime/project, guest-unit/private-data, QEMU/scratch and owned CI-host cleanup
+pass. Normalized route/DNS observations match, while the raw byte comparison is
+false; this is not byte-identical host state or a complete firewall audit. No raw
+model output was exported.
+
+Original artifact `11505764017` ZIP SHA-256:
+`935e115a86abf1da83fe0e3d68ebac90d37ecbe399c7dcc79f055ff26dc33e83`;
+job `112962546447` original raw log, 68,786 bytes, SHA-256:
+`369407954fff82728d2ff41d5d0e229c78726ea8ae487bf2112964138ca492d8`.
+The log is retained without decoding or newline normalization. Earlier failures,
+original receipts, model/task checks and resource/deadline bounds are unchanged.
+
+The next source candidate makes native verification scope explicit. Native
+inference reads the converted GGUF, not the original conversion-source shards.
+The worker retains the actual complete initial shard/aggregate measurement and
+fully verifies the used GGUF before loading and after closing the native handle.
+It no longer reads the unused 8,044,982,000 source bytes a second time after
+generation. The PyTorch execution-weight checks remain unchanged.
+
+A mandatory closed `verification_scope` in the internal native report states
+this distinction; Rust rejects old reports, missing scope and extra or different
+scope. Conversion tensor checks, complete GGUF hashes, model identity, owner
+controls, resources and deadlines are unchanged. The focused Python and Rust
+contract checks and independent source review pass. This removes redundant work,
+not the failed trial: **a new complete native turn and OpenCode coding scenario
+still need actual execution evidence**. See the
+[verification contract](../crates/volparossa/src/compute/private_conversation/WIRE.md).
 
 ### Browser consent cooperation and public filter snapshots
 
