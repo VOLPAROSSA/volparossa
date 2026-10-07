@@ -52,6 +52,25 @@ jobs:
             command -v "$tool"
           done
 
+      - name: Install reviewed Protobuf compiler on the disposable hosted runner
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(dpkg --print-architecture)" = amd64
+          # Official Noble security package; signed apt metadata authenticates it.
+          # https://packages.ubuntu.com/noble/amd64/protobuf-compiler
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            protobuf-compiler=3.21.12-8.2ubuntu0.3
+          test "$(protoc --version)" = 'libprotoc 3.21.12'
+
+      - name: Verify original ABCI schemas and inert fixture contracts
+        run: |
+          python3 -B third_party/cometbft/verify.py
+          python3 -B third_party/cometbft/test_verify.py
+          python3 -B tests/integration/transaction-abci-contract-tests.py
+          python3 -B tests/integration/transaction-abci-wiring-tests.py
+
       - name: Check formatting and shell sources
         run: |
           cargo fmt --all -- --check

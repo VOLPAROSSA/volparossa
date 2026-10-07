@@ -207,17 +207,180 @@ The original job log is retained with SHA-256
 `4e542c134b1799920fcd9eeffa2ba7e6a27e29efd50112176d75a1405a1d546a`.
 The follow-up derives both operation-table bounds from one checked conversion,
 returning a store error if the bound cannot fit. It changes no bound, state hash,
-signature domain or ledger transition and suppresses no lint. Hosted checks must
-pass on that follow-up; modern Clippy was not available locally and is not claimed.
+signature domain or ledger transition and suppresses no lint. Exact follow-up
+`c239a5df` passed hosted strict Clippy, workspace tests and the integration harness
+in [Quality37622478637](https://github.com/VOLPAROSSA/volparossa/actions/runs/37622478637),
+alongside CodeQL. [PR214](https://github.com/VOLPAROSSA/volparossa/pull/214)
+merged the ordered application foundation; these checks do not establish consensus.
 
-The [next distributed milestone](services/TRANSACTION_LAYER.md#distributed-test-execution)
-selects source-pinned CometBFT with four fixed TEST validators. Ordered local
-execution does not itself establish consensus: actual conflicting spends,
-partitions, crash replay, malicious validators and client finality verification
-remain required before distributed execution is complete.
+The new Rust `volparossa-transaction-abci` adapter uses the original pinned
+CometBFT 0.40 Protobuf schemas over same-owner private Unix sockets. Four fixed
+TEST validators and full genesis inputs bind the application authority. Proposal
+inspection remains read-only; only Commit persists FinalizeBlock results. Thirteen
+adapter/socket/CLI tests and all twenty-two existing core tests pass, independently
+repeated by root. Unsupported proof queries and snapshot adoption are refused;
+query results explicitly do not claim a consensus certificate. The thirteen
+verbatim schema/license inputs pass offline digest and closed-import verification.
+A guest-only four-validator fixture now has actual Comet/Rust transfer, partition,
+rejoin and post-commit crash/retry evidence, with a successful exact-source trial
+including the separate guest-parent state-observation and cleanup gates. This is
+bounded four-validator TEST interoperability, not a complete transaction service;
+the earlier failures, successful trial and remaining limits are recorded below.
 
-This durable slice has no network, gateway, encryption at rest, consensus,
-distributed finality, external reconciliation, corrections or AML capability.
+The initial adapter source checks remain recorded as failures: `ac3e6632`
+failed a statement-order lint and `97aeaddc` a test semicolon lint. After those
+narrow corrections, [Quality 37633299184](https://github.com/VOLPAROSSA/volparossa/actions/runs/37633299184)
+on `311a91bf` passed compilation/Clippy and executable tests, then failed nine
+generated documentation examples: Protobuf's C, Java and Python examples for
+Timestamp and Duration were interpreted as Rust. Original job `112832869946`
+log SHA-256:
+`4a3788e96036408a611fb4b5082479a19e71dd2b0889e6e3252ec5742ff503d0`.
+The same source's CodeQL aggregate check `112833145423` reported two hard-coded
+nonce findings. Both buffers were already overwritten with OS randomness before
+use; the production path propagated entropy errors before signing. Original
+annotations are retained, not dismissed.
+
+The follow-up uses the existing pinned `getrandom::fill` API directly, whose
+fallible entropy flow is recognized by the analyzer. No nonce constant, fallback,
+new dependency version or suppressed query is introduced. Generation omits only
+the two imported types' foreign-language comments and links their pinned original
+documentation instead. All thirteen upstream inputs remain byte-identical; no
+owned Rust test or crate-wide documentation gate is disabled. Full package tests
+(thirteen executable tests and the documentation phase), strict package Clippy
+and the five vendor-verification tests pass on the checked local toolchains.
+Exact source `4255acfcd186b16637c9d4a1b3f47d0b40d25964` passed
+[Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/37638201321)
+and all four [CodeQL analyses](https://github.com/VOLPAROSSA/volparossa/actions/runs/37638195394).
+The first manually dispatched [validator trial 37642984011](https://github.com/VOLPAROSSA/volparossa/actions/runs/37642984011/job/112866268585)
+failed during source binding, before the VM, Go build or Comet validators started.
+The original job log is retained with SHA-256
+`dc619a01991d4724f7753cce70a8c22f2632672a1be18efa083895b140150a5a`;
+the run produced no artifact. It provides no validator or distributed-transfer proof.
+
+The failing pre-existing cooperative-browser test used a stale shell delimiter,
+extracting more than the intended argument selector, and omitted the fourth code
+cohort from its expected export guard. The correction requires unique, ordered,
+size-bounded selectors, accepts only argument-selection statements and checks shell
+syntax before execution. Negative controls reject changed delimiters and executable
+statements before invoking a subprocess. All four real cohorts remain covered;
+no source gate or runtime requirement is skipped. Early-failure reporting now
+explicitly records absent runtime evidence instead of searching root paths for
+uninitialized artifact locations. Thirty-four cooperative-browser tests, eleven
+ABCI wiring tests and eighteen fixture contract tests pass, independently repeated
+by root. The original log does not establish whether the overlong old fragment
+attempted runner file changes; it must not be cited as host-cleanup evidence.
+Exact `2dc4e8cf` passed Quality37645623095 and CodeQL37645472983. Its one
+[isolated validator trial37651982154](https://github.com/VOLPAROSSA/volparossa/actions/runs/37651982154/job/112897358952)
+then **failed** at `partition_3_1` / `command_failed`. Source builds succeeded,
+four independent stores/private sockets started, conflicting signed TEST reserves
+returned codes `[0,7]` at height4, and a height6 commit debited/credited70 while
+conserving100 TEST. Partition, rejoin and crash/replay checkpoints were not reached.
+All eight child processes were reaped; owned namespaces and private keys were
+removed. The separate guest-parent unchanged gate was **false**: address and
+IPv6 route hashes differed. Only hashes survived, so lifetime countdowns are a
+possible explanation, not an established cause or unchanged-state evidence.
+Original artifact ZIP SHA-256:
+`84b921b7b532c3a4ec7f0d74fe4d612bc12362db65f5d3f182336e96301372ca`;
+original job log SHA-256:
+`f6313aae833aa169a9d47578bb17e7fefa4d2adfbb3c9d40b24687a5535af719`.
+
+Source review found the generated nft table lacked the separator required after
+the nested chain by the guest's nftables1.1.3 grammar. The narrow correction adds
+that separator and fixed install/list/remove failure tags; discarded stderr does
+not retrospectively prove the exact runtime error. New bounded in-memory parent
+diagnostics distinguish known lifetime-field changes from structural differences
+without exporting addresses or raw snapshots. Raw snapshot hashes and their
+unchanged-state acceptance gate remain intact, even for lifetime-only changes.
+Twenty-five inert contract and twelve wiring tests pass, independently repeated
+by root; no acceptance requirement, command scope, resource limit or deadline was
+relaxed. That source was used for the subsequent trial recorded next.
+
+The next exact-source `66cf3670d79e550bf8db50b4a9888ce83fa60ee1`
+[trial 37659526190](https://github.com/VOLPAROSSA/volparossa/actions/runs/37659526190/job/112923185107)
+also **failed overall**, but its inner functional receipt passed all nine
+checkpoints. Four actual Comet validators and Rust stores rejected one of two
+competing 70-of-100 TEST reserves (codes `[7,0]`), then conserved 100 while moving 70.
+The 3–1 partition recorded both-direction packet drops, a stationary isolated
+validator and majority progress from height 7 to 11; 2–2 recorded drops and no
+progress at height 15. Both healed. After a post-commit node restart, the two
+byte-identical original commands were executed again in new block 24 with codes
+`[0,0]`; all four stores retained the original sequence 1/2 receipts and balances,
+then converged at height 25. All eight processes were reaped, owned namespaces
+removed and synthetic private keys deleted.
+
+Outer acceptance remained false because raw address and IPv6-route snapshots
+differed. Bounded diagnostics found only lifetime-field values changed (10 address
+fields and 2 route fields); every other parent-state digest matched. The old
+receipt contains no measured lifetime deltas/read windows, so natural timer
+countdown is **not retrospectively established**, and the run cannot be relabelled
+as passing. Original ZIP SHA-256:
+`1fecd4fc9f8cb9bcb9db13aa7bbbb1ab4388238d1423cb88b2c6815d903c238f`.
+Exact decoded job log SHA-256:
+`b45a16ca1060b700c4d5ff842dec914013d3b05778930dde4f994a1b24e6927f`.
+The separately retained first log copy has one extra final line feed; its digest
+is not substituted for that exact decoded evidence.
+
+The following observer-only correction preserves raw hashes and
+`parent_unchanged`, and adds a separate `parent_semantically_unchanged` result.
+For changed address/IPv6-route bytes, it checks every finite lifetime's actual
+decrement against monotonic windows surrounding the corresponding reads, with
+explicit integer-second rounding tolerance. It refuses increases, out-of-window
+decay, finite/forever transitions, missing fields, unknown structural changes and
+unbounded timing. All other raw digests must still match. Closed source-bound
+counts, hashes and elapsed windows are exported, not addresses or lifetime values;
+this is an observation check, not a cryptographic history proof. Raw-identical
+snapshots retain endpoint-equality semantics and cannot exclude an invisible
+refresh or mutate-and-restore between reads. Neither can a within-window change
+be attributed uniquely to natural expiry. Cleanup and all functional/exit gates
+remain mandatory. Thirty-four inert contract and fourteen wiring/evidence tests
+pass. The original failed trial, source, logs and consumed dispatch receipts
+remain unchanged; the correction's new runtime result follows separately.
+
+Exact source `2ea504e399eb08b7d67d64e5087f6dad596db65a` passed
+[trial 37669796654, attempt 1](https://github.com/VOLPAROSSA/volparossa/actions/runs/37669796654/job/112958337820)
+on 2026-10-07. The original artifact and decoded job log were retained, all five
+artifact members were checked byte-for-byte, and the exact-source offline gate
+was independently repeated successfully. Driver and guest exits were both 0,
+guest phase was `complete`, and both inner and outer acceptance were true.
+
+All nine functional checkpoints passed:
+
+- `setup` created four independent stores and private sockets; `startup`
+  converged at height 2. `signed_conflict` rejected one of two competing 70-of-100
+  TEST reserves with codes `[7,0]` and converged at height 4. `commit` moved 70,
+  conserved 100 and converged at height 6.
+- `partition_3_1` kept the isolated validator at height 6 for 31 samples over
+  8.006s while the majority advanced from 8 to 12; both-direction drop counters
+  were `[38,21]`. `rejoin_3_1` converged at 14. `partition_2_2` held all four at
+  16 for 30 samples over 8.264s, with drops `[28,39]`; `rejoin_2_2` converged at 18.
+- `crash_replay` restarted node 3 after commit. Both original signed byte strings
+  executed again in new block 21 with codes `[0,0]`; all four stores preserved
+  original sequence 1/2 receipts and balances, then converged at height 22.
+
+All eight child processes were reaped, owned guest namespaces removed and
+synthetic private keys deleted. **Raw parent snapshots were not equal**:
+addresses and IPv6 routes differed. The separate `bounded-expiry-countdown-v1`
+observer accepted four finite address lifetimes and two finite route lifetimes
+decreasing within their measured approximately 43.06s windows; six forever
+address lifetimes, both structures and all seven other raw state hashes remained
+equal. This is source-bound endpoint observation, not proof of a unique cause or
+continuous absence of changes. It covers the guest parent namespace, not a
+whole-runner/development-host audit. Driver exit 0 includes its cleanup path;
+the artifact has no separate per-object QEMU/scratch cleanup receipt.
+
+Original ZIP SHA-256:
+`43e00358b5567c831df0363bc3f98fba2482921d8a2107df303e4769235e4687`.
+Exact decoded job log SHA-256:
+`51a6847626ce069f786eee4265114c188d108e3640baa78f4e91191d90cf1a79`.
+
+This completes the [bounded four-validator TEST milestone](services/TRANSACTION_LAYER.md#distributed-test-execution),
+not the Bank goal. Byzantine equivocation, distributed pre-commit crashes,
+independent devices, protected overlay transport, confidential validators and
+independently verified client finality remain unproved. Earlier failed outer
+gates remain failed; this new result does not relabel them.
+
+The owner-local `Store` API still has no network, gateway, encryption at rest,
+consensus, distributed finality, external reconciliation, corrections or AML capability.
 The older isolated experiment's simulated external/correction operations are not
 features of the durable API. See the [executable core example](services/TRANSACTION_LAYER.md#durable-test-unit-core).
 

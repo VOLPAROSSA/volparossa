@@ -21,8 +21,8 @@ The confirmed portfolio rule is ROIC times FCF-yield with nonnegative inputs. Po
 weights do not establish prices, legal title or redemption guarantees. The Bank
 [research document](https://github.com/VOLPAROSSA/volparossa-bank/blob/main/docs/RESEARCH.md)
 compares Interledger/Open Payments, GNU Taler and governed BFT ledger protocols,
-and records financial/legal boundaries. The next TEST-unit milestone selects
-CometBFT for ordering, not for payment gateways or securities ownership. Neither
+and records financial/legal boundaries. The bounded TEST-unit ordering slice uses
+CometBFT, not payment gateways or securities ownership. Neither
 Kademlia nor signed advertisements supply financial consensus.
 
 ## Intended versioned interface
@@ -174,9 +174,33 @@ when given the same input order. That test supplies the order itself and therefo
 does not prove distributed agreement. These application-level checks do not
 replace the multi-validator fixture below.
 
+### Private ABCI adapter
+
+`crates/volparossa-transaction-abci` connects the ordered store to the official
+CometBFT 0.40 ABCI socket protocol. Its only listener is an owner-private Unix
+socket under a canonical mode-0700 directory; bounded frames and four connections
+share one serialized application. No public RPC, real funds or automatic financial
+participation is enabled by starting this adapter.
+
+An explicit TEST genesis binds the chain, four equally weighted validators,
+consensus parameters, initial accounts and agreed time. CheckTx and proposal
+inspection do not mutate balances. FinalizeBlock stages results; Commit persists
+them. Info reports committed state after restart. Queries expose committed TEST
+balances or receipts, not cryptographic finality, and reject requested proofs or
+unsupported historical heights. No snapshot import or validator-set update is
+pretended to work.
+
+Thirteen adapter tests cover real Unix framing and four connections, cross-connection
+state visibility, lifecycle/replay, fatal shutdown, malformed input, proof rejection
+and actual CLI signing. All twenty-two core tests also pass. These local checks do
+not establish interoperability with a running CometBFT process. The exact schema,
+import and license inventory is in [the vendored source record](../../third_party/cometbft/README.md).
+Builds use the system Protobuf compiler and the locked Rust generator; they fetch
+no schema at build time. Debian development prerequisites already include `protoc`.
+
 ### Distributed TEST execution
 
-The next implementation target is four independently persisted validators using
+The bounded implementation fixture uses four independently persisted validators with
 **CometBFT v0.40.0**, pinned to
 `0880b4d378f347ab16e54ec677ff50d803f37d62`, as a separate ordering process.
 The Rust application retains VOLPAROSSA's signed TEST-unit rules. This does not
@@ -219,8 +243,69 @@ can read replicated commands and account relationships; this fixture does not
 prove confidential financial processing, open membership or protected overlay
 transport. A response from one RPC endpoint is not independently verified finality.
 The client still needs trusted validator membership and verified commit/header
-binding. The four-node service and these distributed acceptance results remain
-unimplemented; deterministic local staging is only their application foundation.
+binding. The `transaction-abci` disposable VM scenario runs this
+four-validator interoperability trial within the existing four-CPU, 4 GiB RAM,
+16 GiB disk envelope. It source-builds exact CometBFT with a separately hash-checked
+Go compiler; no engine binary or private keys are exported. Five isolated guest
+namespaces support genuine 3–1 and 2–2 partition rules without changing parent
+routes, DNS or firewall. Acceptance requires live packet-drop observations,
+rejoined state, original receipts, byte-identical retries in newly committed
+blocks and complete owned-resource cleanup. Only bounded receipts are exported.
+
+The first actual four-validator run reached startup, conflicting signed TEST
+reserves and a conserved transfer, then failed at the first partition command.
+Its processes/namespaces/keys were cleaned up, but the separate guest-parent
+unchanged-state check also failed. It is not distributed acceptance or recovery
+proof. The source correction fixes a missing nft chain separator and adds closed
+diagnostics without relaxing the original state-comparison or runtime gates.
+The later exact-source `66cf3670` trial passed all inner functional checkpoints:
+competing signed reserves, conserved transfer, observed 3–1 majority progress and
+2–2 halt, healing, and a post-commit restart followed by both original commands
+executing again in a new block without changing historical receipts or balances.
+It still **failed overall**: address and IPv6-route lifetime fields changed in
+the separate parent-state comparison. All processes/namespaces/keys were cleaned
+up. That old receipt lacks the actual deltas and read timing needed to establish
+natural countdown; it remains failed and is not complete acceptance.
+
+The follow-up observer keeps raw equality separate from bounded expiry semantics.
+Each address/IPv6-route read has its own monotonic start/end window, at most 20s;
+before-to-after spans may not exceed the existing 600s guest trial-service bound.
+For changed raw snapshots, every finite lifetime decrement must fit the minimum
+and maximum possible elapsed seconds, allowing one additional integer second
+around outward rounding. Saturation at zero is allowed; increases, refresh-like
+insufficient decay, finite/forever transitions and any structural difference are
+refused. Field presence, ordering and unknown fields are retained; no broad
+field-masking pass is accepted. DNS, firewall, routes4, rules, namespaces and
+sysctls still require exact raw equality. Closed counts, hashes and elapsed windows
+bind the observation to the source and raw receipt; no raw network values are
+exported. The offline gate checks that binding plus every original execution and
+cleanup condition. Raw-identical snapshots remain endpoint-equality evidence,
+not proof that no refresh or transient mutation occurred between reads. Even a
+bounded accepted decrement cannot prove its cause; this is neither cryptographic
+attestation nor continuous monitoring. Positive/negative component tests and the
+new successful trial below support this observer; the old failed runs are not
+retrospectively upgraded.
+
+The exact-source `2ea504e399eb08b7d67d64e5087f6dad596db65a`
+[trial 37669796654, attempt 1](https://github.com/VOLPAROSSA/volparossa/actions/runs/37669796654/job/112958337820)
+passed on 2026-10-07: all nine setup/startup, signed-conflict, commit, partition,
+rejoin and crash/replay checkpoints, plus the outer acceptance and cleanup gates.
+One conflicting reserve was rejected; 70 TEST units moved while total supply
+remained 100. A 3–1 split permitted majority progress and a 2–2 split halted all
+four live validators. Both healed. After the post-commit restart, both original
+signed commands executed again in block 21 without changing balances or original
+receipts; all stores converged at height 22. Driver and guest exits were 0.
+
+All eight processes were reaped and owned namespaces/private keys removed.
+Raw parent address/IPv6-route hashes still differed: the separate observer
+accepted six finite lifetime countdowns over approximately 43.06s, preserving six
+forever values, structure and all other raw hashes. This scoped guest-parent
+result is not raw equality or a whole-runner audit. The original ZIP/log and
+independently repeated offline gate are recorded in the implementation status.
+
+See the [original trials and remaining evidence](../IMPLEMENTATION_STATUS.md).
+Post-commit restart is not a pre-commit crash or actively equivocating validator;
+those cases and independent client finality verification remain separate work.
 
 ### Bank integration and remaining financial functions
 

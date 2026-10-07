@@ -4,6 +4,40 @@ Original VOLPAROSSA source in this repository is licensed under GPL-3.0-only. De
 vendored components retain their own licenses. This file is a provenance record, not a substitute
 for the license text shipped by each upstream project.
 
+## CometBFT ABCI transaction adapter inputs
+
+The TEST-only transaction adapter generates its wire bindings from the official
+CometBFT v0.40.0 schemas at commit
+`0880b4d378f347ab16e54ec677ff50d803f37d62` (Apache-2.0). The five schema files,
+original LICENSE and NOTICE are retained verbatim under `third_party/cometbft/`.
+Their Gogo options come from cosmos/gogoproto v1.7.2 at
+`cf5213e4dcbf1fea203185c0af00840e566790d9` (BSD-3-Clause), matching the pinned
+CometBFT go.mod. The Timestamp, Duration and Descriptor imports come from Protocol
+Buffers v21.12 at `f0dc78d7e6e331b8c6bb2d5283e06aa26883ca7c` (BSD-3-Clause).
+Both projects' original license texts are included unchanged.
+
+[The source manifest](third_party/cometbft/sources.json) records exact paths,
+revisions, Git blobs, byte counts and SHA-256 values; no upstream patches are
+applied. [The offline verifier](third_party/cometbft/verify.py) checks these inputs
+without fetching or executing a consensus engine. Generated bindings and schema
+integrity do not establish distributed consensus. A separate source-built
+validator fixture must retain its own Go toolchain/dependency provenance and
+notices before any runtime result is claimed.
+
+The separate, disposable transaction fixture pins the official Go 1.27.1 Linux
+amd64 compiler archive, 70,553,950 bytes, SHA-256
+`63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445`,
+as published in [Go's release metadata](https://go.dev/dl/?mode=json).
+This is an explicitly downloaded upstream compiler binary, not a reproduced
+compiler source build or a prebuilt CometBFT engine. Its source tag resolves to
+`862c888e612ac346c7c4d99c9392bdfd265f33b0`; the unchanged BSD-3-Clause
+[LICENSE](third_party/licenses/go1.27.1-BSD-3-Clause.txt) is retained separately.
+The complete compiler distribution and its notices must remain intact inside the
+guest. CometBFT itself is built there from the pinned source, with automatic Go
+toolchain switching disabled and module versions constrained by the original
+go.mod/go.sum. No Go installation on the development host is authorized by this
+fixture. Source staging and compiler integrity are not evidence of consensus.
+
 ## Explicit native editor integration trial
 
 The `agent-native-editor` guest trial uses VOLPAROSSA Code commit
