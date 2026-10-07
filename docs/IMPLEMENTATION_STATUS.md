@@ -19,9 +19,10 @@ Last updated: 2026-10-07
 
 - [ ] An owner-selected `llama_cpp_bf16_v1` backend is being connected to the
   existing isolated private-conversation worker. The source-only build of pinned
-  llama.cpp `7fe450e19305b828c199d602c23a8337aaa1f03b` passes. This is **not yet
-  an actual model-conversion, generation-speed or successful OpenCode trial**.
-  The original timed-out 4B result remains failed in the evidence below.
+  llama.cpp `7fe450e19305b828c199d602c23a8337aaa1f03b` passes. Actual conversion
+  and provisioning now pass, but the latest trial's model result is incomplete
+  (`invalid_output`): **no usable native turn or successful OpenCode coding task
+  is proved**. All original failed results remain in the evidence below.
   This first backend accepts only the original Qwen3-4B-Instruct-2507 profile and
   explicitly negotiated `greedy_v1`; public jobs, training and other profiles
   retain their existing backend. It does not establish confidential peer execution.
@@ -205,7 +206,8 @@ check log SHA-256 is
 `adf689f10f35ebdeaf42f47d997e3496809f1683788d7dd7eacb1085622a5510`.
 One hundred twenty-five focused worker tests and twenty-one diagnostic-fixture
 tests pass, independently repeated by root. No patched model-loading or inference
-trial has run, and no resource limit or task has been relaxed.
+trial had run at that source-only checkpoint, and no resource limit or task was
+relaxed. The subsequent actual trial is recorded below.
 The fixed-code Rust diagnostic test also passes on CI's Rust 1.85. Independent
 source review and a repeat of the actual tiny validation harness found no blocker.
 
@@ -220,6 +222,38 @@ and tolerances; its 18 F32 vector cases and three BF16 checks pass (log SHA-256
 `6fac1d1773ae750583092ed00014e40983d319811a67afea385cc014fe514e46`).
 This is scoped kernel evidence, not a passing complete upstream suite or model
 inference. Sanitized build artifacts cannot be provisioned as production models.
+
+The subsequent [trial 37654339995](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37654339995),
+attempt 1 on Code `8b5d5b6a` / core `f4cd8bd7`, remains **failed**. Native source
+build, conversion and provisioning complete. One submitted model request returns
+one cleanup-confirmed incomplete result (`invalid_output`); no usable turn, tool
+call, permission request or completed command is observed. The provider reports
+`invalid_model_output` once, with zero `execution_failed`, token-limit and
+wire-truncation events. Core records `result_observed` once and
+`conversation_native_json` twice: the latter are two validations of the same
+report, not two executions. The tagged tool-call body failed typed JSON
+deserialization, but the historical closed code does not distinguish syntax,
+schema/type, duplicate fields or incomplete JSON. No raw model output was
+exported, and no unique prompt, template or model-loading cause is established.
+
+Core cgroup peak is 4,555,878,400 bytes against 11 GiB, with zero OOM kills and
+swap. Task-memory and graceful-core-stop fields are absent; they are not zero or
+successful observations. Reported owned units/process-group/private data and
+outer QEMU/scratch cleanup pass. Normalized route/DNS observations match, while
+raw IPv6 route hashes differ; this is scoped observation, not byte-identical host
+state or a complete firewall audit. Original artifact `11499080343` ZIP SHA-256:
+`c7d3ed9150e8eb8e7d58a65ed46b0179c997a74f2191c621cf0109552278b6dd`;
+job `112905525075` decoded log SHA-256:
+`fd62b12408eee3e4bbf6c994a84a9cede4fd088806103525782cf428f1ff6610`.
+The original archives, logs and consumed receipts remain unchanged.
+
+The diagnostic-only follow-up separates Serde's closed JSON error categories
+(`syntax`, `data`, `eof`, `io`) after the unchanged report binding. Historical
+generic codes remain readable. It exports no parser message, field name, source
+position or output fragment and leaves `invalid_output`, single-call acceptance,
+the complete prompt/model and every resource/deadline bound unchanged. This is
+source-level diagnostic coverage, not a repaired model result or passing coding
+trial; no new model execution has been performed for this follow-up.
 
 ### Bank and Transaction layer implementation
 

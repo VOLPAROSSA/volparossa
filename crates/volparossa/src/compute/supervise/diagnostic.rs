@@ -55,7 +55,12 @@ const FIXED_CODES: &[&str] = &[
     "conversation_native_marker",
     "conversation_native_call",
     "conversation_native_preface",
+    // Retained for original receipts; new JSON rejections use closed categories.
     "conversation_native_json",
+    "conversation_native_json_syntax",
+    "conversation_native_json_data",
+    "conversation_native_json_eof",
+    "conversation_native_json_io",
     "conversation_unknown_tool",
     "conversation_custom_input",
     "conversation_arguments",

@@ -134,7 +134,15 @@ not retry a failed generation or disclose raw parser/backend diagnostics.
 When explicitly enabled, the `volparossa::compute::private_diagnostic` debug
 target records a fixed native-output rejection category only after the complete
 report binding passes. It never includes raw output, tool names or arguments;
-the wire reply remains `invalid_output`. These events observe report validation,
+the wire reply remains `invalid_output`. JSON rejection uses only Serde's closed
+`syntax`, `data`, `eof` or `io` category, emitted as
+`conversation_native_json_{category}`. No error message, field name, path, line or
+column is exported. `data` includes schema/type and duplicate-key rejection;
+`eof` is an incomplete JSON body, not proof of a token or transport limit. `io`
+is retained for exhaustive classification, not a claim that the current
+string-backed parser performs I/O. Historical `conversation_native_json` records
+remain readable, but cannot retrospectively be assigned a finer category.
+These events observe report validation,
 not model attempts: validating the same bound report again may repeat its code
 without another execution. Request/result counters track actual attempts.
 
