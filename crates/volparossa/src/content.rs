@@ -21,6 +21,7 @@ use zeroize::Zeroizing;
 pub(crate) mod agent_artifact;
 mod browser_download;
 mod custody;
+mod filter_snapshot;
 mod handoff;
 mod https_download;
 mod mailbox;
@@ -74,6 +75,12 @@ pub(crate) enum Command {
     Fetch(Fetch),
     /// Resolve an explicit public publisher/name and stream verified bytes to your new local file.
     FetchName(FetchName),
+    /// Fetch one explicitly authorized immutable public domain-block snapshot; no browser changes.
+    ///
+    /// Accepts only ||lowercase.domain^ rules, blank lines and an optional first-line
+    /// [Adblock Plus 2.0] header, at most 1 MiB and 4096 rules. No comments, options,
+    /// exceptions, scriptlets, remote includes or preprocessing directives are supported.
+    FilterSnapshot(Box<filter_snapshot::Options>),
     /// Authenticate HTTPS origin metadata, fetch peer chunks and fill missing ranges via origin.
     FetchHttps(FetchHttps),
     /// Offer one verified HTTPS object as a short-lived localhost browser download.
@@ -551,6 +558,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
             return super::print_response(super::control::request(socket, operation).await?);
         }
         Command::FetchName(args) => return named_download::run(&args, socket).await,
+        Command::FilterSnapshot(args) => filter_snapshot::run(&args, socket).await?,
         Command::FetchHttps(args) => {
             if let Some(output) = &args.local_output {
                 return https_download::run(&args, socket, output).await;

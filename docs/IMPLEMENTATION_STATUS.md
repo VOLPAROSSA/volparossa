@@ -15,6 +15,33 @@ Last updated: 2026-10-07
 
 ## Current integration and active work
 
+### Browser consent cooperation and public filter snapshots
+
+Browser [PR8](https://github.com/VOLPAROSSA/volparossa-browser/pull/8) and
+[PR9](https://github.com/VOLPAROSSA/volparossa-browser/pull/9) are merged.
+Consent-O-Matic is the fourth pinned, unmodified signed extension. Actual isolated
+ESR tests verify recorded refusal in a synthetic consent dialog, uBlock Origin
+probe blocking, preserved essential resources, user choices and persistent
+extension disable/removal. An ordinary supplementary list can be added and
+removed across restarts without replacing uBO's ten original selections.
+The [browser evidence](https://github.com/VOLPAROSSA/volparossa-browser/blob/main/docs/BUNDLED_EXTENSIONS.md#isolated-consent-and-user-control-proof)
+does not establish arbitrary-site coverage or VOLPAROSSA delivery of that list.
+
+The new `content filter-snapshot` command reuses the existing protected public-text
+fetch path with an independently selected publisher, name and exact manifest hash.
+Explicit filter-authority and public-content acknowledgments are required. It
+validates bounded domain-block rules and atomically exports their original bytes,
+signed manifest and delivery receipt to a new private directory. No browser setting
+is changed and no browsing context is collected. Eleven focused tests verify
+signed-data rejection, bounds, unchanged expiry, CLI authority requirements and
+non-overwriting output/cleanup. These are component tests, not a peer-transfer
+or installed subscription demonstration.
+
+Cold peer delivery, warm reuse, default removable subscription integration,
+cooperative rule discovery, independent publication approval and regression-based
+rollback remain open. A valid publisher signature is not by itself permission to
+change browser policy; the current command requires that authorization separately.
+
 ### Bank and Transaction layer implementation
 
 The 2026-10-04 user extension adds VOLPAROSSA Bank and a reusable Transaction-layer.
