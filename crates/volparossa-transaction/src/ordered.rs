@@ -182,27 +182,9 @@ impl OrderedStore {
         accounts: &[GenesisAccount],
         time: BlockTime,
     ) -> Result<Self, Error> {
-        time.validate()?;
-        if authority_id == [0; 32] || accounts.is_empty() || accounts.len() > MAX_ACCOUNTS {
-            return Err(Error::Invalid);
-        }
-        let mut accounts = accounts.to_vec();
-        accounts.sort_by_key(|account| account.owner);
-        let genesis = Genesis {
-            version: 1,
-            authority: authority_id.to_vec(),
-            time: Some(time),
-            accounts: accounts
-                .iter()
-                .map(|a| InitialAccount {
-                    owner: a.owner.to_vec(),
-                    units: a.units,
-                })
-                .collect(),
-        };
-        let genesis_bytes = encode_canonical(&genesis, 8192).map_err(|_| Error::Invalid)?;
+        let genesis_bytes = encode_genesis(authority_id, accounts, time)?;
         let ledger = genesis_ledger(&genesis_bytes);
-        let store = disk::create_mode(path, ledger, &accounts, Mode::Ordered, |db| {
+        let store = disk::create_mode(path, ledger, accounts, Mode::Ordered, |db| {
             db.execute_batch("CREATE TABLE ordered_checkpoint(singleton INTEGER PRIMARY KEY CHECK(singleton=1),genesis BLOB NOT NULL CHECK(length(genesis) BETWEEN 1 AND 8192),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 131072)) STRICT;
                 CREATE TRIGGER ordered_genesis_immutable BEFORE UPDATE OF genesis ON ordered_checkpoint BEGIN SELECT RAISE(ABORT,'immutable genesis'); END;")?;
             let mut record = Record {
@@ -245,6 +227,24 @@ impl OrderedStore {
     /// Genesis-derived domain for `SignedCommand::sign_ordered`.
     pub fn ledger_id(&self) -> LedgerId {
         self.store.ledger_id
+    }
+
+    /// Compare the complete original genesis, not current balances or staged state.
+    /// The adapter supplies its separately verified chain/validator authority binding.
+    ///
+    /// # Errors
+    /// Rejects malformed genesis inputs, corruption or database errors.
+    pub fn matches_genesis(
+        &self,
+        authority_id: [u8; 32],
+        accounts: &[GenesisAccount],
+        time: BlockTime,
+    ) -> Result<bool, Error> {
+        let expected = encode_genesis(authority_id, accounts, time)?;
+        let tx = self.store.connection.unchecked_transaction()?;
+        let (actual, _) = load(&tx, self.ledger_id())?;
+        tx.commit()?;
+        Ok(actual == expected)
     }
 
     /// Return only the durable checkpoint, never a staged calculation.
@@ -393,6 +393,32 @@ impl OrderedStore {
         self.staged = None;
         Ok(receipt)
     }
+}
+
+fn encode_genesis(
+    authority_id: [u8; 32],
+    accounts: &[GenesisAccount],
+    time: BlockTime,
+) -> Result<Vec<u8>, Error> {
+    time.validate()?;
+    if authority_id == [0; 32] || accounts.is_empty() || accounts.len() > MAX_ACCOUNTS {
+        return Err(Error::Invalid);
+    }
+    let mut accounts = accounts.to_vec();
+    accounts.sort_by_key(|account| account.owner);
+    let genesis = Genesis {
+        version: 1,
+        authority: authority_id.to_vec(),
+        time: Some(time),
+        accounts: accounts
+            .iter()
+            .map(|a| InitialAccount {
+                owner: a.owner.to_vec(),
+                units: a.units,
+            })
+            .collect(),
+    };
+    encode_canonical(&genesis, 8192).map_err(|_| Error::Invalid)
 }
 
 fn validate_block(block: &Block) -> Result<(), Error> {

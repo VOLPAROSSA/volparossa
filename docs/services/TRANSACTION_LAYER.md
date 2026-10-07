@@ -174,6 +174,30 @@ when given the same input order. That test supplies the order itself and therefo
 does not prove distributed agreement. These application-level checks do not
 replace the multi-validator fixture below.
 
+### Private ABCI adapter
+
+`crates/volparossa-transaction-abci` connects the ordered store to the official
+CometBFT 0.40 ABCI socket protocol. Its only listener is an owner-private Unix
+socket under a canonical mode-0700 directory; bounded frames and four connections
+share one serialized application. No public RPC, real funds or automatic financial
+participation is enabled by starting this adapter.
+
+An explicit TEST genesis binds the chain, four equally weighted validators,
+consensus parameters, initial accounts and agreed time. CheckTx and proposal
+inspection do not mutate balances. FinalizeBlock stages results; Commit persists
+them. Info reports committed state after restart. Queries expose committed TEST
+balances or receipts, not cryptographic finality, and reject requested proofs or
+unsupported historical heights. No snapshot import or validator-set update is
+pretended to work.
+
+Thirteen adapter tests cover real Unix framing and four connections, cross-connection
+state visibility, lifecycle/replay, fatal shutdown, malformed input, proof rejection
+and actual CLI signing. All twenty-two core tests also pass. These local checks do
+not establish interoperability with a running CometBFT process. The exact schema,
+import and license inventory is in [the vendored source record](../../third_party/cometbft/README.md).
+Builds use the system Protobuf compiler and the locked Rust generator; they fetch
+no schema at build time. Debian development prerequisites already include `protoc`.
+
 ### Distributed TEST execution
 
 The next implementation target is four independently persisted validators using
@@ -219,8 +243,18 @@ can read replicated commands and account relationships; this fixture does not
 prove confidential financial processing, open membership or protected overlay
 transport. A response from one RPC endpoint is not independently verified finality.
 The client still needs trusted validator membership and verified commit/header
-binding. The four-node service and these distributed acceptance results remain
-unimplemented; deterministic local staging is only their application foundation.
+binding. The `transaction-abci` disposable VM scenario now prepares this
+four-validator interoperability trial within the existing four-CPU, 4 GiB RAM,
+16 GiB disk envelope. It source-builds exact CometBFT with a separately hash-checked
+Go compiler; no engine binary or private keys are exported. Five isolated guest
+namespaces support genuine 3–1 and 2–2 partition rules without changing parent
+routes, DNS or firewall. Acceptance requires live packet-drop observations,
+rejoined state, original receipts, byte-identical retries in newly committed
+blocks and complete owned-resource cleanup. Only bounded receipts are exported.
+
+No distributed acceptance result is yet established: the fixture has not run.
+Post-commit restart is not a pre-commit crash or actively equivocating validator;
+those cases and independent client finality verification remain separate work.
 
 ### Bank integration and remaining financial functions
 

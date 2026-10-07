@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "scope": "Verbatim ABCI protobuf schema inputs and notices only; not a built or running consensus engine.",
+  "sources": [
+    {
+      "id": "cometbft",
+      "repository": "https://github.com/cometbft/cometbft",
+      "revision": "0880b4d378f347ab16e54ec677ff50d803f37d62",
+      "release": "v0.40.0",
+      "license": "Apache-2.0",
+      "patches": []
+    },
+    {
+      "id": "gogoproto",
+      "repository": "https://github.com/cosmos/gogoproto",
+      "revision": "cf5213e4dcbf1fea203185c0af00840e566790d9",
+      "release": "v1.7.2",
+      "license": "BSD-3-Clause",
+      "patches": []
+    },
+    {
+      "id": "protobuf",
+      "repository": "https://github.com/protocolbuffers/protobuf",
+      "revision": "f0dc78d7e6e331b8c6bb2d5283e06aa26883ca7c",
+      "release": "v21.12",
+      "license": "BSD-3-Clause",
+      "patches": []
+    }
+  ],
+  "files": [
+    {
+      "path": "licenses/CometBFT-LICENSE",
+      "repository": "https://github.com/cometbft/cometbft",
+      "revision": "0880b4d378f347ab16e54ec677ff50d803f37d62",
+      "upstream_path": "LICENSE",
+      "git_blob": "d645695673349e3947e8e5ae42332d0ac3164cd7",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": "licenses/CometBFT-NOTICE",
+      "repository": "https://github.com/cometbft/cometbft",
+      "revision": "0880b4d378f347ab16e54ec677ff50d803f37d62",
+      "upstream_path": "NOTICE",
+      "git_blob": "332778b3e1e51dfdd9df9bc2a295150ccfddabd9",
+      "bytes": 1445,
+      "sha256": "be0d7b38da6d67b23020a1427c6fd46694c3d72e1006e75b1480d3ae6431bc5c"
+    },
+    {
+      "path": "licenses/GogoProtobuf-LICENSE",
+      "repository": "https://github.com/cosmos/gogoproto",
+      "revision": "cf5213e4dcbf1fea203185c0af00840e566790d9",
+      "upstream_path": "LICENSE",
+      "git_blob": "16be18e5c50d611d185bbb070cb157d6acab72ac",
+      "bytes": 1745,
+      "sha256": "369124fea6f5c2a4eb29ce462519a2d06c4e6e4ba27ba8116534d454faccf823"
+    },
+    {
+      "path": "licenses/Protobuf-LICENSE",
+      "repository": "https://github.com/protocolbuffers/protobuf",
+      "revision": "f0dc78d7e6e331b8c6bb2d5283e06aa26883ca7c",
+      "upstream_path": "LICENSE",
+      "git_blob": "19b305b00060a774a9180fb916c14b49edb2008f",
+      "bytes": 1732,
+      "sha256": "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d"
+    },
+    {
+      "path": "proto/tendermint/abci/types.proto",
+      "repository": "https://github.com/cometbft/cometbft",
+      "revision": "0880b4d378f347ab16e54ec677ff50d803f37d62",
+      "upstream_path": "proto/tendermint/abci/types.proto",
+      "git_blob": "e9194cab6ebb26179dc19ee0c5a8dfa7d7c4d89c",
+      "bytes": 16449,
+      "sha256": "1b3944469fce574069cd465734cfbeea568f1f8c2a945a677f9f56dc0421e7de"
+    },
+    {
+      "path": "proto/tendermint/crypto/keys.proto",
+      "repository": "https://github.com/cometbft/cometbft",
+      "revision": "0880b4d378f347ab16e54ec677ff50d803f37d62",
+      "upstream_path": "proto/tendermint/crypto/keys.proto",
+      "git_blob": "feb3d3182854d1e2aa6bf75d5207f5519f5e906c",
+      "bytes": 456,
+      "sha256": "5f650381a011fa7e98b12f2f94172497d0051bde143099a6ce4023aafe115b83"
+    },
+    {
+      "path": "proto/tendermint/crypto/proof.proto",
+      "repository": "https://github.com/cometbft/cometbft",
+      "revision": "0880b4d378f347ab16e54ec677ff50d803f37d62",
+      "upstream_path": "proto/tendermint/crypto/proof.proto",
+      "git_blob": "30de143181bb0a6d600de834b59f83b17e05785a",
+      "bytes": 845,
+      "sha256": "24ee9bb2ea75601e3562a7993641cfda28211078549c66e3cfd8d30892591980"
+    },
+    {
+      "path": "proto/tendermint/types/params.proto",
+      "repository": "https://github.com/cometbft/cometbft",
+      "revision": "0880b4d378f347ab16e54ec677ff50d803f37d62",
+      "upstream_path": "proto/tendermint/types/params.proto",
+      "git_blob": "10e9c71122ca56f4fa071719e950d44a3a03422c",
+      "bytes": 3423,
+      "sha256": "57db8a45197addaeaacd5828f8d6a216fd4a866de44385241a10a81eb08ae644"
+    },
+    {
+      "path": "proto/tendermint/types/validator.proto",
+      "repository": "https://github.com/cometbft/cometbft",
+      "revision": "0880b4d378f347ab16e54ec677ff50d803f37d62",
+      "upstream_path": "proto/tendermint/types/validator.proto",
+      "git_blob": "18639779eefab9553613e3a19d9ceef903a9d043",
+      "bytes": 1234,
+      "sha256": "77814697e9cd97d3c8af160f9f4f7c8b2a9c15147cfe5a9fe0b906db9b438b06"
+    },
+    {
+      "path": "vendor/gogoproto/gogo.proto",
+      "repository": "https://github.com/cosmos/gogoproto",
+      "revision": "cf5213e4dcbf1fea203185c0af00840e566790d9",
+      "upstream_path": "gogoproto/gogo.proto",
+      "git_blob": "974b36a7ccd59e3405823db8545b25cb94c6e537",
+      "bytes": 4876,
+      "sha256": "a2bef0fb7e233ff2f442da08b3764be6ce59cc3f2df05cd1c9a44dbb5b55c18f"
+    },
+    {
+      "path": "vendor/google/protobuf/descriptor.proto",
+      "repository": "https://github.com/protocolbuffers/protobuf",
+      "revision": "f0dc78d7e6e331b8c6bb2d5283e06aa26883ca7c",
+      "upstream_path": "src/google/protobuf/descriptor.proto",
+      "git_blob": "f8eb216cdcc364ab0172f0e8aebaa07a7ab1bb63",
+      "bytes": 38497,
+      "sha256": "7b393792dec5a4931926fe6ac62b1939365572e9dc498232d267e9b7285818a9"
+    },
+    {
+      "path": "vendor/google/protobuf/duration.proto",
+      "repository": "https://github.com/protocolbuffers/protobuf",
+      "revision": "f0dc78d7e6e331b8c6bb2d5283e06aa26883ca7c",
+      "upstream_path": "src/google/protobuf/duration.proto",
+      "git_blob": "81c3e369fd1304b1b377d991c4fa76a9df784d7e",
+      "bytes": 4895,
+      "sha256": "099047097e8fe73657b49ef67af914a7a686ac6154f9d872882708b5eb3db04c"
+    },
+    {
+      "path": "vendor/google/protobuf/timestamp.proto",
+      "repository": "https://github.com/protocolbuffers/protobuf",
+      "revision": "f0dc78d7e6e331b8c6bb2d5283e06aa26883ca7c",
+      "upstream_path": "src/google/protobuf/timestamp.proto",
+      "git_blob": "3b2df6d91168e7ab87cff1f4ac0d080d319628b7",
+      "bytes": 6459,
+      "sha256": "9489462cbd4eff7c013d10de596be38da1087c7824ea34357669bc21bf5c0800"
+    }
+  ]
+}

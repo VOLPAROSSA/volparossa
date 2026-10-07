@@ -117,8 +117,22 @@ The original job log is retained with SHA-256
 `4e542c134b1799920fcd9eeffa2ba7e6a27e29efd50112176d75a1405a1d546a`.
 The follow-up derives both operation-table bounds from one checked conversion,
 returning a store error if the bound cannot fit. It changes no bound, state hash,
-signature domain or ledger transition and suppresses no lint. Hosted checks must
-pass on that follow-up; modern Clippy was not available locally and is not claimed.
+signature domain or ledger transition and suppresses no lint. Exact follow-up
+`c239a5df` passed hosted strict Clippy, workspace tests and the integration harness
+in [Quality37622478637](https://github.com/VOLPAROSSA/volparossa/actions/runs/37622478637),
+alongside CodeQL. [PR214](https://github.com/VOLPAROSSA/volparossa/pull/214)
+merged the ordered application foundation; these checks do not establish consensus.
+
+The new Rust `volparossa-transaction-abci` adapter uses the original pinned
+CometBFT 0.40 Protobuf schemas over same-owner private Unix sockets. Four fixed
+TEST validators and full genesis inputs bind the application authority. Proposal
+inspection remains read-only; only Commit persists FinalizeBlock results. Thirteen
+adapter/socket/CLI tests and all twenty-two existing core tests pass, independently
+repeated by root. Unsupported proof queries and snapshot adoption are refused;
+query results explicitly do not claim a consensus certificate. The thirteen
+verbatim schema/license inputs pass offline digest and closed-import verification.
+A guest-only four-validator fixture is being integrated; no actual Comet/Rust
+interoperability, partition or distributed recovery result is claimed yet.
 
 The [next distributed milestone](services/TRANSACTION_LAYER.md#distributed-test-execution)
 selects source-pinned CometBFT with four fixed TEST validators. Ordered local
