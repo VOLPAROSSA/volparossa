@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 import unittest
@@ -20,7 +21,8 @@ from unittest import mock
 import build_llama_cpu as builder
 import convert_llama_cpu as conversion
 import llama_cpu as native
-from test_worker_protocol import WORKER, request, controlled_pipe, control
+from test_worker_protocol import WORKER, request, controlled_pipe, control, dataset
+from test_qwen4b_weights import synthetic_shards
 
 
 def job():
@@ -37,6 +39,147 @@ def manifest():
             "gguf": {"path": "model.gguf", "sha256": "c" * 64, "bytes": 20},
             "verification": {"tensor_count": 398, "tensor_values_equal": True, "tokenizer_equal": True,
                              "chat_template_sha256": "d" * 64}, "build_manifest_sha256": "e" * 64}
+
+
+class HashOwnerControlTests(unittest.TestCase):
+    def hash_with_control(self, action):
+        """Real files and owner pipes; never a model or a resource-pressure trial."""
+        block = 1024 * 1024
+        raw = b"a" * block + b"b" * block + b"c" * 17
+        paused, expired = threading.Event(), threading.Event()
+        reads, results, errors = [], [], []
+        reading = False
+        with tempfile.TemporaryDirectory() as directory, controlled_pipe() as (session, writer, wire):
+            path = Path(directory) / "inert-weights"
+            path.write_bytes(raw)
+            os.write(writer, control(1))
+            session.check()
+            session.request["max_seconds"] = 1
+            original_start = session.started
+            aggregate = hashlib.sha256(b"prefix")
+            original_open, original_emit = WORKER.os.fdopen, WORKER.emit
+
+            class ObservedReader:
+                def __init__(self, descriptor, mode):
+                    self.source = original_open(descriptor, mode)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return self.source.__exit__(*args)
+
+                def fileno(self):
+                    return self.source.fileno()
+
+                def read(self, size):
+                    nonlocal reading
+                    self_test.assertEqual(size, block)
+                    reading = True
+                    try:
+                        data = self.source.read(size)
+                    finally:
+                        reading = False
+                    reads.append(len(data))
+                    if len(reads) == 1:
+                        os.write(writer, control(2, "cancel" if action == "cancel" else "pause"))
+                    return data
+
+            self_test = self
+
+            def emit(record):
+                self.assertFalse(reading, "no ACK while a read is executing")
+                original_emit(record)
+                if record.get("phase") == "paused":
+                    paused.set()
+
+            def hash_file():
+                try:
+                    results.append(WORKER.file_hash(path, expected_size=len(raw), aggregate=aggregate,
+                                                    session=session))
+                except BaseException as error:
+                    errors.append(error)
+
+            with mock.patch.object(WORKER.os, "fdopen", ObservedReader), \
+                    mock.patch.object(WORKER, "emit", emit), \
+                    mock.patch.object(session, "elapsed", side_effect=lambda: 1001 if expired.is_set() else 0):
+                thread = threading.Thread(target=hash_file)
+                thread.start()
+                try:
+                    if action != "cancel":
+                        self.assertTrue(paused.wait(3), "missing pause ACK between hash reads")
+                        self.assertTrue(thread.is_alive())
+                        self.assertEqual(reads, [block], "paused hashing must not read another chunk")
+                        self.assertEqual(results, [])
+                        if action == "resume":
+                            os.write(writer, control(3, "resume"))
+                        else:
+                            expired.set()
+                    thread.join(3)
+                    self.assertFalse(thread.is_alive(), "hash worker did not finish bounded control")
+                finally:
+                    if thread.is_alive():
+                        os.write(writer, control(session.sequence + 1, "cancel"))
+                        thread.join(3)
+            self.assertEqual(session.started, original_start, "pause must not reset the deadline")
+            records = [json.loads(line) for line in wire.getvalue().splitlines()]
+            if action == "resume":
+                self.assertEqual(errors, [])
+                self.assertEqual(results, [{"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}])
+                self.assertEqual(aggregate.hexdigest(), hashlib.sha256(b"prefix" + raw).hexdigest())
+                self.assertEqual(reads, [block, block, 17, 0])
+                self.assertEqual([row["phase"] for row in records], ["resumed", "paused", "resumed"])
+            else:
+                self.assertEqual(results, [])
+                self.assertEqual(reads, [block])
+                self.assertEqual(len(errors), 1)
+                self.assertIsInstance(errors[0], WORKER.JobError)
+                self.assertEqual(str(errors[0]), "JOB_CANCELLED" if action == "cancel" else "JOB_DEADLINE_EXCEEDED")
+
+    def test_hash_pause_resume_preserves_every_byte_and_aggregate(self):
+        self.hash_with_control("resume")
+
+    def test_hash_cancel_does_not_return_a_partial_digest(self):
+        self.hash_with_control("cancel")
+
+    def test_hash_pause_does_not_extend_original_deadline(self):
+        self.hash_with_control("deadline")
+
+    def test_prepare_and_shards_forward_session_and_still_reject_tampering(self):
+        with tempfile.TemporaryDirectory() as directory, controlled_pipe() as (session, writer, _):
+            root = Path(directory)
+            model, output = root / "model", root / "output"
+            model.mkdir(mode=0o700)
+            output.mkdir(mode=0o700)
+            profile, _ = synthetic_shards(model)
+            config = b"{}"
+            (model / "config.json").write_bytes(config)
+            profile["config"] = {}
+            profile["files"]["config.json"] = len(config)
+            profile["hashes"]["config.json"] = hashlib.sha256(config).hexdigest()
+            profile["max_rows"] = 4
+            data = root / "input.json"
+            data.write_text(json.dumps(dataset()))
+            selected = dict(request(), mode="infer", model_root=str(model), output_root=str(output),
+                            dataset_path=str(data))
+            os.write(writer, control(1))
+            hashed = []
+            original = WORKER.file_hash
+
+            def checked(path, *args, **kwargs):
+                self.assertIs(kwargs.get("session"), session)
+                hashed.append(path.name)
+                return original(path, *args, **kwargs)
+
+            with mock.patch.object(WORKER, "model_profile", return_value=profile), \
+                    mock.patch.object(WORKER, "file_hash", side_effect=checked):
+                prepared = WORKER.prepare_files(selected, session=session)
+                self.assertEqual(set(hashed), set(profile["files"]))
+                self.assertEqual(set(prepared[4]), set(profile["files"]))
+                damaged = model / profile["weight_shards"][-1]
+                damaged.write_bytes(b"x" * damaged.stat().st_size)
+                with self.assertRaisesRegex(WORKER.JobError, "MODEL_WEIGHTS_CHANGED_ON_DISK"):
+                    WORKER.prepare_files(selected, session=session)
 
 
 class NativeCpuTests(unittest.TestCase):
@@ -245,7 +388,8 @@ class NativeCpuTests(unittest.TestCase):
             with self.assertRaises(WORKER.JobError): native.validate_manifest(value, WORKER.require)
 
     def test_owner_manifest_and_actual_artifact_hashes_checked_before_library_load(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, controlled_pipe() as (session, writer, _):
+            os.write(writer, control(1))
             root = Path(directory)
             value = manifest()
             template = "original template"
@@ -262,21 +406,69 @@ class NativeCpuTests(unittest.TestCase):
             raw = json.dumps(value).encode()
             (root / "backend.json").write_bytes(raw)
             selected = dict(job(), native_backend_root=str(root), native_backend_sha256=hashlib.sha256(raw).hexdigest())
-            with mock.patch.object(native.ctypes, "CDLL", side_effect=AssertionError("validation must not execute library")):
-                _, _, identity = native.verified_bundle(selected, WORKER, SimpleNamespace(chat_template=template))
+            with mock.patch.object(native.ctypes, "CDLL", side_effect=AssertionError("validation must not execute library")), \
+                    mock.patch.object(WORKER, "file_hash", wraps=WORKER.file_hash) as hashed:
+                _, _, identity = native.verified_bundle(selected, WORKER, SimpleNamespace(chat_template=template), session)
                 self.assertEqual(identity["gguf_sha256"], value["gguf"]["sha256"])
+                self.assertEqual(len(hashed.call_args_list), 2)
+                self.assertTrue(all(call.kwargs.get("session") is session for call in hashed.call_args_list))
                 with self.assertRaisesRegex(WORKER.JobError, "MANIFEST_DIGEST"):
                     native.verified_bundle(dict(selected, native_backend_sha256="0" * 64), WORKER,
-                                           SimpleNamespace(chat_template=template))
+                                           SimpleNamespace(chat_template=template), session)
                 (root / native.LIBRARY).write_bytes(b"x" * value["library"]["bytes"])
                 with self.assertRaisesRegex(WORKER.JobError, "ARTIFACT_DIGEST"):
-                    native.verified_bundle(selected, WORKER, SimpleNamespace(chat_template=template))
+                    native.verified_bundle(selected, WORKER, SimpleNamespace(chat_template=template), session)
         for field in ("tensor_values_equal", "tokenizer_equal"):
             value = manifest(); value["verification"][field] = 1
             with self.assertRaises(WORKER.JobError): native.validate_manifest(value, WORKER.require)
         for name in ("../library.so", "/library.so", "peer.so"):
             value = manifest(); value["library"]["path"] = name
             with self.assertRaises(WORKER.JobError): native.validate_manifest(value, WORKER.require)
+
+    def test_native_verify_after_checks_original_shards_and_gguf_with_same_session(self):
+        # Inert native doubles reach the actual post-execution hashing path;
+        # these tests do not load a model or claim successful inference.
+        with tempfile.TemporaryDirectory() as directory, controlled_pipe() as (session, writer, _):
+            root = Path(directory)
+            model_root = root / "weights"
+            model_root.mkdir()
+            profile, _ = synthetic_shards(model_root)
+            profile["new_tokens"], profile["id"], profile["revision"] = 1, "test", "test"
+            data = b"inert GGUF bytes"
+            (root / "model.gguf").write_bytes(data)
+            value = manifest()
+            value["gguf"].update(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+            bridge, model = mock.Mock(), mock.Mock()
+            bridge.generation_policy.return_value = "greedy_v1"
+            bridge.encode.return_value = [1]
+            selected = WORKER.validate_request(job())
+            os.write(writer, control(1))
+            original_hash = WORKER.file_hash
+            hashed = []
+
+            def checked(path, *args, **kwargs):
+                model.close.assert_called_once()
+                self.assertIs(kwargs.get("session"), session)
+                hashed.append(path.name)
+                return original_hash(path, *args, **kwargs)
+
+            with mock.patch.object(WORKER, "model_profile", return_value=profile), \
+                    mock.patch.object(WORKER, "conversation_module", return_value=bridge), \
+                    mock.patch.object(WORKER, "file_hash", side_effect=checked), \
+                    mock.patch.object(WORKER, "finish_result", side_effect=WORKER.JobError("POST_HASH_REACHED")), \
+                    mock.patch.object(native, "verified_bundle", return_value=(root, value, {})) as bundle, \
+                    mock.patch.object(native, "NativeModel", return_value=model), \
+                    mock.patch.object(native, "generate", return_value={}):
+                with self.assertRaisesRegex(WORKER.JobError, "POST_HASH_REACHED"):
+                    native.execute(selected, session, mock.Mock(), mock.Mock(), {}, model_root, root,
+                                   {}, {}, {}, WORKER)
+                self.assertIs(bundle.call_args.args[-1], session)
+                self.assertEqual(set(hashed), set(profile["files"]) | {"model.gguf"})
+                model.reset_mock()
+                (root / "model.gguf").write_bytes(b"x" * len(data))
+                with self.assertRaisesRegex(WORKER.JobError, "NATIVE_GGUF_CHANGED"):
+                    native.execute(selected, session, mock.Mock(), mock.Mock(), {}, model_root, root,
+                                   {}, {}, {}, WORKER)
 
     def test_pause_and_resume_are_not_acknowledged_until_native_has_joined(self):
         with controlled_pipe() as (session, writer, wire):

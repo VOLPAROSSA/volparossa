@@ -776,7 +776,12 @@ def plain_path(value, directory):
     return path, metadata
 
 
-def file_hash(path, expected_size=None, maximum=None, aggregate=None):
+def file_hash(path, expected_size=None, maximum=None, aggregate=None, *, session=None):
+    # Hash every original byte, but service owner controls on this execution
+    # thread between bounded reads. A pause is never acknowledged while a read
+    # or digest update is running, and does not reset the original job deadline.
+    if session is not None:
+        session.check()
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(descriptor, "rb") as source:
         metadata = os.fstat(source.fileno())
@@ -785,6 +790,8 @@ def file_hash(path, expected_size=None, maximum=None, aggregate=None):
         require(maximum is None or metadata.st_size <= maximum, "ARTIFACT_TOO_LARGE")
         digest, length = hashlib.sha256(), 0
         while True:
+            if session is not None:
+                session.check()
             data = source.read(1024 * 1024)
             if not data:
                 break
@@ -793,6 +800,8 @@ def file_hash(path, expected_size=None, maximum=None, aggregate=None):
             digest.update(data)
             if aggregate is not None:
                 aggregate.update(data)
+        if session is not None:
+            session.check()
         require(length == metadata.st_size, "ARTIFACT_CHANGED")
         return {"bytes": length, "sha256": digest.hexdigest()}
 
@@ -806,7 +815,7 @@ def read_bounded(path, maximum):
         return value
 
 
-def verify_sharded_weights(model_root, profile, verified_files=None):
+def verify_sharded_weights(model_root, profile, verified_files=None, *, session=None):
     """Hash the original shard bytes in pinned order, never the index as weights.
 
     The existing identity wire field remains a SHA256 over actual weight bytes.
@@ -814,7 +823,7 @@ def verify_sharded_weights(model_root, profile, verified_files=None):
     """
     shards = profile["weight_shards"]
     index_name = "model.safetensors.index.json"
-    index_file = file_hash(model_root / index_name, profile["files"][index_name])
+    index_file = file_hash(model_root / index_name, profile["files"][index_name], session=session)
     require(index_file["sha256"] == profile["hashes"][index_name], "MODEL_FILES_NOT_PINNED")
     if verified_files is not None:
         verified_files[index_name] = index_file
@@ -824,7 +833,7 @@ def verify_sharded_weights(model_root, profile, verified_files=None):
             and set(index["weight_map"].values()) == set(shards), "INVALID_WEIGHT_SHARD_INDEX")
     aggregate, total = hashlib.sha256(), 0
     for name in shards:
-        checked = file_hash(model_root / name, profile["files"][name], aggregate=aggregate)
+        checked = file_hash(model_root / name, profile["files"][name], aggregate=aggregate, session=session)
         require(checked["sha256"] == profile["hashes"][name], "MODEL_WEIGHTS_CHANGED_ON_DISK")
         if verified_files is not None:
             verified_files[name] = checked
@@ -835,7 +844,7 @@ def verify_sharded_weights(model_root, profile, verified_files=None):
     return identity
 
 
-def prepare_files(request):
+def prepare_files(request, session=None):
     profile_name = request.get("model_profile", DEFAULT_MODEL_PROFILE)
     profile = model_profile(profile_name)
     model_root, model_metadata = plain_path(request["model_root"], True)
@@ -851,10 +860,10 @@ def prepare_files(request):
     sharded = set(profile.get("weight_shards", ()))
     if sharded:
         sharded.add("model.safetensors.index.json")
-    files = {name: file_hash(model_root / name, expected_size=size)
+    files = {name: file_hash(model_root / name, expected_size=size, session=session)
              for name, size in profile["files"].items() if name not in sharded}
     if sharded:
-        verify_sharded_weights(model_root, profile, files)
+        verify_sharded_weights(model_root, profile, files, session=session)
     require(all(files[name]["sha256"] == expected for name, expected in profile["hashes"].items()),
             "MODEL_FILES_NOT_PINNED")
     config = parse_json(read_bounded(model_root / "config.json", 8192))
@@ -1997,10 +2006,10 @@ def execute_private_infer(request, session, tokenizer, torch, transformers, vers
     session.private_progress("generation", "complete")
     session.private_progress("verify_after", "begin")
     if "weight_shards" in profile:
-        weight_identity = verify_sharded_weights(model_root, profile)
+        weight_identity = verify_sharded_weights(model_root, profile, session=session)
     else:
         weight_identity = None
-        require(file_hash(model_root / "model.safetensors", profile["files"]["model.safetensors"])["sha256"]
+        require(file_hash(model_root / "model.safetensors", profile["files"]["model.safetensors"], session=session)["sha256"]
                 == profile["hashes"]["model.safetensors"], "MODEL_WEIGHTS_CHANGED_ON_DISK")
     session.private_progress("verify_after", "complete")
     result = {"version": VERSION, "id": request["id"], "kind": "result", "status": "ok", "mode": request["mode"],
@@ -2037,10 +2046,10 @@ def execute_code_proposal(request, session, tokenizer, torch, transformers, vers
     outputs = generate(model, samples, tokenizer, torch, session, transformers, profile_name,
                        generation_policy="greedy_v1")
     if "weight_shards" in profile:
-        weight_identity = verify_sharded_weights(model_root, profile)
+        weight_identity = verify_sharded_weights(model_root, profile, session=session)
     else:
         weight_identity = None
-        require(file_hash(model_root / "model.safetensors", profile["files"]["model.safetensors"])["sha256"]
+        require(file_hash(model_root / "model.safetensors", profile["files"]["model.safetensors"], session=session)["sha256"]
                 == profile["hashes"]["model.safetensors"], "MODEL_WEIGHTS_CHANGED_ON_DISK")
     result = {"version": VERSION, "id": request["id"], "kind": "result", "status": "ok",
               "mode": "public_code_proposal", "purpose": "code_proposal",
@@ -2300,7 +2309,7 @@ def execute_job(request, session):
     session.progress("preparing")
     session.private_progress("owner_gate", "complete")
     session.private_progress("verify_files", "begin")
-    model_root, output_root, dataset, data_identity, model_files = prepare_files(request)
+    model_root, output_root, dataset, data_identity, model_files = prepare_files(request, session=session)
     session.private_progress("verify_files", "complete")
     session.check()
     cohort = None

@@ -132,6 +132,38 @@ Tensor values, model pins, tokenizer checks and resource limits are unchanged.
 This is a source-proven correction, not proof that it was the first failing check
 in the original trial or that full model conversion now succeeds.
 
+The following exact-source [trial 37631532611](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37631532611)
+on Code `8a7034d5e09cf34f8ac67742f347eb657f769440` and core
+`10fd16dc78a0c91dee627b9d8bdab2226f2cc415` **fails during execution**,
+after a successful source build, conversion and model provisioning. The verified
+original BF16 GGUF contains 8,051,283,488 bytes (SHA-256
+`d7934f6fa06f9781bc15540f0e2b83f89b1895e86440a4e97af4f0434311d1bd`).
+The worker reaches `verify_files/begin` and then reports
+`compute_control_ack_deadline`: an I/O-pressure pause was issued at 19.12,
+but only the preceding resume was acknowledged. Source review found no owner
+control checkpoint in the full-weight hash loop or subsequent native bundle and
+post-execution verification. The follow-up processes controls on the execution
+thread between the unchanged 1 MiB hash reads, including initial preparation,
+native bundle validation and post-execution rehashing. Every original byte,
+digest comparison, pressure threshold and deadline remains required. All 138
+focused worker/native tests pass, independently repeated by root; real files and
+owner-control pipes prove pause/resume, cancellation without a partial result,
+unchanged deadlines and tamper rejection. A single blocked read or other
+non-cooperative operation can still exceed the existing deadline. This is a
+tested control-path correction, not a successful repeat large-model trial.
+
+No native model turn or tool call completed. Six OpenCode requests failed within
+this one workflow, all with cleanup confirmed; no workflow retry was dispatched.
+Core peak memory was 2,303,844,352 bytes, with zero OOM kills and swap. Reported
+unit/process/private-data/QEMU/scratch cleanup passed; scoped host-state files
+match and no raw model output was exported. This is conversion/provisioning
+evidence, not inference, successful coding or protected peer execution.
+Original artifact ZIP SHA-256:
+`78c4732774fc93dae9872df0460e2addf7f3849a6a190f803069fbc7d6a6e9c8`;
+job `112826781182` log SHA-256:
+`ef7d5c7bbeeebf497ec9a42881746a782b36f7c7bddc9febef11d7af373cb44f`.
+All earlier failed trials and their consumed dispatch receipts remain preserved.
+
 Native sanitizer evidence is mixed and remains explicit: the owned ABI smoke
 passes, but the unchanged upstream all-type tensor test **fails** under UBSan on
 an unaligned `uint32_t` load in the Q1_0/Q8_0 dot product. That quantized path is

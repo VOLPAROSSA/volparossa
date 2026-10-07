@@ -53,7 +53,7 @@ def validate_manifest(value, require):
     return value
 
 
-def verified_bundle(request, worker, tokenizer):
+def verified_bundle(request, worker, tokenizer, session):
     require = worker.require
     require(request.get("inference_backend") == KIND and request.get("model_profile") == PROFILE
             and request["mode"] == "private_conversation", "NATIVE_BACKEND_SCOPE")
@@ -66,7 +66,7 @@ def verified_bundle(request, worker, tokenizer):
     value = validate_manifest(worker.parse_json(raw), require)
     for field in ("library", "gguf"):
         item = value[field]
-        require(worker.file_hash(root / item["path"], expected_size=item["bytes"])["sha256"] == item["sha256"],
+        require(worker.file_hash(root / item["path"], expected_size=item["bytes"], session=session)["sha256"] == item["sha256"],
                 "NATIVE_ARTIFACT_DIGEST")
     build = worker.read_bounded(root / "build.json", 65536)
     require(hashlib.sha256(build).hexdigest() == value["build_manifest_sha256"], "NATIVE_BUILD_DIGEST")
@@ -231,7 +231,7 @@ def execute(request, session, tokenizer, torch, versions, model_root, output_roo
     worker.require(worker.conversation_module().generation_policy(dataset, PROFILE) == "greedy_v1",
                    "NATIVE_GREEDY_POLICY_REQUIRED")
     profile = worker.model_profile(PROFILE)
-    root, manifest, identity = verified_bundle(request, worker, tokenizer)
+    root, manifest, identity = verified_bundle(request, worker, tokenizer, session)
     session.private_progress("prompt_encode", "begin")
     prompt = worker.conversation_module().encode(tokenizer, dataset, profile)
     session.private_progress("prompt_encode", "complete")
@@ -250,8 +250,8 @@ def execute(request, session, tokenizer, torch, versions, model_root, output_roo
     finally:
         model.close()
     session.private_progress("verify_after", "begin")
-    weight_identity = worker.verify_sharded_weights(model_root, profile)
-    worker.require(worker.file_hash(root / "model.gguf", expected_size=manifest["gguf"]["bytes"])["sha256"]
+    weight_identity = worker.verify_sharded_weights(model_root, profile, session=session)
+    worker.require(worker.file_hash(root / "model.gguf", expected_size=manifest["gguf"]["bytes"], session=session)["sha256"]
                    == manifest["gguf"]["sha256"], "NATIVE_GGUF_CHANGED")
     session.private_progress("verify_after", "complete")
     result = {"version": 1, "id": request["id"], "kind": "result", "status": "ok", "mode": request["mode"],
