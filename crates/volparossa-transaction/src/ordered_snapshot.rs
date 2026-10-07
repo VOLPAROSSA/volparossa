@@ -7,26 +7,22 @@ use rusqlite::{
 };
 use volparossa_protocol::encode_canonical;
 
-const TABLES: [(&str, &str, usize); 4] = [
+const TABLES: [(&str, &str); 4] = [
     (
         "SELECT singleton,ledger,unit,supply FROM meta ORDER BY singleton",
         "INSERT INTO meta VALUES(?1,?2,?3,?4)",
-        1,
     ),
     (
         "SELECT owner,available,reserved FROM accounts ORDER BY owner",
         "INSERT INTO accounts VALUES(?1,?2,?3)",
-        MAX_ACCOUNTS,
     ),
     (
         "SELECT id,payer,recipient,units,state FROM reservations ORDER BY id",
         "INSERT INTO reservations VALUES(?1,?2,?3,?4,?5)",
-        MAX_OPERATIONS as usize,
     ),
     (
         "SELECT sequence,id,signer,nonce,signed,hash,reservation,state FROM operations ORDER BY sequence",
         "INSERT INTO operations VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-        MAX_OPERATIONS as usize,
     ),
 ];
 
@@ -63,8 +59,10 @@ enum Scalar {
 impl Snapshot {
     pub(super) fn capture(db: &Connection) -> Result<Self, Error> {
         disk::validate_accounting(db)?;
+        let operations = usize::try_from(MAX_OPERATIONS).map_err(|_| Error::Store)?;
+        let bounds = [1, MAX_ACCOUNTS, operations, operations];
         let mut tables = Vec::new();
-        for (select, _, bound) in TABLES {
+        for ((select, _), bound) in TABLES.into_iter().zip(bounds) {
             let mut statement = db.prepare(select)?;
             let columns = statement.column_count();
             let mut cursor = statement.query([])?;
@@ -108,7 +106,7 @@ impl Snapshot {
             "PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY;",
         )?;
         disk::schema(&db)?;
-        for (table, (_, insert, _)) in self.tables.iter().zip(TABLES) {
+        for (table, (_, insert)) in self.tables.iter().zip(TABLES) {
             for row in &table.rows {
                 let values = row
                     .cells

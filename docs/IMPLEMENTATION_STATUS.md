@@ -110,8 +110,15 @@ repeated by root, including actual process kills at three commit boundaries and
 rollback of both commands when the second command fails. The two ignored tests
 are child entrypoints actually exercised by their parent crash tests. The example
 compiles; formatting/diff checks pass. An independent full-diff review found no
-blocker. Hosted source gates remain pending; modern Clippy was not available
-locally and is not claimed.
+blocker. The original [Quality run37620052454](https://github.com/VOLPAROSSA/volparossa/actions/runs/37620052454/job/112787731672)
+on `c5dabd13` failed strict Clippy on two potentially truncating `u64 as usize`
+snapshot-bound conversions; subsequent hosted tests were skipped, not passed.
+The original job log is retained with SHA-256
+`4e542c134b1799920fcd9eeffa2ba7e6a27e29efd50112176d75a1405a1d546a`.
+The follow-up derives both operation-table bounds from one checked conversion,
+returning a store error if the bound cannot fit. It changes no bound, state hash,
+signature domain or ledger transition and suppresses no lint. Hosted checks must
+pass on that follow-up; modern Clippy was not available locally and is not claimed.
 
 The [next distributed milestone](services/TRANSACTION_LAYER.md#distributed-test-execution)
 selects source-pinned CometBFT with four fixed TEST validators. Ordered local
