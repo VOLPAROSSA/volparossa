@@ -20,7 +20,7 @@ libc.workspace = true
 nix.workspace = true
 rand_core.workspace = true
 rpassword = "7.4.0"
-rustix.workspace = true
+rustix = { workspace = true, features = ["time"] }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
@@ -38,6 +38,9 @@ volparossa-mptcp = { path = "../volparossa-mptcp", version = "=0.1.0" }
 volparossa-policy = { path = "../volparossa-policy", version = "=0.1.0" }
 volparossa-quic = { path = "../volparossa-quic", version = "=0.1.0" }
 zeroize.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
