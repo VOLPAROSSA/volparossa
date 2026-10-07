@@ -157,7 +157,7 @@ fn init_binds_all_genesis_inputs_reopens_and_refuses_other_authority() {
             1 => config.accounts[0].units += 1,
             2 => config.nanos = 1,
             _ => config.validators[0] = hex::encode(public(9)),
-        };
+        }
         assert!(Application::open(&path, config).is_err());
     }
 }
@@ -184,9 +184,9 @@ fn mismatched_init_is_fatal_without_creating_store() {
                     .abci
                     .as_mut()
                     .unwrap()
-                    .vote_extensions_enable_height = 1
+                    .vote_extensions_enable_height = 1;
             }
-        };
+        }
         assert!(
             value
                 .handle(abci::Request {
