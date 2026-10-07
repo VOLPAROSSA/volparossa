@@ -11,7 +11,7 @@ detailed evidence ledger, including historical failures—not an installation gu
 [Original v1 scorecard](#fixed-alpha-v1-scorecard) ·
 [Completion requirements](#definition-of-done)
 
-Last updated: 2026-10-04
+Last updated: 2026-10-07
 
 ## Current integration and active work
 
@@ -81,7 +81,35 @@ validation, both-or-neither owner flags on `run` and `private-serve`, unchanged
 explicit execution, and rejection of native flags on `private-task`. The four
 original failing command-tree tests also pass locally. The new command-tree test
 was observed failing before the correction. These checks do not replace the
-next exact-source CI run or the still-pending disposable native model trial.
+exact-source CI or a disposable native model trial.
+
+Core `7308371b20ced0504662178beb0e46586cfc9d2d` subsequently passed its
+source checks. The first native Code trial `37239050033` stopped during source
+build without retained resource/manifest evidence. Its bounded ready/release
+follow-up on Code `01c5c591b16ed34226341e04fe673a35a7a169de` and the same core
+reached a completed source build in
+[trial37614132814](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37614132814).
+The live helper's verified library and manifest were retained before successful
+exit; observed build peak was 1,031,565,312 bytes, with zero swap/OOM.
+
+That original attempt remains **failed** at model provisioning with the closed
+category `native_conversion` and process status 1. Wheel-graph/runtime-import
+checks passed first, but the catch-all conversion marker does not identify which
+conversion check or subprocess failed. Build resource counters do not describe
+the later conversion. No model provisioning, inference or coding-task success
+is claimed. Reported guest units/process-group/private-data and outer QEMU/scratch
+cleanup passed; the scoped routes/DNS comparison remained unchanged.
+Original artifact ZIP SHA-256:
+`d4b32d66e90d4c76568b2fa989cbab5e49bbb736283868a03a81f9ae0303a254`;
+job `112768290137` log SHA-256:
+`6e561f75a15560a56f3d98c1a49e518c52ad543646ea1463c7f475e5ec2d0ce6`.
+The follow-up retains a closed conversion stage, failure category and bounded
+child exit status without exception text, paths or raw converter output. The
+legacy failure marker remains. Twenty-nine native/conversion fixture tests pass,
+independently repeated by root, including inert injection at all thirteen stages
+and child failure, timeout and cancellation. Quality runs the new tests as part
+of the existing native contract step. This is diagnostic coverage, not a model
+conversion fix or permission to rerun the same failed attempt.
 
 Native sanitizer evidence is mixed and remains explicit: the owned ABI smoke
 passes, but the unchanged upstream all-type tensor test **fails** under UBSan on

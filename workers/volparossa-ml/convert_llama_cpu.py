@@ -27,13 +27,52 @@ import llama_cpu as native
 import provision
 
 HERE = Path(__file__).resolve().parent
+DIAGNOSTIC_PREFIX = "NATIVE_CONVERSION_DIAGNOSTIC "
+DIAGNOSTIC_STAGES = frozenset({"guard", "source", "runtime", "model", "build", "budget",
+    "convert", "tokenizer", "verify", "recheck", "bundle", "manifest", "permissions", "unknown"})
+
+
+def child_status(value):
+    return value if type(value) is int and -128 <= value <= 255 else None
+
+
+def failure_diagnostic(progress, error):
+    """Closed metadata only; exception text, paths and converter output stay private."""
+    if isinstance(error, ConversionCancelled):
+        category = "cancelled"
+    elif isinstance(error, (TimeoutError, subprocess.TimeoutExpired)):
+        category = "timeout"
+    elif isinstance(error, FileNotFoundError):
+        category = "missing_file"
+    elif isinstance(error, PermissionError):
+        category = "permission"
+    elif isinstance(error, MemoryError):
+        category = "memory"
+    elif isinstance(error, ImportError):
+        category = "import"
+    elif isinstance(error, subprocess.SubprocessError):
+        category = "subprocess"
+    elif isinstance(error, OSError):
+        category = "os_error"
+    elif isinstance(error, (KeyError, TypeError, AttributeError)):
+        category = "invalid_shape"
+    elif isinstance(error, (ValueError, provision.ProvisionError)):
+        category = {"NATIVE_CONVERSION_DEADLINE": "timeout",
+                    "NATIVE_CONVERSION_PROCESS_FAILED": "child_failed",
+                    "NATIVE_CONVERSION_DISK_BUDGET": "disk_budget"}.get(str(error), "contract")
+    else:
+        category = "unknown"
+    return dict(version=1, kind="native-conversion-failure",
+                stage=progress.get("stage") if type(progress.get("stage")) is str
+                      and progress.get("stage") in DIAGNOSTIC_STAGES else "unknown",
+                failure=category, child_exit_status=child_status(progress.get("child_exit_status")))
 
 
 class ConversionCancelled(Exception):
     """A fixed cancellation reason; no private subprocess command is exported."""
 
 
-def run_converter(command, log, environment, timeout):
+def run_converter(command, log, environment, timeout, progress=None):
     """Join our direct child; never detach it from the owner's provision group.
 
     TERM/INT/HUP mark cancellation instead of interrupting Popen construction.
@@ -65,6 +104,8 @@ def run_converter(command, log, environment, timeout):
                 raise subprocess.TimeoutExpired("native converter", timeout)
             try:
                 result = process.wait(timeout=min(.1, remaining))
+                if progress is not None:
+                    progress["child_exit_status"] = child_status(result)
                 if cancelled is not None:
                     raise ConversionCancelled("NATIVE_CONVERSION_CANCELLED")
                 builder.require(result == 0, "NATIVE_CONVERSION_PROCESS_FAILED")
@@ -81,6 +122,8 @@ def run_converter(command, log, environment, timeout):
                     process.kill()
                     process.wait(timeout=5)
         finally:
+            if progress is not None and process is not None:
+                progress["child_exit_status"] = child_status(process.poll())
             for signum, handler in previous.items():
                 signal.signal(signum, handler)
         if cancelled is not None:
@@ -221,10 +264,13 @@ def private_bundle_modes(root):
             raise ValueError("NATIVE_BUNDLE_FILE_TYPE")
 
 
-def execute(args):
+def execute(args, progress=None):
     # Reuse the existing explicit disposable VM/CI/CPython3.13/fresh-private-root
     # guard. This tool never relaxes provision's host-safety requirements.
+    progress = {} if progress is None else progress
+    progress.update(stage="guard", child_exit_status=None)
     root, _ = provision.execution_root(args)
+    progress["stage"] = "source"
     builder.verify_source(args.source)
     builder.require(1 <= args.timeout_seconds <= 1800, "NATIVE_CONVERSION_DEADLINE")
     pins = provision.load_pins(provision.QWEN4B_MODEL_PROFILE, native_cpu_converter=True)
@@ -232,9 +278,11 @@ def execute(args):
     deadline = started + args.timeout_seconds
     def check():
         builder.require(time.monotonic() < deadline, "NATIVE_CONVERSION_DEADLINE")
+    progress["stage"] = "runtime"
     for name, expected in (("torch", "2.14.0+cpu"), ("transformers", "5.16.1"), ("peft", "0.20.0"),
                            ("sentencepiece", "0.2.1")):
         builder.require(importlib.metadata.version(name) == expected, "NATIVE_CONVERTER_RUNTIME_PIN")
+    progress["stage"] = "model"
     model = args.model
     builder.require(model.is_absolute() and model == model.resolve() and model.is_dir(), "NATIVE_MODEL_PATH")
     builder.require({path.name for path in model.iterdir()} == {item["path"] for item in pins["files"]}, "NATIVE_MODEL_FILES")
@@ -243,6 +291,7 @@ def execute(args):
         builder.require(builder.digest(model / item["path"]) == {key: item[key] for key in ("sha256", "bytes")},
                         "NATIVE_ORIGINAL_MODEL_PIN")
     provision.verify_weight_set(pins, model, deadline)
+    progress["stage"] = "build"
     build_root = args.build
     build_raw = (build_root / "build.json").read_bytes()
     builder.require(len(build_raw) <= 65536, "NATIVE_BUILD_MANIFEST_BOUND")
@@ -258,6 +307,7 @@ def execute(args):
     library = build_root / native.LIBRARY
     builder.require(builder.digest(library) == {key: build["library"][key] for key in ("bytes", "sha256")},
                     "NATIVE_LIBRARY_PIN")
+    progress["stage"] = "budget"
     required = native.WEIGHTS_BYTES + 128 * 1024 ** 2 + build["library"]["bytes"]
     builder.require(type(args.budget_bytes) is int and required <= args.budget_bytes
                     and shutil.disk_usage(root.parent).free >= args.budget_bytes, "NATIVE_CONVERSION_DISK_BUDGET")
@@ -269,23 +319,29 @@ def execute(args):
     for key in list(env):
         if key.startswith("LD_") or key in ("PYTHONPATH", "PYTHONHOME"):
             env.pop(key)
+    progress["stage"] = "convert"
     with (root / "conversion.log").open("xb") as log:
         run_converter([sys.executable, str(args.source / "convert_hf_to_gguf.py"), str(model),
-                       "--outfile", str(output), "--outtype", "bf16"], log, env, deadline - time.monotonic())
+                       "--outfile", str(output), "--outtype", "bf16"], log, env, deadline - time.monotonic(), progress)
     check()
+    progress["stage"] = "tokenizer"
     sys.path.insert(0, str(args.source / "gguf-py"))
     import gguf
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(str(model), local_files_only=True, trust_remote_code=False, use_fast=True)
+    progress["stage"] = "verify"
     verified = verify_conversion(gguf.GGUFReader(str(output)), model, tokenizer, check)
     check()
+    progress["stage"] = "recheck"
     provision.verify_weight_set(pins, model, deadline)
+    progress["stage"] = "bundle"
     shutil.copyfile(library, root / native.LIBRARY)
     shutil.copyfile(build_root / "build.json", root / "build.json")
     shutil.copytree(build_root / "licenses", root / "licenses", symlinks=False)
     shutil.copyfile(model / "LICENSE", root / "licenses" / "Qwen-APACHE-2.0.txt")
     for notice in provision.native_converter_pins()["notices"]:
         shutil.copyfile(HERE / notice["path"], root / "licenses" / Path(notice["path"]).name)
+    progress["stage"] = "manifest"
     manifest = {"version": 1, "kind": native.KIND, "abi_version": 1, "source_commit": builder.SOURCE,
                 "model_profile": native.PROFILE, "source_weights_sha256": native.WEIGHTS_SHA,
                 "source_weights_bytes": native.WEIGHTS_BYTES,
@@ -297,6 +353,7 @@ def execute(args):
     builder.require(retained + 65536 <= args.budget_bytes, "NATIVE_CONVERSION_DISK_BUDGET")
     check()
     builder.write_json(root / "backend.json", manifest)
+    progress["stage"] = "permissions"
     private_bundle_modes(root)
     return {"version": 1, "kind": native.KIND, "manifest": builder.digest(root / "backend.json"),
             "model_inference": False, "downloads": False}
@@ -318,9 +375,12 @@ def main():
         print(json.dumps({"kind": native.KIND, "source_commit": builder.SOURCE, "model_profile": native.PROFILE,
                           "execute": False, "downloads": False, "model_inference": False}))
         return
+    progress = {"stage": "guard", "child_exit_status": None}
     try:
-        print(json.dumps(execute(args), sort_keys=True))
-    except Exception:
+        print(json.dumps(execute(args, progress), sort_keys=True))
+    except Exception as error:
+        print(DIAGNOSTIC_PREFIX + json.dumps(failure_diagnostic(progress, error), sort_keys=True),
+              file=sys.stderr, flush=True)
         parser.exit(1, "NATIVE_CONVERSION_FAILED\n")
 
 
