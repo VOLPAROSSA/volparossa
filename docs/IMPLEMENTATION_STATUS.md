@@ -11,7 +11,7 @@ detailed evidence ledger, including historical failures—not an installation gu
 [Original v1 scorecard](#fixed-alpha-v1-scorecard) ·
 [Completion requirements](#definition-of-done)
 
-Last updated: 2026-10-05
+Last updated: 2026-10-07
 
 ## Current integration and active work
 
@@ -66,8 +66,7 @@ The original source CI at `62aafe025151894b4f37ca23962028fd339ba6b0`
 (`37238682954`, job `111542803602`) stopped on two Clippy documentation-format
 errors before workspace tests ran. The original log is retained (SHA-256
 `03a9d0da90c958841ff03d49a6974ce4221f38abc94189fbc355bb47a294b550`).
-The same documentation spelling is corrected in the test module as well. Full
-source CI is still required for the follow-up; no modern local Clippy pass is claimed.
+The same documentation spelling is corrected in the test module as well.
 
 The same original commit's CodeQL gate reported 23 hard-coded-nonce findings:
 22 originate in synthetic test fixtures and one in an example's zero-initialized
@@ -77,8 +76,14 @@ report is retained (SHA-256
 Tests now generate fresh CSPRNG nonces and explicitly retain the same nonce or
 signed bytes for replay, capacity and subprocess recovery checks. The example
 constructs its random bytes directly. No query is suppressed and no protocol or
-authorization checks are relaxed. All ten targeted tests pass with these fixtures;
-source CI must independently check the resulting candidate.
+authorization checks are relaxed. All ten targeted tests pass with these fixtures.
+
+The corrected source at `4619c1c10ff1bbad8b226c5fc801615a0d2c4758` passes
+[Quality CI](https://github.com/VOLPAROSSA/volparossa/actions/runs/37240279419/job/111547503875),
+including the workspace source gates, and all four
+[CodeQL analyses](https://github.com/VOLPAROSSA/volparossa/actions/runs/37240276888).
+The routine KVM job was skipped; these checks add no distributed settlement or
+network-datapath evidence. The original failed runs remain failure evidence.
 
 This durable slice has no network, gateway, encryption at rest, consensus,
 distributed finality, external reconciliation, corrections or AML capability.
