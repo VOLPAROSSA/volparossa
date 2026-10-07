@@ -4985,6 +4985,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "volparossa-transaction"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "prost",
+ "rand_core 0.6.4",
+ "rusqlite",
+ "rustix",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.19",
+ "volparossa-protocol",
+]
+
+[[package]]
 name = "volparossa-udp"
 version = "0.1.0"
 dependencies = [

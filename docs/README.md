@@ -74,7 +74,7 @@ or go directly to a topic when you already know what you need.
 | --- | --- |
 | [Content network](services/CONTENT_NETWORK_PROPOSAL.md) | Cache chunks, publishing, HTTPS authority and offline delivery. |
 | [Private storage](services/PRIVATE_STORAGE.md) | Encrypted fragments, redundancy, retention, usage and recovery. |
-| [Transaction layer](services/TRANSACTION_LAYER.md) | New financial research scope, settlement boundaries and correction design. |
+| [Transaction layer](services/TRANSACTION_LAYER.md) | Durable test-unit API, executable example, settlement boundaries and remaining work. |
 | [Mailbox import confirmation](services/MAILBOX_IMPORT_CONFIRMATION.md) | When an application may confirm message import. |
 | [Unbound fallback](network/UNBOUND_FALLBACK.md) | Resolver lifecycle and bounded DNS-cache misses. |
 | [Decentralized agents](services/DECENTRALIZED_AGENTS.md) | Training, public peer tasks, models, privacy and mutual review. |
