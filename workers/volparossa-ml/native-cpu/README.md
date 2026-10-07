@@ -34,6 +34,10 @@ default; `--execute` builds at low priority with at most two compiler jobs into
 a new output directory. `build.json` retains the source/tree, wrapper hashes,
 compiler versions, actual library hash, CPU requirements and dependency list.
 Original upstream notices are copied unchanged.
+Build manifest v2 also binds the explicitly recorded loader-only patch, original
+and effective loader digests, and actual staged-source compilation. The checkout
+stays pristine; old v1 build manifests cannot masquerade as the patched backend.
+See [third-party provenance](../../../THIRD_PARTY_LICENSES.md#explicit-llamacpp-cpu-inference-candidate).
 The actual static GCC runtime archives are hashed; their original Debian GCC
 copyright/runtime-exception notice is retained alongside upstream notices.
 
@@ -42,6 +46,27 @@ separately scoped BF16/F32 wrapper, and the unchanged upstream all-type syntheti
 tensor test under ASan/UBSan. Such artifacts are marked **not provisionable**.
 These are not model or performance tests; the wrapper does not replace or
 change the all-type test or its tolerances.
+
+Both loader paths previously launched a separate asynchronous validation task per
+tensor, independently of the inference thread setting. The local patch defers
+those checks to one execution thread and polls the existing owner callback between
+tensors. Every check still runs before successful loading; cancellation rejects
+the load and frees its state. A single tensor check is not internally interruptible,
+so this is not a guarantee of maximum cancellation latency. Pause acknowledgment
+still waits for native execution to stop.
+
+A new source-derived harness executes both patched launch paths and the actual
+validation-result loop on 398 tiny F32 arrays. It verifies complete checking even
+when the first tensor is invalid, cancellation before selected checks and a fresh
+complete retry. The normal source build passes that harness, the ABI smoke,
+BF16/F32 scope and original all-type test. A separate ASan/UBSan execution covers
+the new harness/extracted statements only, not the already built ggml archive.
+It does not supersede the historical full-suite sanitizer failure below.
+
+The additive ABI-v1 last-open-stage accessor reports only fixed phase numbers
+for model, vocabulary, context and sampler initialization. The worker and core
+reject unknown stages and retain only allowlisted diagnostics, never exception
+text, model paths, tensor names or user content. Missing accessors are refused.
 
 The original all-type sanitizer check **failed** on a misaligned `uint32_t`
 load in upstream `ggml/src/ggml-cpu/arch/x86/quants.c:590`,
@@ -121,7 +146,9 @@ and resume are acknowledged at stopped decode boundaries by the existing owner
 protocol. All handles are closed deterministically, and the supervisor retains
 its independent hard-budget and process-cleanup authority.
 
-Actual guest conversion, memory/performance feasibility, real EOS completion and
-the unchanged OpenCode read/edit/test scenario still require their own evidence.
-Passing a source build, ABI smoke or synthetic tensor test does not establish any
-of those outcomes.
+Actual guest conversion has passed in the preserved trials, including complete
+tensor-value verification. The latest unpatched-loader trial stopped during model
+loading; neither its unique failure cause nor successful native inference is
+established. Patched loading, memory/performance feasibility, real EOS completion
+and the unchanged OpenCode read/edit/test scenario still require their own guest
+evidence. A source build, ABI smoke or synthetic tensor test is not that evidence.

@@ -28,12 +28,14 @@ class ConversionDiagnosticTests(unittest.TestCase):
                 path.write_bytes(b'inert')
             pinned = [{'path': name, 'bytes': 5, 'sha256': hashlib.sha256(b'inert').hexdigest()}
                       for name in ('weights', 'LICENSE')]
-            manifest = dict(version=1, source_commit=conversion.builder.SOURCE, kind=conversion.native.KIND,
+            manifest = dict(version=2, source_commit=conversion.builder.SOURCE, kind=conversion.native.KIND,
+                source_tree=conversion.native.SOURCE_TREE, source_overlay=conversion.native.loader_provenance(),
+                loader_compile_source_verified=True, upstream_original_unchanged=True,
                 abi_version=1, quantization=False, provisionable=True, sanitizers=False,
                 library=dict(path=conversion.native.LIBRARY, **conversion.builder.digest(build / conversion.native.LIBRARY)),
                 dynamic_dependencies=['libc.so.6'],
                 wrapper_sources={name: conversion.builder.digest(conversion.HERE / 'native-cpu' / name)
-                                 for name in ('CMakeLists.txt', 'adapter.h', 'adapter.cpp')})
+                                 for name in conversion.builder.WRAPPER_FILES})
             (build / 'build.json').write_text(json.dumps(manifest))
             progress, visited = {}, []
             def boundary(stage, result=None):
@@ -46,6 +48,10 @@ class ConversionDiagnosticTests(unittest.TestCase):
                 side_effect=lambda _args: boundary('guard', (base / 'output', 'inert'))))
             stack.enter_context(mock.patch.object(conversion.builder, 'verify_source',
                 side_effect=lambda _path: boundary('source', 'inert-tree')))
+            # This suite checks closed diagnostic staging, not native compilation;
+            # real staged-source/hash checks have separate source-only coverage.
+            stack.enter_context(mock.patch.object(conversion.builder, 'verify_loader_compilation',
+                side_effect=lambda _root, _loader: boundary('build')))
             stack.enter_context(mock.patch.object(conversion.provision, 'load_pins', return_value={'files': pinned}))
             versions = {'torch': '2.14.0+cpu', 'transformers': '5.16.1', 'peft': '0.20.0', 'sentencepiece': '0.2.1'}
             stack.enter_context(mock.patch.object(conversion.importlib.metadata, 'version',

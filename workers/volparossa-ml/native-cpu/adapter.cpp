@@ -35,20 +35,24 @@ bool aborted(void * pointer) {
 bool load_progress(float, void * pointer) { return !aborted(pointer); }
 void discard_log(ggml_log_level, const char *, void *) {}
 std::once_flag initialized;
+thread_local uint32_t open_stage = VP_OPEN_NONE;
 }
 
 extern "C" uint32_t vp_llama_abi_v1(void) { return 1; }
 extern "C" const char * vp_llama_source_v1(void) { return source; }
+extern "C" uint32_t vp_llama_open_stage_v1(void) { return open_stage; }
 
 extern "C" int32_t vp_llama_open_v1(const char * path, uint32_t capacity,
                                      uint32_t threads, vp_abort_v1 abort,
                                      void * opaque, void ** handle) {
+    open_stage = VP_OPEN_ARGUMENT;
     if (!handle) { return VP_INVALID; }
     *handle = nullptr;
     if (!path || path[0] != '/' || std::strlen(path) > 4096 || !abort ||
         capacity < 2 || capacity > max_context || threads < 1 || threads > 2) {
         return VP_INVALID;
     }
+    open_stage = VP_OPEN_CPU;
 #if defined(__x86_64__) && defined(__GNUC__)
     if (!__builtin_cpu_supports("avx2") || !__builtin_cpu_supports("fma") ||
         !__builtin_cpu_supports("f16c")) { return VP_INVALID; }
@@ -56,6 +60,7 @@ extern "C" int32_t vp_llama_open_v1(const char * path, uint32_t capacity,
     return VP_INVALID;
 #endif
     try {
+        open_stage = VP_OPEN_BACKEND;
         std::call_once(initialized, [] {
             // No private text, paths, tensor names or backend errors on stdout/stderr.
             llama_log_set(discard_log, nullptr);
@@ -73,9 +78,11 @@ extern "C" int32_t vp_llama_open_v1(const char * path, uint32_t capacity,
         model_params.check_tensors = true;
         model_params.progress_callback = load_progress;
         model_params.progress_callback_user_data = value.get();
+        open_stage = VP_OPEN_MODEL;
         value->model = llama_model_load_from_file(path, model_params);
         if (aborted(value.get())) { return VP_ABORTED; }
         if (!value->model) { return VP_BACKEND; }
+        open_stage = VP_OPEN_VOCABULARY;
         const auto * vocab = llama_model_get_vocab(value->model);
         if (llama_vocab_n_tokens(vocab) != vocabulary || llama_vocab_eos(vocab) != 151645) {
             return VP_INVALID;
@@ -94,12 +101,15 @@ extern "C" int32_t vp_llama_open_v1(const char * path, uint32_t capacity,
         context_params.op_offload = false;
         context_params.abort_callback = aborted;
         context_params.abort_callback_data = value.get();
+        open_stage = VP_OPEN_CONTEXT;
         value->context = llama_init_from_model(value->model, context_params);
         if (aborted(value.get())) { return VP_ABORTED; }
         if (!value->context) { return VP_BACKEND; }
+        open_stage = VP_OPEN_SAMPLER;
         value->sampler = llama_sampler_init_greedy();
         if (!value->sampler) { return VP_BACKEND; }
         *handle = value.release();
+        open_stage = VP_OPEN_READY;
         return VP_OK;
     } catch (...) { return VP_BACKEND; }
 }

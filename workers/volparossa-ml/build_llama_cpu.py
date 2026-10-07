@@ -6,6 +6,7 @@ Input must be the clean original commit; outputs are always a new directory.
 The resulting build.json is provenance, not independent installation authority.
 """
 import argparse
+import difflib
 import hashlib
 import json
 import os
@@ -17,13 +18,16 @@ import stat
 import subprocess
 import time
 
+import llama_cpu as native
+
 SOURCE = "7fe450e19305b828c199d602c23a8337aaa1f03b"
 ORIGIN = "https://github.com/ggml-org/llama.cpp.git"
 KIND = "llama_cpp_bf16_v1"
 HERE = Path(__file__).resolve().parent
 LIBRARY = "libvolparossa_llama_cpu.so"
 ALLOWED_NEEDED = {"libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2", "ld-linux-x86-64.so.2"}
-CHECK_TARGETS = ("vp-native-abi-smoke", "vp-native-bf16-tensors", "vp-upstream-tensor-tests")
+CHECK_TARGETS = ("vp-native-abi-smoke", "vp-native-loader-validation", "vp-native-bf16-tensors", "vp-upstream-tensor-tests")
+WRAPPER_FILES = ("CMakeLists.txt", "adapter.h", "adapter.cpp", "bounded-tensor-validation.patch")
 
 
 def require(condition, code):
@@ -53,7 +57,73 @@ def verify_source(source):
             "NATIVE_SOURCE_ORIGIN")
     require(not command(["git", "status", "--porcelain", "--untracked-files=all"], source),
             "NATIVE_SOURCE_DIRTY")
-    return command(["git", "rev-parse", "HEAD^{tree}"], source).decode().strip()
+    tree = command(["git", "rev-parse", "HEAD^{tree}"], source).decode().strip()
+    require(tree == native.SOURCE_TREE, "NATIVE_SOURCE_TREE")
+    return tree
+
+
+def patched_loader(source):
+    """Only one exact upstream file is transformed; source is never modified."""
+    original = source / "src/llama-model-loader.cpp"
+    require(digest(original)["sha256"] == native.LOADER_ORIGINAL_SHA, "NATIVE_LOADER_ORIGINAL")
+    patch_path = HERE / "native-cpu/bounded-tensor-validation.patch"
+    require(digest(patch_path)["sha256"] == native.LOADER_PATCH_SHA, "NATIVE_LOADER_PATCH")
+    before = original.read_text(encoding="utf-8")
+    require(before.count("std::async(std::launch::async,") == 2, "NATIVE_LOADER_LAUNCH_SHAPE")
+    after = before.replace("std::async(std::launch::async,", "std::async(std::launch::deferred,")
+    old = "    for (auto & future : validation_result) {\n        auto result = future.get();"
+    new = ("    for (auto & future : validation_result) {\n"
+           "        // Complete validation stays on this execution thread; poll owner cancellation\n"
+           "        // between tensors without exposing data or acknowledging pause while loading.\n"
+           "        if (progress_callback && !progress_callback((float) size_done / size_data, progress_callback_user_data)) {\n"
+           "            return false;\n        }\n        auto result = future.get();")
+    require(after.count(old) == 1, "NATIVE_LOADER_JOIN_SHAPE")
+    after = after.replace(old, new)
+    patch = "".join(difflib.unified_diff(before.splitlines(True), after.splitlines(True),
+                     fromfile="a/src/llama-model-loader.cpp", tofile="b/src/llama-model-loader.cpp"))
+    require(patch.encode() == patch_path.read_bytes(), "NATIVE_LOADER_PATCH_SHAPE")
+    result = after.encode("utf-8")
+    require(hashlib.sha256(result).hexdigest() == native.LOADER_EFFECTIVE_SHA, "NATIVE_LOADER_EFFECTIVE")
+    return result
+
+
+def stage_loader(source, output):
+    data = patched_loader(source)
+    overlay = output / "loader-overlay"
+    overlay.mkdir(mode=0o700)
+    target = overlay / "llama-model-loader.cpp"
+    with target.open("xb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    target.chmod(0o444)
+    return target
+
+
+def verify_loader_compilation(output, loader):
+    path = output / "build/compile_commands.json"
+    require(digest(path)["bytes"] <= 16 * 1024 * 1024, "NATIVE_COMPILE_DATABASE_BOUND")
+    entries = json.loads(path.read_bytes())
+    require(type(entries) is list and 1 <= len(entries) <= 4096, "NATIVE_COMPILE_DATABASE_SHAPE")
+    matches = [Path(row["file"]) for row in entries if Path(row["file"]).name == loader.name]
+    require(matches == [loader] and not loader.is_symlink()
+            and digest(loader)["sha256"] == native.LOADER_EFFECTIVE_SHA, "NATIVE_COMPILED_LOADER")
+
+
+def stage_loader_checks(loader):
+    """Source-derived toy check: actual launch/join statements, never a model."""
+    require(digest(loader)["sha256"] == native.LOADER_EFFECTIVE_SHA, "NATIVE_LOADER_EFFECTIVE")
+    source = loader.read_text(encoding="utf-8")
+    launches = re.findall(r"validation_result\.emplace_back\(std::async\(std::launch::deferred,[\s\S]*?\}\)\);", source)
+    require(len(launches) == 2, "NATIVE_LOADER_CHECK_SHAPE")
+    start = source.index("    // check validation results\n")
+    end = source.index("    // check if this is the last call and do final cleanup\n", start)
+    fragments = dict(mapped=launches[0], host=launches[1], join=source[start:end])
+    for name, fragment in fragments.items():
+        path = loader.parent / ("validation-" + name + ".inc")
+        with path.open("x", encoding="utf-8") as stream:
+            stream.write(fragment + "\n")
+        path.chmod(0o444)
 
 
 def dependencies(raw):
@@ -94,12 +164,18 @@ def build(source, output, execute=False, checks=False, sanitize=False):
     for tool in ("cmake", "c++", "cc", "readelf", "nice"):
         require(shutil.which(tool), "NATIVE_BUILD_TOOL_MISSING")
     require(not sanitize or checks, "NATIVE_SANITIZER_REQUIRES_CHECKS")
+    patched_loader(source)
     plan = {"kind": KIND, "source_commit": SOURCE, "source_tree": tree,
             "sanitizers": sanitize, "provisionable": not sanitize,
+            "source_overlay": native.loader_provenance(),
             "jobs": 2, "models_loaded": False, "downloads": False, "install": False}
     if not execute:
         return plan
+    wrapper_sources = {name: digest(HERE / "native-cpu" / name) for name in WRAPPER_FILES}
     output.mkdir(mode=0o700)
+    loader = stage_loader(source, output)
+    if checks:
+        stage_loader_checks(loader)
     started = time.monotonic()
     env = dict(os.environ)
     # Avoid inherited compiler/linker/pkgconfig overrides or arbitrary preload code.
@@ -112,6 +188,7 @@ def build(source, output, execute=False, checks=False, sanitize=False):
     commands = [
         ["cmake", "-S", str(HERE / "native-cpu"), "-B", str(output / "build"),
          "-DVP_LLAMA_SOURCE=" + str(source), "-DCMAKE_BUILD_TYPE=Release",
+         "-DVP_LLAMA_MODEL_LOADER=" + str(loader), "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
          "-DVP_NATIVE_TESTS=" + ("ON" if checks else "OFF"),
          "-DVP_NATIVE_SANITIZE=" + ("ON" if sanitize else "OFF")],
         ["cmake", "--build", str(output / "build"), "--target", "volparossa_llama_cpu",
@@ -123,6 +200,9 @@ def build(source, output, execute=False, checks=False, sanitize=False):
             require(remaining > 0, "NATIVE_BUILD_DEADLINE")
             run_build(args, log, env, remaining)
     require(verify_source(source) == tree, "NATIVE_SOURCE_CHANGED")
+    require(wrapper_sources == {name: digest(HERE / "native-cpu" / name) for name in WRAPPER_FILES},
+            "NATIVE_WRAPPER_CHANGED_DURING_BUILD")
+    verify_loader_compilation(output, loader)
     candidates = list((output / "build").rglob(LIBRARY))
     require(len(candidates) == 1, "NATIVE_LIBRARY_OUTPUT")
     library = output / LIBRARY
@@ -165,7 +245,8 @@ def build(source, output, execute=False, checks=False, sanitize=False):
     require(runtime_notice.is_file(), "NATIVE_TOOLCHAIN_NOTICE")
     shutil.copyfile(runtime_notice, licenses / "GCC-runtime-copyright")
     (licenses / "GCC-runtime-copyright").chmod(0o444)
-    report = dict(plan, version=1, abi_version=1, library={"path": LIBRARY, **digest(library)},
+    report = dict(plan, version=2, abi_version=1, library={"path": LIBRARY, **digest(library)},
+                  upstream_original_unchanged=True, loader_compile_source_verified=True,
                   dynamic_dependencies=needed, cpu="avx2_fma_f16c", quantization=False,
                   checks=list(CHECK_TARGETS) if checks else [],
                   known_upstream_sanitizer_failure={
@@ -174,8 +255,7 @@ def build(source, output, execute=False, checks=False, sanitize=False):
                       "function": "ggml_vec_dot_q1_0_q8_0", "original_log_bytes": 412,
                       "original_log_sha256": "37e07701e4f9a7fadbee0876f77d7eb034192e951a4cd2da572606255bf84f08"},
                   static_runtime_archives=runtime_archives, runtime_notice=digest(runtime_notice),
-                  wrapper_sources={name: digest(HERE / "native-cpu" / name)
-                                   for name in ("CMakeLists.txt", "adapter.h", "adapter.cpp")},
+                  wrapper_sources=wrapper_sources,
                   tool_versions={tool: command([tool, "--version"]).decode().splitlines()[0]
                                  for tool in ("cmake", "c++", "cc")})
     write_json(output / "build.json", report)

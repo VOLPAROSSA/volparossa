@@ -17,12 +17,37 @@ import threading
 
 KIND = "llama_cpp_bf16_v1"
 SOURCE = "7fe450e19305b828c199d602c23a8337aaa1f03b"
+SOURCE_TREE = "fd570ef54b10ec5fecb739e7e04c8ce44a6f415a"
+LOADER_ORIGINAL_SHA = "efdb5f273bd1ab77301f2cadea1a5a804bafb28040aca033e45605a97a450242"
+LOADER_EFFECTIVE_SHA = "fcd26ea4ae21ea04954b275287c41a35e383015b736bbbe2e68f2ab5f6d095f9"
+LOADER_PATCH_SHA = "388fff7d5d9ca812abfeb27fddd1629144b7de6284e4bf685fbc8c147891e8c1"
 PROFILE = "qwen3-4b-instruct-2507-v1"
 LIBRARY = "libvolparossa_llama_cpu.so"
 WEIGHTS_SHA = "79f6bbc34572c0063d12022f0f93074d90bbcd5dfd82134423bf892f7f8df3cf"
 WEIGHTS_BYTES = 8044982000
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 ABORT = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.c_void_p)
+
+
+def loader_provenance():
+    return dict(kind="serial_complete_tensor_validation_v1", original_path="src/llama-model-loader.cpp",
+                original_sha256=LOADER_ORIGINAL_SHA, effective_sha256=LOADER_EFFECTIVE_SHA,
+                patch_path="native-cpu/bounded-tensor-validation.patch", patch_sha256=LOADER_PATCH_SHA,
+                compiled_source="loader-overlay/llama-model-loader.cpp", validation_execution_threads=1,
+                complete_tensor_validation=True, owner_poll_between_tensors=True)
+
+
+def validate_build_provenance(value, require):
+    # Build manifest v2 distinguishes the effective loader from clean upstream.
+    # ABI v1 is retained; old unpatched build manifests are not silently adopted.
+    overlay = value.get("source_overlay") if type(value) is dict else None
+    require(type(value) is dict and type(value.get("version")) is int and value["version"] == 2
+            and value.get("source_commit") == SOURCE and value.get("source_tree") == SOURCE_TREE
+            and type(overlay) is dict and overlay == loader_provenance()
+            and type(overlay["validation_execution_threads"]) is int
+            and overlay["complete_tensor_validation"] is True and overlay["owner_poll_between_tensors"] is True
+            and value.get("loader_compile_source_verified") is True
+            and value.get("upstream_original_unchanged") is True, "NATIVE_BUILD_PATCH_BINDING")
 
 
 def validate_manifest(value, require):
@@ -71,7 +96,8 @@ def verified_bundle(request, worker, tokenizer, session):
     build = worker.read_bounded(root / "build.json", 65536)
     require(hashlib.sha256(build).hexdigest() == value["build_manifest_sha256"], "NATIVE_BUILD_DIGEST")
     provenance = worker.parse_json(build)
-    require(type(provenance) is dict and provenance.get("version") == 1
+    validate_build_provenance(provenance, require)
+    require(type(provenance) is dict
             and provenance.get("kind") == KIND and provenance.get("source_commit") == SOURCE
             and provenance.get("abi_version") == 1 and provenance.get("cpu") == "avx2_fma_f16c"
             and provenance.get("provisionable") is True and provenance.get("sanitizers") is False
@@ -150,6 +176,7 @@ class NativeModel:
         signatures = {
             "vp_llama_abi_v1": (ctypes.c_uint32, []),
             "vp_llama_source_v1": (ctypes.c_char_p, []),
+            "vp_llama_open_stage_v1": (ctypes.c_uint32, []),
             "vp_llama_open_v1": (ctypes.c_int32, [ctypes.c_char_p, ctypes.c_uint32, ctypes.c_uint32,
                 ABORT, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]),
             "vp_llama_decode_v1": (ctypes.c_int32, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32), ctypes.c_uint32]),
@@ -157,7 +184,11 @@ class NativeModel:
             "vp_llama_close_v1": (None, [ctypes.c_void_p]),
         }
         for name, (result, arguments) in signatures.items():
-            function = getattr(self.lib, name)
+            try:
+                function = getattr(self.lib, name)
+            except AttributeError as error:
+                require(False, "NATIVE_ABI_MISMATCH")
+                raise error  # require always raises; no incomplete ABI can proceed.
             function.restype, function.argtypes = result, arguments
         require(self.lib.vp_llama_abi_v1() == 1 and self.lib.vp_llama_source_v1() == SOURCE.encode(),
                 "NATIVE_ABI_MISMATCH")
@@ -165,7 +196,14 @@ class NativeModel:
             status = self.lib.vp_llama_open_v1(str(root / "model.gguf").encode(), capacity, threads,
                                              probe.callback, None, ctypes.byref(self.handle))
             probe.joined()
-            require(status == 0 and self.handle.value is not None, "NATIVE_MODEL_LOAD_FAILED")
+            stage = self.lib.vp_llama_open_stage_v1()
+            codes = {1: "NATIVE_OPEN_INVALID_ARGUMENT", 2: "NATIVE_CPU_UNSUPPORTED",
+                     3: "NATIVE_BACKEND_INITIALIZATION_FAILED", 4: "NATIVE_MODEL_INITIALIZATION_FAILED",
+                     5: "NATIVE_VOCABULARY_MISMATCH", 6: "NATIVE_CONTEXT_INITIALIZATION_FAILED",
+                     7: "NATIVE_SAMPLER_INITIALIZATION_FAILED", 8: "NATIVE_MODEL_LOAD_FAILED"}
+            require(type(stage) is int and stage in codes, "NATIVE_OPEN_DIAGNOSTIC_INVALID")
+            require(status == 0 and self.handle.value is not None, codes[stage])
+            require(stage == 8, "NATIVE_OPEN_DIAGNOSTIC_INVALID")
         except BaseException:
             self.close()
             raise

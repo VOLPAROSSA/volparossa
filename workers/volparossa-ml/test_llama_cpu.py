@@ -396,7 +396,9 @@ class NativeCpuTests(unittest.TestCase):
             for field, data in (("library", b"inert-not-an-executable"), ("gguf", b"inert-not-a-model")):
                 (root / value[field]["path"]).write_bytes(data)
                 value[field].update(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
-            provenance = {"version": 1, "abi_version": 1, "kind": native.KIND, "source_commit": native.SOURCE,
+            provenance = {"version": 2, "abi_version": 1, "kind": native.KIND, "source_commit": native.SOURCE,
+                          "source_tree": native.SOURCE_TREE, "source_overlay": native.loader_provenance(),
+                          "loader_compile_source_verified": True, "upstream_original_unchanged": True,
                           "cpu": "avx2_fma_f16c", "library": value["library"], "provisionable": True,
                           "sanitizers": False, "quantization": False}
             build_raw = json.dumps(provenance).encode()
@@ -566,6 +568,7 @@ class NativeCpuTests(unittest.TestCase):
         library = mock.Mock()
         library.vp_llama_abi_v1.return_value = 1
         library.vp_llama_source_v1.return_value = native.SOURCE.encode()
+        library.vp_llama_open_stage_v1.return_value = 8
         def allocate(_path, _capacity, _threads, _callback, _opaque, out):
             out._obj.value = 123
             return 0
@@ -582,6 +585,102 @@ class NativeCpuTests(unittest.TestCase):
             model = native.NativeModel(Path("/native-backend"), 5600, 2, owner, WORKER.require)
             model.close(); model.close()
         library.vp_llama_close_v1.assert_called_once()
+
+    def test_abi_requires_closed_open_stage_even_when_existing_abi_version_matches(self):
+        codes = {1: "NATIVE_OPEN_INVALID_ARGUMENT", 2: "NATIVE_CPU_UNSUPPORTED",
+                 3: "NATIVE_BACKEND_INITIALIZATION_FAILED", 4: "NATIVE_MODEL_INITIALIZATION_FAILED",
+                 5: "NATIVE_VOCABULARY_MISMATCH", 6: "NATIVE_CONTEXT_INITIALIZATION_FAILED",
+                 7: "NATIVE_SAMPLER_INITIALIZATION_FAILED", 8: "NATIVE_MODEL_LOAD_FAILED"}
+        for stage, expected in [*codes.items(), (0, "NATIVE_OPEN_DIAGNOSTIC_INVALID"),
+                                (9, "NATIVE_OPEN_DIAGNOSTIC_INVALID"),
+                                (True, "NATIVE_OPEN_DIAGNOSTIC_INVALID")]:
+            with self.subTest(stage=stage):
+                library = mock.Mock()
+                library.vp_llama_abi_v1.return_value = 1
+                library.vp_llama_source_v1.return_value = native.SOURCE.encode()
+                library.vp_llama_open_stage_v1.return_value = stage
+                library.vp_llama_open_v1.return_value = 3
+                with mock.patch.object(native.ctypes, "CDLL", return_value=library), \
+                        self.assertRaisesRegex(WORKER.JobError, expected):
+                    native.NativeModel(Path("/inert"), 16, 2, mock.Mock(), WORKER.require)
+                library.vp_llama_decode_v1.assert_not_called()
+                library.vp_llama_close_v1.assert_not_called()
+        # An older ABI1 library cannot silently use the new patched provenance.
+        library = SimpleNamespace(vp_llama_abi_v1=mock.Mock(return_value=1),
+                                  vp_llama_source_v1=mock.Mock(return_value=native.SOURCE.encode()))
+        with mock.patch.object(native.ctypes, "CDLL", return_value=library), \
+                self.assertRaisesRegex(WORKER.JobError, "NATIVE_ABI_MISMATCH"):
+            native.NativeModel(Path("/inert"), 16, 2, mock.Mock(), WORKER.require)
+
+    def test_success_handle_with_wrong_open_stage_is_rejected_and_closed(self):
+        library = mock.Mock()
+        library.vp_llama_abi_v1.return_value = 1
+        library.vp_llama_source_v1.return_value = native.SOURCE.encode()
+        library.vp_llama_open_stage_v1.return_value = 4
+        def allocate(_path, _capacity, _threads, _callback, _opaque, out):
+            out._obj.value = 123
+            return 0
+        library.vp_llama_open_v1.side_effect = allocate
+        with mock.patch.object(native.ctypes, "CDLL", return_value=library), \
+                self.assertRaisesRegex(WORKER.JobError, "NATIVE_OPEN_DIAGNOSTIC_INVALID"):
+            native.NativeModel(Path("/inert"), 16, 2, mock.Mock(), WORKER.require)
+        library.vp_llama_close_v1.assert_called_once()
+
+    def test_effective_loader_provenance_rejects_old_or_ambiguous_builds(self):
+        value = dict(version=2, source_commit=native.SOURCE, source_tree=native.SOURCE_TREE,
+                     source_overlay=native.loader_provenance(), loader_compile_source_verified=True,
+                     upstream_original_unchanged=True)
+        native.validate_build_provenance(value, WORKER.require)
+        for key, bad in (("version", 1), ("source_tree", "0" * 40), ("source_commit", "0" * 40),
+                         ("loader_compile_source_verified", 1), ("upstream_original_unchanged", False)):
+            with self.subTest(key=key), self.assertRaisesRegex(WORKER.JobError, "NATIVE_BUILD_PATCH_BINDING"):
+                native.validate_build_provenance(dict(value, **{key: bad}), WORKER.require)
+        for key, bad in (("validation_execution_threads", True), ("complete_tensor_validation", 1),
+                         ("owner_poll_between_tensors", 1), ("effective_sha256", native.LOADER_ORIGINAL_SHA),
+                         ("original_sha256", "0" * 64), ("patch_sha256", "0" * 64),
+                         ("compiled_source", "src/llama-model-loader.cpp")):
+            changed = copy.deepcopy(value)
+            changed["source_overlay"][key] = bad
+            with self.subTest(key=key), self.assertRaisesRegex(WORKER.JobError, "NATIVE_BUILD_PATCH_BINDING"):
+                native.validate_build_provenance(changed, WORKER.require)
+
+    def test_compilation_must_use_exact_staged_loader_not_clean_upstream(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "build").mkdir()
+            loader = root / "llama-model-loader.cpp"
+            loader.write_bytes(b"inert-source")
+            commands = root / "build/compile_commands.json"
+            commands.write_text(json.dumps([{"file": str(loader)}]))
+            with mock.patch.object(native, "LOADER_EFFECTIVE_SHA", hashlib.sha256(b"inert-source").hexdigest()):
+                builder.verify_loader_compilation(root, loader)
+                for rows in ([{"file": "/unmodified/llama-model-loader.cpp"}], [],
+                             [{"file": str(loader)}, {"file": str(loader)}]):
+                    commands.write_text(json.dumps(rows))
+                    with self.assertRaises(ValueError):
+                        builder.verify_loader_compilation(root, loader)
+                commands.write_text(json.dumps([{"file": str(loader)}]))
+                loader.write_bytes(b"changed-source")
+                with self.assertRaisesRegex(ValueError, "NATIVE_COMPILED_LOADER"):
+                    builder.verify_loader_compilation(root, loader)
+
+    def test_patch_identity_and_fresh_staging_never_overwrite_existing_source(self):
+        patch = builder.HERE / "native-cpu/bounded-tensor-validation.patch"
+        self.assertEqual(builder.digest(patch)["sha256"], native.LOADER_PATCH_SHA)
+        text = patch.read_text()
+        self.assertEqual(text.count("+                validation_result.emplace_back(std::async(std::launch::deferred,"), 1)
+        self.assertEqual(text.count("+                    validation_result.emplace_back(std::async(std::launch::deferred,"), 1)
+        self.assertNotIn("-                    return std::make_pair", text)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(builder, "patched_loader", return_value=b"inert-source"):
+                loader = builder.stage_loader(root / "original", root)
+                self.assertEqual(loader.read_bytes(), b"inert-source")
+                self.assertEqual(stat.S_IMODE(loader.stat().st_mode), 0o444)
+                self.assertEqual(stat.S_IMODE(loader.parent.stat().st_mode), 0o700)
+                with self.assertRaises(FileExistsError):
+                    builder.stage_loader(root / "original", root)
+                self.assertEqual(loader.read_bytes(), b"inert-source")
 
     def test_native_execute_rejects_implicit_sampling_before_any_library_or_model_load(self):
         bridge = mock.Mock()

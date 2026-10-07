@@ -9,13 +9,31 @@ for the license text shipped by each upstream project.
 The opt-in CPU backend uses [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)
 at exact commit `7fe450e19305b828c199d602c23a8337aaa1f03b` (resolved release tag
 `v0.5.0`; MIT). The tag is unsigned. No prebuilt upstream executable, server,
-GPU backend or implicit artifact download is used. Original code is unpatched;
-the GPL-3.0-only adapter exposes a fixed owned C ABI and source-build flags.
+GPU backend or implicit artifact download is used. The original checkout remains
+unchanged; the build applies the explicitly recorded loader-only patch below to
+a fresh staged copy. The GPL-3.0-only adapter exposes a fixed owned C ABI and
+source-build flags.
 The builder preserves tracked upstream licenses/notices, including ggml and
 the Mozilla tinyBLAS notice, unchanged in the generated artifact.
 Static GCC runtime archives retain measured hashes and the original Debian GCC
 copyright/runtime-exception notice; compiler versions are recorded, not silently
 treated as upstream llama.cpp source or reproducible-build proof.
+
+`workers/volparossa-ml/native-cpu/bounded-tensor-validation.patch` changes both
+asynchronous tensor-validation launches to deferred, single-thread execution and
+polls the existing cancellation callback between validation results. It preserves
+every tensor check, error aggregation and final completion callback. The MIT
+upstream code and notices retain their original license; the surrounding owned
+adapter and test harness remain GPL-3.0-only. Build manifest v2 records the clean
+tree `fd570ef54b10ec5fecb739e7e04c8ce44a6f415a` and these SHA-256 digests:
+
+- Original `src/llama-model-loader.cpp`: `efdb5f273bd1ab77301f2cadea1a5a804bafb28040aca033e45605a97a450242`.
+- Patch: `388fff7d5d9ca812abfeb27fddd1629144b7de6284e4bf685fbc8c147891e8c1`.
+- Effective staged loader: `fcd26ea4ae21ea04954b275287c41a35e383015b736bbbe2e68f2ab5f6d095f9`.
+
+The builder verifies that the compilation database selects exactly the staged
+loader. It rejects changed source/patch bytes and retains the clean upstream
+checkout and original notices. This is a local patch, not an upstream release.
 
 The separate offline conversion candidate starts only from the existing pinned
 Apache-2.0 `Qwen/Qwen3-4B-Instruct-2507` revision

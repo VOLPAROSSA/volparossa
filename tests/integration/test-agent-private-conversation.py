@@ -251,6 +251,23 @@ class FixtureTests(unittest.TestCase):
         self.assertIn('--property=StandardOutput=append:{diagnostic_log}', fixture)
         self.assertIn('--property=StandardError=append:{diagnostic_log}', fixture)
 
+    def test_native_load_diagnostics_preserve_only_closed_phases(self):
+        codes = {code for code in FIX['SERVICE_CODES'] if 'NATIVE' in code}
+        self.assertEqual(len(codes), 13)
+        events = [dict(version=1, phase='execution', detail=dict(code=code, io_kind='none',
+            exit_code=None, signal=None, stderr_class=None)) for code in sorted(codes)]
+        with tempfile.TemporaryDirectory(prefix='native-diagnostic-test-', dir=HERE) as directory:
+            path = Path(directory) / 'private.log'
+            unknown = dict(events[0], detail=dict(events[0]['detail'], code='NATIVE_PRIVATE_CANARY'))
+            path.write_text(''.join('DEBUG private_execution_diagnostic ' + json.dumps(event) + '\n'
+                for event in [*events, unknown]))
+            path.chmod(0o600)
+            result = FIX['service_diagnostic'](path)
+            self.assertEqual(result['events'], events)
+            self.assertTrue(result['unrecognized_record'])
+            self.assertFalse(result['truncated'])
+            self.assertNotIn('CANARY', json.dumps(result))
+
     def test_terminal_execution_state_distinguishes_gate_pause_from_completed_model_load(self):
         value = dict(version=1, last_phase='paused', substage=dict(stage='owner_gate', state='begin', elapsed_ms=0),
             capacity=dict(decision='pause', constraint='cpu', cpu_some_avg10=24.5, io_some_avg10=0.0,

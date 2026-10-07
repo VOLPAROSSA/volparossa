@@ -314,14 +314,16 @@ def execute(args, progress=None):
     build_raw = (build_root / "build.json").read_bytes()
     builder.require(len(build_raw) <= 65536, "NATIVE_BUILD_MANIFEST_BOUND")
     build = json.loads(build_raw)
-    builder.require(build["version"] == 1 and build["source_commit"] == builder.SOURCE
+    native.validate_build_provenance(build, builder.require)
+    builder.verify_loader_compilation(build_root, build_root / "loader-overlay/llama-model-loader.cpp")
+    builder.require(build["source_commit"] == builder.SOURCE
                     and build["kind"] == native.KIND and build["abi_version"] == 1
                     and build["quantization"] is False and build["provisionable"] is True
                     and build["sanitizers"] is False and build["library"]["path"] == native.LIBRARY
                     and set(build["dynamic_dependencies"]) <= builder.ALLOWED_NEEDED,
                     "NATIVE_BUILD_MANIFEST")
     builder.require(build["wrapper_sources"] == {name: builder.digest(HERE / "native-cpu" / name)
-                    for name in ("CMakeLists.txt", "adapter.h", "adapter.cpp")}, "NATIVE_WRAPPER_SOURCE_BINDING")
+                    for name in builder.WRAPPER_FILES}, "NATIVE_WRAPPER_SOURCE_BINDING")
     library = build_root / native.LIBRARY
     builder.require(builder.digest(library) == {key: build["library"][key] for key in ("bytes", "sha256")},
                     "NATIVE_LIBRARY_PIN")

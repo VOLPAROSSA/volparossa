@@ -164,6 +164,51 @@ job `112826781182` log SHA-256:
 `ef7d5c7bbeeebf497ec9a42881746a782b36f7c7bddc9febef11d7af373cb44f`.
 All earlier failed trials and their consumed dispatch receipts remain preserved.
 
+The owner-responsive verification [trial 37641148934](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/37641148934),
+attempt 1 on Code `d48801a6` / core `773d6377`, also **fails**. Source build,
+conversion and provisioning pass with the same full BF16 model. The retained
+state now records all 20 issued controls acknowledged and reaches
+`model_load/begin`, but ends with the closed `worker_other` diagnostic. The
+receipt does not identify the native load failure's exact cause; no native turn,
+tool call or coding task completes. Six failed runtime requests have confirmed
+cleanup. Core cgroup peak is 8,106,295,296 bytes against 11 GiB, with zero swap
+and OOM kills. Reported owned-unit, process, private-data, QEMU and scratch
+cleanup passes. Normalized route/DNS observations match; raw IPv6 route bytes
+differ in the excluded counter column, so byte-identical host snapshots are not
+claimed for this run. No raw model output was exported.
+
+Original artifact `11492792961` ZIP SHA-256:
+`b2621c8918f1304848fcc4a7b9e736fab2379cdf19c29de9ab11606e5c9e9cfc`;
+job `112860150266` log SHA-256:
+`4e32650af9e373e5e28ec93663777f1fe833feee419a5fe604fcfdfa6b7ec438`.
+The consumed one-shot helper and receipts remain unchanged. Progress beyond
+file verification is not successful model loading or inference.
+
+Source inspection found that the upstream loader starts one asynchronous
+validation task per tensor, independently of the two-thread inference limit.
+The new loader-only patch defers both validation paths to one execution thread
+and polls the existing owner callback between tensors. It preserves all checks,
+error aggregation and the final completion callback; cancellation rejects the
+entire load. This removes a demonstrated source hazard, not a uniquely proved
+cause of the historical failure. A single tensor check remains non-interruptible.
+
+The original checkout and notices remain unchanged. Build manifest v2 binds the
+original tree, patch and effective loader digests and verifies the staged source
+in the compilation database. Old build manifests and absent diagnostic accessors
+are refused. Native errors now retain only fixed model/vocabulary/context/sampler
+phase codes through the worker, core and fixture; private exception text remains
+excluded. A fresh source-only build passes four check targets, including 398 tiny
+F32 validations through both actual patched launch paths, invalid-tensor rejection
+after complete checking, cancellation and fresh retry. Its build manifest SHA-256
+is `884bdbd00ad7cbcf1211b468d2835bf1e4b9edee2081cb6758712b3703ed0769`;
+check log SHA-256 is
+`adf689f10f35ebdeaf42f47d997e3496809f1683788d7dd7eacb1085622a5510`.
+One hundred twenty-five focused worker tests and twenty-one diagnostic-fixture
+tests pass, independently repeated by root. No patched model-loading or inference
+trial has run, and no resource limit or task has been relaxed.
+The fixed-code Rust diagnostic test also passes on CI's Rust 1.85. Independent
+source review and a repeat of the actual tiny validation harness found no blocker.
+
 Native sanitizer evidence is mixed and remains explicit: the owned ABI smoke
 passes, but the unchanged upstream all-type tensor test **fails** under UBSan on
 an unaligned `uint32_t` load in the Q1_0/Q8_0 dot product. That quantized path is
