@@ -77,7 +77,7 @@ are not interchangeable**, and private data is not automatically training materi
 | Storage | Retain encrypted private files with recovery copies and reciprocal capacity. |
 | Compute | Share suitable work, models and learning across participating devices. |
 
-A fifth **Transaction-layer is being researched**, separately from these services.
+A fifth **Transaction-layer is being developed with fictitious test value**, separately from these services.
 It is not yet an operational payment or banking facility.
 
 <a id="one-network-many-paths"></a>
@@ -253,8 +253,11 @@ application proposes participant-owned portfolios weighted by nonnegative
 Reusable authorization, reservations, settlement status and dispute handling
 belong in the core; investment methodology and presentation belong in Bank.
 
-Only isolated arithmetic and transaction-state research are being developed.
-There is no live bank, trading service or financial gateway. The immune system
+Research and test-value implementations are the first steps toward a working
+core service, not the final deliverable. There is no live bank, trading service
+or financial gateway. The first durable core module supports signed test-unit
+reservations, transfers and cancellation with safe retries after restart; it is
+not yet distributed settlement. The immune system
 should help detect abuse without exposing everyone's finances, but cannot
 guarantee lawful transactions or recover money after every external transfer.
 Financial participation remains separate from contributing network resources.

@@ -123,7 +123,7 @@ and tolerances; its 18 F32 vector cases and three BF16 checks pass (log SHA-256
 This is scoped kernel evidence, not a passing complete upstream suite or model
 inference. Sanitized build artifacts cannot be provisioned as production models.
 
-### Bank and Transaction layer research
+### Bank and Transaction layer implementation
 
 The 2026-10-04 user extension adds VOLPAROSSA Bank and a reusable Transaction-layer.
 The [design](services/TRANSACTION_LAYER.md) separates portfolio construction,
@@ -132,7 +132,9 @@ and authorized corrections. Research prototypes are isolated from the daemon;
 they accept no real funds and provide no distributed or cryptographic settlement.
 Live payments, custody, financial gateway integration, confidential AML review,
 price discovery and recovery of forwarded funds remain unimplemented. Research
-tests do not satisfy these functional requirements.
+tests do not satisfy these functional requirements. Research is a first stage,
+not the requested endpoint: the core is required to provide working reusable
+transaction infrastructure and the Bank application must connect to it.
 
 Nine offline transaction-state tests pass: exact integer conservation, scoped
 simulation authority, reservations, duplicate IDs, external uncertainty, bounded
@@ -141,6 +143,60 @@ All state and authority are single-process test inputs; restart-safe idempotency
 distributed consensus and actual recovery are not proved. The separate Bank
 arithmetic prototype has nine passing tests for the confirmed ROIC × FCF-yield
 rule and configured ownership headroom, not investment performance or compliance.
+
+The new `volparossa-transaction` workspace crate implements owner-local durable
+accounting with separately enrolled Ed25519 financial test keys, canonical signed
+commands, exact integer TEST units, reserve/commit/cancel and historical receipts.
+The accepted original bytes, permanent operation ID/nonce, balances and receipt
+are committed atomically in SQLite. Exact retries after reopening return the
+original receipt without another debit, including after the command expires.
+Completion slots are reserved so exhausting the journal cannot strand already
+accepted reservations. No production daemon endpoint or real-asset adapter is
+enabled; a local database and signatures are not distributed consensus.
+
+Ten targeted tests pass, independently repeated by root: two conflicting local
+writers; invalid signature/payer/domain/encoding; durable ID/nonce conflicts;
+maximum integer supply; private files/sidecars; 512 reserves followed by all 512
+completions; and actual subprocess kills both before and after SQLite commit,
+with reopen and exact retry. The one marked-ignored test is the child entrypoint
+actually invoked by the crash test, not a skipped functional requirement.
+The locked/offline all-target compile passes. The real offline example separately
+passes reserve, commit, cancel and two reopens, ending with 30/70 available units
+and zero reserved; reusing its directory is refused without changing the database.
+Directory/database modes are 0700/0600. Independent bounded source review found
+no blocker. A read-only `Store::inspect` API verifies signed command terms and
+payer enrollment for application retry journals without duplicating the wire
+parser. It does not admit a command, consume a nonce or bypass `apply` checks.
+Its test covers wrong-ledger/unenrolled/forged commands, unchanged balances and
+expired but inspectable terms; `ledger_id` exposes the exact local store domain.
+
+The original source CI at `62aafe025151894b4f37ca23962028fd339ba6b0`
+(`37238682954`, job `111542803602`) stopped on two Clippy documentation-format
+errors before workspace tests ran. The original log is retained (SHA-256
+`03a9d0da90c958841ff03d49a6974ce4221f38abc94189fbc355bb47a294b550`).
+The same documentation spelling is corrected in the test module as well.
+
+The same original commit's CodeQL gate reported 23 hard-coded-nonce findings:
+22 originate in synthetic test fixtures and one in an example's zero-initialized
+buffer that was already fully overwritten by `OsRng`. The original annotation
+report is retained (SHA-256
+`9f129b1ea233f1d26e025f8267e8dac5982958a76f6eac908e51231219060889`).
+Tests now generate fresh CSPRNG nonces and explicitly retain the same nonce or
+signed bytes for replay, capacity and subprocess recovery checks. The example
+constructs its random bytes directly. No query is suppressed and no protocol or
+authorization checks are relaxed. All ten targeted tests pass with these fixtures.
+
+The corrected source at `4619c1c10ff1bbad8b226c5fc801615a0d2c4758` passes
+[Quality CI](https://github.com/VOLPAROSSA/volparossa/actions/runs/37240279419/job/111547503875),
+including the workspace source gates, and all four
+[CodeQL analyses](https://github.com/VOLPAROSSA/volparossa/actions/runs/37240276888).
+The routine KVM job was skipped; these checks add no distributed settlement or
+network-datapath evidence. The original failed runs remain failure evidence.
+
+This durable slice has no network, gateway, encryption at rest, consensus,
+distributed finality, external reconciliation, corrections or AML capability.
+The older isolated experiment's simulated external/correction operations are not
+features of the durable API. See the [executable core example](services/TRANSACTION_LAYER.md#durable-test-unit-core).
 
 ### Eligible controls in route preselection
 
