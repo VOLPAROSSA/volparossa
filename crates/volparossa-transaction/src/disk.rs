@@ -1,10 +1,11 @@
 //! Private files and `SQLite` atomicity, following private-storage's existing patterns.
 use crate::{
-    Error, GenesisAccount, LedgerId, MAX_ACCOUNTS, MAX_OPERATIONS, MAX_UNITS, Store, TEST_UNIT,
+    Error, GenesisAccount, LedgerId, MAX_ACCOUNTS, MAX_OPERATIONS, MAX_UNITS, Mode, Store,
+    TEST_UNIT,
 };
 use ed25519_dalek::VerifyingKey;
 use rusqlite::{Connection, OpenFlags, params};
-use rustix::fs::{Mode, OFlags};
+use rustix::fs::{Mode as FileMode, OFlags};
 use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
@@ -15,6 +16,7 @@ use std::{
 
 const FILE: &str = "test-transactions.sqlite3";
 const APP: i32 = 0x5650_5431;
+const ORDERED_APP: i32 = 0x5650_5432;
 
 fn directory(path: &Path) -> Result<File, Error> {
     if !path.is_absolute() || path.as_os_str().len() > 4096 || path.canonicalize()? != path {
@@ -24,7 +26,7 @@ fn directory(path: &Path) -> Result<File, Error> {
         rustix::fs::open(
             path,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
+            FileMode::empty(),
         )
         .map_err(std::io::Error::from)?,
     );
@@ -40,7 +42,7 @@ fn private_file(path: &Path) -> Result<File, Error> {
         rustix::fs::open(
             path,
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            Mode::empty(),
+            FileMode::empty(),
         )
         .map_err(std::io::Error::from)?,
     );
@@ -105,6 +107,16 @@ pub(super) fn create(
     ledger: LedgerId,
     accounts: &[GenesisAccount],
 ) -> Result<Store, Error> {
+    create_mode(path, ledger, accounts, Mode::Local, |_| Ok(()))
+}
+
+pub(super) fn create_mode(
+    path: &Path,
+    ledger: LedgerId,
+    accounts: &[GenesisAccount],
+    mode: Mode,
+    initialize: impl FnOnce(&Connection) -> Result<(), Error>,
+) -> Result<Store, Error> {
     if !path.is_absolute()
         || ledger == [0; 32]
         || accounts.is_empty()
@@ -137,13 +149,16 @@ pub(super) fn create(
         .sync_all()?;
     let mut db = connection(path, &root)?;
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    tx.execute_batch("CREATE TABLE meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1),ledger BLOB NOT NULL CHECK(length(ledger)=32),unit TEXT NOT NULL,supply INTEGER NOT NULL CHECK(supply>=0)) STRICT;
-        CREATE TABLE accounts(owner BLOB PRIMARY KEY CHECK(length(owner)=32),available INTEGER NOT NULL CHECK(available>=0),reserved INTEGER NOT NULL CHECK(reserved>=0)) STRICT;
-        CREATE TABLE reservations(id BLOB PRIMARY KEY CHECK(length(id)=32),payer BLOB NOT NULL REFERENCES accounts(owner),recipient BLOB NOT NULL REFERENCES accounts(owner),units INTEGER NOT NULL CHECK(units>0),state INTEGER NOT NULL CHECK(state IN (1,2,3))) STRICT;
-        CREATE TABLE operations(sequence INTEGER PRIMARY KEY CHECK(sequence>0),id BLOB UNIQUE NOT NULL CHECK(length(id)=32),signer BLOB NOT NULL REFERENCES accounts(owner),nonce BLOB NOT NULL CHECK(length(nonce)=32),signed BLOB NOT NULL CHECK(length(signed) BETWEEN 1 AND 4096),hash BLOB NOT NULL CHECK(length(hash)=32),reservation BLOB NOT NULL REFERENCES reservations(id),state INTEGER NOT NULL CHECK(state IN (1,2,3)),UNIQUE(signer,nonce)) STRICT;
-        CREATE TRIGGER operations_no_update BEFORE UPDATE ON operations BEGIN SELECT RAISE(ABORT,'immutable receipt'); END;
-        CREATE TRIGGER operations_no_delete BEFORE DELETE ON operations BEGIN SELECT RAISE(ABORT,'immutable receipt'); END;")?;
-    tx.pragma_update(None, "application_id", APP)?;
+    schema(&tx)?;
+    tx.pragma_update(
+        None,
+        "application_id",
+        if mode == Mode::Local {
+            APP
+        } else {
+            ORDERED_APP
+        },
+    )?;
     tx.pragma_update(None, "user_version", 1)?;
     tx.execute(
         "INSERT INTO meta VALUES(1,?1,?2,?3)",
@@ -156,6 +171,7 @@ pub(super) fn create(
         )?;
     }
     validate_accounting(&tx)?;
+    initialize(&tx)?;
     tx.commit()?;
     root.sync_all()?;
     if let Some(parent) = path.parent() {
@@ -165,13 +181,23 @@ pub(super) fn create(
         connection: db,
         _directory: root,
         ledger_id: ledger,
+        mode,
     })
 }
 
 pub(super) fn open(path: &Path) -> Result<Store, Error> {
+    open_mode(path, Mode::Local)
+}
+
+pub(super) fn open_mode(path: &Path, mode: Mode) -> Result<Store, Error> {
     let root = directory(path)?;
     let db = connection(path, &root)?;
-    if db.pragma_query_value(None, "application_id", |row| row.get::<_, i32>(0))? != APP
+    if db.pragma_query_value(None, "application_id", |row| row.get::<_, i32>(0))?
+        != if mode == Mode::Local {
+            APP
+        } else {
+            ORDERED_APP
+        }
         || db.pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0))? != 1
     {
         return Err(Error::Store);
@@ -189,7 +215,18 @@ pub(super) fn open(path: &Path) -> Result<Store, Error> {
         connection: db,
         _directory: root,
         ledger_id: ledger.try_into().map_err(|_| Error::Store)?,
+        mode,
     })
+}
+
+pub(super) fn schema(db: &Connection) -> Result<(), Error> {
+    db.execute_batch("CREATE TABLE meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1),ledger BLOB NOT NULL CHECK(length(ledger)=32),unit TEXT NOT NULL,supply INTEGER NOT NULL CHECK(supply>=0)) STRICT;
+        CREATE TABLE accounts(owner BLOB PRIMARY KEY CHECK(length(owner)=32),available INTEGER NOT NULL CHECK(available>=0),reserved INTEGER NOT NULL CHECK(reserved>=0)) STRICT;
+        CREATE TABLE reservations(id BLOB PRIMARY KEY CHECK(length(id)=32),payer BLOB NOT NULL REFERENCES accounts(owner),recipient BLOB NOT NULL REFERENCES accounts(owner),units INTEGER NOT NULL CHECK(units>0),state INTEGER NOT NULL CHECK(state IN (1,2,3))) STRICT;
+        CREATE TABLE operations(sequence INTEGER PRIMARY KEY CHECK(sequence>0),id BLOB UNIQUE NOT NULL CHECK(length(id)=32),signer BLOB NOT NULL REFERENCES accounts(owner),nonce BLOB NOT NULL CHECK(length(nonce)=32),signed BLOB NOT NULL CHECK(length(signed) BETWEEN 1 AND 4096),hash BLOB NOT NULL CHECK(length(hash)=32),reservation BLOB NOT NULL REFERENCES reservations(id),state INTEGER NOT NULL CHECK(state IN (1,2,3)),UNIQUE(signer,nonce)) STRICT;
+        CREATE TRIGGER operations_no_update BEFORE UPDATE ON operations BEGIN SELECT RAISE(ABORT,'immutable receipt'); END;
+        CREATE TRIGGER operations_no_delete BEFORE DELETE ON operations BEGIN SELECT RAISE(ABORT,'immutable receipt'); END;")?;
+    Ok(())
 }
 
 pub(super) fn validate_accounting(db: &Connection) -> Result<(), Error> {

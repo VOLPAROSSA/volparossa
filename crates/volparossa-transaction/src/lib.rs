@@ -1,15 +1,18 @@
-//! Durable, explicitly owner-local accounting of fictitious TEST units.
+//! Durable accounting of fictitious TEST units with separate local/ordered modes.
 //!
 //! This is a reusable core store, not distributed settlement, money, securities,
 //! a financial gateway or a daemon endpoint. Separate financial test keys sign
 //! exact commands; network identity and model output provide no authorization.
-//! `SQLite` serializes local transitions. A future reviewed ordering protocol must
+//! `SQLite` serializes local transitions. Ordered execution stages whole blocks in
+//! memory and persists only at Commit, with a separate signed-command domain.
+//! Neither mode implements consensus. A future reviewed ordering protocol must
 //! supply its own membership/finality proof rather than call this local order
 //! distributed consensus. Owner-private files are not encrypted-at-rest storage.
 
 #![forbid(unsafe_code)]
 
 mod disk;
+mod ordered;
 mod wire;
 
 use std::{fs::File, path::Path};
@@ -17,7 +20,17 @@ use std::{fs::File, path::Path};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use sha2::{Digest as _, Sha256};
 
+pub use ordered::{
+    Block, BlockOutcome, BlockReceipt, BlockTime, CommandFailure, MAX_BLOCK_BYTES,
+    MAX_BLOCK_COMMANDS, OrderedStore, StagedBlock,
+};
 pub use wire::SignedCommand;
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Mode {
+    Local,
+    Ordered,
+}
 
 /// Exact identifier of one independently initialized test ledger.
 pub type LedgerId = [u8; 32];
@@ -177,6 +190,7 @@ pub struct Store {
     connection: Connection,
     _directory: File,
     ledger_id: LedgerId,
+    mode: Mode,
 }
 
 impl Store {
@@ -237,68 +251,13 @@ impl Store {
         now: u64,
         before_commit: impl FnOnce(),
     ) -> Result<Receipt, Error> {
-        let verified = wire::verify(bytes, self.ledger_id)?;
+        if self.mode != Mode::Local {
+            return Err(Error::Store);
+        }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let command = verified.command;
-        account(&tx, &command.payer)?;
-        let hash: [u8; 32] = Sha256::digest(bytes).into();
-        if let Some(previous) = receipt(&tx, self.ledger_id, command.operation_id)? {
-            let original: Vec<u8> = tx.query_row(
-                "SELECT signed FROM operations WHERE id=?1",
-                [command.operation_id.as_slice()],
-                |row| row.get(0),
-            )?;
-            return if original == bytes {
-                Ok(previous)
-            } else {
-                Err(Error::Conflict)
-            };
-        }
-        if now < verified.valid_from || now >= verified.expires {
-            return Err(Error::NotLive);
-        }
-        let used: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM operations WHERE signer=?1 AND nonce=?2)",
-            params![command.payer.as_slice(), verified.nonce.as_slice()],
-            |row| row.get(0),
-        )?;
-        if used {
-            return Err(Error::Replay);
-        }
-        let count: u64 = tx.query_row("SELECT count(*) FROM operations", [], |row| row.get(0))?;
-        if count >= MAX_OPERATIONS {
-            return Err(Error::Capacity);
-        }
-        if matches!(command.action, Action::Reserve { .. }) {
-            let pending: u64 = tx.query_row(
-                "SELECT count(*) FROM reservations WHERE state=1",
-                [],
-                |row| row.get(0),
-            )?;
-            // One durable record for this reserve and another for its eventual
-            // completion, in addition to every already pending completion.
-            if count
-                .checked_add(pending)
-                .and_then(|n| n.checked_add(2))
-                .is_none_or(|n| n > MAX_OPERATIONS)
-            {
-                return Err(Error::Capacity);
-            }
-        }
-        let (reservation_id, state) = transition(&tx, command)?;
-        let result = Receipt {
-            ledger_id: self.ledger_id,
-            operation_id: command.operation_id,
-            command_sha256: hash,
-            sequence: count + 1,
-            reservation_id,
-            state,
-        };
-        tx.execute("INSERT INTO operations(sequence,id,signer,nonce,signed,hash,reservation,state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![result.sequence, command.operation_id.as_slice(), command.payer.as_slice(), verified.nonce.as_slice(), bytes, hash.as_slice(), reservation_id.as_slice(), state_number(state)])?;
-        disk::validate_accounting(&tx)?;
+        let result = apply_command(&tx, self.ledger_id, Mode::Local, bytes, now)?;
         before_commit();
         tx.commit()?;
         Ok(result)
@@ -319,6 +278,77 @@ impl Store {
     pub fn operation(&self, id: OperationId) -> Result<Option<Receipt>, Error> {
         receipt(&self.connection, self.ledger_id, id)
     }
+}
+
+// The caller owns the transaction/savepoint and its persistence boundary.
+fn apply_command(
+    db: &Connection,
+    ledger: LedgerId,
+    mode: Mode,
+    bytes: &[u8],
+    now: u64,
+) -> Result<Receipt, Error> {
+    let verified = wire::verify_mode(bytes, ledger, mode)?;
+    let tx = db;
+    let command = verified.command;
+    account(tx, &command.payer)?;
+    let hash: [u8; 32] = Sha256::digest(bytes).into();
+    if let Some(previous) = receipt(tx, ledger, command.operation_id)? {
+        let original: Vec<u8> = tx.query_row(
+            "SELECT signed FROM operations WHERE id=?1",
+            [command.operation_id.as_slice()],
+            |row| row.get(0),
+        )?;
+        return if original == bytes {
+            Ok(previous)
+        } else {
+            Err(Error::Conflict)
+        };
+    }
+    if now < verified.valid_from || now >= verified.expires {
+        return Err(Error::NotLive);
+    }
+    let used: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM operations WHERE signer=?1 AND nonce=?2)",
+        params![command.payer.as_slice(), verified.nonce.as_slice()],
+        |row| row.get(0),
+    )?;
+    if used {
+        return Err(Error::Replay);
+    }
+    let count: u64 = tx.query_row("SELECT count(*) FROM operations", [], |row| row.get(0))?;
+    if count >= MAX_OPERATIONS {
+        return Err(Error::Capacity);
+    }
+    if matches!(command.action, Action::Reserve { .. }) {
+        let pending: u64 = tx.query_row(
+            "SELECT count(*) FROM reservations WHERE state=1",
+            [],
+            |row| row.get(0),
+        )?;
+        // One durable record for this reserve and another for its eventual
+        // completion, in addition to every already pending completion.
+        if count
+            .checked_add(pending)
+            .and_then(|n| n.checked_add(2))
+            .is_none_or(|n| n > MAX_OPERATIONS)
+        {
+            return Err(Error::Capacity);
+        }
+    }
+    let (reservation_id, state) = transition(tx, command)?;
+    let result = Receipt {
+        ledger_id: ledger,
+        operation_id: command.operation_id,
+        command_sha256: hash,
+        sequence: count + 1,
+        reservation_id,
+        state,
+    };
+    tx.execute("INSERT INTO operations(sequence,id,signer,nonce,signed,hash,reservation,state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![result.sequence, command.operation_id.as_slice(), command.payer.as_slice(), verified.nonce.as_slice(), bytes, hash.as_slice(), reservation_id.as_slice(), state_number(state)])?;
+    disk::validate_accounting(tx)?;
+    Ok(result)
 }
 
 fn account(db: &Connection, owner: &AccountId) -> Result<Balance, Error> {
