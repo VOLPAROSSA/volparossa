@@ -40,9 +40,9 @@ sources; this preparation does not replace either trial or change its pins.
 | --- | --- | --- |
 | Integrated cache and Weather delivery — `volparossa`, `volparossa-weather` | Preserve the real provider sequence and both joined web-client proofs. | Core PR227, PR229 and PR230, and Weather PR14–PR18 are merged. Drizz.li run `38228710535` and Overmorrow run `38241212407` pass actual acquisition, separate protected cold transfers and exact initial/refresh UI checks. Independent reconstruction, Quality and CodeQL pass. Automatic acquisition, browser-initiated cold retrieval and the complete weather service remain open. |
 | Native Overmorrow — `volparossa`, `volparossa-weather` | Preserve actual app-triggered core delivery and verify expiry behavior with real products. | Actual `38717988016` passes on exact core `aac5be7f` / Weather `3b90442a`: initial cold peer retrieval, two cache-backed refreshes, joined native tables, background/resume and cleanup. Source Quality `38714089083` and CodeQL `38714082172` pass. Actual expiry, physical devices, iOS and the complete service remain open. |
-| Persistent private storage maintenance — `volparossa`, then Image/Cloud | Complete consumer publication, repair and restoration after provider loss. | Targeted source run `38799870413` on `0e17aff5` and full profile-9 Quality `38800337179` on `fc75a42d` pass. Actual `38804192575` fails during Cloud FINALIZE after Image publication, with `helper_kernel` then `helper_cleanup_incomplete`; the exact suboperation remains unknown. The separate listener correction passes targeted run `38815471227`, including a real Linux MPTCP rejection/reuse test. Actual `38816407455` tests that correction on `728db40b` with unchanged Image/Cloud pins and acceptance gates; no complete storage acceptance is established yet. |
+| Persistent private storage maintenance — `volparossa`, then Image/Cloud | Complete consumer publication, repair and restoration after provider loss. | The listener correction passes targeted run `38815471227`, including a real Linux MPTCP rejection/reuse test. Actual `38816407455` on `728db40b` instead fails at Image FINALIZE fragment 0/copy 1 while reading the provider challenge; Cloud publication is not reached. Its standalone core lifecycle and two restores pass, but consumer repair, restoration and remote retirement remain unproved. Trace the challenge stall without extending the operation deadline. Earlier `38804192575` retains its separate unresolved flow-acquisition failure. |
 | Automatic private uploads — `volparossa`, Image/Cloud | Enroll a new encrypted upload under finite service authority, then resume maintenance and restore it after provider loss. | Core PR233 adds an absolute authorization ceiling; Image PR7 forwards it without rebasing. Cloud PR14 implements finite shared admission budgets, durable reservation/enrollment, restart reconciliation and an encrypted empty catalog for a first upload. Actual OpenCloud SDK upload/list/read checks pass with a synthetic core; this does not prove peer maintenance. Join these candidates to the real upload-to-repair-to-restore trial after the existing storage milestone; its pinned consumers stay unchanged. |
-| Native coding execution — `volparossa`, `volparossa-code` | Complete the post-task resource checks around the successful real read/edit/test task, then integrate the accepted native candidate. | Actual `38806073909` completes the bounded coding task but fails afterward, with task memory and later checks absent. The task-holder correction passes 533 source tests with five explicit skips; actual `38816006720` remains bound to Code `0031c0e9` / core `6d65bb12`. Code PR11 now joins main on `8e873c3d`; its source run `38817880150` also passes, with executable files unchanged from the dispatched candidate. Native core source gates pass separately. The ordinary tools, model, approvals and budgets remain unchanged; whole-trial and protected-peer acceptance remain open. |
+| Native coding execution — `volparossa`, `volparossa-code` | Complete the real read/edit/test task with timely owner pause/resume and post-task checks. | Actual `38806073909` completes the task but fails afterward. The task-holder correction in `38816006720` retains task status and memory, but this task misses a pause acknowledgement after two reads and an edit. Adaptive prefill checkpoints now pass 116 inert cases while retaining the original ten-second guard, complete prompt, model, tools, permissions and budgets. Real responsiveness and throughput need a new model trial; whole-trial and protected-peer acceptance remain open. |
 | Protected remote compute — `volparossa`, then Code/Browser | Join an authorized immutable guest, the resident coding worker and a guest-terminated TLS 1.3 session. | PR258's authenticated refusal path has actual route evidence; PR262 integrates explicit same-connection key confirmation. The next implementation reuses the native worker lifecycle and existing TLS stack, rather than extending the probe into task authority. Boot/runtime/model integrity, production roots and current vendor appraisal must be checked before private input; task authority needs its own finite grant. Those functions and actual protected execution remain open; suitable confidential-computing hardware is unavailable. |
 
 Detailed earlier Android and storage checkpoints remain in the
@@ -50,6 +50,54 @@ Detailed earlier Android and storage checkpoints remain in the
 The latest completed outcomes are summarized below.
 
 ### Latest completed integration evidence — 15–16 October
+
+- **Storage retains its base lifecycle proof but stalls during Image publication.**
+  [Actual `38816407455`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38816407455)
+  fails on exact core `728db40b8b51141652b1e5d7f79d2530e72bb256`, with
+  unchanged Image `9694a2b9` / Cloud `47b0f03b` pins. Image FINALIZE
+  fragment 0/copy 1 reports `CONTENT_UNAVAILABLE` at
+  `challenge_read_verify`, under the operation deadline. Its elapsed buckets
+  are under one second before the challenge and 90–120 seconds within it.
+  This request reaches the challenge stage, not the earlier flow-acquisition
+  failure; that distinction does not establish the cause of either failure.
+  Cloud publication is not reached.
+
+  The original standalone lifecycle components validate: core-loss resume,
+  a fresh owner turn, two non-consuming whole-archive-verified restores,
+  removal of all eleven copies plus the foreground copy, and zero final
+  charged/provider usage. The combined consumer report remains failed.
+  Local consumer and guest-owned cleanup and the QEMU join are confirmed;
+  consumer remote cleanup and provider usage are not. Guest-root-namespace
+  snapshots match, but are not host-runner network snapshots.
+  Original artifact and log ZIP SHA-256 values are respectively
+  `3de6ff71efbdbcbf1447b3fded93143b49462064faad326743b8ec68b3b3a783`
+  and `c022af40589f8ef245d60d834b645266e1d9d35e40851739083d461e5c079eef`.
+
+- **Adaptive prefill adds more frequent, honest pause checkpoints.**
+  [Actual `38816006720`](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/38816006720)
+  fails on Code `0031c0e9` / core `6d65bb12` with
+  `compute_control_ack_deadline`: eight controls were issued and seven
+  acknowledged, leaving a pause outstanding. Two reads and one approved edit
+  complete; no test command completes. The corrected holder retains task exit
+  status and memory counters. These observations do not identify the duration
+  or internal cause of a particular native operation.
+
+  Prefill now starts with 16 tokens and adapts subsequent batches toward
+  two-second checkpoints, bounded to 1–128 tokens and at most twofold growth.
+  The measurement covers only the synchronized native decode, not a subsequent
+  owner-requested pause. A pause is acknowledged only after native work joins.
+  The complete prompt and retained-prefix rules, model, greedy policy and
+  original ten-second acknowledgement deadline remain unchanged. A stalled
+  one-token decode still fails closed; this is not preemption or a latency guarantee.
+
+  All 116 inert contracts pass: the 98 existing cases and 18 new scheduling
+  cases. They cover complete ordered prompts up to 12,288 tokens, pause/resume
+  over real pipes with synthetic native costs, cancellation and absolute
+  deadlines. Under the synthetic fast cost, a 5,164-token prompt takes 43
+  batches instead of 41; this is not a measured native speed ratio. Native
+  C++ and artifact pins are unchanged. Different batch shapes can affect
+  floating-point results; bit-identical output is not promised. The real
+  coding trial still needs to establish responsiveness, throughput and completion.
 
 - **A real coding task succeeds; its outer postflight still fails.**
   [Trial `38806073909`](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/38806073909)
@@ -86,7 +134,8 @@ The latest completed outcomes are summarized below.
   absolute task deadline, ordinary tools, model and permissions are unchanged.
   [Actual `38816006720`](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/38816006720)
   remains bound to Code `0031c0e97f8bd0221c207c5a0f00370073cf617d` and the same
-  core `6d65bb12`; complete acceptance is still pending.
+  core `6d65bb12`; it retains the postflight counters but fails on the worker
+  pause deadline described above. Complete acceptance remains open.
 
   Code PR11 now targets main at `8e873c3d1b38c5fab25b6d336aef0dddb1bd2501`.
   Only instructions, Dependabot settings and two documentation files differ

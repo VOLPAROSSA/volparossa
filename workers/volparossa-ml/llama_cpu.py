@@ -10,10 +10,12 @@ hard limits, and confirms process cleanup independently.
 import ctypes
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import stat
 import threading
+import time
 
 KIND = "llama_cpp_bf16_v1"
 SOURCE = "7fe450e19305b828c199d602c23a8337aaa1f03b"
@@ -320,9 +322,15 @@ class NativeModel:
         self.require(type(tokens) is list and 1 <= len(tokens) <= 128
                      and all(type(token) is int and 0 <= token < 151936 for token in tokens), "NATIVE_TOKEN_BOUND")
         values = (ctypes.c_int32 * len(tokens))(*tokens)
+        started = time.monotonic()
         status = self.lib.vp_llama_decode_v1(self.handle, values, len(tokens))
+        elapsed = time.monotonic() - started
         self.probe.joined()
         self.require(status == 0, "NATIVE_DECODE_FAILED")
+        # Measure only the synchronous, synchronized ABI operation. joined()
+        # may honestly pause until the owner resumes; that wait is not decode
+        # cost and must not drive the next prefill quantum down to one token.
+        return elapsed
 
     def sample(self):
         token = ctypes.c_int32(-1)
@@ -368,6 +376,27 @@ class NativeModel:
             self.handle = ctypes.c_void_p()
 
 
+class PrefillQuantum:
+    """Turn-local work granularity, never a latency guarantee or new deadline.
+
+    Start conservatively, then use the last completed synchronized decode to
+    target a two-second checkpoint. Growth is at most twofold; a slowdown can
+    shrink immediately. The unchanged ten-second owner ACK guard still fails
+    closed if even a one-token operation stalls. This is not preemption. No
+    tokens are dropped or retried.
+    """
+    def __init__(self):
+        self.tokens = 16
+
+    def completed(self, count, seconds, require):
+        require(type(count) is int and 1 <= count <= 128
+                and type(seconds) in (int, float) and math.isfinite(seconds) and seconds >= 0,
+                "NATIVE_DECODE_FAILED")
+        # A zero-duration clock sample cannot authorize unbounded growth.
+        estimated = int(count * (2.0 / max(seconds, 0.000001)))
+        self.tokens = max(1, min(128, count * 2, estimated))
+
+
 def generate(model, prompt, tokenizer, profile, session, worker, observation=None, *, retained_tokens=0,
              decoded_tokens=None):
     worker.require(type(prompt) is list and 1 <= len(prompt) <= profile["prompt_tokens"]
@@ -377,9 +406,13 @@ def generate(model, prompt, tokenizer, profile, session, worker, observation=Non
     # This is the complete original HF-rendered prompt in bounded prefill batches,
     # not truncation, sliding context, a second prompt or a hidden warmup.
     worker.require(type(retained_tokens) is int and 0 <= retained_tokens < len(prompt), "NATIVE_SESSION_PREFIX_BOUND")
-    for start in range(retained_tokens, len(prompt), 128):
+    quantum, start = PrefillQuantum(), retained_tokens
+    while start < len(prompt):
         session.check()
-        model.decode(prompt[start:start + 128])
+        batch = prompt[start:start + quantum.tokens]
+        elapsed = model.decode(batch)
+        quantum.completed(len(batch), elapsed, worker.require)
+        start += len(batch)
     if observation is not None:
         observation.forward_complete(None, None, None)
     generated = []

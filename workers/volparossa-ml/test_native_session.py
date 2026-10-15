@@ -157,10 +157,11 @@ class PrefixTests(unittest.TestCase):
         self.assertEqual(self.model_type.call_count, 1)
         model.close.assert_not_called()
         model.sample.return_value = 151645
+        model.decode.return_value = 0.25
         native.generate(model, prompt, SimpleNamespace(eos_token_id=151645, decode=lambda *a, **k: ""),
                         WORKER.model_profile(native.PROFILE), mock.Mock(), WORKER, retained_tokens=prefix)
         self.assertEqual([token for call in model.decode.call_args_list for token in call.args[0]], prompt)
-        self.assertEqual([len(call.args[0]) for call in model.decode.call_args_list], [128, 128, 1])
+        self.assertEqual([len(call.args[0]) for call in model.decode.call_args_list], [16, 32, 64, 128, 17])
         state.tokens = prompt
         self.assertEqual(self.begin(state, [1, 1])[1], 1)
         self.assertEqual(state.capacity, 1536)  # No shrink/reallocation on a shorter turn.
@@ -215,6 +216,7 @@ class PrefixTests(unittest.TestCase):
 
     def test_generate_reuses_no_uncomputed_sample_and_keeps_full_prompt_bound(self):
         model = mock.Mock()
+        model.decode.return_value = 0.25
         model.sample.side_effect = [4, 151645]
         tokenizer = SimpleNamespace(eos_token_id=151645, decode=lambda *a, **k: "ok")
         tokens = []
