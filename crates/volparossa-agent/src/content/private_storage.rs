@@ -2,11 +2,15 @@
 //! Application signing keys never enter the agent; this local control interface retains its
 //! existing operator/admin authority and is not a new least-authority application boundary.
 
+mod observation;
+mod outcome;
+pub(crate) use outcome::Outcomes;
+
 use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use libp2p::{PeerId, identity};
-use tokio::{net::UnixStream, time::timeout};
+use tokio::{io::AsyncWrite, net::UnixStream, time::timeout};
 use volparossa_content::{
     Validity,
     private_storage::{
@@ -21,9 +25,12 @@ use volparossa_content::{
 };
 use volparossa_local_control::{
     CONTROL_PROTOCOL_VERSION, ContentReceipt, ControlResponse, ControlResult,
-    PrivateStorageAdmission, PrivateStorageAdmissionRequest, PrivateStorageGrant,
-    PrivateStorageGrantRequest, PrivateStorageReady, PrivateStorageRemoteRequest,
-    PrivateStorageServeRequest, control_response::Payload, write_response,
+    PrivateStorageAdmission, PrivateStorageAdmissionRequest,
+    PrivateStorageDeadlineScope as Deadline, PrivateStorageGrant, PrivateStorageGrantRequest,
+    PrivateStorageOutcome, PrivateStorageOutcomePhase as OutcomePhase,
+    PrivateStorageOutcomeRequest, PrivateStorageReady, PrivateStorageRemoteDetail,
+    PrivateStorageRemoteRequest, PrivateStorageRemoteStage as Stage, PrivateStorageServeRequest,
+    control_response::Payload, write_response,
 };
 use volparossa_policy::VerifiedManifest as VerifiedPolicy;
 
@@ -39,6 +46,7 @@ struct RemoteRequest {
     provider_key: [u8; 32],
     peer: PeerId,
     grant: VerifiedStorageGrant,
+    maintenance: Option<Arc<super::storage_maintenance::Turn>>,
 }
 
 struct SelectedProvider {
@@ -48,6 +56,21 @@ struct SelectedProvider {
 }
 
 impl ContentRuntime {
+    pub(crate) fn private_storage_outcome(
+        &self,
+        request: &PrivateStorageOutcomeRequest,
+        local: &UnixStream,
+    ) -> Result<PrivateStorageOutcome, ContentError> {
+        let uid = local.peer_cred().map_err(|_| ContentError::Invalid)?.uid();
+        let mut outcome = self
+            .storage_outcomes
+            .take(uid, &request.original_request_id)?;
+        if !request.include_append_timing {
+            outcome.append_timing = None;
+        }
+        Ok(outcome)
+    }
+
     /// Administrative local operation on the exact attached store, never a peer request.
     /// No key, caller-selected path, policy bypass or automatic lease eviction is introduced.
     pub(crate) async fn private_storage_admission(
@@ -196,15 +219,67 @@ impl ContentRuntime {
         local: &mut UnixStream,
         request_id: &[u8],
         ready_sent: &mut bool,
+        detail: &mut Option<PrivateStorageRemoteDetail>,
     ) -> Result<(), ContentError> {
-        let request = validate_remote(&request)?;
-        let _foreground = self.foreground.enter();
-        timeout(EXCHANGE_TIMEOUT, async {
-            let _retrieval = super::named_retrieval(&self.retrieval, local).await?;
-            remote(&request, context, local, request_id, ready_sent).await
-        })
-        .await
-        .map_err(|_| ContentError::Unavailable)?
+        *detail = None;
+        let observation = observation::Observation::new(request.include_flow_acquire_detail);
+        let uid = local.peer_cred().map_err(|_| ContentError::Invalid)?.uid();
+        let outcome = self.storage_outcomes.begin(uid, request_id)?;
+        let turn = request.maintenance_turn.clone();
+        let mut request = validate_remote(&request)?;
+        if !turn.is_empty() {
+            request.maintenance =
+                Some(self.maintenance_turn(&turn, uid, request.grant.owner_key().as_bytes())?);
+        }
+        let _foreground = request
+            .maintenance
+            .is_none()
+            .then(|| self.foreground.enter());
+        let operation = observation.budget(Deadline::Operation, EXCHANGE_TIMEOUT, async {
+            // One actual flow per retained background worker reservation, not just one
+            // allowance calculation at a time. Parallel callers cannot multiply its RAM/FD use.
+            let _maintenance_operation = request
+                .maintenance
+                .as_ref()
+                .map(|turn| turn.operation())
+                .transpose()?;
+            let _retrieval = if request.maintenance.is_none() {
+                Some(super::named_retrieval(&self.retrieval, local).await?)
+            } else {
+                None
+            };
+            Box::pin(remote(
+                &request,
+                context,
+                local,
+                request_id,
+                ready_sent,
+                &observation,
+                &outcome,
+            ))
+            .await
+        });
+        // Reuse the exact original construction-time budget instant, without shifting it.
+        outcome.start_operation(observation.operation_started());
+        let operation = Box::pin(operation);
+        let result = if let Some(turn) = &request.maintenance {
+            tokio::select! {
+                biased;
+                () = turn.cancelled() => {
+                    observation.reset();
+                    outcome.cancelled();
+                    Err(ContentError::Busy)
+                },
+                result = operation => result,
+            }
+        } else {
+            operation.await
+        };
+        if !*ready_sent {
+            *detail = observation.detail();
+        }
+        outcome.finish(&result, observation.deadline());
+        result
     }
 }
 
@@ -279,6 +354,7 @@ fn validate_remote(request: &PrivateStorageRemoteRequest) -> Result<RemoteReques
         provider_key,
         peer: PeerId::from_public_key(&identity::PublicKey::from(public)),
         grant,
+        maintenance: None,
     })
 }
 
@@ -327,49 +403,69 @@ async fn remote(
     local: &mut UnixStream,
     id: &[u8],
     ready_sent: &mut bool,
+    observation: &observation::Observation,
+    outcome: &outcome::Guard,
 ) -> Result<(), ContentError> {
     let policy = checked_policy(context, None).await?;
-    until_requester_closed(local, async {
-        Box::pin(
-            context
-                .routes
-                .connect_tcp(&context.config, &context.discovery, &context.helper),
-        )
-        .await
-        .map_err(|_| ContentError::Unavailable)
-    })
-    .await?;
-    let control = context
-        .routes
-        .content_discovery_control()
-        .await
-        .ok_or(ContentError::Unavailable)?;
-    route_current(context, &policy, control, request.peer).await?;
-    let mut providers = until_requester_closed(local, async {
-        context
-            .discovery
-            .lookup_content_providers(control, &[request.peer])
+    observation
+        .requester_boundary(Stage::RouteConnect, local, async {
+            Box::pin(context.routes.connect_tcp(
+                &context.config,
+                &context.discovery,
+                &context.helper,
+            ))
             .await
             .map_err(|_| ContentError::Unavailable)
-    })
-    .await?;
-    if providers.len() != 1 {
-        return Err(ContentError::Unavailable);
-    }
-    let provider = providers.pop().ok_or(ContentError::Unavailable)?;
-    if provider.peer_id != request.peer || provider.offer.provider_key() != &request.provider_key {
-        return Err(ContentError::Invalid);
-    }
+        })
+        .await?;
+    let control = observation
+        .boundary(Stage::ControlSelection, async {
+            context
+                .routes
+                .content_discovery_control()
+                .await
+                .ok_or(ContentError::Unavailable)
+        })
+        .await?;
+    route_current(context, &policy, control, request.peer).await?;
+    let mut providers = observation
+        .requester_boundary(Stage::ProviderLookup, local, async {
+            context
+                .discovery
+                .lookup_content_providers(control, &[request.peer])
+                .await
+                .map_err(|_| ContentError::Unavailable)
+        })
+        .await?;
+    let provider = observation
+        .boundary(Stage::ProviderCardinality, async {
+            if providers.len() != 1 {
+                return Err(ContentError::Unavailable);
+            }
+            let provider = providers.pop().ok_or(ContentError::Unavailable)?;
+            if provider.peer_id != request.peer
+                || provider.offer.provider_key() != &request.provider_key
+            {
+                return Err(ContentError::Invalid);
+            }
+            Ok(provider)
+        })
+        .await?;
     grant_current(&request.grant)?;
-    let remaining = request
-        .grant
-        .validity()
-        .expires
-        .min(provider.offer.validity().expires)
-        .checked_sub(now())
-        .filter(|seconds| *seconds > 0)
-        .ok_or(ContentError::Unavailable)?;
-    timeout(
+    let remaining = observation
+        .boundary(Stage::OfferValidity, async {
+            request
+                .grant
+                .validity()
+                .expires
+                .min(provider.offer.validity().expires)
+                .checked_sub(now())
+                .filter(|seconds| *seconds > 0)
+                .ok_or(ContentError::Unavailable)
+        })
+        .await?;
+    Box::pin(observation.budget(
+        Deadline::Exchange,
         Duration::from_secs(remaining.min(MAX_AUTH_SECONDS)),
         exchange(
             request,
@@ -382,12 +478,21 @@ async fn remote(
             local,
             id,
             ready_sent,
+            observation,
+            outcome,
         ),
-    )
+    ))
     .await
-    .map_err(|_| ContentError::Unavailable)?
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Two request-local observers preserve existing stream and deadline ownership"
+)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep the ordered handshake, transfer and stream cleanup in one ownership scope"
+)]
 async fn exchange(
     request: &RemoteRequest,
     selected: SelectedProvider,
@@ -395,6 +500,8 @@ async fn exchange(
     local: &mut UnixStream,
     id: &[u8],
     ready_sent: &mut bool,
+    observation: &observation::Observation,
+    outcome: &outcome::Guard,
 ) -> Result<(), ContentError> {
     let SelectedProvider {
         provider,
@@ -403,80 +510,134 @@ async fn exchange(
     } = selected;
     let current = route_current(context, &policy, control, request.peer).await?;
     let endpoint = provider.offer.endpoint();
-    let mut flow = until_requester_closed(local, async {
-        context
-            .routes
-            .open_content_stream(
-                &current,
-                endpoint.hostname(),
-                endpoint.port(),
-                unix_millis(),
-            )
-            .await
-            .map_err(|_| ContentError::Unavailable)
-    })
-    .await?;
-    let mut remote = until_requester_closed(local, async {
-        tls::connect(flow.stream_mut(), request.peer, &provider.offer)
-            .await
-            .map_err(|_| ContentError::Unavailable)
-    })
-    .await?;
-    let challenge = until_requester_closed(local, async {
-        wire::begin(&mut remote, &request.grant)
-            .await
-            .map_err(|_| ContentError::Unavailable)
-    })
-    .await?;
-    route_current(context, &policy, control, request.peer).await?;
-    grant_current(&request.grant)?;
-    *ready_sent = true;
-    send(
-        local,
-        id,
-        "PRIVATE_STORAGE_READY",
-        Payload::PrivateStorageReady(PrivateStorageReady {
-            provider_key: request.provider_key.to_vec(),
-            challenge: challenge.encode(),
+    let mut flow = Box::pin(
+        observation.requester_boundary(Stage::StreamOpen, local, async {
+            context
+                .routes
+                .open_content_stream_diagnosed(
+                    &current,
+                    endpoint.hostname(),
+                    endpoint.port(),
+                    unix_millis(),
+                )
+                .await
+                .map_err(|failure| {
+                    observation.record_stream_failure(observation::stream_failure(failure.cause()));
+                    observation.record_flow_acquire(failure.flow_acquire());
+                    ContentError::Unavailable
+                })
         }),
     )
     .await?;
-    let transfer = wire::bridge(local, &mut remote, &request.grant, &challenge)
-        .await
-        .map_err(|_| ContentError::Unavailable)?;
+    let mut remote = observation
+        .requester_boundary(Stage::TlsHandshake, local, async {
+            tls::connect_observed(flow.stream_mut(), request.peer, &provider.offer)
+                .await
+                .map_err(|(_, failure)| {
+                    observation.record_tls_failure(failure);
+                    ContentError::Unavailable
+                })
+        })
+        .await?;
+    let challenge = observation
+        .requester_boundary(Stage::Challenge, local, async {
+            wire::begin_observed(&mut remote, &request.grant, observation)
+                .await
+                .map_err(|_| ContentError::Unavailable)
+        })
+        .await?;
+    route_current(context, &policy, control, request.peer).await?;
+    grant_current(&request.grant)?;
+    outcome.enter(OutcomePhase::ReadyWrite);
+    send_ready(
+        local,
+        id,
+        ready_sent,
+        PrivateStorageReady {
+            provider_key: request.provider_key.to_vec(),
+            challenge: challenge.encode(),
+        },
+    )
+    .await?;
+    let transfer = wire::bridge_admitted_observed(
+        local,
+        &mut remote,
+        &request.grant,
+        &challenge,
+        |bytes| async move {
+            if let Some(turn) = &request.maintenance {
+                turn.admit(bytes).await
+            } else {
+                true
+            }
+        },
+        outcome,
+    )
+    .await
+    .map_err(|error| {
+        outcome.wire_error(&error);
+        ContentError::Unavailable
+    })?;
+    outcome.enter(OutcomePhase::ProviderTlsClose);
     tls::finish(&mut remote)
         .await
         .map_err(|_| ContentError::Unavailable)?;
     drop(remote);
+    outcome.enter(OutcomePhase::TransportTlsClose);
     tls::finish(flow.stream_mut())
         .await
         .map_err(|_| ContentError::Unavailable)?;
     flow.shutdown();
+    outcome.enter(OutcomePhase::FinalRouteCheck);
     route_current(context, &policy, control, request.peer).await?;
+    outcome.enter(OutcomePhase::FinalGrantCheck);
     grant_current(&request.grant)?;
+    outcome.enter(OutcomePhase::FinalLifetimeCheck);
     if provider.offer.validity().expires <= now() || challenge.validity().expires <= now() {
         return Err(ContentError::Unavailable);
     }
     // This terminal proves route/policy/TLS closure, not custody by itself. Exact lease,
     // stored prefix and expiry are in the owner-verified signed receipt sent beforehand.
+    outcome.enter(OutcomePhase::TerminalWrite);
+    let bytes = transfer.ciphertext_bytes;
     send(
         local,
         id,
         "CONTENT_OK",
-        Payload::Content(ContentReceipt {
-            bytes: transfer.ciphertext_bytes,
-            peer_bytes: transfer.ciphertext_bytes,
-            providers_used: 1,
-            provider_peer_ids: vec![request.peer.to_string()],
-            control_relay_peer_id: control.to_string(),
-            ..ContentReceipt::default()
-        }),
+        Payload::Content(route_receipt(bytes, request.peer, control)),
     )
     .await
 }
 
-async fn send(
-    local: &mut UnixStream,
+fn route_receipt(bytes: u64, provider: PeerId, control: PeerId) -> ContentReceipt {
+    ContentReceipt {
+        bytes,
+        peer_bytes: bytes,
+        providers_used: 1,
+        provider_peer_ids: vec![provider.to_string()],
+        control_relay_peer_id: control.to_string(),
+        ..ContentReceipt::default()
+    }
+}
+
+async fn send_ready<W: AsyncWrite + Unpin>(
+    local: &mut W,
+    id: &[u8],
+    ready_sent: &mut bool,
+    ready: PrivateStorageReady,
+) -> Result<(), ContentError> {
+    *ready_sent = true;
+    send(
+        local,
+        id,
+        "PRIVATE_STORAGE_READY",
+        Payload::PrivateStorageReady(ready),
+    )
+    .await
+}
+
+async fn send<W: AsyncWrite + Unpin>(
+    local: &mut W,
     id: &[u8],
     code: &str,
     payload: Payload,
@@ -488,6 +649,7 @@ async fn send(
             request_id: id.to_vec(),
             result: ControlResult::Ok as i32,
             diagnostic_code: code.into(),
+            private_storage_remote_detail: None,
             payload: Some(payload),
         },
     )

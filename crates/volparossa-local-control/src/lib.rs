@@ -19,6 +19,9 @@ pub use compute_control::{
 mod custody;
 mod mailbox;
 mod private_storage;
+mod private_storage_detail;
+mod private_storage_outcome;
+mod provider_activity;
 mod quote;
 pub use content::{
     ContentCacheLimits, ContentExportRequest, ContentFetchNameRequest, ContentFetchRequest,
@@ -34,8 +37,23 @@ pub use custody::{
 pub use mailbox::{MailboxReady, MailboxRemoteRequest, MailboxServeRequest};
 pub use private_storage::{
     PrivateStorageAdmission, PrivateStorageAdmissionRequest, PrivateStorageGrant,
-    PrivateStorageGrantRequest, PrivateStorageReady, PrivateStorageRemoteRequest,
-    PrivateStorageServeRequest,
+    PrivateStorageGrantRequest, PrivateStorageMaintenanceReady, PrivateStorageMaintenanceRequest,
+    PrivateStorageReady, PrivateStorageRemoteRequest, PrivateStorageServeRequest,
+};
+pub use private_storage_detail::{
+    PrivateStorageChallengeDetail, PrivateStorageChallengePhase, PrivateStorageDeadlineScope,
+    PrivateStorageElapsedBucket, PrivateStorageFlowAcquireDetail, PrivateStorageFlowAcquireFailure,
+    PrivateStorageFlowAcquireReason, PrivateStorageFlowAcquireStage, PrivateStorageRemoteDetail,
+    PrivateStorageRemoteStage, PrivateStorageStreamFailure, PrivateStorageTlsFailure,
+};
+pub use private_storage_outcome::{
+    PrivateStorageAppendTiming, PrivateStorageOutcome, PrivateStorageOutcomeCategory,
+    PrivateStorageOutcomeDeadline, PrivateStorageOutcomePhase, PrivateStorageOutcomeRequest,
+    PrivateStorageOutcomeStatus,
+};
+pub use provider_activity::{
+    ContentProviderActivity, MAX_PROVIDER_SESSIONS, ProviderActivityElapsedBucket,
+    ProviderActivityGroup, ProviderActivityStage, ProviderActivityState,
 };
 pub use quote::{QuoteAttachRequest, QuoteReady, QuoteRemoteRequest};
 
@@ -66,7 +84,7 @@ pub struct ControlRequest {
     /// One allowlisted operation.
     #[prost(
         oneof = "control_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48"
     )]
     pub operation: Option<control_request::Operation>,
 }
@@ -81,8 +99,10 @@ pub mod control_request {
         ContentExportRequest, ContentFetchNameRequest, ContentFetchRequest, ContentImportRequest,
         ContentLocalFetchNameRequest, ContentPolicyApplyRequest, ContentServeRequest, Empty,
         HttpsContentFetchRequest, LogQuery, MailboxRemoteRequest, MailboxServeRequest,
-        PrivateStorageAdmissionRequest, PrivateStorageGrantRequest, PrivateStorageRemoteRequest,
-        PrivateStorageServeRequest, QuoteAttachRequest, QuoteRemoteRequest, RoleChange,
+        PrivateStorageAdmissionRequest, PrivateStorageGrantRequest,
+        PrivateStorageMaintenanceRequest, PrivateStorageOutcomeRequest,
+        PrivateStorageRemoteRequest, PrivateStorageServeRequest, QuoteAttachRequest,
+        QuoteRemoteRequest, RoleChange,
     };
 
     /// Exactly one supported CLI-to-agent operation.
@@ -196,6 +216,16 @@ pub mod control_request {
         /// Upgrade this exact socket for one distinct protected quote exchange.
         #[prost(message, tag = "45")]
         QuoteRemote(QuoteRemoteRequest),
+        /// Request one supervised owner-private maintenance turn, retaining this connection.
+        /// Tag 43 from the unmerged storage candidate is not a compatibility alias.
+        #[prost(message, tag = "46")]
+        PrivateStorageMaintenance(PrivateStorageMaintenanceRequest),
+        /// Consume this Unix caller's bounded observation after a failed stream handoff.
+        #[prost(message, tag = "47")]
+        PrivateStorageOutcome(PrivateStorageOutcomeRequest),
+        /// Read only finite aggregate provider stages on the protected local socket.
+        #[prost(message, tag = "48")]
+        ContentProviderActivity(Empty),
     }
 }
 
@@ -278,10 +308,13 @@ pub struct ControlResponse {
     /// Stable diagnostic code, never an arbitrary upstream error string.
     #[prost(string, tag = "4")]
     pub diagnostic_code: String,
+    /// Optional closed observation, only on a failed initial private-storage Ack.
+    #[prost(message, optional, tag = "5")]
+    pub private_storage_remote_detail: Option<PrivateStorageRemoteDetail>,
     /// Typed response body.
     #[prost(
         oneof = "control_response::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36"
     )]
     pub payload: Option<control_response::Payload>,
 }
@@ -292,11 +325,12 @@ pub mod control_response {
 
     use super::{
         BrowserGatewayGranted, ComputeDiscovered, ComputeReady, ComputeTranscript,
-        ContentCustodyDiscovered, ContentCustodyReady, ContentPolicyReceipt, ContentReceipt,
-        ContentTransferReady, Empty, HttpsContentTransferReady, LogList, MailboxReady,
-        NamedContentTransferReady, PathList, PeerList, PolicySnapshot, PrivateStorageAdmission,
-        PrivateStorageGrant, PrivateStorageReady, QuoteReady, RoleSnapshot, SessionList,
-        StatusSnapshot,
+        ContentCustodyDiscovered, ContentCustodyReady, ContentPolicyReceipt,
+        ContentProviderActivity, ContentReceipt, ContentTransferReady, Empty,
+        HttpsContentTransferReady, LogList, MailboxReady, NamedContentTransferReady, PathList,
+        PeerList, PolicySnapshot, PrivateStorageAdmission, PrivateStorageGrant,
+        PrivateStorageMaintenanceReady, PrivateStorageOutcome, PrivateStorageReady, QuoteReady,
+        RoleSnapshot, SessionList, StatusSnapshot,
     };
 
     /// Exactly one response body.
@@ -374,6 +408,16 @@ pub mod control_response {
         /// Route, TLS and signed quote challenge are ready; no quote or admission yet.
         #[prost(message, tag = "33")]
         QuoteReady(QuoteReady),
+        /// Connection-owned background resource allowance, not signing or custody authority.
+        /// Tag 33 from the unmerged storage candidate is not a compatibility alias.
+        #[prost(message, tag = "34")]
+        PrivateStorageMaintenanceReady(PrivateStorageMaintenanceReady),
+        /// Local failure observation only; not a signed provider custody receipt.
+        #[prost(message, tag = "35")]
+        PrivateStorageOutcome(PrivateStorageOutcome),
+        /// Local aggregate activity, never storage acceptance or causal attribution.
+        #[prost(message, tag = "36")]
+        ContentProviderActivity(ContentProviderActivity),
     }
 }
 
@@ -793,6 +837,8 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
         control_request::Operation::PrivateStorageServe(request) => request.validate()?,
         control_request::Operation::PrivateStorageGrant(request) => request.validate()?,
         control_request::Operation::PrivateStorageRemote(request) => request.validate()?,
+        control_request::Operation::PrivateStorageOutcome(request) => request.validate()?,
+        control_request::Operation::PrivateStorageMaintenance(request) => request.validate()?,
         control_request::Operation::BrowserGatewayGrant(request) => request.validate()?,
         control_request::Operation::PrivateStorageAdmission(request) => request.validate()?,
         control_request::Operation::ContentCustody(request) => request.validate()?,
@@ -816,6 +862,7 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
         | control_request::Operation::Roles(_)
         | control_request::Operation::ContentStop(_)
         | control_request::Operation::QuoteDetach(_)
+        | control_request::Operation::ContentProviderActivity(_)
         | control_request::Operation::ContentStatus(_) => {}
     }
     Ok(())
@@ -826,11 +873,15 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
     ControlResult::try_from(response.result)
         .map_err(|_| ControlProtocolError::Invalid("result"))?;
     safe_code(&response.diagnostic_code)?;
+    private_storage_detail::validate(response)?;
     let payload = response
         .payload
         .as_ref()
         .ok_or(ControlProtocolError::Invalid("missing response payload"))?;
     match payload {
+        control_response::Payload::ContentProviderActivity(snapshot) => {
+            validate_provider_activity_response(response, snapshot)?;
+        }
         control_response::Payload::Peers(list) => {
             list_len(list.peers.len())?;
             for peer in &list.peers {
@@ -897,6 +948,10 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
         control_response::Payload::NamedContentTransferReady(ready) => ready.validate()?,
         control_response::Payload::MailboxReady(ready) => ready.validate()?,
         control_response::Payload::PrivateStorageReady(ready) => ready.validate()?,
+        control_response::Payload::PrivateStorageOutcome(outcome) => {
+            validate_storage_outcome_response(response, outcome)?;
+        }
+        control_response::Payload::PrivateStorageMaintenanceReady(ready) => ready.validate()?,
         control_response::Payload::PrivateStorageGrant(grant) => grant.validate()?,
         control_response::Payload::BrowserGatewayGranted(grant) => grant.validate()?,
         control_response::Payload::PrivateStorageAdmission(status) => status.validate()?,
@@ -909,6 +964,36 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
         control_response::Payload::Ack(_)
         | control_response::Payload::Status(_)
         | control_response::Payload::Roles(_) => {}
+    }
+    Ok(())
+}
+
+fn validate_provider_activity_response(
+    response: &ControlResponse,
+    snapshot: &ContentProviderActivity,
+) -> Result<(), ControlProtocolError> {
+    snapshot.validate()?;
+    if response.result != ControlResult::Ok as i32
+        || response.diagnostic_code != "CONTENT_PROVIDER_ACTIVITY"
+    {
+        return Err(ControlProtocolError::Invalid(
+            "content provider activity envelope",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_storage_outcome_response(
+    response: &ControlResponse,
+    outcome: &PrivateStorageOutcome,
+) -> Result<(), ControlProtocolError> {
+    outcome.validate()?;
+    if response.result != ControlResult::Ok as i32
+        || response.diagnostic_code != "PRIVATE_STORAGE_OUTCOME"
+    {
+        return Err(ControlProtocolError::Invalid(
+            "private storage outcome envelope",
+        ));
     }
     Ok(())
 }
@@ -1083,6 +1168,7 @@ mod tests {
             request_id: vec![1; 16],
             result: ControlResult::Policy as i32,
             diagnostic_code: "example.com".to_owned(),
+            private_storage_remote_detail: None,
             payload: Some(control_response::Payload::Ack(Empty {})),
         };
         assert!(encode_response(&response).is_err());

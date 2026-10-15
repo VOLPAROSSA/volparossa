@@ -180,6 +180,7 @@ async fn exchange(root: &Path, args: Vec<String>, key: &VerifyingKey, fault: Fau
             request_id: request.request_id.clone(),
             result: ControlResult::Ok as i32,
             diagnostic_code: "CONTENT_TRANSFER_READY".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::ContentTransferReady(ContentTransferReady {
                 manifest_id: manifest.manifest_id().to_vec(),
                 bytes: manifest.length(),
@@ -227,6 +228,7 @@ async fn exchange(root: &Path, args: Vec<String>, key: &VerifyingKey, fault: Fau
                 request_id: request.request_id,
                 result: ControlResult::Ok as i32,
                 diagnostic_code: "CONTENT_OK".into(),
+                private_storage_remote_detail: None,
                 payload: Some(Payload::Content(ContentReceipt {
                     bytes: manifest.length(),
                     chunks: u32::try_from(manifest.chunks().len()).unwrap(),

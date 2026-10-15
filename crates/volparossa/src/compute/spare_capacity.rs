@@ -13,6 +13,8 @@ use std::{
 use super::device_capacity::{DeviceBudget, DeviceObservation};
 use serde::Serialize;
 
+pub(super) mod memory;
+
 const MAX_FILE_BYTES: u64 = 16 * 1024;
 const MAX_CGROUP_DEPTH: usize = 64;
 const MIN_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
@@ -277,54 +279,16 @@ fn capped_memory(available: u64, limit: &str, current: Option<&str>) -> Option<u
 }
 
 pub(super) fn memory_headroom() -> Option<u64> {
-    let host = available_memory(&system_text(Path::new("/proc/meminfo")).ok()?)?;
-    let relative = unified_path(&system_text(Path::new("/proc/self/cgroup")).ok()?)?;
-    cgroup_headroom(host, &relative, system_text)
+    memory::sample(false).headroom
 }
 
+#[cfg(test)]
 fn cgroup_headroom(
-    mut available: u64,
+    available: u64,
     relative: &Path,
     read: impl Fn(&Path) -> Result<String, ErrorKind>,
 ) -> Option<u64> {
-    let root = Path::new("/sys/fs/cgroup");
-    let mut path = root.join(relative);
-    loop {
-        match read(&path.join("memory.max")) {
-            Ok(limit) => {
-                let current = if limit.trim() == "max" {
-                    None
-                } else {
-                    Some(read(&path.join("memory.current")).ok()?)
-                };
-                available = capped_memory(available, &limit, current.as_deref())?;
-            }
-            Err(ErrorKind::NotFound) if path == root => {
-                // The actual unified hierarchy root has no memory.max. Its
-                // supported controllers distinguish that case from absent data.
-                let controllers = read(&path.join("cgroup.controllers")).ok()?;
-                if !controllers.split_whitespace().any(|name| name == "memory") {
-                    return None;
-                }
-            }
-            Err(ErrorKind::NotFound) => {
-                // With memory disabled on the parent this child has no own cap;
-                // continue upward, where an ancestor can still impose one.
-                let parent = path.parent().filter(|parent| parent.starts_with(root))?;
-                let controllers = read(&parent.join("cgroup.subtree_control")).ok()?;
-                if controllers.split_whitespace().any(|name| name == "memory") {
-                    return None;
-                }
-            }
-            Err(_) => return None,
-        }
-        if path == root {
-            return Some(available);
-        }
-        if !path.pop() || !path.starts_with(root) {
-            return None;
-        }
-    }
+    memory::cgroup_sample(available, relative, &read, false).headroom
 }
 
 #[cfg(test)]

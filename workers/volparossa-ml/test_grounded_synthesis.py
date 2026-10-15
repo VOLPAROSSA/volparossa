@@ -162,7 +162,8 @@ class GroundedSynthesisTests(unittest.TestCase):
                 (model / name).touch(mode=0o600)
             (model / "config.json").write_text(json.dumps(profile["config"]))
             # File/hash doubles exercise worker identity logic, never model data or load.
-            def file_hash(path, expected_size=None):
+            def file_hash(path, expected_size=None, *, session=None):
+                self.assertIsNone(session)
                 self.assertEqual(expected_size, profile["files"][path.name])
                 return dict(bytes=expected_size, sha256=profile["hashes"][path.name])
             for mode, value in (("infer", grounded()), ("plan_document", planning(grounded()))):

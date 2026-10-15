@@ -205,6 +205,7 @@ async fn exchange(
             request_id: request.request_id.clone(),
             result: ControlResult::Ok as i32,
             diagnostic_code: "CONTENT_TRANSFER_READY".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::ContentTransferReady(ContentTransferReady {
                 manifest_id: ready_id,
                 bytes: manifest.length(),
@@ -255,6 +256,7 @@ async fn exchange(
                 request_id,
                 result: ControlResult::Ok as i32,
                 diagnostic_code: "CONTENT_OK".into(),
+                private_storage_remote_detail: None,
                 payload: Some(Payload::Content(ContentReceipt {
                     bytes: manifest.length(),
                     chunks: u32::try_from(manifest.chunks().len()).expect("bounded chunks"),

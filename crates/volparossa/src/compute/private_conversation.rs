@@ -28,6 +28,12 @@ pub(super) struct Input {
         deserialize_with = "present_generation_policy"
     )]
     generation_policy: Option<GenerationPolicy>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_output_constraint"
+    )]
+    output_constraint: Option<super::native_cpu::OutputConstraint>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -41,6 +47,12 @@ fn present_generation_policy<'de, D: serde::Deserializer<'de>>(
 ) -> std::result::Result<Option<GenerationPolicy>, D::Error> {
     // Omission means legacy generation. Explicit null is not a policy selection.
     GenerationPolicy::deserialize(deserializer).map(Some)
+}
+
+fn present_output_constraint<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<super::native_cpu::OutputConstraint>, D::Error> {
+    super::native_cpu::OutputConstraint::deserialize(deserializer).map(Some)
 }
 
 /// The supervisor must not bind a result after silently accepting duplicate keys.
@@ -139,6 +151,24 @@ fn arguments(value: &Value) -> bool {
     value.is_object() && serde_json::to_vec(value).is_ok_and(|raw| raw.len() <= 4096)
 }
 
+fn constrained_argument_depth(value: &Value, depth: u8) -> bool {
+    match value {
+        Value::Object(values) => {
+            depth <= 16
+                && values
+                    .values()
+                    .all(|value| constrained_argument_depth(value, depth + 1))
+        }
+        Value::Array(values) => {
+            depth <= 16
+                && values
+                    .iter()
+                    .all(|value| constrained_argument_depth(value, depth + 1))
+        }
+        _ => true,
+    }
+}
+
 impl Tool {
     fn key(&self) -> (&str, Option<&str>) {
         match self {
@@ -180,6 +210,18 @@ impl Tool {
 }
 
 impl Input {
+    pub(super) fn output_constraint(&self) -> Option<super::native_cpu::OutputConstraint> {
+        self.output_constraint
+    }
+
+    pub(super) fn output_constraint_tools(&self) -> Option<Vec<String>> {
+        self.output_constraint.map(|_| {
+            (0..self.tools.len())
+                .map(|index| format!("vp_{index}"))
+                .collect()
+        })
+    }
+
     pub(super) fn requires_generation_policy_handshake(&self) -> bool {
         self.generation_policy.is_some()
     }
@@ -217,6 +259,13 @@ impl Input {
 
     fn validate_profile(&self, profile: ModelProfile) -> Result<()> {
         let bounds = limits::for_profile(profile);
+        ensure!(
+            self.output_constraint.is_none()
+                || (profile == ModelProfile::Qwen4bInstruct2507
+                    && self.generation_policy == Some(GenerationPolicy::GreedyV1)
+                    && (1..=32).contains(&self.tools.len())),
+            "conversation_output_constraint"
+        );
         ensure!(
             self.generation_policy.is_none() || profile.is_native_conversation(),
             "conversation_generation_policy"
@@ -333,7 +382,12 @@ impl Input {
                 arguments: args,
             } => {
                 self.call(call_id, name, namespace.as_deref(), false, &seen)?;
-                ensure!(arguments(args), "conversation_arguments");
+                ensure!(
+                    arguments(args)
+                        && (self.output_constraint.is_none()
+                            || constrained_argument_depth(args, 1)),
+                    "conversation_arguments"
+                );
             }
             Output::CustomToolCall {
                 call_id,
@@ -401,6 +455,11 @@ pub(super) fn validate_report(report: &Value, raw: &[u8], profile: ModelProfile)
         report.get("generation_policy") == expected_policy.as_ref(),
         "conversation_generation_policy_binding"
     );
+    let expected_constraint = input.output_constraint.map(|constraint| json!(constraint));
+    ensure!(
+        report.get("output_constraint") == expected_constraint.as_ref(),
+        "conversation_output_constraint_binding"
+    );
     let expected = if profile.is_native_conversation() {
         qwen::turn(
             &input,
@@ -444,6 +503,9 @@ pub(super) fn summary(report: &Value, profile: ModelProfile) -> Value {
         "cleanup":{"complete":true,"retained_input":false,"retained_report":false}});
     if let Some(policy) = report.get("generation_policy") {
         result["generation_policy"] = policy.clone();
+    }
+    if let Some(constraint) = report.get("output_constraint") {
+        result["output_constraint"] = constraint.clone();
     }
     result
 }

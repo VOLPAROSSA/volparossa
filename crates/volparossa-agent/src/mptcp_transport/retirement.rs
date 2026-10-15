@@ -14,10 +14,11 @@ use std::{
 
 use rand_core::{OsRng, RngCore};
 use socket2::SockRef;
-use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use volparossa_routing::{HelperResult, RetireMptcpFlow};
 
 use super::MptcpTransportError;
+use super::acquire_diagnostic::{Observation, Reason, Stage};
 use crate::helper::{HelperClient, HelperClientError};
 
 const MAX_FLOWS: usize = 64;
@@ -61,15 +62,25 @@ impl Retirements {
     }
 
     pub(super) fn reserve(&self) -> io::Result<Reservation> {
+        self.reserve_classified().map_err(|(error, _)| error)
+    }
+
+    pub(super) fn reserve_classified(&self) -> Result<Reservation, (io::Error, Reason)> {
         if self.0.acquire_unconfirmed.load(Ordering::Acquire) {
-            return Err(io::Error::other("MPTCP acquire requires route retirement"));
+            return Err((
+                io::Error::other("MPTCP acquire requires route retirement"),
+                Reason::Unconfirmed,
+            ));
         }
-        let slot = self
-            .0
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| io::Error::other("MPTCP flow retirement capacity pending"))?;
+        let slot = self.0.slots.clone().try_acquire_owned().map_err(|error| {
+            (
+                io::Error::other("MPTCP flow retirement capacity pending"),
+                match error {
+                    TryAcquireError::NoPermits => Reason::LocalCapacity,
+                    TryAcquireError::Closed => Reason::LocalUnavailable,
+                },
+            )
+        })?;
         Ok(Reservation {
             owner: self.clone(),
             slot: Some(slot),
@@ -137,6 +148,15 @@ impl Retirements {
 impl Reservation {
     pub(super) fn begin_acquire(&mut self) {
         self.acquire_started = true;
+    }
+
+    pub(super) fn acquire_failed_classified(
+        &mut self,
+        error: HelperClientError,
+        observation: &mut Observation,
+    ) -> MptcpTransportError {
+        observation.record(Stage::HelperAcquire, Reason::helper(&error));
+        self.acquire_failed(error)
     }
 
     /// Preserve the shared route only when the authenticated, correlated helper response proves
@@ -423,3 +443,6 @@ mod tests {
         assert_eq!(owner.0.slots.available_permits(), MAX_FLOWS);
     }
 }
+
+#[cfg(test)]
+mod diagnostic_tests;

@@ -221,6 +221,7 @@ async fn send(
             request_id: request_id.to_vec(),
             result: ControlResult::Ok.into(),
             diagnostic_code: code.into(),
+            private_storage_remote_detail: None,
             payload: Some(payload),
         },
     )

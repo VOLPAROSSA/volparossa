@@ -388,6 +388,7 @@ async fn send_local_response(
             request_id: request_id.to_vec(),
             result: ControlResult::Ok as i32,
             diagnostic_code: code.into(),
+            private_storage_remote_detail: None,
             payload: Some(payload),
         },
     )

@@ -19,6 +19,7 @@ mod named_admission_tests;
 mod object_policy;
 mod parallel;
 mod private_storage;
+mod provider_activity;
 mod quote;
 mod quote_remote;
 mod recent;
@@ -29,13 +30,14 @@ mod replication;
 mod replication_budget;
 #[cfg(test)]
 mod resume_tests;
+mod storage_maintenance;
 mod tls;
 mod worker_budget;
 
 use replication::ReplicationRuntime;
 use replication_budget::Foreground;
 
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{future::Future, net::SocketAddr, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use socket2::SockRef;
@@ -46,17 +48,22 @@ use tokio::{
     time::{interval, timeout},
 };
 use volparossa_content::provider::{
-    ProviderEndpoint, ProviderError, PublicationRegistry, SignedProviderOffer, serve_publication,
+    ProviderEndpoint, ProviderError, PublicationRegistry, SignedProviderOffer,
+    activity::{Observer as _, Stage},
+    serve_publication_with_activity,
 };
 use volparossa_content::transfer::{TransferError, TransferLimits};
 use volparossa_content::{CacheLimits, ChunkStore, SignedManifest, Validity, VerifiedManifest};
 #[cfg(test)]
-use volparossa_content::{provider::pull_publication_with_progress, transfer::TransferProgress};
+use volparossa_content::{
+    provider::{pull_publication_with_progress, serve_publication},
+    transfer::TransferProgress,
+};
 use volparossa_core::CONTRIBUTION_SOCKET_PRIORITY;
 use volparossa_identity::Identity;
 use volparossa_local_control::{
     ContentCacheLimits, ContentFetchNameRequest, ContentFetchRequest, ContentReceipt,
-    ContentServeRequest, HttpsContentFetchRequest,
+    ContentServeRequest, HttpsContentFetchRequest, MAX_PROVIDER_SESSIONS,
 };
 use zeroize::Zeroizing;
 
@@ -72,6 +79,39 @@ const OFFER_LIFETIME: u64 = 300;
 // Metadata admission only, shorter than the existing 15-second selector exchange.
 // The four-session serving bound still applies while a caller waits.
 const REGISTRY_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(2);
+
+enum ProviderRefresh {
+    Withdrawn,
+    Registered(Result<(), DiscoveryError>),
+    InvalidOffer,
+}
+
+async fn refresh_provider_offer(
+    automatic: bool,
+    registry: &Mutex<PublicationRegistry>,
+    signer: &SigningKey,
+    endpoint: &ProviderEndpoint,
+    discovery: &DiscoveryControlHandle,
+) -> ProviderRefresh {
+    if automatic {
+        let registry = registry.lock().await;
+        if !registry.has_live_publications(now())
+            && !registry.has_mailbox()
+            && !registry.has_private_storage()
+            && !registry.has_custody()
+            && !registry.has_compute()
+            && !registry.has_quote()
+        {
+            drop(registry);
+            let _ = discovery.withdraw_content_offer().await;
+            return ProviderRefresh::Withdrawn;
+        }
+    }
+    let Ok(offer) = make_offer(signer, endpoint.clone()) else {
+        return ProviderRefresh::InvalidOffer;
+    };
+    ProviderRefresh::Registered(discovery.register_content_offer(offer).await.map(|_| ()))
+}
 
 async fn provider_snapshot(
     registry: &Mutex<PublicationRegistry>,
@@ -115,6 +155,9 @@ pub(crate) struct ContentRuntime {
     retrieval: Arc<Mutex<()>>,
     foreground: Arc<Foreground>,
     background_custody: Arc<background_custody::BackgroundCustody>,
+    storage_maintenance: Arc<storage_maintenance::Coordinator>,
+    storage_outcomes: Arc<private_storage::Outcomes>,
+    provider_activity: Arc<provider_activity::Activity>,
     recent: Arc<Mutex<recent::RecentProviders>>,
     source_costs: Arc<Mutex<https::sources::SourceCosts>>,
     worker_budget: worker_budget::WorkerBudget,
@@ -154,6 +197,7 @@ struct ServingLoop {
     stop: watch::Receiver<bool>,
     automatic: bool,
     events: Option<Arc<RwLock<AgentState>>>,
+    activity: Arc<provider_activity::Activity>,
 }
 
 impl ContentRuntime {
@@ -172,6 +216,9 @@ impl ContentRuntime {
             retrieval: Arc::new(Mutex::new(())),
             foreground: Arc::new(Foreground::default()),
             background_custody: Arc::new(background_custody::BackgroundCustody::default()),
+            storage_maintenance: Arc::new(storage_maintenance::Coordinator::default()),
+            storage_outcomes: Arc::new(private_storage::Outcomes::default()),
+            provider_activity: Arc::new(provider_activity::Activity::default()),
             recent: Arc::new(Mutex::new(recent::RecentProviders::default())),
             source_costs: Arc::new(Mutex::new(https::sources::SourceCosts::default())),
             worker_budget: worker_budget::WorkerBudget::default(),
@@ -371,6 +418,7 @@ impl ContentRuntime {
             stop: receiver,
             automatic: options.automatic,
             events: Some(Arc::clone(&context.state)),
+            activity: Arc::clone(&self.provider_activity),
         };
         let listener_stopped = stop.clone();
         let task = tokio::spawn(async move {
@@ -413,6 +461,7 @@ impl ContentRuntime {
             stop,
             automatic: false,
             events: None,
+            activity: Arc::new(provider_activity::Activity::default()),
         })
         .await;
     }
@@ -432,39 +481,48 @@ impl ContentRuntime {
             mut stop,
             automatic,
             events,
+            activity,
         } = server;
         let mut sessions = JoinSet::new();
         refresh.tick().await;
         let mut registration_pending = false;
+        // Keep the bounded discovery RPC owned here, not inside a select branch or
+        // a detached task: accepting TLS, joining sessions and stopping must remain
+        // pollable while its reply (or the automatic registry check) is pending.
+        let mut refresh_work: Option<Pin<Box<dyn Future<Output = ProviderRefresh> + Send + '_>>> =
+            None;
         loop {
             tokio::select! {
                 changed = stop.changed() => {
                     if changed.is_err() || *stop.borrow() { break; }
                 }
                 _ = refresh.tick() => {
-                    if automatic {
-                        let registry = registry.lock().await;
-                        if !registry.has_live_publications(now())
-                            && !registry.has_mailbox()
-                            && !registry.has_private_storage()
-                            && !registry.has_custody()
-                            && !registry.has_compute()
-                            && !registry.has_quote()
-                        {
-                            drop(registry);
-                            let _ = discovery.withdraw_content_offer().await;
-                            continue;
-                        }
+                    // Consume ticks while pending; only a timer tick, never completion
+                    // itself, may start another refresh. Never queue overlapping work.
+                    if refresh_work.is_none() {
+                        refresh_work = Some(Box::pin(refresh_provider_offer(
+                            automatic, &registry, &signer, &endpoint, &discovery,
+                        )));
                     }
-                    let Ok(offer) = make_offer(&signer, endpoint.clone()) else { break; };
-                    match discovery.register_content_offer(offer).await {
-                        Ok(_) => {
+                }
+                outcome = async {
+                    if let Some(work) = refresh_work.as_mut() {
+                        work.await
+                    } else {
+                        std::future::pending().await
+                    }
+                }, if refresh_work.is_some() => {
+                    refresh_work = None;
+                    match outcome {
+                        ProviderRefresh::Withdrawn => {}
+                        ProviderRefresh::InvalidOffer => break,
+                        ProviderRefresh::Registered(Ok(())) => {
                             if registration_pending {
                                 provider_event(events.as_ref(), "CONTENT_PROVIDER_REGISTRATION_RECOVERED").await;
                             }
                             registration_pending = false;
                         }
-                        Err(DiscoveryError::Busy | DiscoveryError::Timeout) => {
+                        ProviderRefresh::Registered(Err(DiscoveryError::Busy | DiscoveryError::Timeout)) => {
                             // Keep the exact bound listener/registry, not the old advertisement's
                             // authority. Discovery still expires/withdraws unrefreshed offers;
                             // clients still verify their independently signed offer's TTL.
@@ -472,13 +530,13 @@ impl ContentRuntime {
                             registration_pending = true;
                             provider_event(events.as_ref(), "CONTENT_PROVIDER_REGISTRATION_RETRY_PENDING").await;
                         }
-                        Err(_) => {
+                        ProviderRefresh::Registered(Err(_)) => {
                             provider_event(events.as_ref(), "CONTENT_PROVIDER_REGISTRATION_FAILED").await;
                             break;
                         }
                     }
                 }
-                accepted = listener.accept(), if sessions.len() < 4 => {
+                accepted = listener.accept(), if sessions.len() < MAX_PROVIDER_SESSIONS => {
                     let Ok((stream, _source)) = accepted else { break; };
                     if SockRef::from(&stream).set_priority(CONTRIBUTION_SOCKET_PRIORITY).is_err() {
                         continue;
@@ -486,28 +544,40 @@ impl ContentRuntime {
                     let registry = Arc::clone(&registry);
                     let tls = tls.clone();
                     let events = events.clone();
+                    let activity = activity.begin();
                     sessions.spawn(async move {
                         let Ok(mut stream) = tls.accept(stream).await else { return; };
+                        activity.enter(Stage::RegistrySnapshot);
                         // Snapshot at most 64 explicit registrations; never hold the metadata
                         // lock while a background receiver waits before requesting a chunk.
                         // Cache handles retain their own exclusive ownership checks.
                         let Ok(registry) = provider_snapshot(&registry, REGISTRY_SNAPSHOT_TIMEOUT).await else {
+                            activity.enter(Stage::Closing);
                             provider_event(events.as_ref(), "CONTENT_PROVIDER_REGISTRY_TIMEOUT").await;
                             return;
                         };
-                        match serve_publication(&mut stream, &registry, TransferLimits::default()).await {
+                        let mut storage_failure = None;
+                        let result = serve_publication_with_activity(&mut stream, &registry, TransferLimits::default(), &mut storage_failure, &activity).await;
+                        activity.enter(Stage::Closing);
+                        match result {
                             Ok(_) => { let _ = tls::finish(&mut stream).await; }
-                            Err(error) => provider_event(events.as_ref(), provider_error_code(&error)).await,
+                            Err(error) => provider_failure_event(events.as_ref(), &error, storage_failure).await,
                         }
                     });
                 }
                 Some(_) = sessions.join_next(), if !sessions.is_empty() => {}
             }
         }
+        // Close any outstanding RPC reply before withdrawing the listener's offer.
+        drop(refresh_work);
         drop(listener);
         sessions.abort_all();
         while sessions.join_next().await.is_some() {}
         let _ = discovery.withdraw_content_offer().await;
+    }
+
+    pub(crate) fn provider_activity(&self) -> volparossa_local_control::ContentProviderActivity {
+        self.provider_activity.snapshot()
     }
 
     pub(crate) async fn stop(
@@ -858,6 +928,37 @@ async fn provider_event(state: Option<&Arc<RwLock<AgentState>>>, code: &'static 
             code,
             unix_millis(),
         );
+    }
+}
+
+async fn provider_failure_event(
+    state: Option<&Arc<RwLock<AgentState>>>,
+    error: &ProviderError,
+    storage_failure: Option<volparossa_content::private_storage::wire::diagnostic::Failure>,
+) {
+    if let Some(state) = state {
+        let mut state = state.write().await;
+        // Preserve the historical category and V1 tuple, adding at most one closed
+        // APPEND I/O tuple under the same lock. No new await, sink or identifier is added.
+        state.log(
+            volparossa_local_control::LogLevel::Info,
+            provider_error_code(error),
+            unix_millis(),
+        );
+        if let Some(failure) = storage_failure {
+            state.log(
+                volparossa_local_control::LogLevel::Info,
+                failure.event_code(),
+                unix_millis(),
+            );
+            if let Some(code) = failure.payload_io_event_code() {
+                state.log(
+                    volparossa_local_control::LogLevel::Info,
+                    code,
+                    unix_millis(),
+                );
+            }
+        }
     }
 }
 

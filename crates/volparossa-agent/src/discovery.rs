@@ -11148,19 +11148,10 @@ impl DiscoveryRuntime {
             );
             return;
         }
-        state.write().await.log(
-            if succeeded {
-                LogLevel::Info
-            } else {
-                LogLevel::Warn
-            },
-            if succeeded {
-                "MPTCP_EXIT_FLOW_COMPLETED"
-            } else {
-                "MPTCP_EXIT_FLOW_FAILED"
-            },
-            unix_millis(),
-        );
+        state
+            .write()
+            .await
+            .log_mptcp_exit_flow(succeeded, route_context_id, unix_millis());
     }
 
     async fn finish_mptcp_exit_runtime(

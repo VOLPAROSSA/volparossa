@@ -31,14 +31,51 @@ pub(crate) enum Command {
     },
     /// Retain explicit independently pinned provider copies, with non-consuming restore failover.
     Replicas {
+        /// Opt in to coarse local APPEND timing in diagnostic reports (version 7).
+        #[arg(long, global = true, conflicts_with = "flow_acquire_diagnostics_v8")]
+        append_diagnostics_v7: bool,
+        /// Opt in to closed local flow-acquisition detail and v7 APPEND timing (version 8).
+        #[arg(long, global = true, conflicts_with = "append_diagnostics_v7")]
+        flow_acquire_diagnostics_v8: bool,
         #[command(subcommand)]
         command: Box<peer::replicas::Command>,
     },
     /// Split already encrypted archives across explicit providers with per-fragment copies.
     Fragments {
+        /// Opt in to coarse local APPEND timing in diagnostic reports (version 7).
+        #[arg(long, global = true, conflicts_with = "flow_acquire_diagnostics_v8")]
+        append_diagnostics_v7: bool,
+        /// Opt in to closed local flow-acquisition detail and v7 APPEND timing (version 8).
+        #[arg(long, global = true, conflicts_with = "append_diagnostics_v7")]
+        flow_acquire_diagnostics_v8: bool,
         #[command(subcommand)]
         command: Box<peer::replicas::fragments::Command>,
     },
+}
+
+impl Command {
+    fn validate_diagnostics(&self) -> Result<(), clap::Error> {
+        // Global values can arrive from different subcommand scopes. Recheck
+        // the final selection before constructing or polling any storage work.
+        if matches!(
+            self,
+            Self::Replicas {
+                append_diagnostics_v7: true,
+                flow_acquire_diagnostics_v8: true,
+                ..
+            } | Self::Fragments {
+                append_diagnostics_v7: true,
+                flow_acquire_diagnostics_v8: true,
+                ..
+            }
+        ) {
+            return Err(clap::Error::raw(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--append-diagnostics-v7 conflicts with --flow-acquire-diagnostics-v8",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -110,12 +147,33 @@ pub(crate) enum LocalCommand {
 }
 
 pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
+    command.validate_diagnostics()?;
     let command = match command {
         Command::Local { command } => command,
         Command::Peer { command } => return peer::run(*command, socket).await,
-        Command::Replicas { command } => return peer::replicas::run(*command, socket).await,
-        Command::Fragments { command } => {
-            return peer::replicas::fragments::run(*command, socket).await;
+        Command::Replicas {
+            command,
+            append_diagnostics_v7,
+            flow_acquire_diagnostics_v8,
+        } => {
+            return Box::pin(peer::with_diagnostics(
+                append_diagnostics_v7,
+                flow_acquire_diagnostics_v8,
+                peer::replicas::run(*command, socket),
+            ))
+            .await;
+        }
+        Command::Fragments {
+            command,
+            append_diagnostics_v7,
+            flow_acquire_diagnostics_v8,
+        } => {
+            return Box::pin(peer::with_diagnostics(
+                append_diagnostics_v7,
+                flow_acquire_diagnostics_v8,
+                peer::replicas::fragments::run(*command, socket),
+            ))
+            .await;
         }
     };
     match command {

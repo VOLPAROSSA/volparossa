@@ -270,6 +270,11 @@ async fn local_exchange(mut local: tokio::net::UnixStream, peers: &[FixturePeer]
         control_request::Operation, control_response::Payload, read_request, write_response,
     };
     let request = read_request(&mut local).await.unwrap();
+    // This fixture models an older agent without an outcome registry. A failed
+    // optional query must not turn a lost terminal into a successful operation.
+    if matches!(request.operation, Some(Operation::PrivateStorageOutcome(_))) {
+        return;
+    }
     let Some(Operation::PrivateStorageRemote(requested)) = request.operation else {
         panic!("wrong IPC operation")
     };
@@ -295,6 +300,7 @@ async fn local_exchange(mut local: tokio::net::UnixStream, peers: &[FixturePeer]
         request_id: request.request_id,
         result: 0,
         diagnostic_code: "PRIVATE_STORAGE_READY".into(),
+        private_storage_remote_detail: None,
         payload: Some(Payload::PrivateStorageReady(PrivateStorageReady {
             provider_key: peer.grant.provider_key().to_bytes().to_vec(),
             challenge: challenge.encode(),
@@ -364,6 +370,16 @@ async fn replica_two_real_stores_resume_failover_and_delete_without_consuming_su
     assert_eq!(partial["uncertain_payload_bytes"], length);
     assert_eq!(partial["committed_payload_bytes"], length);
     assert_eq!(partial["physical_payload_charge_upper_bound"], 2 * length);
+    assert_eq!(
+        partial["deposit_diagnostics"],
+        serde_json::json!({
+            "version": 6, "omitted_failures": 0, "failures": [{
+                "fragment_index": null, "copy_index": 0, "operation": "reserve",
+                "stage": "agent_terminal", "category": "io", "agent_code": null,
+                "agent_detail": null, "agent_outcome": {"status": "query_failed", "detail": null}
+            }]
+        })
+    );
     assert!(set.copy(0).unwrap().journal.lease.is_none());
     drop(set);
     first.stop().await;
@@ -381,6 +397,12 @@ async fn replica_two_real_stores_resume_failover_and_delete_without_consuming_su
         .unwrap();
     assert_eq!(completed["operation_complete"], true);
     assert_eq!(completed["committed_payload_bytes"], 2 * length);
+    assert_eq!(
+        completed["deposit_diagnostics"],
+        serde_json::json!({
+            "version": 6, "omitted_failures": 0, "failures": []
+        })
+    );
     for (index, original) in identities.iter().enumerate() {
         assert_eq!(
             &set.copy(index)

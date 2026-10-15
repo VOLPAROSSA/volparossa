@@ -107,6 +107,35 @@ impl OwnedLifetimes {
                 .await;
         }
     }
+
+    /// Aggregate process CPU for this exact still-observable tree. Each record
+    /// includes its own waited-child counters, but a previously observed member
+    /// disappearing is conservatively an error, never invented CPU credit.
+    pub(super) fn cpu_ticks(&self) -> Result<u64> {
+        ensure!(
+            !self.observation_failed,
+            "compute_private_process_observation"
+        );
+        let mut total = 0_u64;
+        for expected in &self.members {
+            let root = Path::new("/proc").join(expected.pid.to_string());
+            let raw = super::system_text(&root.join("stat"))?;
+            ensure!(
+                parse_record(expected.pid, &raw)?.identity == *expected,
+                "compute_native_session_cpu_identity"
+            );
+            let (_, tail) = raw
+                .rsplit_once(") ")
+                .context("compute_native_session_cpu_stat")?;
+            let fields: Vec<_> = tail.split_whitespace().collect();
+            for index in [11, 12, 13, 14] {
+                total = total
+                    .checked_add(fields[index].parse::<u64>()?)
+                    .context("compute_native_session_cpu_bound")?;
+            }
+        }
+        Ok(total)
+    }
 }
 
 fn same_lifetime(expected: Identity) -> Result<bool> {
@@ -203,6 +232,7 @@ mod tests {
         let tracker = OwnedLifetimes::capture(pid).unwrap();
         child.kill().await.unwrap();
         assert!(timed_out.is_err());
+        assert!(tracker.cpu_ticks().is_err());
         tracker
             .wait_closed(Instant::now() + Duration::from_secs(1))
             .await

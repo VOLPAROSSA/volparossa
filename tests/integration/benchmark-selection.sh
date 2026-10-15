@@ -109,6 +109,10 @@ benchmark_route_diagnostic_prefix() {
         benchmark_diagnostic_prefix=cloud-private-file
     elif [ "${image_snapshot:-no}" = yes ]; then
         benchmark_diagnostic_prefix=image-snapshot
+    elif [ "${private_storage_maintenance:-no}" = yes ]; then
+        # Internal closed intermediate; only the validated combined projection
+        # is exported by the maintenance finalizer, never these private markers.
+        benchmark_diagnostic_prefix=private-storage-maintenance-selection
     elif [ "${agent_cooperative_code:-no}" = yes ]; then
         benchmark_diagnostic_prefix=agent-cooperative-code
     elif [ "${agent_cooperative_browser:-no}" = yes ]; then
@@ -120,6 +124,22 @@ benchmark_route_diagnostic_prefix() {
 
 benchmark_image_route_diagnostic() {
     benchmark_route_diagnostic_prefix || return 0
+    if [ "$benchmark_diagnostic_prefix" = private-storage-maintenance-selection ]; then
+        if [ "$1" = initialize ]; then
+            (umask 077
+             : >"$WORK/private-storage-maintenance-selection-end.private"
+             : >"$WORK/private-storage-maintenance-selection-route-diagnostic.json"
+             case "${benchmark_label:-}" in
+                 private-storage-fragments) printf 'initial\n' ;;
+                 private-storage-maintenance-reconnect) printf 'reconnect\n' ;;
+                 *) printf 'unknown\n' ;;
+             esac >"$WORK/private-storage-maintenance-selection-phase.private"
+             date +%s%3N >"$WORK/private-storage-maintenance-selection-start.private") || true
+        else
+            (umask 077
+             date +%s%3N >"$WORK/private-storage-maintenance-selection-end.private") || true
+        fi
+    fi
     benchmark_diagnostic_retries=$((benchmark_connect_count - 1))
     [ "$benchmark_diagnostic_retries" -ge 0 ] || benchmark_diagnostic_retries=0
     if jq -cn --arg stage "$1" --arg reason "$2" \

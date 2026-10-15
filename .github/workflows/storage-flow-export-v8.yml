@@ -1,0 +1,305 @@
+name: Bounded Storage flow diagnostic v8 export
+
+on:
+  push:
+    branches:
+      - feature/storage-flow-export-v8
+    paths:
+      - .github/workflows/storage-flow-export-v8.yml
+      - crates/volparossa-agent/src/content/private_storage.rs
+      - crates/volparossa-agent/src/content/private_storage/observation.rs
+      - crates/volparossa-agent/src/content/private_storage/observation/tests.rs
+      - crates/volparossa-agent/src/content/private_storage/observation/flow_acquire.rs
+      - crates/volparossa-agent/src/content/private_storage/observation/flow_acquire/tests.rs
+      - crates/volparossa-agent/src/content/private_storage/tests.rs
+      - crates/volparossa-agent/src/control.rs
+      - crates/volparossa-local-control/src/lib.rs
+      - crates/volparossa-local-control/src/private_storage.rs
+      - crates/volparossa-local-control/src/private_storage_detail.rs
+      - crates/volparossa-local-control/src/private_storage_detail/tests.rs
+      - crates/volparossa-local-control/src/private_storage_detail/flow_acquire.rs
+      - crates/volparossa-local-control/src/private_storage_detail/flow_acquire/tests.rs
+      - crates/volparossa/src/control_tests.rs
+      - crates/volparossa/src/storage.rs
+      - crates/volparossa/src/storage/peer.rs
+      - crates/volparossa/src/storage/peer_challenge_diagnostics_tests.rs
+      - crates/volparossa/src/storage/peer_diagnostics.rs
+      - crates/volparossa/src/storage/peer_diagnostics_tests.rs
+      - crates/volparossa/src/storage/peer_tests.rs
+      - crates/volparossa/src/storage/peer_transfer.rs
+      - crates/volparossa/src/storage/peer_flow_acquire.rs
+      - crates/volparossa/src/storage/peer_flow_acquire_tests.rs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: storage-flow-export-v8-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_BUILD_JOBS: '2'
+  SOURCE_BASE: e7ce0cddaca7c28af5e3540835a7e47b49e8a42e
+
+jobs:
+  contracts:
+    name: Opt-in v8 wire, request lifetime and historical JSON contracts
+    if: >-
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.ref == 'refs/heads/feature/storage-flow-export-v8'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out the exact export candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind the candidate, unchanged dependencies and exact source delta
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
+          test "$GITHUB_REF" = refs/heads/feature/storage-flow-export-v8
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          test "$(id -u)" != 0
+          test "$CARGO_BUILD_JOBS" = 2
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          git merge-base --is-ancestor "$SOURCE_BASE" HEAD
+          umask 077
+          test ! -e storage-flow-v8-evidence
+          mkdir storage-flow-v8-evidence
+          python3 -B - <<'PY'
+          import json
+          import os
+          import pathlib
+          import subprocess
+          allowed = set('''
+          .github/workflows/storage-flow-export-v8.yml
+          crates/volparossa-agent/src/content/private_storage.rs
+          crates/volparossa-agent/src/content/private_storage/observation.rs
+          crates/volparossa-agent/src/content/private_storage/observation/tests.rs
+          crates/volparossa-agent/src/content/private_storage/observation/flow_acquire.rs
+          crates/volparossa-agent/src/content/private_storage/observation/flow_acquire/tests.rs
+          crates/volparossa-agent/src/content/private_storage/tests.rs
+          crates/volparossa-agent/src/control.rs
+          crates/volparossa-local-control/src/lib.rs
+          crates/volparossa-local-control/src/private_storage.rs
+          crates/volparossa-local-control/src/private_storage_detail.rs
+          crates/volparossa-local-control/src/private_storage_detail/tests.rs
+          crates/volparossa-local-control/src/private_storage_detail/flow_acquire.rs
+          crates/volparossa-local-control/src/private_storage_detail/flow_acquire/tests.rs
+          crates/volparossa/src/control_tests.rs
+          crates/volparossa/src/storage.rs
+          crates/volparossa/src/storage/peer.rs
+          crates/volparossa/src/storage/peer_challenge_diagnostics_tests.rs
+          crates/volparossa/src/storage/peer_diagnostics.rs
+          crates/volparossa/src/storage/peer_diagnostics_tests.rs
+          crates/volparossa/src/storage/peer_tests.rs
+          crates/volparossa/src/storage/peer_transfer.rs
+          crates/volparossa/src/storage/peer_flow_acquire.rs
+          crates/volparossa/src/storage/peer_flow_acquire_tests.rs
+          '''.split())
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          changed = set(git('diff', '--name-only', os.environ['SOURCE_BASE'], 'HEAD').splitlines())
+          assert len(allowed) == 24 and changed == allowed, 'unexpected source delta'
+          dependencies = ('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml',
+              'crates/volparossa-agent/Cargo.toml',
+              'crates/volparossa-local-control/Cargo.toml', 'crates/volparossa/Cargo.toml')
+          for name in dependencies:
+              assert git('rev-parse', 'HEAD:' + name) == git('rev-parse', os.environ['SOURCE_BASE'] + ':' + name)
+          record = dict(schema=1, source_commit=os.environ['GITHUB_SHA'],
+              source_tree=git('rev-parse', 'HEAD^{tree}'), base_commit=os.environ['SOURCE_BASE'],
+              workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'],
+              source_blobs={name: git('rev-parse', 'HEAD:' + name) for name in sorted(changed)},
+              dependency_blobs={name: git('rev-parse', 'HEAD:' + name) for name in dependencies},
+              build_jobs=2, scope='opt-in-storage-flow-diagnostic-v8-local-software-contracts',
+              application_adapter_integration_proven=False,
+              live_storage_or_mptcp_acceptance=False,
+              feature_equivalence_to_full_workspace_proven=False)
+          pathlib.Path('storage-flow-v8-evidence/source.json').write_text(json.dumps(record, sort_keys=True) + '\n')
+          PY
+
+      - name: Install the existing pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.85.0 \
+            --profile minimal \
+            --component clippy \
+            --component rustfmt
+          rustup show active-toolchain
+          rustc --version --verbose
+          cargo --version --verbose
+
+      - name: Install reviewed Protobuf only on the disposable hosted runner
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(dpkg --print-architecture)" = amd64
+          sudo -n apt-get update
+          sudo -n apt-get install --yes --no-install-recommends \
+            protobuf-compiler=3.21.12-8.2ubuntu0.3
+          test "$(protoc --version)" = 'libprotoc 3.21.12'
+
+      - name: Fetch the unchanged locked dependency graph
+        run: cargo fetch --locked
+
+      - name: Inventory and execute new and historical disjoint contract groups
+        # Local Unix IPC, temporary owned storage and pure validators only.
+        # No VM, model, live route, namespace, retry or test-thread override.
+        run: |
+          set -euo pipefail
+          export RUST_BACKTRACE=1
+          contract_group() {
+            local label="$1" package="$2" filter="$3" expected="$4" skip="$5" test_source="$6"
+            local -a target=(--lib) exclusions=()
+            if test "$package" = volparossa; then
+              target=(--bin volparossa)
+            fi
+            if test -n "$skip"; then
+              exclusions=(--skip "$skip")
+            fi
+            # Cargo uses substring filters: unrelated compute modules also
+            # contain `storage::` or `control::tests::` in their full names.
+            case "$label" in
+              cli-historical|cli-control) exclusions+=(--skip compute::) ;;
+            esac
+            timeout --kill-after=5s 600s \
+              cargo test --locked --offline -p "$package" "${target[@]}" "$filter" \
+              -- --list "${exclusions[@]}" 2>&1 | tee "storage-flow-v8-evidence/$label-inventory.log"
+            python3 -B - "$label" "$filter" "$expected" "$skip" "$test_source" <<'PY'
+          import pathlib
+          import re
+          import sys
+          label, prefix, expected, skip, source = sys.argv[1:]
+          text = pathlib.Path('storage-flow-v8-evidence/' + label + '-inventory.log').read_text()
+          names = re.findall(r'^([^\n]+): test$', text, re.MULTILINE)
+          assert 1 <= len(names) <= 256 and len(names) == len(set(names)), 'empty or invalid inventory'
+          assert all(name.startswith(prefix) for name in names), 'unexpected test scope'
+          assert not skip or not any(skip in name for name in names), 'new test repeated as historical'
+          assert re.search(r'^' + str(len(names)) + r' tests?, 0 benchmarks$', text, re.MULTILINE)
+          if int(expected):
+              assert len(names) == int(expected), 'unexpected fixed test count'
+          if source:
+              functions = re.findall(r'#\[(?:tokio::)?test(?:\([^\]]*\))?\]\s*(?:async )?fn (\w+)\(', pathlib.Path(source).read_text())
+              assert len(functions) == int(expected), 'unexpected new source inventory'
+              assert set(names) == {prefix + function for function in functions}, 'new source case omitted'
+          PY
+            timeout --kill-after=5s 180s \
+              cargo test --locked --offline -p "$package" "${target[@]}" "$filter" \
+              -- --nocapture "${exclusions[@]}" 2>&1 | tee "storage-flow-v8-evidence/$label-test.log"
+            python3 -B - "$label" <<'PY'
+          import pathlib
+          import re
+          import sys
+          root = pathlib.Path('storage-flow-v8-evidence')
+          inventory = (root / (sys.argv[1] + '-inventory.log')).read_text()
+          output = (root / (sys.argv[1] + '-test.log')).read_text()
+          names = re.findall(r'^([^\n]+): test$', inventory, re.MULTILINE)
+          results = re.findall(r'^test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out;', output, re.MULTILINE)
+          assert results == [str(len(names))], 'not every inventoried test passed'
+          for name in names:
+              assert len(re.findall(r'^test ' + re.escape(name) + r' \.\.\. ok$', output, re.MULTILINE)) == 1, name
+          PY
+          }
+          contract_group wire-new volparossa-local-control private_storage_detail::flow_acquire::tests:: 7 '' crates/volparossa-local-control/src/private_storage_detail/flow_acquire/tests.rs
+          contract_group agent-new volparossa-agent content::private_storage::observation::flow_acquire::tests:: 7 '' crates/volparossa-agent/src/content/private_storage/observation/flow_acquire/tests.rs
+          contract_group cli-new volparossa storage::peer::tests::flow_acquire:: 13 '' crates/volparossa/src/storage/peer_flow_acquire_tests.rs
+          contract_group wire-historical volparossa-local-control private_storage 0 private_storage_detail::flow_acquire::tests:: ''
+          contract_group agent-historical volparossa-agent content::private_storage:: 0 content::private_storage::observation::flow_acquire::tests:: ''
+          contract_group agent-control volparossa-agent control::tests::private_storage_detail_ 1 '' ''
+          contract_group cli-historical volparossa storage:: 0 storage::peer::tests::flow_acquire:: ''
+          contract_group cli-control volparossa control::tests:: 2 '' ''
+
+      - name: Require all twenty-seven new cases without historical double-counting
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          import json
+          import pathlib
+          import re
+          root = pathlib.Path('storage-flow-v8-evidence')
+          groups = {
+              'wire-new': 'volparossa-local-control', 'agent-new': 'volparossa-agent',
+              'cli-new': 'volparossa', 'wire-historical': 'volparossa-local-control',
+              'agent-historical': 'volparossa-agent', 'agent-control': 'volparossa-agent',
+              'cli-historical': 'volparossa', 'cli-control': 'volparossa'}
+          names = []
+          counts = {}
+          for group, package in groups.items():
+              text = (root / (group + '-inventory.log')).read_text()
+              inventory = re.findall(r'^([^\n]+): test$', text, re.MULTILINE)
+              counts[group] = len(inventory)
+              names.extend(package + ':' + name for name in inventory)
+          assert len(names) == len(set(names)), 'a test was executed in multiple groups'
+          assert [counts[group] for group in ('wire-new', 'agent-new', 'cli-new')] == [7, 7, 13]
+          assert all(1 <= count <= 256 for count in counts.values())
+          record = dict(schema=1, unique_tests=len(names), new_tests=27,
+              historical_tests=len(names) - 27, group_counts=counts, test_names=sorted(names),
+              application_adapter_integration_proven=False, live_storage_or_mptcp_acceptance=False)
+          (root / 'tests.json').write_text(json.dumps(record, sort_keys=True) + '\n')
+          PY
+
+      - name: Lint all targets of the three affected packages
+        run: |
+          set -euo pipefail
+          timeout --kill-after=5s 600s \
+            cargo clippy --locked --offline \
+            -p volparossa-local-control -p volparossa-agent -p volparossa \
+            --all-targets --all-features -- -D warnings 2>&1 | tee storage-flow-v8-evidence/clippy.log
+
+      - name: Check formatting without rewriting the tested source
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check 2>&1 | tee storage-flow-v8-evidence/format.log
+
+      - name: Recheck exact source and lockfile even after a failure
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          git diff --exit-code HEAD
+          test "$(git rev-parse HEAD:Cargo.lock)" = "$(git rev-parse "$SOURCE_BASE":Cargo.lock)"
+
+      - name: Preserve original bounded contract evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: storage-flow-export-v8-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            storage-flow-v8-evidence/source.json
+            storage-flow-v8-evidence/tests.json
+            storage-flow-v8-evidence/wire-new-inventory.log
+            storage-flow-v8-evidence/wire-new-test.log
+            storage-flow-v8-evidence/agent-new-inventory.log
+            storage-flow-v8-evidence/agent-new-test.log
+            storage-flow-v8-evidence/cli-new-inventory.log
+            storage-flow-v8-evidence/cli-new-test.log
+            storage-flow-v8-evidence/wire-historical-inventory.log
+            storage-flow-v8-evidence/wire-historical-test.log
+            storage-flow-v8-evidence/agent-historical-inventory.log
+            storage-flow-v8-evidence/agent-historical-test.log
+            storage-flow-v8-evidence/agent-control-inventory.log
+            storage-flow-v8-evidence/agent-control-test.log
+            storage-flow-v8-evidence/cli-historical-inventory.log
+            storage-flow-v8-evidence/cli-historical-test.log
+            storage-flow-v8-evidence/cli-control-inventory.log
+            storage-flow-v8-evidence/cli-control-test.log
+            storage-flow-v8-evidence/clippy.log
+            storage-flow-v8-evidence/format.log

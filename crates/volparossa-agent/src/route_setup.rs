@@ -13,6 +13,7 @@
 
 mod bootstrap;
 mod browser_failure;
+mod content_stream;
 mod dns_reuse;
 mod extension;
 mod live_refill;
@@ -22,6 +23,7 @@ mod path_telemetry;
 mod retirement;
 mod selection_bridge;
 
+pub(crate) use content_stream::{ContentStreamOpenCause, ContentStreamOpenFailure};
 pub(crate) use extension::CommittedMptcpExtension;
 pub(crate) use selection_bridge::{
     PreProbeContinuation, PreparedPreselectionEvidence, prepare_preselection_evidence,
@@ -1699,12 +1701,31 @@ impl ClientRouteControl {
         port: u16,
         now_ms: u64,
     ) -> Result<ActiveProductionMptcpClientFlow, ClientRouteConnectError> {
+        self.open_content_stream_diagnosed(policy, hostname, port, now_ms)
+            .await
+            .map_err(ContentStreamOpenFailure::into_route_error)
+    }
+
+    /// Same stream, authority and lifetime as `open_content_stream`, with one finite local
+    /// failure stage. No shared last-error state, additional retries or peer disclosures.
+    pub(crate) async fn open_content_stream_diagnosed(
+        &self,
+        policy: &VerifiedManifest,
+        hostname: &str,
+        port: u16,
+        now_ms: u64,
+    ) -> Result<ActiveProductionMptcpClientFlow, ContentStreamOpenFailure> {
         policy
             .authorize_domain(now_ms, hostname, TransportProtocol::Tcp, port)
-            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            .map_err(|_| {
+                ContentStreamOpenFailure::new(
+                    ContentStreamOpenCause::Policy,
+                    ClientRouteConnectError::TransportRuntimeUnavailable,
+                )
+            })?;
         let destination = ClientTcpDestination::Hostname(hostname.to_owned());
         let (transport, material) = self
-            .acquire_tcp_flow_transport(policy, &destination, port, now_ms)
+            .acquire_tcp_flow_transport_diagnosed(policy, &destination, port, now_ms)
             .await?;
         activate_production_mptcp_client_flow(
             transport,
@@ -1715,7 +1736,7 @@ impl ClientRouteControl {
             now_ms,
         )
         .await
-        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)
+        .map_err(|failure| ContentStreamOpenFailure::from_activation(&failure))
     }
 
     /// Retain the carrying route's control identity for generic service lookup.
@@ -1776,32 +1797,75 @@ impl ClientRouteControl {
         ),
         ClientRouteConnectError,
     > {
+        self.acquire_tcp_flow_transport_diagnosed(policy, destination, port, now_ms)
+            .await
+            .map_err(ContentStreamOpenFailure::into_route_error)
+    }
+
+    async fn acquire_tcp_flow_transport_diagnosed(
+        &self,
+        policy: &VerifiedManifest,
+        destination: &ClientTcpDestination,
+        port: u16,
+        now_ms: u64,
+    ) -> Result<
+        (
+            crate::mptcp_transport::ClientMptcpFlowTransport,
+            ClientOpenTcpMaterial,
+        ),
+        ContentStreamOpenFailure,
+    > {
+        use crate::mptcp_transport::acquire_diagnostic::{
+            Failure, History, Observation, Reason, Stage,
+        };
+
         self.retire_expired_route(now_ms, Instant::now()).await;
         let mut state = self.state.lock().await;
         let ClientRouteControlState::Established(established) = &mut *state else {
-            return Err(ClientRouteConnectError::Busy);
+            return Err(ContentStreamOpenFailure::new(
+                ContentStreamOpenCause::RouteState,
+                ClientRouteConnectError::Busy,
+            ));
         };
-        let route = established
-            .route
-            .as_ref()
-            .ok_or(ClientRouteConnectError::Busy)?;
-        let material = client_open_tcp_material(route, policy, destination, port, now_ms)?;
+        let route = established.route.as_ref().ok_or_else(|| {
+            ContentStreamOpenFailure::new(
+                ContentStreamOpenCause::RouteState,
+                ClientRouteConnectError::Busy,
+            )
+        })?;
+        let material = client_open_tcp_material(route, policy, destination, port, now_ms).map_err(
+            |error| ContentStreamOpenFailure::new(ContentStreamOpenCause::RouteMaterial, error),
+        )?;
         let ClientTransportState::TcpMptcp(transport) = &mut established.transport else {
-            return Err(ClientRouteConnectError::Busy);
+            return Err(ContentStreamOpenFailure::new(
+                ContentStreamOpenCause::RouteState,
+                ClientRouteConnectError::Busy,
+            ));
         };
         let mut helper_route_was_lost = false;
+        let mut history = History::default();
         for _ in 0..8 {
-            let local_port = random_mptcp_source_port(PRODUCTION_MPTCP_EXIT_PORT)?;
+            let local_port =
+                random_mptcp_source_port(PRODUCTION_MPTCP_EXIT_PORT).map_err(|error| {
+                    history.record_round(Some(Failure {
+                        stage: Stage::SourcePort,
+                        reason: Reason::Entropy,
+                    }));
+                    ContentStreamOpenFailure::from_flow_acquire(error, history.summary())
+                })?;
+            let mut observation = Observation::default();
             match transport
-                .acquire_flow(&established.helper, local_port)
+                .acquire_flow(&established.helper, local_port, &mut observation)
                 .await
             {
                 Ok(flow) => return Ok((flow, material)),
-                Err(error) if mptcp_acquire_failure_lost_helper_route(&error) => {
-                    helper_route_was_lost = true;
-                    break;
+                Err(error) => {
+                    history.record_round(observation.failure());
+                    if mptcp_acquire_failure_lost_helper_route(&error) {
+                        helper_route_was_lost = true;
+                        break;
+                    }
                 }
-                Err(_) => {}
             }
         }
         if helper_route_was_lost {
@@ -1811,7 +1875,10 @@ impl ClientRouteControl {
                 Box::pin(established.shutdown(self.agent_state.as_ref())).await;
             }
         }
-        Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+        Err(ContentStreamOpenFailure::from_flow_acquire(
+            ClientRouteConnectError::TransportRuntimeUnavailable,
+            history.summary(),
+        ))
     }
 
     /// Bind one accepted kernel-observed TCP stream and proxy it over the selected genuine

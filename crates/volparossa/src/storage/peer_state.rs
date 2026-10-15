@@ -174,6 +174,17 @@ impl LockedJournal {
 }
 
 pub(super) fn directory(path: &Path) -> Result<nix::fcntl::Flock<File>> {
+    let file = directory_readonly(path)?;
+    // Close-on-exec does not prevent a concurrently forked child retaining the
+    // open file description before exec. Unlock when this owner's scope ends,
+    // rather than waiting for every inherited descriptor to close.
+    nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock)
+        .map_err(|(_, error)| std::io::Error::from_raw_os_error(error as i32))
+        .context("private archive state is already in use")
+}
+
+/// Pin the owner-private directory for read-only status while its worker holds the write lock.
+pub(super) fn directory_readonly(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -185,12 +196,7 @@ pub(super) fn directory(path: &Path) -> Result<nix::fcntl::Flock<File>> {
             && metadata.uid() == rustix::process::geteuid().as_raw(),
         "archive state directory must be owned by this user with mode 0700"
     );
-    // Close-on-exec does not prevent a concurrently forked child retaining the
-    // open file description before exec. Unlock when this owner's scope ends,
-    // rather than waiting for every inherited descriptor to close.
-    nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock)
-        .map_err(|(_, error)| std::io::Error::from_raw_os_error(error as i32))
-        .context("private archive state is already in use")
+    Ok(file)
 }
 
 pub(super) fn anchored(directory: &File) -> PathBuf {

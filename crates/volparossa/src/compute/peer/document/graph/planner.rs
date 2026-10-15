@@ -196,6 +196,7 @@ pub(super) async fn prepare(
     task::write_bytes(&args.directory.join("planner-input.json"), &bytes, false)?;
     let output = args.directory.join("model-planner");
     let options = compute::Options {
+        native_backend: compute::native_cpu::Options::default(),
         mode: compute::Mode::PlanTasks,
         model_profile: args.model_profile,
         runtime_root: args

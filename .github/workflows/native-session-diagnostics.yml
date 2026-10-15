@@ -1,0 +1,292 @@
+name: Native session closed diagnostics
+run-name: Exact-source native session diagnostics without a model
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/native-session-closed-errors]
+    paths:
+      - .github/workflows/native-session-diagnostics.yml
+      - crates/volparossa/src/compute/supervise/diagnostic.rs
+      - crates/volparossa/src/compute/supervise/native_session.rs
+      - crates/volparossa/src/compute/supervise/native_session/tests.rs
+      - crates/volparossa/src/compute/supervise/native_session/worker.rs
+      - tests/integration/agent-private-conversation.py
+      - tests/integration/test-agent-private-conversation.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-session-diagnostics-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  BASELINE_COMMIT: 0de65f423a6d96fa565facf6f283efae70adf2bd
+  CARGO_BUILD_JOBS: '2'
+  CARGO_TERM_COLOR: never
+  PYTHONDONTWRITEBYTECODE: '1'
+  RUSTUP_TOOLCHAIN: 1.85.0
+
+jobs:
+  diagnostics:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Bind the source and reject changes outside this diagnostics slice
+        id: scope
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          test "$(id -u)" != 0
+          test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
+          test "$GITHUB_REF" = refs/heads/feature/native-session-closed-errors
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          timeout --kill-after=10s 120s git fetch --no-tags --depth=1 origin "$BASELINE_COMMIT"
+          umask 077
+          output="$RUNNER_TEMP/native-session-diagnostics"
+          target="$RUNNER_TEMP/native-session-diagnostics-target"
+          test ! -e "$output"
+          test ! -e "$target"
+          install -d -m 0700 "$output" "$target"
+          printf 'DIAGNOSTIC_OUTPUT=%s\nCARGO_TARGET_DIR=%s\n' "$output" "$target" >> "$GITHUB_ENV"
+          python3 -B - "$output/source.json" <<'PY'
+          import hashlib, json, os, subprocess, sys
+          from pathlib import Path
+
+          def git(*args):
+              return subprocess.check_output(['git', *args])
+
+          baseline = os.environ['BASELINE_COMMIT']
+          head = os.environ['GITHUB_SHA']
+          paths = {
+              '.github/workflows/native-session-diagnostics.yml': 'A',
+              'crates/volparossa/src/compute/supervise/diagnostic.rs': 'M',
+              'crates/volparossa/src/compute/supervise/native_session.rs': 'M',
+              'crates/volparossa/src/compute/supervise/native_session/tests.rs': 'M',
+              'crates/volparossa/src/compute/supervise/native_session/worker.rs': 'M',
+              'tests/integration/agent-private-conversation.py': 'M',
+              'tests/integration/test-agent-private-conversation.py': 'M',
+          }
+          changed = git('diff', '--no-renames', '--name-status', baseline, head).decode().splitlines()
+          assert sorted(changed) == sorted(f'{status}\t{path}' for path, status in paths.items())
+          files = {}
+          for path in sorted(paths):
+              entry = git('ls-tree', head, '--', path).decode().strip()
+              assert entry.startswith('100644 blob ') and entry.endswith('\t' + path)
+              raw = git('show', f'{head}:{path}')
+              files[path] = {'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
+          value = dict(version=1, candidate_commit=head,
+              workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'],
+              candidate_tree=git('rev-parse', f'{head}^{{tree}}').decode().strip(),
+              baseline_commit=baseline,
+              baseline_tree=git('rev-parse', f'{baseline}^{{tree}}').decode().strip(),
+              run_id=os.environ['GITHUB_RUN_ID'], run_attempt=os.environ['GITHUB_RUN_ATTEMPT'],
+              files=files, other_tracked_source_unchanged=True,
+              model_execution=False, native_build=False, vm_execution=False,
+              original_actual_failure_cause_proven=False)
+          Path(sys.argv[1]).write_text(json.dumps(value, sort_keys=True) + '\n')
+          PY
+
+      - name: Install the pinned source-check toolchain
+        id: toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.85.0 --profile minimal --no-self-update \
+            --component clippy --component rustfmt
+          rustc +1.85.0 --version --verbose
+          cargo +1.85.0 --version --verbose
+
+      - name: Install the reviewed Protobuf compiler on this disposable runner
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(dpkg --print-architecture)" = amd64
+          sudo -n apt-get update
+          sudo -n apt-get install --yes --no-install-recommends \
+            protobuf-compiler=3.21.12-8.2ubuntu0.3
+          test "$(protoc --version)" = 'libprotoc 3.21.12'
+
+      - name: Check the closed Python collector contracts
+        id: python
+        run: |
+          set -euo pipefail
+          set +e
+          timeout --kill-after=5s 90s python3 -B tests/integration/test-agent-private-conversation.py \
+            2>&1 | tee "$DIAGNOSTIC_OUTPUT/python.log"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          printf '%s\n' "${statuses[0]}" > "$DIAGNOSTIC_OUTPUT/python.status"
+          test "${statuses[1]}" -eq 0
+          test "${statuses[0]}" -eq 0
+          python3 -B - "$DIAGNOSTIC_OUTPUT/python.log" <<'PY'
+          import re, sys
+          from pathlib import Path
+          text = Path(sys.argv[1]).read_text()
+          assert re.findall(r'^Ran (\d+) tests in .+$', text, re.M) == ['32']
+          assert re.findall(r'^OK.*$', text, re.M) == ['OK']
+          PY
+
+      - name: Fetch locked dependencies before offline checks
+        id: fetch
+        run: |
+          set -euo pipefail
+          timeout --kill-after=10s 300s cargo +1.85.0 fetch --locked
+          git diff --exit-code
+
+      - name: Inventory and execute only the three native diagnostic test groups
+        id: rust
+        run: |
+          set -euo pipefail
+          for group in diagnostic native_session private_serve; do
+            case "$group" in
+              diagnostic) filter=compute::supervise::diagnostic:: ;;
+              native_session) filter=compute::supervise::native_session:: ;;
+              private_serve) filter=compute::private_serve::tests::native_session:: ;;
+            esac
+            set +e
+            timeout --kill-after=10s 900s cargo +1.85.0 test --locked --offline \
+              -p volparossa --bin volparossa "$filter" -- --list --format terse \
+              2>&1 | tee "$DIAGNOSTIC_OUTPUT/$group.inventory.log"
+            statuses=("${PIPESTATUS[@]}")
+            set -e
+            printf '%s\n' "${statuses[0]}" > "$DIAGNOSTIC_OUTPUT/$group.inventory.status"
+            test "${statuses[1]}" -eq 0
+            test "${statuses[0]}" -eq 0
+            set +e
+            timeout --kill-after=10s 180s cargo +1.85.0 test --locked --offline \
+              -p volparossa --bin volparossa "$filter" -- --color never \
+              2>&1 | tee "$DIAGNOSTIC_OUTPUT/$group.tests.log"
+            statuses=("${PIPESTATUS[@]}")
+            set -e
+            printf '%s\n' "${statuses[0]}" > "$DIAGNOSTIC_OUTPUT/$group.tests.status"
+            test "${statuses[1]}" -eq 0
+            test "${statuses[0]}" -eq 0
+            python3 -B - "$DIAGNOSTIC_OUTPUT" "$group" "$filter" <<'PY'
+          import json, re, sys
+          from pathlib import Path
+          output, group, prefix = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+          inventory = (output / f'{group}.inventory.log').read_text()
+          result = (output / f'{group}.tests.log').read_text()
+          names = re.findall(r'^([A-Za-z0-9_:]+): test$', inventory, re.M)
+          assert names and len(names) == len(set(names)) and all(name.startswith(prefix) for name in names)
+          assert ': benchmark' not in inventory
+          passed = re.findall(r'^test ([A-Za-z0-9_:]+) \.\.\. ok$', result, re.M)
+          assert sorted(passed) == sorted(names)
+          summaries = re.findall(r'^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;', result, re.M)
+          assert summaries == [(str(len(names)), '0', '0')]
+          required = {
+              'diagnostic': ['session_codes_are_exact_and_do_not_change_legacy_error_projection',
+                  'received_native_codes_require_exact_correlation_and_never_invent_exit_facts',
+                  'native_worker_unknown_codes_and_extra_private_fields_never_escape_projection'],
+              'native_session': ['closed_failure_preserves_only_projected_diagnostic_without_opening_its_source',
+                  'received_worker_error_cannot_construct_exit_adapter_or_cleanup_authority',
+                  'closed_projected_failure_is_accepted_by_both_collector_versions'],
+              'private_serve': ['same_connection_two_turns_retain_slot_until_explicit_session_close_and_eof',
+                  'opaque_engine_failure_without_cleanup_facts_quarantines_before_slot_release'],
+          }[group]
+          assert all(any(name.endswith('::' + case) for name in names) for case in required)
+          (output / f'{group}.json').write_text(json.dumps(dict(version=1, filter=prefix,
+              tests=sorted(names), passed=len(names), failed=0, ignored=0,
+              model_execution=False), sort_keys=True) + '\n')
+          PY
+          done
+
+      - name: Run strict CLI and test Clippy without executing other tests
+        id: clippy
+        run: |
+          set -euo pipefail
+          set +e
+          timeout --kill-after=10s 600s cargo +1.85.0 clippy --locked --offline \
+            -p volparossa --bin volparossa --tests -- -D warnings \
+            2>&1 | tee "$DIAGNOSTIC_OUTPUT/clippy.log"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          printf '%s\n' "${statuses[0]}" > "$DIAGNOSTIC_OUTPUT/clippy.status"
+          test "${statuses[1]}" -eq 0
+          test "${statuses[0]}" -eq 0
+
+      - name: Check formatting even after a preceding check fails
+        id: format
+        if: always() && steps.scope.outcome == 'success' && steps.toolchain.outcome == 'success'
+        run: |
+          set -euo pipefail
+          set +e
+          timeout --kill-after=5s 90s cargo +1.85.0 fmt --all -- --check \
+            2>&1 | tee "$DIAGNOSTIC_OUTPUT/format.log"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          printf '%s\n' "${statuses[0]}" > "$DIAGNOSTIC_OUTPUT/format.status"
+          test "${statuses[1]}" -eq 0
+          test "${statuses[0]}" -eq 0
+
+      - name: Retain exact outcomes without promoting missing phases
+        if: always() && steps.scope.outcome == 'success'
+        env:
+          TOOLCHAIN_OUTCOME: ${{ steps.toolchain.outcome }}
+          PYTHON_OUTCOME: ${{ steps.python.outcome }}
+          FORMAT_OUTCOME: ${{ steps.format.outcome }}
+          FETCH_OUTCOME: ${{ steps.fetch.outcome }}
+          RUST_OUTCOME: ${{ steps.rust.outcome }}
+          CLIPPY_OUTCOME: ${{ steps.clippy.outcome }}
+        run: |
+          set -euo pipefail
+          python3 -B - "$DIAGNOSTIC_OUTPUT/outcomes.json" <<'PY'
+          import json, os, subprocess, sys
+          from pathlib import Path
+          names = ['TOOLCHAIN', 'PYTHON', 'FORMAT', 'FETCH', 'RUST', 'CLIPPY']
+          phases = {name.lower(): os.environ[name + '_OUTCOME'] for name in names}
+          unchanged = not subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=all'])
+          Path(sys.argv[1]).write_text(json.dumps(dict(version=1, phases=phases,
+              checkout_unchanged=unchanged, model_execution=False,
+              original_actual_failure_cause_proven=False), sort_keys=True) + '\n')
+          assert unchanged and all(value == 'success' for value in phases.values())
+          PY
+
+      - name: Preserve only source, inventory and original check evidence including failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-session-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/native-session-diagnostics/source.json
+            ${{ runner.temp }}/native-session-diagnostics/outcomes.json
+            ${{ runner.temp }}/native-session-diagnostics/python.log
+            ${{ runner.temp }}/native-session-diagnostics/python.status
+            ${{ runner.temp }}/native-session-diagnostics/format.log
+            ${{ runner.temp }}/native-session-diagnostics/format.status
+            ${{ runner.temp }}/native-session-diagnostics/diagnostic.inventory.log
+            ${{ runner.temp }}/native-session-diagnostics/diagnostic.inventory.status
+            ${{ runner.temp }}/native-session-diagnostics/diagnostic.tests.log
+            ${{ runner.temp }}/native-session-diagnostics/diagnostic.tests.status
+            ${{ runner.temp }}/native-session-diagnostics/diagnostic.json
+            ${{ runner.temp }}/native-session-diagnostics/native_session.inventory.log
+            ${{ runner.temp }}/native-session-diagnostics/native_session.inventory.status
+            ${{ runner.temp }}/native-session-diagnostics/native_session.tests.log
+            ${{ runner.temp }}/native-session-diagnostics/native_session.tests.status
+            ${{ runner.temp }}/native-session-diagnostics/native_session.json
+            ${{ runner.temp }}/native-session-diagnostics/private_serve.inventory.log
+            ${{ runner.temp }}/native-session-diagnostics/private_serve.inventory.status
+            ${{ runner.temp }}/native-session-diagnostics/private_serve.tests.log
+            ${{ runner.temp }}/native-session-diagnostics/private_serve.tests.status
+            ${{ runner.temp }}/native-session-diagnostics/private_serve.json
+            ${{ runner.temp }}/native-session-diagnostics/clippy.log
+            ${{ runner.temp }}/native-session-diagnostics/clippy.status

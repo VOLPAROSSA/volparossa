@@ -119,6 +119,7 @@ async fn local_discovery_carries_only_public_publisher_and_profile_selection() {
                 request_id: request.request_id,
                 result: ControlResult::Ok.into(),
                 diagnostic_code: "COMPUTE_DISCOVER_OK".into(),
+                private_storage_remote_detail: None,
                 payload: Some(Payload::ComputeDiscovered(found)),
             },
         )
@@ -177,6 +178,7 @@ async fn recovery_uses_exact_model_and_explicit_singleton_without_submitting() {
                 request_id: request.request_id,
                 result: ControlResult::Ok.into(),
                 diagnostic_code: "COMPUTE_DISCOVERED".into(),
+                private_storage_remote_detail: None,
                 payload: Some(Payload::ComputeDiscovered(found)),
             },
         )

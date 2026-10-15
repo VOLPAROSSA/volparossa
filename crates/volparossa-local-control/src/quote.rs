@@ -104,7 +104,185 @@ impl QuoteReady {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CONTROL_PROTOCOL_VERSION, ControlRequest, Empty, control_request::Operation};
+    use crate::{
+        CONTROL_PROTOCOL_VERSION, ControlRequest, ControlResponse, ControlResult, Empty,
+        PrivateStorageMaintenanceReady, PrivateStorageMaintenanceRequest,
+        control_request::Operation, control_response::Payload,
+    };
+
+    fn request(operation: Option<Operation>) -> ControlRequest {
+        ControlRequest {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: vec![7; 16],
+            operation,
+        }
+    }
+
+    fn response(payload: Option<Payload>) -> ControlResponse {
+        ControlResponse {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: vec![7; 16],
+            result: ControlResult::Ok as i32,
+            diagnostic_code: "CONTENT_READY".into(),
+            private_storage_remote_detail: None,
+            payload,
+        }
+    }
+
+    fn tagged(mut prefix: Vec<u8>, tag: [u8; 2], body: &impl Message) -> Vec<u8> {
+        // Literal canonical field keys freeze the published/candidate tag
+        // assignments independently of the current oneof declarations.
+        prefix.extend_from_slice(&tag);
+        body.encode_length_delimited(&mut prefix).unwrap();
+        prefix
+    }
+
+    fn maintenance_request() -> PrivateStorageMaintenanceRequest {
+        PrivateStorageMaintenanceRequest {
+            owner_key: ed25519_dalek::SigningKey::from_bytes(&[29; 32])
+                .verifying_key()
+                .to_bytes()
+                .to_vec(),
+            enrollment_id: vec![2; 32],
+            maximum_bytes: 134_217_728,
+        }
+    }
+
+    fn maintenance_ready() -> PrivateStorageMaintenanceReady {
+        PrivateStorageMaintenanceReady {
+            turn: vec![2; 32],
+            expires: 3600,
+            maximum_bytes: 134_217_728,
+        }
+    }
+
+    #[test]
+    fn published_quote_request_tags_remain_fixed_and_maintenance_uses_46() {
+        assert_eq!(CONTROL_PROTOCOL_VERSION, 2);
+        let attach = QuoteAttachRequest {
+            bind_address: "127.0.0.1:8443".into(),
+            advertised_hostname: "provider.example".into(),
+            requester_key: vec![1; 32],
+            expires_at: 1000,
+            maximum_attempts: 1,
+            confirmation_version: None,
+        };
+        let remote = QuoteRemoteRequest {
+            provider_key: vec![2; 32],
+            confirmation_version: None,
+        };
+        let maintenance = maintenance_request();
+        let prefix = request(None).encode_to_vec();
+        for (operation, wire) in [
+            (
+                Operation::QuoteAttach(attach.clone()),
+                tagged(prefix.clone(), [0xda, 0x02], &attach),
+            ),
+            (
+                Operation::QuoteDetach(Empty {}),
+                tagged(prefix.clone(), [0xe2, 0x02], &Empty {}),
+            ),
+            (
+                Operation::QuoteRemote(remote.clone()),
+                tagged(prefix.clone(), [0xea, 0x02], &remote),
+            ),
+            (
+                Operation::PrivateStorageMaintenance(maintenance.clone()),
+                tagged(prefix, [0xf2, 0x02], &maintenance),
+            ),
+        ] {
+            let expected = request(Some(operation));
+            assert_eq!(crate::encode_request(&expected).unwrap(), wire);
+            assert_eq!(crate::decode_request(&wire).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn published_quote_ready_tag_remains_33_and_maintenance_uses_34() {
+        let quote = QuoteReady {
+            provider_key: vec![1; 32],
+            requester_key: vec![2; 32],
+            confirmation_version: None,
+        };
+        let maintenance = maintenance_ready();
+        let prefix = response(None).encode_to_vec();
+        for (payload, wire) in [
+            (
+                Payload::QuoteReady(quote.clone()),
+                tagged(prefix.clone(), [0x8a, 0x02], &quote),
+            ),
+            (
+                Payload::PrivateStorageMaintenanceReady(maintenance.clone()),
+                tagged(prefix, [0x92, 0x02], &maintenance),
+            ),
+        ] {
+            let expected = response(Some(payload));
+            assert_eq!(crate::encode_response(&expected).unwrap(), wire);
+            assert_eq!(crate::decode_response(&wire).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn unmerged_maintenance_tags_are_rejected_instead_of_becoming_quote_authority() {
+        let maintenance = maintenance_request();
+        let ready = maintenance_ready();
+        maintenance.validate().unwrap();
+        ready.validate().unwrap();
+        // These were valid storage-only candidate payloads. Request field 3
+        // and response field 2 have incompatible wire types in quote messages.
+        let old_request = tagged(request(None).encode_to_vec(), [0xda, 0x02], &maintenance);
+        let old_ready = tagged(response(None).encode_to_vec(), [0x8a, 0x02], &ready);
+        assert!(crate::decode_request(&old_request).is_err());
+        assert!(crate::decode_response(&old_ready).is_err());
+
+        let quote = QuoteReady {
+            provider_key: vec![1; 32],
+            requester_key: vec![2; 32],
+            confirmation_version: None,
+        };
+        let wrong_new_ready = tagged(response(None).encode_to_vec(), [0x92, 0x02], &quote);
+        assert!(crate::decode_response(&wrong_new_ready).is_err());
+        let attach = QuoteAttachRequest {
+            bind_address: "127.0.0.1:8443".into(),
+            advertised_hostname: "provider.example".into(),
+            requester_key: vec![1; 32],
+            expires_at: 1000,
+            maximum_attempts: 1,
+            confirmation_version: None,
+        };
+        let wrong_new_request = tagged(request(None).encode_to_vec(), [0xf2, 0x02], &attach);
+        assert!(crate::decode_request(&wrong_new_request).is_err());
+    }
+
+    #[test]
+    fn default_legacy_payloads_still_require_closed_quote_validation() {
+        // Omitted incompatible fields can be parsed structurally as quote
+        // defaults, but may never bypass mandatory quote identity/authority.
+        let old_request = tagged(
+            request(None).encode_to_vec(),
+            [0xda, 0x02],
+            &PrivateStorageMaintenanceRequest::default(),
+        );
+        let old_ready = tagged(
+            response(None).encode_to_vec(),
+            [0x8a, 0x02],
+            &PrivateStorageMaintenanceReady::default(),
+        );
+        assert!(matches!(
+            ControlRequest::decode(old_request.as_slice())
+                .unwrap()
+                .operation,
+            Some(Operation::QuoteAttach(_))
+        ));
+        assert!(matches!(
+            ControlResponse::decode(old_ready.as_slice())
+                .unwrap()
+                .payload,
+            Some(Payload::QuoteReady(_))
+        ));
+        assert!(crate::decode_request(&old_request).is_err());
+        assert!(crate::decode_response(&old_ready).is_err());
+    }
 
     #[test]
     fn quote_local_operations_are_distinct_bounded_and_roundtrip() {

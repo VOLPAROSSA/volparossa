@@ -754,6 +754,7 @@ mod tests {
             request_id: vec![3; 16],
             result: ControlResult::Ok as i32,
             diagnostic_code: "CONTENT_POLICY_APPLIED".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::ContentPolicy(receipt.clone())),
         };
         assert_eq!(
@@ -808,6 +809,7 @@ mod tests {
             request_id: vec![3; 16],
             result: ControlResult::Ok as i32,
             diagnostic_code: "NAMED_CONTENT_TRANSFER_READY".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::NamedContentTransferReady(
                 NamedContentTransferReady {
                     manifest: vec![4; 1024],
@@ -1002,6 +1004,7 @@ mod tests {
             request_id: vec![3; 16],
             result: ControlResult::Ok as i32,
             diagnostic_code: "CONTENT_TRANSFER_READY".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::ContentTransferReady(ready.clone())),
         };
         assert_eq!(
@@ -1161,6 +1164,7 @@ mod tests {
             request_id: vec![4; 16],
             result: ControlResult::Ok as i32,
             diagnostic_code: "CONTENT_OK".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::Content(value)),
         };
         let valid = response(receipt.clone());
@@ -1227,6 +1231,7 @@ mod tests {
             request_id: request.request_id,
             result: ControlResult::Ok as i32,
             diagnostic_code: "HTTPS_CONTENT_TRANSFER_READY".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::HttpsContentTransferReady(ready.clone())),
         };
         assert_eq!(
@@ -1293,6 +1298,7 @@ mod tests {
                 request_id: vec![1; 16],
                 result: ControlResult::Ok as i32,
                 diagnostic_code: "HTTPS_CONTENT_TRANSFER_READY".into(),
+                private_storage_remote_detail: None,
                 payload: Some(Payload::HttpsContentTransferReady(ready)),
             };
             assert_eq!(
@@ -1481,6 +1487,7 @@ mod tests {
             request_id: vec![6; 16],
             result: ControlResult::Ok as i32,
             diagnostic_code: "CONTENT_HTTPS_OK".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::Content(value)),
         };
         let valid = response(receipt.clone());
@@ -1594,6 +1601,7 @@ mod tests {
             request_id: vec![8; 16],
             result: ControlResult::Ok as i32,
             diagnostic_code: "CONTENT_OK".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::Content(value)),
         };
         let valid = response(receipt.clone());

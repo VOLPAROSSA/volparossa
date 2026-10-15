@@ -1,0 +1,232 @@
+name: Bounded Storage APPEND diagnostics
+
+on:
+  push:
+    branches:
+      - feature/storage-append-diagnostics
+    paths:
+      - .github/workflows/storage-append-diagnostics.yml
+      - crates/volparossa-agent/src/content.rs
+      - crates/volparossa-agent/src/content/private_storage/**
+      - crates/volparossa-agent/src/content/private_storage.rs
+      - crates/volparossa-content/src/private_storage/wire/**
+      - crates/volparossa-content/src/private_storage/wire.rs
+      - crates/volparossa-local-control/src/lib.rs
+      - crates/volparossa-local-control/src/private_storage_outcome.rs
+      - crates/volparossa/src/storage.rs
+      - crates/volparossa/src/storage/peer*.rs
+      - tests/integration/private-storage-maintenance-smoke.py
+      - tests/integration/test-private-storage-maintenance-smoke.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: storage-append-diagnostics-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: never
+  SOURCE_BASE: b7e6358943a16ace8ca095b8af9ce292a12ed8af
+
+jobs:
+  diagnostics:
+    name: Finite APPEND timing and provider error contracts
+    if: >-
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.ref == 'refs/heads/feature/storage-append-diagnostics'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out the exact diagnostic candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind the candidate, unchanged lockfile and closed source scope
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
+          test "$GITHUB_REF" = refs/heads/feature/storage-append-diagnostics
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          git merge-base --is-ancestor "$SOURCE_BASE" HEAD
+          mkdir storage-append-evidence
+          python3 -B - <<'PY'
+          import json
+          import os
+          import pathlib
+          import subprocess
+          allowed = set('''
+          .github/workflows/storage-append-diagnostics.yml
+          crates/volparossa-agent/src/content.rs
+          crates/volparossa-agent/src/content/private_storage.rs
+          crates/volparossa-agent/src/content/private_storage/observation.rs
+          crates/volparossa-agent/src/content/private_storage/observation/challenge.rs
+          crates/volparossa-agent/src/content/private_storage/outcome.rs
+          crates/volparossa-agent/src/content/private_storage/outcome/tests.rs
+          crates/volparossa-agent/src/content/private_storage/outcome/timing.rs
+          crates/volparossa-agent/src/content/private_storage/tests.rs
+          crates/volparossa-content/src/private_storage/wire.rs
+          crates/volparossa-content/src/private_storage/wire/diagnostic.rs
+          crates/volparossa-content/src/private_storage/wire/diagnostic/tests.rs
+          crates/volparossa-content/src/private_storage/wire/tests/diagnostic.rs
+          crates/volparossa-local-control/src/lib.rs
+          crates/volparossa-local-control/src/private_storage_outcome.rs
+          crates/volparossa/src/storage.rs
+          crates/volparossa/src/storage/peer.rs
+          crates/volparossa/src/storage/peer_diagnostics.rs
+          crates/volparossa/src/storage/peer_diagnostics_tests.rs
+          crates/volparossa/src/storage/peer_append_diagnostics_tests.rs
+          crates/volparossa/src/storage/peer_outcome.rs
+          crates/volparossa/src/storage/peer_outcome_tests.rs
+          crates/volparossa/src/storage/peer_outcome_transfer_tests.rs
+          tests/integration/private-storage-maintenance-smoke.py
+          tests/integration/test-private-storage-maintenance-smoke.py
+          '''.split())
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          changed = set(git('diff', '--name-only', os.environ['SOURCE_BASE'], 'HEAD').splitlines())
+          assert changed and changed <= allowed, 'unexpected source delta'
+          for name in ('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml'):
+              assert git('rev-parse', 'HEAD:' + name) == git('rev-parse', os.environ['SOURCE_BASE'] + ':' + name)
+          record = dict(schema=1, source_commit=os.environ['GITHUB_SHA'],
+              base_commit=os.environ['SOURCE_BASE'], workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'],
+              source_blobs={name: git('rev-parse', 'HEAD:' + name) for name in sorted(changed)},
+              cargo_lock_blob=git('rev-parse', 'HEAD:Cargo.lock'),
+              scope='bounded-storage-append-diagnostic-contracts',
+              live_cloud_or_mptcp_acceptance=False,
+              feature_equivalence_to_full_workspace_proven=False)
+          pathlib.Path('storage-append-evidence/source.json').write_text(json.dumps(record, sort_keys=True) + '\n')
+          PY
+
+      - name: Install the existing pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.85.0 \
+            --profile minimal \
+            --component clippy \
+            --component rustfmt
+          rustup show active-toolchain
+          rustc --version --verbose
+          cargo --version --verbose
+
+      - name: Install reviewed Protobuf only on the disposable hosted runner
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(dpkg --print-architecture)" = amd64
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            protobuf-compiler=3.21.12-8.2ubuntu0.3
+          test "$(protoc --version)" = 'libprotoc 3.21.12'
+
+      - name: Check closed provider export and historical validators without network access
+        run: |
+          set -euo pipefail
+          python3 -B tests/integration/test-private-storage-maintenance-smoke.py \
+            2>&1 | tee storage-append-evidence/exporter.log
+
+      - name: Fetch the unchanged locked dependency graph
+        run: cargo fetch --locked
+
+      - name: Compile inventory and execute each bounded contract group once
+        # No model, VM, network namespace, retry, test-thread override or full CLI suite.
+        run: |
+          set -euo pipefail
+          export RUST_BACKTRACE=1
+          contract_group() {
+            local label="$1" package="$2" filter="$3"
+            local -a target=(--lib)
+            if test "$package" = volparossa; then
+              target=(--bin volparossa)
+            fi
+            timeout --kill-after=5s 600s \
+              cargo test --locked --offline -p "$package" "${target[@]}" "$filter" \
+              -- --list 2>&1 | tee "storage-append-evidence/$label-inventory.log"
+            python3 -B - "$label" "$filter" <<'PY'
+          import pathlib
+          import re
+          import sys
+          text = pathlib.Path('storage-append-evidence/' + sys.argv[1] + '-inventory.log').read_text()
+          names = re.findall(r'^([^\n]+): test$', text, re.MULTILINE)
+          assert 1 <= len(names) <= 200 and len(set(names)) == len(names), 'empty or invalid inventory'
+          assert all(name.startswith(sys.argv[2]) for name in names), 'unexpected test scope'
+          assert re.search(r'^' + str(len(names)) + r' tests?, 0 benchmarks$', text, re.MULTILINE)
+          PY
+            timeout --kill-after=5s 120s \
+              cargo test --locked --offline -p "$package" "${target[@]}" "$filter" \
+              -- --nocapture 2>&1 | tee "storage-append-evidence/$label-test.log"
+            python3 -B - "$label" <<'PY'
+          import pathlib
+          import re
+          import sys
+          root = pathlib.Path('storage-append-evidence')
+          inventory = (root / (sys.argv[1] + '-inventory.log')).read_text()
+          output = (root / (sys.argv[1] + '-test.log')).read_text()
+          names = re.findall(r'^([^\n]+): test$', inventory, re.MULTILINE)
+          results = re.findall(r'^test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out;', output, re.MULTILINE)
+          assert results == [str(len(names))], 'not every inventoried test passed'
+          for name in names:
+              assert len(re.findall(r'^test ' + re.escape(name) + r' \.\.\. ok$', output, re.MULTILINE)) == 1, name
+          PY
+          }
+          contract_group provider volparossa-content private_storage::wire::
+          contract_group local-control volparossa-local-control private_storage_outcome::tests::
+          contract_group agent-outcome volparossa-agent content::private_storage::outcome::
+          contract_group agent-query volparossa-agent content::private_storage::tests::
+          contract_group cli-diagnostics volparossa storage::peer::diagnostics::
+          contract_group cli-query volparossa storage::peer::outcome::
+          contract_group cli-transfer volparossa storage::peer::tests::outcome_transfer::
+
+      - name: Lint the same libraries and their test targets
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --offline \
+            -p volparossa-content -p volparossa-local-control -p volparossa-agent \
+            --lib --tests -- -D warnings 2>&1 | tee storage-append-evidence/clippy-libraries.log
+          cargo clippy --locked --offline -p volparossa --bin volparossa --tests \
+            -- -D warnings 2>&1 | tee storage-append-evidence/clippy-cli.log
+
+      - name: Check formatting without changing the compiled and tested source
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check 2>&1 | tee storage-append-evidence/format.log
+
+      - name: Retain exact source, inventories and original outcomes even on failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: storage-append-diagnostics-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            storage-append-evidence/source.json
+            storage-append-evidence/exporter.log
+            storage-append-evidence/provider-inventory.log
+            storage-append-evidence/provider-test.log
+            storage-append-evidence/local-control-inventory.log
+            storage-append-evidence/local-control-test.log
+            storage-append-evidence/agent-outcome-inventory.log
+            storage-append-evidence/agent-outcome-test.log
+            storage-append-evidence/agent-query-inventory.log
+            storage-append-evidence/agent-query-test.log
+            storage-append-evidence/cli-diagnostics-inventory.log
+            storage-append-evidence/cli-diagnostics-test.log
+            storage-append-evidence/cli-query-inventory.log
+            storage-append-evidence/cli-query-test.log
+            storage-append-evidence/cli-transfer-inventory.log
+            storage-append-evidence/cli-transfer-test.log
+            storage-append-evidence/clippy-libraries.log
+            storage-append-evidence/clippy-cli.log
+            storage-append-evidence/format.log

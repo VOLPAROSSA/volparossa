@@ -46,12 +46,26 @@ pub(super) fn admits(profile: ModelProfile, available: Option<u64>) -> bool {
         .is_none_or(|required| available.is_some_and(|bytes| bytes >= required))
 }
 
-pub(super) fn admission(profile: ModelProfile) -> Result<()> {
-    if limits(profile).admission_headroom.is_some() {
-        ensure!(
-            admits(profile, super::spare_capacity::memory_headroom()),
-            "compute_model_memory_headroom"
-        );
+pub(super) fn admission(profile: ModelProfile, diagnostic: bool) -> Result<()> {
+    admission_with(profile, diagnostic, super::spare_capacity::memory::sample)
+}
+
+fn admission_with(
+    profile: ModelProfile,
+    diagnostic: bool,
+    sample: impl FnOnce(bool) -> super::spare_capacity::memory::Sample,
+) -> Result<()> {
+    if let Some(required) = limits(profile).admission_headroom {
+        let observe = diagnostic && super::spare_capacity::memory::enabled();
+        let sample = sample(observe);
+        let admitted = admits(profile, sample.headroom);
+        if observe {
+            super::spare_capacity::memory::emit(&serde_json::json!({
+                "version":1,"phase":"admission","required_bytes":required,
+                "admitted":admitted,"sample":sample.snapshot()
+            }));
+        }
+        ensure!(admitted, "compute_model_memory_headroom");
     }
     Ok(())
 }
@@ -59,6 +73,106 @@ pub(super) fn admission(profile: ModelProfile) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Clone)]
+    struct Log(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Log {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn admission_observation_requires_both_explicit_native_scope_and_debug_opt_in() {
+        let profile = ModelProfile::Qwen4bInstruct2507;
+        for diagnostic in [false, true] {
+            for enabled in [false, true] {
+                let log = Log(std::sync::Arc::default());
+                let writer = log.clone();
+                let subscriber = tracing_subscriber::fmt()
+                    .without_time()
+                    .with_ansi(false)
+                    .with_target(false)
+                    .with_level(false)
+                    .with_max_level(if enabled {
+                        tracing::Level::DEBUG
+                    } else {
+                        tracing::Level::ERROR
+                    })
+                    .with_writer(move || writer.clone())
+                    .finish();
+                tracing::subscriber::with_default(subscriber, || {
+                    let result = admission_with(profile, diagnostic, |stats| {
+                        assert_eq!(stats, diagnostic && enabled);
+                        super::super::spare_capacity::memory::Sample::for_test(None)
+                    });
+                    assert_eq!(
+                        result.unwrap_err().to_string(),
+                        "compute_model_memory_headroom"
+                    );
+                });
+                let raw = log.0.lock().unwrap();
+                if diagnostic && enabled {
+                    let text = std::str::from_utf8(&raw).unwrap();
+                    let record: serde_json::Value = serde_json::from_str(
+                        text.trim()
+                            .strip_prefix("private_memory_diagnostic ")
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(record["version"], 1);
+                    assert_eq!(record["phase"], "admission");
+                    assert_eq!(record["required_bytes"], 11_274_289_152_u64);
+                    assert_eq!(record["admitted"], false);
+                    assert_eq!(record["sample"]["missing_stage"], "meminfo");
+                    assert!(raw.len() <= 4096);
+                } else {
+                    assert!(raw.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn memory_diagnostic_sampling_uses_the_same_unbounded_value_once() {
+        let profile = ModelProfile::Qwen4bInstruct2507;
+        let required = limits(profile).admission_headroom.unwrap();
+        for diagnostic in [false, true] {
+            for value in [
+                None,
+                Some(0),
+                Some(required - 1),
+                Some(required),
+                Some(u64::MAX),
+            ] {
+                let calls = std::cell::Cell::new(0);
+                let result = admission_with(profile, diagnostic, |_| {
+                    calls.set(calls.get() + 1);
+                    super::super::spare_capacity::memory::Sample::for_test(value)
+                });
+                assert_eq!(calls.get(), 1);
+                assert_eq!(result.is_ok(), admits(profile, value));
+                if let Err(error) = result {
+                    assert_eq!(error.to_string(), "compute_model_memory_headroom");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn profiles_without_admission_never_gain_a_memory_sample() {
+        for profile in [ModelProfile::Default135, ModelProfile::Smol360] {
+            for diagnostic in [false, true] {
+                admission_with(profile, diagnostic, |_| panic!("unrequested sample")).unwrap();
+            }
+        }
+    }
 
     #[test]
     fn existing_profiles_keep_their_exact_resource_contracts() {

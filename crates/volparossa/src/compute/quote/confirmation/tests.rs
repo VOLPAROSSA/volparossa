@@ -7,6 +7,7 @@ fn terminal() -> ControlResponse {
         request_id: vec![1; 16],
         result: ControlResult::Ok.into(),
         diagnostic_code: "QUOTE_KEY_CONFIRMED".into(),
+        private_storage_remote_detail: None,
         payload: Some(Payload::Ack(Empty {})),
     }
 }

@@ -52,6 +52,7 @@ fn transcript_final_payload_has_a_separate_bounded_frame() {
             request_id: vec![1; 16],
             result: ControlResult::Ok.into(),
             diagnostic_code: "COMPUTE_RPC_OK".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::ComputeTranscript(ComputeTranscript {
                 transcript: vec![7; bytes],
             })),
@@ -67,6 +68,7 @@ fn transcript_final_payload_has_a_separate_bounded_frame() {
             request_id: vec![1; 16],
             result: ControlResult::Ok.into(),
             diagnostic_code: "COMPUTE_RPC_OK".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::ComputeTranscript(ComputeTranscript {
                 transcript: vec![7; bytes],
             })),
@@ -241,6 +243,7 @@ fn discovered_frame_rejects_duplicate_mixed_or_unbounded_observations() {
         request_id: vec![1; 16],
         result: ControlResult::Ok.into(),
         diagnostic_code: "COMPUTE_DISCOVERED".into(),
+        private_storage_remote_detail: None,
         payload: Some(Payload::ComputeDiscovered(discovered.clone())),
     };
     assert_eq!(

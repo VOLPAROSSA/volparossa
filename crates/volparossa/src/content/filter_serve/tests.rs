@@ -290,6 +290,7 @@ async fn complete_original_named_download_is_served_by_the_broker_without_rewrit
             request_id: request.request_id,
             result: ControlResult::Ok as i32,
             diagnostic_code: "NAMED_CONTENT_TRANSFER_READY".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::NamedContentTransferReady(
                 NamedContentTransferReady {
                     manifest: signed,

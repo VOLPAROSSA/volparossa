@@ -79,6 +79,7 @@ async fn serve(
             request_id: control.request_id.clone(),
             result: ControlResult::Ok as i32,
             diagnostic_code: "COMPUTE_RPC_READY".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::ComputeReady(ComputeReady {
                 provider_key: remote.provider_key,
                 requester_key: vec![23; 32],

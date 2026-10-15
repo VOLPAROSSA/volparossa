@@ -19,6 +19,7 @@ private_storage_handoff=no
 signal_backup=no
 signal_backup_fragments=no
 private_storage_fragments=no
+private_storage_maintenance=no
 image_snapshot=no
 cloud_private_file=no
 cloud_private_upload=no
@@ -80,7 +81,7 @@ usage() {
         '         --scenario content-provider accepts --browser-filter-bundle ARCHIVE --browser-filter-manifest-sha256 HEX' \
         '         --scenario protected-quote checks signed refusal and authority; it does not prove protected execution.' \
         '         or --weather-client-bundle ARCHIVE --weather-client-manifest-sha256 HEX (not both)' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|private-storage-maintenance|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
 }
 
 print_plan() {
@@ -172,6 +173,15 @@ print_plan() {
             '  remove local ciphertext, stop A, restore twice via B/C and decrypt/verify every original hash;' \
             '  retain owner keys privately, delete every remote copy and prove exact cleanup/host state;' \
             '  no running Immich, mobile sync or general serverless availability claim.'
+        return
+    fi
+    if [ "$private_storage_maintenance" = yes ]; then
+        printf '%s\n' \
+            'VOLPAROSSA private-storage-maintenance protected network smoke plan:' \
+            '  explicit finite owner enrollment, real idle turns and signed renewal/repair;' \
+            '  foreground preemption, owner EOF, guest-only core restart and SIGTERM/resume;' \
+            '  preserve journals/charges, restore twice without A, retire/delete all copies;' \
+            '  actual protected routes, private cleanup and unchanged host state.'
         return
     fi
     if [ "$private_storage_fragments" = yes ]; then
@@ -783,6 +793,7 @@ while [ "$#" -gt 0 ]; do
             signal_backup=no
             signal_backup_fragments=no
             private_storage_fragments=no
+            private_storage_maintenance=no
             image_snapshot=no
             cloud_private_file=no
             cloud_private_upload=no
@@ -826,6 +837,7 @@ while [ "$#" -gt 0 ]; do
                 private-storage-replicas) scenario=content-custody; private_storage_replicas=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-handoff) scenario=content-custody; private_storage_handoff=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-fragments) scenario=content-custody; private_storage_fragments=yes; wifi_link=no; uplink_link=no ;;
+                private-storage-maintenance) scenario=content-custody; private_storage_fragments=yes; private_storage_maintenance=yes; storage_consumer_profile_version=9; wifi_link=no; uplink_link=no ;;
                 image-snapshot) scenario=content-custody; private_storage_fragments=yes; image_snapshot=yes; wifi_link=no; uplink_link=no ;;
                 cloud-private-file) scenario=content-custody; private_storage_fragments=yes; cloud_private_file=yes; wifi_link=no; uplink_link=no ;;
                 cloud-private-upload) scenario=content-custody; private_storage_fragments=yes; cloud_private_upload=yes; wifi_link=no; uplink_link=no ;;
@@ -1167,6 +1179,22 @@ if [ "$private_storage_fragments" = yes ]; then
         private-storage-replicas-smoke.sh private-storage-replicas-smoke.py private-storage-peer-smoke.py; do
         [ -f "$source_directory/tests/integration/$storage_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
+    done
+fi
+if [ "$private_storage_maintenance" = yes ]; then
+    for maintenance_fixture in private-storage-maintenance-smoke.sh private-storage-maintenance-smoke.py \
+        private-storage-log-sampler.py content-provider-readiness.py storage-provider-activity-sampler.py \
+        storage-consumer-maintenance-smoke.sh storage-consumer-maintenance-smoke.py \
+        storage-consumer-maintenance.mjs storage-consumer-maintenance-pins.json storage-consumer-maintenance-pins-v2.json \
+        storage-consumer-maintenance-pins-v3.json storage-consumer-maintenance-pins-v4.json storage-consumer-maintenance-pins-v5.json \
+        storage-consumer-maintenance-pins-v6.json storage-consumer-maintenance-pins-v7.json \
+        storage-consumer-maintenance-pins-v8.json storage-consumer-maintenance-pins-v9.json \
+        storage-consumer-control-underlay.sh storage-consumer-control-underlay.py \
+        storage-consumer-network.sh storage-consumer-network.py storage-consumer-route-sampler.py \
+        storage-consumer-maintenance-evidence.py storage-consumer-maintenance-provision.py \
+        image-snapshot-provision.py agent-private-task-code.py agent-private-task-code-pins.json; do
+        [ -f "$source_directory/tests/integration/$maintenance_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$maintenance_fixture" ] || exit 69
     done
 fi
 if [ "$cloud_private_file" = yes ] || [ "$cloud_private_upload" = yes ]; then
@@ -1587,6 +1615,9 @@ CLIENT_OBSERVER_PID=
 EXIT_OBSERVER_PID=
 PRIVACY_CLIENT_PID=
 PROVIDER_CONTROL_PID=
+CONSUMER_CONTROL_0_PID=
+CONSUMER_CONTROL_1_PID=
+CONSUMER_CONTROL_2_PID=
 PRIVACY_RELAY0_PID=
 PRIVACY_RELAY1_PID=
 PRIVACY_RELAY2_PID=
@@ -2233,7 +2264,8 @@ cleanup() {
         content_repair_stop_captures || original_status=1
     fi
     for observer_pid in "$PRIVACY_CLIENT_PID" "$PRIVACY_RELAY0_PID" "$PRIVACY_RELAY1_PID" \
-        "$PRIVACY_RELAY2_PID" "$PRIVACY_EXIT_PID" "$PROVIDER_CONTROL_PID"; do
+        "$PRIVACY_RELAY2_PID" "$PRIVACY_EXIT_PID" "$PROVIDER_CONTROL_PID" \
+        "$CONSUMER_CONTROL_0_PID" "$CONSUMER_CONTROL_1_PID" "$CONSUMER_CONTROL_2_PID"; do
         [ -z "$observer_pid" ] || kill -TERM "$observer_pid" 2>/dev/null || true
     done
     if [ -n "$HTTP3_SERVER_PID" ]; then
@@ -2254,7 +2286,8 @@ cleanup() {
         [ -z "$observer_pid" ] || wait "$observer_pid" 2>/dev/null || true
     done
     for observer_pid in "$PRIVACY_CLIENT_PID" "$PRIVACY_RELAY0_PID" "$PRIVACY_RELAY1_PID" \
-        "$PRIVACY_RELAY2_PID" "$PRIVACY_EXIT_PID" "$PROVIDER_CONTROL_PID"; do
+        "$PRIVACY_RELAY2_PID" "$PRIVACY_EXIT_PID" "$PROVIDER_CONTROL_PID" \
+        "$CONSUMER_CONTROL_0_PID" "$CONSUMER_CONTROL_1_PID" "$CONSUMER_CONTROL_2_PID"; do
         [ -z "$observer_pid" ] || wait "$observer_pid" 2>/dev/null || true
     done
     if [ -n "$DESTINATION_PID" ]; then
@@ -2285,6 +2318,12 @@ cleanup() {
     fi
     if [ "$signal_backup" = yes ] && command -v signal_backup_cleanup >/dev/null 2>&1; then
         signal_backup_cleanup || original_status=1
+    fi
+    if [ "$private_storage_maintenance" = yes ] && command -v private_storage_maintenance_join >/dev/null 2>&1; then
+        private_storage_maintenance_join || original_status=1
+    fi
+    if [ "$private_storage_maintenance" = yes ] && command -v private_storage_consumer_cleanup >/dev/null 2>&1; then
+        private_storage_consumer_cleanup || original_status=1
     fi
     if [ "$private_storage_fragments" = yes ] && [ "$signal_backup_fragments" = no ] \
         && command -v private_storage_fragments_cleanup >/dev/null 2>&1; then
@@ -2352,8 +2391,17 @@ cleanup() {
             relay5 exit exit2; do
             cleanup_socket=$WORK/runtime-$cleanup_node/control/agent.sock
             [ -S "$cleanup_socket" ] || continue
+            cleanup_logs_status=0
             "$binary_directory/volparossa" --control-socket "$cleanup_socket" \
-                logs --limit 400 >"$WORK/logs-$cleanup_node.txt" 2>/dev/null || true
+                logs --limit 400 >"$WORK/logs-$cleanup_node.txt" 2>/dev/null || cleanup_logs_status=$?
+            if [ "$private_storage_maintenance" = yes ]; then
+                case $cleanup_node in client|relay0|relay1|relay2|relay3|relay4|relay5)
+                    # Existing query only. A failed/truncated capture must not
+                    # masquerade as a successful empty ring in the sidecar.
+                    printf '%s\n' "$cleanup_logs_status" \
+                        2>/dev/null >"$WORK/logs-$cleanup_node-cleanup-status.private" || true ;;
+                esac
+            fi
             "$binary_directory/volparossa" --control-socket "$cleanup_socket" \
                 peers >"$WORK/peers-$cleanup_node.txt" 2>/dev/null || true
             "$binary_directory/volparossa" --control-socket "$cleanup_socket" \
@@ -2592,6 +2640,8 @@ cleanup() {
         cloud_private_file_finalize_report "$original_status" || original_status=1
     elif [ "$image_snapshot" = yes ]; then
         image_snapshot_finalize_report "$original_status" || original_status=1
+    elif [ "$private_storage_maintenance" = yes ]; then
+        private_storage_maintenance_finalize_report "$original_status" || original_status=1
     elif [ "$private_storage_fragments" = yes ]; then
         private_storage_fragments_finalize_report "$original_status" || original_status=1
     elif [ "$private_storage_handoff" = yes ]; then
@@ -2787,6 +2837,16 @@ fi
 if [ "$private_storage_fragments" = yes ]; then
     # shellcheck source=tests/integration/private-storage-fragments-smoke.sh
     . "$source_directory/tests/integration/private-storage-fragments-smoke.sh"
+fi
+if [ "$private_storage_maintenance" = yes ]; then
+    # shellcheck source=tests/integration/private-storage-maintenance-smoke.sh
+    . "$source_directory/tests/integration/private-storage-maintenance-smoke.sh"
+    # shellcheck source=tests/integration/storage-consumer-maintenance-smoke.sh
+    . "$source_directory/tests/integration/storage-consumer-maintenance-smoke.sh"
+    # shellcheck source=tests/integration/storage-consumer-control-underlay.sh
+    . "$source_directory/tests/integration/storage-consumer-control-underlay.sh"
+    # shellcheck source=tests/integration/storage-consumer-network.sh
+    . "$source_directory/tests/integration/storage-consumer-network.sh"
 fi
 if [ "$signal_backup_fragments" = yes ]; then
     # shellcheck source=tests/integration/signal-backup-fragments-smoke.sh
@@ -3035,6 +3095,36 @@ fi
 if [ "$private_storage_fragments" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/private-storage-fragments-smoke.py" \
         "$WORK/bin/private-storage-fragments-smoke.py"
+fi
+if [ "$private_storage_maintenance" = yes ]; then
+    for maintenance_script in private-storage-maintenance-smoke.py private-storage-log-sampler.py content-provider-readiness.py \
+        storage-provider-activity-sampler.py \
+        storage-consumer-maintenance-smoke.py storage-consumer-maintenance.mjs \
+        storage-consumer-maintenance-evidence.py storage-consumer-maintenance-provision.py \
+        storage-consumer-control-underlay.py storage-consumer-network.py storage-consumer-route-sampler.py \
+        image-snapshot-provision.py agent-private-task-code.py; do
+        install -o root -g root -m 0555 "$source_directory/tests/integration/$maintenance_script" "$WORK/bin/$maintenance_script"
+    done
+    install -o root -g root -m 0444 "$source_directory/tests/integration/storage-consumer-maintenance-pins.json" \
+        "$WORK/bin/storage-consumer-maintenance-pins.json"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/storage-consumer-maintenance-pins-v2.json" \
+        "$WORK/bin/storage-consumer-maintenance-pins-v2.json"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/storage-consumer-maintenance-pins-v3.json" \
+        "$WORK/bin/storage-consumer-maintenance-pins-v3.json"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/storage-consumer-maintenance-pins-v4.json" \
+        "$WORK/bin/storage-consumer-maintenance-pins-v4.json"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/storage-consumer-maintenance-pins-v5.json" \
+        "$WORK/bin/storage-consumer-maintenance-pins-v5.json"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/storage-consumer-maintenance-pins-v6.json" \
+        "$WORK/bin/storage-consumer-maintenance-pins-v6.json"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/storage-consumer-maintenance-pins-v7.json" \
+        "$WORK/bin/storage-consumer-maintenance-pins-v7.json"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/storage-consumer-maintenance-pins-v8.json" \
+        "$WORK/bin/storage-consumer-maintenance-pins-v8.json"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/storage-consumer-maintenance-pins-v9.json" \
+        "$WORK/bin/storage-consumer-maintenance-pins-v9.json"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/agent-private-task-code-pins.json" \
+        "$WORK/bin/agent-private-task-code-pins.json"
 fi
 if [ "$image_snapshot" = yes ] || [ "$cloud_private_file" = yes ] || [ "$cloud_private_upload" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/image-snapshot-smoke.py" \
@@ -3403,9 +3493,12 @@ for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 rela
     if { { [ "$scenario" = content-message ] || [ "$scenario" = content-provider ] || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; } \
         && { [ "$node" = client ] \
             || [ "$node" = relay3 ] || [ "$node" = relay4 ] || [ "$node" = relay5 ]; }; } \
+        || { [ "$private_storage_maintenance" = yes ] && [ "$node" = exit ]; } \
         || { { [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ]; } \
             && { [ "$node" = client ] || [ "$node" = relay4 ]; }; }; then
         # Match package access without adding the operator to the private service group.
+        # This trial alone also observes the Exit's bounded in-memory flow ring.
+        # Native sockets, credentials and provider stores remain service-private.
         chgrp volparossa-users "$WORK/runtime-$node/control"
         printf 'a+ %s - - - - group:volparossa-users:--x,mask::r-x\n' "$WORK/runtime-$node" \
             | systemd-tmpfiles --create - || fail CONTENT_CONTROL_TRAVERSAL_FAILED
@@ -4740,10 +4833,22 @@ content_provider_mode = interfaces[:1] == ["--content-providers"]
 if content_provider_mode:
     interfaces.pop(0)
 content_control_pairs = {}
+consumer_control_role = None
 if role == "content-control" and content_provider_mode:
+    if interfaces and interfaces[0].startswith("--consumer-control="):
+        consumer_control_role = interfaces.pop(0).removeprefix("--consumer-control=")
+        if consumer_control_role not in ("relay0", "relay1", "relay2"):
+            raise SystemExit("invalid consumer control capture")
     control_argument = interfaces.pop(0) if interfaces else ""
     control_addresses = control_argument.removeprefix("--content-control=").split(",")
     allowed_interfaces = (["cp0", "cp1"], ["ac0", "ac1", "ac2"], ["lc0", "lc1"])
+    if consumer_control_role is not None:
+        number = ("relay0", "relay1", "relay2").index(consumer_control_role)
+        allowed_interfaces = ([f"cc{number}{p}" for p in range(3)],)
+        expected_addresses = [dict(relay0="42.158.0.1", relay1="44.160.1.1", relay2="45.161.2.1")[consumer_control_role],
+            "48.164.4.1", "49.165.5.1", "50.166.6.1"]
+        if control_addresses != expected_addresses:
+            raise SystemExit("invalid consumer control addresses")
     if not control_argument.startswith("--content-control=") or interfaces not in allowed_interfaces \
             or len(control_addresses) != len(interfaces) + 1 \
             or len(set(control_addresses)) != len(control_addresses):
@@ -5271,6 +5376,7 @@ with open(output_path, "x", encoding="ascii") as output:
             "provider_payload_timing": provider_payload_timing,
             "unexpected_provider_application_packets": unexpected_provider_application_packets,
             "content_control_pairs": content_control_pairs,
+            **({"consumer_control_role": consumer_control_role} if consumer_control_role is not None else {}),
             "content_control_packets": content_control_packets,
             "unexpected_provider_control_packets": unexpected_provider_control_packets,
             "packet_socket_drops": packet_socket_drops,
@@ -6312,6 +6418,10 @@ start_privacy_observers() {
             [ "$signal_backup" = yes ] || return 1 ;;
         private-storage-replicas-upload-privacy|private-storage-replicas-failover-privacy|private-storage-replicas-finish-privacy)
             [ "$private_storage_replicas" = yes ] || return 1 ;;
+        private-storage-fragments-lifecycle-privacy)
+            [ "$private_storage_maintenance" = yes ] || return 1 ;;
+        private-storage-fragments-consumer-publish-privacy|private-storage-fragments-consumer-exercise-privacy|private-storage-fragments-consumer-finish-privacy)
+            [ "$private_storage_maintenance" = yes ] || return 1 ;;
         private-storage-fragments-upload-privacy|private-storage-fragments-restore-privacy|private-storage-fragments-finish-privacy)
             [ "$private_storage_fragments" = yes ] || return 1 ;;
         private-storage-handoff-upload-privacy|private-storage-handoff-pending-privacy|private-storage-handoff-complete-privacy|private-storage-handoff-restore_b-privacy|private-storage-handoff-restore_c-privacy|private-storage-handoff-finish-privacy)
@@ -7084,6 +7194,10 @@ elif [ "$cloud_private_file" = yes ]; then
 fi
 if [ "$image_snapshot" = yes ]; then
     image_snapshot_run
+    exit 0
+fi
+if [ "$private_storage_maintenance" = yes ]; then
+    private_storage_maintenance_run
     exit 0
 fi
 if [ "$private_storage_fragments" = yes ]; then

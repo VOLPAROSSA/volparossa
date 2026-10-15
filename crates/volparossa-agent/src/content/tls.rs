@@ -5,7 +5,7 @@
 //! never disclosed to a content destination. Neither certificate nor offer authenticates an
 //! Internet origin, publication or whitelist grant. Those authorities remain independent.
 
-use std::{sync::Arc, time::Duration};
+use std::{io, sync::Arc, time::Duration};
 
 use libp2p::{PeerId, identity};
 use rustls::{
@@ -21,6 +21,7 @@ use tokio_rustls::{
     TlsAcceptor, TlsConnector, client::TlsStream as ClientStream, server::TlsStream as ServerStream,
 };
 use volparossa_content::provider::VerifiedProviderOffer;
+use volparossa_local_control::PrivateStorageTlsFailure;
 
 const CONTENT_ALPN: &[u8] = b"volparossa-content/1";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -101,28 +102,71 @@ pub(super) async fn connect<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    validate_offer(peer, offer)?;
+    connect_observed(stream, peer, offer)
+        .await
+        .map_err(|(error, _)| error)
+}
+
+/// Same TLS exchange, with a closed local failure class, never a remote cause.
+/// An underlying protected stream can itself return a TLS or I/O error.
+pub(super) async fn connect_observed<S>(
+    stream: S,
+    peer: PeerId,
+    offer: &VerifiedProviderOffer,
+) -> Result<ClientStream<S>, (ContentTlsError, PrivateStorageTlsFailure)>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    validate_offer(peer, offer).map_err(|error| (error, PrivateStorageTlsFailure::Offer))?;
     // libp2p TLS requires mutual authentication. A one-session key avoids turning a cache
     // request into a durable Client-node-to-publication association at the provider.
     let ephemeral = identity::Keypair::generate_ed25519();
-    let mut config = libp2p::tls::make_client_config(&ephemeral, Some(peer))
-        .map_err(|_| ContentTlsError::Configuration)?;
+    let mut config = libp2p::tls::make_client_config(&ephemeral, Some(peer)).map_err(|_| {
+        (
+            ContentTlsError::Configuration,
+            PrivateStorageTlsFailure::Configuration,
+        )
+    })?;
     config.alpn_protocols = vec![CONTENT_ALPN.to_vec()];
     config.enable_sni = true;
     let hostname = ServerName::try_from(offer.endpoint().hostname().to_owned())
-        .map_err(|_| ContentTlsError::Offer)?;
+        .map_err(|_| (ContentTlsError::Offer, PrivateStorageTlsFailure::Offer))?;
     let connector = TlsConnector::from(Arc::new(config));
     let tls = timeout(HANDSHAKE_TIMEOUT, connector.connect(hostname, stream))
         .await
-        .map_err(|_| ContentTlsError::Handshake)?
-        .map_err(|_| ContentTlsError::Handshake)?;
-    validate_offer(peer, offer)?;
+        .map_err(|_| {
+            (
+                ContentTlsError::Handshake,
+                PrivateStorageTlsFailure::HandshakeDeadline,
+            )
+        })?
+        .map_err(|error| (ContentTlsError::Handshake, handshake_failure(&error)))?;
+    validate_offer(peer, offer).map_err(|error| (error, PrivateStorageTlsFailure::Offer))?;
     if tls.get_ref().1.alpn_protocol() != Some(CONTENT_ALPN)
         || tls.get_ref().1.protocol_version() != Some(rustls::ProtocolVersion::TLSv1_3)
     {
-        return Err(ContentTlsError::Handshake);
+        return Err((
+            ContentTlsError::Handshake,
+            PrivateStorageTlsFailure::TlsOther,
+        ));
     }
     Ok(tls)
+}
+
+fn handshake_failure(error: &io::Error) -> PrivateStorageTlsFailure {
+    // tokio-rustls retains its concrete rustls error inside io::Error. Inspect only
+    // its type/variant, never its text or certificate/peer data. An I/O TimedOut
+    // is not evidence that our own ten-second handshake deadline elapsed.
+    match error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+    {
+        Some(rustls::Error::InvalidCertificate(_) | rustls::Error::NoCertificatesPresented) => {
+            PrivateStorageTlsFailure::Authentication
+        }
+        Some(_) => PrivateStorageTlsFailure::TlsOther,
+        None => PrivateStorageTlsFailure::Io,
+    }
 }
 
 fn validate_offer(peer: PeerId, offer: &VerifiedProviderOffer) -> Result<(), ContentTlsError> {
@@ -161,6 +205,9 @@ where
     .await
     .map_err(|_| ContentTlsError::Close)?
 }
+
+#[cfg(test)]
+mod diagnostic_tests;
 
 #[cfg(test)]
 mod tests {

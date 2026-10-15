@@ -7,8 +7,29 @@ use rand_core::{OsRng, RngCore};
 use tokio::net::UnixStream;
 use volparossa_local_control::{
     CONTROL_PROTOCOL_VERSION, ControlRequest, ControlResponse, ControlResult,
-    control_request::Operation, read_response, write_request,
+    PrivateStorageRemoteDetail, control_request::Operation, read_response, write_request,
 };
+
+/// Typed rejection retained for closed, caller-owned diagnostics. The peer supplied
+/// code must be allowlisted before being included in a machine-readable report.
+#[derive(Debug)]
+pub(crate) struct AgentRejected {
+    pub(crate) diagnostic_code: String,
+    pub(crate) private_storage_remote_detail: Option<PrivateStorageRemoteDetail>,
+    result: ControlResult,
+}
+
+impl std::fmt::Display for AgentRejected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "agent rejected request: {} ({:?})",
+            self.diagnostic_code, self.result
+        )
+    }
+}
+
+impl std::error::Error for AgentRejected {}
 
 /// Sends one typed operation and validates correlation and result metadata.
 pub async fn request(socket: &Path, operation: Operation) -> Result<ControlResponse> {
@@ -34,7 +55,12 @@ pub(crate) async fn begin_request(
     write_request(&mut stream, &request)
         .await
         .context("cannot send request to agent")?;
-    let response = finish_request(&mut stream, &request.request_id).await?;
+    let response = finish_scoped_request(
+        &mut stream,
+        &request.request_id,
+        matches!(request.operation, Some(Operation::PrivateStorageRemote(_))),
+    )
+    .await?;
     Ok((stream, request.request_id, response))
 }
 
@@ -43,19 +69,37 @@ pub(crate) async fn finish_request(
     stream: &mut UnixStream,
     request_id: &[u8],
 ) -> Result<ControlResponse> {
+    // A terminal receipt cannot carry a pre-READY observation.
+    finish_scoped_request(stream, request_id, false).await
+}
+
+async fn finish_scoped_request(
+    stream: &mut UnixStream,
+    request_id: &[u8],
+    private_storage_initial: bool,
+) -> Result<ControlResponse> {
     let response = read_response(stream)
         .await
         .context("cannot read response from agent")?;
     if response.request_id != request_id {
         bail!("agent response correlation ID does not match");
     }
+    if response.private_storage_remote_detail.is_some() && !private_storage_initial {
+        bail!("agent private storage detail does not match response operation");
+    }
     let result = ControlResult::try_from(response.result)
         .map_err(|_| anyhow::anyhow!("agent returned an unknown result"))?;
     if result != ControlResult::Ok {
-        bail!(
-            "agent rejected request: {} ({result:?})",
-            response.diagnostic_code
-        );
+        return Err(AgentRejected {
+            diagnostic_code: response.diagnostic_code,
+            private_storage_remote_detail: response.private_storage_remote_detail,
+            result,
+        }
+        .into());
     }
     Ok(response)
 }
+
+#[cfg(test)]
+#[path = "control_tests.rs"]
+mod tests;

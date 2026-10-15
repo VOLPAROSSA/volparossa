@@ -2,6 +2,7 @@
 
 pub(super) mod diagnostic;
 mod lifetime;
+pub(super) mod native_session;
 
 use std::{
     collections::BTreeSet, fmt, fs::File, io::Read, os::unix::process::ExitStatusExt, path::Path,
@@ -401,6 +402,15 @@ fn check_public_contract(value: &Value, options: &Options) -> Result<()> {
 }
 
 fn check_model_backend(value: &Value, request: &WorkerRequest) -> Result<()> {
+    request.native_backend.check_report(value)?;
+    if request.native_backend.enabled() {
+        ensure!(
+            request.model_profile == super::ModelProfile::Qwen4bInstruct2507
+                && request.mode == Mode::PrivateConversation,
+            "compute_native_backend_scope"
+        );
+        return Ok(());
+    }
     if matches!(
         request.model_profile,
         super::ModelProfile::Smol1700
@@ -432,6 +442,10 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
     if value.get("status").and_then(Value::as_str) == Some("error") {
         return Err(worker_failure(value, &request.id, status));
     }
+    check_successful_result(value, request)
+}
+
+fn check_successful_result(value: &Value, request: &WorkerRequest) -> Result<()> {
     ensure!(
         value.get("status").and_then(Value::as_str) == Some("ok"),
         "compute_backend_failed"
@@ -1175,6 +1189,7 @@ mod tests {
         }
         let options = Options {
             mode: Mode::AggregateAdapter,
+            native_backend: super::super::native_cpu::Options::default(),
             model_profile: crate::compute::ModelProfile::default(),
             runtime_root: root.path().join("unused-runtime"),
             model_root: root.path().join("unused-model"),
@@ -1208,6 +1223,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let options = Options {
             mode: Mode::PlanTasks,
+            native_backend: super::super::native_cpu::Options::default(),
             model_profile: crate::compute::ModelProfile::default(),
             runtime_root: directory.path().join("unused-runtime"),
             model_root: directory.path().join("unused-model"),
@@ -1253,6 +1269,7 @@ mod tests {
         // Inert result-contract inputs, not model execution or answer-quality evidence.
         for mode in [Mode::Infer, Mode::Train] {
             let request = WorkerRequest {
+                native_backend: super::super::native_cpu::Request::default(),
                 version: 1,
                 id: "abc".into(),
                 mode,
@@ -1290,6 +1307,7 @@ mod tests {
     fn larger_profile_requires_actual_precision_and_distinguishes_tokenizer_only_work() {
         // Inert protocol evidence only; this does not instantiate a model.
         let mut request = WorkerRequest {
+            native_backend: super::super::native_cpu::Request::default(),
             version: 1,
             id: "abc".into(),
             mode: Mode::Infer,

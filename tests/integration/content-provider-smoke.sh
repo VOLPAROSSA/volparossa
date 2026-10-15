@@ -100,6 +100,11 @@ content_provider_start_control_observer() {
 # A fresh adaptive phase may select a different broker. Its links and route evidence must
 # not overwrite the two-link phase; all changes remain inside the owned disposable nodes.
 content_provider_adaptive_control_underlay() {
+    adaptive_route_prefix=${2:-content-provider-adaptive-control}
+    case $adaptive_route_prefix in
+        content-provider-adaptive-control|private-storage-maintenance-current-control) ;;
+        *) return 1 ;;
+    esac
     provider_control_peer=$1
     provider_control_node=$(jq -er --arg peer "$provider_control_peer" \
         'to_entries[] | select(.value == $peer) | .key' "$WORK/a01-expected-peers.json") || return 1
@@ -112,20 +117,35 @@ content_provider_adaptive_control_underlay() {
     for adaptive_node in relay3 relay4 relay5; do
         content_provider_node "$adaptive_node" || return 1
         adaptive_segment=$((83 + adaptive_slot))
-        link_nodes "$provider_control_ns" "ac$adaptive_slot" "10.241.$adaptive_segment.1/30" \
-            "$provider_ns" "ap$adaptive_slot" "10.241.$adaptive_segment.2/30" || return 1
+        if [ "$adaptive_route_prefix" = private-storage-maintenance-current-control ]; then
+            # Rebinding must never expose a live, temporarily unfiltered link.
+            # Both ends start down inside the already-owned namespaces.
+            ip -n "$provider_control_ns" link add "ac$adaptive_slot" type veth \
+                peer name "ap$adaptive_slot" netns "$provider_ns" || return 1
+            ip -n "$provider_control_ns" address add "10.241.$adaptive_segment.1/30" \
+                dev "ac$adaptive_slot" || return 1
+            ip -n "$provider_ns" address add "10.241.$adaptive_segment.2/30" \
+                dev "ap$adaptive_slot" || return 1
+        else
+            link_nodes "$provider_control_ns" "ac$adaptive_slot" "10.241.$adaptive_segment.1/30" \
+                "$provider_ns" "ap$adaptive_slot" "10.241.$adaptive_segment.2/30" || return 1
+        fi
         content_provider_filter_link "$provider_control_ns" "adaptive_$adaptive_slot" "ac$adaptive_slot" \
             "$provider_control_ip" "$provider_ip" || return 1
         content_provider_filter_link "$provider_ns" "adaptive_$adaptive_slot" "ap$adaptive_slot" \
             "$provider_ip" "$provider_control_ip" || return 1
+        if [ "$adaptive_route_prefix" = private-storage-maintenance-current-control ]; then
+            ip -n "$provider_control_ns" link set "ac$adaptive_slot" up || return 1
+            ip -n "$provider_ns" link set "ap$adaptive_slot" up || return 1
+        fi
         ip -n "$provider_control_ns" route replace "$provider_ip/32" \
             via "10.241.$adaptive_segment.2" dev "ac$adaptive_slot" src "$provider_control_ip" || return 1
         ip -n "$provider_ns" route replace "$provider_control_ip/32" \
             via "10.241.$adaptive_segment.1" dev "ap$adaptive_slot" src "$provider_ip" || return 1
         ip -n "$provider_control_ns" -j route get "$provider_ip" \
-            >"$WORK/content-provider-adaptive-control-$adaptive_node-out.json" || return 1
+            >"$WORK/$adaptive_route_prefix-$adaptive_node-out.json" || return 1
         ip -n "$provider_ns" -j route get "$provider_control_ip" \
-            >"$WORK/content-provider-adaptive-control-$adaptive_node-back.json" || return 1
+            >"$WORK/$adaptive_route_prefix-$adaptive_node-back.json" || return 1
         provider_control_ips=$provider_control_ips,$provider_ip
         adaptive_slot=$((adaptive_slot + 1))
     done

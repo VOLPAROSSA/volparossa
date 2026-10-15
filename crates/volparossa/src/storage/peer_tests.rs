@@ -27,6 +27,12 @@ use super::{
     transfer,
 };
 
+#[path = "peer_outcome_transfer_tests.rs"]
+mod outcome_transfer;
+
+#[path = "peer_flow_acquire_tests.rs"]
+mod flow_acquire;
+
 fn fixture_grant() -> (SigningKey, SigningKey, VerifiedStorageGrant) {
     let provider = SigningKey::from_bytes(&[11; 32]);
     let owner = SigningKey::from_bytes(&[22; 32]);
@@ -280,6 +286,7 @@ async fn local_provider_admission_cli_uses_real_framed_status_and_preserves_cust
                 request_id: incoming.request_id,
                 result: ControlResult::Ok as i32,
                 diagnostic_code: "PRIVATE_STORAGE_ADMISSION".into(),
+                private_storage_remote_detail: None,
                 payload: Some(Payload::PrivateStorageAdmission(PrivateStorageAdmission {
                     provider_key: provider_key.to_bytes().to_vec(),
                     capacity_bytes: status.capacity_bytes,
@@ -376,12 +383,19 @@ async fn fake_agent(
         CONTROL_PROTOCOL_VERSION, ContentReceipt, ControlResponse, PrivateStorageReady,
         control_request::Operation, control_response::Payload, read_request, write_response,
     };
-    for index in 0..11 {
+    let mut index = 0;
+    while index < 11 {
         let (mut local, _) = listener.accept().await.unwrap();
         let request = read_request(&mut local).await.unwrap();
+        if matches!(request.operation, Some(Operation::PrivateStorageOutcome(_))) {
+            // Optional query to an old agent: close without changing the operation count.
+            continue;
+        }
         let Some(Operation::PrivateStorageRemote(requested)) = request.operation else {
             panic!("wrong IPC operation")
         };
+        let lose_terminal = index == 0;
+        index += 1;
         assert_eq!(requested.provider_key, grant.provider_key().as_bytes());
         assert_eq!(requested.grant, grant.signed().encode());
         let (mut remote, mut provider) = tokio::io::duplex(4096);
@@ -398,6 +412,7 @@ async fn fake_agent(
             request_id: request.request_id,
             result: 0,
             diagnostic_code: "PRIVATE_STORAGE_READY".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::PrivateStorageReady(PrivateStorageReady {
                 provider_key: grant.provider_key().to_bytes().to_vec(),
                 challenge: challenge.encode(),
@@ -410,7 +425,7 @@ async fn fake_agent(
         provider_task.await.unwrap();
         // First Reserve reached disk, but local terminal success was lost. A verified signed
         // receipt alone must not turn a failed agent handoff into a successful CLI operation.
-        if index == 0 {
+        if lose_terminal {
             continue;
         }
         response.diagnostic_code = "CONTENT_OK".into();

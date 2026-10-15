@@ -364,6 +364,7 @@ impl Agent {
             maintenance_routes,
             dns_routes.clone(),
             self.content.object_policy_gate(),
+            self.content.clone(),
             shutdown_rx,
         ));
         let mut path_health_task = tokio::spawn(run_path_maintenance(
@@ -1563,6 +1564,7 @@ async fn run_maintenance(
     routes: ClientRouteControl,
     dns_routes: ClientRouteControl,
     object_policy: volparossa_content::object_policy::ObjectPolicyGate,
+    content: content::ContentRuntime,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut interval = tokio::time::interval(MAINTENANCE_INTERVAL);
@@ -1575,6 +1577,7 @@ async fn run_maintenance(
                 }
             }
             _ = interval.tick() => {
+                content.storage_maintenance_tick();
                 let now_ms = unix_millis();
                 let previous_policy = state.read().await.policy_snapshot(now_ms);
                 let was_active = previous_policy.active;

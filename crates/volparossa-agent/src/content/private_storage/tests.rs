@@ -1,5 +1,152 @@
 use super::*;
 
+#[test]
+fn terminal_route_receipt_retains_exact_fields_and_no_custody_claim() {
+    let provider = PeerId::random();
+    let control = PeerId::random();
+    assert_eq!(
+        route_receipt(37, provider, control),
+        ContentReceipt {
+            bytes: 37,
+            peer_bytes: 37,
+            providers_used: 1,
+            provider_peer_ids: vec![provider.to_string()],
+            control_relay_peer_id: control.to_string(),
+            ..ContentReceipt::default()
+        }
+    );
+}
+
+#[tokio::test]
+async fn outcome_query_uses_actual_unix_peer_uid_and_consumes_only_its_request() {
+    use volparossa_local_control::PrivateStorageOutcomeStatus as Status;
+    let runtime = ContentRuntime::new(&volparossa_identity::Identity::generate()).unwrap();
+    let (_caller, socket) = UnixStream::pair().unwrap();
+    let uid = socket.peer_cred().unwrap().uid();
+    let own = runtime.storage_outcomes.begin(uid, &[3; 16]).unwrap();
+    own.enter(OutcomePhase::LocalRequestRead);
+    drop(own);
+    let sibling_uid = uid.wrapping_add(1);
+    let sibling = runtime
+        .storage_outcomes
+        .begin(sibling_uid, &[4; 16])
+        .unwrap();
+    sibling.enter(OutcomePhase::LocalRequestRead);
+    drop(sibling);
+    let query = |id| PrivateStorageOutcomeRequest {
+        original_request_id: vec![id; 16],
+        include_append_timing: false,
+    };
+    for (id, expected) in [
+        (4, Status::Missing),
+        (3, Status::Observed),
+        (3, Status::Missing),
+    ] {
+        assert_eq!(
+            runtime
+                .private_storage_outcome(&query(id), &socket)
+                .unwrap()
+                .status,
+            expected as i32
+        );
+    }
+    assert_eq!(
+        runtime
+            .storage_outcomes
+            .take(sibling_uid, &[4; 16])
+            .unwrap()
+            .status,
+        Status::Observed as i32
+    );
+}
+
+#[tokio::test]
+async fn append_timing_query_opt_in_is_caller_bound_and_consumes_the_same_original_slot() {
+    use volparossa_local_control::PrivateStorageOutcomeStatus as Status;
+
+    let runtime = ContentRuntime::new(&volparossa_identity::Identity::generate()).unwrap();
+    let (_caller, socket) = UnixStream::pair().unwrap();
+    let uid = socket.peer_cred().unwrap().uid();
+    for (id, enabled) in [(31, false), (32, true)] {
+        let guard = runtime.storage_outcomes.begin(uid, &[id; 16]).unwrap();
+        guard.start_operation(Some(tokio::time::Instant::now()));
+        guard.enter(OutcomePhase::RemotePayloadWrite);
+        guard.enter(OutcomePhase::RemoteReceiptRead);
+        drop(guard);
+        assert_eq!(
+            runtime
+                .storage_outcomes
+                .take(uid.wrapping_add(1), &[id; 16])
+                .unwrap()
+                .status,
+            Status::Missing as i32
+        );
+        let mut query = PrivateStorageOutcomeRequest {
+            original_request_id: vec![id; 16],
+            include_append_timing: enabled,
+        };
+        let result = runtime.private_storage_outcome(&query, &socket).unwrap();
+        result.validate().unwrap();
+        assert_eq!(result.status, Status::Observed as i32);
+        assert_eq!(result.append_timing.is_some(), enabled);
+        // Opting in later never consumes a second copy or revives the original observation.
+        query.include_append_timing = true;
+        let consumed = runtime.private_storage_outcome(&query, &socket).unwrap();
+        assert_eq!(consumed.status, Status::Missing as i32);
+        assert!(consumed.append_timing.is_none());
+    }
+}
+
+#[tokio::test]
+async fn partial_private_storage_ready_write_is_already_committed_to_stream_framing() {
+    use std::{
+        io,
+        pin::Pin,
+        task::{Context, Poll},
+    };
+    struct PartialWrite {
+        bytes: Vec<u8>,
+    }
+    impl AsyncWrite for PartialWrite {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.bytes.is_empty() {
+                self.bytes.push(bytes[0]);
+                Poll::Ready(Ok(1))
+            } else {
+                Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)))
+            }
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+    let mut stream = PartialWrite { bytes: Vec::new() };
+    let mut ready_sent = false;
+    let result = send_ready(
+        &mut stream,
+        &[1; 16],
+        &mut ready_sent,
+        PrivateStorageReady {
+            provider_key: SigningKey::from_bytes(&[3; 32])
+                .verifying_key()
+                .to_bytes()
+                .to_vec(),
+            challenge: vec![1],
+        },
+    )
+    .await;
+    assert!(matches!(result, Err(ContentError::Unavailable)));
+    assert!(ready_sent);
+    assert_eq!(stream.bytes.len(), 1);
+}
+
 fn operator_grant(owner: &SigningKey) -> PrivateStorageGrantRequest {
     PrivateStorageGrantRequest {
         owner_key: owner.verifying_key().to_bytes().to_vec(),
@@ -51,8 +198,10 @@ fn private_storage_remote_binds_independent_provider_before_discovery() {
     let owner = SigningKey::from_bytes(&[42; 32]);
     let issued = issue_grant(&node, &operator_grant(&owner), now()).unwrap();
     let mut request = PrivateStorageRemoteRequest {
+        include_flow_acquire_detail: false,
         provider_key: issued.provider_key,
         grant: issued.grant,
+        maintenance_turn: Vec::new(),
     };
     let checked = validate_remote(&request).unwrap();
     assert_eq!(checked.grant.owner_key(), &owner.verifying_key());

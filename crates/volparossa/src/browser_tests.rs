@@ -109,6 +109,7 @@ async fn browser_grant_framed_reply_is_written_privately_without_secret_in_repor
                 request_id: request.request_id,
                 result: ControlResult::Ok as i32,
                 diagnostic_code: "BROWSER_GATEWAY_GRANTED".into(),
+                private_storage_remote_detail: None,
                 payload: Some(Payload::BrowserGatewayGranted(granted)),
             },
         )

@@ -12,7 +12,7 @@ use volparossa_exit::{
     ActiveTcpEgressRoute, ActiveTcpRoute, ExitNativeRouteAuthorization, ExitService,
     TcpEgressLimits,
 };
-use volparossa_mptcp::MptcpInfo;
+use volparossa_mptcp::{MptcpAcceptError, MptcpInfo};
 use volparossa_tcp_proxy::{
     StreamTransferLimits, StreamTransferStats, Tls13MptcpClient, Tls13MptcpServer,
     Tls13MptcpStream, VerifiedMptcpRoute, proxy_bidirectional, write_open_tcp,
@@ -78,6 +78,10 @@ enum ExitRuntimeEvent<A, T> {
     FlowCompleted(Result<T, tokio::task::JoinError>),
     MaintainPaths,
     ExtendPath(path_extension::PathCommand),
+}
+
+fn accept_failure_ends_route(error: &MptcpAcceptError) -> bool {
+    matches!(error, MptcpAcceptError::Listener(_))
 }
 
 async fn next_exit_runtime_event<A, T: 'static>(
@@ -241,7 +245,7 @@ impl ProductionMptcpExitRuntime {
                     event = next_exit_runtime_event(
                         Duration::from_millis(remaining),
                         accepting,
-                        transport.listener().accept(),
+                        transport.listener().accept_classified(),
                         &mut flows,
                         &mut maintenance,
                     ) => event,
@@ -270,9 +274,16 @@ impl ProductionMptcpExitRuntime {
                         .unwrap_or(Err(ProductionMptcpExitError::Accept))
                     });
                 }
-                ExitRuntimeEvent::Accepted(Err(_)) => {
+                ExitRuntimeEvent::Accepted(Err(error)) => {
                     failed = true;
-                    break;
+                    if accept_failure_ends_route(&error) {
+                        break;
+                    }
+                    // The rejected stream is already closed. Preserve this same listener and
+                    // the independently owned flows, but never hide the failed acceptance or
+                    // let repeated rejections monopolize the executor. The next iteration
+                    // still checks shutdown, route expiry, capacity and path maintenance.
+                    tokio::task::yield_now().await;
                 }
                 ExitRuntimeEvent::FlowCompleted(result) => {
                     report_exit_flow_result(result, &mut failed, &mut flow_completed).await;
@@ -634,23 +645,23 @@ pub(crate) async fn activate_production_mptcp_client_flow(
         || Sha256::digest(&certificate_der).as_slice() != expected_certificate_sha256
     {
         return Err(ProductionMptcpClientFailure::new(
-            ProductionMptcpClientError::Certificate,
+            ProductionMptcpClientActivationStage::Certificate,
         ));
     }
     let mut roots = RootCertStore::empty();
     if roots.add(CertificateDer::from(certificate_der)).is_err() {
         return Err(ProductionMptcpClientFailure::new(
-            ProductionMptcpClientError::Certificate,
+            ProductionMptcpClientActivationStage::Certificate,
         ));
     }
     let Ok(server_name) = ServerName::try_from(tls_server_name.to_owned()) else {
         return Err(ProductionMptcpClientFailure::new(
-            ProductionMptcpClientError::Certificate,
+            ProductionMptcpClientActivationStage::Certificate,
         ));
     };
     let Ok(client) = Tls13MptcpClient::new(roots) else {
         return Err(ProductionMptcpClientFailure::new(
-            ProductionMptcpClientError::Tls,
+            ProductionMptcpClientActivationStage::Tls,
         ));
     };
     let Ok(mut stream) = client
@@ -658,12 +669,12 @@ pub(crate) async fn activate_production_mptcp_client_flow(
         .await
     else {
         return Err(ProductionMptcpClientFailure::new(
-            ProductionMptcpClientError::Tls,
+            ProductionMptcpClientActivationStage::Tls,
         ));
     };
     if paths.ensure_initial(&stream).await.is_err() {
         return Err(ProductionMptcpClientFailure::new(
-            ProductionMptcpClientError::Stream,
+            ProductionMptcpClientActivationStage::InitialPaths,
         ));
     }
     if let Err(cause) = prime_open_tcp_and_wait_for_subflows(
@@ -678,7 +689,11 @@ pub(crate) async fn activate_production_mptcp_client_flow(
     }
     let stream = observations
         .attach(stream, paths.flow_handle())
-        .map_err(|_| ProductionMptcpClientFailure::new(ProductionMptcpClientError::Stream))?;
+        .map_err(|_| {
+            ProductionMptcpClientFailure::new(
+                ProductionMptcpClientActivationStage::StreamAttachment,
+            )
+        })?;
     Ok(ActiveProductionMptcpClientFlow {
         stream,
         retirement: paths.into_retirement(),
@@ -690,33 +705,61 @@ async fn prime_open_tcp_and_wait_for_subflows<W, F>(
     signed_open_tcp: &[u8],
     required_subflows: usize,
     mut observe: F,
-) -> Result<(), ProductionMptcpClientError>
+) -> Result<(), ProductionMptcpClientActivationStage>
 where
     W: AsyncWrite + Unpin,
     F: FnMut(&W) -> io::Result<MptcpInfo>,
 {
     write_open_tcp(stream, signed_open_tcp, OPEN_TCP_TIMEOUT)
         .await
-        .map_err(|_| ProductionMptcpClientError::OpenTcp)?;
+        .map_err(|_| ProductionMptcpClientActivationStage::OpenTcp)?;
     wait_for_selected_subflows(|| observe(&*stream), required_subflows)
         .await
-        .map_err(|_| ProductionMptcpClientError::Multipath)?;
+        .map_err(|_| ProductionMptcpClientActivationStage::SubflowReadiness)?;
     Ok(())
 }
 
 #[must_use = "failed MPTCP client activation must be handled"]
 pub(crate) struct ProductionMptcpClientFailure {
-    cause: ProductionMptcpClientError,
+    stage: ProductionMptcpClientActivationStage,
 }
 
 impl ProductionMptcpClientFailure {
-    const fn new(cause: ProductionMptcpClientError) -> Self {
-        Self { cause }
+    const fn new(stage: ProductionMptcpClientActivationStage) -> Self {
+        Self { stage }
     }
 
     pub(crate) const fn cause(&self) -> ProductionMptcpClientError {
-        self.cause
+        match self.stage {
+            ProductionMptcpClientActivationStage::Certificate => {
+                ProductionMptcpClientError::Certificate
+            }
+            ProductionMptcpClientActivationStage::Tls => ProductionMptcpClientError::Tls,
+            ProductionMptcpClientActivationStage::OpenTcp => ProductionMptcpClientError::OpenTcp,
+            ProductionMptcpClientActivationStage::SubflowReadiness => {
+                ProductionMptcpClientError::Multipath
+            }
+            ProductionMptcpClientActivationStage::InitialPaths
+            | ProductionMptcpClientActivationStage::StreamAttachment => {
+                ProductionMptcpClientError::Stream
+            }
+        }
     }
+
+    pub(crate) const fn stage(&self) -> ProductionMptcpClientActivationStage {
+        self.stage
+    }
+}
+
+/// Request-local activation stage only; never retains a transport error or identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProductionMptcpClientActivationStage {
+    Certificate,
+    Tls,
+    InitialPaths,
+    OpenTcp,
+    SubflowReadiness,
+    StreamAttachment,
 }
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
@@ -746,6 +789,95 @@ fn production_tcp_limits() -> Result<TcpEgressLimits, volparossa_exit::ExitError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_stream_activation_stages_preserve_legacy_causes() {
+        for (stage, cause) in [
+            (
+                ProductionMptcpClientActivationStage::Certificate,
+                ProductionMptcpClientError::Certificate,
+            ),
+            (
+                ProductionMptcpClientActivationStage::Tls,
+                ProductionMptcpClientError::Tls,
+            ),
+            (
+                ProductionMptcpClientActivationStage::InitialPaths,
+                ProductionMptcpClientError::Stream,
+            ),
+            (
+                ProductionMptcpClientActivationStage::OpenTcp,
+                ProductionMptcpClientError::OpenTcp,
+            ),
+            (
+                ProductionMptcpClientActivationStage::SubflowReadiness,
+                ProductionMptcpClientError::Multipath,
+            ),
+            (
+                ProductionMptcpClientActivationStage::StreamAttachment,
+                ProductionMptcpClientError::Stream,
+            ),
+        ] {
+            let failure = ProductionMptcpClientFailure::new(stage);
+            assert_eq!(failure.stage(), stage);
+            assert_eq!(failure.cause(), cause);
+        }
+    }
+
+    #[tokio::test]
+    async fn content_stream_open_tcp_failure_does_not_attempt_subflow_readiness() {
+        struct RejectedWriter;
+        impl AsyncWrite for RejectedWriter {
+            fn poll_write(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                _: &[u8],
+            ) -> std::task::Poll<io::Result<usize>> {
+                std::task::Poll::Ready(Err(io::Error::other("private-write-canary")))
+            }
+
+            fn poll_flush(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<io::Result<()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+
+            fn poll_shutdown(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<io::Result<()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        let failure = prime_open_tcp_and_wait_for_subflows(
+            &mut RejectedWriter,
+            b"signed-open-canary",
+            2,
+            |_| panic!("a failed OPEN_TCP write must stop before subflow observation"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failure, ProductionMptcpClientActivationStage::OpenTcp);
+        assert_eq!(format!("{failure:?}"), "OpenTcp");
+    }
+
+    #[tokio::test]
+    async fn content_stream_subflow_failure_does_not_expose_observer_error() {
+        let mut written = Vec::new();
+        let failure =
+            prime_open_tcp_and_wait_for_subflows(&mut written, b"signed-open-canary", 2, |_| {
+                Err(io::Error::other("private-subflow-canary"))
+            })
+            .await
+            .unwrap_err();
+        assert!(written.ends_with(b"signed-open-canary"));
+        assert_eq!(
+            failure,
+            ProductionMptcpClientActivationStage::SubflowReadiness
+        );
+        assert_eq!(format!("{failure:?}"), "SubflowReadiness");
+    }
 
     #[test]
     fn exit_egress_diagnostics_never_include_inner_error_text() {
@@ -853,6 +985,80 @@ mod tests {
 
         assert_eq!(reports, [true]);
         assert!(!failed);
+    }
+
+    #[test]
+    fn only_listener_accept_failure_ends_reusable_exit_route() {
+        for kind in [io::ErrorKind::ConnectionAborted, io::ErrorKind::Other] {
+            assert!(accept_failure_ends_route(&MptcpAcceptError::Listener(
+                io::Error::from(kind)
+            )));
+            assert!(!accept_failure_ends_route(
+                &MptcpAcceptError::RejectedStream(io::Error::from(kind))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_exit_accept_returns_to_cancellation_and_expiry_checks() {
+        let mut flows = JoinSet::<()>::new();
+        let mut maintenance = time::interval_at(
+            time::Instant::now() + Duration::from_secs(30),
+            Duration::from_secs(1),
+        );
+        let (shutdown, receiver) = watch::channel(false);
+        let mut failed = false;
+        let rejection = || {
+            std::future::ready(Err::<(), _>(MptcpAcceptError::RejectedStream(
+                io::Error::from(io::ErrorKind::ConnectionAborted),
+            )))
+        };
+        for _ in 0..2 {
+            let event = next_exit_runtime_event(
+                Duration::from_secs(60),
+                true,
+                rejection(),
+                &mut flows,
+                &mut maintenance,
+            )
+            .await;
+            let ExitRuntimeEvent::Accepted(Err(error)) = event else {
+                panic!("expected only the consumed stream rejection");
+            };
+            failed = true;
+            assert!(!accept_failure_ends_route(&error));
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            failed,
+            "a rejected acceptance must not become a successful route outcome"
+        );
+        shutdown.send(true).unwrap();
+        assert!(
+            until_exit_shutdown(
+                receiver,
+                next_exit_runtime_event(
+                    Duration::from_secs(60),
+                    true,
+                    rejection(),
+                    &mut flows,
+                    &mut maintenance,
+                )
+            )
+            .await
+            .is_none()
+        );
+        assert!(matches!(
+            next_exit_runtime_event(
+                Duration::ZERO,
+                false,
+                rejection(),
+                &mut flows,
+                &mut maintenance,
+            )
+            .await,
+            ExitRuntimeEvent::RouteExpired
+        ));
     }
 
     #[test]

@@ -38,7 +38,8 @@ permanent availability or rely on the development service as your only copy.
 - **Manage archives:** [whole-copy compatibility](#replica-set-candidate-explicit-copies-and-restore-failover),
   [distributed fragments](#fragment-placement-candidate-redundant-pieces-not-whole-archives-per-provider),
   [replacement](#explicit-fragment-copy-replacement), [drain](#bounded-owner-driven-archive-drain),
-  and [repair](#bounded-owner-driven-repair-pass).
+  [repair](#bounded-owner-driven-repair-pass), and
+  [background maintenance](#owner-authorized-background-maintenance-candidate).
 - **Check the evidence:** [fragment proof](#disposable-protected-fragment-proof),
   [Signal round trip](#native-signal-backup-round-trip), and
   [Image/Cloud recovery trials](#recorded-application-recovery-trials).
@@ -372,6 +373,44 @@ request-bound provider receipt and the final correlated response on the same age
 connection. Grant issuance authorizes limits; it does not reserve disk or establish a
 replica. See [shared-core and application lifetimes](../architecture/APPLICATION_LIFECYCLE.md) for the
 remaining enrollment, per-application authority and lifecycle work.
+
+### Bounded transfer diagnostics
+
+An incomplete deposit retains its journal and conservative storage charge. Its
+optional `deposit_diagnostics` records at most eight fragment/copy failures plus
+an omitted count; it does not replace receipts or prove provider custody.
+
+Diagnostics version 2 adds nullable `agent_detail` to each failure. A non-null
+detail is valid only for a correlated initial `PrivateStorageRemote` rejection
+at `agent_ready`. It contains two closed values: the observed preparation stage
+and `deadline_scope` (`none`, `operation` or `exchange`). The latter distinguishes
+the existing whole-operation deadline from the inner grant/offer-bounded exchange;
+neither deadline is extended. A TLS-stage observation, for example, says where
+preparation stopped, not why the provider or network failed. Unknown or
+contradictory details are rejected, not copied into public error text.
+
+There is no additional error frame after READY has begun, including a partial
+write. Historical version-1 diagnostics retain their original six failure fields.
+Addresses, provider identities, keys, paths, private journals and free-form errors
+are excluded from the exported diagnostic. Retries, authority and accounting are
+unchanged. The new detail path is a reviewed candidate awaiting hosted Rust and
+live consumer verification; see the [status ledger](../IMPLEMENTATION_STATUS.md).
+
+Provider-local diagnostics are separate from those client deposit records. The
+current candidate adds a fixed operation/phase/error-family event to the existing
+bounded log ring. The operation is named only after owner-request verification;
+earlier failures use `UNKNOWN`. Backend and receipt phases remain distinct: a
+failed receipt or timeout is not proof that an operation did not commit. The
+event contains no request identifier and cannot correlate itself to a particular
+client failure.
+
+The disposable maintenance trial exports at most 32 observed event tuples per
+role plus an omitted-record count. This sidecar's v2 validator also accepts exact
+historical v1 records. It preserves the existing 400-record ring and 65-KiB export
+limit, omits raw error text and private fields, and explicitly denies acceptance,
+causal-attribution and event-absence claims. The candidate still needs hosted
+Rust verification and a fresh live consumer trial; it changes neither deadlines
+nor receipts, authorization, retry behavior or storage accounting.
 
 ### Explicit usage
 
@@ -798,6 +837,38 @@ contribution resizing, a new redundancy policy or proof of independent device av
 The original signed reconstruction root and the existing v2 consumer boundary are unchanged.
 Its functional probe uses actual signed local provider services and SQLite stores, not a
 new protected-overlay run.
+
+### Owner-authorized background maintenance candidate
+
+The `storage fragments maintenance` commands add a candidate owner service for
+renewal and repair. `enroll` signs finite permission for one existing archive,
+named candidate providers, original provider grants and explicit byte ceilings.
+`serve` keeps the owner identity and private journals in the owner's process;
+`status` reads its checkpoint without unlocking the identity or contacting peers.
+The core issues temporary resource turns, not permission to store somebody's data.
+
+Each turn uses the core's existing background lane and worker budget. Foreground
+demand, disconnects and deadlines revoke the turn; an active exchange retains its
+resource reservation until it stops. Requested payload and bounded framing bytes
+are charged before forwarding. The owner rotates through fragments, checks actual
+retention and attempts at most one replacement handoff per turn. Uncertain copies
+continue counting toward the authorized storage ceiling.
+
+If the core disappears, the service reconnects with bounded backoff while retaining
+the enrollment, cursor, grants, lease identities and repair journals. Reconnection
+does not renew authority. SIGINT and SIGTERM use the same checkpoint-and-stop
+path. The signed enrollment's absolute expiry caps new retention and is checked
+again after a provider challenge, before signing; waiting cannot extend permission.
+Provider grant refresh remains a separate authorized action.
+
+This candidate has passed source review and formatting, **not yet compilation or
+functional acceptance**. New Unix/SQLite tests cover reconnect, interrupted
+operations, expiry while waiting and delayed renewal/repair. They still require
+hosted execution; even when passing, they will not prove the protected-overlay
+lifecycle. The separate guest-network trial must exercise real core restart,
+process signals, provider replacement, reconstruction and cleanup. Automatic
+application supervision, reciprocal contribution adjustment and permanent
+availability remain open.
 
 ### Disposable protected-fragment proof
 

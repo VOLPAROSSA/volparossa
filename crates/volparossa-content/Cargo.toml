@@ -39,6 +39,7 @@ zeroize.workspace = true
 libp2p-identity.workspace = true
 rand_core.workspace = true
 rcgen.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 volparossa-local-control = { path = "../volparossa-local-control", version = "=0.1.0" }
 
 [lints]

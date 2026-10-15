@@ -29,8 +29,42 @@ use volparossa_local_control::{
 
 use super::{
     Deposit, Existing, Restore,
+    diagnostics::{Boundary, Operation as DiagnosticOperation, Stage},
     state::{self, Journal, LockedJournal},
 };
+
+tokio::task_local! {
+    static MAINTENANCE_TURN: Vec<u8>;
+    static MAINTENANCE_EXPIRES: u64;
+}
+
+/// Background reads grant at most one upload-sized chunk; ordinary range reads are unchanged.
+pub(super) fn range_bytes() -> u64 {
+    if MAINTENANCE_TURN.try_with(|_| ()).is_ok() {
+        CHUNK_BYTES as u64
+    } else {
+        MAX_RANGE_BYTES
+    }
+}
+
+/// One core-admitted owner operation, without changing the foreground CLI's transport.
+pub(super) async fn with_maintenance_turn<F: Future>(token: Vec<u8>, work: F) -> F::Output {
+    MAINTENANCE_TURN.scope(token, work).await
+}
+
+/// The original signed enrollment deadline, independent of async resource turns.
+pub(super) async fn with_maintenance_expiry<F: Future>(expires: u64, work: F) -> F::Output {
+    MAINTENANCE_EXPIRES.scope(expires, work).await
+}
+
+fn maintenance_expiry(expires: u64, now: u64) -> Result<u64> {
+    if let Ok(cap) = MAINTENANCE_EXPIRES.try_with(|cap| *cap) {
+        ensure!(now < cap, "enrollment_expired");
+        Ok(expires.min(cap))
+    } else {
+        Ok(expires)
+    }
+}
 
 pub(super) async fn deposit(args: Deposit, socket: &Path) -> Result<serde_json::Value> {
     ensure!(
@@ -78,66 +112,87 @@ pub(super) async fn deposit_retained(
     retained: &mut LockedJournal,
     input: &mut File,
 ) -> Result<()> {
-    let length = retained.journal.ciphertext_bytes;
-    ensure!(
-        retained.journal.last_state != Some(ReceiptState::Deleted as i32),
-        "this archive was explicitly deleted; resume cannot resurrect it"
-    );
-    let initial = observe_or_reserve(socket, grant, signer, retained).await?;
-    if initial == ReceiptState::Committed {
-        return Ok(());
-    }
-    let mut offset = retained.journal.last_stored_bytes;
-    ensure!(
-        offset <= length && (offset == length || offset % CHUNK_BYTES as u64 == 0),
-        "invalid provider upload position"
-    );
-    input.seek(SeekFrom::Start(offset))?;
-    let mut chunk = vec![0; CHUNK_BYTES];
-    while offset < length {
-        let count = usize::try_from((length - offset).min(CHUNK_BYTES as u64))?;
-        input
-            .read_exact(&mut chunk[..count])
-            .context("ciphertext changed or became truncated during upload")?;
-        let operation = StorageOperation::Append {
-            offset,
-            length: u32::try_from(count)?,
-            sha256: Sha256::digest(&chunk[..count]).into(),
+    let mut boundary = Boundary::new(StorageOperation::Progress, Stage::ReceiptValidation);
+    let result: Result<()> = async {
+        let length = retained.journal.ciphertext_bytes;
+        ensure!(
+            retained.journal.last_state != Some(ReceiptState::Deleted as i32),
+            "this archive was explicitly deleted; resume cannot resurrect it"
+        );
+        let initial = observe_or_reserve(socket, grant, signer, retained).await?;
+        if initial == ReceiptState::Committed {
+            return Ok(());
+        }
+        let mut offset = retained.journal.last_stored_bytes;
+        ensure!(
+            offset <= length && (offset == length || offset % CHUNK_BYTES as u64 == 0),
+            "invalid provider upload position"
+        );
+        boundary = Boundary {
+            operation: DiagnosticOperation::Append,
+            stage: Stage::LocalInput,
         };
+        input.seek(SeekFrom::Start(offset))?;
+        let mut chunk = vec![0; CHUNK_BYTES];
+        while offset < length {
+            boundary.stage = Stage::LocalInput;
+            let count = usize::try_from((length - offset).min(CHUNK_BYTES as u64))?;
+            input
+                .read_exact(&mut chunk[..count])
+                .context("ciphertext changed or became truncated during upload")?;
+            let operation = StorageOperation::Append {
+                offset,
+                length: u32::try_from(count)?,
+                sha256: Sha256::digest(&chunk[..count]).into(),
+            };
+            let target = retained
+                .journal
+                .target()
+                .context(Boundary::new(operation, Stage::JournalOpen))?;
+            let reply = remote(socket, grant, signer, target, operation, &chunk[..count]).await?;
+            boundary.stage = Stage::ReceiptValidation;
+            let result = reply.receipt.result();
+            ensure!(
+                result.stored_bytes == offset + count as u64,
+                "provider did not retain the exact appended prefix"
+            );
+            boundary.stage = Stage::JournalSave;
+            retained.journal.apply(result)?;
+            retained.save()?;
+            offset = result.stored_bytes;
+        }
+        let target = retained.journal.target().context(Boundary::new(
+            StorageOperation::Finalize,
+            Stage::JournalOpen,
+        ))?;
         let reply = remote(
             socket,
             grant,
             signer,
-            retained.journal.target()?,
-            operation,
-            &chunk[..count],
+            target,
+            StorageOperation::Finalize,
+            &[],
         )
         .await?;
-        let result = reply.receipt.result();
+        boundary = Boundary::new(StorageOperation::Finalize, Stage::ReceiptValidation);
         ensure!(
-            result.stored_bytes == offset + count as u64,
-            "provider did not retain the exact appended prefix"
+            reply.receipt.result().state == ReceiptState::Committed,
+            "provider did not commit the verified archive"
         );
-        retained.journal.apply(result)?;
+        boundary.stage = Stage::JournalSave;
+        retained.journal.apply(reply.receipt.result())?;
         retained.save()?;
-        offset = result.stored_bytes;
+        Ok(())
     }
-    let reply = remote(
-        socket,
-        grant,
-        signer,
-        retained.journal.target()?,
-        StorageOperation::Finalize,
-        &[],
-    )
-    .await?;
-    ensure!(
-        reply.receipt.result().state == ReceiptState::Committed,
-        "provider did not commit the verified archive"
-    );
-    retained.journal.apply(reply.receipt.result())?;
-    retained.save()?;
-    Ok(())
+    .await;
+    // Preserve an inner, more precise remote boundary instead of relabelling it.
+    result.map_err(|error| {
+        if error.downcast_ref::<Boundary>().is_some() {
+            error
+        } else {
+            error.context(boundary)
+        }
+    })
 }
 
 pub(super) async fn existing(
@@ -236,7 +291,7 @@ pub(super) async fn restore_retained(
     let mut hash = Sha256::new();
     let mut offset = 0;
     while offset < retained.journal.ciphertext_bytes {
-        let length = (retained.journal.ciphertext_bytes - offset).min(MAX_RANGE_BYTES);
+        let length = (retained.journal.ciphertext_bytes - offset).min(range_bytes());
         let reply = remote(
             socket,
             grant,
@@ -285,13 +340,21 @@ async fn observe_or_reserve(
         socket,
         grant,
         signer,
-        retained.journal.target()?,
+        retained
+            .journal
+            .target()
+            .context(Boundary::new(operation, Stage::JournalOpen))?,
         operation,
         &[],
     )
     .await?;
-    retained.journal.apply(reply.receipt.result())?;
-    retained.save()?;
+    retained
+        .journal
+        .apply(reply.receipt.result())
+        .context(Boundary::new(operation, Stage::JournalSave))?;
+    retained
+        .save()
+        .context(Boundary::new(operation, Stage::JournalSave))?;
     Ok(reply.receipt.result().state)
 }
 
@@ -300,7 +363,8 @@ pub(super) fn requested_expiry(grant: &VerifiedStorageGrant, lifetime: u64) -> R
         lifetime <= grant.limits().max_retention_seconds,
         "requested lease exceeds provider retention permission"
     );
-    let expires = super::super::expiry(super::super::now()?, lifetime)?;
+    let now = super::super::now()?;
+    let expires = maintenance_expiry(super::super::expiry(now, lifetime)?, now)?;
     ensure!(
         expires <= grant.validity().expires,
         "requested lease outlives the original provider grant"
@@ -352,56 +416,97 @@ pub(super) async fn remote(
     operation: StorageOperation,
     payload: &[u8],
 ) -> Result<StorageTransfer> {
-    tokio::time::timeout(Duration::from_secs(600), async {
-        grant.current(super::super::now()?)?;
-        ensure!(
-            grant.owner_key() == &signer.verifying_key() && grant.limits().rights.allows(operation),
-            "owner operation is not granted"
-        );
-        let request = PrivateStorageRemoteRequest {
-            provider_key: grant.provider_key().to_bytes().to_vec(),
-            grant: grant.signed().encode(),
-        };
-        let (mut stream, request_id, response) =
-            crate::control::begin_request(socket, Operation::PrivateStorageRemote(request)).await?;
-        ensure!(
-            response.diagnostic_code == "PRIVATE_STORAGE_READY",
-            "missing explicit private storage readiness"
-        );
-        let Some(Payload::PrivateStorageReady(ready)) = response.payload else {
-            bail!("wrong private storage readiness payload")
-        };
-        ensure!(
-            ready.provider_key == grant.provider_key().as_bytes(),
-            "agent selected a different private storage provider"
-        );
-        let now = super::super::now()?;
-        let challenge = StorageChallenge::decode_and_verify(&ready.challenge, grant, now)?;
-        let request = SignedStorageRequest::sign(
-            signer,
-            grant,
-            &challenge,
-            target,
-            operation,
-            Validity {
-                created: now,
-                expires: challenge.validity().expires,
-            },
-        )?;
-        let result = wire::finish(&mut stream, grant, &challenge, &request, payload).await?;
-        let response = crate::control::finish_request(&mut stream, &request_id).await?;
-        let Some(Payload::Content(receipt)) = response.payload else {
-            bail!("missing final private storage transfer receipt")
-        };
-        ensure!(
-            response.diagnostic_code == "CONTENT_OK",
-            "private storage transfer did not finish normally"
-        );
-        accounting(&receipt, grant, result.ciphertext.len() as u64)?;
-        Ok(result)
-    })
-    .await
-    .context("private storage operation exceeded its deadline; journal retained for retry")?
+    let mut stage = Stage::Authorization;
+    let mut outcome_request_id = None;
+    let result: Result<Result<StorageTransfer>> =
+        tokio::time::timeout(Duration::from_secs(600), async {
+            grant.current(super::super::now()?)?;
+            ensure!(
+                grant.owner_key() == &signer.verifying_key()
+                    && grant.limits().rights.allows(operation),
+                "owner operation is not granted"
+            );
+            let request = PrivateStorageRemoteRequest {
+                include_flow_acquire_detail: super::diagnostics::flow_acquire_enabled(),
+                provider_key: grant.provider_key().to_bytes().to_vec(),
+                grant: grant.signed().encode(),
+                maintenance_turn: MAINTENANCE_TURN.try_with(Clone::clone).unwrap_or_default(),
+            };
+            stage = Stage::AgentReady;
+            let (mut stream, request_id, response) =
+                crate::control::begin_request(socket, Operation::PrivateStorageRemote(request))
+                    .await?;
+            ensure!(
+                response.diagnostic_code == "PRIVATE_STORAGE_READY",
+                "missing explicit private storage readiness"
+            );
+            let Some(Payload::PrivateStorageReady(ready)) = response.payload else {
+                bail!("wrong private storage readiness payload")
+            };
+            ensure!(
+                ready.provider_key == grant.provider_key().as_bytes(),
+                "agent selected a different private storage provider"
+            );
+            stage = Stage::Challenge;
+            let now = super::super::now()?;
+            let challenge = StorageChallenge::decode_and_verify(&ready.challenge, grant, now)?;
+            // The handshake may have awaited past enrollment expiry. Do not sign a
+            // fresh operation outside that authority, or silently rewrite an older
+            // journal/reservation to make it appear authorized by this enrollment.
+            stage = Stage::SignedRequest;
+            let expires = maintenance_expiry(challenge.validity().expires, now)?;
+            if let StorageOperation::Reserve { expires_at }
+            | StorageOperation::Renew { expires_at } = operation
+            {
+                ensure!(
+                    maintenance_expiry(expires_at, now)? == expires_at,
+                    "requested lease outlives maintenance enrollment"
+                );
+            }
+            let request = SignedStorageRequest::sign(
+                signer,
+                grant,
+                &challenge,
+                target,
+                operation,
+                Validity {
+                    created: now,
+                    expires,
+                },
+            )?;
+            stage = Stage::WireReceipt;
+            outcome_request_id = Some(request_id.clone());
+            let result = wire::finish(&mut stream, grant, &challenge, &request, payload).await?;
+            stage = Stage::AgentTerminal;
+            let response = crate::control::finish_request(&mut stream, &request_id).await?;
+            let Some(Payload::Content(receipt)) = response.payload else {
+                bail!("missing final private storage transfer receipt")
+            };
+            ensure!(
+                response.diagnostic_code == "CONTENT_OK",
+                "private storage transfer did not finish normally"
+            );
+            stage = Stage::Accounting;
+            accounting(&receipt, grant, result.ciphertext.len() as u64)?;
+            Ok(result)
+        })
+        .await
+        .context("private storage operation exceeded its deadline; journal retained for retry");
+    let (result, failure_stage) = match result {
+        Ok(result) => (result, stage),
+        Err(error) => (Err(error), Stage::Deadline),
+    };
+    // The original future and stream are already dropped. Keep its typed failure;
+    // an independent, short local query may explain the handoff, never its custody.
+    let result = match (result, outcome_request_id) {
+        (Err(error), Some(request_id))
+            if matches!(stage, Stage::WireReceipt | Stage::AgentTerminal) =>
+        {
+            Err(error.context(super::outcome::query(socket, &request_id).await))
+        }
+        (result, _) => result,
+    };
+    result.context(Boundary::new(operation, failure_stage))
 }
 
 fn accounting(receipt: &ContentReceipt, grant: &VerifiedStorageGrant, bytes: u64) -> Result<()> {

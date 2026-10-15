@@ -40,6 +40,29 @@ def assistant_response(text):
         prompt_tokens=279, generated_tokens=19, output=dict(type='assistant', text=text))
 
 
+def memory_snapshot_fixture():
+    """Synthetic finite collector input; not a kernel measurement."""
+    detail = dict(state='observed', anon_bytes=1, file_bytes=2, shmem_bytes=3,
+        inactive_file_bytes=4, active_file_bytes=5, kernel_bytes=6)
+    return dict(headroom_bytes=10 * FIX['GIB'], host_available_bytes=20 * FIX['GIB'],
+        self_headroom_bytes=10 * FIX['GIB'], ancestor_headroom_bytes=11 * FIX['GIB'],
+        self_current_bytes=2 * FIX['GIB'], self_max_bytes=12 * FIX['GIB'],
+        ancestor_current_bytes=3 * FIX['GIB'], ancestor_max_bytes=14 * FIX['GIB'],
+        limiting_scope='self', missing_stage='none', io_kind='none', numeric_overflow=False,
+        self_stat=copy.deepcopy(detail), ancestor_stat=copy.deepcopy(detail))
+
+
+def memory_admission_fixture():
+    return dict(version=1, phase='admission', required_bytes=FIX['MEMORY_REQUIRED_BYTES'],
+        admitted=False, sample=memory_snapshot_fixture())
+
+
+def memory_cache_fixture(outcome='advised'):
+    return dict(version=1, phase='cache_hint', binding='bound', outcome=outcome,
+        supervisor_ok=True, before=memory_snapshot_fixture(), after=memory_snapshot_fixture(),
+        syscall_error=None if outcome == 'advised' else 'other')
+
+
 def example_receipt():
     """Deliberately fabricated validator input, never exported as runtime proof."""
     provisioner = runpy.run_path(str(FIX['ML'] / 'provision.py'))
@@ -83,6 +106,158 @@ def example_receipt():
 
 
 class FixtureTests(unittest.TestCase):
+    def collect_memory(self, records, enabled=True, raw_suffix=b''):
+        with tempfile.TemporaryDirectory(prefix='memory-collector-', dir=HERE) as directory:
+            path = Path(directory) / 'private.log'
+            data = b''.join(b'DEBUG ' + FIX['MEMORY_MARKER'] +
+                (record if type(record) is bytes else json.dumps(record).encode()) + b'\n' for record in records)
+            path.write_bytes(data + raw_suffix)
+            path.chmod(0o600)
+            return FIX['service_diagnostic'](path, memory_enabled=enabled)
+
+    def test_memory_requires_explicit_opt_in_and_preserves_legacy_byte_shape(self):
+        record = memory_admission_fixture()
+        expected = dict(version=1, events=[], truncated=False, unrecognized_record=False)
+        self.assertEqual(json.dumps(self.collect_memory([record, b'PRIVATE_CANARY'], enabled=False)),
+                         json.dumps(expected))
+        current = self.collect_memory([])
+        self.assertEqual(current, dict(expected, version=2, memory=[]))
+        event = dict(version=1, phase='task', detail=dict(code='compute_model_memory_headroom',
+            io_kind='none', exit_code=None, signal=None, stderr_class=None))
+        suffix = b'DEBUG private_execution_diagnostic ' + json.dumps(event).encode() + b'\n'
+        legacy = self.collect_memory([record], enabled=False, raw_suffix=suffix)
+        current = self.collect_memory([record], raw_suffix=suffix)
+        self.assertEqual(legacy, dict(expected, events=[event]))
+        self.assertEqual(current, dict(legacy, version=2, memory=[record]))
+        state = dict(version=1, last_phase=None, substage=None,
+            capacity=dict(decision='pause', constraint='memory', cpu_some_avg10=None,
+                io_some_avg10=None, memory_bytes=None), controls=None, peak_rss_bytes=0)
+        suffix += b'DEBUG private_execution_state ' + json.dumps(state).encode() + b'\n'
+        legacy = self.collect_memory([record], enabled=False, raw_suffix=suffix)
+        current = self.collect_memory([record], raw_suffix=suffix)
+        self.assertEqual(legacy['states'], [state])
+        self.assertEqual(current, dict(legacy, version=2, memory=[record]))
+        for enabled in (1, 'true', None):
+            with self.assertRaises(ValueError): self.collect_memory([record], enabled=enabled)
+
+    def test_memory_admission_and_cache_hint_are_observations_not_reclaim_claims(self):
+        records = [memory_admission_fixture(), memory_cache_fixture(), memory_cache_fixture('error')]
+        result = self.collect_memory(records)
+        self.assertEqual(result['memory'], records)
+        self.assertFalse(result['unrecognized_record'])
+        self.assertEqual(records[1]['before'], records[1]['after'])
+        self.assertNotIn('acceptance', json.dumps(result))
+        self.assertNotIn('reclaimed', json.dumps(result))
+
+    def test_memory_snapshot_closed_counter_types_and_stat_states(self):
+        validate = FIX['memory_snapshot']
+        for field in FIX['MEMORY_COUNTERS']:
+            for changed in (-1, True, 1.5, 2**53, float('nan'), 'PRIVATE_CANARY'):
+                value = memory_snapshot_fixture(); value[field] = changed
+                with self.subTest(field=field, changed=changed), self.assertRaises(ValueError):
+                    validate(value)
+        for state in ('unobserved', 'unavailable', 'invalid', 'unrepresentable'):
+            value = memory_snapshot_fixture()
+            value['self_stat'] = dict.fromkeys(FIX['MEMORY_STAT_COUNTERS']) | {'state': state}
+            self.assertEqual(validate(value), value)
+            value['self_stat']['file_bytes'] = 1
+            with self.assertRaises(ValueError): validate(value)
+        for key in FIX['MEMORY_STAT_COUNTERS']:
+            for changed in (None, True, -1, 2**53, 'PRIVATE_CANARY'):
+                value = memory_snapshot_fixture(); value['ancestor_stat'][key] = changed
+                with self.subTest(key=key, changed=changed), self.assertRaises(ValueError): validate(value)
+        for key, changed in [('numeric_overflow', 1), ('limiting_scope', 'PRIVATE_CANARY'),
+                ('missing_stage', 'PRIVATE_CANARY'), ('io_kind', 'PRIVATE_CANARY'),
+                ('self_stat', {'private_path': 'PRIVATE_CANARY'}), ('private_id', 'PRIVATE_CANARY')]:
+            value = memory_snapshot_fixture(); value[key] = changed
+            with self.subTest(key=key), self.assertRaises(ValueError): validate(value)
+
+    def test_memory_minimum_ties_and_partial_observations_remain_distinct(self):
+        value = memory_snapshot_fixture()
+        value['ancestor_headroom_bytes'] = value['headroom_bytes']; value['limiting_scope'] = 'multiple'
+        self.assertEqual(FIX['memory_snapshot'](value), value)
+        for key, changed in [('headroom_bytes', value['headroom_bytes'] + 1), ('limiting_scope', 'self')]:
+            with self.assertRaises(ValueError): FIX['memory_snapshot'](dict(value, **{key: changed}))
+        partial = dict(value, headroom_bytes=None, missing_stage='current', io_kind='permission', limiting_scope='unknown')
+        self.assertEqual(FIX['memory_snapshot'](partial), partial)
+        with self.assertRaises(ValueError): FIX['memory_snapshot'](dict(partial, headroom_bytes=0))
+        event = memory_admission_fixture(); event['sample'] = partial
+        self.assertEqual(FIX['memory_diagnostic'](event), event)
+        with self.assertRaises(ValueError): FIX['memory_diagnostic'](dict(event, admitted=True))
+
+    def test_memory_unrepresentable_headroom_does_not_rewrite_internal_admission(self):
+        sample = memory_snapshot_fixture()
+        sample.update(headroom_bytes=None, host_available_bytes=None, self_headroom_bytes=None,
+            ancestor_headroom_bytes=None, numeric_overflow=True)
+        for admitted in (False, True):
+            event = dict(memory_admission_fixture(), sample=sample, admitted=admitted)
+            self.assertEqual(FIX['memory_diagnostic'](event), event)
+        value = dict(memory_cache_fixture(), outcome='headroom_sufficient', before=sample,
+            after=None, syscall_error=None)
+        self.assertEqual(FIX['memory_diagnostic'](value), value)
+        sample.update(missing_stage='max', limiting_scope='unknown', io_kind='invalid_data')
+        event = dict(memory_admission_fixture(), sample=sample, admitted=True)
+        with self.assertRaises(ValueError): FIX['memory_diagnostic'](event)
+        value['outcome'] = 'headroom_unknown'
+        self.assertEqual(FIX['memory_diagnostic'](value), value)
+
+    def test_memory_cache_hint_outcomes_bind_supervision_identity_and_low_headroom(self):
+        validate = FIX['memory_diagnostic']
+        for outcome in ('identity_changed', 'range_invalid'):
+            event = dict(memory_cache_fixture(), outcome=outcome, after=None)
+            self.assertEqual(validate(event), event)
+        unknown = memory_snapshot_fixture()
+        unknown.update(headroom_bytes=None, missing_stage='meminfo', limiting_scope='unknown', io_kind='not_found')
+        event = dict(memory_cache_fixture(), outcome='headroom_unknown', before=unknown, after=None)
+        self.assertEqual(validate(event), event)
+        sufficient = memory_snapshot_fixture()
+        sufficient.update(self_headroom_bytes=12 * FIX['GIB'], headroom_bytes=11 * FIX['GIB'], limiting_scope='ancestor')
+        event = dict(memory_cache_fixture(), outcome='headroom_sufficient', before=sufficient, after=None)
+        self.assertEqual(validate(event), event)
+        for binding in ('not_applicable', 'root_invalid', 'open_failed', 'file_invalid', 'path_changed'):
+            event = dict(memory_cache_fixture(), binding=binding, outcome='not_bound', before=None, after=None)
+            self.assertEqual(validate(event), event)
+        event = dict(memory_cache_fixture(), outcome='supervisor_error', supervisor_ok=False, before=None, after=None)
+        self.assertEqual(validate(event), event)
+        for changes in ({'supervisor_ok': False}, {'binding': 'not_applicable'}, {'after': None},
+                {'before': sufficient}, {'before': unknown}, {'syscall_error': 'other'},
+                {'outcome': 'not_bound'}, {'outcome': 'headroom_unknown'}, {'outcome': 'PRIVATE_CANARY'}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                validate(dict(memory_cache_fixture(), **changes))
+        for error in ('bad_fd', 'invalid', 'unsupported', 'interrupted', 'other'):
+            event = dict(memory_cache_fixture('error'), syscall_error=error)
+            self.assertEqual(validate(event), event)
+        with self.assertRaises(ValueError): validate(dict(memory_cache_fixture('error'), syscall_error=None))
+
+    def test_memory_json_rejects_unknown_duplicate_nonfinite_and_private_values(self):
+        valid = memory_admission_fixture(); raw = json.dumps(valid).encode()
+        invalid = [dict(valid, request_id='PRIVATE_CANARY'), dict(valid, version=True),
+            dict(valid, required_bytes=True), dict(valid, required_bytes=1), dict(valid, admitted=True),
+            raw[:-1] + b', "version":1}', raw.replace(b'"numeric_overflow": false', b'"numeric_overflow": NaN'),
+            raw.replace(b'"anon_bytes": 1', b'"anon_bytes": 1, "anon_bytes": 2'),
+            b'PRIVATE_CANARY', b'[]', b'{', b'{"phase":"PRIVATE_CANARY"}',
+            b'[' * 1100 + b'0' + b']' * 1100,
+            raw + FIX['MEMORY_MARKER'] + b'PRIVATE_CANARY']
+        for value in invalid:
+            with self.subTest(value=str(value)[:60]):
+                result = self.collect_memory([value])
+                self.assertEqual(result['memory'], [])
+                self.assertTrue(result['unrecognized_record'])
+                self.assertNotIn('PRIVATE_CANARY', json.dumps(result))
+
+    def test_memory_record_and_collection_bounds_include_marker_and_newline(self):
+        raw = json.dumps(memory_admission_fixture()).encode()
+        padding = FIX['MEMORY_RECORD_BYTES'] - len(FIX['MEMORY_MARKER']) - len(raw) - 1
+        accepted = self.collect_memory([raw + b' ' * padding])
+        self.assertEqual(len(accepted['memory']), 1)
+        rejected = self.collect_memory([raw + b' ' * (padding + 1)])
+        self.assertEqual(rejected['memory'], []); self.assertTrue(rejected['unrecognized_record'])
+        result = self.collect_memory([memory_admission_fixture()] * 17)
+        self.assertEqual(len(result['memory']), 16); self.assertTrue(result['truncated'])
+        result = self.collect_memory([memory_admission_fixture()], raw_suffix=b'PRIVATE_CANARY' * 8192)
+        self.assertEqual(len(result['memory']), 1); self.assertTrue(result['truncated'])
+        self.assertNotIn('PRIVATE_CANARY', json.dumps(result))
+
     def test_generation_state_closed_metadata_unknown_flags_and_forward_token_distinction(self):
         value = dict(prompt_tokens=12288, threads=2, interop_threads=1,
             cpu=dict(isa='AVX2', avx2=True, avx512_bf16=False, amx_bf16=None, amx_tile=None,
@@ -221,8 +396,8 @@ class FixtureTests(unittest.TestCase):
                 FIX['service_diagnostic'](link)
 
     def test_native_output_subtypes_are_fixed_local_observations_not_raw_errors(self):
-        codes = {code for code in FIX['SERVICE_CODES'] if code.startswith('conversation_')}
-        self.assertEqual(len(codes), 11)
+        codes = {code for code in FIX['SERVICE_CODES'] if code.startswith('conversation_') and not code.endswith('_binding')}
+        self.assertEqual(len(codes), 15)
         events = [dict(version=1, phase='execution', detail=dict(code=code, io_kind='none',
             exit_code=None, signal=None, stderr_class=None)) for code in sorted(codes)]
         with tempfile.TemporaryDirectory(prefix='qwen-fixture-test-', dir=HERE) as directory:
@@ -237,10 +412,33 @@ class FixtureTests(unittest.TestCase):
             self.assertFalse(result['truncated'])
             self.assertNotIn('PRIVATE_CANARY', json.dumps(result))
 
+    def test_task_setup_and_report_failures_remain_closed_and_bounded(self):
+        source = (HERE.parents[1] / 'crates/volparossa/src/compute/supervise/diagnostic.rs').read_text()
+        prefix = source.split('const FIXED_CODES: &[&str] = &[', 1)[1].split('"compute_deadline"', 1)[0]
+        codes = re.findall(r'"([A-Za-z_]+)"', prefix)
+        self.assertEqual(len(codes), 30)
+        self.assertIn('compute_model_memory_headroom', codes)
+        self.assertIn('compute_private_result_scope', codes)
+        with tempfile.TemporaryDirectory(prefix='qwen-fixture-test-', dir=HERE) as directory:
+            path = Path(directory) / 'private.log'
+            for start in range(0, len(codes), 15):
+                events = [dict(version=1, phase='task', detail=dict(code=code, io_kind='none',
+                    exit_code=None, signal=None, stderr_class=None)) for code in codes[start:start + 15]]
+                invalid = dict(events[0], detail=dict(events[0]['detail'],
+                    code=events[0]['detail']['code'] + ' PRIVATE_CANARY'))
+                path.write_text(''.join('DEBUG private_execution_diagnostic ' + json.dumps(value) + '\n'
+                    for value in [*events, invalid]))
+                path.chmod(0o600)
+                result = FIX['service_diagnostic'](path)
+                self.assertEqual(result['events'], events)
+                self.assertTrue(result['unrecognized_record'])
+                self.assertFalse(result['truncated'])
+                self.assertNotIn('PRIVATE_CANARY', json.dumps(result))
+
     def test_service_diagnostic_vocabulary_matches_source_and_log_is_not_exported(self):
         source = (HERE.parents[1] / 'crates/volparossa/src/compute/supervise/diagnostic.rs').read_text()
         expected = {'unclassified', 'worker_other', 'startup_missing_result', 'result_observed', 'panic', 'join_cancelled'}
-        for name in ('FIXED_CODES', 'WORKER_CODES'):
+        for name in ('FIXED_CODES', 'WORKER_CODES', 'SESSION_CODES', 'SESSION_WORKER_CODES'):
             array = source.split(f'const {name}: &[&str] = &[', 1)[1].split('];', 1)[0]
             expected.update(re.findall(r'"([A-Za-z_]+)"', array))
         self.assertEqual(FIX['SERVICE_CODES'], expected)
@@ -250,6 +448,77 @@ class FixtureTests(unittest.TestCase):
         self.assertIn('--setenv=NO_COLOR=1', fixture)
         self.assertIn('--property=StandardOutput=append:{diagnostic_log}', fixture)
         self.assertIn('--property=StandardError=append:{diagnostic_log}', fixture)
+
+    def test_native_json_diagnostics_keep_old_code_and_only_four_closed_categories(self):
+        codes = {'conversation_native_json', 'conversation_native_json_syntax', 'conversation_native_json_data',
+                 'conversation_native_json_eof', 'conversation_native_json_io'}
+        self.assertEqual({code for code in FIX['SERVICE_CODES'] if code.startswith('conversation_native_json')}, codes)
+        events = [dict(version=1, phase='execution', detail=dict(code=code, io_kind='none',
+            exit_code=None, signal=None, stderr_class=None)) for code in sorted(codes)]
+        with tempfile.TemporaryDirectory(prefix='native-json-diagnostic-test-', dir=HERE) as directory:
+            path = Path(directory) / 'private.log'
+            unknown = dict(events[0], detail=dict(events[0]['detail'], code='conversation_native_json_PRIVATE_CANARY'))
+            leaked = dict(events[0], detail=dict(events[0]['detail'], message='/PRIVATE_CANARY/secret', line=2, column=4))
+            path.write_text(''.join('DEBUG private_execution_diagnostic ' + json.dumps(event) + '\n'
+                for event in [*events, unknown, leaked]))
+            path.chmod(0o600)
+            result = FIX['service_diagnostic'](path)
+            self.assertEqual(result['events'], events)
+            self.assertTrue(result['unrecognized_record'])
+            self.assertFalse(result['truncated'])
+            self.assertNotIn('CANARY', json.dumps(result))
+            self.assertNotIn('column', json.dumps(result))
+
+    def test_native_load_diagnostics_preserve_only_closed_phases(self):
+        source = (HERE.parents[1] / 'crates/volparossa/src/compute/supervise/diagnostic.rs').read_text()
+        historical = source.split('const WORKER_CODES: &[&str] = &[', 1)[1].split('];', 1)[0]
+        codes = {code for code in re.findall(r'"([A-Za-z_]+)"', historical) if 'NATIVE' in code}
+        self.assertEqual(len(codes), 13)
+        events = [dict(version=1, phase='execution', detail=dict(code=code, io_kind='none',
+            exit_code=None, signal=None, stderr_class=None)) for code in sorted(codes)]
+        with tempfile.TemporaryDirectory(prefix='native-diagnostic-test-', dir=HERE) as directory:
+            path = Path(directory) / 'private.log'
+            unknown = dict(events[0], detail=dict(events[0]['detail'], code='NATIVE_PRIVATE_CANARY'))
+            path.write_text(''.join('DEBUG private_execution_diagnostic ' + json.dumps(event) + '\n'
+                for event in [*events, unknown]))
+            path.chmod(0o600)
+            result = FIX['service_diagnostic'](path)
+            self.assertEqual(result['events'], events)
+            self.assertTrue(result['unrecognized_record'])
+            self.assertFalse(result['truncated'])
+            self.assertNotIn('CANARY', json.dumps(result))
+
+    def test_native_session_codes_are_closed_bounded_and_preserve_receipt_shape(self):
+        source = (HERE.parents[1] / 'crates/volparossa/src/compute/supervise/diagnostic.rs').read_text()
+        codes = []
+        for name, count in [('SESSION_CODES', 21), ('SESSION_WORKER_CODES', 10)]:
+            array = source.split(f'const {name}: &[&str] = &[', 1)[1].split('];', 1)[0]
+            selected = re.findall(r'"([A-Za-z_]+)"', array)
+            self.assertEqual(len(selected), count)
+            codes.extend(selected)
+        self.assertEqual(len(set(codes)), 31)
+        with tempfile.TemporaryDirectory(prefix='native-session-diagnostic-', dir=HERE) as directory:
+            path = Path(directory) / 'private.log'
+            for start in range(0, len(codes), 15):
+                events = [dict(version=1, phase='task', detail=dict(code=code, io_kind='none',
+                    exit_code=None, signal=None, stderr_class=None)) for code in codes[start:start + 15]]
+                invalid = dict(events[0], detail=dict(events[0]['detail'], code='NATIVE_PRIVATE_CANARY'))
+                raw = 'PRIVATE_CANARY /private/prompt\n' + ''.join(
+                    'DEBUG private_execution_diagnostic ' + json.dumps(value) + '\n'
+                    for value in [*events, invalid])
+                path.write_text(raw)
+                path.chmod(0o600)
+                result = FIX['service_diagnostic'](path)
+                self.assertEqual(result, dict(version=1, events=events,
+                    truncated=False, unrecognized_record=True))
+                self.assertNotIn('CANARY', json.dumps(result))
+                self.assertNotIn('cleanup', json.dumps(result))
+            line = 'DEBUG private_execution_diagnostic ' + json.dumps(events[0]) + '\n'
+            path.write_text(line * 17)
+            result = FIX['service_diagnostic'](path)
+            self.assertEqual(len(result['events']), 16)
+            self.assertTrue(result['truncated'])
+            self.assertFalse(result['unrecognized_record'])
 
     def test_terminal_execution_state_distinguishes_gate_pause_from_completed_model_load(self):
         value = dict(version=1, last_phase='paused', substage=dict(stage='owner_gate', state='begin', elapsed_ms=0),

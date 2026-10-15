@@ -29,6 +29,7 @@ fn response(ready: QuoteReady) -> ControlResponse {
         request_id: vec![3; 16],
         result: ControlResult::Ok.into(),
         diagnostic_code: "QUOTE_READY".into(),
+        private_storage_remote_detail: None,
         payload: Some(Payload::QuoteReady(ready)),
     }
 }

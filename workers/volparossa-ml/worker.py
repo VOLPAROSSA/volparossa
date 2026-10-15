@@ -25,6 +25,7 @@ import stat
 import struct
 import sys
 import time
+from types import SimpleNamespace
 
 VERSION = 1
 MAX_REQUEST = 65536
@@ -258,7 +259,8 @@ def bounded_integer(value, low, high):
 def validate_request(value):
     required = {"version", "id", "mode", "model_root", "dataset_path", "output_root"}
     optional = {"steps", "threads", "max_seconds", "adapter_root", "owner_control", "model_profile",
-                "private_generation_diagnostics"}
+                "private_generation_diagnostics", "inference_backend", "native_backend_root", "native_backend_sha256",
+                "output_constraint", "output_constraint_tools", "native_session"}
     require(type(value) is dict and required <= value.keys()
             and value.keys() <= required | optional, "INVALID_REQUEST_FIELDS")
     require(type(value["version"]) is int and value["version"] == VERSION, "UNSUPPORTED_VERSION")
@@ -266,6 +268,32 @@ def validate_request(value):
     require(value["mode"] in ("infer", "train", "plan_document", "plan_tasks", "private_infer", "private_conversation", "public_code_proposal", "aggregate_adapter"), "INVALID_JOB_MODE")
     profile_name = value.get("model_profile", DEFAULT_MODEL_PROFILE)
     model_profile(profile_name)
+    native_fields = {"inference_backend", "native_backend_root", "native_backend_sha256"}
+    if native_fields & value.keys():
+        require(native_fields <= value.keys() and value["inference_backend"] == "llama_cpp_bf16_v1"
+                and profile_name == QWEN4B_MODEL_PROFILE and value["mode"] == "private_conversation"
+                and type(value["native_backend_sha256"]) is str
+                and re.fullmatch(r"[0-9a-f]{64}", value["native_backend_sha256"]), "INVALID_NATIVE_BACKEND_SCOPE")
+    if "native_session" in value:
+        selected = value["native_session"]
+        require(type(selected) is dict and selected.keys() == {"version", "turn"}
+                and type(selected["version"]) is int and selected["version"] == 1
+                and bounded_integer(selected["turn"], 1, 128)
+                and native_fields <= value.keys() and value.get("owner_control") is True,
+                "INVALID_NATIVE_SESSION")
+        turn = selected["turn"]
+        require(value["model_root"] == "/model" and value["native_backend_root"] == "/native-backend"
+                and value["dataset_path"] == f"/session/turn-{turn}/input.json"
+                and value["output_root"] == f"/session/turn-{turn}/output", "INVALID_NATIVE_SESSION_PATH")
+    constraint_fields = {"output_constraint", "output_constraint_tools"}
+    if constraint_fields & value.keys():
+        aliases = value.get("output_constraint_tools")
+        require(constraint_fields <= value.keys() and native_fields <= value.keys()
+                and value["output_constraint"] == "qwen_tagged_tool_json_v1"
+                and type(value["output_constraint"]) is str
+                and type(aliases) is list and 1 <= len(aliases) <= 32
+                and aliases == [f"vp_{index}" for index in range(len(aliases))],
+                "INVALID_NATIVE_OUTPUT_CONSTRAINT")
     require("private_generation_diagnostics" not in value or
             (type(value["private_generation_diagnostics"]) is bool and
              (not value["private_generation_diagnostics"] or
@@ -291,8 +319,8 @@ def validate_request(value):
             "AGGREGATION_EXECUTION_SCOPE")
     require("owner_control" not in value or type(value["owner_control"]) is bool,
             "INVALID_OWNER_CONTROL")
-    for field in ("model_root", "dataset_path", "output_root", "adapter_root"):
-        if field == "adapter_root" and field not in value:
+    for field in ("model_root", "dataset_path", "output_root", "adapter_root", "native_backend_root"):
+        if field in ("adapter_root", "native_backend_root") and field not in value:
             continue
         path = value[field]
         require(type(path) is str and 1 < len(path.encode("utf-8")) <= 4096
@@ -769,8 +797,122 @@ def plain_path(value, directory):
     return path, metadata
 
 
-def file_hash(path, expected_size=None, maximum=None, aggregate=None):
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+class NativeSourceCache:
+    """One bounded hint for already verified, no-longer-consumed source shards.
+
+    Keep the actual hashing descriptors, not reopened lookalikes. This is neither
+    a memory measurement nor admission credit, and emits no additional records.
+    """
+    SHARDS = tuple(f"model-{index:05d}-of-00003.safetensors" for index in range(1, 4))
+
+    def __init__(self, request):
+        require(request.get("inference_backend") == "llama_cpp_bf16_v1"
+                and request.get("model_profile") == QWEN4B_MODEL_PROFILE
+                and request.get("mode") == "private_conversation", "NATIVE_SOURCE_PROVENANCE")
+        self.root = Path(request["model_root"])
+        profile = model_profile(QWEN4B_MODEL_PROFILE)
+        self.files = dict(profile["files"])
+        self.parent, self.identity, self.shards = None, None, []
+        self.used, self.prepared = False, False
+        self.valid = tuple(profile["weight_shards"]) == self.SHARDS
+
+    @staticmethod
+    def identity_of(info):
+        return (info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink,
+                info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    def __enter__(self):
+        try:
+            if self.valid and self.root.is_absolute() and self.root.resolve(strict=True) == self.root:
+                self.parent = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                                      | os.O_NONBLOCK | os.O_CLOEXEC)
+                info = os.fstat(self.parent)
+                self.identity = self.identity_of(info)
+                self.valid = (stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid()
+                              and stat.S_IMODE(info.st_mode) == 0o700 and self.parent_unchanged())
+            else:
+                self.valid = False
+        except OSError:
+            self.valid = False
+        return self
+
+    def __exit__(self, *_error):
+        descriptors = [entry[0] for entry in self.shards]
+        if self.parent is not None:
+            descriptors.append(self.parent)
+        self.shards, self.parent, self.valid = [], None, False
+        for descriptor in descriptors:
+            # Never retry close: even a failed close may have released this FD.
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+
+    def parent_unchanged(self):
+        return (self.parent is not None and self.root.resolve(strict=True) == self.root
+                and self.identity_of(os.fstat(self.parent)) == self.identity
+                and self.identity_of(self.root.lstat()) == self.identity
+                and set(os.listdir(self.parent)) == set(self.files))
+
+    def retain(self, path, descriptor, before):
+        try:
+            index = len(self.shards)
+            after = os.fstat(descriptor)
+            identity = self.identity_of(after)
+            if (not self.valid or index >= 3 or path != self.root / self.SHARDS[index]
+                    or not self.parent_unchanged() or not stat.S_ISREG(after.st_mode)
+                    or after.st_uid != os.geteuid() or stat.S_IMODE(after.st_mode) & 0o077
+                    or after.st_nlink != 1 or after.st_size != self.files[self.SHARDS[index]]
+                    or not 0 < after.st_size <= 4 * 1024 ** 3
+                    or self.identity_of(before) != identity or self.identity_of(path.lstat()) != identity):
+                self.valid = False
+                return
+            # dup retains the exact file description used for hashing; no content
+            # is reread, and Python creates the duplicate non-inheritable.
+            self.shards.append((os.dup(descriptor), self.SHARDS[index], identity))
+        except OSError:
+            self.valid = False
+
+    def unchanged(self, entry):
+        descriptor, name, identity = entry
+        return (self.parent_unchanged() and self.identity_of(os.fstat(descriptor)) == identity
+                and self.identity_of((self.root / name).lstat()) == identity)
+
+    def advise(self, session):
+        if self.used:
+            return
+        self.used = True
+        # Owner control/deadline exceptions must propagate, never be mistaken for
+        # an unavailable best-effort advisory. No pause or deadline is reset.
+        session.check()
+        try:
+            if (not self.valid or not self.prepared or len(self.shards) != 3
+                    or not all(map(self.unchanged, self.shards))):
+                return
+        except OSError:
+            return
+        for entry in self.shards:
+            session.check()
+            try:
+                if not self.unchanged(entry):
+                    return
+                os.posix_fadvise(entry[0], 0, entry[2][5], os.POSIX_FADV_DONTNEED)
+                if not self.unchanged(entry):
+                    return
+            except (OSError, AttributeError):
+                # Unsupported/failed advice is not verification failure or proof
+                # of reclaim. Each descriptor receives at most one attempt.
+                continue
+
+
+def file_hash(path, expected_size=None, maximum=None, aggregate=None, *, session=None, source_cache=None):
+    # Hash every original byte, but service owner controls on this execution
+    # thread between bounded reads. A pause is never acknowledged while a read
+    # or digest update is running, and does not reset the original job deadline.
+    if session is not None:
+        session.check()
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    if source_cache is not None:
+        flags |= os.O_NONBLOCK | os.O_CLOEXEC
+    descriptor = os.open(path, flags)
     with os.fdopen(descriptor, "rb") as source:
         metadata = os.fstat(source.fileno())
         require(stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1, "INVALID_ARTIFACT_FILE")
@@ -778,6 +920,8 @@ def file_hash(path, expected_size=None, maximum=None, aggregate=None):
         require(maximum is None or metadata.st_size <= maximum, "ARTIFACT_TOO_LARGE")
         digest, length = hashlib.sha256(), 0
         while True:
+            if session is not None:
+                session.check()
             data = source.read(1024 * 1024)
             if not data:
                 break
@@ -786,7 +930,11 @@ def file_hash(path, expected_size=None, maximum=None, aggregate=None):
             digest.update(data)
             if aggregate is not None:
                 aggregate.update(data)
+        if session is not None:
+            session.check()
         require(length == metadata.st_size, "ARTIFACT_CHANGED")
+        if source_cache is not None:
+            source_cache.retain(path, source.fileno(), metadata)
         return {"bytes": length, "sha256": digest.hexdigest()}
 
 
@@ -799,7 +947,7 @@ def read_bounded(path, maximum):
         return value
 
 
-def verify_sharded_weights(model_root, profile, verified_files=None):
+def verify_sharded_weights(model_root, profile, verified_files=None, *, session=None, source_cache=None):
     """Hash the original shard bytes in pinned order, never the index as weights.
 
     The existing identity wire field remains a SHA256 over actual weight bytes.
@@ -807,7 +955,7 @@ def verify_sharded_weights(model_root, profile, verified_files=None):
     """
     shards = profile["weight_shards"]
     index_name = "model.safetensors.index.json"
-    index_file = file_hash(model_root / index_name, profile["files"][index_name])
+    index_file = file_hash(model_root / index_name, profile["files"][index_name], session=session)
     require(index_file["sha256"] == profile["hashes"][index_name], "MODEL_FILES_NOT_PINNED")
     if verified_files is not None:
         verified_files[index_name] = index_file
@@ -817,7 +965,8 @@ def verify_sharded_weights(model_root, profile, verified_files=None):
             and set(index["weight_map"].values()) == set(shards), "INVALID_WEIGHT_SHARD_INDEX")
     aggregate, total = hashlib.sha256(), 0
     for name in shards:
-        checked = file_hash(model_root / name, profile["files"][name], aggregate=aggregate)
+        checked = file_hash(model_root / name, profile["files"][name], aggregate=aggregate, session=session,
+                            **({"source_cache": source_cache} if source_cache is not None else {}))
         require(checked["sha256"] == profile["hashes"][name], "MODEL_WEIGHTS_CHANGED_ON_DISK")
         if verified_files is not None:
             verified_files[name] = checked
@@ -828,7 +977,17 @@ def verify_sharded_weights(model_root, profile, verified_files=None):
     return identity
 
 
-def prepare_files(request):
+def prepare_files(request, session=None, *, initial_source=None, source_cache=None):
+    # Native inference consumes a converted GGUF, not these source shards. Keep
+    # their actually measured initial identity without changing the existing
+    # five-value API or the ordinary PyTorch before/after verification path.
+    if initial_source is not None:
+        require(type(initial_source) is dict and not initial_source
+                and request.get("inference_backend") == "llama_cpp_bf16_v1"
+                and request.get("model_profile") == QWEN4B_MODEL_PROFILE
+                and request.get("mode") == "private_conversation", "NATIVE_SOURCE_PROVENANCE")
+    require(source_cache is None or (initial_source is not None and type(source_cache) is NativeSourceCache),
+            "NATIVE_SOURCE_PROVENANCE")
     profile_name = request.get("model_profile", DEFAULT_MODEL_PROFILE)
     profile = model_profile(profile_name)
     model_root, model_metadata = plain_path(request["model_root"], True)
@@ -844,10 +1003,13 @@ def prepare_files(request):
     sharded = set(profile.get("weight_shards", ()))
     if sharded:
         sharded.add("model.safetensors.index.json")
-    files = {name: file_hash(model_root / name, expected_size=size)
+    files = {name: file_hash(model_root / name, expected_size=size, session=session)
              for name, size in profile["files"].items() if name not in sharded}
     if sharded:
-        verify_sharded_weights(model_root, profile, files)
+        measured_weights = verify_sharded_weights(model_root, profile, files, session=session,
+                            **({"source_cache": source_cache} if source_cache is not None else {}))
+        if initial_source is not None:
+            initial_source["weights"] = dict(measured_weights, files=list(measured_weights["files"]))
     require(all(files[name]["sha256"] == expected for name, expected in profile["hashes"].items()),
             "MODEL_FILES_NOT_PINNED")
     config = parse_json(read_bounded(model_root / "config.json", 8192))
@@ -862,6 +1024,8 @@ def prepare_files(request):
     if request["mode"] in ("private_infer", "private_conversation"):
         identity = {"sha256": hashlib.sha256(raw_dataset).hexdigest(), "bytes": len(raw_dataset),
                     "visibility": "private_local"}
+        if source_cache is not None:
+            source_cache.prepared = True
         return model_root, output_root, dataset, identity, files
     identity = {
         "sha256": hashlib.sha256(raw_dataset).hexdigest(), "bytes": len(raw_dataset),
@@ -1961,6 +2125,22 @@ def conversation_module():
     return module
 
 
+def conversation_constraint_binding(request, dataset, profile_name):
+    requested = "output_constraint" in request
+    require(requested == ("output_constraint" in dataset), "NATIVE_OUTPUT_CONSTRAINT_BINDING")
+    if not requested:
+        require("output_constraint_tools" not in request, "NATIVE_OUTPUT_CONSTRAINT_BINDING")
+        return None
+    conversation_module().validate(dataset, profile_name)
+    constraint = conversation_module().output_constraint(dataset, profile_name)
+    require(request["output_constraint"] == constraint
+            and request.get("inference_backend") == "llama_cpp_bf16_v1",
+            "NATIVE_OUTPUT_CONSTRAINT_BINDING")
+    aliases = [f"vp_{index}" for index in range(len(dataset["tools"]))]
+    require(request.get("output_constraint_tools") == aliases, "NATIVE_OUTPUT_CONSTRAINT_TOOLS")
+    return constraint
+
+
 def execute_private_infer(request, session, tokenizer, torch, transformers, versions,
                           model_root, output_root, dataset, data_identity, model_files):
     profile_name = request.get("model_profile", DEFAULT_MODEL_PROFILE)
@@ -1990,10 +2170,10 @@ def execute_private_infer(request, session, tokenizer, torch, transformers, vers
     session.private_progress("generation", "complete")
     session.private_progress("verify_after", "begin")
     if "weight_shards" in profile:
-        weight_identity = verify_sharded_weights(model_root, profile)
+        weight_identity = verify_sharded_weights(model_root, profile, session=session)
     else:
         weight_identity = None
-        require(file_hash(model_root / "model.safetensors", profile["files"]["model.safetensors"])["sha256"]
+        require(file_hash(model_root / "model.safetensors", profile["files"]["model.safetensors"], session=session)["sha256"]
                 == profile["hashes"]["model.safetensors"], "MODEL_WEIGHTS_CHANGED_ON_DISK")
     session.private_progress("verify_after", "complete")
     result = {"version": VERSION, "id": request["id"], "kind": "result", "status": "ok", "mode": request["mode"],
@@ -2030,10 +2210,10 @@ def execute_code_proposal(request, session, tokenizer, torch, transformers, vers
     outputs = generate(model, samples, tokenizer, torch, session, transformers, profile_name,
                        generation_policy="greedy_v1")
     if "weight_shards" in profile:
-        weight_identity = verify_sharded_weights(model_root, profile)
+        weight_identity = verify_sharded_weights(model_root, profile, session=session)
     else:
         weight_identity = None
-        require(file_hash(model_root / "model.safetensors", profile["files"]["model.safetensors"])["sha256"]
+        require(file_hash(model_root / "model.safetensors", profile["files"]["model.safetensors"], session=session)["sha256"]
                 == profile["hashes"]["model.safetensors"], "MODEL_WEIGHTS_CHANGED_ON_DISK")
     result = {"version": VERSION, "id": request["id"], "kind": "result", "status": "ok",
               "mode": "public_code_proposal", "purpose": "code_proposal",
@@ -2286,16 +2466,27 @@ def save_checkpoint(model, output_root, session):
     return adapter_root, artifacts
 
 
-def execute_job(request, session):
+def execute_job(request, session, *, native_session=None):
+    require((native_session is not None) == ("native_session" in request), "INVALID_NATIVE_SESSION")
     profile_name = request.get("model_profile", DEFAULT_MODEL_PROFILE)
     profile = model_profile(profile_name)
     session.private_progress("owner_gate", "begin")
     session.progress("preparing")
     session.private_progress("owner_gate", "complete")
     session.private_progress("verify_files", "begin")
-    model_root, output_root, dataset, data_identity, model_files = prepare_files(request)
-    session.private_progress("verify_files", "complete")
-    session.check()
+    initial_source = {}
+    with contextlib.ExitStack() as source_lifetime:
+        source_cache = (source_lifetime.enter_context(NativeSourceCache(request))
+                        if request.get("inference_backend") == "llama_cpp_bf16_v1" else None)
+        preparation = ({"initial_source": initial_source, "source_cache": source_cache}
+                       if source_cache is not None else {})
+        model_root, output_root, dataset, data_identity, model_files = prepare_files(request, session=session, **preparation)
+        if request["mode"] == "private_conversation":
+            conversation_constraint_binding(request, dataset, profile_name)
+        session.private_progress("verify_files", "complete")
+        session.check()
+        if source_cache is not None:
+            source_cache.advise(session)
     cohort = None
     if request["mode"] == "aggregate_adapter":
         root, metadata = plain_path(request["adapter_root"], True)
@@ -2308,20 +2499,29 @@ def execute_job(request, session):
     configure_offline()
     session.check()
     session.private_progress("backend_import", "begin")
-    torch, transformers, peft, versions = load_backend(request["threads"], session)
+    torch, transformers, peft, versions = (load_backend(request["threads"], session)
+        if native_session is None else native_session.backend(request["threads"], session))
     session.private_progress("backend_import", "complete")
     session.check()
     if cohort is not None:
         return execute_aggregation(request, session, torch, versions, output_root,
                                    data_identity, model_files, cohort)
     session.private_progress("tokenizer_load", "begin")
-    tokenizer = transformers.AutoTokenizer.from_pretrained(
+    tokenizer = (transformers.AutoTokenizer.from_pretrained(
         str(model_root), local_files_only=True, trust_remote_code=False, use_fast=True)
+        if native_session is None else native_session.tokenizer(transformers, model_root))
     expected_pad, expected_eos = (151643, 151645) if profile_name in NATIVE_CONVERSATION_PROFILES else (2, 2)
     require(tokenizer.pad_token_id == expected_pad and tokenizer.eos_token_id == expected_eos,
             "MODEL_TOKENIZER_MISMATCH")
     session.private_progress("tokenizer_load", "complete")
     session.check()
+    if request.get("inference_backend") == "llama_cpp_bf16_v1":
+        native_backend = sys.modules.get("volparossa_llama_cpu")
+        require(native_backend is not None, "NATIVE_BACKEND_MODULE_UNAVAILABLE")
+        warm = {} if native_session is None else {"retained": native_session.model}
+        return native_backend.execute(request, session, tokenizer, torch, versions, model_root, output_root,
+                                      dataset, data_identity, model_files, SimpleNamespace(**globals()),
+                                      initial_source_weights=initial_source.get("weights"), **warm)
     if request["mode"] == "plan_document":
         plan = plan_document(tokenizer, dataset, session, profile_name)
         raw = json.dumps(plan, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("ascii")
@@ -2494,6 +2694,10 @@ def stop_requested(_signum, _frame):
     STOP_REQUESTED = True
 
 
+def is_stopping():
+    return STOP_REQUESTED
+
+
 def main():
     os.umask(0o077)
     signal.signal(signal.SIGTERM, stop_requested)
@@ -2509,6 +2713,10 @@ def main():
         if type(value) is dict and type(value.get("id")) is str and HEX32.fullmatch(value["id"]):
             request_id = value["id"]
         request = validate_request(value)
+        if "native_session" in request:
+            runtime = sys.modules.get("volparossa_native_session")
+            require(runtime is not None, "NATIVE_SESSION_MODULE_UNAVAILABLE")
+            return runtime.run(request, frames, SimpleNamespace(**globals()))
         session = Session(request, frames if controlled else None)
         # Third-party diagnostics may include local paths. Only our fixed, bounded protocol
         # uses the original stdout; no raw prompt, dataset or stack trace is logged.

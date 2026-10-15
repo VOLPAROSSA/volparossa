@@ -151,6 +151,10 @@ async fn exchange(
     trace: &Mutex<Vec<Event>>,
 ) {
     let request = read_request(&mut local).await.unwrap();
+    if matches!(request.operation, Some(Operation::PrivateStorageOutcome(_))) {
+        // Older-agent compatibility: no outcome support and no custody retry.
+        return;
+    }
     let Some(Operation::PrivateStorageRemote(requested)) = request.operation else {
         panic!("expected protected private-storage IPC handoff")
     };
@@ -172,6 +176,7 @@ async fn exchange(
         request_id: request.request_id,
         result: 0,
         diagnostic_code: "PRIVATE_STORAGE_READY".into(),
+        private_storage_remote_detail: None,
         payload: Some(Payload::PrivateStorageReady(PrivateStorageReady {
             provider_key: peer.grant.provider_key().to_bytes().to_vec(),
             challenge: challenge.encode(),

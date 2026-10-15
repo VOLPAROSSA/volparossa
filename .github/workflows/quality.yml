@@ -114,11 +114,36 @@ jobs:
           python3 -B tests/integration/test-alpha-vm-diagnostics.py
           sh -n tests/integration/run-alpha-topology-vm.sh
 
+      - name: Check Storage consumer diagnostic profiles without network access
+        run: |
+          python3 -B tests/integration/test-storage-consumer-maintenance-provision.py
+          python3 -B tests/integration/test-storage-consumer-maintenance-smoke.py
+          python3 -B tests/integration/test-storage-consumer-maintenance-evidence.py
+          python3 -B tests/integration/test-storage-consumer-maintenance-shell.py
+          node --test tests/integration/test-storage-consumer-maintenance.mjs
+          python3 -B tests/integration/test-private-storage-maintenance-smoke.py
+          python3 -B tests/integration/test-private-storage-maintenance-wiring.py
+
       - name: Check formatting and shell sources
         run: |
           python3 -B scripts/test-diagnose-backport-lock.py
           cargo fmt --all -- --check
           ./scripts/check-shell.sh
+
+      - name: Check native CPU contracts without loading models
+        working-directory: workers/volparossa-ml
+        run: python3 -B -m unittest test_llama_cpu test_conversion_diagnostic test_native_output_constraint test_native_source_lifecycle test_native_session
+
+      - name: Check native CPU cache hints and unchanged admission without loading models
+        run: |
+          cargo test --locked -p volparossa compute::native_cpu
+          cargo test --locked -p volparossa compute::supervise::native_session
+          cargo test --locked -p volparossa compute::private_serve::tests::native_session
+          cargo test --locked -p volparossa compute::sandbox::tests::native_session
+          cargo test --locked -p volparossa compute::resources::tests
+          cargo test --locked -p volparossa compute::spare_capacity::memory::tests
+          python3 -B tests/integration/test-agent-private-conversation.py
+          python3 -B tests/integration/test-native-source-weight-cache-contract.py
 
       - name: Check bounded bidirectional streaming before audit tool builds
         # In-memory duplex and real TLS only; no host sockets or namespace setup.
@@ -204,6 +229,16 @@ jobs:
           # Sudo fallback drops to the original runner UID/GID; all paths remove capabilities.
           VOLPAROSSA_TEST_ALLOW_SUDO_NETNS: '1'
         run: cargo test --locked --offline --workspace --all-features
+
+      - name: Check storage outcome tests without unrelated workspace feature unification
+        run: >-
+          cargo test --locked --offline -p volparossa-agent --lib
+          content::private_storage::outcome::tests:: -- --test-threads=1
+
+      - name: Check storage wire tests without unrelated workspace feature unification
+        run: >-
+          cargo test --locked --offline -p volparossa-content --lib
+          private_storage::wire -- --test-threads=1
 
       - name: Report namespace-backed proof outcomes
         run: |

@@ -134,9 +134,59 @@ not retry a failed generation or disclose raw parser/backend diagnostics.
 When explicitly enabled, the `volparossa::compute::private_diagnostic` debug
 target records a fixed native-output rejection category only after the complete
 report binding passes. It never includes raw output, tool names or arguments;
-the wire reply remains `invalid_output`. These events observe report validation,
+the wire reply remains `invalid_output`. JSON rejection uses only Serde's closed
+`syntax`, `data`, `eof` or `io` category, emitted as
+`conversation_native_json_{category}`. No error message, field name, path, line or
+column is exported. `data` includes schema/type and duplicate-key rejection;
+`eof` is an incomplete JSON body, not proof of a token or transport limit. `io`
+is retained for exhaustive classification, not a claim that the current
+string-backed parser performs I/O. Historical `conversation_native_json` records
+remain readable, but cannot retrospectively be assigned a finer category.
+These events observe report validation,
 not model attempts: validating the same bound report again may repeat its code
 without another execution. Request/result counters track actual attempts.
+
+## Connection-bound native sessions
+
+The explicit Qwen4B native backend can retain its model and decoded prompt
+prefix within one authenticated owner connection. Negotiate
+`native_session_version:1` together with `generation_policy_version:1` in
+`conversation_capabilities`. Only that handshake adds `native_session_version:1`
+and `native_session` to the capabilities. The latter is either null (unsupported)
+or exactly `{version:1,max_task_seconds:2400,max_idle_seconds:300,max_requests:128}`.
+Support requires the owner-bound backend v3/build v4 manifest with
+`native_sessions:["connection_bound_v1"]`. This is not a bearer session identifier
+or permission to share private state with another connection.
+
+Send `{type:"open_native_session"}` after negotiation. The core reserves the
+shared execution slot and returns `native_session_opened` with the open ID;
+model preparation starts only after the first admitted `submit_conversation`.
+Submissions retain their ordinary input, tool, generation-policy and output-
+constraint validation. A successful inner result has `version:2` and replaces
+only the legacy cleanup member with
+`{version:2,request_files_removed:true,session_closed:false,session_private_state_retained:true}`.
+The envelope stays version 1. This result proves neither worker exit nor final
+private-state removal. Legacy clients cannot interpret it as a v1 result.
+
+Send `{type:"close_native_session"}` to end the owner task. Only after joined
+worker/descendant cleanup and private staging removal does the core return
+`native_session_closed` with the close ID and
+`cleanup:{version:1,child_reaped:true,private_state_removed:true}`, followed by EOF.
+Automatic idle or lifetime closure uses the original open ID. Terminal native
+errors carry `session_cleanup` with the same confirmed record or null when
+cleanup is uncertain. They correlate to the pending request, requested close or
+original open, respectively. Cancellation uses the existing task ID; its immediate
+acknowledgement is not a cleanup receipt. Uncertain cleanup quarantines the slot.
+
+The core keeps the 600-second request ceiling, including preparation, generation
+and the internal end-of-turn handshake. It caps the owner lifetime at 2,400 seconds,
+idle time at 300 seconds and submissions at 128. Each request retains its CPU
+allowance; the resident process has a separate cumulative task ceiling. Memory,
+pressure and owner-activity checks continue while resident, including idle time.
+Exact matching decoded tokens may be reused, with the final prompt token
+recomputed; no prompt truncation, model substitution or shared KV cache is added.
+Final cleanup is process/staging cleanup, not a claim of forensic RAM erasure.
+Real acceleration and a complete coding task still require actual-model evidence.
 
 ## Explicit limits
 
@@ -228,11 +278,32 @@ its weight length is 8,044,982,000 bytes. It is not the index's hash, nor the
 index's tensor-size metadata. Worker `model.files` retains the real index and
 shard names. Only this profile adds `model.weights` with layout
 `safetensors_shards_concat_v1`, aggregate `bytes`/`sha256`, and ordered `files`.
-Provisioning and the worker verify every original shard plus the aggregate; the
-worker verifies again after generation and the Rust supervisor checks the exact
-reported asset set/identity. Single-file profile reports remain unchanged.
+Provisioning and the worker verify every original shard plus the aggregate. The
+PyTorch backend verifies those execution weights again after generation; its
+behavior and single-file profile reports remain unchanged. The Rust supervisor
+checks the exact reported asset set/identity for both backends.
 
-Candidate resources are CPU BF16/SDPA, at most two threads, 600 seconds per task,
+For the explicit `llama_cpp_bf16_v1` backend, the original shards are conversion
+source provenance, not the weights read by native inference. The worker carries
+the actual complete initial shard/aggregate measurement into `model.weights`;
+it does not reconstruct that measurement from expected constants or claim a
+second source-shard verification at the end. The owner-bound converted GGUF is
+fully hashed before and after each native generation. A one-shot execution closes
+its handle before the final hash; a connection-bound session retains that handle
+until session cleanup and still performs the complete per-request hashes.
+Converter tensor-value equality, original model identity, native complete tensor
+validation and library/build/manifest authorization remain required.
+
+The internal native `inference_backend` report must now include exactly
+`verification_scope: {"version":1,"source_weights":"initial_complete_bytes_only",
+"execution_weights":"gguf_complete_bytes_before_and_after"}`. The core rejects
+missing, unknown or different scope, including old worker reports without this
+field; there is no permissive interpretation or fallback. This intentionally
+changes the internal native verification contract, not the public conversation
+schema. It does not attest continuous filesystem immutability against the local
+owner, successful inference, or private execution on other nodes.
+
+Candidate resources are CPU BF16/SDPA, at most two threads, 600 seconds per request,
 10GiB observed RSS, 24GiB address space and 10.5GiB known spare memory before
 launch. These are admission/stop limits, not measured adequacy or a no-impact
 guarantee. The planned disposable comparison uses a 12GiB guest with an 11GiB

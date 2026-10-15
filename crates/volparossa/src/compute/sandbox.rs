@@ -1,6 +1,6 @@
 //! Fixed Debian sandbox, never a remotely supplied executable or shell command.
 
-use std::process::Stdio;
+use std::{path::Path, process::Stdio};
 
 use tokio::process::Command;
 
@@ -48,6 +48,12 @@ fn worker_source() -> String {
     let qwen = serde_json::json!(include_str!(
         "../../../../workers/volparossa-ml/qwen_conversation.py"
     ));
+    let native_cpu = serde_json::json!(include_str!(
+        "../../../../workers/volparossa-ml/llama_cpu.py"
+    ));
+    let native_session = serde_json::json!(include_str!(
+        "../../../../workers/volparossa-ml/native_session.py"
+    ));
     format!(
         "import sys as _vp_sys, types as _vp_types\n\
          _vp_decoder = _vp_types.ModuleType('volparossa_task_graph_decoder')\n\
@@ -61,15 +67,32 @@ fn worker_source() -> String {
          _vp_sys.modules['volparossa_conversation'] = _vp_conversation\n\
          _vp_qwen = _vp_types.ModuleType('volparossa_qwen_conversation')\n\
          exec({qwen}, _vp_qwen.__dict__)\n\
-         _vp_sys.modules['volparossa_qwen_conversation'] = _vp_qwen\n{}",
+         _vp_sys.modules['volparossa_qwen_conversation'] = _vp_qwen\n\
+         _vp_native_cpu = _vp_types.ModuleType('volparossa_llama_cpu')\n\
+         _vp_sys.modules['volparossa_llama_cpu'] = _vp_native_cpu\n\
+         exec({native_cpu}, _vp_native_cpu.__dict__)\n\
+         _vp_native_session = _vp_types.ModuleType('volparossa_native_session')\n\
+         _vp_sys.modules['volparossa_native_session'] = _vp_native_session\n\
+         exec({native_session}, _vp_native_session.__dict__)\n{}",
         include_str!("../../../../workers/volparossa-ml/worker.py")
     )
 }
 
+pub(super) fn command(options: &Options) -> Command {
+    command_inner(options, None)
+}
+
+pub(super) fn native_session_command(options: &Options, root: &Path) -> Command {
+    command_inner(options, Some(root))
+}
+
 // Keep the complete fixed sandbox argument vector reviewable in one place.
 #[allow(clippy::too_many_lines)]
-pub(super) fn command(options: &Options) -> Command {
+fn command_inner(options: &Options, session_root: Option<&Path>) -> Command {
     let mut command = Command::new("/usr/bin/bwrap");
+    if let Some(root) = &options.native_backend.native_backend_root {
+        command.arg("--ro-bind").arg(root).arg("/native-backend");
+    }
     if let Some(adapter) = &options.adapter_root {
         command.arg("--ro-bind").arg(adapter).arg("/adapter");
     }
@@ -112,16 +135,26 @@ pub(super) fn command(options: &Options) -> Command {
         .arg("/runtime")
         .arg("--ro-bind")
         .arg(&options.model_root)
-        .arg("/model")
-        .arg("--ro-bind")
-        .arg(&options.dataset)
-        .arg("/dataset.json")
-        .arg("--bind")
-        .arg(&options.output)
-        .arg("/output")
+        .arg("/model");
+    if let Some(root) = session_root {
+        command.arg("--bind").arg(root).arg("/session");
+    } else {
+        command
+            .arg("--ro-bind")
+            .arg(&options.dataset)
+            .arg("/dataset.json")
+            .arg("--bind")
+            .arg(&options.output)
+            .arg("/output");
+    }
+    command
         .args([
             "--chdir",
-            "/output",
+            if session_root.is_some() {
+                "/session"
+            } else {
+                "/output"
+            },
             "--setenv",
             "LANG",
             "C.UTF-8",
@@ -165,7 +198,8 @@ pub(super) fn command(options: &Options) -> Command {
             // to use that same window rather than killing a two-thread job early.
             &format!(
                 "--cpu={}",
-                u64::from(options.max_seconds) * u64::from(options.threads)
+                session_root.map_or(u64::from(options.max_seconds), |_| 2400)
+                    * u64::from(options.threads)
             ),
             "/usr/bin/nice",
             "-n",
@@ -190,10 +224,49 @@ mod tests {
     use super::{SOURCE_ARGUMENT_BYTES, WORKER_BOOTSTRAP, source_arguments, worker_source};
 
     #[test]
+    fn native_backend_has_only_the_explicit_readonly_mount_and_fixed_bundled_code() {
+        let mut options = super::Options {
+            mode: crate::compute::Mode::PrivateConversation,
+            runtime_root: "/owner/runtime".into(),
+            model_root: "/owner/model".into(),
+            model_profile: crate::compute::ModelProfile::Qwen4bInstruct2507,
+            native_backend: crate::compute::native_cpu::Options::default(),
+            adapter_root: None,
+            dataset: "/owner/input".into(),
+            output: "/owner/output".into(),
+            steps: 1,
+            threads: 2,
+            max_seconds: 600,
+            spare_capacity: true,
+            execute: true,
+        };
+        let arguments = |options: &super::Options| -> Vec<String> {
+            super::command(options)
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect()
+        };
+        let legacy = arguments(&options);
+        assert!(!legacy.iter().any(|arg| arg == "/native-backend"));
+        options.native_backend.native_backend_root = Some("/owner/native".into());
+        options.native_backend.native_backend_sha256 = Some("a".repeat(64));
+        let native = arguments(&options);
+        assert_eq!(
+            &native[..3],
+            ["--ro-bind", "/owner/native", "/native-backend"]
+        );
+        assert_eq!(&native[3..], legacy);
+        assert!(worker_source().contains("ModuleType('volparossa_llama_cpu')"));
+        assert!(native.iter().any(|arg| arg == "--unshare-net"));
+    }
+
+    #[test]
     fn kernel_cpu_limit_covers_only_the_authorized_wall_window_and_worker_threads() {
         for threads in [1, 2] {
             for seconds in [1, 600] {
                 let options = super::Options {
+                    native_backend: crate::compute::native_cpu::Options::default(),
                     mode: crate::compute::Mode::PrivateConversation,
                     runtime_root: "/runtime-fixture".into(),
                     model_root: "/model-fixture".into(),
@@ -238,6 +311,54 @@ mod tests {
                 assert!(result.stderr.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn native_session_keeps_fixed_sandbox_with_distinct_task_cpu_and_mount_lifetime() {
+        let options = super::Options {
+            mode: crate::compute::Mode::PrivateConversation,
+            runtime_root: "/owner/runtime".into(),
+            model_root: "/owner/model".into(),
+            model_profile: crate::compute::ModelProfile::Qwen4bInstruct2507,
+            native_backend: crate::compute::native_cpu::Options {
+                native_backend_root: Some("/owner/native".into()),
+                native_backend_sha256: Some("a".repeat(64)),
+            },
+            adapter_root: None,
+            dataset: "/owner/session/turn-1/input.json".into(),
+            output: "/owner/session/turn-1/output".into(),
+            steps: 1,
+            threads: 2,
+            max_seconds: 600,
+            spare_capacity: true,
+            execute: true,
+        };
+        let command =
+            super::native_session_command(&options, std::path::Path::new("/owner/session"));
+        let arguments: Vec<_> = command.as_std().get_args().collect();
+        assert!(
+            arguments
+                .windows(3)
+                .any(|args| args == ["--bind", "/owner/session", "/session"])
+        );
+        for (source, destination) in [
+            ("/owner/model", "/model"),
+            ("/owner/runtime", "/runtime"),
+            ("/owner/native", "/native-backend"),
+        ] {
+            assert!(
+                arguments
+                    .windows(3)
+                    .any(|args| args == ["--ro-bind", source, destination])
+            );
+        }
+        for flag in ["--unshare-net", "--die-with-parent", "--cpu=4800"] {
+            assert!(arguments.iter().any(|arg| *arg == flag));
+        }
+        assert!(!arguments.iter().any(|arg| *arg == "/dataset.json"));
+        let legacy = super::command(&options);
+        assert!(legacy.as_std().get_args().any(|arg| arg == "--cpu=1200"));
+        assert!(worker_source().contains("ModuleType('volparossa_native_session')"));
     }
 
     #[test]

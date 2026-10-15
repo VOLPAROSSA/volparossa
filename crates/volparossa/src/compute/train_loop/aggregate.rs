@@ -970,6 +970,7 @@ async fn execute_selected(
             .min(u64::from(args.max_seconds)),
     )?;
     let options = super::super::Options {
+        native_backend: crate::compute::native_cpu::Options::default(),
         mode: super::super::Mode::AggregateAdapter,
         model_profile: super::super::ModelProfile::default(),
         runtime_root: args.runtime_root.clone(),

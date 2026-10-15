@@ -1,0 +1,224 @@
+name: Bounded Storage flow-acquire diagnostics
+
+on:
+  push:
+    branches:
+      - feature/storage-flow-acquire-diagnostics
+    paths:
+      - .github/workflows/storage-flow-acquire-diagnostics.yml
+      - crates/volparossa-agent/src/mptcp_transport.rs
+      - crates/volparossa-agent/src/mptcp_transport/retirement.rs
+      - crates/volparossa-agent/src/mptcp_transport/acquire_diagnostic.rs
+      - crates/volparossa-agent/src/mptcp_transport/acquire_diagnostic/tests.rs
+      - crates/volparossa-agent/src/mptcp_transport/retirement/diagnostic_tests.rs
+      - crates/volparossa-agent/src/route_setup.rs
+      - crates/volparossa-agent/src/route_setup/content_stream.rs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: storage-flow-acquire-diagnostics-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_BUILD_JOBS: '2'
+  SOURCE_BASE: 324581656fdddab71b803d279e31d58796281be6
+
+jobs:
+  diagnostics:
+    name: Request-local flow failure and unchanged retirement contracts
+    if: >-
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.ref == 'refs/heads/feature/storage-flow-acquire-diagnostics'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out the exact diagnostic candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind candidate, unchanged dependency graph and closed source scope
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
+          test "$GITHUB_REF" = refs/heads/feature/storage-flow-acquire-diagnostics
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          test "$(id -u)" != 0
+          test "$CARGO_BUILD_JOBS" = 2
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          git merge-base --is-ancestor "$SOURCE_BASE" HEAD
+          umask 077
+          test ! -e storage-flow-evidence
+          mkdir storage-flow-evidence
+          python3 -B - <<'PY'
+          import json
+          import os
+          import pathlib
+          import subprocess
+          allowed = set('''
+          .github/workflows/storage-flow-acquire-diagnostics.yml
+          crates/volparossa-agent/src/mptcp_transport.rs
+          crates/volparossa-agent/src/mptcp_transport/retirement.rs
+          crates/volparossa-agent/src/mptcp_transport/acquire_diagnostic.rs
+          crates/volparossa-agent/src/mptcp_transport/acquire_diagnostic/tests.rs
+          crates/volparossa-agent/src/mptcp_transport/retirement/diagnostic_tests.rs
+          crates/volparossa-agent/src/route_setup.rs
+          crates/volparossa-agent/src/route_setup/content_stream.rs
+          '''.split())
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          changed = set(git('diff', '--name-only', os.environ['SOURCE_BASE'], 'HEAD').splitlines())
+          assert changed == allowed, 'unexpected source delta'
+          for name in ('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml'):
+              assert git('rev-parse', 'HEAD:' + name) == git('rev-parse', os.environ['SOURCE_BASE'] + ':' + name)
+          record = dict(schema=1, source_commit=os.environ['GITHUB_SHA'],
+              source_tree=git('rev-parse', 'HEAD^{tree}'), base_commit=os.environ['SOURCE_BASE'],
+              workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'],
+              source_blobs={name: git('rev-parse', 'HEAD:' + name) for name in sorted(changed)},
+              cargo_lock_blob=git('rev-parse', 'HEAD:Cargo.lock'), build_jobs=2,
+              scope='internal-storage-flow-acquire-and-retirement-contracts',
+              diagnostic_export_implemented=False, live_storage_or_mptcp_acceptance=False,
+              feature_equivalence_to_full_workspace_proven=False)
+          pathlib.Path('storage-flow-evidence/source.json').write_text(json.dumps(record, sort_keys=True) + '\n')
+          PY
+
+      - name: Install the existing pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.85.0 \
+            --profile minimal \
+            --component clippy \
+            --component rustfmt
+          rustup show active-toolchain
+          rustc --version --verbose
+          cargo --version --verbose
+
+      - name: Install reviewed Protobuf only on the disposable hosted runner
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(dpkg --print-architecture)" = amd64
+          sudo -n apt-get update
+          sudo -n apt-get install --yes --no-install-recommends \
+            protobuf-compiler=3.21.12-8.2ubuntu0.3
+          test "$(protoc --version)" = 'libprotoc 3.21.12'
+
+      - name: Fetch the unchanged locked dependency graph
+        run: cargo fetch --locked
+
+      - name: Compile inventories and run each disjoint contract group once
+        # Real local Unix-pair ownership only; no VM, model, namespace or helper service.
+        # The filters do not execute the full agent suite or change its test parallelism.
+        run: |
+          set -euo pipefail
+          export RUST_BACKTRACE=1
+          contract_group() {
+            local label="$1" filter="$2" expected="$3"
+            timeout --kill-after=5s 600s \
+              cargo test --locked --offline -p volparossa-agent --lib "$filter" \
+              -- --list 2>&1 | tee "storage-flow-evidence/$label-inventory.log"
+            python3 -B - "$label" "$filter" "$expected" <<'PY'
+          import pathlib
+          import re
+          import sys
+          text = pathlib.Path('storage-flow-evidence/' + sys.argv[1] + '-inventory.log').read_text()
+          names = re.findall(r'^([^\n]+): test$', text, re.MULTILINE)
+          expected = int(sys.argv[3])
+          assert len(names) == expected and len(set(names)) == expected, 'unexpected inventory'
+          assert all(name.startswith(sys.argv[2]) for name in names), 'unexpected test scope'
+          assert re.search(r'^' + str(expected) + r' tests, 0 benchmarks$', text, re.MULTILINE)
+          PY
+            timeout --kill-after=5s 120s \
+              cargo test --locked --offline -p volparossa-agent --lib "$filter" \
+              -- --nocapture 2>&1 | tee "storage-flow-evidence/$label-test.log"
+            python3 -B - "$label" <<'PY'
+          import pathlib
+          import re
+          import sys
+          root = pathlib.Path('storage-flow-evidence')
+          inventory = (root / (sys.argv[1] + '-inventory.log')).read_text()
+          output = (root / (sys.argv[1] + '-test.log')).read_text()
+          names = re.findall(r'^([^\n]+): test$', inventory, re.MULTILINE)
+          results = re.findall(r'^test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out;', output, re.MULTILINE)
+          assert results == [str(len(names))], 'not every inventoried test passed'
+          for name in names:
+              assert len(re.findall(r'^test ' + re.escape(name) + r' \.\.\. ok$', output, re.MULTILINE)) == 1, name
+          PY
+          }
+          contract_group acquire mptcp_transport::acquire_diagnostic::tests:: 6
+          contract_group retirement mptcp_transport::retirement:: 11
+          contract_group stream route_setup::content_stream::tests:: 6
+
+      - name: Require all twelve new cases within twenty-three unique passing tests
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          import json
+          import pathlib
+          import re
+          root = pathlib.Path('storage-flow-evidence')
+          names = []
+          for group in ('acquire', 'retirement', 'stream'):
+              text = (root / (group + '-inventory.log')).read_text()
+              names.extend(re.findall(r'^([^\n]+): test$', text, re.MULTILINE))
+          assert len(names) == len(set(names)) == 23, 'overlapping or missing tests'
+          new = [name for name in names if 'flow_acquire' in name.rsplit('::', 1)[-1]]
+          assert len(new) == 12, 'missing new flow-acquire regressions'
+          record = dict(schema=1, unique_tests=23, new_tests=12, historical_tests=11,
+              test_names=sorted(names), live_storage_or_mptcp_acceptance=False)
+          (root / 'tests.json').write_text(json.dumps(record, sort_keys=True) + '\n')
+          PY
+
+      - name: Lint the same agent library and its test targets
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --offline -p volparossa-agent --lib --tests \
+            -- -D warnings 2>&1 | tee storage-flow-evidence/clippy.log
+
+      - name: Check formatting without changing the compiled and tested source
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check 2>&1 | tee storage-flow-evidence/format.log
+          git diff --exit-code
+
+      - name: Verify the source and lockfile remained unchanged even on failure
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          git diff --exit-code HEAD
+
+      - name: Retain exact source, inventories and original outcomes even on failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: storage-flow-acquire-diagnostics-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            storage-flow-evidence/source.json
+            storage-flow-evidence/tests.json
+            storage-flow-evidence/acquire-inventory.log
+            storage-flow-evidence/acquire-test.log
+            storage-flow-evidence/retirement-inventory.log
+            storage-flow-evidence/retirement-test.log
+            storage-flow-evidence/stream-inventory.log
+            storage-flow-evidence/stream-test.log
+            storage-flow-evidence/clippy.log
+            storage-flow-evidence/format.log

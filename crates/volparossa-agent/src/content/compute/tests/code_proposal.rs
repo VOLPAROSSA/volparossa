@@ -1,6 +1,7 @@
 //! Signed public-source admission, not evidence of remote model execution.
 
 use super::*;
+use volparossa_content::SignedManifest;
 
 fn code_capabilities(profile: ModelProfile) -> Capabilities {
     let spec = profile.spec();
@@ -21,7 +22,13 @@ fn code_capabilities(profile: ModelProfile) -> Capabilities {
     caps
 }
 
-fn signed(cache: &mut ChunkStore, publisher: &SigningKey, text: &str, mime: &str) -> Vec<u8> {
+fn signed(
+    cache: &mut ChunkStore,
+    publisher: &SigningKey,
+    text: &str,
+    mime: &str,
+    validity: Validity,
+) -> Vec<u8> {
     publish(
         &mut text.as_bytes(),
         Publication {
@@ -31,10 +38,7 @@ fn signed(cache: &mut ChunkStore, publisher: &SigningKey, text: &str, mime: &str
                 content_type: mime.into(),
             },
             length: text.len() as u64,
-            validity: Validity {
-                created: now() - 1,
-                expires: now() + 500,
-            },
+            validity,
         },
         publisher,
         cache,
@@ -44,6 +48,15 @@ fn signed(cache: &mut ChunkStore, publisher: &SigningKey, text: &str, mime: &str
 }
 
 fn code_request(root: &Path, publisher: &SigningKey, requester: &SigningKey) -> Request {
+    code_request_at(root, publisher, requester, now())
+}
+
+fn code_request_at(
+    root: &Path,
+    publisher: &SigningKey,
+    requester: &SigningKey,
+    timestamp: u64,
+) -> Request {
     let mut request = request(root, publisher, requester);
     let mut cache = ChunkStore::create(
         &root.join("code-cache"),
@@ -54,8 +67,14 @@ fn code_request(root: &Path, publisher: &SigningKey, requester: &SigningKey) -> 
         },
     )
     .unwrap();
+    // One interval for the nested publication: a second clock sample must not
+    // extend the outer dataset beyond its signed source at a second boundary.
+    let validity = Validity {
+        created: timestamp - 1,
+        expires: timestamp + 500,
+    };
     let context = "pub fn sum(a: u32, b: u32) -> u32 { a - b }\n";
-    let manifest = signed(&mut cache, publisher, context, "text/plain");
+    let manifest = signed(&mut cache, publisher, context, "text/plain", validity);
     let json = serde_json::to_string(&dataset::CodeProposalDataset {
         version: 6,
         visibility: "public".into(),
@@ -77,9 +96,10 @@ fn code_request(root: &Path, publisher: &SigningKey, requester: &SigningKey) -> 
         publisher,
         &json,
         dataset::CODE_PROPOSAL_CONTENT_TYPE,
+        validity,
     );
     let source =
-        dataset::verify_source(&manifest, &publisher.verifying_key(), &json, now()).unwrap();
+        dataset::verify_source(&manifest, &publisher.verifying_key(), &json, timestamp).unwrap();
     let Operation::Submit(submit) = &mut request.operation else {
         panic!("submit")
     };
@@ -91,6 +111,62 @@ fn code_request(root: &Path, publisher: &SigningKey, requester: &SigningKey) -> 
     submit.dataset_json = derive_submission(&source, &submit.binding).unwrap();
     submit.binding.dataset_sha256 = hex::encode(Sha256::digest(submit.dataset_json.as_bytes()));
     request
+}
+
+#[test]
+fn nested_code_publication_keeps_source_expiry_across_a_second_boundary() {
+    let root = tempfile::tempdir().unwrap();
+    let publisher = SigningKey::from_bytes(&[45; 32]);
+    let requester = SigningKey::from_bytes(&[46; 32]);
+    let timestamp = 1000;
+    let request = code_request_at(root.path(), &publisher, &requester, timestamp);
+    let Operation::Submit(submit) = request.operation else {
+        panic!("submit")
+    };
+    let manifest = hex::decode(submit.publication.manifest_hex).unwrap();
+    let json = submit.publication.dataset_json;
+    let original: dataset::CodeProposalDataset = serde_json::from_str(&json).unwrap();
+    for bytes in [
+        manifest.clone(),
+        hex::decode(original.source_manifest_hex).unwrap(),
+    ] {
+        let verified = SignedManifest::decode(&bytes)
+            .unwrap()
+            .verify(&publisher.verifying_key(), timestamp + 1)
+            .unwrap();
+        assert_eq!(verified.validity().expires, timestamp + 500);
+    }
+    dataset::verify_source(&manifest, &publisher.verifying_key(), &json, timestamp + 1).unwrap();
+
+    // Reproduce the old two-clock boundary without sleeping. Both signatures
+    // remain valid, but the outer interval exceeds its source by one second.
+    let mut cache = ChunkStore::create(
+        &root.path().join("boundary-cache"),
+        CacheLimits {
+            max_bytes: 1024 * 1024,
+            max_entries: 8,
+            min_free_bytes: 0,
+        },
+    )
+    .unwrap();
+    let extended = signed(
+        &mut cache,
+        &publisher,
+        &json,
+        dataset::CODE_PROPOSAL_CONTENT_TYPE,
+        Validity {
+            created: timestamp,
+            expires: timestamp + 501,
+        },
+    );
+    SignedManifest::decode(&extended)
+        .unwrap()
+        .verify(&publisher.verifying_key(), timestamp + 1)
+        .unwrap();
+    assert!(matches!(
+        dataset::verify_source(&extended, &publisher.verifying_key(), &json, timestamp + 1),
+        Err(ComputeError::Authentication)
+    ));
 }
 
 #[test]

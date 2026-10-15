@@ -124,6 +124,7 @@ mod tests {
                         ControlResult::Ok
                     } as i32,
                     diagnostic_code: "CONTENT_CUSTODY_DISCOVERED".into(),
+                    private_storage_remote_detail: None,
                     payload: Some(Payload::ContentCustodyDiscovered(
                         ContentCustodyDiscovered {
                             control_relay_peer_id: "broker".into(),

@@ -587,6 +587,7 @@ mod tests {
             request_id: vec![1; 16],
             result: ControlResult::Ok.into(),
             diagnostic_code: "QUOTE_DEVICE_UNAVAILABLE".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::Ack(Empty {})),
         };
         assert!(check_terminal(&outcome, &finished).is_ok());

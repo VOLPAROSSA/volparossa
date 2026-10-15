@@ -1,5 +1,9 @@
 //! Private archive commands. The owner signs locally; only the agent opens overlay routes.
 
+#[path = "peer_diagnostics.rs"]
+mod diagnostics;
+#[path = "peer_outcome.rs"]
+mod outcome;
 #[path = "replicas.rs"]
 pub(super) mod replicas;
 #[path = "peer_state.rs"]
@@ -26,6 +30,19 @@ use volparossa_local_control::{
 };
 
 use crate::content::{IdentityUnlock, parse_publisher_key};
+
+pub(super) async fn with_append_diagnostics<F: Future>(enabled: bool, work: F) -> F::Output {
+    diagnostics::with_append_timing(enabled, work).await
+}
+
+pub(super) async fn with_diagnostics<F: Future>(
+    append_v7: bool,
+    flow_v8: bool,
+    work: F,
+) -> F::Output {
+    diagnostics::with_flow_acquire(flow_v8, with_append_diagnostics(append_v7 || flow_v8, work))
+        .await
+}
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {

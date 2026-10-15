@@ -83,6 +83,29 @@ Unconfirmed cleanup quarantines further admission. Temporary input/output files
 exist only under the owner's private work directory and follow the existing
 private-task cleanup contract; this is **not** a RAM-only or secure-erasure claim.
 
+## Owner-selected native CPU backend
+
+The owner may explicitly supply both `--native-backend-root` and
+`--native-backend-sha256` at service startup. The latter is the SHA-256 of the
+private `backend.json` manifest binding the pinned library and converted model.
+An IPC request cannot supply these paths or authorize executable code. The
+backend directory is mounted read-only inside the existing isolated worker;
+the worker verifies the complete artifact hashes before loading the library.
+
+This candidate supports only `qwen3-4b-instruct-2507-v1` conversations. Its
+conversation capabilities add `inference_backend: "llama_cpp_bf16_v1"` and
+`required_generation_policy: "greedy_v1"`; both fields are absent for the
+unchanged default backend. Clients must negotiate `generation_policy_version: 1`
+and explicitly submit `greedy_v1`. Missing policy is rejected before admission.
+The existing Qwen4B wire validation rejects Q&A capabilities and submission;
+the native backend does not enable a Q&A service. A conversation capability
+response is not evidence that a model has run successfully. The public result
+schema remains unchanged; the core binds
+the worker's native artifact identity and reported precision internally.
+
+This is still same-owner local execution, not confidential execution on peers.
+Actual conversion, full generation and application trials remain required.
+
 ## Browser boundary
 
 Only privileged, owner-authorized browser code may use the socket. Web page scripts

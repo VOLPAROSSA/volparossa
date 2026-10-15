@@ -23,6 +23,12 @@ private_storage_replicas_serve() {
     storage_serve_node=$1
     content_custody_endpoint "$storage_serve_node" || return 1
     if [ "$2" = yes ]; then set -- --reuse-store
+    elif [ "${private_storage_maintenance:-no}" = yes ]; then
+        # The joined Image/Cloud phase reuses these same stores after deleting
+        # the original archive. Each survivor must hold both encrypted objects,
+        # each bounded to 1 MiB. This is disposable fixture capacity, not credit
+        # or a change to production contribution rules or owner grant limits.
+        set -- --capacity-bytes 2097152 --min-free-bytes 268435456
     else set -- --capacity-bytes 1048576 --min-free-bytes 268435456; fi
     content_custody_cli "$storage_serve_node" storage peer serve \
         --bind "$custody_address:18080" --advertised-hostname "$custody_hostname" \

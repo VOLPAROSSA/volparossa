@@ -19,6 +19,27 @@ enum Work {
     New(usize),
 }
 
+/// Conservative additional payload for the first actual attempt, not another charge ledger.
+pub(super) fn next_additional_charge(set: &LockedFragments, from: &VerifyingKey) -> Result<u64> {
+    Ok(match work(set, from)?.first() {
+        Some(Work::New(index)) => set.data.fragments[*index].length,
+        Some(Work::Resume(index)) => {
+            let copies = set.fragment(*index)?;
+            let intent = copies
+                .data
+                .handoff
+                .as_ref()
+                .context("pending handoff missing")?;
+            if copies.data.copies[intent.to].charge == Charge::Unattempted {
+                set.data.fragments[*index].length
+            } else {
+                0
+            }
+        }
+        None => 0,
+    })
+}
+
 /// Copying intents retain priority. Already verified retirements stay charged,
 /// but do not repeatedly consume the entire repair budget ahead of new copies.
 fn work(set: &LockedFragments, from: &VerifyingKey) -> Result<Vec<Work>> {

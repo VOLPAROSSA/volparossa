@@ -1,0 +1,181 @@
+name: Native CPU source contracts
+
+on:
+  push:
+    branches:
+      - feature/native-cpu-inference
+      - feature/native-coding-output-constraint
+      - fix/native-session-context-capacity
+      - fix/native-q1-aligned-load
+    paths:
+      - workers/volparossa-ml/native-cpu/**
+      - workers/volparossa-ml/build_llama_cpu.py
+      - workers/volparossa-ml/convert_llama_cpu.py
+      - workers/volparossa-ml/llama_cpu.py
+      - workers/volparossa-ml/test_native_session.py
+      - workers/volparossa-ml/test_native_cpu_alignment.py
+      - .github/workflows/native-cpu-contract.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-cpu-contract-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native:
+    name: Source-only ${{ matrix.mode }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [normal, asan-ubsan]
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      NATIVE_MODE: ${{ matrix.mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require disposable hosted runner and exact source
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          env -i PATH=/usr/local/bin:/usr/bin:/bin /bin/bash -euo pipefail -c \
+            'for tool in cmake c++ cc git readelf nice python3; do command -v "$tool"; done'
+          mkdir -p build/native-contract
+          python3 -B - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+
+          def git(*args):
+              return subprocess.check_output(['git', *args])
+
+          head = os.environ['GITHUB_SHA']
+          paths = (
+              'workers/volparossa-ml/build_llama_cpu.py',
+              'workers/volparossa-ml/convert_llama_cpu.py',
+              'workers/volparossa-ml/llama_cpu.py',
+              'workers/volparossa-ml/native-cpu/CMakeLists.txt',
+              'workers/volparossa-ml/native-cpu/q1-aligned-load.patch',
+              'workers/volparossa-ml/native-cpu/abi-smoke.cpp',
+              'workers/volparossa-ml/native-cpu/adapter.cpp',
+              'workers/volparossa-ml/native-cpu/adapter.h',
+              'workers/volparossa-ml/native-cpu/session-state.h',
+              'workers/volparossa-ml/native-cpu/session-tests.cpp',
+              'workers/volparossa-ml/test_native_session.py',
+              'workers/volparossa-ml/test_native_cpu_alignment.py',
+          )
+          files = {}
+          for name in paths:
+              raw = git('show', head + ':' + name)
+              assert Path(name).read_bytes() == raw
+              files[name] = dict(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest(),
+                  blob=git('rev-parse', head + ':' + name).decode().strip())
+          workflow = '.github/workflows/native-cpu-contract.yml'
+          record = dict(version=1, kind='native-cpu-contract-source',
+              source_commit=head, source_tree=git('rev-parse', 'HEAD^{tree}').decode().strip(),
+              workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'], workflow_path=workflow,
+              workflow_sha256=hashlib.sha256(git('show', head + ':' + workflow)).hexdigest(),
+              mode=os.environ['NATIVE_MODE'], run_id=os.environ['GITHUB_RUN_ID'],
+              run_attempt=os.environ['GITHUB_RUN_ATTEMPT'], files=files,
+              model_execution=False, real_kv_memory_saving_proven=False)
+          with Path('build/native-contract/source.json').open('x') as stream:
+              stream.write(json.dumps(record, sort_keys=True) + '\n')
+          PY
+      - name: Check the same 98 inert Python cases in each matrix mode
+        run: |
+          set -euo pipefail
+          (
+            cd workers/volparossa-ml
+            timeout --kill-after=5s 120s \
+              env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 \
+              python3 -B -m unittest -v test_llama_cpu test_conversion_diagnostic \
+                test_native_output_constraint test_native_source_lifecycle test_native_session \
+                test_native_cpu_alignment
+          ) 2>&1 | tee build/native-contract/python-contracts.log
+          python3 -B - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          text = Path('build/native-contract/python-contracts.log').read_text()
+          cases = re.findall(r'^(test_[A-Za-z0-9_]+) \(([^)]+)\) \.\.\. ok$', text, re.M)
+          names = [scope + '::' + method for method, scope in cases]
+          assert len(names) == len(set(names)) == 98
+          assert re.findall(r'^Ran (\d+) tests in .+$', text, re.M) == ['98']
+          assert re.findall(r'^OK.*$', text, re.M) == ['OK']
+          record = dict(version=1, mode=os.environ['NATIVE_MODE'], passed=98, failed=0,
+              skipped=0, unique_tests_across_matrix=98, repeated_in_each_matrix_mode=True,
+              test_names=sorted(names), model_execution=False)
+          with Path('build/native-contract/python-contracts.json').open('x') as stream:
+              stream.write(json.dumps(record, sort_keys=True) + '\n')
+          PY
+      - name: Fetch the pinned upstream source only
+        run: |
+          set -euo pipefail
+          mkdir -p build/native-contract
+          git init build/native-contract/llama
+          git -C build/native-contract/llama remote add origin https://github.com/ggml-org/llama.cpp.git
+          git -C build/native-contract/llama fetch --depth=1 origin 7fe450e19305b828c199d602c23a8337aaa1f03b
+          git -C build/native-contract/llama checkout --detach 7fe450e19305b828c199d602c23a8337aaa1f03b
+          test "$(git -C build/native-contract/llama rev-parse HEAD)" = 7fe450e19305b828c199d602c23a8337aaa1f03b
+      - name: Compile and run bounded native and upstream checks without models
+        run: |
+          set -euo pipefail
+          flags=()
+          if test "$NATIVE_MODE" = asan-ubsan; then flags+=(--sanitize); fi
+          env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 \
+            python3 -B workers/volparossa-ml/build_llama_cpu.py \
+              --source "$PWD/build/native-contract/llama" \
+              --output "$PWD/build/native-contract/output" --execute --checks "${flags[@]}"
+      - name: Recheck original source after success or failure
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p build/native-contract
+          (
+            test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+            test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+            git diff --exit-code HEAD
+            # Only the predeclared evidence/upstream/build directory is untracked output.
+            test -z "$(git status --porcelain --untracked-files=all -- . ':(exclude)build/native-contract')"
+            python3 -B - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          record = json.loads(Path('build/native-contract/source.json').read_text())
+          assert record['source_commit'] == os.environ['GITHUB_SHA']
+          assert record['workflow_commit'] == os.environ['GITHUB_WORKFLOW_SHA']
+          assert record['source_tree'] == subprocess.check_output(
+              ['git', 'rev-parse', 'HEAD^{tree}']).decode().strip()
+          for name, expected in record['files'].items():
+              raw = Path(name).read_bytes()
+              assert len(raw) == expected['bytes']
+              assert hashlib.sha256(raw).hexdigest() == expected['sha256']
+          assert hashlib.sha256(Path(record['workflow_path']).read_bytes()).hexdigest() == record['workflow_sha256']
+          print('NATIVE_SOURCE_UNCHANGED')
+          PY
+          ) 2>&1 | tee build/native-contract/source-check.log
+      - name: Retain original source-only reports and logs, including failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-source-${{ matrix.mode }}-${{ github.sha }}
+          path: |
+            build/native-contract/source.json
+            build/native-contract/source-check.log
+            build/native-contract/python-contracts.json
+            build/native-contract/python-contracts.log
+            build/native-contract/output/build.json
+            build/native-contract/output/build.log
+            build/native-contract/output/checks.log
+          if-no-files-found: error
+          retention-days: 14

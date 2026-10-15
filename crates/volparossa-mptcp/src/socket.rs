@@ -117,6 +117,28 @@ impl MptcpStream {
 #[derive(Debug)]
 pub struct MptcpListener(net::TcpListener);
 
+/// Separates a listener failure from rejection of one already-owned connection.
+///
+/// A rejected stream has been closed without being exposed to the caller. It does not revoke
+/// the listener or imply that other independently negotiated MPTCP streams are invalid.
+#[derive(Debug, thiserror::Error)]
+pub enum MptcpAcceptError {
+    /// The listener did not yield an owned stream; its continued usability is not established.
+    #[error("MPTCP listener accept failed")]
+    Listener(#[source] io::Error),
+    /// One accepted stream failed the genuine-MPTCP check and was closed.
+    #[error("accepted stream did not prove genuine MPTCP negotiation")]
+    RejectedStream(#[source] io::Error),
+}
+
+impl MptcpAcceptError {
+    fn into_io(self) -> io::Error {
+        match self {
+            Self::Listener(error) | Self::RejectedStream(error) => error,
+        }
+    }
+}
+
 impl MptcpListener {
     /// Adopts one already-bound MPTCP listener received from a trusted namespace owner.
     ///
@@ -189,9 +211,26 @@ impl MptcpListener {
     /// Returns the underlying socket error when accepting a connection fails, and rejects any
     /// accepted connection for which the kernel reports ordinary-TCP fallback.
     pub async fn accept(&self) -> io::Result<(MptcpStream, SocketAddr)> {
-        let (stream, address) = self.0.accept().await?;
+        self.accept_classified()
+            .await
+            .map_err(MptcpAcceptError::into_io)
+    }
+
+    /// Accepts one stream without conflating its rejection with loss of the listener.
+    ///
+    /// There is no internal retry loop. After rejecting a stream, an owner can return to its
+    /// cancellation, expiry, resource and maintenance checks before accepting another one.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Listener` if accept itself fails, or `RejectedStream` after closing a stream
+    /// that did not prove genuine MPTCP negotiation. Neither error exposes a usable stream.
+    pub async fn accept_classified(&self) -> Result<(MptcpStream, SocketAddr), MptcpAcceptError> {
+        let (stream, address) = self.0.accept().await.map_err(MptcpAcceptError::Listener)?;
         let stream = MptcpStream(stream);
-        stream.require_negotiated()?;
+        stream
+            .require_negotiated()
+            .map_err(MptcpAcceptError::RejectedStream)?;
         Ok((stream, address))
     }
 
@@ -323,7 +362,105 @@ fn validate_concrete_address(address: SocketAddr) -> io::Result<()> {
 mod tests {
     use std::{io, net::TcpListener, os::fd::OwnedFd, thread};
 
-    use super::{MptcpListener, MptcpStream};
+    use super::{MptcpAcceptError, MptcpListener, MptcpStream};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn accept_error_origin_survives_identical_io_kinds_and_legacy_flattening() {
+        for kind in [io::ErrorKind::ConnectionAborted, io::ErrorKind::Other] {
+            let listener = MptcpAcceptError::Listener(io::Error::from(kind));
+            let stream = MptcpAcceptError::RejectedStream(io::Error::from(kind));
+            assert!(matches!(&listener, MptcpAcceptError::Listener(_)));
+            assert!(matches!(&stream, MptcpAcceptError::RejectedStream(_)));
+            assert_eq!(listener.into_io().kind(), kind);
+            assert_eq!(stream.into_io().kind(), kind);
+        }
+    }
+
+    #[tokio::test]
+    async fn classified_accept_closes_rejected_stream_and_keeps_same_listener() {
+        // Negative descriptor test: deliberately wrap a TCP listener, which cannot prove MPTCP.
+        // This is not a fallback or a positive MPTCP datapath test.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let listener = MptcpListener(
+                tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                    .await
+                    .unwrap(),
+            );
+            let address = listener.local_addr().unwrap();
+            for _ in 0..2 {
+                let mut peer = tokio::net::TcpStream::connect(address).await.unwrap();
+                assert!(matches!(
+                    listener.accept_classified().await,
+                    Err(MptcpAcceptError::RejectedStream(_))
+                ));
+                assert_eq!(peer.read(&mut [0_u8; 1]).await.unwrap(), 0);
+                assert_eq!(listener.local_addr().unwrap(), address);
+            }
+            let mut peer = tokio::net::TcpStream::connect(address).await.unwrap();
+            assert!(
+                listener
+                    .accept()
+                    .await
+                    .unwrap_err()
+                    .raw_os_error()
+                    .is_some()
+            );
+            assert_eq!(peer.read(&mut [0_u8; 1]).await.unwrap(), 0);
+        })
+        .await
+        .expect("rejected descriptors must close without stopping acceptance");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires real Linux MPTCP; run explicitly on a disposable hosted runner"]
+    async fn kernel_mptcp_rejection_preserves_existing_and_next_streams() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let listener = super::listen("127.0.0.1:0".parse().unwrap(), 8).unwrap();
+            let address = listener.local_addr().unwrap();
+            let mut first = super::connect(address, None, std::time::Duration::from_secs(2))
+                .await
+                .unwrap();
+            let (mut existing, _) = listener.accept_classified().await.unwrap();
+            first.require_negotiated().unwrap();
+            existing.require_negotiated().unwrap();
+
+            let mut rejected = tokio::net::TcpStream::connect(address).await.unwrap();
+            assert!(matches!(
+                listener.accept_classified().await,
+                Err(MptcpAcceptError::RejectedStream(_))
+            ));
+            assert_eq!(rejected.read(&mut [0_u8; 1]).await.unwrap(), 0);
+            first.as_tcp_stream_mut().write_all(b"old").await.unwrap();
+            let mut bytes = [0; 3];
+            existing
+                .as_tcp_stream_mut()
+                .read_exact(&mut bytes)
+                .await
+                .unwrap();
+            assert_eq!(&bytes, b"old");
+
+            let mut next = super::connect(address, None, std::time::Duration::from_secs(2))
+                .await
+                .unwrap();
+            let (mut accepted, _) = listener.accept_classified().await.unwrap();
+            next.require_negotiated().unwrap();
+            accepted.require_negotiated().unwrap();
+            accepted
+                .as_tcp_stream_mut()
+                .write_all(b"new")
+                .await
+                .unwrap();
+            next.as_tcp_stream_mut()
+                .read_exact(&mut bytes)
+                .await
+                .unwrap();
+            assert_eq!(&bytes, b"new");
+            assert_eq!(listener.local_addr().unwrap(), address);
+        })
+        .await
+        .expect("real MPTCP listener and independent streams must survive one rejection");
+    }
 
     #[test]
     fn wildcard_listener_address_preserves_only_family_and_port() {

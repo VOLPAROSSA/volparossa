@@ -1,5 +1,6 @@
 //! Production adoption of helper-owned MPTCP transport capabilities.
 
+pub(crate) mod acquire_diagnostic;
 pub(crate) mod retirement;
 
 use std::{collections::BTreeSet, io, net::SocketAddr, os::fd::AsRawFd, time::Duration};
@@ -357,16 +358,19 @@ impl ClientMptcpTransport {
         &mut self,
         helper: &HelperClient,
         local_port: u16,
+        observation: &mut acquire_diagnostic::Observation,
     ) -> Result<ClientMptcpFlowTransport, MptcpTransportError> {
-        self.retirements.drain(helper).await?;
-        let certificate_der = self
-            .certificate_der
-            .clone()
-            .ok_or(MptcpTransportError::InvalidMetadata)?;
-        let observations = self
-            .refill_observations
-            .clone()
-            .ok_or(MptcpTransportError::InvalidMetadata)?;
+        use acquire_diagnostic::{Reason, Stage};
+
+        observation.reset();
+        self.retirements
+            .drain(helper)
+            .await
+            .map_err(|error| observation.transport_error(Stage::RetirementDrain, error))?;
+        let certificate_der =
+            observation.required(Stage::Material, self.certificate_der.clone())?;
+        let observations =
+            observation.required(Stage::Material, self.refill_observations.clone())?;
         // Route preparation connects this first socket before application TLS starts.
         // The Exit may have closed it after its bounded ClientHello deadline while
         // the caller was preparing work. Do not give the first real request a known
@@ -380,25 +384,30 @@ impl ClientMptcpTransport {
             (
                 stream,
                 std::mem::take(&mut self.initial_flow_handle),
-                self.initial_retirement
-                    .take()
-                    .ok_or(MptcpTransportError::InvalidMetadata)?,
+                observation.required(Stage::Material, self.initial_retirement.take())?,
             )
         } else {
             // An expired initial socket also owned one issued capability.
             drop(self.initial_retirement.take());
-            self.retirements.drain(helper).await?;
-            let mut slot = self.retirements.reserve()?;
-            let signal = self
-                .signal
-                .as_ref()
-                .ok_or(MptcpTransportError::InvalidMetadata)?;
-            let request = client_acquire_request(signal, self.context_handle.clone(), local_port)?;
+            self.retirements
+                .drain(helper)
+                .await
+                .map_err(|error| observation.transport_error(Stage::RetirementDrain, error))?;
+            let mut slot = self
+                .retirements
+                .reserve_classified()
+                .map_err(|(error, reason)| {
+                    observation.record(Stage::SlotReservation, reason);
+                    MptcpTransportError::Io(error)
+                })?;
+            let signal = observation.required(Stage::Material, self.signal.as_ref())?;
+            let request = client_acquire_request(signal, self.context_handle.clone(), local_port)
+                .map_err(|error| observation.transport_error(Stage::Material, error))?;
             slot.begin_acquire();
             let acquired = helper
                 .acquire_transport_socket(request)
                 .await
-                .map_err(|error| slot.acquire_failed(error))?;
+                .map_err(|error| slot.acquire_failed_classified(error, observation))?;
             let flow = acquired.metadata().mptcp_flow_handle.clone();
             let retirement = slot.bind(
                 volparossa_routing::RetireMptcpFlow {
@@ -406,24 +415,28 @@ impl ClientMptcpTransport {
                     context_handle: self.context_handle.clone(),
                     mptcp_flow_handle: flow.clone(),
                 },
-                acquired
-                    .descriptor()
-                    .try_clone_to_owned()
-                    .map_err(|_| MptcpTransportError::AcquireUnconfirmed)?,
+                acquired.descriptor().try_clone_to_owned().map_err(|_| {
+                    observation.record(Stage::DescriptorClone, Reason::Io);
+                    MptcpTransportError::AcquireUnconfirmed
+                })?,
             );
-            (adopt_client_stream(acquired)?, flow, retirement)
+            (
+                adopt_client_stream(acquired).map_err(|error| {
+                    observation.transport_error(Stage::DescriptorAdoption, error)
+                })?,
+                flow,
+                retirement,
+            )
         };
-        let signal = self
-            .signal
-            .as_ref()
-            .ok_or(MptcpTransportError::InvalidMetadata)?;
+        let signal = observation.required(Stage::FlowMetadata, self.signal.as_ref())?;
         let paths = ClientMptcpFlowPaths {
             helper: helper.clone(),
             context: self.route_context_id.clone(),
             handle: self.context_handle.clone(),
-            flow: flow
-                .try_into()
-                .map_err(|_| MptcpTransportError::InvalidMetadata)?,
+            flow: flow.try_into().map_err(|_| {
+                observation
+                    .transport_error(Stage::FlowMetadata, MptcpTransportError::InvalidMetadata)
+            })?,
             initial: signal.initial_active_path_ids.clone(),
             retirement,
         };

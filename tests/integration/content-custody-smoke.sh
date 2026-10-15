@@ -16,10 +16,16 @@ content_custody_config() {
     if [ "${scenario:-}" = content-custody ] && [ "$node" = client ]; then
         # Real existing Client underlay interfaces; optional background work observes
         # these configured owner-first budgets, not fictional spare capacity.
+        custody_client_receive_interface=cr2
+        custody_client_ceiling=1
+        if [ "${private_storage_maintenance:-no}" = yes ]; then
+            custody_client_receive_interface=cr0
+            custody_client_ceiling=10
+        fi
         printf 'sharing:\n  enabled: true\n  interface: cr0\n'
-        printf '  total_upload_mbps: 100\n  contribution_upload_ceiling_mbps: 1\n'
-        printf 'download_sharing:\n  enabled: true\n  interface: cr2\n'
-        printf '  total_download_mbps: 100\n  contribution_download_ceiling_mbps: 1\n'
+        printf '  total_upload_mbps: 100\n  contribution_upload_ceiling_mbps: %s\n' "$custody_client_ceiling"
+        printf 'download_sharing:\n  enabled: true\n  interface: %s\n' "$custody_client_receive_interface"
+        printf '  total_download_mbps: 100\n  contribution_download_ceiling_mbps: %s\n' "$custody_client_ceiling"
         return 0
     fi
     case $node in relay3|relay4|relay5) ;; *) return 0 ;; esac

@@ -274,6 +274,7 @@ case $4 in
     cloud-private-upload) cloud_private_upload=yes ;;
     agent-cooperative-browser) agent_cooperative_browser=yes ;;
     agent-cooperative-code) agent_cooperative_code=yes ;;
+    private-storage-maintenance) private_storage_maintenance=yes ;;
     no) : ;;
     *) exit 98 ;;
 esac
@@ -316,7 +317,7 @@ printf '%s\n' "$result"
         fields = {"schema_version", "stage", "reason", "last_connect_reason", "connect_exit_status",
                   "attempts", "retries", "redraws", "path_polls", "path_status"}
         scenarios = ("image-snapshot", "cloud-private-file", "cloud-private-upload", "agent-cooperative-browser",
-                     "agent-cooperative-code")
+                     "agent-cooperative-code", "private-storage-maintenance")
         for scenario, case in ((scenario, case) for scenario in scenarios for case in cases):
             mode, status, stage, reason, connect_exit, attempts = case
             with self.subTest(scenario=scenario, mode=mode), tempfile.TemporaryDirectory(
@@ -325,7 +326,8 @@ printf '%s\n' "$result"
                 outcome = subprocess.run([*command, scenario], check=True, text=True,
                     capture_output=True, timeout=10, env={"PATH": "/usr/bin:/bin"})
                 self.assertEqual(int(outcome.stdout), status)
-                path = Path(directory, f"{scenario}-route-diagnostic.json")
+                prefix = scenario + ('-selection' if scenario == 'private-storage-maintenance' else '')
+                path = Path(directory, f"{prefix}-route-diagnostic.json")
                 encoded = path.read_text()
                 record = json.loads(encoded)
                 self.assertEqual(set(record), fields)
@@ -347,6 +349,56 @@ printf '%s\n' "$result"
                     capture_output=True, timeout=10, env={"PATH": "/usr/bin:/bin"})
                 self.assertEqual(int(ordinary.stdout), status)
                 self.assertFalse(path.exists())
+
+    def test_maintenance_window_resets_at_reconnect_without_an_extra_connect(self):
+        script = r'''
+set -eu
+umask 077
+. "$1/benchmark-selection.sh"
+WORK=$2; private_storage_maintenance=yes; binary_directory=/unused; source_directory=/unused
+date() { if [ "$1" = +%s ]; then printf '0\n'; else printf '%s\n' "$clock"; fi; }
+sleep() { :; }
+calls=0
+timeout() {
+    calls=$((calls + 1))
+    [ ! -s "$WORK/private-storage-maintenance-selection-end.private" ]
+    [ "$(cat "$WORK/private-storage-maintenance-selection-start.private")" = "$clock" ]
+    clock=$((clock + 10))
+    if [ "$calls" -eq 1 ]; then
+        printf '%s\n' 'Error: agent rejected request: NO_ELIGIBLE_PATHS (Unavailable)' >&2
+        return 1
+    fi
+}
+benchmark_capture_paths() {
+    printf '{"synthetic_contract":true}\n' >"$WORK/$1-selection.json"
+}
+clock=100
+if benchmark_select_route private-storage-fragments mptcp; then exit 91; fi
+[ "$(cat "$WORK/private-storage-maintenance-selection-phase.private")" = initial ]
+[ "$(cat "$WORK/private-storage-maintenance-selection-end.private")" = 110 ]
+clock=200
+benchmark_select_route private-storage-maintenance-reconnect mptcp
+[ "$(cat "$WORK/private-storage-maintenance-selection-phase.private")" = reconnect ]
+[ "$(cat "$WORK/private-storage-maintenance-selection-end.private")" = 210 ]
+# A broken diagnostic writer on a later initialization must not preserve a
+# previous route result and falsely bind it to the new observation window.
+cp "$WORK/private-storage-maintenance-selection-route-diagnostic.json" "$WORK/observed.json"
+jq() { return 1; }
+clock=300
+benchmark_image_route_diagnostic initialize STARTED
+[ ! -s "$WORK/private-storage-maintenance-selection-route-diagnostic.json" ]
+[ ! -s "$WORK/private-storage-maintenance-selection-end.private" ]
+printf '%s\n' "$calls"
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            result = subprocess.run(['sh', '-c', script, 'test', str(HERE), temporary],
+                check=True, capture_output=True, text=True, timeout=5, env={'PATH': '/usr/bin:/bin'})
+            self.assertEqual(result.stdout, '2\n')
+            for suffix in ('start', 'end', 'phase'):
+                self.assertEqual(Path(temporary, f'private-storage-maintenance-selection-{suffix}.private')
+                    .stat().st_mode & 0o777, 0o600)
+            value = json.loads(Path(temporary, 'observed.json').read_text())
+            self.assertEqual((value['reason'], value['attempts'], value['retries']), ('SELECTED', 1, 0))
 
     def test_image_connect_diagnostic_keeps_only_allowlisted_native_reason(self):
         script = r'''

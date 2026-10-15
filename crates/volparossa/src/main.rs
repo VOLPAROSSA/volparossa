@@ -685,6 +685,9 @@ fn print_response(response: ControlResponse) -> Result<()> {
         Payload::ContentCustodyDiscovered(_) => {
             anyhow::bail!("unexpected custody selection outside an explicit retention workflow")
         }
+        Payload::ContentProviderActivity(_) => {
+            anyhow::bail!("provider activity requires its scoped content command")
+        }
         Payload::Content(receipt) => println!(
             "{}",
             serde_json::json!({
@@ -757,6 +760,8 @@ fn print_response(response: ControlResponse) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&receipt)?);
         }
         Payload::PrivateStorageReady(_)
+        | Payload::PrivateStorageOutcome(_)
+        | Payload::PrivateStorageMaintenanceReady(_)
         | Payload::PrivateStorageGrant(_)
         | Payload::PrivateStorageAdmission(_) => {
             anyhow::bail!("private storage reply requires its scoped storage command")
