@@ -98,11 +98,12 @@ fn clock_ticks() -> Result<u64> {
 }
 
 impl Live {
-    pub(super) fn spawn(options: &Options, root: &Path) -> Result<Self> {
+    pub(super) fn spawn(options: &Options, root: &Path, deadline: Instant) -> Result<Self> {
+        super::budget::check_deadline(deadline)?;
         let ticks = clock_ticks()?;
-        let child = sandbox::native_session_command(options, root)
-            .spawn()
-            .context("compute_sandbox_spawn")?;
+        let mut command = sandbox::native_session_command(options, root);
+        super::budget::check_deadline(deadline)?;
+        let child = command.spawn().context("compute_sandbox_spawn")?;
         Ok(Self::own(child, ticks))
     }
 

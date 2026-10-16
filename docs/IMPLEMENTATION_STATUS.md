@@ -42,8 +42,43 @@ sources; this preparation does not replace either trial or change its pins.
 | Native Overmorrow — `volparossa`, `volparossa-weather` | Preserve actual app-triggered core delivery and verify expiry behavior with real products. | Actual `38717988016` passes on exact core `aac5be7f` / Weather `3b90442a`: initial cold peer retrieval, two cache-backed refreshes, joined native tables, background/resume and cleanup. Source Quality `38714089083` and CodeQL `38714082172` pass. Actual expiry, physical devices, iOS and the complete service remain open. |
 | Persistent private storage maintenance — `volparossa`, then Image/Cloud | Complete consumer publication, repair and restoration after provider loss. | The listener correction passes targeted run `38815471227`, including a real Linux MPTCP rejection/reuse test. Actual `38816407455` on `728db40b` instead fails at Image FINALIZE fragment 0/copy 1 while reading the provider challenge; Cloud publication is not reached. Its standalone core lifecycle and two restores pass, but consumer repair, restoration and remote retirement remain unproved. Trace the challenge stall without extending the operation deadline. Earlier `38804192575` retains its separate unresolved flow-acquisition failure. |
 | Automatic private uploads — `volparossa`, Image/Cloud | Enroll a new encrypted upload under finite service authority, then resume maintenance and restore it after provider loss. | Core PR233 adds an absolute authorization ceiling; Image PR7 forwards it without rebasing. Cloud PR14 implements finite shared admission budgets, durable reservation/enrollment, restart reconciliation and an encrypted empty catalog for a first upload. Actual OpenCloud SDK upload/list/read checks pass with a synthetic core; this does not prove peer maintenance. Join these candidates to the real upload-to-repair-to-restore trial after the existing storage milestone; its pinned consumers stay unchanged. |
-| Native coding execution — `volparossa`, `volparossa-code` | Complete the real read/edit/test task with timely owner pause/resume and post-task checks. | Actual `38806073909` completes the task but fails afterward. The task-holder correction in `38816006720` retains task status and memory, but this task misses a pause acknowledgement after two reads and an edit. Adaptive prefill checkpoints now pass 116 inert cases while retaining the original ten-second guard, complete prompt, model, tools, permissions and budgets. Real responsiveness and throughput need a new model trial; whole-trial and protected-peer acceptance remain open. |
-| Protected remote compute — `volparossa`, then Code/Browser | Join an authorized immutable guest, the resident coding worker and a guest-terminated TLS 1.3 session. | PR258's authenticated refusal path has actual route evidence; PR262 integrates explicit same-connection key confirmation. The next implementation reuses the native worker lifecycle and existing TLS stack, rather than extending the probe into task authority. Boot/runtime/model integrity, production roots and current vendor appraisal must be checked before private input; task authority needs its own finite grant. Those functions and actual protected execution remain open; suitable confidential-computing hardware is unavailable. |
+| Native coding execution — `volparossa`, `volparossa-code` | Build on the accepted bounded coding lifecycle with native editor operation and protected remote execution. | Actual `38824828727` passes on Code `fd4ff968` / core `7d0f9f0b`: two reads, approved edit/test, independent verification, task-resource and input-integrity checks, and cleanup. Code PR11 is merged, retaining that immutable core dependency; the native/Storage core candidate is not merged into core `main`. General coding quality, competitive performance, native editor UI and protected-peer execution remain open. Earlier failures retain their original outcomes. |
+| Protected remote compute — `volparossa`, then Code/Browser | Join an authorized immutable guest, the resident coding worker and a guest-terminated TLS 1.3 session. | PR258's authenticated refusal path has actual route evidence; PR262 integrates explicit same-connection key confirmation. The resident worker now accepts a caller-anchored finite execution budget; original hosted run `38838859525` passes compile, 72 contracts and strict lint but fails test formatting. The exact formatting correction awaits verification. Next, bind the immutable boot/runtime/model inputs, a separate task grant and the guest TLS channel to that same worker. Production roots, current vendor appraisal and actual protected execution remain open; suitable confidential-computing hardware is unavailable. |
+
+### Finite resident execution candidate
+
+The existing resident worker uses one absolute parent deadline for preparation,
+all requests and event delivery. Its normal limits remain 2,400 seconds and 128
+requests; a caller may tighten them, not renew them. Each turn also retains its
+600-second ceiling and the idle limit remains 300 seconds. Waiting for an event
+receiver cannot restart the task clock or prevent owner cancellation.
+
+The original worker join, private-directory removal and cleanup receipts remain
+separate from execution expiry. Expiry before any owned directory is created
+does not produce a cleanup receipt; failure after creation follows the owned
+cleanup path. Cleanup failures remain failures and cannot free a quarantined
+execution slot by presenting expiry as success.
+
+The candidate adds 19 paused-clock and public-fixture tests alongside the existing
+resident, connection and diagnostic contracts. Original hosted run
+[`38838859525`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38838859525)
+on exact `b93f8b295e00d0ba22d72db60972116df2aaa1db` passes compilation,
+72 unique tests and strict lint: 30 resident cases (including the 19 new cases),
+30 connection cases and 12 diagnostic cases, with none failed or ignored. The
+run remains failed because three test-call layouts need formatting. Only those
+original formatter changes are applied; verification of the correction is pending.
+Original artifact and log ZIP SHA-256 values are respectively
+`a812305adf76f7fad8af36e4d509c938abb2236b3dcb6b341fae1fd51efe0800`
+and `dc31cba4613f2eacbab70c846b5a61f4cc6fb46a30ca36cccf8689ed0b225d28`.
+These fixtures do not execute a model or boot a guest. The budget is execution
+accounting, not admission, attestation or permission to release private input.
+
+The next end-to-end milestone is a public multi-turn task in a separately sealed
+guest image using this worker and a guest-terminated TLS channel. The current
+Code development VM has writable provisioning and administrative access, so it
+cannot supply that boundary unchanged. Boot and runtime integrity, explicit task
+authority and verified hardware appraisal are required before private remote
+execution can be accepted.
 
 Detailed earlier Android and storage checkpoints remain in the
 [pre-merge evidence ledger](https://github.com/VOLPAROSSA/volparossa/blob/2f3fa1179373b4e71ed42715bebff9bdc9c4a3ff/docs/IMPLEMENTATION_STATUS.md#android-to-core-integration-boundary).

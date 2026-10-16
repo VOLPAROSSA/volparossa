@@ -1,9 +1,14 @@
 //! A single same-owner IPC connection owns one resident native worker.
 //! Per-turn files and whole-process cleanup have deliberately different receipts.
 
+mod budget;
+#[cfg(test)]
+mod budget_tests;
 #[cfg(test)]
 mod tests;
 mod worker;
+
+pub(in crate::compute) use budget::SessionBudget;
 
 use std::{
     fmt, fs,
@@ -205,26 +210,29 @@ impl Resident {
         root: &Path,
         id: String,
         input: &[u8],
-        task_deadline: Instant,
+        budget: &SessionBudget,
         activity: &mut watch::Receiver<bool>,
     ) -> Result<Value> {
+        budget.check()?;
         ensure!(
-            self.turn < MAX_REQUESTS,
+            self.turn < budget.maximum_requests(),
             "compute_native_session_request_bound"
         );
+        let deadline = budget.turn_deadline(config.max_seconds)?;
+        budget::check_execution(deadline, activity)?;
         self.turn += 1;
-        let deadline = (Instant::now() + Duration::from_secs(u64::from(config.max_seconds)))
-            .min(task_deadline);
         let options = stage(config, root, self.turn, input)?;
         let request = request(&options, id)?;
+        budget::check_execution(deadline, activity)?;
         if self.worker.is_none() {
             resources::admission(config.model_profile, true)?;
-            ensure!(*activity.borrow(), "compute_owner_busy");
+            budget::check_execution(deadline, activity)?;
             self.hints = Some(native_cpu::SessionHints::bind(
                 &request.native_backend,
                 &options,
             ));
-            self.worker = Some(worker::Live::spawn(&options, root)?);
+            budget::check_execution(deadline, activity)?;
+            self.worker = Some(worker::Live::spawn(&options, root, deadline)?);
         }
         let report = self
             .worker
@@ -255,15 +263,14 @@ async fn serve(
     commands: &mut mpsc::Receiver<Command>,
     events: &mpsc::Sender<Event>,
     activity: &mut watch::Receiver<bool>,
+    budget: &SessionBudget,
 ) -> Result<()> {
-    let task_deadline = Instant::now() + Duration::from_secs(MAX_TASK_SECONDS);
+    budget.check()?;
+    let task_deadline = budget.deadline();
     let mut idle_deadline = Instant::now() + Duration::from_secs(MAX_IDLE_SECONDS);
     let mut ticks = tokio::time::interval(Duration::from_millis(250));
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    events
-        .send(Event::Opened)
-        .await
-        .context("compute_native_session_receiver")?;
+    budget::send_event(events, Event::Opened, task_deadline, activity).await?;
     loop {
         tokio::select! {
             biased;
@@ -273,8 +280,8 @@ async fn serve(
             },
             command = commands.recv() => match command {
                 Some(Command::Submit { id, input }) => {
-                    let value = resident.submit(config, root, id.clone(), &input, task_deadline, activity).await?;
-                    events.send(Event::Result { id, value }).await.context("compute_native_session_receiver")?;
+                    let value = resident.submit(config, root, id.clone(), &input, budget, activity).await?;
+                    budget::send_event(events, Event::Result { id, value }, task_deadline, activity).await?;
                     idle_deadline = Instant::now() + Duration::from_secs(MAX_IDLE_SECONDS);
                 },
                 Some(Command::Close) | None => return Ok(()),
@@ -288,35 +295,68 @@ async fn serve(
 
 pub(in crate::compute) async fn run(
     config: Arc<private_task::ExecutionConfig>,
-    mut commands: mpsc::Receiver<Command>,
+    commands: mpsc::Receiver<Command>,
     events: mpsc::Sender<Event>,
-    mut activity: watch::Receiver<bool>,
+    activity: watch::Receiver<bool>,
 ) -> Result<Value> {
+    let budget = SessionBudget::new(
+        Instant::now() + Duration::from_secs(MAX_TASK_SECONDS),
+        MAX_REQUESTS,
+    )?;
+    run_bounded(config, commands, events, activity, budget).await
+}
+
+/// Execute under an already anchored budget, not an admission or attestation permit.
+/// Configuration, preparation and all turns consume the same original deadline.
+/// Cleanup retains its separate existing ceiling and must finish before its receipt.
+pub(in crate::compute) async fn run_bounded(
+    config: Arc<private_task::ExecutionConfig>,
+    commands: mpsc::Receiver<Command>,
+    events: mpsc::Sender<Event>,
+    activity: watch::Receiver<bool>,
+    budget: SessionBudget,
+) -> Result<Value> {
+    budget.check()?;
     ensure!(
         !nix::unistd::geteuid().is_root(),
         "compute_unprivileged_user_required"
     );
     config.validate()?;
+    budget.check()?;
     ensure!(
         config
             .native_backend
             .supports_native_session(config.model_profile),
         "compute_native_session_unsupported"
     );
+    budget.check()?;
     let _lease = runtime_lease(&config.runtime_root)?;
+    budget.check()?;
     let root = PrivateRoot::new(&config.work_parent)?;
+    run_owned(&config, root, commands, events, activity, &budget).await
+}
+
+async fn run_owned(
+    config: &private_task::ExecutionConfig,
+    root: PrivateRoot,
+    mut commands: mpsc::Receiver<Command>,
+    events: mpsc::Sender<Event>,
+    mut activity: watch::Receiver<bool>,
+    budget: &SessionBudget,
+) -> Result<Value> {
     let mut resident = Resident {
         worker: None,
         hints: None,
         turn: 0,
     };
     let result = serve(
-        &config,
+        config,
         root.path(),
         &mut resident,
         &mut commands,
         &events,
         &mut activity,
+        budget,
     )
     .await;
     if let Some(worker) = resident.worker.take() {
