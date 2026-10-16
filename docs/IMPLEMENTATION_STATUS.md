@@ -32,18 +32,19 @@ The immediate milestones build on the retained candidates and evidence below:
 The prepared integration candidate combines native core `a410b015` and Storage
 `728db40b`. Their production changes occupy separate paths; the shared Quality
 workflow and license notices retain both sides. Only this status ledger required
-conflict resolution. The combined source still needs its own verification before
-acceptance for main. Original actual trials keep their dispatched
-sources; this preparation does not replace either trial or change its pins.
+conflict resolution. Its Quality run `38819466450` passes on candidate `dcdf7cfb`,
+but the failing actual Storage consumer trial still prevents acceptance for main.
+Original actual trials keep their dispatched sources; this preparation does not
+replace either trial or change its pins.
 
 | Workstream and repositories | Next demonstrable milestone | Dependencies and remaining blockers |
 | --- | --- | --- |
 | Integrated cache and Weather delivery — `volparossa`, `volparossa-weather` | Preserve the real provider sequence and both joined web-client proofs. | Core PR227, PR229 and PR230, and Weather PR14–PR18 are merged. Drizz.li run `38228710535` and Overmorrow run `38241212407` pass actual acquisition, separate protected cold transfers and exact initial/refresh UI checks. Independent reconstruction, Quality and CodeQL pass. Automatic acquisition, browser-initiated cold retrieval and the complete weather service remain open. |
 | Native Overmorrow — `volparossa`, `volparossa-weather` | Preserve actual app-triggered core delivery and verify expiry behavior with real products. | Actual `38717988016` passes on exact core `aac5be7f` / Weather `3b90442a`: initial cold peer retrieval, two cache-backed refreshes, joined native tables, background/resume and cleanup. Source Quality `38714089083` and CodeQL `38714082172` pass. Actual expiry, physical devices, iOS and the complete service remain open. |
-| Persistent private storage maintenance — `volparossa`, then Image/Cloud | Complete consumer publication, repair and restoration after provider loss. | The listener correction passes targeted run `38815471227`, including a real Linux MPTCP rejection/reuse test. Actual `38816407455` on `728db40b` instead fails at Image FINALIZE fragment 0/copy 1 while reading the provider challenge; Cloud publication is not reached. Its standalone core lifecycle and two restores pass, but consumer repair, restoration and remote retirement remain unproved. Trace the challenge stall without extending the operation deadline. Earlier `38804192575` retains its separate unresolved flow-acquisition failure. |
+| Persistent private storage maintenance — `volparossa`, then Image/Cloud | Complete consumer publication, repair and restoration after provider loss. | Actual `38851643524` on `878c2aa9` passes the base maintenance lifecycle but fails Cloud FINALIZE during flow acquisition; the prior Cloud APPEND failure and Image challenge stall remain distinct. The new helper diagnostic records one connection poll timeout, without request/fragment binding or a proven network cause. Source run `38850938318` passes compilation, 33 Rust and 185 Python tests, strict lint and formatting. Investigate connection setup and failure cleanup without extending deadlines or treating diagnostics as acceptance. Consumer remote cleanup remains unproven. |
 | Automatic private uploads — `volparossa`, Image/Cloud | Enroll a new encrypted upload under finite service authority, then resume maintenance and restore it after provider loss. | Core PR233 adds an absolute authorization ceiling; Image PR7 forwards it without rebasing. Cloud PR14 implements finite shared admission budgets, durable reservation/enrollment, restart reconciliation and an encrypted empty catalog for a first upload. Actual OpenCloud SDK upload/list/read checks pass with a synthetic core; this does not prove peer maintenance. Join these candidates to the real upload-to-repair-to-restore trial after the existing storage milestone; its pinned consumers stay unchanged. |
 | Native coding execution — `volparossa`, `volparossa-code` | Build on the accepted bounded coding lifecycle with native editor operation and protected remote execution. | Actual `38824828727` passes on Code `fd4ff968` / core `7d0f9f0b`: two reads, approved edit/test, independent verification, task-resource and input-integrity checks, and cleanup. Code PR11 is merged, retaining that immutable core dependency; the native/Storage core candidate is not merged into core `main`. General coding quality, competitive performance, native editor UI and protected-peer execution remain open. Earlier failures retain their original outcomes. |
-| Protected remote compute — `volparossa`, then Code/Browser | Join an authorized immutable guest, the resident coding worker and a guest-terminated TLS 1.3 session. | PR258's authenticated refusal path has actual route evidence; PR262 integrates explicit same-connection key confirmation. The resident worker now accepts a caller-anchored finite execution budget; original hosted run `38838859525` passes compile, 72 contracts and strict lint but fails test formatting. The exact formatting correction awaits verification. Next, bind the immutable boot/runtime/model inputs, a separate task grant and the guest TLS channel to that same worker. Production roots, current vendor appraisal and actual protected execution remain open; suitable confidential-computing hardware is unavailable. |
+| Protected remote compute — `volparossa`, then Code/Browser | Join an authorized immutable guest, the resident coding worker and a guest-terminated TLS 1.3 session. | PR258 has refusal-path evidence and PR262 adds same-connection key confirmation. The resident worker budget passes compile, 72 contracts, lint and formatting in `38839509355`. Public immutable boot `38860629051` now passes on exact `888d79fc`: verified read-only boot, write denial, fixed entrypoint, corrupted-disk rejection and cleanup, alongside 179 contracts. This does not execute a model or establish private/TEE protection. Next join two public model turns to one guest TLS session under a separate finite task grant and an explicitly sized model profile. Production roots, vendor appraisal and protected execution remain open; suitable confidential-computing hardware is unavailable. |
 
 ### Finite resident execution candidate
 
@@ -65,11 +66,22 @@ resident, connection and diagnostic contracts. Original hosted run
 on exact `b93f8b295e00d0ba22d72db60972116df2aaa1db` passes compilation,
 72 unique tests and strict lint: 30 resident cases (including the 19 new cases),
 30 connection cases and 12 diagnostic cases, with none failed or ignored. The
-run remains failed because three test-call layouts need formatting. Only those
-original formatter changes are applied; verification of the correction is pending.
+run remains failed because three test-call layouts need formatting. The correction
+changes only those three layouts and this ledger; production code, workflow and
+dependencies are unchanged.
 Original artifact and log ZIP SHA-256 values are respectively
 `a812305adf76f7fad8af36e4d509c938abb2236b3dcb6b341fae1fd51efe0800`
 and `dc31cba4613f2eacbab70c846b5a61f4cc6fb46a30ca36cccf8689ed0b225d28`.
+
+Corrected run
+[`38839509355`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38839509355)
+on exact `372cad8a58731ca697814763edac94110ce9796b` passes compilation,
+the same 72 unique tests, strict lint, formatting and the unchanged-source check.
+No test fails or is ignored. The retained source manifest matches the six
+candidate files and four unchanged dependency blobs. Original artifact and log
+ZIP SHA-256 values are respectively
+`d84cc7ca0a65e1b0a3853d878847e5869895fbb508dc551deb80f593d448fdf7`
+and `cef803b69a0d16f0bf5b934af6e8c600641c168c5d325afb9802d22911a7fcf0`.
 These fixtures do not execute a model or boot a guest. The budget is execution
 accounting, not admission, attestation or permission to release private input.
 
@@ -80,11 +92,488 @@ cannot supply that boundary unchanged. Boot and runtime integrity, explicit task
 authority and verified hardware appraisal are required before private remote
 execution can be accepted.
 
+### Public immutable boot prerequisite
+
+The next candidate seals a derivative of the pinned Debian image with dm-verity
+and builds a fixed minimal initrd from its authenticated files and three pinned
+Debian packages. Both guest disks are read-only. The bootstrap reads every
+authenticated data block before mounting the root, checks a real write denial
+at a known writable-by-root file, and invokes only the fixed test entrypoint.
+The separate negative boot changes one data byte after sealing and requires an
+actual failed read with the kernel's corruption status; a timeout is not proof.
+
+The fixture has no guest network, SSH, administrative shell or original cloud
+initialization. Its contract suite covers public archive, parser, process and
+bootstrap behavior; image construction and actual boots require the separate
+explicit hosted workflow. This first gate contains no resident worker, model or
+private input. Its build manifest records evidence, not independent production
+approval or hardware attestation. The subsequent worker/channel integration
+remains the end-to-end milestone above.
+
+Original push
+[`38842022060`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38842022060)
+on `bc1cd6fd7685a57d2cda118eb08ec523e129eaf4` fails before any job starts:
+GitHub rejects `runner.temp` in job-level `env`. No hosted test or boot runs and
+no artifact is produced. The correction derives the same temporary evidence
+path from shell `RUNNER_TEMP` inside each step; all image and bootstrap code,
+tests and input pins remain unchanged.
+
+Corrected source run
+[`38842199462`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38842199462)
+on exact `f01891b7ea8927abb03e7bc4c8713df637d6ae04` passes all 52 contracts,
+syntax, ShellCheck and source checks. The ten changed blobs and seven unchanged
+dependencies match its manifest. Original artifact and log ZIP SHA-256 values
+are `ac50a27cad28afe425d38ff63caed80996c6346bf296d095a64b9d5f30e158cd`
+and `58b99b377650c10b4a34a8c44b77fa73006894e395c6e33f45c3a962a64a37ed`.
+
+The first actual hosted trial,
+[`38842577830`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38842577830),
+uses that same source and fails at `input_download` with `download_redirect`.
+It does not reach image extraction or either boot. Completed tool processes are
+joined, their original process groups are absent, scratch removal succeeds,
+the original KVM ACL is restored and compared, and source identity is unchanged.
+Original boot-artifact and log ZIP SHA-256 values are
+`24e6ff988aa67a3d37a47bf6266d579d941e225c9e3ed51a3846e4579add4bf5`
+and `53470c9e06b987467a49ba9dd455bdf11531a27c109eab435c87f65796716a4f`.
+The original receipt does not retain the redirect destination. A separate live
+HEAD request observes Debian redirecting the pinned image to the same path on
+`saimei.ftp.acc.umu.se`. The narrow correction permits that reviewed HTTPS
+mirror with unchanged path, query, input hashes, size bounds and deadlines;
+four additional inert tests cover that exception and rejected variants. Actual
+boot verification remains open.
+
+The mirror correction passes original source run
+[`38843228942`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38843228942)
+on exact `566c30f30098a5448fe016eab503f6961cfe3351`: 36 image/runner and
+20 initrd/bootstrap tests, without failures or skips. Syntax, ShellCheck and
+source checks pass; all ten changed blobs and seven unchanged dependencies
+match the retained manifest. Original artifact and log ZIP SHA-256 values are
+`a48f6ab780f32bdd291d63ac8d0995a7c0e73bad254c26f25ddf77c83adc5f29`
+and `188d19a16d828347cba27957535ed51c38e8bbc23ebdf637cfe67a0bac5b9ef6`.
+
+The next original actual trial,
+[`38843802439`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38843802439),
+uses that same source and passes all four pinned input downloads and hash checks,
+then fails at `image_extract / command_failed`. Its receipt does not identify the
+failed guestfish call. No sealed image, minimal initrd or public guest boot is
+verified. Owned child joins, process-group absence and scratch removal are
+reported; the KVM ACL restore/comparison and source checks pass. Original boot
+artifact and log ZIP SHA-256 values are
+`a888c18407b94f509a712528ed2a24f75b332d3ea52f9ba9015e31dcd85801a9`
+and `6791904f88c09bd084a787b052fe05199d0efa23ec0386197eb6885e0e7263ad`.
+
+Source review separately identifies an inspection-lifetime defect: the second
+guestfish process requests inspection metadata without inspecting its own
+handle. [libguestfs caches that state per handle](https://libguestfs.org/guestfs.3.html#inspection).
+The correction inspects and verifies the same single root in that second handle,
+retaining the Debian version, filesystem, input-hash and size checks. A closed
+callsite and numeric exit status identify future completed-command failures
+without exporting arguments, paths or raw tool output. Timeout and cancellation
+do not report cleanup's termination signal as an original command result.
+Seven new regressions cover handle-local inspection, changed or ambiguous roots
+and bounded failure records; the local suite passes 43 image/runner and 20 initrd
+cases. Corrected source run
+[`38844660428`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38844660428)
+on `9beb6d3f8cb1b1b70d94f6a355e65f5b5fb8cbd2` passes those 63 contracts,
+syntax, ShellCheck and source checks. Original artifact and log ZIP SHA-256 values
+are `0f947a57c547ea4d38a9bf2261720a04687d386aa1f0c89cc14f70bc10c92e73`
+and `cb236f022845e349d81e5d1ae0de51b9bfe21c164614436f63898246f365037d`.
+
+Actual trial
+[`38844838861`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38844838861)
+on the same source fails at the **first** guestfish call: `image_extract /
+command_failed`, operation `inspect_roots`, natural exit status `1`. It never
+reaches the corrected second handle, a sealed image or the public boot pair.
+The original receipt does not distinguish appliance preparation, launch or
+inspection failure. Child joins, process-group absence and scratch removal are
+reported; KVM ACL restoration/comparison and source checks pass. Original boot
+artifact and log ZIP SHA-256 values are
+`ad098b640fe82f4ce848c4201b51748b8c41e4072f50f92978090d396dbffca2`
+and `64fafca3301f45b3054efd31f9866d1fb5559c23f82fa1108fbb9926e53576d5`.
+
+The next candidate adds a bounded host preflight before downloads and a closed
+classification of the failing command's stderr. The preflight reports only
+kernel/module readability counts and KVM API access, not paths, kernel selection
+or successful guest creation. Exact upstream error lines produce a fixed label;
+unknown or ambiguous output stays explicit and raw output remains private.
+All input pins, deadlines, boot criteria and process cleanup remain unchanged.
+Thirteen new inert cases cover these observations and their privacy bounds.
+Source run
+[`38846464802`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38846464802)
+on `3279be38602fa38ac20649c997e8359182864058` passes 76 unique contracts,
+syntax, ShellCheck and source checks. Original artifact and log ZIP SHA-256 values
+are `643dad46262c92dd5c1672b363431a05748248f8bafbbf585546e235c626f059`
+and `88f2bfcb69a1d65fcf1d019fcb355ffefe77c2720da3ac8151ffb06deaddcf4b`.
+
+Actual run
+[`38846723637`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38846723637)
+on the same source again fails at `inspect_roots` with exit `1` and an
+unclassified stderr result. Its preflight finds no readable kernel among two
+candidates: one is missing and one is denied; both module indexes are readable
+and KVM reports API 12. This establishes an availability problem for the build
+appliance, not the kernel selected by supermin or the exact cause of the exit.
+No image-build, initrd or boot-pair receipt is produced. Child joins, process-group
+absence, scratch removal, KVM ACL restoration/comparison and source checks pass.
+Original boot artifact and log ZIP SHA-256 values are
+`bc5c29ed881b6c1cb6f37122efb94e86aad914f5c1a8fbb75be4b9ca3bd116ea`
+and `feaf84655d61fd4c4a0aeaabb0e90d5effe7d048bec390ce3a7a71c5232b3e7d`.
+
+The correction gives only the hosted libguestfs appliance an explicitly selected,
+bounded copy of the runner's existing kernel and its matching modules. The fixed
+privileged operation only reads that kernel into a new, user-owned private file;
+Guestfish remains unprivileged and the final Debian guest keeps its pinned kernel.
+Source metadata, copied bytes, embedded release and matching module index are
+checked before adoption into the existing cleanup scope. No host kernel permissions
+change, no substitute kernel is installed, and the original 1,200-second budget
+starts before staging. All 96 inert contracts pass locally (76 runner/image and
+20 initrd/bootstrap), including 20 new staging and closed-error cases. Original
+hosted source run
+[`38848792036`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38848792036)
+on `bd0e929a07c3790c9794aa09ec21b9db735d8f3b` passes those same cases, syntax,
+ShellCheck and unchanged-source checks. All ten source blobs and seven unchanged
+dependencies match. Original artifact and log ZIP SHA-256 values are
+`2fe024b71b4a46b1804e812eff3f64d6186bda3d4f43fac2d1a9abfd152ba35b`
+and `9fa10ab2388a76a3587b004870bc3498d0742294509584f387d84dab202a9311`.
+
+Actual run
+[`38849036346`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38849036346)
+on that same source confirms kernel staging and adoption, then fails at
+`inspect_roots` with exit `1` and the closed class `kvm_unavailable`. The staged
+runner kernel is `6.17.0-1022-azure`, 16,017,480 bytes, SHA-256
+`195c688fb2b9cb0b7e27d66d11bbf618dcdc5db1a380ac14e5a2ffac766e9681`;
+the final Debian kernel pin is unchanged. KVM API 12 is observable, but the
+original receipt contains no VM-creation result or errno. libguestfs's detection
+has not enabled KVM; this does not identify a hardware, permission or QEMU cause.
+No build, initrd or boot-pair receipt exists. Child joins, process-group absence,
+payload/staging cleanup, KVM ACL restoration/comparison and source checks pass.
+Original boot artifact and log ZIP SHA-256 values are
+`de52818d697c217a64365a08f76ca65e93841000d6b5cb161061966e8cc576e2`
+and `1f9ad26f55685afe1ddea640c485283c9c78f74adb2482a2074c866bc1ff75e3`.
+
+The candidate adds a bounded, paused QEMU check before downloads, using the
+same hash-bound executable as libguestfs and no disk or network. It requires
+strictly parsed QMP KVM `present` and `enabled` results, a natural zero exit and
+the existing process cleanup. Only closed diagnostic fields enter the existing
+build or cleanup receipt. The original 1,200-second budget remains unchanged;
+there is no software-emulation fallback or privileged guestfish execution.
+All 116 inert cases pass locally (96 image/runner and 20 initrd/bootstrap),
+including 20 new QMP cases; shell syntax, ShellCheck and workflow syntax checks
+also pass.
+
+Original source run
+[`38850896646`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38850896646)
+on exact `b233f8865725997c511fe1940c6b5e699bb3edd3` passes all 116 unique
+contracts with no failures or skips, syntax, ShellCheck and source preservation.
+All ten changed source blobs and seven unchanged dependencies match the retained
+manifest. Original contract-artifact and log ZIP SHA-256 values are
+`09b30d53d8b44aa57e36314622803836d31c22f6bd184707df9c32b69b38f021`
+and `31d0085543495f88c7052a0954035d6510a3dcc2507597815bc98d4e8dfae4e6`.
+
+Actual run
+[`38851183384`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38851183384)
+on the same source passes that strict QMP check: both `present` and `enabled`
+are true, with a natural zero exit and joined process. The selected QEMU binary
+has SHA-256 `8a35ccba41582fc6c38b9df85fc9e35fa1d42f414d2d7d8090ee9b2f5e7c0854`.
+Kernel staging and adoption also pass. The subsequent first libguestfs call
+still fails at `image_extract / inspect_roots`, exit `1`, class `kvm_unavailable`.
+This is not evidence that the runner cannot use KVM: the original internal
+probe uses a different launch profile, and its underlying failure is not retained.
+
+No build, initrd or public boot-pair receipt exists. Child joins, process-group
+absence, scratch/staging removal, original KVM ACL restoration/comparison and
+source checks pass. The whole build step lasts 21 seconds; the receipt does not
+export a monotonic start/end pair. The 1,200-second budget remains source-bound.
+Original boot-artifact and log ZIP SHA-256 values are
+`1eeaa0bf290d53b760702c31a6b294ad2d2d36012267f588b0b16730320086d9`
+and `495f94e5b1e78ef66bfac0760e64099d5f4744e35f196b0207bb70cb2fa56763`.
+
+The new bounded diagnostic observes the original libguestfs QMP subprocess,
+whose stderr the [upstream command lifecycle](https://github.com/libguestfs/libguestfs/blob/v1.52.0/lib/command.c)
+otherwise removes without being read by that probe. A source-bound exec wrapper
+retains at most two checked stderr inodes, then replaces itself with the same
+validated QEMU executable. Arguments, environment, streams, process groups and
+cleanup remain unchanged; Python's startup signal changes are restored before
+exec. The interpreter, wrapper, builder source and real QEMU are checked.
+
+After the original child is joined, only bounded closed stderr classifications
+and exact `query-kvm` cache booleans enter the existing receipts. Observations
+remain explicitly uncorrelated with individual queries. Failed or expired
+re-observation clears earlier fields; missing data cannot become a kernel cause
+or replace the original failure. No raw stderr or paths are exported, no extra
+QEMU process is started and no cache result is changed.
+
+All 140 inert cases pass locally and in original source run
+[`38853517990`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38853517990)
+on exact `e572cf4203c5bd99243ab437845d0947e99dff34`: 120 image/runner cases,
+including 24 new cases, and 20 initrd/bootstrap tests, with no failures or skips.
+Syntax, ShellCheck and source checks pass; the retained manifest matches all ten
+candidate blobs and seven unchanged dependencies. Original contract-artifact
+and log ZIP SHA-256 values are
+`903b1c7c84b188f07191b54596fe8436174c00a4dcef2635fabba42b90d5382e`
+and `656b3869849dae1719ee7b0d22758a653760606310209f8057262dc1b451e1bc`.
+
+Actual run
+[`38853721676`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38853721676)
+uses that exact source and again passes the strict direct QMP preflight, with
+KVM present and enabled. Both retained original libguestfs probes instead report
+`kvm_permission_denied`; its `query-kvm` cache records `present=true` and
+`enabled=false`. The two stderr observations remain uncorrelated with individual
+queries. Their current classification combines permission-denied messages from
+device opening and later initialization; it does not establish a syscall, errno
+or underlying permission cause.
+
+The first inspection still fails with `kvm_unavailable`, before sealed-image
+construction or either public boot. The build step lasts 18 seconds. The original
+1,200-second budget is unchanged; no monotonic start/end pair is exported.
+Child joins, process-group absence, scratch/staging removal, KVM ACL restoration
+and comparison, and unchanged-source checks pass. Original boot-artifact and
+log ZIP SHA-256 values are
+`d251f3025f71a4ca32ae8e4e57190ae74d9a7ab36d9956be44975bc2c49b2356`
+and `1115cafba49f4a76bb46cd31b15c9aa874021af98bda1c0fd7597c5e869baf45`.
+
+The diagnostic candidate now separates exact open and initialization permission
+messages, including `EACCES` versus `EPERM`. Immediately before the same original
+QEMU exec, it observes only device opening and `KVM_GET_API_VERSION`, never VM
+creation. It compares credentials, capabilities, seccomp/NoNewPrivs, the LSM
+label and device metadata/ACL with a private parent baseline taken after the
+strict preflight. Only `equal`, `different` or `unavailable` is exported; values,
+labels and their private digests stay in owned scratch. Missing observations do
+not compare equal. Sampling uses only the same two reserved probe slots.
+
+All 156 inert tests pass locally and in original source run
+[`38855265469`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38855265469)
+on exact `123b61a07ae474a3b477f75095abd738cc52a3f0`: 136 image/runner cases,
+including 16 new cases, and 20 initrd/bootstrap cases, with no failures or skips.
+Syntax, ShellCheck and source checks pass; all ten source blobs and seven
+unchanged dependencies match. Original contract-artifact and log ZIP SHA-256
+values are `89a60286f711788af00ca88c972d72caa0606cad854b1271e760452ee008dd85`
+and `cad388276e54699fc5249623662aa9eb292af7f2bb031269b9abc11f8fca33c1`.
+
+Actual run
+[`38855410093`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38855410093)
+uses that same source and fails the first inspection in a 19-second build step.
+The strict QMP check again passes with KVM present and enabled. Both original
+probe slots subsequently record `EACCES` for device opening and initialization,
+with KVM access already denied in their wrappers before QEMU exec. All six
+measured context components match the private parent baseline. That baseline was
+taken **after** the successful direct VM had exited: equality cannot rule out a
+permission change during that VM's lifetime, and does not cover every security
+mechanism. The original cache records KVM present but disabled. Query correlation
+remains false.
+
+Only the cleanup receipt is produced. Child joins, process-group absence,
+scratch/staging removal, original KVM ACL restoration/comparison and source
+checks pass; the original 1,200-second budget remains unchanged. Original
+boot-artifact and log ZIP SHA-256 values are
+`a72ca1a01b25e9a1de9298a7a673c3f9496e128e25e6af3c62b3bb9392743241`
+and `d1db17da0f2f46d32429fc486a16b4bb50d8d16eca17882c72a0f4783ea8d937`.
+
+There is a concrete permission-lifecycle risk in the one-time named-user ACL:
+[KVM emits device change events on VM creation and destruction](https://github.com/torvalds/linux/blob/v6.17/virt/kvm/kvm_main.c#L5880),
+and [systemd's device ACL processing can remove named-user entries](https://github.com/systemd/systemd/blob/v255/src/shared/devnode-acl.c#L17).
+This explains a possible mechanism, not a proven cause of the original trial.
+The candidate correction now uses the existing device group's permissions for
+only the builder process tree, retaining the same non-root user. A read-only
+preselection validates the named `kvm` group and root-owned character device;
+execution checks real, effective and saved user/group IDs, the ACL group-object
+and effective mask, and any named-caller entry that would take precedence. Only
+the execute launch uses the temporary primary group. The original prepared
+source and absolute deadline remain bound across that launch, and the original
+ACL restoration/comparison remains required. There is no persistent group
+membership, udev-rule change, broad device permission or root guestfish execution.
+
+All 171 inert contracts pass locally: 151 image cases, including 15 new cases,
+and 20 initrd cases. Independent review passes 26 targeted launch, staging and
+failure/cleanup cases; syntax, ShellCheck and diff checks also pass. These tests
+mock device and privilege operations; they are not actual guest-boot evidence.
+
+Original source run
+[`38856930029`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38856930029)
+on `5aed15f252f161252b8707e965d6939b3f8c42bd` fails one of the 151 image tests;
+the initrd suite does not run. The new expiry test incorrectly assumes that a
+one-nanosecond start is expired: on this fresh runner, uptime is below the
+1,200-second build budget. This is a test-clock error, not demonstrated failure
+of the production launch guard. Source binding, syntax, ShellCheck and unchanged
+source checks pass. Original contract-artifact and log ZIP SHA-256 values are
+`a9c463e64ea2a41db965f6c15e8f243ca818cbb21cc28fea55c7016974943840`
+and `e57ae98704d204672ed34bbaf4cee69f5309655ff0d51c9c9d1383595a6eac37`.
+The correction makes the test clock explicit and checks both early-uptime
+admission and expiry of the original budget; it does not change production code
+or deadlines. Corrected source run
+[`38857241396`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38857241396)
+passes on exact `b0a48354a7d668bcf761bfbb7322f53fc50b245e`: all 171 unique
+contracts, syntax, ShellCheck, ten source blobs and seven unchanged dependencies.
+Its original artifact and log ZIP SHA-256 values are
+`be49852fdf4b7b949e3741251a90aca2339c3fd77d5433c06f3caed9b2efb5cd`
+and `c1988d8452bbef25dff9d5d2d87f9f9ff32c9d4c61c03c284b851f3fa0b081f4`.
+
+Actual run
+[`38857430394`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38857430394)
+uses that same source but fails before builder execution: the same-user,
+different-group `sudo` launch reports that a password is required. No process
+launch, KVM, boot or cleanup JSON receipt exists, so this run does not test the
+group remedy itself. The exact sudoers rule was not observed. Preparation,
+kernel-copy completion and ID selection precede the failed launch by source
+order, not by independent staging receipts. Unadopted staging cleanup, original
+KVM ACL restoration/comparison and unchanged-source checks pass. This is not a
+generic child-join receipt or successful boot. Original boot-artifact and log ZIP
+SHA-256 values are
+`82641a1bfa06527dd5f2f8287e0a649616911e87871e7012bfff6a4130e0c24f`
+and `c753a7dd6b19b2f60c91a070293b6a074a38a0b76d64174743d3fc9fb451d24e`.
+
+The launcher correction now uses the runner's ordinary authorized root launch
+only for the fixed system `setpriv` executable. Before running Python, it drops
+to the same non-root UID and validated primary KVM group, clears supplementary
+groups and capability sets, and enables no-new-privileges. The builder rechecks
+that restricted state before creating work or adopting staging. This follows
+[the upstream privilege-drop interface](https://github.com/util-linux/util-linux/blob/v2.39.3/sys-utils/setpriv.1.adoc)
+and adds no permanent permission or sudoers change. All 176 inert contracts pass
+locally: 156 image cases, including five new privilege-drop cases, and 20 initrd
+cases. The launch-argument test uses an inert `sudo` stub, not actual privilege
+execution. Hosted source run
+[`38858249218`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38858249218)
+passes on exact `104667a57e12ba0ff8cf0a08dae0ea9834097005`: the same 176
+unique contracts, syntax, ShellCheck and source preservation, with ten source
+blobs and seven unchanged dependencies verified. Original artifact and log ZIP
+SHA-256 values are
+`dfb489b3d2da2f133f85265da32d808f4ac29030fe4f8df3f7216403821c0845`
+and `4349060d83d2d4b5dd81ff43d576cad6879ea0ad522c4e6f5c9de90fcd7b2e0d`.
+
+Actual run
+[`38858400872`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38858400872)
+uses that same source. Its launch receipt confirms the same unprivileged user,
+validated primary KVM group, cleared supplementary groups and capability sets,
+and no-new-privileges. The strict same-binary QMP check passes; both original
+probe wrappers can access the KVM API, and the retained probe cache reports KVM
+present and enabled. The latter is still an uncorrelated diagnostic observation,
+not proof of a particular command's successful appliance boot.
+
+The build step fails after 45 seconds at `image_extract / io_error`, without a
+command-specific failure. No sealed image, initrd or successful boot pair is
+produced. Child joins, process-group absence, owned scratch removal, staging
+cleanup, original ACL restoration/comparison and source preservation pass.
+The contracts job again passes all 176 cases. Original boot-artifact and log ZIP
+SHA-256 values are
+`e72d36dc8ed24b66292078089545f1590053bcf2791c1ba6fbe4d102bfaf56b1`
+and `561f2ff13000f048a56bccc7c464ee2df2730a396b622ab979045402436e9da9`.
+
+Separate source reproduction identifies a missing parent: `extract_boot` calls
+the bounded archive extractor for `root-tree/usr` without first creating
+`root-tree`. A tiny public tar fixture using the real extractor reproduces
+`FileNotFoundError` on the previous source; this does not establish the exact
+exception location in that original actual run. The correction creates only
+the new parent at mode `0700`; it does not enable recursive creation or reuse
+an existing directory, file or symlink. The existing inspection test no longer
+mocks this extraction boundary. All 178 inert contracts pass locally (158 image,
+20 initrd), and the two new filesystem cases pass independent review. Hosted
+source run
+[`38859500185`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38859500185)
+passes on exact `5e1f68af894b6b0be41cd8388baabf72a5928108`: all 178 unique
+contracts, syntax, ShellCheck, source preservation and the same ten source/seven
+dependency bindings. Original artifact and log ZIP SHA-256 values are
+`3bf1c99e5ea8cdb0154139dc33a8f07c7aa9bac35520fa148aa13431e5699bb1`
+and `c7c561b88924e7c8d7c742d6191589ca2afb20b5c9c26feb3cbe55c635f333c0`.
+
+Actual run
+[`38859687975`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38859687975)
+uses the same source and now produces the sealed-image and minimal-initrd
+receipts. The guest bootstrap executes on the pinned kernel and emits
+`boot_rejected / verity_open`. That stage includes mapper creation, node setup,
+read-only and size checks; the original receipt does not identify a particular
+failed suboperation. No successful boot or corrupted-image receipt exists, and
+the post-boot input rehash is not reached. All proof flags remain false.
+
+The build receipt binds the fixed image/packages and a 3,085,959,168-byte root;
+the 7,111,234-byte initrd has 38 recorded closure entries. The build step takes
+74 seconds within its original limits. All 178 contracts, launch checks, child
+joins, process-group absence, scratch/staging cleanup, original ACL restoration
+and source checks pass. Original boot-artifact and log ZIP SHA-256 values are
+`e60b5d1d69a4aedc7eb89de0b740803a3e8eca95494bbabefb19af88516cf0ab`
+and `e93dcc141adcf0518c2597dc631614575695b1302fcfb9cc07787fcc89204ab0`.
+
+Source review independently identifies an invalid option in the guest command:
+the pinned veritysetup version does not support `--batch-mode`. Its
+[complete option table](https://github.com/mbroz/cryptsetup/blob/v2.7.5/src/veritysetup_arg_list.h)
+and [parser](https://github.com/mbroz/cryptsetup/blob/v2.7.5/src/veritysetup.c)
+reject unknown options before opening a mapping. Removing that option preserves
+the fixed devices, root hash, salt, block counts and all integrity checks; it
+does not prove the exact historical failure suboperation. The corresponding
+Debian source packaging has no patch changing this parser. The manual's listing
+of the option conflicts with the executable's source and is not relied on here.
+The new inert shell test captures the exact bootstrap command's arguments and
+preserves both successful and failed command status without executing a device
+tool. It fails with the former extra option and passes after its removal; all
+179 contracts pass locally (158 image, 21 initrd). Hosted source run
+[`38860475110`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38860475110)
+passes on exact `888d79fcbc055a3481e8fa244077b880196bd1e7`: all 179 unique
+contracts, syntax, ShellCheck, source preservation and the ten source/seven
+dependency bindings. Original artifact and log ZIP SHA-256 values are
+`dfec7d5dddda62cdcda823f991b21a448c3d59df9debeac4a2c14b97453b9eb1`
+and `c69a7e8ae96503a514d08f3f8f01a2cacfc187d82c1979df8f7b29da6f5d0faf`.
+
+**The public immutable boot prerequisite passes** in original actual run
+[`38860629051`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38860629051)
+on that same source. The intact guest reports `boot_verified / complete`, with
+verified data reads, a read-only root, a real denied write and invocation of the
+fixed entrypoint. The separately corrupted disk reports
+`integrity_failure / verity_read`: the bootstrap requires both a failed mapped
+read and the kernel's `C` status before filesystem mounting or entrypoint use.
+
+All five original JSON receipts are present. The build and 38-entry initrd
+closure bind the pinned inputs and rendered bootstrap. Completion occurs only
+after all four boot-input files are rehashed and source/appliance bindings are
+rechecked; there is no separate exported post-boot hash measurement. Child joins,
+process-group absence, owned scratch/staging cleanup, ACL restoration/comparison
+and source preservation pass. The actual build/boot step takes 94 seconds within
+the unchanged limits; all 179 contracts also pass. Independent readback of the
+original receipts, source blobs, template hash and archives agrees. Original
+boot-artifact and log ZIP SHA-256 values are
+`e3872be8670163ba0e976aea0a153e6dd963f1ba04308c1075942748f2aaf5c8`
+and `c5f20723205b46f2a0b985a4a124fde5788833aefb3a08876df9016ce781ac14`.
+
+This accepts the public boot fixture, not model/worker execution, private-input
+release, hardware attestation or independent production approval. Earlier
+failures keep their original outcomes. The next slice needs two real public
+model turns in one resident session, guest-terminated TLS and a distinct finite
+task grant; quote confirmation is not task authority. Give that model workload
+its own explicit image, memory and execution profile instead of silently
+reusing this small boot-only fixture's limits. Protected execution remains open.
+
 Detailed earlier Android and storage checkpoints remain in the
 [pre-merge evidence ledger](https://github.com/VOLPAROSSA/volparossa/blob/2f3fa1179373b4e71ed42715bebff9bdc9c4a3ff/docs/IMPLEMENTATION_STATUS.md#android-to-core-integration-boundary).
 The latest completed outcomes are summarized below.
 
 ### Latest completed integration evidence — 15–16 October
+
+- **Storage reaches Cloud publication but still fails consumer acceptance.**
+  [Actual `38838512301`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38838512301)
+  fails on exact `9209c6feced0db5da5cae614775769c60b2ff11b`, with unchanged
+  Image `9694a2b9` and Cloud `47b0f03b` pins. Cloud APPEND fragment 0/copy 1
+  reports `CONTENT_UNAVAILABLE` at `stream_open`, before TLS or a provider
+  challenge. Three flow-acquisition rounds retain first `helper_kernel` and
+  last `helper_cleanup_incomplete`; no kernel operation or errno is established.
+
+  Original base Storage components still pass strict lifecycle, restore, delete
+  and private-cleanup validation, with zero usage at all three base providers.
+  The original combined consumer report remains failed. Local fixture cleanup,
+  guest-owned network cleanup and QEMU exit/join are supported; consumer provider
+  usage and remote cleanup are not. Reaching Cloud publication does not itself
+  prove complete Image maintenance.
+
+  The new eight-row correlation receipt validates and confirms collector
+  disarm/join, but remains incomplete and is not bound to the failed
+  fragment/copy. It is diagnostic evidence, not proof of cause or acceptance.
+  Original artifact and log ZIP SHA-256 values are
+  `533cdd4463ae281c4e11ffeb3d32c7dc65ee6432b80629184295e04deb71490c`
+  and `400c49417576e1c455bced674b73b37e7df6b8033f607c18dc00d55636843eef`.
+
+  The next diagnostic slice will preserve a closed socket-operation, failure
+  class and optional errno inside the credential- and request-bound helper
+  response, before the existing generic error conversion. A bounded projection
+  of the fixture's private helper log can retain only those fields after cleanup,
+  without exporting raw logs or changing public RPCs, consumer schemas, app pins,
+  retries or cleanup decisions. This remains planned, and the separate receipt
+  will not claim a binding to a particular Cloud fragment/copy.
 
 - **Storage retains its base lifecycle proof but stalls during Image publication.**
   [Actual `38816407455`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38816407455)

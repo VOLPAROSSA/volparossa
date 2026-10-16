@@ -1,0 +1,271 @@
+name: Public immutable guest boot prerequisite
+
+on:
+  push:
+    branches: [feature/protected-resident-image]
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: Source contracts or one explicit public-only KVM boot trial
+        required: true
+        type: choice
+        default: source-contracts
+        options: [source-contracts, public-verity-boot]
+      expected_source:
+        description: Exact reviewed commit required for a public boot trial
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protected-resident-image-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  SOURCE_BASE: 372cad8a58731ca697814763edac94110ce9796b
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  contracts:
+    if: >-
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.ref == 'refs/heads/feature/protected-resident-image'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind exact public fixture source and unchanged core
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          git merge-base --is-ancestor "$SOURCE_BASE" HEAD
+          umask 077
+          mkdir protected-image-contracts
+          python3 -B - <<'PY'
+          import json, os, pathlib, subprocess
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          allowed = {'.github/workflows/protected-resident-image.yml',
+              'THIRD_PARTY_LICENSES.md',
+              'docs/IMPLEMENTATION_STATUS.md',
+              'packaging/protected-resident/init',
+              'packaging/protected-resident/entrypoint',
+              'tests/integration/protected-resident-image.py',
+              'tests/integration/protected-resident-image-pins-v1.json',
+              'tests/integration/test-protected-resident-image.py',
+              'tests/integration/protected-resident-initrd.py',
+              'tests/integration/test-protected-resident-initrd.py'}
+          changed = git('diff', '--name-only', os.environ['SOURCE_BASE'], 'HEAD').splitlines()
+          assert changed and len(changed) == len(set(changed)) and set(changed) <= allowed
+          dependencies = ('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml',
+              'tests/helper/debian13-amd64-image-v1.json',
+              'crates/volparossa/src/compute/supervise/native_session.rs',
+              'crates/volparossa/src/compute/supervise/native_session/budget.rs',
+              'crates/volparossa/src/compute/supervise/native_session/worker.rs')
+          for name in dependencies:
+              assert git('rev-parse', 'HEAD:' + name) == git('rev-parse', os.environ['SOURCE_BASE'] + ':' + name)
+          receipt = dict(version=1, source_commit=os.environ['GITHUB_SHA'],
+              workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'], source_tree=git('rev-parse', 'HEAD^{tree}'),
+              source_blobs={name: git('rev-parse', 'HEAD:' + name) for name in changed},
+              dependency_blobs={name: git('rev-parse', 'HEAD:' + name) for name in dependencies},
+              scope='public-immutable-boot-prerequisite', guest_execution=False,
+              model_execution=False, private_input_release=False, hardware_attestation=False)
+          pathlib.Path('protected-image-contracts/source.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
+          PY
+      - name: Check Python and fixed bootstrap syntax without execution
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          import ast, pathlib
+          for name in ('protected-resident-image.py', 'test-protected-resident-image.py',
+                       'protected-resident-initrd.py', 'test-protected-resident-initrd.py'):
+              path = pathlib.Path('tests/integration') / name
+              ast.parse(path.read_text(), filename=str(path))
+          PY
+          sh -n packaging/protected-resident/init
+          sh -n packaging/protected-resident/entrypoint
+          shellcheck --shell=sh packaging/protected-resident/init packaging/protected-resident/entrypoint
+      - name: Run inert image and bootstrap contracts
+        run: |
+          set -euo pipefail
+          timeout --kill-after=5s 180s python3 -B tests/integration/test-protected-resident-image.py -v \
+            2>&1 | tee protected-image-contracts/image-tests.log
+          timeout --kill-after=5s 180s python3 -B tests/integration/test-protected-resident-initrd.py -v \
+            2>&1 | tee protected-image-contracts/initrd-tests.log
+          python3 -B - <<'PY'
+          import json, pathlib, re
+          root = pathlib.Path('protected-image-contracts')
+          counts = {}
+          expected = {'image': 158, 'initrd': 21}
+          for group in ('image', 'initrd'):
+              raw = (root / (group + '-tests.log')).read_text()
+              totals = re.findall(r'^Ran ([0-9]+) tests? in [0-9.]+s$', raw, re.M)
+              assert len(totals) == 1 and int(totals[0]) == expected[group], group
+              assert re.findall(r'^OK(?: .*)?$', raw, re.M) == ['OK'], group
+              assert not re.search(r'\bskipped\b|^FAILED', raw, re.M), group
+              counts[group] = int(totals[0])
+          (root / 'tests.json').write_text(json.dumps(dict(version=1,
+              counts=counts, guest_execution=False, private_input_release=False), sort_keys=True) + '\n')
+          PY
+      - name: Preserve unchanged source
+        if: always()
+        run: git diff --exit-code HEAD
+      - name: Retain original contract evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: protected-image-contracts-${{ github.run_id }}
+          path: protected-image-contracts/
+          if-no-files-found: warn
+          retention-days: 14
+
+  public-boot:
+    needs: contracts
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.scenario == 'public-verity-boot' &&
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.ref == 'refs/heads/feature/protected-resident-image'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      EXPECTED_SOURCE: ${{ inputs.expected_source }}
+      LIBGUESTFS_BACKEND: direct
+      LIBGUESTFS_BACKEND_SETTINGS: force_kvm
+      LIBGUESTFS_MEMSIZE: '2048'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require exact explicit hosted source
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$GITHUB_SHA" = "$EXPECTED_SOURCE"
+          test "$GITHUB_WORKFLOW_SHA" = "$EXPECTED_SOURCE"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          test "$(dpkg --print-architecture)" = amd64
+          umask 077
+          mkdir "$RUNNER_TEMP/protected-resident-image-evidence-$GITHUB_RUN_ID"
+      - name: Install official tools only on this disposable hosted runner
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          # These are authenticated distribution tools, not a claim of a
+          # pre-pinned reproducible appliance or of production launch trust.
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+            libguestfs-tools qemu-system-x86 qemu-utils cryptsetup-bin \
+            cpio zstd initramfs-tools-core acl
+          dpkg-query -W -f='${binary:Package} ${Version}\n' \
+            libguestfs-tools qemu-system-x86 qemu-utils cryptsetup-bin cpio zstd initramfs-tools-core \
+            >"$RUNNER_TEMP/protected-resident-image-evidence-$GITHUB_RUN_ID/host-packages.txt"
+      - name: Grant and record only temporary KVM device access
+        run: |
+          set -euo pipefail
+          test -c /dev/kvm
+          test "$(stat -c '%u' /dev/kvm)" = 0
+          getfacl -p /dev/kvm >"$RUNNER_TEMP/protected-resident-image-evidence-$GITHUB_RUN_ID/kvm-original.acl"
+          sudo -n setfacl -m "u:$(id -u):rw" /dev/kvm
+      - name: Build and boot the public verity fixture and its corrupt negative
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          umask 077
+          image_tool() {
+            local launch=()
+            if test "$1" = execute; then
+              # Process-scoped primary group only; the UID stays unprivileged.
+              # uaccess change events may remove the earlier named-user ACL.
+              # Only this fixed system privilege-drop tool starts as root;
+              # env/Python and all descendants run after its irreversible drop.
+              launch=(sudo -n -- /usr/bin/setpriv --reuid="$launch_uid" --regid="$launch_gid"
+                --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs --)
+            fi
+            "${launch[@]}" /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 \
+              GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux \
+              GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_RUN_ID="$GITHUB_RUN_ID" \
+              GITHUB_SHA="$GITHUB_SHA" GITHUB_REF="$GITHUB_REF" RUNNER_TEMP="$RUNNER_TEMP" \
+              VP_PUBLIC_BOOT_UID="${launch_uid:-}" VP_PUBLIC_BOOT_KVM_GID="${launch_gid:-}" \
+              python3 -B tests/integration/protected-resident-image.py "$@" \
+                --expected-source "$EXPECTED_SOURCE" --yes
+          }
+          # Start the SAME 1200-second build budget before staging. Only this
+          # bounded read is privileged; the shell creates the private output.
+          kernel_release="$(image_tool prepare-appliance)"
+          [[ "$kernel_release" =~ ^[0-9][A-Za-z0-9._+-]{0,127}$ ]]
+          appliance_stage="$RUNNER_TEMP/protected-resident-appliance-$GITHUB_RUN_ID"
+          if ! (set -o noclobber
+            { sudo -n /usr/bin/timeout --kill-after=2s 15s /usr/bin/dd \
+                "if=/boot/vmlinuz-$kernel_release" iflag=nofollow,count_bytes \
+                count=67108865 bs=1048576 status=none;
+            } >"$appliance_stage/kernel" 2>/dev/null
+          ); then
+            printf '%s\n' 'protected_resident_appliance_copy_failed' >&2
+            exit 1
+          fi
+          image_tool finish-appliance
+          launch_ids="$(image_tool kvm-launch-ids)"
+          [[ "$launch_ids" =~ ^([1-9][0-9]{0,9})\ ([1-9][0-9]{0,9})$ ]]
+          launch_uid="${BASH_REMATCH[1]}"
+          launch_gid="${BASH_REMATCH[2]}"
+          test "$launch_uid" = "$(id -u)"
+          image_tool execute --work "$RUNNER_TEMP/protected-resident-image-$GITHUB_RUN_ID"
+      - name: Remove only an unadopted appliance staging directory
+        if: always()
+        run: |
+          set -euo pipefail
+          env -i PATH=/usr/bin:/bin LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 \
+            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" RUNNER_TEMP="$RUNNER_TEMP" \
+            python3 -B tests/integration/protected-resident-image.py cleanup-appliance \
+              --expected-source "$EXPECTED_SOURCE" --yes
+      - name: Restore the original KVM ACL
+        if: always()
+        run: |
+          set -euo pipefail
+          if test -f "$RUNNER_TEMP/protected-resident-image-evidence-$GITHUB_RUN_ID/kvm-original.acl"; then
+            sudo -n setfacl --restore="$RUNNER_TEMP/protected-resident-image-evidence-$GITHUB_RUN_ID/kvm-original.acl"
+            getfacl -p /dev/kvm | cmp "$RUNNER_TEMP/protected-resident-image-evidence-$GITHUB_RUN_ID/kvm-original.acl" -
+          fi
+      - name: Retain source identity
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          git diff --exit-code HEAD
+      - name: Retain original public boot evidence including failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: protected-image-boot-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/protected-resident-image-evidence-${{ github.run_id }}/host-packages.txt
+            ${{ runner.temp }}/protected-resident-image-evidence-${{ github.run_id }}/kvm-original.acl
+            ${{ runner.temp }}/protected-resident-image-${{ github.run_id }}/evidence/build.json
+            ${{ runner.temp }}/protected-resident-image-${{ github.run_id }}/evidence/initrd.json
+            ${{ runner.temp }}/protected-resident-image-${{ github.run_id }}/evidence/good-boot.json
+            ${{ runner.temp }}/protected-resident-image-${{ github.run_id }}/evidence/corrupt-boot.json
+            ${{ runner.temp }}/protected-resident-image-${{ github.run_id }}/evidence/cleanup.json
+          if-no-files-found: warn
+          retention-days: 14

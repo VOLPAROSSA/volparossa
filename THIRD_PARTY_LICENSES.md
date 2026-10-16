@@ -85,6 +85,42 @@ that revision are therefore retained unchanged under
 URLs, sizes and hashes in the optional pins. Converted artifacts include all
 five notices; no notice is replaced by this summary.
 
+## Public immutable guest boot prerequisite
+
+The disposable boot candidate reuses the exact Debian 13 cloud image in
+[`debian13-amd64-image-v1.json`](tests/helper/debian13-amd64-image-v1.json).
+Its reviewed SHA-512 comes from Debian's published checksums, not a detached
+release signature. The kernel package is `6.12.105-1`, with release
+`6.12.105+deb13-cloud-amd64`. Image packages retain their own original notices
+and distribution patches; they are not relicensed as VOLPAROSSA code.
+
+The image downloader also permits the exact same-path HTTPS redirect to
+`saimei.ftp.acc.umu.se` observed from the pinned Debian URL. Debian lists
+`ftp.acc.umu.se` among its [registered image mirrors](https://www.debian.org/CD/http-ftp/).
+This transport exception does not change the original image SHA-512, permit
+arbitrary mirrors or replace the required content verification.
+
+The [additional package pins](tests/integration/protected-resident-image-pins-v1.json)
+bind each official Debian download by exact version, size and SHA-256:
+
+- `cryptsetup-bin` and `libcryptsetup12`, both `2:2.7.5-2`, supply veritysetup
+  and its library. The [original cryptsetup copyright record](https://metadata.ftp-master.debian.org/changelogs/main/c/cryptsetup/cryptsetup_2.7.5-2_copyright)
+  includes GPL-2-or-later with an OpenSSL exception and LGPL-2.1-or-later
+  components; the complete per-file notices remain authoritative.
+- `busybox-static`, `1:1.37.0-6+b9`, supplies the fixed initrd shell and utilities.
+  Its [original Debian copyright record](https://metadata.ftp-master.debian.org/changelogs/main/b/busybox/busybox_1.37.0-6_copyright)
+  specifies GPL version 2 and retains the component copyrights.
+
+Only authenticated package contents are extracted, without maintainer-script
+execution or local patches to these binaries. The staged root retains their
+`/usr/share/doc` notices and Debian's common license texts. VOLPAROSSA supplies
+its own fixed bootstrap and test entrypoint rather than running the image's
+original cloud initialization. No guest image, initrd or executable is published
+as a workflow artifact; the retained output is bounded public test evidence.
+A distributable guest requires a separate complete notice/source-compliance and
+release review. Observed hosted build-tool hashes are not a reproducible or
+independently approved production toolchain.
+
 ## Public SNP verifier fixture trial
 
 The disposable public-fixture workflow selects
