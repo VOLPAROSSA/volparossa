@@ -2,6 +2,7 @@
 //! In-memory transports are not proof of MPTCP, relays, or the Cloud application.
 
 mod challenge;
+mod kernel;
 
 use super::*;
 use sha2::{Digest as _, Sha256};
