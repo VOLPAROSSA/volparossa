@@ -100,7 +100,7 @@ jobs:
         run: python3 -B tests/integration/protected-compute-quote.py receipt
       - name: Retain only bounded public source lock and test evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: protected-compute-core-evidence-${{ github.sha }}
           retention-days: 14
@@ -123,7 +123,7 @@ jobs:
             ${{ runner.temp }}/volparossa-protected-compute-admission/evidence/clippy.log
       - name: Retain bounded guest software evidence
         if: always() && (github.ref == 'refs/heads/feature/protected-compute-guest' || github.ref == 'refs/heads/feature/protected-compute-quote-exchange')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: protected-compute-guest-software-${{ github.sha }}
           retention-days: 14
@@ -134,7 +134,7 @@ jobs:
             ${{ runner.temp }}/volparossa-protected-compute-admission/guest-evidence/report.json
       - name: Retain bounded quote software evidence
         if: always() && github.ref == 'refs/heads/feature/protected-compute-quote-exchange'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: protected-compute-quote-software-${{ github.sha }}
           retention-days: 14
