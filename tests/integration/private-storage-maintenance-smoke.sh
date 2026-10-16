@@ -365,6 +365,8 @@ private_storage_maintenance_finalize_report() {
     # replacement for the original outcome and never changes acceptance.
     # The same Python process independently publishes a closed provider-event
     # sidecar from the existing pre-agent-stop captures; no additional RPC.
+    # It also projects only fixed acquire-failure categories from the now-stopped
+    # client's private helper log. That sidecar is not per-request attribution.
     if python3 -B "$source_directory/tests/integration/private-storage-maintenance-smoke.py" "$maintenance_diagnostic_command" \
         "$WORK" "$PHASE" "${provider_baseline_ms:-0}" >"$WORK/maintenance-route-diagnostic.part" 2>/dev/null; then
         mv -- "$WORK/maintenance-route-diagnostic.part" "$WORK/private-storage-maintenance-route-diagnostic.json" || true

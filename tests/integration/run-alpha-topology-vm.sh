@@ -1199,6 +1199,7 @@ MAINTENANCE_NAMES = (FRAGMENTS_NAMES - {"private-storage-fragments-smoke.json", 
     "private-storage-maintenance-lifecycle-failure.json",
     "private-storage-maintenance-route-diagnostic.json",
     "private-storage-maintenance-provider-events.json",
+    "private-storage-maintenance-helper-acquire.json",
     "private-storage-provider-activity.json",
     "private-storage-fixture-correlation.json",
     "private-storage-maintenance-inventory.json",
@@ -1835,6 +1836,15 @@ def collect(home, opt, revision, scenario, guest_status,
                     timeout=2, check=True, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
             except (OSError, subprocess.SubprocessError):
                 continue  # Missing/invalid closed projection is never raw export authority.
+        if path.name == "private-storage-maintenance-helper-acquire.json":
+            if original_size > 16384 or original_size != len(data):
+                continue
+            try:
+                subprocess.run(["/usr/bin/python3", "-I", "-B", str(home / "source/tests/integration/storage-acquire-diagnostic.py"),
+                    "validate-stdin"], input=data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=2, check=True, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+            except (OSError, subprocess.SubprocessError):
+                continue  # A filename alone never authorizes arbitrary log fields.
         if scenario == "private-storage-maintenance":
             if original_size > len(data):
                 continue  # A truncated JSON tail is not structured evidence.
@@ -2450,6 +2460,10 @@ elif [ "$scenario" = private-storage-fragments ] || [ "$scenario" = private-stor
         if [ -f "$retained_path" ] && [ ! -L "$retained_path" ]; then
             if [ "$retained" = private-storage-fixture-correlation.json ]; then
                 python3 -I -B tests/integration/storage-fixture-correlation-sampler.py validate-stdin \
+                    <"$retained_path" >/dev/null 2>&1 || continue
+            fi
+            if [ "$retained" = private-storage-maintenance-helper-acquire.json ]; then
+                python3 -I -B tests/integration/storage-acquire-diagnostic.py validate-stdin \
                     <"$retained_path" >/dev/null 2>&1 || continue
             fi
             [ "$(wc -c <"$retained_path")" -le 1048576 ] || exit 1

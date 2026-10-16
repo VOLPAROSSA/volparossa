@@ -16,15 +16,136 @@ Last updated: 2026-10-16
 
 ## Current integration and active work
 
+### Closed helper acquisition diagnostic candidate
+
+Actual run
+[`38838512301`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38838512301)
+on `9209c6feced0db5da5cae614775769c60b2ff11b` reaches Cloud publication but fails
+APPEND fragment 0/copy 1 before TLS: the first flow-acquisition error is
+`helper_kernel`, the last `helper_cleanup_incomplete`. Its valid correlation
+sidecar does not identify the kernel operation or bind that event to a fragment.
+The base lifecycle, restore and delete checks pass, but consumer maintenance and
+remote cleanup remain unproven. The earlier Image challenge stall in
+`38816407455` is a separate unresolved failure. Original artifact and log ZIP
+SHA-256 values for `38838512301` are
+`533cdd4463ae281c4e11ffeb3d32c7dc65ee6432b80629184295e04deb71490c`
+and `400c49417576e1c455bced674b73b37e7df6b8033f607c18dc00d55636843eef`.
+
+The next source candidate preserves the socket operation, closed failure class
+and optional original errno inside the helper's credentialed response. This
+optional detail applies only to a failed client MPTCP acquisition; it contains
+no address, path, peer identity or free-form error. It does not change the public
+helper response, original result, deadlines, retries or descriptor cleanup.
+Existing responses without the detail retain their bytes. A later parent-side
+descriptor-adoption failure may still report `Kernel` without this detail.
+
+The fixture projects the private client-helper log after the existing helper
+shutdown into `private-storage-maintenance-helper-acquire.json`. It reads at
+most 4 MiB, retains at most 64 closed records and exports at most 16 KiB. Missing,
+changed, malformed or truncated observations stay explicit. Normal and emergency
+export validate the same schema; raw helper logs remain excluded. This projection
+does not bind a record to an application request or fragment/copy, prove the
+cause, prove absence of other failures, or establish remote cleanup. Diagnostic
+failure cannot replace the original consumer result.
+
+Thirteen new Rust contracts cover the closed response, credentials, descriptor
+rejection, unchanged result mapping and typed tracing. The source workflow
+compiles the helper and its real entrypoint, runs those and selected existing
+boundary contracts, and checks the Python projection and maintenance exporters.
+Original hosted source run
+[`38846990417`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38846990417)
+on `d252cd25cb3abfe9dbdd91f551240e0ffd0b51f5` compiles both packages and passes
+33 unique Rust cases (13 new, 20 historical) and 168 Python cases, without failed
+or skipped tests. The overall run fails three strict-lint findings and formatting;
+it is not a passing source gate. Original artifact and log ZIP SHA-256 values are
+`2fd3f05b512fb5a893708f62683a7b13edfbc43a3958a528b18a0769bbf3ae42`
+and `77004ac080d65b3c45d865ac95291f15a522619ccfd14a905d027df6ed3d25e1`.
+All 16 source blobs and 11 unchanged dependencies match the original manifest.
+The narrow correction passes compilation, the same 33 Rust and 168 Python cases,
+and strict lint in original hosted run
+[`38848309510`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38848309510)
+on `85de72d41a9eb9350179c65aefd00dcf66909a0d`. One test-call layout still fails
+formatting, so this run also remains failed. Its original artifact and log ZIP
+SHA-256 values are `02633bc99253ea96af875a96a51308807e6921a3c973c25366ed8fdd344ad146`
+and `1d2d3c0cfa534ce491f318fc1cda96950ea59742b7f4db8e9513aa2ddb3fb37b`;
+all source and dependency blobs match. The exact formatter correction passes
+original hosted source run
+[`38849123582`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38849123582)
+on `04f51e5cd7f17d736979872e4e64968d79d0540f`: compilation, the same 33 Rust
+and 168 Python cases, strict lint and formatting. Its original artifact and log
+ZIP SHA-256 values are
+`6213fe56d8978d5d3cd04990bf45194af7be94c1c1a2fc3828f7d2de0f149e1e`
+and `e9e3385c7e8c38fd6f457422abe3218b026fad9e16f18dacf78289e54b0c6c06`;
+all 16 source and 11 dependency blobs match.
+
+Actual run
+[`38849945061`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38849945061)
+on that exact source fails its inert preflight before VM preparation. Three
+sampler test methods incorrectly expect the optional helper-acquire sidecar in
+fixtures without that receipt. The exporter correctly excludes it. No VM,
+consumer, storage, cleanup or helper diagnostic observation was produced; no
+artifact exists. The original log ZIP SHA-256 is
+`2b79f44ed8b67b6af3393cd44e2367e53ec49f3203c26881f406450bfd5b5b0f`.
+This failed preflight supplies no new evidence about the earlier runtime faults.
+
+The narrow test correction passes all 17 sampler cases locally and adds this
+suite to the hosted source gate: 17 allowed source files and five Python suites
+(185 expected cases). Original hosted source run
+[`38850938318`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38850938318)
+passes on exact `878c2aa9d906fff707a2036873e634800f9253e8`: helper and entrypoint
+compilation, 33 Rust and 185 Python cases, strict lint and formatting, with no
+failures or skips. All 17 source and 11 unchanged dependency blobs match.
+Original artifact and log ZIP SHA-256 values are
+`b697cfdff6c49cb74e2f38d6a1b361879690539f2526e42a86256dbba0396419`
+and `9777f5f3ba2faef946e5c6c4ac9bb1da6f7f43aad6c5460df5e07917cee4b0c3`.
+
+The subsequent actual run
+[`38851643524`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38851643524)
+uses that same source, Image `9694a2b9` and Cloud `47b0f03b`, consumer profile 9
+and network profile 2. It fails after 52 minutes 31 seconds. The original base
+maintenance components validate successfully: restart/resume, foreground
+interruption, two restores, replacement/retirement and deletion, with all three
+provider usage snapshots zero. That evidence precedes the consumer phase and
+does not establish the consumers' remote cleanup.
+
+The first closed consumer failure is Cloud FINALIZE fragment 0/copy 0 at
+`stream_open/flow_acquire`, with `CONTENT_UNAVAILABLE`. Two acquisition rounds
+report first `helper_kernel`, then `helper_cleanup_incomplete`; no TLS, challenge
+or provider outcome is recorded. The combined schema-8 report remains failed,
+with maintenance and consumer results absent, and the consumer-v9 acceptance
+gate is not reached. The earlier APPEND failure and Image challenge stall remain
+separate original outcomes.
+
+The new closed helper sidecar contains exactly one `poll/timed_out` record, with
+no errno. Its complete bounded projection corresponds to the helper's existing
+5,000-ms connection poll returning zero; it is not a kernel errno. It has no
+request/fragment binding and cannot prove which copy or retry produced it, or
+why the network connection did not finish. Inspect connection setup, route
+lifetime and failure cleanup next, without increasing the original deadlines or
+rerunning an unchanged candidate merely to seek a passing result.
+
+The consumer process joins and local fixture cleanup pass. Consumer provider
+usage and remote cleanup remain unproven. Guest network-state comparisons and
+owned-object cleanup pass; these concern the disposable guest, not a measured
+physical-host network snapshot. The runner reaches the final unchanged base-image
+hash check after confirmed QEMU stop/reap. There is no separate VM scratch-removal
+receipt, so the cleanup trap alone is not independent proof of that removal.
+Original artifact and log ZIP SHA-256 values are
+`f4e4e24e2e8066d3e71f4f604ff776446d66849983f0216913141e063668288d`
+and `e6a573302ce6944f46a280c57f6665b14b948d69b1a1b54007d087d86a5d4359`;
+both ZIP CRC checks pass and the artifact matches the API digest.
+
 ### Storage connection correlation candidate
 
 The next diagnostic candidate targets the unresolved Image publication stall in
 [actual run 38816407455](https://github.com/VOLPAROSSA/volparossa/actions/runs/38816407455).
 It observes the client and provider sides of an inner TLS stream without changing
 storage wire bytes, permissions or operation deadlines. The recorded candidate
-passes compilation and targeted runtime checks; its lint correction and the full
-consumer trial remain unverified. This is not a storage fix or consumer acceptance
-result.
+passes corrected hosted source run
+[`38837117036`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38837117036):
+120 Rust and 267 Python tests, compilation, strict lint and formatting. The
+subsequent actual consumer failure is recorded above. This diagnostic is not a
+storage fix or consumer acceptance result.
 
 An explicit development-only command on the existing local socket arms a
 short-lived, Unix-owner-bound RAM buffer. Client writes and provider reads hash

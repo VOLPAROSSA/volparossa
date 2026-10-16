@@ -1299,13 +1299,18 @@ impl FunctionalAlphaLeaseBackend {
             .execute_until(key.context_id, generation, request, operation_deadline)
             .await;
         let descriptor = match execution {
-            Ok(execution) => match classify_acquire_transport_execution(execution, &internal) {
-                AcquireTransportExecution::Ready(descriptor) => descriptor,
-                AcquireTransportExecution::Definite(error) => return Err(error),
-                AcquireTransportExecution::RequiresCleanup(error) => {
-                    return Err(self.cleanup_after_failure(key, deadline, error).await);
+            Ok(execution) => {
+                // The coordinator has validated credentials, the complete canonical response,
+                // request digest and descriptor-free failure binding before this observation.
+                log_acquire_failure(&execution);
+                match classify_acquire_transport_execution(execution, &internal) {
+                    AcquireTransportExecution::Ready(descriptor) => descriptor,
+                    AcquireTransportExecution::Definite(error) => return Err(error),
+                    AcquireTransportExecution::RequiresCleanup(error) => {
+                        return Err(self.cleanup_after_failure(key, deadline, error).await);
+                    }
                 }
-            },
+            }
             Err(WorkerV3Error::Capacity) => return Err(BackendError::Capacity),
             Err(_) => {
                 return Err(self
@@ -3881,6 +3886,23 @@ enum AcquireTransportExecution {
     RequiresCleanup(BackendError),
 }
 
+fn log_acquire_failure(execution: &crate::worker_transport::CredentialedWorkerExecution) {
+    if execution.response.result != InternalWorkerResult::Kernel as i32
+        || execution.response.outcome.is_some()
+        || execution.descriptor.is_some()
+    {
+        return;
+    }
+    if let Some(diagnostic) = execution.response.acquire_failure {
+        tracing::warn!(
+            diagnostic_code = "WORKER_TRANSPORT_ACQUIRE_FAILED",
+            operation = diagnostic.operation,
+            class = diagnostic.class,
+            errno = diagnostic.errno,
+        );
+    }
+}
+
 fn classify_acquire_transport_execution(
     mut execution: crate::worker_transport::CredentialedWorkerExecution,
     request: &InternalAcquireTransportSocket,
@@ -5991,16 +6013,175 @@ pub(super) mod tests {
 
     use super::*;
     use crate::{
-        internal_protocol::ContextDestroyed,
+        internal_protocol::{
+            AcquireFailureClass, AcquireFailureDiagnostic, AcquireFailureOperation,
+            ContextDestroyed, InternalWorkerResponse as DiagnosticResponse,
+        },
         worker_transport::{
-            ExpectedUnixCredentials, private_credential_worker_channel,
-            receive_credential_worker_request, send_credential_worker_response,
+            CredentialedWorkerExecution as DiagnosticExecution, ExpectedUnixCredentials,
+            private_credential_worker_channel, receive_credential_worker_request,
+            send_credential_worker_response,
         },
         worker_v3::{
             BootstrapChallenge, DurableWorkerPrepareOutcome, DurableWorkerPrepareTerminal,
             SpawnedWorker, StablePhase, WorkerProcess, correlated_response,
         },
     };
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum AcquireLogValue {
+        Integer(i64),
+        Text(String),
+        Unexpected,
+    }
+
+    type AcquireLogEvent = BTreeMap<String, AcquireLogValue>;
+
+    #[derive(Default)]
+    struct AcquireLogFields(AcquireLogEvent);
+
+    impl tracing::field::Visit for AcquireLogFields {
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            self.0
+                .insert(field.name().to_owned(), AcquireLogValue::Integer(value));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(
+                field.name().to_owned(),
+                AcquireLogValue::Text(value.to_owned()),
+            );
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_owned(), AcquireLogValue::Unexpected);
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct AcquireLogCapture(Arc<Mutex<Vec<AcquireLogEvent>>>);
+
+    impl tracing::Subscriber for AcquireLogCapture {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut fields = AcquireLogFields::default();
+            event.record(&mut fields);
+            self.0.lock().expect("test event capture").push(fields.0);
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    fn acquire_log_execution(errno: Option<i32>) -> DiagnosticExecution {
+        DiagnosticExecution {
+            response: DiagnosticResponse {
+                protocol_version: INTERNAL_WORKER_PROTOCOL_VERSION,
+                magic: INTERNAL_WORKER_MAGIC.to_vec(),
+                request_id: vec![0xa1; 16],
+                request_digest: vec![0xb2; 32],
+                result: InternalWorkerResult::Kernel as i32,
+                activation_failure: None,
+                acquire_failure: Some(AcquireFailureDiagnostic {
+                    operation: AcquireFailureOperation::Bind as i32,
+                    class: AcquireFailureClass::Io as i32,
+                    errno,
+                }),
+                outcome: None,
+            },
+            descriptor: None,
+        }
+    }
+
+    #[test]
+    fn acquire_diagnostic_tracing_is_closed_typed_and_unknown_errno_is_absent() {
+        // This checks actual tracing fields, not a substitute JSON formatter. The helper-entry
+        // owns the existing JSON formatter; the fixture parser separately tests its closed JSON.
+        for errno in [None, Some(libc::EADDRINUSE)] {
+            let capture = AcquireLogCapture::default();
+            tracing::subscriber::with_default(capture.clone(), || {
+                log_acquire_failure(&acquire_log_execution(errno));
+            });
+            let mut expected = BTreeMap::from([
+                (
+                    "diagnostic_code".to_owned(),
+                    AcquireLogValue::Text("WORKER_TRANSPORT_ACQUIRE_FAILED".to_owned()),
+                ),
+                ("operation".to_owned(), AcquireLogValue::Integer(3)),
+                ("class".to_owned(), AcquireLogValue::Integer(1)),
+            ]);
+            if let Some(errno) = errno {
+                expected.insert(
+                    "errno".to_owned(),
+                    AcquireLogValue::Integer(i64::from(errno)),
+                );
+            }
+            assert_eq!(*capture.0.lock().expect("captured fields"), vec![expected]);
+        }
+    }
+
+    #[test]
+    fn acquire_diagnostic_tracing_skips_old_responses_and_nonfailure_shapes() {
+        let capture = AcquireLogCapture::default();
+        tracing::subscriber::with_default(capture.clone(), || {
+            let mut execution = acquire_log_execution(None);
+            execution.response.acquire_failure = None;
+            log_acquire_failure(&execution);
+            for result in [
+                InternalWorkerResult::Invalid,
+                InternalWorkerResult::CleanupIncomplete,
+            ] {
+                let mut execution = acquire_log_execution(None);
+                execution.response.result = result as i32;
+                log_acquire_failure(&execution);
+            }
+            let mut execution = acquire_log_execution(None);
+            execution.response.outcome = Some(internal_worker_response::Outcome::Destroyed(
+                ContextDestroyed {},
+            ));
+            log_acquire_failure(&execution);
+            let (descriptor, _peer) = std::os::unix::net::UnixStream::pair().expect("test FD");
+            let mut execution = acquire_log_execution(None);
+            execution.descriptor = Some(descriptor.into());
+            log_acquire_failure(&execution);
+        });
+        assert!(capture.0.lock().expect("captured fields").is_empty());
+    }
+
+    #[test]
+    fn acquire_diagnostic_does_not_change_definite_kernel_classification() {
+        let request = InternalAcquireTransportSocket {
+            route_context_id: vec![1; 16],
+            path_id: 1,
+            role: InternalEndpointRole::Client as i32,
+            descriptor_kind: InternalTransportSocketKind::MptcpConnected as i32,
+            expected_local: None,
+            expected_remote: None,
+        };
+        for present in [false, true] {
+            let mut execution = acquire_log_execution(Some(libc::EADDRINUSE));
+            if !present {
+                execution.response.acquire_failure = None;
+            }
+            assert!(matches!(
+                classify_acquire_transport_execution(execution, &request),
+                AcquireTransportExecution::Definite(BackendError::Kernel)
+            ));
+        }
+    }
 
     fn fixture_underlays(
         candidate: UnderlayCandidate,
@@ -8254,6 +8435,7 @@ pub(super) mod tests {
                 result: result as i32,
                 request_digest: vec![0xd2; 32],
                 activation_failure: None,
+                acquire_failure: None,
                 outcome,
             },
             descriptor: None,
@@ -10733,6 +10915,7 @@ pub(super) mod tests {
                     result: InternalWorkerResult::Ok as i32,
                     request_digest: vec![0x92; 32],
                     activation_failure: None,
+                    acquire_failure: None,
                     outcome: Some(internal_worker_response::Outcome::ProbedCommitted(
                         crate::internal_protocol::ProbedLeases {
                             leases: vec![crate::internal_protocol::ProbedLease {
@@ -11384,6 +11567,7 @@ pub(super) mod tests {
                     result: InternalWorkerResult::Ok as i32,
                     request_digest: vec![8; 32],
                     activation_failure: None,
+                    acquire_failure: None,
                     outcome: Some(internal_worker_response::Outcome::Activated(
                         crate::internal_protocol::ActivatedLeases {
                             leases: vec![crate::internal_protocol::ActivatedLease {
@@ -11573,6 +11757,7 @@ pub(super) mod tests {
                     result: InternalWorkerResult::Ok as i32,
                     request_digest: vec![8; 32],
                     activation_failure: None,
+                    acquire_failure: None,
                     outcome: Some(internal_worker_response::Outcome::ProbedCommitted(
                         crate::internal_protocol::ProbedLeases {
                             leases: vec![crate::internal_protocol::ProbedLease {
@@ -11655,6 +11840,7 @@ pub(super) mod tests {
                     result: InternalWorkerResult::Ok as i32,
                     request_digest: vec![8; 32],
                     activation_failure: None,
+                    acquire_failure: None,
                     outcome: Some(internal_worker_response::Outcome::ProbedCommitted(
                         crate::internal_protocol::ProbedLeases { leases },
                     )),
