@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import tarfile
 import tempfile
@@ -176,6 +177,50 @@ class VmFailureDiagnostics(unittest.TestCase):
         files, summary = self.snapshot("private-storage-maintenance")
         self.assertFalse(any(name.startswith("work-1/") for name in files))
         self.assertFalse(summary["success"])
+
+    def test_helper_acquire_sidecar_exports_only_valid_closed_whole_json(self):
+        helper = RUNNER.with_name('storage-acquire-diagnostic.py')
+        module = runpy.run_path(str(helper))
+        staged = self.guest / 'source/tests/integration/storage-acquire-diagnostic.py'
+        staged.parent.mkdir(parents=True)
+        staged.write_bytes(helper.read_bytes())
+        payload = module['empty']('absent')
+        encoded = module['encoded'](payload)
+        path = self.work / module['NAME']
+        path.write_bytes(encoded)
+        (self.work / 'helper-client.log').write_bytes(b'PRIVATE_HELPER_LOG')
+        files, summary = self.snapshot('private-storage-maintenance')
+        self.assertEqual(files['work-1/' + module['NAME']], encoded)
+        self.assertFalse(any(b'PRIVATE_HELPER_LOG' in raw for raw in files.values()))
+        self.assertFalse(summary['success'])
+        invalid = [dict(payload, private='PRIVATE_CANARY'),
+                   dict(payload, causal_attribution=True), dict(payload, event_absence_proven=True),
+                   dict(payload, records=[dict(operation='connect', failure_class='io', errno=0)])]
+        for value in invalid:
+            with self.subTest(value=value):
+                path.write_text(json.dumps(value))
+                files, _ = self.snapshot('private-storage-maintenance')
+                self.assertNotIn('work-1/' + module['NAME'], files)
+                self.assertFalse(any(b'PRIVATE_CANARY' in raw for raw in files.values()))
+        path.write_bytes(b' ' * module['MAX_BYTES'] + encoded)
+        files, _ = self.snapshot('private-storage-maintenance')
+        self.assertNotIn('work-1/' + module['NAME'], files)
+
+    def test_helper_acquire_sidecar_requires_original_validator_and_safe_file(self):
+        helper = runpy.run_path(str(RUNNER.with_name('storage-acquire-diagnostic.py')))
+        path = self.work / helper['NAME']
+        path.write_bytes(helper['encoded'](helper['empty']('absent')))
+        files, _ = self.snapshot('private-storage-maintenance')
+        self.assertNotIn('work-1/' + helper['NAME'], files)
+        path.unlink()
+        path.symlink_to(self.work / 'secret')
+        (self.work / 'secret').write_bytes(b'PRIVATE_CANARY')
+        files, _ = self.snapshot('private-storage-maintenance')
+        self.assertFalse(any(b'PRIVATE_CANARY' in raw for raw in files.values()))
+        path.unlink()
+        os.mkfifo(path)
+        files, _ = self.snapshot('private-storage-maintenance')
+        self.assertNotIn('work-1/' + helper['NAME'], files)
 
     def test_uplink_guest_requires_actual_egress_namespace_proof(self):
         driver = SOURCE.split("<<'GUEST_DRIVER_SCRIPT'\n", 1)[1].split("\nGUEST_DRIVER_SCRIPT\n", 1)[0]

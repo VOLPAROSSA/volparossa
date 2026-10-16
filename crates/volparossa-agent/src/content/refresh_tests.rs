@@ -102,6 +102,7 @@ async fn fixture_with_replies(replies: RefreshReplies) -> Fixture {
         automatic: false,
         events: None,
         activity: Arc::clone(&runtime.provider_activity),
+        fixture: Arc::clone(&runtime.fixture_correlation),
     };
     // Only this test supplies a faster clock; production constructs its fixed 60s timer.
     let task = tokio::spawn(ContentRuntime::serve_loop_with_refresh(

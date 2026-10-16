@@ -41,7 +41,9 @@ EXPORT_NAMES = tuple(name for name in F['EXPORT_NAMES'] if name not in
     'private-storage-maintenance-lifecycle-failure.json',
     'private-storage-maintenance-route-diagnostic.json',
     'private-storage-maintenance-provider-events.json',
+    'private-storage-maintenance-helper-acquire.json',
     'private-storage-provider-activity.json',
+    'private-storage-fixture-correlation.json',
     'private-storage-maintenance-inventory.json',
     'private-storage-maintenance-supervisor.json',
     'private-storage-fragments-lifecycle-live-selection.json',
@@ -386,6 +388,16 @@ def export_provider_events(work, phase, baseline, *, version=2):
             part.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def export_helper_acquire(work):
+    # Cleanup has stopped the fixture helpers. The optional closed projection
+    # never changes the route diagnostic or the original maintenance outcome.
+    try:
+        helper = runpy.run_path(str(Path(__file__).with_name('storage-acquire-diagnostic.py')))
+        helper['publish'](work)
+    except BaseException:
+        pass
 
 
 def validate_selection_route(value):
@@ -2122,9 +2134,11 @@ def main(args):
     if len(args) in (2, 4) and args[0] == 'route-diagnostic':
         if len(args) == 4:
             export_provider_events(Path(args[1]), args[2], args[3])
+            export_helper_acquire(Path(args[1]))
         print(json.dumps(route_diagnostic(Path(args[1])), sort_keys=True)); return
     if len(args) == 4 and args[0] == 'route-diagnostic-v3':
         export_provider_events(Path(args[1]), args[2], args[3], version=3)
+        export_helper_acquire(Path(args[1]))
         print(json.dumps(route_diagnostic(Path(args[1])), sort_keys=True)); return
     if len(args) == 2 and args[0] == 'route-diagnostic-check':
         validate_route_diagnostic(read(Path(args[1]))); return
@@ -2147,6 +2161,11 @@ def main(args):
     if len(args) == 2 and args[0] == 'export-names':
         names = list(EXPORT_NAMES)
         try:
+            helper = runpy.run_path(str(Path(__file__).with_name('storage-acquire-diagnostic.py')))
+            helper['read'](Path(args[1]) / helper['NAME'])
+        except Exception:
+            names.remove('private-storage-maintenance-helper-acquire.json')
+        try:
             provider_events_file(Path(args[1]) / PROVIDER_EVENTS_NAME)
         except BaseException:
             names.remove(PROVIDER_EVENTS_NAME)
@@ -2157,6 +2176,13 @@ def main(args):
             activity['validate'](value)
         except Exception:
             names.remove('private-storage-provider-activity.json')
+        try:
+            correlation = runpy.run_path(str(Path(__file__).with_name('storage-fixture-correlation-sampler.py')))
+            path = Path(args[1]) / correlation['NAME']
+            value = correlation['decode'](closed_diagnostic_text(path, correlation['MAX_BYTES']).encode(), correlation['MAX_BYTES'])
+            correlation['validate'](value)
+        except Exception:
+            names.remove('private-storage-fixture-correlation.json')
         print('\n'.join(names)); return
     if len(args) == 2 and args[0] == 'preselection-diagnostic':
         work = Path(args[1])

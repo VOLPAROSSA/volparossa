@@ -76,17 +76,39 @@ impl ContentTlsServer {
         })
     }
 
+    #[cfg(test)]
     pub(super) async fn accept<S>(&self, stream: S) -> Result<ServerStream<S>, ContentTlsError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        let tls = timeout(HANDSHAKE_TIMEOUT, self.acceptor.accept(stream))
+        self.accept_observed(stream, &super::fixture_correlation::Guard::default())
             .await
-            .map_err(|_| ContentTlsError::Handshake)?
-            .map_err(|_| ContentTlsError::Handshake)?;
+    }
+
+    pub(super) async fn accept_observed<S>(
+        &self,
+        stream: S,
+        fixture: &super::fixture_correlation::Guard,
+    ) -> Result<ServerStream<S>, ContentTlsError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        use volparossa_local_control::StorageFixtureCorrelationTerminal as Terminal;
+        let tls = match timeout(HANDSHAKE_TIMEOUT, self.acceptor.accept(stream)).await {
+            Ok(Ok(tls)) => tls,
+            Ok(Err(_)) => {
+                fixture.finish(Terminal::TlsError);
+                return Err(ContentTlsError::Handshake);
+            }
+            Err(_) => {
+                fixture.finish(Terminal::TlsTimeout);
+                return Err(ContentTlsError::Handshake);
+            }
+        };
         if tls.get_ref().1.alpn_protocol() != Some(CONTENT_ALPN)
             || tls.get_ref().1.protocol_version() != Some(rustls::ProtocolVersion::TLSv1_3)
         {
+            fixture.finish(Terminal::TlsError);
             return Err(ContentTlsError::Handshake);
         }
         Ok(tls)

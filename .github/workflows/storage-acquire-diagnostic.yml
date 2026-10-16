@@ -1,0 +1,213 @@
+name: Closed helper MPTCP acquisition diagnostics
+
+on:
+  push:
+    branches: [fix/storage-acquire-diagnostic]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: storage-acquire-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  SOURCE_BASE: 9209c6feced0db5da5cae614775769c60b2ff11b
+  CARGO_BUILD_JOBS: '2'
+  CARGO_TERM_COLOR: never
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  contracts:
+    if: >-
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.ref == 'refs/heads/fix/storage-acquire-diagnostic'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind exact diagnostic source and unchanged consumers
+        id: source
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          git merge-base --is-ancestor "$SOURCE_BASE" HEAD
+          umask 077
+          mkdir storage-acquire-evidence
+          python3 -B - <<'PY'
+          import json, os, pathlib, subprocess
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          allowed = set('''
+          .github/workflows/storage-acquire-diagnostic.yml
+          docs/IMPLEMENTATION_STATUS.md
+          crates/volparossa-helper/src/internal_protocol.rs
+          crates/volparossa-helper/src/worker_transport.rs
+          crates/volparossa-helper/src/worker_v3.rs
+          crates/volparossa-helper/src/worker_v3/functional_backend.rs
+          crates/volparossa-helper/src/worker_v3/dead_worker_reaper.rs
+          tests/integration/storage-acquire-diagnostic.py
+          tests/integration/test-storage-acquire-diagnostic.py
+          tests/integration/test-storage-provider-activity-sampler.py
+          tests/integration/private-storage-maintenance-smoke.py
+          tests/integration/private-storage-maintenance-smoke.sh
+          tests/integration/kvm-alpha-topology.sh
+          tests/integration/run-alpha-topology-vm.sh
+          tests/integration/test-private-storage-maintenance-wiring.py
+          tests/integration/test-private-storage-maintenance-smoke.py
+          tests/integration/test-alpha-vm-diagnostics.py
+          '''.split())
+          changed = git('diff', '--name-only', os.environ['SOURCE_BASE'], 'HEAD').splitlines()
+          assert changed and len(changed) == len(set(changed)) and set(changed) == allowed
+          dependencies = ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
+              'crates/volparossa-helper/Cargo.toml', 'crates/volparossa-helper-entry/Cargo.toml',
+              'crates/volparossa-agent/src/mptcp_transport/acquire_diagnostic.rs',
+              'tests/integration/storage-consumer-maintenance-pins-v9.json',
+              'tests/integration/storage-consumer-maintenance-smoke.py',
+              'tests/integration/storage-consumer-maintenance.mjs',
+              'tests/integration/storage-consumer-network.py',
+              'tests/helper/debian13-amd64-image-v1.json')
+          for name in dependencies:
+              assert git('rev-parse', 'HEAD:' + name) == git('rev-parse', os.environ['SOURCE_BASE'] + ':' + name)
+          record = dict(version=1, source_commit=os.environ['GITHUB_SHA'],
+              workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'], source_tree=git('rev-parse', 'HEAD^{tree}'),
+              source_blobs={name:git('rev-parse', 'HEAD:' + name) for name in changed},
+              dependency_blobs={name:git('rev-parse', 'HEAD:' + name) for name in dependencies},
+              scope='helper-internal-acquire-diagnostic-and-fixture-log-projection',
+              live_consumer_acceptance=False, causal_attribution=False,
+              fragment_copy_binding=False, feature_equivalence_to_full_workspace_proven=False)
+          pathlib.Path('storage-acquire-evidence/source.json').write_text(json.dumps(record, sort_keys=True) + '\n')
+          PY
+      - name: Exercise closed sidecar and existing maintenance exports
+        run: |
+          set -euo pipefail
+          for suite in storage-acquire-diagnostic private-storage-maintenance-wiring private-storage-maintenance-smoke alpha-vm-diagnostics storage-provider-activity-sampler; do
+            timeout --kill-after=5s 180s python3 -B "tests/integration/test-$suite.py" -v \
+              2>&1 | tee "storage-acquire-evidence/python-$suite.log"
+          done
+          sh -n tests/integration/private-storage-maintenance-smoke.sh
+          sh -n tests/integration/kvm-alpha-topology.sh
+          sh -n tests/integration/run-alpha-topology-vm.sh
+          shellcheck --severity=warning tests/integration/private-storage-maintenance-smoke.sh
+          python3 -B - <<'PY'
+          import json, pathlib, re
+          root = pathlib.Path('storage-acquire-evidence')
+          counts, names = {}, []
+          for path in sorted(root.glob('python-*.log')):
+              raw = path.read_text()
+              totals = re.findall(r'^Ran ([0-9]+) tests? in [0-9.]+s$', raw, re.M)
+              passed = re.findall(r'^(test_\S+) \(([^\n]+)\) \.\.\. ok$', raw, re.M)
+              assert len(totals) == 1 and 1 <= int(totals[0]) <= 512, path
+              assert len(passed) == int(totals[0]), path
+              assert re.findall(r'^OK(?: .*)?$', raw, re.M) == ['OK'], path
+              assert not re.search(r'\bskipped\b|^FAILED', raw, re.M), path
+              counts[path.stem] = len(passed)
+              names.extend(path.stem + ':' + scope + ':' + name for name, scope in passed)
+          assert len(counts) == 5 and counts['python-storage-provider-activity-sampler'] == 17
+          assert len(names) == len(set(names))
+          (root / 'python-tests.json').write_text(json.dumps(dict(version=1, counts=counts,
+              unique_tests=len(names), test_names=sorted(names), live_consumer_acceptance=False), sort_keys=True) + '\n')
+          PY
+      - name: Install existing pinned Rust toolchain on hosted runner
+        id: toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.85.0 --profile minimal --component clippy --component rustfmt
+          rustc --version --verbose
+          cargo --version --verbose
+      - name: Install reviewed Protobuf on disposable hosted runner
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(dpkg --print-architecture)" = amd64
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends protobuf-compiler=3.21.12-8.2ubuntu0.3
+          test "$(protoc --version)" = 'libprotoc 3.21.12'
+      - name: Compile helper and actual helper entrypoint
+        id: build
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          cargo test --locked --offline -p volparossa-helper -p volparossa-helper-entry --no-run \
+            2>&1 | tee storage-acquire-evidence/build.log
+      - name: Inventory and execute disjoint diagnostic and boundary tests
+        run: |
+          set -euo pipefail
+          export RUST_BACKTRACE=1
+          group() {
+            local label="$1" filter="$2"
+            timeout --kill-after=5s 180s cargo test --locked --offline -p volparossa-helper --lib "$filter" -- --list \
+              2>&1 | tee "storage-acquire-evidence/$label-inventory.log"
+            timeout --kill-after=5s 180s cargo test --locked --offline -p volparossa-helper --lib "$filter" \
+              2>&1 | tee "storage-acquire-evidence/$label-test.log"
+          }
+          group new acquire_diagnostic_
+          group credentials worker_transport::tests::credential
+          group credential-reject worker_transport::tests::missing_duplicate_and_wrong_credentials_fail_closed
+          group fd-reject worker_transport::tests::descriptor_on_error_is_rejected_and_closed
+          group fd-deadline worker_transport::tests::acquire_response_and_late_fd_share_one_absolute_deadline_and_close_queued_fd
+          group activation internal_protocol::tests::activation_failure_diagnostic_is_closed_correlated_and_failure_only
+          group source-release internal_protocol::tests::transport_source_release_binding_
+          group child worker_v3::tests::production_child_acquire_reaches_only_the_closed_socket_factory_and_fd_sender
+          group context worker_v3::functional_backend::tests::definite_worker_socket_error_retains_the_exact_committed_context
+          group cancellation worker_v3::functional_backend::tests::dropped_acquire_future_leaves_no_descriptor_cache_or_in_flight_call
+          group shape worker_v3::functional_backend::tests::descriptor_shape_mismatch_is_closed_and_retains_the_committed_generation
+          python3 -B - <<'PY'
+          import json, pathlib, re
+          root = pathlib.Path('storage-acquire-evidence')
+          counts, all_names = {}, []
+          for label in ('new','credentials','credential-reject','fd-reject','fd-deadline',
+                        'activation','source-release','child','context','cancellation','shape'):
+              inventory = (root / (label + '-inventory.log')).read_text()
+              output = (root / (label + '-test.log')).read_text()
+              names = re.findall(r'^([^\n]+): test$', inventory, re.M)
+              assert 1 <= len(names) <= 512 and len(names) == len(set(names)), label
+              results = re.findall(r'^test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out;', output, re.M)
+              assert results == [str(len(names))], label
+              for name in names:
+                  assert len(re.findall(r'^test ' + re.escape(name) + r' \.\.\. ok$', output, re.M)) == 1
+              counts[label] = len(names)
+              all_names.extend(names)
+          assert counts['new'] == 13 and len(all_names) == len(set(all_names))
+          (root / 'rust-tests.json').write_text(json.dumps(dict(version=1, counts=counts,
+              unique_tests=len(all_names), test_names=sorted(all_names), live_consumer_acceptance=False,
+              causal_attribution=False), sort_keys=True) + '\n')
+          PY
+      - name: Lint affected helper packages
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --offline -p volparossa-helper -p volparossa-helper-entry --all-targets --all-features -- -D warnings \
+            2>&1 | tee storage-acquire-evidence/clippy.log
+      - name: Check formatting without changing source
+        if: ${{ always() && steps.source.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check 2>&1 | tee storage-acquire-evidence/format.log
+      - name: Preserve original source
+        if: always()
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code HEAD
+      - name: Retain original source and bounded test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: storage-acquire-diagnostic-${{ github.run_id }}
+          path: storage-acquire-evidence/
+          if-no-files-found: warn
+          retention-days: 14

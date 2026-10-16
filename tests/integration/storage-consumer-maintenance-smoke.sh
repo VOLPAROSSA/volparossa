@@ -7,6 +7,10 @@
 private_storage_consumer_private() {
     consumer_profile_version=${storage_consumer_profile_version-7}
     case $consumer_profile_version in 7|8|9) ;; *) fail CONSUMER_PROFILE_INVALID; return 1 ;; esac
+    set -- "$@" --profile-version "$consumer_profile_version" --network-version 2
+    case $1:${storage_fixture_correlation:-no}:$consumer_profile_version in
+        publish:yes:9|exercise:yes:9|finish:yes:9) set -- "$@" --fixture-correlation ;;
+    esac
     STORAGE_PROOF_BASELINE_MS=${provider_baseline_ms:-0} \
       STORAGE_PROOF_ROUTE_SCOPE=${storage_route_scope:-} \
       STORAGE_PROOF_ROUTE_POLICY=${consumer_route_policy:-} \
@@ -14,7 +18,7 @@ private_storage_consumer_private() {
       timeout --signal=TERM --kill-after=30s 2400s setpriv \
         --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$custody_control_gid" \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
-        -- python3 -B "$WORK/bin/storage-consumer-maintenance-smoke.py" "$@" --profile-version "$consumer_profile_version" --network-version 2
+        -- python3 -B "$WORK/bin/storage-consumer-maintenance-smoke.py" "$@"
 }
 
 private_storage_consumer_phase() {
@@ -38,6 +42,15 @@ private_storage_consumer_phase() {
         mv -- "$WORK/provider-activity.part" "$WORK/private-storage-provider-activity.json" || true
     else
         rm -f -- "$WORK/provider-activity.part" || true
+    fi
+    if [ "${storage_fixture_correlation:-no}" = yes ]; then
+        if (umask 077; python3 -B "$WORK/bin/storage-fixture-correlation-sampler.py" \
+            "$consumer_user/private-storage-fixture-correlation-$consumer_phase.json" \
+            "$consumer_phase" "$WORKER_UID" >"$WORK/fixture-correlation.part") 2>/dev/null; then
+            mv -- "$WORK/fixture-correlation.part" "$WORK/private-storage-fixture-correlation.json" || true
+        else
+            rm -f -- "$WORK/fixture-correlation.part" || true
+        fi
     fi
     [ "$consumer_status" -eq 0 ] || fail CONSUMER_APPLICATION_FAILED
     # These are independent actual route, packet/control and completion checks,

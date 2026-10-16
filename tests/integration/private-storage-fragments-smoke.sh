@@ -257,6 +257,9 @@ private_storage_fragments_run() {
     private_storage_fragments_usage deleted_usage
     if [ "${private_storage_maintenance:-no}" = yes ]; then
         private_storage_consumer_run
+        if [ "${cloud_upload_maintenance:-no}" = yes ]; then
+            private_cloud_upload_run
+        fi
     fi
     benchmark_disconnect_route private-storage-fragments || fail FRAGMENTS_ROUTE_CLEANUP_FAILED
     private_storage_fragments_cleanup || fail FRAGMENTS_PRIVATE_CLEANUP_FAILED

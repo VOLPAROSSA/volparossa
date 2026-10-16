@@ -32,7 +32,8 @@ use volparossa_linux_uapi::{
 use crate::{
     deadline::{HardDeadline, wait_for_fd, wait_for_readable_fd},
     internal_protocol::{
-        AcquireClientIngressReplySocket, AcquireClientIngressSocket, AcquireTransportSocket,
+        AcquireClientIngressReplySocket, AcquireClientIngressSocket, AcquireFailureClass,
+        AcquireFailureDiagnostic, AcquireFailureOperation, AcquireTransportSocket,
         DeadlineBoundWorkerRequest, InternalEndpointRole, InternalIngressAddressFamily,
         InternalIngressSocketKind, InternalProtocolError, InternalSocketAddress,
         InternalTransportSocketKind, InternalWorkerRequest, InternalWorkerResponse,
@@ -218,6 +219,57 @@ pub(crate) enum WorkerTransportError {
     Io(#[from] io::Error),
     #[error("worker network-namespace proof failed")]
     Sandbox(#[from] crate::worker_sandbox::WorkerSandboxError),
+}
+
+/// Affine original error plus a request-local copy of closed diagnostic fields.
+/// This wrapper does not implement `Display` or expose an additional error chain.
+pub(crate) struct AcquireTransportFailure {
+    pub(crate) error: WorkerTransportError,
+    pub(crate) diagnostic: Option<AcquireFailureDiagnostic>,
+}
+
+impl From<WorkerTransportError> for AcquireTransportFailure {
+    fn from(error: WorkerTransportError) -> Self {
+        Self {
+            error,
+            diagnostic: None,
+        }
+    }
+}
+
+fn acquire_io<T>(
+    operation: AcquireFailureOperation,
+    result: io::Result<T>,
+) -> Result<T, AcquireTransportFailure> {
+    result.map_err(|error| {
+        let class = if error.kind() == io::ErrorKind::TimedOut {
+            AcquireFailureClass::TimedOut
+        } else {
+            AcquireFailureClass::Io
+        };
+        let errno = error
+            .raw_os_error()
+            .filter(|errno| (1..=4095).contains(errno));
+        AcquireTransportFailure {
+            error: WorkerTransportError::Io(error),
+            diagnostic: Some(AcquireFailureDiagnostic {
+                operation: operation as i32,
+                class: class as i32,
+                errno,
+            }),
+        }
+    })
+}
+
+fn ambiguous_connect_readiness(message: &'static str) -> AcquireTransportFailure {
+    AcquireTransportFailure {
+        error: WorkerTransportError::Io(io::Error::other(message)),
+        diagnostic: Some(AcquireFailureDiagnostic {
+            operation: AcquireFailureOperation::ConnectReadiness as i32,
+            class: AcquireFailureClass::AmbiguousReadiness as i32,
+            errno: None,
+        }),
+    }
 }
 
 /// Creates a private, bounded blocking `SOCK_SEQPACKET` channel.
@@ -1275,19 +1327,32 @@ fn kernel_ingress_family(value: InternalIngressAddressFamily) -> KernelIngressSo
 ///
 /// Returns Invalid unless the request matches the exact committed context, path, role and overlay
 /// host address. Kernel errors and failure to prove genuine MPTCP negotiation fail closed.
+#[cfg(test)]
 pub(crate) fn create_transport_socket(
     lease: CommittedSocketLease,
     request: &AcquireTransportSocket,
 ) -> Result<OwnedFd, WorkerTransportError> {
+    create_transport_socket_diagnosed(lease, request).map_err(|failure| failure.error)
+}
+
+/// Only connected MPTCP has a typed diagnostic; all other original errors stay unchanged.
+pub(crate) fn create_transport_socket_diagnosed(
+    lease: CommittedSocketLease,
+    request: &AcquireTransportSocket,
+) -> Result<OwnedFd, AcquireTransportFailure> {
     validate_committed_request(lease, request)?;
     match transport_socket_expectation(request)? {
         TransportSocketExpectation::MptcpConnected { local, remote } => {
             create_connected_mptcp(local, remote)
         }
-        TransportSocketExpectation::MptcpListener { local } => create_mptcp_listener(local),
-        TransportSocketExpectation::UdpUnconnected { local } => create_bound_udp(local),
+        TransportSocketExpectation::MptcpListener { local } => {
+            create_mptcp_listener(local).map_err(Into::into)
+        }
+        TransportSocketExpectation::UdpUnconnected { local } => {
+            create_bound_udp(local).map_err(Into::into)
+        }
         TransportSocketExpectation::NativeProbeUdpConnected { local, remote } => {
-            create_connected_udp(local, remote)
+            create_connected_udp(local, remote).map_err(Into::into)
         }
     }
 }
@@ -1479,14 +1544,21 @@ fn role_allows_socket(role: InternalEndpointRole, kind: InternalTransportSocketK
 fn create_connected_mptcp(
     local: SocketAddr,
     remote: SocketAddr,
-) -> Result<OwnedFd, WorkerTransportError> {
-    let socket = Socket::new(
-        Domain::for_address(local),
-        Type::STREAM.nonblocking().cloexec(),
-        Some(Protocol::MPTCP),
+) -> Result<OwnedFd, AcquireTransportFailure> {
+    use AcquireFailureOperation as Operation;
+
+    let socket = acquire_io(
+        Operation::SocketCreate,
+        Socket::new(
+            Domain::for_address(local),
+            Type::STREAM.nonblocking().cloexec(),
+            Some(Protocol::MPTCP),
+        ),
     )?;
-    configure_exact_address_family(&socket, local)?;
-    socket.bind(&SockAddr::from(local))?;
+    if local.is_ipv6() {
+        acquire_io(Operation::Ipv6OnlySet, socket.set_only_v6(true))?;
+    }
+    acquire_io(Operation::Bind, socket.bind(&SockAddr::from(local)))?;
     match socket.connect(&SockAddr::from(remote)) {
         Ok(()) => {}
         Err(error)
@@ -1497,10 +1569,10 @@ fn create_connected_mptcp(
                         || code == libc::EALREADY
                         || code == libc::EWOULDBLOCK
             ) => {}
-        Err(error) => return Err(error.into()),
+        Err(error) => return acquire_io(Operation::Connect, Err(error)),
     }
     wait_for_connect(&socket)?;
-    validate_connected_mptcp(&socket, local, remote)?;
+    validate_connected_mptcp_diagnosed(&socket, local, remote)?;
     Ok(socket.into())
 }
 
@@ -1547,24 +1619,39 @@ fn create_connected_udp(
     Ok(socket.into())
 }
 
-fn wait_for_connect(socket: &Socket) -> Result<(), WorkerTransportError> {
+fn wait_for_connect(socket: &Socket) -> Result<(), AcquireTransportFailure> {
+    use AcquireFailureOperation as Operation;
+
     let mut descriptors = [PollFd::new(socket.as_fd(), PollFlags::POLLOUT)];
-    if poll(&mut descriptors, MPTCP_CONNECT_TIMEOUT_MILLISECONDS).map_err(errno_io)? == 0 {
-        return Err(WorkerTransportError::Timeout);
+    if acquire_io(
+        Operation::Poll,
+        poll(&mut descriptors, MPTCP_CONNECT_TIMEOUT_MILLISECONDS).map_err(errno_io),
+    )? == 0
+    {
+        return Err(AcquireTransportFailure {
+            error: WorkerTransportError::Timeout,
+            diagnostic: Some(AcquireFailureDiagnostic {
+                operation: Operation::Poll as i32,
+                class: AcquireFailureClass::TimedOut as i32,
+                errno: None,
+            }),
+        });
     }
     let events = descriptors[0]
         .revents()
-        .ok_or_else(|| io::Error::other("poll returned no MPTCP events"))?;
+        .ok_or_else(|| ambiguous_connect_readiness("poll returned no MPTCP events"))?;
     if events.intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL)
         || !events.contains(PollFlags::POLLOUT)
     {
-        if let Some(error) = socket.take_error()? {
-            return Err(error.into());
+        if let Some(error) = acquire_io(Operation::ConnectSocketError, socket.take_error())? {
+            return acquire_io(Operation::ConnectSocketError, Err(error));
         }
-        return Err(io::Error::other("MPTCP connect readiness is ambiguous").into());
+        return Err(ambiguous_connect_readiness(
+            "MPTCP connect readiness is ambiguous",
+        ));
     }
-    if let Some(error) = socket.take_error()? {
-        return Err(error.into());
+    if let Some(error) = acquire_io(Operation::ConnectSocketError, socket.take_error())? {
+        return acquire_io(Operation::ConnectSocketError, Err(error));
     }
     Ok(())
 }
@@ -1574,12 +1661,22 @@ fn validate_connected_mptcp(
     local: SocketAddr,
     remote: SocketAddr,
 ) -> Result<(), WorkerTransportError> {
-    validate_common(socket, Type::STREAM, Protocol::MPTCP, local, false)?;
-    if socket.peer_addr()?.as_socket() != Some(remote) {
-        return Err(WorkerTransportError::Invalid);
+    validate_connected_mptcp_diagnosed(socket, local, remote).map_err(|failure| failure.error)
+}
+
+fn validate_connected_mptcp_diagnosed(
+    socket: &Socket,
+    local: SocketAddr,
+    remote: SocketAddr,
+) -> Result<(), AcquireTransportFailure> {
+    use AcquireFailureOperation as Operation;
+
+    validate_common_diagnosed(socket, Type::STREAM, Protocol::MPTCP, local, false)?;
+    if acquire_io(Operation::PeerAddress, socket.peer_addr())?.as_socket() != Some(remote) {
+        return Err(WorkerTransportError::Invalid.into());
     }
-    if !mptcp_info(socket)?.is_negotiated() {
-        return Err(WorkerTransportError::Invalid);
+    if !acquire_io(Operation::MptcpInfo, mptcp_info(socket))?.is_negotiated() {
+        return Err(WorkerTransportError::Invalid.into());
     }
     Ok(())
 }
@@ -1637,22 +1734,46 @@ fn validate_common(
     expected_local: SocketAddr,
     expected_listener: bool,
 ) -> Result<(), WorkerTransportError> {
-    if socket.domain()? != Domain::for_address(expected_local)
-        || socket.r#type()? != expected_type
-        || socket.protocol()? != Some(expected_protocol)
-        || socket.local_addr()?.as_socket() != Some(expected_local)
-        || socket.is_listener()? != expected_listener
-        || socket.take_error()?.is_some()
-        || (expected_local.is_ipv6() && !socket.only_v6()?)
+    validate_common_diagnosed(
+        socket,
+        expected_type,
+        expected_protocol,
+        expected_local,
+        expected_listener,
+    )
+    .map_err(|failure| failure.error)
+}
+
+fn validate_common_diagnosed(
+    socket: &Socket,
+    expected_type: Type,
+    expected_protocol: Protocol,
+    expected_local: SocketAddr,
+    expected_listener: bool,
+) -> Result<(), AcquireTransportFailure> {
+    use AcquireFailureOperation as Operation;
+
+    if acquire_io(Operation::SocketDomain, socket.domain())? != Domain::for_address(expected_local)
+        || acquire_io(Operation::SocketType, socket.r#type())? != expected_type
+        || acquire_io(Operation::SocketProtocol, socket.protocol())? != Some(expected_protocol)
+        || acquire_io(Operation::LocalAddress, socket.local_addr())?.as_socket()
+            != Some(expected_local)
+        || acquire_io(Operation::ListenerState, socket.is_listener())? != expected_listener
+        || acquire_io(Operation::SocketError, socket.take_error())?.is_some()
+        || (expected_local.is_ipv6() && !acquire_io(Operation::Ipv6OnlyGet, socket.only_v6())?)
     {
-        return Err(WorkerTransportError::Invalid);
+        return Err(WorkerTransportError::Invalid.into());
     }
-    let descriptor_flags =
-        FdFlag::from_bits_truncate(fcntl(socket, FcntlArg::F_GETFD).map_err(errno_io)?);
-    let status_flags =
-        OFlag::from_bits_truncate(fcntl(socket, FcntlArg::F_GETFL).map_err(errno_io)?);
+    let descriptor_flags = FdFlag::from_bits_truncate(acquire_io(
+        Operation::DescriptorFlags,
+        fcntl(socket, FcntlArg::F_GETFD).map_err(errno_io),
+    )?);
+    let status_flags = OFlag::from_bits_truncate(acquire_io(
+        Operation::StatusFlags,
+        fcntl(socket, FcntlArg::F_GETFL).map_err(errno_io),
+    )?);
     if !descriptor_flags.contains(FdFlag::FD_CLOEXEC) || !status_flags.contains(OFlag::O_NONBLOCK) {
-        return Err(WorkerTransportError::Invalid);
+        return Err(WorkerTransportError::Invalid.into());
     }
     Ok(())
 }
@@ -1936,6 +2057,7 @@ mod tests {
             result: result as i32,
             request_digest: blake3::hash(encoded.as_slice()).as_bytes().to_vec(),
             activation_failure: None,
+            acquire_failure: None,
             outcome,
         }
     }
@@ -2004,6 +2126,7 @@ mod tests {
             result: InternalWorkerResult::Ok as i32,
             request_digest: blake3::hash(encoded.as_slice()).as_bytes().to_vec(),
             activation_failure: None,
+            acquire_failure: None,
             outcome: Some(outcome),
         }
     }
@@ -2190,6 +2313,154 @@ mod tests {
             expected_wire_deadline
         );
         assert!(child_deadline.expires_at() <= parent_deadline.expires_at());
+    }
+
+    fn acquire_failure<T>(result: Result<T, AcquireTransportFailure>) -> AcquireTransportFailure {
+        match result {
+            Err(failure) => failure,
+            Ok(_) => panic!("expected original failure"),
+        }
+    }
+
+    fn acquire_diagnostic() -> AcquireFailureDiagnostic {
+        AcquireFailureDiagnostic {
+            operation: AcquireFailureOperation::Bind as i32,
+            class: AcquireFailureClass::Io as i32,
+            errno: Some(libc::EADDRINUSE),
+        }
+    }
+
+    #[test]
+    fn acquire_diagnostic_preserves_io_errno_and_unknown_is_not_zero() {
+        for operation in 1..=17 {
+            let operation = AcquireFailureOperation::try_from(operation).expect("fixed operation");
+            let failure = acquire_failure(acquire_io::<()>(
+                operation,
+                Err(io::Error::from_raw_os_error(libc::EADDRINUSE)),
+            ));
+            assert!(matches!(failure.error, WorkerTransportError::Io(ref error)
+                if error.raw_os_error() == Some(libc::EADDRINUSE)));
+            assert_eq!(
+                failure.diagnostic,
+                Some(AcquireFailureDiagnostic {
+                    operation: operation as i32,
+                    ..acquire_diagnostic()
+                })
+            );
+        }
+        let unknown = acquire_failure(acquire_io::<()>(
+            AcquireFailureOperation::Connect,
+            Err(io::Error::other("private route/peer/address canary")),
+        ));
+        assert_eq!(
+            unknown.diagnostic.expect("closed unknown errno").errno,
+            None
+        );
+        let timed_out = acquire_failure(acquire_io::<()>(
+            AcquireFailureOperation::ConnectSocketError,
+            Err(io::Error::from_raw_os_error(libc::ETIMEDOUT)),
+        ));
+        let diagnostic = timed_out.diagnostic.expect("original kernel timeout");
+        assert_eq!(diagnostic.class, AcquireFailureClass::TimedOut as i32);
+        assert_eq!(diagnostic.errno, Some(libc::ETIMEDOUT));
+        assert!(matches!(timed_out.error, WorkerTransportError::Io(_)));
+    }
+
+    #[test]
+    fn acquire_diagnostic_readiness_ambiguity_does_not_inspect_error_text() {
+        for message in [
+            "poll returned no MPTCP events",
+            "MPTCP connect readiness is ambiguous",
+        ] {
+            let failure = ambiguous_connect_readiness(message);
+            let diagnostic = failure.diagnostic.expect("typed readiness");
+            assert_eq!(
+                diagnostic.operation,
+                AcquireFailureOperation::ConnectReadiness as i32
+            );
+            assert_eq!(
+                diagnostic.class,
+                AcquireFailureClass::AmbiguousReadiness as i32
+            );
+            assert_eq!(diagnostic.errno, None);
+            diagnostic.validate().expect("finite readiness");
+            assert!(matches!(failure.error, WorkerTransportError::Io(ref error)
+                if error.to_string() == message));
+        }
+        let ordinary = acquire_failure(acquire_io::<()>(
+            AcquireFailureOperation::Poll,
+            Err(io::Error::other("MPTCP connect readiness is ambiguous")),
+        ));
+        assert_eq!(
+            ordinary.diagnostic.expect("ordinary I/O").class,
+            AcquireFailureClass::Io as i32
+        );
+    }
+
+    #[test]
+    fn acquire_diagnostic_error_drops_owned_descriptor_and_invalid_has_no_detail() {
+        let (owned, mut peer) = UnixStream::pair().expect("owned descriptor fixture");
+        let fail_with_owned = |_owned: UnixStream| -> Result<(), AcquireTransportFailure> {
+            acquire_io::<()>(
+                AcquireFailureOperation::Bind,
+                Err(io::Error::from_raw_os_error(libc::EADDRINUSE)),
+            )?;
+            Ok(())
+        };
+        let result = fail_with_owned(owned);
+        assert_eq!(
+            acquire_failure(result).diagnostic,
+            Some(acquire_diagnostic())
+        );
+        peer.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("bounded EOF");
+        assert_eq!(peer.read(&mut [0]).expect("closed descriptor"), 0);
+        for error in [
+            WorkerTransportError::Invalid,
+            WorkerTransportError::Protocol,
+        ] {
+            let failure = AcquireTransportFailure::from(error);
+            assert!(failure.diagnostic.is_none());
+        }
+    }
+
+    #[test]
+    fn acquire_diagnostic_credentialed_failure_preserves_detail_and_no_descriptor() {
+        let expected = current_expected_credentials();
+        let request = acquire_request(InternalTransportSocketKind::MptcpConnected);
+        let mut reply = response(&request, InternalWorkerResult::Kernel);
+        reply.acquire_failure = Some(acquire_diagnostic());
+        let (parent, worker) = private_credential_worker_channel().expect("private channel");
+        send_credential_worker_response(&worker, &request, &reply, None).expect("typed failure");
+        let execution = receive_credential_worker_response(&parent, &request, expected)
+            .expect("validated credentials/digest/failure binding");
+        assert_eq!(execution.response, reply);
+        assert!(execution.descriptor.is_none());
+    }
+
+    #[test]
+    fn acquire_diagnostic_is_bound_to_failure_binding_and_rejects_smuggled_fd() {
+        let expected = current_expected_credentials();
+        let request = acquire_request(InternalTransportSocketKind::MptcpConnected);
+        let mut reply = response(&request, InternalWorkerResult::Kernel);
+        let old_binding = transport_descriptor_binding(&request, &reply).expect("old binding");
+        reply.acquire_failure = Some(acquire_diagnostic());
+        let binding = transport_descriptor_binding(&request, &reply).expect("new binding");
+        assert_ne!(old_binding, binding);
+        let bytes = encode_response(&reply).expect("typed failure");
+        let (parent, worker) = private_credential_worker_channel().expect("private channel");
+        send_credential_record(&worker, &bytes).expect("response");
+        send_credential_record(&worker, &old_binding).expect("stale binding");
+        assert!(receive_credential_worker_response(&parent, &request, expected).is_err());
+        let (parent, worker) = private_credential_worker_channel().expect("private channel");
+        let (descriptor, mut peer) = UnixStream::pair().expect("forbidden descriptor");
+        send_credential_record(&worker, &bytes).expect("response");
+        send_credential_fd_record(&worker, &descriptor, &binding).expect("forbidden descriptor");
+        drop(descriptor);
+        assert!(receive_credential_worker_response(&parent, &request, expected).is_err());
+        peer.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("bounded EOF");
+        assert_eq!(peer.read(&mut [0]).expect("forbidden FD closed"), 0);
     }
 
     #[test]

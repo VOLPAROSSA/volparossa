@@ -657,14 +657,16 @@ class NativeCpuTests(unittest.TestCase):
     def test_full_4572_prompt_eos_raw_text_and_no_hidden_warmup(self):
         prompt = list(range(4572))
         model = mock.Mock()
+        model.decode.return_value = 0.25
         model.sample.side_effect = [77, 78, 151645]
         tokenizer = SimpleNamespace(eos_token_id=151645, decode=mock.Mock(return_value="<tool_call>raw</tool_call>"))
         session, observation = mock.Mock(), mock.Mock()
         profile = WORKER.model_profile(native.PROFILE)
         result = native.generate(model, prompt, tokenizer, profile, session, WORKER, observation)
         batches = [entry.args[0] for entry in model.decode.call_args_list]
-        self.assertEqual(sum(batches[:36], []), prompt)
-        self.assertEqual(batches[36:], [[77], [78]])
+        self.assertEqual(sum(batches[:-2], []), prompt)
+        self.assertEqual(batches[-2:], [[77], [78]])
+        self.assertEqual([len(batch) for batch in batches[:4]], [16, 32, 64, 128])
         self.assertTrue(all(1 <= len(batch) <= 128 for batch in batches))
         self.assertEqual(result["generation"]["stop_reason"], "eos")
         self.assertEqual(result["text"], "<tool_call>raw</tool_call>")
@@ -674,6 +676,7 @@ class NativeCpuTests(unittest.TestCase):
 
     def test_no_invented_eos_or_silent_prompt_truncation(self):
         model = mock.Mock(); model.sample.return_value = 77
+        model.decode.return_value = 0.25
         tokenizer = SimpleNamespace(eos_token_id=151645, decode=mock.Mock(return_value="raw"))
         profile = WORKER.model_profile(native.PROFILE)
         result = native.generate(model, [1], tokenizer, profile, mock.Mock(), WORKER)
@@ -692,6 +695,7 @@ class NativeCpuTests(unittest.TestCase):
 
     def test_raw_output_wire_bound_stays_original(self):
         model = mock.Mock(); model.sample.return_value = 151645
+        model.decode.return_value = 0.25
         tokenizer = SimpleNamespace(eos_token_id=151645, decode=mock.Mock(return_value="漢" * 2000))
         result = native.generate(model, [1], tokenizer, WORKER.model_profile(native.PROFILE), mock.Mock(), WORKER)
         self.assertTrue(result["text_truncated"])

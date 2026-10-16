@@ -17,6 +17,7 @@ pub use compute_control::{
     ComputeReady, ComputeRemoteRequest, ComputeTranscript,
 };
 mod custody;
+pub mod fixture_correlation;
 mod mailbox;
 mod private_storage;
 mod private_storage_detail;
@@ -33,6 +34,12 @@ pub use content::{
 pub use custody::{
     ContentCustodyDiscoverRequest, ContentCustodyDiscovered, ContentCustodyProvider,
     ContentCustodyReady, ContentCustodyRequest,
+};
+pub use fixture_correlation::{
+    StorageFixtureCorrelationAction, StorageFixtureCorrelationPhase,
+    StorageFixtureCorrelationRecord, StorageFixtureCorrelationRequest,
+    StorageFixtureCorrelationResponse, StorageFixtureCorrelationRole,
+    StorageFixtureCorrelationState, StorageFixtureCorrelationTerminal,
 };
 pub use mailbox::{MailboxReady, MailboxRemoteRequest, MailboxServeRequest};
 pub use private_storage::{
@@ -84,7 +91,7 @@ pub struct ControlRequest {
     /// One allowlisted operation.
     #[prost(
         oneof = "control_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49"
     )]
     pub operation: Option<control_request::Operation>,
 }
@@ -102,7 +109,7 @@ pub mod control_request {
         PrivateStorageAdmissionRequest, PrivateStorageGrantRequest,
         PrivateStorageMaintenanceRequest, PrivateStorageOutcomeRequest,
         PrivateStorageRemoteRequest, PrivateStorageServeRequest, QuoteAttachRequest,
-        QuoteRemoteRequest, RoleChange,
+        QuoteRemoteRequest, RoleChange, StorageFixtureCorrelationRequest,
     };
 
     /// Exactly one supported CLI-to-agent operation.
@@ -226,6 +233,9 @@ pub mod control_request {
         /// Read only finite aggregate provider stages on the protected local socket.
         #[prost(message, tag = "48")]
         ContentProviderActivity(Empty),
+        /// Private development-fixture correlation, additionally gated by the agent.
+        #[prost(message, tag = "49")]
+        StorageFixtureCorrelation(StorageFixtureCorrelationRequest),
     }
 }
 
@@ -314,7 +324,7 @@ pub struct ControlResponse {
     /// Typed response body.
     #[prost(
         oneof = "control_response::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37"
     )]
     pub payload: Option<control_response::Payload>,
 }
@@ -330,7 +340,7 @@ pub mod control_response {
         HttpsContentTransferReady, LogList, MailboxReady, NamedContentTransferReady, PathList,
         PeerList, PolicySnapshot, PrivateStorageAdmission, PrivateStorageGrant,
         PrivateStorageMaintenanceReady, PrivateStorageOutcome, PrivateStorageReady, QuoteReady,
-        RoleSnapshot, SessionList, StatusSnapshot,
+        RoleSnapshot, SessionList, StatusSnapshot, StorageFixtureCorrelationResponse,
     };
 
     /// Exactly one response body.
@@ -418,6 +428,9 @@ pub mod control_response {
         /// Local aggregate activity, never storage acceptance or causal attribution.
         #[prost(message, tag = "36")]
         ContentProviderActivity(ContentProviderActivity),
+        /// Private fixture snapshot, not a custody or acceptance receipt.
+        #[prost(message, tag = "37")]
+        StorageFixtureCorrelation(StorageFixtureCorrelationResponse),
     }
 }
 
@@ -838,6 +851,7 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
         control_request::Operation::PrivateStorageGrant(request) => request.validate()?,
         control_request::Operation::PrivateStorageRemote(request) => request.validate()?,
         control_request::Operation::PrivateStorageOutcome(request) => request.validate()?,
+        control_request::Operation::StorageFixtureCorrelation(request) => request.validate()?,
         control_request::Operation::PrivateStorageMaintenance(request) => request.validate()?,
         control_request::Operation::BrowserGatewayGrant(request) => request.validate()?,
         control_request::Operation::PrivateStorageAdmission(request) => request.validate()?,
@@ -879,6 +893,9 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
         .as_ref()
         .ok_or(ControlProtocolError::Invalid("missing response payload"))?;
     match payload {
+        control_response::Payload::StorageFixtureCorrelation(snapshot) => {
+            validate_fixture_response(response, snapshot)?;
+        }
         control_response::Payload::ContentProviderActivity(snapshot) => {
             validate_provider_activity_response(response, snapshot)?;
         }
@@ -964,6 +981,21 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
         control_response::Payload::Ack(_)
         | control_response::Payload::Status(_)
         | control_response::Payload::Roles(_) => {}
+    }
+    Ok(())
+}
+
+fn validate_fixture_response(
+    response: &ControlResponse,
+    snapshot: &StorageFixtureCorrelationResponse,
+) -> Result<(), ControlProtocolError> {
+    snapshot.validate()?;
+    if response.result != ControlResult::Ok as i32
+        || response.diagnostic_code != "STORAGE_FIXTURE_CORRELATION"
+    {
+        return Err(ControlProtocolError::Invalid(
+            "storage fixture correlation envelope",
+        ));
     }
     Ok(())
 }

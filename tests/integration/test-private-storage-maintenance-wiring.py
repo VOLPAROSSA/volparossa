@@ -24,6 +24,24 @@ SCENARIO = 'private-storage-maintenance'
 M = runpy.run_path(str(HERE / (SCENARIO + '-smoke.py')))
 FIXTURE = runpy.run_path(str(HERE / ('test-' + SCENARIO + '-smoke.py')))
 DIAGNOSTICS = runpy.run_path(str(HERE / 'test-private-storage-fragments-wiring.py'))['diagnostics']
+CORRELATION = runpy.run_path(str(HERE / 'storage-fixture-correlation-sampler.py'))
+ACQUIRE = runpy.run_path(str(HERE / 'storage-acquire-diagnostic.py'))
+
+
+def correlation_fixture(home, roots):
+    helper = home / 'source/tests/integration/storage-fixture-correlation-sampler.py'
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.write_bytes((HERE / helper.name).read_bytes())
+    data = CORRELATION['encoded'](CORRELATION['Samples']('publish').report())
+    for root in roots: (root / CORRELATION['NAME']).write_bytes(data)
+
+
+def acquire_fixture(home, roots):
+    helper = home / 'source/tests/integration/storage-acquire-diagnostic.py'
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.write_bytes((HERE / helper.name).read_bytes())
+    data = ACQUIRE['encoded'](ACQUIRE['empty']('absent'))
+    for root in roots: (root / ACQUIRE['NAME']).write_bytes(data)
 
 
 def retained_private_fixture(root, pending=True):
@@ -114,6 +132,7 @@ class Wiring(unittest.TestCase):
         block = guest[start:guest.index('\nfi', start) + 3]
         names = ('private-storage-maintenance-smoke.sh', 'private-storage-maintenance-smoke.py',
             'private-storage-log-sampler.py', 'content-provider-readiness.py', 'storage-provider-activity-sampler.py',
+            'storage-fixture-correlation-sampler.py', 'storage-acquire-diagnostic.py',
             'storage-consumer-maintenance-smoke.sh', 'storage-consumer-maintenance-smoke.py',
             'storage-consumer-maintenance.mjs', 'storage-consumer-maintenance-pins.json', 'storage-consumer-maintenance-pins-v2.json',
             'storage-consumer-maintenance-pins-v3.json', 'storage-consumer-maintenance-pins-v4.json',
@@ -265,6 +284,8 @@ private_storage_fragments_run() {
             published.mkdir(parents=True)
             for name in names:
                 (published / name).write_text('{}')
+            correlation_fixture(home, (published,))
+            acquire_fixture(home, (published,))
             for name in ('maintenance-owner-lifecycle.private', 'lifecycle-result.json',
                     'identity.key', 'enrollment.json', 'checkpoint.json', 'logs-client.txt',
                     'private-storage-maintenance-selection-route-diagnostic.json',
@@ -295,6 +316,8 @@ private_storage_fragments_run() {
                 for name in names:
                     (root / name).write_text('{}\n')
                 (root / 'consumer-binding.json').write_text('PRIVATE_MUST_NOT_EXPORT')
+            correlation_fixture(home, (published, work))
+            acquire_fixture(home, (published, work))
             distinct = 'storage-consumer-finish.json'
             (work / distinct).write_text('{"passed":false}\n')
             archive = diagnostics['collect'](home, opt, 'a' * 40, SCENARIO, 124,

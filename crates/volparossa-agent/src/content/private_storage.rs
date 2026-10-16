@@ -30,7 +30,9 @@ use volparossa_local_control::{
     PrivateStorageOutcome, PrivateStorageOutcomePhase as OutcomePhase,
     PrivateStorageOutcomeRequest, PrivateStorageReady, PrivateStorageRemoteDetail,
     PrivateStorageRemoteRequest, PrivateStorageRemoteStage as Stage, PrivateStorageServeRequest,
-    control_response::Payload, write_response,
+    StorageFixtureCorrelationPhase as FixturePhase,
+    StorageFixtureCorrelationTerminal as FixtureTerminal, control_response::Payload,
+    write_response,
 };
 use volparossa_policy::VerifiedManifest as VerifiedPolicy;
 
@@ -231,6 +233,7 @@ impl ContentRuntime {
             request.maintenance =
                 Some(self.maintenance_turn(&turn, uid, request.grant.owner_key().as_bytes())?);
         }
+        let observation = observation.with_fixture(self.fixture_correlation.client(uid));
         let _foreground = request
             .maintenance
             .is_none()
@@ -266,6 +269,7 @@ impl ContentRuntime {
             tokio::select! {
                 biased;
                 () = turn.cancelled() => {
+                    observation.fixture().finish(FixtureTerminal::Cancelled);
                     observation.reset();
                     outcome.cancelled();
                     Err(ContentError::Busy)
@@ -279,6 +283,11 @@ impl ContentRuntime {
             *detail = observation.detail();
         }
         outcome.finish(&result, observation.deadline());
+        observation.fixture().finish(if result.is_ok() {
+            FixtureTerminal::Complete
+        } else {
+            FixtureTerminal::OperationError
+        });
         result
     }
 }
@@ -531,12 +540,19 @@ async fn exchange(
     .await?;
     let mut remote = observation
         .requester_boundary(Stage::TlsHandshake, local, async {
-            tls::connect_observed(flow.stream_mut(), request.peer, &provider.offer)
-                .await
-                .map_err(|(_, failure)| {
-                    observation.record_tls_failure(failure);
-                    ContentError::Unavailable
-                })
+            tls::connect_observed(
+                super::fixture_correlation::Observed::client(
+                    flow.stream_mut(),
+                    observation.fixture(),
+                ),
+                request.peer,
+                &provider.offer,
+            )
+            .await
+            .map_err(|(_, failure)| {
+                observation.record_tls_failure(failure);
+                ContentError::Unavailable
+            })
         })
         .await?;
     let challenge = observation
@@ -549,6 +565,7 @@ async fn exchange(
     route_current(context, &policy, control, request.peer).await?;
     grant_current(&request.grant)?;
     outcome.enter(OutcomePhase::ReadyWrite);
+    observation.fixture().enter(FixturePhase::ClientExchange);
     send_ready(
         local,
         id,
@@ -579,6 +596,7 @@ async fn exchange(
         ContentError::Unavailable
     })?;
     outcome.enter(OutcomePhase::ProviderTlsClose);
+    observation.fixture().enter(FixturePhase::Closing);
     tls::finish(&mut remote)
         .await
         .map_err(|_| ContentError::Unavailable)?;

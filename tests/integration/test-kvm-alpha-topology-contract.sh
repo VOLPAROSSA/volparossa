@@ -509,13 +509,15 @@ jobs = (root / "agent-jobs-smoke.sh").read_text()
 workflow = (root / "../../.github/workflows/alpha-topology.yml").resolve().read_text()
 assert guest.count("agent_autonomous_aggregation=no") == 2
 timeout_line = next(line.strip() for line in workflow.splitlines() if line.strip().startswith('timeout-minutes:'))
-# Native Codex is built from pinned source before the guest trial; only that
-# scenario gets a 240-minute window. Keep all existing scenario bounds intact.
+# Cloud upload runs the preceding maintenance proof before its own lifecycle;
+# it retains its separate 270-minute window. Native Codex is built from pinned
+# source before its guest trial and retains 240 minutes. Keep every other bound.
 # Both Signal scenarios retain their 150-minute window alongside maintenance.
 # Compare the whole closed expression: the former single-clause regex did not
 # understand main's parenthesized Signal alternatives and dropped their bound.
 assert timeout_line == (
-    "timeout-minutes: ${{ inputs.scenario == 'agent-native-coding' && 240 || "
+    "timeout-minutes: ${{ inputs.scenario == 'cloud-upload-maintenance' && 270 || "
+    "inputs.scenario == 'agent-native-coding' && 240 || "
     "inputs.scenario == 'agent-autonomous-aggregation' && 180 || "
     "(inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments' "
     "|| inputs.scenario == 'private-storage-maintenance') "

@@ -200,7 +200,8 @@ class Wiring(unittest.TestCase):
 
     def expected_exports(self, activity):
         maintenance = runpy.run_path(str(HERE / 'private-storage-maintenance-smoke.py'))
-        names = set(maintenance['EXPORT_NAMES']) - {maintenance['PROVIDER_EVENTS_NAME']}
+        names = set(maintenance['EXPORT_NAMES']) - {maintenance['PROVIDER_EVENTS_NAME'],
+            'private-storage-fixture-correlation.json', 'private-storage-maintenance-helper-acquire.json'}
         return names if activity else names - {M['NAME']}
 
     def test_actual_exporter_includes_valid_optional_activity_in_each_phase(self):

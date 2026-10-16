@@ -688,6 +688,9 @@ fn print_response(response: ControlResponse) -> Result<()> {
         Payload::ContentProviderActivity(_) => {
             anyhow::bail!("provider activity requires its scoped content command")
         }
+        Payload::StorageFixtureCorrelation(_) => {
+            anyhow::bail!("fixture correlation requires its private scoped content command")
+        }
         Payload::Content(receipt) => println!(
             "{}",
             serde_json::json!({

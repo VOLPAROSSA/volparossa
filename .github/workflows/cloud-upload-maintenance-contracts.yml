@@ -1,0 +1,220 @@
+name: Joined finite Cloud upload contracts
+
+on:
+  push:
+    branches: [feature/cloud-upload-maintenance-proof]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-upload-maintenance-contracts-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  STORAGE_SOURCE: 33faa7449ee982f8114c001107692eedf03cb5d5
+  UPLOAD_SOURCE: cc465235b5728313bc1338e979990ea33c4726f7
+  JOIN_BASE: dcdf7cfbe551eb0a5d4b6add382820007fa2bde7
+  CARGO_BUILD_JOBS: '2'
+  CARGO_TERM_COLOR: never
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  contracts:
+    if: >-
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.ref == 'refs/heads/feature/cloud-upload-maintenance-proof'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind exact composition and unchanged parent sources
+        id: source
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          git merge-base --is-ancestor "$STORAGE_SOURCE" HEAD
+          git merge-base --is-ancestor "$UPLOAD_SOURCE" HEAD
+          umask 077
+          mkdir cloud-upload-contract-evidence
+          python3 -B - <<'PY'
+          import json, os, pathlib, subprocess
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          storage, upload, base = (os.environ[k] for k in ('STORAGE_SOURCE', 'UPLOAD_SOURCE', 'JOIN_BASE'))
+          assert git('merge-base', storage, upload) == base
+          def changed(ref): return set(git('diff', '--name-only', base, ref).splitlines())
+          def entry(ref, name): return git('ls-tree', ref, '--', name)
+          left, right = changed(storage), changed(upload)
+          workflow = '.github/workflows/cloud-upload-maintenance-contracts.yml'
+          reviewed = {workflow, '.github/workflows/alpha-topology.yml',
+              'docs/IMPLEMENTATION_STATUS.md', 'tests/integration/kvm-alpha-topology.sh',
+              'tests/integration/run-alpha-topology-vm.sh',
+              'tests/integration/test-cloud-upload-maintenance-shell.py',
+              'tests/integration/test-cloud-upload-maintenance-vm-wiring.py'}
+          actual = set(git('diff', '--name-only', storage, 'HEAD').splitlines())
+          assert actual == right | {workflow}
+          assert changed('HEAD') == left | right | {workflow}
+          bindings = {}
+          for name in sorted(left | right):
+              a, b = entry(storage, name), entry(upload, name)
+              if name not in reviewed:
+                  expected = a if name in left else b
+                  if name in left & right: assert a == b, name
+                  assert entry('HEAD', name) == expected, name
+              bindings[name] = dict(storage=a, upload=b, joined=entry('HEAD', name))
+          dependencies = ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
+              'crates/volparossa/Cargo.toml', 'crates/volparossa-agent/Cargo.toml',
+              'tests/integration/storage-consumer-maintenance-pins-v9.json',
+              'tests/integration/cloud-upload-maintenance-pins-v5.json',
+              'tests/helper/debian13-amd64-image-v1.json')
+          for name in dependencies:
+              parent = upload if name.endswith('cloud-upload-maintenance-pins-v5.json') else storage
+              assert entry('HEAD', name) == entry(parent, name), name
+          record = dict(version=1, source_commit=os.environ['GITHUB_SHA'],
+              workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'], source_tree=git('rev-parse', 'HEAD^{tree}'),
+              storage_source=storage, upload_source=upload, join_base=base,
+              source_blobs={n:entry('HEAD', n) for n in sorted(actual)},
+              parent_bindings=bindings, dependency_blobs={n:entry('HEAD', n) for n in dependencies},
+              actual_peer_maintenance=False, real_datapath_execution=False,
+              original_tls_failure_resolved=False)
+          pathlib.Path('cloud-upload-contract-evidence/source.json').write_text(json.dumps(record, sort_keys=True)+'\n')
+          PY
+      - name: Install pinned hosted Rust and Protobuf
+        id: toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.85.0 --profile minimal --no-self-update --component clippy --component rustfmt
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends protobuf-compiler=3.21.12-8.2ubuntu0.3
+          test "$(protoc --version)" = 'libprotoc 3.21.12'
+      - name: Compile affected agent and owner CLI
+        id: build
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          cargo test --locked --offline -p volparossa-agent -p volparossa --no-run \
+            2>&1 | tee cloud-upload-contract-evidence/build.log
+      - name: Execute exact admission retirement and finite authority contracts
+        run: |
+          set -euo pipefail
+          group() {
+            local label="$1" package="$2" filter="$3"
+            local -a target
+            case "$package" in
+              volparossa-agent) target=(--lib) ;;
+              volparossa) target=(--bin volparossa) ;;
+              *) return 1 ;;
+            esac
+            timeout --kill-after=5s 180s cargo test --locked --offline -p "$package" "${target[@]}" "$filter" -- --list \
+              2>&1 | tee "cloud-upload-contract-evidence/$label-inventory.log"
+            timeout --kill-after=5s 180s cargo test --locked --offline -p "$package" "${target[@]}" "$filter" \
+              2>&1 | tee "cloud-upload-contract-evidence/$label-test.log"
+          }
+          group retirement volparossa-agent lost_helper_retirement_
+          group admission volparossa-agent tcp_flow_admission_
+          group disconnect volparossa-agent route_setup::tests::client_disconnect_
+          group expiry volparossa-agent route_setup::tests::client_route_expiry_
+          group classification volparossa-agent route_setup::tests::mptcp_acquire_
+          group authority volparossa enrollment_authority::
+          python3 -B - <<'PY'
+          import json, pathlib, re
+          root = pathlib.Path('cloud-upload-contract-evidence')
+          expected = dict(retirement=7, admission=8, disconnect=3, expiry=2, classification=1, authority=5)
+          all_names = []
+          for label, count in expected.items():
+              inventory = (root/(label+'-inventory.log')).read_text()
+              output = (root/(label+'-test.log')).read_text()
+              names = re.findall(r'^([^\n]+): test$', inventory, re.M)
+              assert len(names) == len(set(names)) == count, label
+              totals = re.findall(r'^test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out;', output, re.M)
+              assert totals == [str(count)], label
+              for name in names:
+                  assert len(re.findall(r'^test '+re.escape(name)+r' \.\.\. ok$', output, re.M)) == 1
+              all_names.extend(names)
+          assert len(all_names) == len(set(all_names)) == 26
+          (root/'rust-tests.json').write_text(json.dumps(dict(version=1, counts=expected,
+              test_names=sorted(all_names), actual_peer_maintenance=False), sort_keys=True)+'\n')
+          PY
+      - name: Execute inert upload wiring and closed export contracts
+        run: |
+          set -euo pipefail
+          sh -n tests/integration/kvm-alpha-topology.sh
+          sh -n tests/integration/run-alpha-topology-vm.sh
+          sh -n tests/integration/cloud-upload-maintenance-smoke.sh
+          sh -n tests/integration/private-storage-fragments-smoke.sh
+          python3 -B - <<'PY'
+          import json, pathlib, re, subprocess
+          root = pathlib.Path('cloud-upload-contract-evidence')
+          counts = {}
+          expected = {'cloud-upload-maintenance-provision':13, 'cloud-upload-maintenance-smoke':19,
+              'cloud-upload-maintenance-evidence':32, 'cloud-upload-maintenance-shell':17,
+              'cloud-upload-maintenance-vm-wiring':13, 'storage-consumer-network':12,
+              'private-storage-maintenance-wiring':41, 'storage-fixture-correlation-sampler':27,
+              'storage-acquire-diagnostic':33, 'alpha-vm-diagnostics':10,
+              'storage-consumer-maintenance-shell':9}
+          for suite, count in expected.items():
+              # Full historical evidence reconstruction took 195s locally.
+              # This bounds source tests only, not an operation or authority window.
+              test_seconds = 360 if suite == 'cloud-upload-maintenance-evidence' else 180
+              result = subprocess.run(['python3', '-B', 'tests/integration/test-'+suite+'.py', '-v'],
+                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=test_seconds)
+              (root/(suite+'.log')).write_bytes(result.stdout)
+              output = result.stdout.decode('utf-8')
+              print(output, end='')
+              assert result.returncode == 0 and len(result.stdout) <= 1048576, suite
+              totals = re.findall(r'^Ran (\d+) tests? in ', output, re.M)
+              passed = re.findall(r'^test_\S+ \([^)]+\) \.\.\. ok$', output, re.M)
+              assert totals == [str(count)] and len(passed) == len(set(passed)) == count, suite
+              assert re.search(r'^OK$', output, re.M) and 'skipped=' not in output, suite
+              counts[suite] = len(passed)
+          assert sum(counts.values()) == 226
+          (root/'python-tests.json').write_text(json.dumps(dict(version=1, counts=counts,
+              total=sum(counts.values()), actual_peer_maintenance=False), sort_keys=True)+'\n')
+          PY
+          node --version | tee cloud-upload-contract-evidence/node-version.txt
+          node --test --test-reporter=tap tests/integration/test-cloud-upload-maintenance.mjs \
+            2>&1 | tee cloud-upload-contract-evidence/node-tests.log
+          python3 -B - <<'PY'
+          import pathlib, re
+          output=pathlib.Path('cloud-upload-contract-evidence/node-tests.log').read_text()
+          for label, count in [('tests',15),('pass',15),('fail',0),('cancelled',0),('skipped',0)]:
+              assert re.findall(r'^# '+label+r' (\d+)$',output,re.M)==[str(count)],label
+          PY
+      - name: Lint affected packages
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --offline -p volparossa-agent -p volparossa --all-targets --all-features -- -D warnings \
+            2>&1 | tee cloud-upload-contract-evidence/clippy.log
+      - name: Check formatter without changing source
+        if: ${{ always() && steps.source.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check 2>&1 | tee cloud-upload-contract-evidence/format.log
+      - name: Verify final source
+        if: always()
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code HEAD
+      - name: Retain original source and test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: cloud-upload-contracts-${{ github.run_id }}
+          path: cloud-upload-contract-evidence/
+          if-no-files-found: warn
+          retention-days: 14

@@ -1819,32 +1819,41 @@ impl ClientRouteControl {
             Failure, History, Observation, Reason, Stage,
         };
 
-        self.retire_expired_route(now_ms, Instant::now()).await;
-        let mut state = self.state.lock().await;
+        let busy = ContentStreamOpenFailure::new(
+            ContentStreamOpenCause::RouteState,
+            ClientRouteConnectError::Busy,
+        );
+        let (mut state, admitted_at_ms) = self
+            .admit_production_tcp_flow_attempt(None, now_ms, busy)
+            .await?;
         let ClientRouteControlState::Established(established) = &mut *state else {
-            return Err(ContentStreamOpenFailure::new(
-                ContentStreamOpenCause::RouteState,
-                ClientRouteConnectError::Busy,
-            ));
+            return Err(busy);
         };
-        let route = established.route.as_ref().ok_or_else(|| {
-            ContentStreamOpenFailure::new(
-                ContentStreamOpenCause::RouteState,
-                ClientRouteConnectError::Busy,
-            )
+        let route = established.route.as_ref().ok_or(busy)?;
+        let material = client_open_tcp_material(route, policy, destination, port, admitted_at_ms)
+            .map_err(|error| {
+            ContentStreamOpenFailure::new(ContentStreamOpenCause::RouteMaterial, error)
         })?;
-        let material = client_open_tcp_material(route, policy, destination, port, now_ms).map_err(
-            |error| ContentStreamOpenFailure::new(ContentStreamOpenCause::RouteMaterial, error),
-        )?;
-        let ClientTransportState::TcpMptcp(transport) = &mut established.transport else {
-            return Err(ContentStreamOpenFailure::new(
-                ContentStreamOpenCause::RouteState,
-                ClientRouteConnectError::Busy,
-            ));
-        };
         let mut helper_route_was_lost = false;
         let mut history = History::default();
-        for _ in 0..8 {
+        for attempt in 0..8 {
+            let failure = if attempt == 0 {
+                busy
+            } else {
+                ContentStreamOpenFailure::from_flow_acquire(
+                    ClientRouteConnectError::TransportRuntimeUnavailable,
+                    history.summary(),
+                )
+            };
+            (state, _) = self
+                .admit_production_tcp_flow_attempt(Some(state), now_ms, failure)
+                .await?;
+            let ClientRouteControlState::Established(established) = &mut *state else {
+                unreachable!("admitted TCP route owner remains locked")
+            };
+            let ClientTransportState::TcpMptcp(transport) = &mut established.transport else {
+                return Err(busy);
+            };
             let local_port =
                 random_mptcp_source_port(PRODUCTION_MPTCP_EXIT_PORT).map_err(|error| {
                     history.record_round(Some(Failure {
@@ -1868,17 +1877,109 @@ impl ClientRouteControl {
                 }
             }
         }
-        if helper_route_was_lost {
-            let prior_route = std::mem::replace(&mut *state, ClientRouteControlState::Idle);
-            drop(state);
-            if let ClientRouteControlState::Established(established) = prior_route {
-                Box::pin(established.shutdown(self.agent_state.as_ref())).await;
-            }
-        }
-        Err(ContentStreamOpenFailure::from_flow_acquire(
+        let failure = ContentStreamOpenFailure::from_flow_acquire(
             ClientRouteConnectError::TransportRuntimeUnavailable,
             history.summary(),
-        ))
+        );
+        Err(self
+            .finish_flow_acquire_failure(state, helper_route_was_lost, failure, |prior| {
+                let ClientRouteControlState::Established(established) = prior else {
+                    unreachable!("validated failed flow route owner")
+                };
+                self.start_retirement(established)
+            })
+            .await)
+    }
+
+    async fn admit_production_tcp_flow_attempt<'a>(
+        &'a self,
+        previous: Option<tokio::sync::MutexGuard<'a, ClientRouteControlState>>,
+        requested_at_ms: u64,
+        failure: ContentStreamOpenFailure,
+    ) -> Result<(tokio::sync::MutexGuard<'a, ClientRouteControlState>, u64), ContentStreamOpenFailure>
+    {
+        self.admit_tcp_flow_attempt(
+            previous,
+            || (crate::unix_millis().max(requested_at_ms), Instant::now()),
+            |state, wall_now_ms, monotonic_now| match state {
+                ClientRouteControlState::Established(established) => {
+                    Some(established.is_expired(wall_now_ms, monotonic_now))
+                }
+                _ => None,
+            },
+            |prior| {
+                let ClientRouteControlState::Established(established) = prior else {
+                    unreachable!("expired TCP route owner remains locked")
+                };
+                self.start_retirement(established)
+            },
+            failure,
+        )
+        .await
+    }
+
+    /// Sample both clocks only after admission owns the route slot. Subsequent attempts retain
+    /// that same guard and original hard deadline; neither lock waiting nor retries rebase it.
+    /// The private callbacks keep the existing affine-owner fixtures independent of kernel I/O.
+    async fn admit_tcp_flow_attempt<'a>(
+        &'a self,
+        previous: Option<tokio::sync::MutexGuard<'a, ClientRouteControlState>>,
+        clock: impl FnOnce() -> (u64, Instant),
+        expired: impl FnOnce(&ClientRouteControlState, u64, Instant) -> Option<bool>,
+        start_retirement: impl FnOnce(ClientRouteControlState) -> ClientRouteControlState,
+        failure: ContentStreamOpenFailure,
+    ) -> Result<(tokio::sync::MutexGuard<'a, ClientRouteControlState>, u64), ContentStreamOpenFailure>
+    {
+        let state = match previous {
+            Some(state) => state,
+            None => self.state.lock().await,
+        };
+        let (wall_now_ms, monotonic_now) = clock();
+        let Some(expired) = expired(&state, wall_now_ms, monotonic_now) else {
+            let retirement = match &*state {
+                ClientRouteControlState::CleanupPending(retirement) => Some(retirement.clone()),
+                _ => None,
+            };
+            drop(state);
+            if let Some(retirement) = retirement {
+                let _ = self
+                    .confirm_retirement(&retirement, MAXIMUM_CALL_DURATION)
+                    .await;
+            }
+            return Err(failure);
+        };
+        if !expired {
+            return Ok((state, wall_now_ms));
+        }
+        Err(self
+            .finish_flow_acquire_failure(state, true, failure, start_retirement)
+            .await)
+    }
+
+    async fn finish_flow_acquire_failure(
+        &self,
+        mut state: tokio::sync::MutexGuard<'_, ClientRouteControlState>,
+        helper_route_was_lost: bool,
+        failure: ContentStreamOpenFailure,
+        start_retirement: impl FnOnce(ClientRouteControlState) -> ClientRouteControlState,
+    ) -> ContentStreamOpenFailure {
+        if helper_route_was_lost {
+            let prior = std::mem::replace(&mut *state, ClientRouteControlState::Connecting);
+            // Publish the retained cleanup owner before unlocking or awaiting. Cancellation of
+            // this failed flow must not admit another route or abandon exact helper cleanup.
+            *state = start_retirement(prior);
+            let ClientRouteControlState::CleanupPending(retirement) = &*state else {
+                unreachable!("failed flow retirement owner retained")
+            };
+            let retirement = retirement.clone();
+            drop(state);
+            let _ = self
+                .confirm_retirement(&retirement, MAXIMUM_CALL_DURATION)
+                .await;
+        }
+        // Cleanup failure/timeout remains owned by the controller, not a replacement for the
+        // original flow-acquire error and its first/last failure history.
+        failure
     }
 
     /// Bind one accepted kernel-observed TCP stream and proxy it over the selected genuine
@@ -8546,6 +8647,9 @@ fn validate_committed(
 
 #[cfg(test)]
 mod tests {
+    mod lost_helper_retirement_tests;
+    mod tcp_flow_admission_tests;
+
     use std::{
         collections::BTreeMap,
         net::{IpAddr, Ipv4Addr},

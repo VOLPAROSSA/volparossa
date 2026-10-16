@@ -1122,3 +1122,13 @@ network state pass. See the [source-bound evidence and historical failures](../I
 This is an explicit owner-private upload space, not recovery of ordinary
 OpenCloud accounts, permissions, sharing, writable synchronization or complete
 server-independent service. The preceding read-only trial remains unchanged.
+
+Automatic enrollment and background repair of new uploads are a separate,
+unfinished milestone. The `cloud-upload-maintenance` candidate first requires
+the complete storage-maintenance and Image/Cloud consumer proof, then tests a
+new authenticated upload under finite authority, provider withdrawal, new
+repair, two cold reads across restart and deletion of all retained copies.
+Its current evidence profile uses the same verified control underlay as the
+preceding proof, with separate per-phase captures and unchanged private data
+boundaries. A passing upload-only result above does not establish that longer
+automatic-maintenance chain.
