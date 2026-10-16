@@ -1200,6 +1200,7 @@ MAINTENANCE_NAMES = (FRAGMENTS_NAMES - {"private-storage-fragments-smoke.json", 
     "private-storage-maintenance-route-diagnostic.json",
     "private-storage-maintenance-provider-events.json",
     "private-storage-provider-activity.json",
+    "private-storage-fixture-correlation.json",
     "private-storage-maintenance-inventory.json",
     "private-storage-maintenance-supervisor.json",
     "private-storage-maintenance-control-transition.json",
@@ -1239,7 +1240,7 @@ MAINTENANCE_PRIORITY_NAMES = {
     name.startswith("storage-consumer-") or name.startswith("private-storage-maintenance-")
     or name.endswith("_usage.json") or name.endswith("private_cleanup.json"))
 } | {"host-state-before.json", "host-state-after.json", "guest-exit-status", "current-phase",
-     "private-storage-provider-activity.json"}
+     "private-storage-provider-activity.json", "private-storage-fixture-correlation.json"}
 
 SIGNAL_FRAGMENT_NAMES = {"a01-expected-peers.json", "signal-backup-provision.json",
     "signal-backup-private_cleanup.json", "host-state-before.json", "host-state-after.json",
@@ -1825,6 +1826,15 @@ def collect(home, opt, revision, scenario, guest_status,
         if observed is None:
             continue
         data, original_size = observed
+        if path.name == "private-storage-fixture-correlation.json":
+            if original_size > 16384 or original_size != len(data):
+                continue
+            try:
+                subprocess.run(["/usr/bin/python3", "-I", "-B", str(home / "source/tests/integration/storage-fixture-correlation-sampler.py"),
+                    "validate-stdin"], input=data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=2, check=True, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+            except (OSError, subprocess.SubprocessError):
+                continue  # Missing/invalid closed projection is never raw export authority.
         if scenario == "private-storage-maintenance":
             if original_size > len(data):
                 continue  # A truncated JSON tail is not structured evidence.
@@ -2438,6 +2448,10 @@ elif [ "$scenario" = private-storage-fragments ] || [ "$scenario" = private-stor
         case $retained in */*|'') exit 1 ;; esac
         retained_path=/home/vpci/alpha-output/$retained
         if [ -f "$retained_path" ] && [ ! -L "$retained_path" ]; then
+            if [ "$retained" = private-storage-fixture-correlation.json ]; then
+                python3 -I -B tests/integration/storage-fixture-correlation-sampler.py validate-stdin \
+                    <"$retained_path" >/dev/null 2>&1 || continue
+            fi
             [ "$(wc -c <"$retained_path")" -le 1048576 ] || exit 1
             printf '%s\n' "$retained"
         fi

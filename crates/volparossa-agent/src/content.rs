@@ -11,6 +11,7 @@ mod compute_remote;
 mod contribution;
 mod custody;
 mod custody_discovery;
+mod fixture_correlation;
 mod https;
 mod mailbox;
 mod named;
@@ -120,6 +121,59 @@ async fn provider_snapshot(
     timeout(maximum_wait, async { registry.lock().await.clone() }).await
 }
 
+async fn serve_provider_session(
+    stream: tokio::net::TcpStream,
+    tls: tls::ContentTlsServer,
+    registry: Arc<Mutex<PublicationRegistry>>,
+    events: Option<Arc<RwLock<AgentState>>>,
+    activity: provider_activity::Session,
+    fixture: fixture_correlation::Guard,
+) {
+    use volparossa_local_control::StorageFixtureCorrelationTerminal as Terminal;
+    let observer = fixture_correlation::ProviderObserver {
+        activity: &activity,
+        fixture: &fixture,
+    };
+    let stream = fixture_correlation::Observed::provider(stream, &fixture);
+    let Ok(mut stream) = tls.accept_observed(stream, &fixture).await else {
+        return;
+    };
+    observer.enter(Stage::RegistrySnapshot);
+    // Snapshot at most 64 explicit registrations; never hold the metadata
+    // lock while a background receiver waits before requesting a chunk.
+    // Cache handles retain their own exclusive ownership checks.
+    let Ok(registry) = provider_snapshot(&registry, REGISTRY_SNAPSHOT_TIMEOUT).await else {
+        fixture.finish(Terminal::OperationError);
+        observer.enter(Stage::Closing);
+        provider_event(events.as_ref(), "CONTENT_PROVIDER_REGISTRY_TIMEOUT").await;
+        return;
+    };
+    let mut storage_failure = None;
+    let result = serve_publication_with_activity(
+        &mut stream,
+        &registry,
+        TransferLimits::default(),
+        &mut storage_failure,
+        &observer,
+    )
+    .await;
+    if result.is_err() {
+        fixture.finish(Terminal::OperationError);
+    }
+    observer.enter(Stage::Closing);
+    match result {
+        Ok(_) => {
+            let result = tls::finish(&mut stream).await;
+            fixture.finish(if result.is_ok() {
+                Terminal::Complete
+            } else {
+                Terminal::OperationError
+            });
+        }
+        Err(error) => provider_failure_event(events.as_ref(), &error, storage_failure).await,
+    }
+}
+
 /// FIFO admission shares the caller's existing operation deadline. The local control
 /// server bounds live requests; waiting creates no cache, peer stream or background task.
 /// A requester leaving before readiness must also leave the mutex queue immediately.
@@ -158,6 +212,7 @@ pub(crate) struct ContentRuntime {
     storage_maintenance: Arc<storage_maintenance::Coordinator>,
     storage_outcomes: Arc<private_storage::Outcomes>,
     provider_activity: Arc<provider_activity::Activity>,
+    fixture_correlation: Arc<fixture_correlation::Correlation>,
     recent: Arc<Mutex<recent::RecentProviders>>,
     source_costs: Arc<Mutex<https::sources::SourceCosts>>,
     worker_budget: worker_budget::WorkerBudget,
@@ -198,6 +253,7 @@ struct ServingLoop {
     automatic: bool,
     events: Option<Arc<RwLock<AgentState>>>,
     activity: Arc<provider_activity::Activity>,
+    fixture: Arc<fixture_correlation::Correlation>,
 }
 
 impl ContentRuntime {
@@ -219,6 +275,7 @@ impl ContentRuntime {
             storage_maintenance: Arc::new(storage_maintenance::Coordinator::default()),
             storage_outcomes: Arc::new(private_storage::Outcomes::default()),
             provider_activity: Arc::new(provider_activity::Activity::default()),
+            fixture_correlation: Arc::new(fixture_correlation::Correlation::default()),
             recent: Arc::new(Mutex::new(recent::RecentProviders::default())),
             source_costs: Arc::new(Mutex::new(https::sources::SourceCosts::default())),
             worker_budget: worker_budget::WorkerBudget::default(),
@@ -419,6 +476,7 @@ impl ContentRuntime {
             automatic: options.automatic,
             events: Some(Arc::clone(&context.state)),
             activity: Arc::clone(&self.provider_activity),
+            fixture: Arc::clone(&self.fixture_correlation),
         };
         let listener_stopped = stop.clone();
         let task = tokio::spawn(async move {
@@ -462,6 +520,7 @@ impl ContentRuntime {
             automatic: false,
             events: None,
             activity: Arc::new(provider_activity::Activity::default()),
+            fixture: Arc::new(fixture_correlation::Correlation::default()),
         })
         .await;
     }
@@ -482,6 +541,7 @@ impl ContentRuntime {
             automatic,
             events,
             activity,
+            fixture,
         } = server;
         let mut sessions = JoinSet::new();
         refresh.tick().await;
@@ -545,25 +605,10 @@ impl ContentRuntime {
                     let tls = tls.clone();
                     let events = events.clone();
                     let activity = activity.begin();
-                    sessions.spawn(async move {
-                        let Ok(mut stream) = tls.accept(stream).await else { return; };
-                        activity.enter(Stage::RegistrySnapshot);
-                        // Snapshot at most 64 explicit registrations; never hold the metadata
-                        // lock while a background receiver waits before requesting a chunk.
-                        // Cache handles retain their own exclusive ownership checks.
-                        let Ok(registry) = provider_snapshot(&registry, REGISTRY_SNAPSHOT_TIMEOUT).await else {
-                            activity.enter(Stage::Closing);
-                            provider_event(events.as_ref(), "CONTENT_PROVIDER_REGISTRY_TIMEOUT").await;
-                            return;
-                        };
-                        let mut storage_failure = None;
-                        let result = serve_publication_with_activity(&mut stream, &registry, TransferLimits::default(), &mut storage_failure, &activity).await;
-                        activity.enter(Stage::Closing);
-                        match result {
-                            Ok(_) => { let _ = tls::finish(&mut stream).await; }
-                            Err(error) => provider_failure_event(events.as_ref(), &error, storage_failure).await,
-                        }
-                    });
+                    let fixture = fixture.provider();
+                    sessions.spawn(serve_provider_session(
+                        stream, tls, registry, events, activity, fixture,
+                    ));
                 }
                 Some(_) = sessions.join_next(), if !sessions.is_empty() => {}
             }

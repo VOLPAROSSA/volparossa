@@ -14,7 +14,8 @@ use volparossa_content::private_storage::wire::begin_observation::{self, Observe
 use volparossa_local_control::{
     PrivateStorageChallengePhase, PrivateStorageDeadlineScope as Deadline,
     PrivateStorageRemoteDetail, PrivateStorageRemoteStage as Stage, PrivateStorageStreamFailure,
-    PrivateStorageTlsFailure,
+    PrivateStorageTlsFailure, StorageFixtureCorrelationPhase as FixturePhase,
+    StorageFixtureCorrelationTerminal as FixtureTerminal,
 };
 
 use super::{ContentError, until_requester_closed};
@@ -50,9 +51,22 @@ pub(super) struct Observation {
     stream_failure: AtomicI32,
     challenge: challenge::Progress,
     flow_acquire: flow_acquire::Progress,
+    fixture: super::super::fixture_correlation::Guard,
 }
 
 impl Observation {
+    pub(super) fn with_fixture(
+        mut self,
+        fixture: super::super::fixture_correlation::Guard,
+    ) -> Self {
+        self.fixture = fixture;
+        self
+    }
+
+    pub(super) const fn fixture(&self) -> &super::super::fixture_correlation::Guard {
+        &self.fixture
+    }
+
     pub(super) fn new(include_flow_acquire_detail: bool) -> Self {
         Self {
             flow_acquire: flow_acquire::Progress::new(include_flow_acquire_detail),
@@ -91,6 +105,13 @@ impl Observation {
             && failure != PrivateStorageTlsFailure::Unobserved
         {
             self.tls_failure.store(failure as i32, Ordering::Relaxed);
+            self.fixture.finish(match failure {
+                PrivateStorageTlsFailure::HandshakeDeadline => FixtureTerminal::TlsTimeout,
+                PrivateStorageTlsFailure::Authentication
+                | PrivateStorageTlsFailure::TlsOther
+                | PrivateStorageTlsFailure::Io => FixtureTerminal::TlsError,
+                _ => FixtureTerminal::OperationError,
+            });
         }
     }
 
@@ -143,6 +164,11 @@ impl Observation {
     ) -> Result<T, ContentError> {
         self.reset();
         self.stage.store(stage as i32, Ordering::Relaxed);
+        self.fixture.enter(match stage {
+            Stage::TlsHandshake => FixturePhase::TlsHandshake,
+            Stage::Challenge => FixturePhase::ClientChallenge,
+            _ => FixturePhase::FlowAcquire,
+        });
         if stage == Stage::Challenge {
             self.challenge.enter();
         }
@@ -172,6 +198,7 @@ impl Observation {
         })
         .await;
         if !completed {
+            self.fixture.finish(FixtureTerminal::Cancelled);
             self.reset();
         }
         result
@@ -196,6 +223,7 @@ impl Observation {
             if let Ok(result) = operation.await {
                 result
             } else {
+                self.fixture.finish(FixtureTerminal::OperationError);
                 self.challenge.fail();
                 self.flow_acquire.reset();
                 self.tls_failure.store(
@@ -216,6 +244,7 @@ impl Observation {
 impl Observer for Observation {
     fn phase(&self, phase: begin_observation::Phase) {
         if self.stage.load(Ordering::Relaxed) == Stage::Challenge as i32 {
+            self.fixture.enter(FixturePhase::ClientChallenge);
             self.challenge.phase(match phase {
                 begin_observation::Phase::SelectorWriteFlush => {
                     PrivateStorageChallengePhase::SelectorWriteFlush
@@ -233,3 +262,6 @@ impl Observer for Observation {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod fixture_correlation_tests;

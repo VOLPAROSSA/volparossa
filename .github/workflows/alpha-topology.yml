@@ -180,6 +180,7 @@ jobs:
           python3 -B tests/integration/test-storage-consumer-maintenance-provision.py
           python3 -B tests/integration/test-storage-consumer-maintenance-smoke.py
           python3 -B tests/integration/test-storage-provider-activity-sampler.py
+          python3 -B tests/integration/test-storage-fixture-correlation-sampler.py
           python3 -B tests/integration/test-storage-consumer-maintenance-evidence.py
           python3 -B tests/integration/test-image-snapshot-provision.py
           python3 -B tests/integration/test-image-snapshot-wiring.py

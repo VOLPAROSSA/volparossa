@@ -23,6 +23,7 @@ mod browser_download;
 mod custody;
 mod filter_serve;
 mod filter_snapshot;
+mod fixture_correlation;
 mod handoff;
 mod https_download;
 mod mailbox;
@@ -95,6 +96,8 @@ pub(crate) enum Command {
     Status,
     /// Read finite local provider activity; no peer queries or storage acceptance claims.
     ProviderActivity,
+    /// Private development-fixture correlation; bounded JSON input on stdin only.
+    FixtureCorrelation,
 }
 
 #[derive(Debug, Args)]
@@ -584,6 +587,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
             );
         }
         Command::ProviderActivity => return provider_activity::run(socket).await,
+        Command::FixtureCorrelation => return fixture_correlation::run(socket).await,
     };
     println!("{}", serde_json::to_string(&report)?);
     Ok(())

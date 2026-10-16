@@ -59,7 +59,8 @@ private_storage_replicas_serve relay4 "$3"
         guest = (HERE / 'kvm-alpha-topology.sh').read_text()
         self.assertIn('storage-consumer-maintenance-provision.py provision --download --profile-version 9', runner)
         self.assertIn('consumer_profile_version=${storage_consumer_profile_version-7}', TEXT)
-        self.assertIn('storage-consumer-maintenance-smoke.py" "$@" --profile-version "$consumer_profile_version"', TEXT)
+        self.assertIn('set -- "$@" --profile-version "$consumer_profile_version" --network-version 2', TEXT)
+        self.assertIn('storage-consumer-maintenance-smoke.py" "$@"', TEXT)
         self.assertIn('"evidence-v$consumer_profile_version" "$WORK" "$WORK/storage-consumer-evidence.json"', TEXT)
         for name in ('storage-consumer-maintenance-pins.json', 'storage-consumer-maintenance-pins-v2.json',
                 'storage-consumer-maintenance-pins-v3.json', 'storage-consumer-maintenance-pins-v4.json',
@@ -131,7 +132,8 @@ private_storage_consumer_private publish /synthetic/owner
         cleanup = TEXT.split('private_storage_consumer_cleanup() {', 1)[1].split('\n}', 1)[0]
         self.assertNotIn('rm -', cleanup)
         self.assertEqual([line.strip() for line in TEXT.splitlines() if 'rm -' in line],
-            ['rm -f -- "$WORK/provider-activity.part" || true'])
+            ['rm -f -- "$WORK/provider-activity.part" || true',
+             'rm -f -- "$WORK/fixture-correlation.part" || true'])
         self.assertNotIn('consumer-binding.json', TEXT)
         self.assertNotIn('remote_cleanup_confirmed:true', TEXT)
 

@@ -1,6 +1,7 @@
 //! Protected local CLI socket and typed operation dispatch.
 
 mod content_transfer;
+mod fixture_correlation;
 
 use std::{
     fs,
@@ -174,6 +175,26 @@ async fn process_connection(
         .await
         .map_err(|_| ControlServerError::Timeout)?
         .map_err(|_| ControlServerError::InvalidFrame)?;
+    if let Some(control_request::Operation::StorageFixtureCorrelation(query)) =
+        request.operation.as_ref()
+    {
+        let reply = timeout(
+            CONTROL_TIMEOUT,
+            fixture_correlation::respond(
+                context.config.runtime_mode,
+                &context.content,
+                request.request_id,
+                query,
+                &stream,
+            ),
+        )
+        .await
+        .map_err(|_| ControlServerError::Timeout)?;
+        return timeout(CONTROL_TIMEOUT, write_response(&mut stream, &reply))
+            .await
+            .map_err(|_| ControlServerError::Timeout)?
+            .map_err(|_| ControlServerError::InvalidFrame);
+    }
     if let Some(control_request::Operation::PrivateStorageOutcome(query)) =
         request.operation.as_ref()
     {
@@ -405,6 +426,7 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
         | control_request::Operation::MailboxRemote(_)
         | control_request::Operation::PrivateStorageRemote(_)
         | control_request::Operation::PrivateStorageOutcome(_)
+        | control_request::Operation::StorageFixtureCorrelation(_)
         | control_request::Operation::PrivateStorageMaintenance(_)
         | control_request::Operation::ContentCustody(_)
         | control_request::Operation::ContentCustodyDiscover(_)

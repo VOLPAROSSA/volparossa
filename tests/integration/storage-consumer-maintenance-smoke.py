@@ -21,6 +21,8 @@ HERE = Path(__file__).resolve().parent
 BASE = runpy.run_path(str(HERE / 'private-storage-fragments-smoke.py'))
 SAMPLER = runpy.run_path(str(HERE / 'private-storage-log-sampler.py'))
 ACTIVITY = runpy.run_path(str(HERE / 'storage-provider-activity-sampler.py'))
+CORRELATION = runpy.run_path(str(HERE / 'storage-fixture-correlation-sampler.py'))
+FIXTURE_CORRELATION = False
 PROVISIONER = runpy.run_path(str(HERE / 'storage-consumer-maintenance-provision.py'))
 NODE = Path('/opt/volparossa-node/bin/node')
 PROVISION = Path('/opt/volparossa-storage-consumers/provision.json')
@@ -627,6 +629,15 @@ def phase(root, selected, exit_socket, flow_root, provision, deadline):
     cloud = private_json(root / 'cloud/storage.json')
     require(image['coreBinary'] == cloud['coreBinary'] and image['controlSocket'] == cloud['controlSocket'], 'shared_core')
     binary, client = validate_locations(root, image['coreBinary'], image['controlSocket'])
+    correlation = CORRELATION['capture'](binary, root.parents[1], root, selected) if (
+        FIXTURE_CORRELATION and PROFILE_VERSION == 9 and NETWORK_VERSION == 2) else nullcontext()
+    # Fix the original application/network/deadline outcome before optional
+    # diagnostic shutdown. Its query/disarm latency is not acceptance authority.
+    with correlation:
+        return phase_with_core(root, selected, exit_socket, flow_root, provision, deadline, binary, client)
+
+
+def phase_with_core(root, selected, exit_socket, flow_root, provision, deadline, binary, client):
     require(Path(exit_socket) == root.parents[1] / 'runtime-exit/control/agent.sock'
         and Path(flow_root) == root.parents[1] / 'client-fixtures/private-storage-user', 'flow_locations')
     private_directory(Path(flow_root))
@@ -700,7 +711,8 @@ def cleanup_tree(root):
     files, directories, total = [], [], 0
     original = private_directory(root)
     top_files = {'consumer-binding.json', *(f'storage-consumer-{p}.json' for p in PHASES),
-        *(ACTIVITY['private_name'](phase) for phase in ACTIVITY['PHASES'])}
+        *(ACTIVITY['private_name'](phase) for phase in ACTIVITY['PHASES']),
+        *(CORRELATION['private_name'](phase) for phase in CORRELATION['PHASES'])}
 
     def visit(path, depth):
         nonlocal total
@@ -745,15 +757,20 @@ def cleanup(root):
 
 
 def main(arguments):
-    global PROFILE_VERSION, NETWORK_VERSION
+    global PROFILE_VERSION, NETWORK_VERSION, FIXTURE_CORRELATION
     PROFILE_VERSION = 1
     NETWORK_VERSION = 1
+    FIXTURE_CORRELATION = bool(arguments and arguments[-1] == '--fixture-correlation')
+    if FIXTURE_CORRELATION:
+        arguments = arguments[:-1]
     if len(arguments) >= 2 and arguments[-2:] == ['--network-version', '2']:
         NETWORK_VERSION = 2
         arguments = arguments[:-2]
     if len(arguments) >= 2 and arguments[-2] == '--profile-version' and arguments[-1] in ('2', '3', '4', '5', '6', '7', '8', '9'):
         PROFILE_VERSION = int(arguments[-1])
         arguments = arguments[:-2]
+    require(not FIXTURE_CORRELATION or (PROFILE_VERSION == 9 and NETWORK_VERSION == 2
+        and arguments and arguments[0] in CORRELATION['PHASES']), 'fixture_correlation_scope')
     if len(arguments) == 2 and arguments[0] == 'flow-minimum':
         require(arguments[1] in FLOW_MINIMUM, 'phase')
         print(FLOW_MINIMUM[arguments[1]])

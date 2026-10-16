@@ -123,6 +123,7 @@ jobs:
           node --test tests/integration/test-storage-consumer-maintenance.mjs
           python3 -B tests/integration/test-private-storage-maintenance-smoke.py
           python3 -B tests/integration/test-private-storage-maintenance-wiring.py
+          python3 -B tests/integration/test-storage-fixture-correlation-sampler.py
 
       - name: Check formatting and shell sources
         run: |

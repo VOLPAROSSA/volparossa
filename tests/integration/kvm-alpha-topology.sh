@@ -20,6 +20,7 @@ signal_backup=no
 signal_backup_fragments=no
 private_storage_fragments=no
 private_storage_maintenance=no
+storage_fixture_correlation=no
 image_snapshot=no
 cloud_private_file=no
 cloud_private_upload=no
@@ -794,6 +795,7 @@ while [ "$#" -gt 0 ]; do
             signal_backup_fragments=no
             private_storage_fragments=no
             private_storage_maintenance=no
+            storage_fixture_correlation=no
             image_snapshot=no
             cloud_private_file=no
             cloud_private_upload=no
@@ -837,7 +839,7 @@ while [ "$#" -gt 0 ]; do
                 private-storage-replicas) scenario=content-custody; private_storage_replicas=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-handoff) scenario=content-custody; private_storage_handoff=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-fragments) scenario=content-custody; private_storage_fragments=yes; wifi_link=no; uplink_link=no ;;
-                private-storage-maintenance) scenario=content-custody; private_storage_fragments=yes; private_storage_maintenance=yes; storage_consumer_profile_version=9; wifi_link=no; uplink_link=no ;;
+                private-storage-maintenance) scenario=content-custody; private_storage_fragments=yes; private_storage_maintenance=yes; storage_consumer_profile_version=9; storage_fixture_correlation=yes; wifi_link=no; uplink_link=no ;;
                 image-snapshot) scenario=content-custody; private_storage_fragments=yes; image_snapshot=yes; wifi_link=no; uplink_link=no ;;
                 cloud-private-file) scenario=content-custody; private_storage_fragments=yes; cloud_private_file=yes; wifi_link=no; uplink_link=no ;;
                 cloud-private-upload) scenario=content-custody; private_storage_fragments=yes; cloud_private_upload=yes; wifi_link=no; uplink_link=no ;;
@@ -1183,7 +1185,7 @@ if [ "$private_storage_fragments" = yes ]; then
 fi
 if [ "$private_storage_maintenance" = yes ]; then
     for maintenance_fixture in private-storage-maintenance-smoke.sh private-storage-maintenance-smoke.py \
-        private-storage-log-sampler.py content-provider-readiness.py storage-provider-activity-sampler.py \
+        private-storage-log-sampler.py content-provider-readiness.py storage-provider-activity-sampler.py storage-fixture-correlation-sampler.py \
         storage-consumer-maintenance-smoke.sh storage-consumer-maintenance-smoke.py \
         storage-consumer-maintenance.mjs storage-consumer-maintenance-pins.json storage-consumer-maintenance-pins-v2.json \
         storage-consumer-maintenance-pins-v3.json storage-consumer-maintenance-pins-v4.json storage-consumer-maintenance-pins-v5.json \
@@ -3098,7 +3100,7 @@ if [ "$private_storage_fragments" = yes ]; then
 fi
 if [ "$private_storage_maintenance" = yes ]; then
     for maintenance_script in private-storage-maintenance-smoke.py private-storage-log-sampler.py content-provider-readiness.py \
-        storage-provider-activity-sampler.py \
+        storage-provider-activity-sampler.py storage-fixture-correlation-sampler.py \
         storage-consumer-maintenance-smoke.py storage-consumer-maintenance.mjs \
         storage-consumer-maintenance-evidence.py storage-consumer-maintenance-provision.py \
         storage-consumer-control-underlay.py storage-consumer-network.py storage-consumer-route-sampler.py \

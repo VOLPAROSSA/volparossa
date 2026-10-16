@@ -997,7 +997,8 @@ class ConsumerOrchestration(unittest.TestCase):
             'agent-private-task-code.py', 'agent-private-task-code-pins.json',
             'private-storage-fragments-smoke.py', 'private-storage-replicas-smoke.py',
             'private-storage-peer-smoke.py', 'content-provider-https-smoke.py',
-            'content-network-smoke.py', 'private-storage-log-sampler.py', 'storage-provider-activity-sampler.py')
+            'content-network-smoke.py', 'private-storage-log-sampler.py', 'storage-provider-activity-sampler.py',
+            'storage-fixture-correlation-sampler.py')
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             for name in names:
