@@ -20,6 +20,7 @@ signal_backup=no
 signal_backup_fragments=no
 private_storage_fragments=no
 private_storage_maintenance=no
+private_storage_deposit_sequence=no
 storage_fixture_correlation=no
 image_snapshot=no
 cloud_private_file=no
@@ -82,7 +83,7 @@ usage() {
         '         --scenario content-provider accepts --browser-filter-bundle ARCHIVE --browser-filter-manifest-sha256 HEX' \
         '         --scenario protected-quote checks signed refusal and authority; it does not prove protected execution.' \
         '         or --weather-client-bundle ARCHIVE --weather-client-manifest-sha256 HEX (not both)' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|private-storage-maintenance|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|private-storage-deposit-sequence|private-storage-maintenance|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
 }
 
 print_plan() {
@@ -174,6 +175,15 @@ print_plan() {
             '  remove local ciphertext, stop A, restore twice via B/C and decrypt/verify every original hash;' \
             '  retain owner keys privately, delete every remote copy and prove exact cleanup/host state;' \
             '  no running Immich, mobile sync or general serverless availability claim.'
+        return
+    fi
+    if [ "$private_storage_deposit_sequence" = yes ]; then
+        printf '%s\n' \
+            'VOLPAROSSA private-storage-deposit-sequence: core-only prefix on one fresh protected MPTCP route:' \
+            '  real provider daemons A/B/C; nine deposits A,B,B,C,C,A,A,B,A, then B;' \
+            '  two real WireGuard relay paths, normal helper ownership and finite deadlines;' \
+            '  owner-verified receipts, all confirmed leases deleted and private/host cleanup;' \
+            '  no full consumer, encryption, restart or repair acceptance claim.'
         return
     fi
     if [ "$private_storage_maintenance" = yes ]; then
@@ -795,6 +805,7 @@ while [ "$#" -gt 0 ]; do
             signal_backup_fragments=no
             private_storage_fragments=no
             private_storage_maintenance=no
+            private_storage_deposit_sequence=no
             storage_fixture_correlation=no
             image_snapshot=no
             cloud_private_file=no
@@ -839,6 +850,7 @@ while [ "$#" -gt 0 ]; do
                 private-storage-replicas) scenario=content-custody; private_storage_replicas=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-handoff) scenario=content-custody; private_storage_handoff=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-fragments) scenario=content-custody; private_storage_fragments=yes; wifi_link=no; uplink_link=no ;;
+                private-storage-deposit-sequence) scenario=content-custody; private_storage_deposit_sequence=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-maintenance) scenario=content-custody; private_storage_fragments=yes; private_storage_maintenance=yes; storage_consumer_profile_version=10; storage_fixture_correlation=yes; wifi_link=no; uplink_link=no ;;
                 image-snapshot) scenario=content-custody; private_storage_fragments=yes; image_snapshot=yes; wifi_link=no; uplink_link=no ;;
                 cloud-private-file) scenario=content-custody; private_storage_fragments=yes; cloud_private_file=yes; wifi_link=no; uplink_link=no ;;
@@ -1172,6 +1184,14 @@ if [ "$signal_backup" = yes ]; then
 fi
 if [ "$signal_backup_fragments" = yes ]; then
     for storage_fixture in signal-backup-fragments-smoke.sh signal-backup-fragments-smoke.py signal-backup-fragments-pins.json; do
+        [ -f "$source_directory/tests/integration/$storage_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
+    done
+fi
+if [ "$private_storage_deposit_sequence" = yes ]; then
+    for storage_fixture in private-storage-deposit-sequence-smoke.sh private-storage-deposit-sequence-smoke.py \
+        private-storage-fragments-smoke.py private-storage-replicas-smoke.sh private-storage-replicas-smoke.py \
+        private-storage-peer-smoke.py; do
         [ -f "$source_directory/tests/integration/$storage_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$storage_fixture" ] || exit 69
     done
@@ -2328,7 +2348,9 @@ cleanup() {
     if [ "$private_storage_maintenance" = yes ] && command -v private_storage_consumer_cleanup >/dev/null 2>&1; then
         private_storage_consumer_cleanup || original_status=1
     fi
-    if [ "$private_storage_fragments" = yes ] && [ "$signal_backup_fragments" = no ] \
+    if [ "$private_storage_deposit_sequence" = yes ] && command -v private_storage_sequence_cleanup >/dev/null 2>&1; then
+        private_storage_sequence_cleanup || original_status=1
+    elif [ "$private_storage_fragments" = yes ] && [ "$signal_backup_fragments" = no ] \
         && command -v private_storage_fragments_cleanup >/dev/null 2>&1; then
         private_storage_fragments_cleanup || original_status=1
     elif [ "$private_storage_handoff" = yes ] && command -v private_storage_handoff_cleanup >/dev/null 2>&1; then
@@ -2643,6 +2665,8 @@ cleanup() {
         cloud_private_file_finalize_report "$original_status" || original_status=1
     elif [ "$image_snapshot" = yes ]; then
         image_snapshot_finalize_report "$original_status" || original_status=1
+    elif [ "$private_storage_deposit_sequence" = yes ]; then
+        private_storage_sequence_finalize_report "$original_status" || original_status=1
     elif [ "$private_storage_maintenance" = yes ]; then
         private_storage_maintenance_finalize_report "$original_status" || original_status=1
     elif [ "$private_storage_fragments" = yes ]; then
@@ -2829,7 +2853,7 @@ if [ "$private_storage_peer" = yes ]; then
     # shellcheck source=tests/integration/private-storage-peer-smoke.sh
     . "$source_directory/tests/integration/private-storage-peer-smoke.sh"
 fi
-if [ "$private_storage_fragments" = yes ] || [ "$private_storage_replicas" = yes ] || [ "$private_storage_handoff" = yes ] || [ "$signal_backup" = yes ]; then
+if [ "$private_storage_deposit_sequence" = yes ] || [ "$private_storage_fragments" = yes ] || [ "$private_storage_replicas" = yes ] || [ "$private_storage_handoff" = yes ] || [ "$signal_backup" = yes ]; then
     # shellcheck source=tests/integration/private-storage-replicas-smoke.sh
     . "$source_directory/tests/integration/private-storage-replicas-smoke.sh"
 fi
@@ -2840,6 +2864,10 @@ fi
 if [ "$private_storage_fragments" = yes ]; then
     # shellcheck source=tests/integration/private-storage-fragments-smoke.sh
     . "$source_directory/tests/integration/private-storage-fragments-smoke.sh"
+fi
+if [ "$private_storage_deposit_sequence" = yes ]; then
+    # shellcheck source=tests/integration/private-storage-deposit-sequence-smoke.sh
+    . "$source_directory/tests/integration/private-storage-deposit-sequence-smoke.sh"
 fi
 if [ "$private_storage_maintenance" = yes ]; then
     # shellcheck source=tests/integration/private-storage-maintenance-smoke.sh
@@ -3098,6 +3126,12 @@ fi
 if [ "$private_storage_fragments" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/private-storage-fragments-smoke.py" \
         "$WORK/bin/private-storage-fragments-smoke.py"
+fi
+if [ "$private_storage_deposit_sequence" = yes ]; then
+    for storage_fixture in private-storage-deposit-sequence-smoke.py private-storage-fragments-smoke.py \
+        private-storage-replicas-smoke.py private-storage-peer-smoke.py; do
+        install -o root -g root -m 0555 "$source_directory/tests/integration/$storage_fixture" "$WORK/bin/$storage_fixture"
+    done
 fi
 if [ "$private_storage_maintenance" = yes ]; then
     for maintenance_script in private-storage-maintenance-smoke.py private-storage-log-sampler.py content-provider-readiness.py \
@@ -6419,6 +6453,8 @@ start_privacy_observers() {
             [ "$scenario" = content-mailbox ] || return 1 ;;
         private-storage-peer-privacy)
             [ "$private_storage_peer" = yes ] || return 1 ;;
+        private-storage-deposit-sequence-privacy)
+            [ "$private_storage_deposit_sequence" = yes ] || return 1 ;;
         signal-backup-native-privacy)
             [ "$signal_backup" = yes ] || return 1 ;;
         private-storage-replicas-upload-privacy|private-storage-replicas-failover-privacy|private-storage-replicas-finish-privacy)
@@ -7203,6 +7239,12 @@ if [ "$image_snapshot" = yes ]; then
 fi
 if [ "$private_storage_maintenance" = yes ]; then
     private_storage_maintenance_run
+    exit 0
+fi
+# Extracted dispatch contracts may omit this new optional scenario flag. The
+# default matches top-level initialization: only explicit selection enables it.
+if [ "${private_storage_deposit_sequence:-no}" = yes ]; then
+    private_storage_sequence_run
     exit 0
 fi
 if [ "$private_storage_fragments" = yes ]; then
