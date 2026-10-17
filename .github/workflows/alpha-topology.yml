@@ -2131,7 +2131,7 @@ jobs:
 
       - name: Upload closed transaction TEST evidence
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'transaction-abci' && env.VOLPAROSSA_ALPHA_OUTPUT != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: alpha-production-helper-topology-${{ github.run_id }}
           path: |
@@ -2153,7 +2153,7 @@ jobs:
 
       - name: Upload closed protected quote refusal evidence
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'protected-quote' && env.VOLPAROSSA_ALPHA_OUTPUT != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: alpha-production-helper-topology-${{ github.run_id }}
           path: |
@@ -2164,7 +2164,7 @@ jobs:
 
       - name: Upload bounded topology diagnostics
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-conversation' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-native-coding' && env.VOLPAROSSA_ALPHA_SCENARIO != 'transaction-abci' && env.VOLPAROSSA_ALPHA_SCENARIO != 'protected-quote'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: alpha-production-helper-topology-${{ github.run_id }}
           path: ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}
@@ -2173,7 +2173,7 @@ jobs:
 
       - name: Upload bounded private conversation fixture evidence
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-private-conversation'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: alpha-production-helper-topology-${{ github.run_id }}
           path: |
@@ -2202,7 +2202,7 @@ jobs:
 
       - name: Upload bounded native coding fixture evidence
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-native-coding'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: alpha-production-helper-topology-${{ github.run_id }}
           path: |
