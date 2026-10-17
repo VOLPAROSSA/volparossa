@@ -35,6 +35,113 @@ async fn providers(state: &Arc<Correlation>, fingerprint: &[u8]) -> Response {
     state.request(UID, &query).await.unwrap()
 }
 
+#[tokio::test]
+async fn fixture_v2_epoch_rejects_cross_version_queries_without_resetting_lifetime() {
+    for version in [1, 2] {
+        let state = Arc::new(Correlation::default());
+        let query = |action, version| Request {
+            version,
+            ..request(action)
+        };
+        state
+            .request(UID, &query(Action::Arm, version))
+            .await
+            .unwrap();
+        let guard = state.client(UID);
+        for action in [Action::Clients, Action::Disarm] {
+            assert!(
+                state
+                    .request(UID, &query(action, 3 - version))
+                    .await
+                    .is_err()
+            );
+        }
+        let row = state
+            .request(UID, &query(Action::Clients, version))
+            .await
+            .unwrap();
+        assert_eq!(row.version, version);
+        assert_eq!(row.records.len(), 1);
+        state
+            .request(UID, &query(Action::Disarm, version))
+            .await
+            .unwrap();
+        state
+            .request(UID, &query(Action::Arm, version))
+            .await
+            .unwrap();
+        let new_guard = state.client(UID);
+        guard.finish(Terminal::OperationError);
+        let row = state
+            .request(UID, &query(Action::Clients, version))
+            .await
+            .unwrap();
+        assert_eq!(row.records[0].terminal, Terminal::Active as i32);
+        drop(new_guard);
+    }
+}
+
+fn acquire_summary() -> StorageFixtureAcquireSummary {
+    use volparossa_local_control::{
+        PrivateStorageFlowAcquireFailure, PrivateStorageFlowAcquireReason as Reason,
+        PrivateStorageFlowAcquireStage as Stage, StorageFixtureAcquireFailure,
+        StorageFixtureHelperDiagnostic as Code,
+    };
+    let failure = StorageFixtureAcquireFailure {
+        failure: Some(PrivateStorageFlowAcquireFailure {
+            stage: Stage::HelperAcquire as i32,
+            reason: Reason::HelperCleanupIncomplete as i32,
+        }),
+        helper_diagnostic: Some(Code::StaleBackendResult as i32),
+    };
+    StorageFixtureAcquireSummary {
+        rounds: 1,
+        first: Some(failure),
+        last: Some(failure),
+    }
+}
+
+#[tokio::test]
+async fn fixture_v2_contended_cancel_advance_and_reset_cannot_export_stale_detail() {
+    for action in 0..3 {
+        let state = Arc::new(Correlation::default());
+        let request = |action| Request {
+            version: 2,
+            ..request(action)
+        };
+        state.request(UID, &request(Action::Arm)).await.unwrap();
+        let guard = state.client(UID);
+        guard.flow_acquire(Some(acquire_summary()));
+        let held = state.bank.lock().unwrap();
+        match action {
+            0 => guard.finish(Terminal::Cancelled),
+            1 => guard.enter(Phase::TlsHandshake),
+            _ => guard.flow_acquire(None),
+        }
+        drop(held);
+        guard.finish(Terminal::OperationError);
+        let response = state.request(UID, &request(Action::Clients)).await.unwrap();
+        assert!(response.incomplete);
+        assert_eq!(response.records[0].flow_acquire, None);
+    }
+}
+
+#[tokio::test]
+async fn fixture_v2_normal_guard_drop_preserves_the_first_terminal_detail() {
+    let state = Arc::new(Correlation::default());
+    let request = |action| Request {
+        version: 2,
+        ..request(action)
+    };
+    state.request(UID, &request(Action::Arm)).await.unwrap();
+    let guard = state.client(UID);
+    guard.flow_acquire(Some(acquire_summary()));
+    guard.finish(Terminal::OperationError);
+    drop(guard);
+    let response = state.request(UID, &request(Action::Clients)).await.unwrap();
+    assert_eq!(response.records[0].flow_acquire, Some(acquire_summary()));
+}
+
 fn digest(epoch: &[u8; 16], bytes: &[u8]) -> Vec<u8> {
     let mut hash = Sha256::new();
     hash.update(DOMAIN);

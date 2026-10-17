@@ -32,22 +32,28 @@ pub(crate) enum Command {
     /// Retain explicit independently pinned provider copies, with non-consuming restore failover.
     Replicas {
         /// Opt in to coarse local APPEND timing in diagnostic reports (version 7).
-        #[arg(long, global = true, conflicts_with = "flow_acquire_diagnostics_v8")]
+        #[arg(long, global = true, conflicts_with_all = ["flow_acquire_diagnostics_v8", "tls_close_diagnostics_v9"])]
         append_diagnostics_v7: bool,
         /// Opt in to closed local flow-acquisition detail and v7 APPEND timing (version 8).
-        #[arg(long, global = true, conflicts_with = "append_diagnostics_v7")]
+        #[arg(long, global = true, conflicts_with_all = ["append_diagnostics_v7", "tls_close_diagnostics_v9"])]
         flow_acquire_diagnostics_v8: bool,
+        /// Opt in to outer TLS close failures and all v8 diagnostic fields (version 9).
+        #[arg(long, global = true, conflicts_with_all = ["append_diagnostics_v7", "flow_acquire_diagnostics_v8"])]
+        tls_close_diagnostics_v9: bool,
         #[command(subcommand)]
         command: Box<peer::replicas::Command>,
     },
     /// Split already encrypted archives across explicit providers with per-fragment copies.
     Fragments {
         /// Opt in to coarse local APPEND timing in diagnostic reports (version 7).
-        #[arg(long, global = true, conflicts_with = "flow_acquire_diagnostics_v8")]
+        #[arg(long, global = true, conflicts_with_all = ["flow_acquire_diagnostics_v8", "tls_close_diagnostics_v9"])]
         append_diagnostics_v7: bool,
         /// Opt in to closed local flow-acquisition detail and v7 APPEND timing (version 8).
-        #[arg(long, global = true, conflicts_with = "append_diagnostics_v7")]
+        #[arg(long, global = true, conflicts_with_all = ["append_diagnostics_v7", "tls_close_diagnostics_v9"])]
         flow_acquire_diagnostics_v8: bool,
+        /// Opt in to outer TLS close failures and all v8 diagnostic fields (version 9).
+        #[arg(long, global = true, conflicts_with_all = ["append_diagnostics_v7", "flow_acquire_diagnostics_v8"])]
+        tls_close_diagnostics_v9: bool,
         #[command(subcommand)]
         command: Box<peer::replicas::fragments::Command>,
     },
@@ -57,21 +63,29 @@ impl Command {
     fn validate_diagnostics(&self) -> Result<(), clap::Error> {
         // Global values can arrive from different subcommand scopes. Recheck
         // the final selection before constructing or polling any storage work.
-        if matches!(
-            self,
+        let selectors = match self {
             Self::Replicas {
-                append_diagnostics_v7: true,
-                flow_acquire_diagnostics_v8: true,
-                ..
-            } | Self::Fragments {
-                append_diagnostics_v7: true,
-                flow_acquire_diagnostics_v8: true,
+                append_diagnostics_v7,
+                flow_acquire_diagnostics_v8,
+                tls_close_diagnostics_v9,
                 ..
             }
-        ) {
+            | Self::Fragments {
+                append_diagnostics_v7,
+                flow_acquire_diagnostics_v8,
+                tls_close_diagnostics_v9,
+                ..
+            } => [
+                *append_diagnostics_v7,
+                *flow_acquire_diagnostics_v8,
+                *tls_close_diagnostics_v9,
+            ],
+            _ => [false; 3],
+        };
+        if selectors.into_iter().filter(|enabled| *enabled).count() > 1 {
             return Err(clap::Error::raw(
                 clap::error::ErrorKind::ArgumentConflict,
-                "--append-diagnostics-v7 conflicts with --flow-acquire-diagnostics-v8",
+                "storage diagnostic version selectors are mutually exclusive",
             ));
         }
         Ok(())
@@ -155,10 +169,12 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
             command,
             append_diagnostics_v7,
             flow_acquire_diagnostics_v8,
+            tls_close_diagnostics_v9,
         } => {
-            return Box::pin(peer::with_diagnostics(
+            return Box::pin(peer::with_all_diagnostics(
                 append_diagnostics_v7,
                 flow_acquire_diagnostics_v8,
+                tls_close_diagnostics_v9,
                 peer::replicas::run(*command, socket),
             ))
             .await;
@@ -167,10 +183,12 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
             command,
             append_diagnostics_v7,
             flow_acquire_diagnostics_v8,
+            tls_close_diagnostics_v9,
         } => {
-            return Box::pin(peer::with_diagnostics(
+            return Box::pin(peer::with_all_diagnostics(
                 append_diagnostics_v7,
                 flow_acquire_diagnostics_v8,
+                tls_close_diagnostics_v9,
                 peer::replicas::fragments::run(*command, socket),
             ))
             .await;

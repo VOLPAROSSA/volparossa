@@ -22,7 +22,7 @@ use volparossa_content::private_storage::{
 use volparossa_local_control::{
     PrivateStorageDeadlineScope, PrivateStorageOutcome, PrivateStorageOutcomeCategory as Category,
     PrivateStorageOutcomeDeadline as Deadline, PrivateStorageOutcomePhase as Phase,
-    PrivateStorageOutcomeStatus as Status,
+    PrivateStorageOutcomeStatus as Status, PrivateStorageTlsCloseFailure,
 };
 
 use super::ContentError;
@@ -65,6 +65,7 @@ impl Outcomes {
             phase: AtomicI32::new(Phase::Unobserved as i32),
             deadline: AtomicI32::new(Deadline::None as i32),
             category: AtomicI32::new(Category::Unobserved as i32),
+            tls_close_failure: AtomicI32::new(0),
             succeeded: false,
             finished: false,
             timing: timing::Progress::default(),
@@ -93,6 +94,7 @@ impl Outcomes {
 
 fn status(status: Status) -> PrivateStorageOutcome {
     PrivateStorageOutcome {
+        tls_close_failure: None,
         status: status as i32,
         phase: 0,
         category: 0,
@@ -109,6 +111,7 @@ pub(super) struct Guard {
     phase: AtomicI32,
     deadline: AtomicI32,
     category: AtomicI32,
+    tls_close_failure: AtomicI32,
     succeeded: bool,
     finished: bool,
     timing: timing::Progress,
@@ -120,8 +123,16 @@ impl Guard {
     }
 
     pub(super) fn enter(&self, phase: Phase) {
+        self.tls_close_failure.store(0, Ordering::Relaxed);
         self.timing.phase(phase);
         self.phase.store(phase as i32, Ordering::Relaxed);
+    }
+
+    pub(super) fn tls_close_failure(&self, failure: PrivateStorageTlsCloseFailure) {
+        if self.phase.load(Ordering::Relaxed) == Phase::TransportTlsClose as i32 {
+            self.tls_close_failure
+                .store(failure as i32, Ordering::Relaxed);
+        }
     }
 
     pub(super) fn wire_error(&self, error: &WireError) {
@@ -145,6 +156,7 @@ impl Guard {
             .store(Category::Cancelled as i32, Ordering::Relaxed);
         self.deadline
             .store(Deadline::None as i32, Ordering::Relaxed);
+        self.tls_close_failure.store(0, Ordering::Relaxed);
     }
 
     pub(super) fn finish(
@@ -161,6 +173,7 @@ impl Guard {
             return;
         }
         if outer != PrivateStorageDeadlineScope::None {
+            self.tls_close_failure.store(0, Ordering::Relaxed);
             let deadline = match outer {
                 PrivateStorageDeadlineScope::Operation => Deadline::Operation,
                 PrivateStorageDeadlineScope::Exchange => Deadline::Exchange,
@@ -209,6 +222,13 @@ impl Drop for Guard {
         } else {
             Deadline::None as i32
         };
+        let close = self.tls_close_failure.load(Ordering::Relaxed);
+        let tls_close_failure = (self.finished
+            && phase == Phase::TransportTlsClose as i32
+            && category == Category::Unavailable as i32
+            && deadline == Deadline::None as i32
+            && close != 0)
+            .then_some(close);
         entries.insert(
             self.key,
             Entry::Failed {
@@ -219,6 +239,7 @@ impl Drop for Guard {
                     category,
                     deadline,
                     append_timing: self.timing.detail(phase),
+                    tls_close_failure,
                 },
             },
         );

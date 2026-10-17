@@ -6,10 +6,10 @@
 
 private_storage_consumer_private() {
     consumer_profile_version=${storage_consumer_profile_version-7}
-    case $consumer_profile_version in 7|8|9) ;; *) fail CONSUMER_PROFILE_INVALID; return 1 ;; esac
+    case $consumer_profile_version in 7|8|9|10) ;; *) fail CONSUMER_PROFILE_INVALID; return 1 ;; esac
     set -- "$@" --profile-version "$consumer_profile_version" --network-version 2
     case $1:${storage_fixture_correlation:-no}:$consumer_profile_version in
-        publish:yes:9|exercise:yes:9|finish:yes:9) set -- "$@" --fixture-correlation ;;
+        publish:yes:9|exercise:yes:9|finish:yes:9|publish:yes:10|exercise:yes:10|finish:yes:10) set -- "$@" --fixture-correlation ;;
     esac
     STORAGE_PROOF_BASELINE_MS=${provider_baseline_ms:-0} \
       STORAGE_PROOF_ROUTE_SCOPE=${storage_route_scope:-} \
@@ -139,7 +139,7 @@ private_storage_consumer_run() {
         >"$WORK/storage-consumer-withdrawal.json"
     private_storage_consumer_cleanup || fail CONSUMER_PRIVATE_CLEANUP_FAILED
     consumer_profile_version=${storage_consumer_profile_version-7}
-    case $consumer_profile_version in 7|8|9) ;; *) fail CONSUMER_PROFILE_INVALID; return 1 ;; esac
+    case $consumer_profile_version in 7|8|9|10) ;; *) fail CONSUMER_PROFILE_INVALID; return 1 ;; esac
     python3 -B "$source_directory/tests/integration/storage-consumer-maintenance-evidence.py" \
         "evidence-v$consumer_profile_version" "$WORK" "$WORK/storage-consumer-evidence.json" \
         || fail CONSUMER_EVIDENCE_INVALID

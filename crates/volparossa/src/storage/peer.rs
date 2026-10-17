@@ -44,6 +44,19 @@ pub(super) async fn with_diagnostics<F: Future>(
         .await
 }
 
+pub(super) async fn with_all_diagnostics<F: Future>(
+    append_v7: bool,
+    flow_v8: bool,
+    close_v9: bool,
+    work: F,
+) -> F::Output {
+    diagnostics::with_tls_close(
+        close_v9,
+        with_diagnostics(append_v7 || close_v9, flow_v8 || close_v9, work),
+    )
+    .await
+}
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
     /// Attach an explicitly owned private store to the running agent's provider service.

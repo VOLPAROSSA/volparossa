@@ -1,5 +1,42 @@
 use super::*;
 
+#[tokio::test]
+async fn tls_close_v9_query_opt_in_does_not_revive_or_disclose_sibling_outcomes() {
+    use volparossa_local_control::{
+        PrivateStorageOutcomeStatus as Status, PrivateStorageTlsCloseFailure,
+    };
+    let runtime = ContentRuntime::new(&volparossa_identity::Identity::generate()).unwrap();
+    let (_caller, socket) = UnixStream::pair().unwrap();
+    let uid = socket.peer_cred().unwrap().uid();
+    for (id, enabled) in [(21, false), (22, true)] {
+        let guard = runtime.storage_outcomes.begin(uid, &[id; 16]).unwrap();
+        guard.enter(OutcomePhase::TransportTlsClose);
+        guard.tls_close_failure(PrivateStorageTlsCloseFailure::ReadIo);
+        guard.finish(&Err(ContentError::Unavailable), Deadline::None);
+        assert_eq!(
+            runtime
+                .storage_outcomes
+                .take(uid.wrapping_add(1), &[id; 16])
+                .unwrap()
+                .status,
+            Status::Missing as i32
+        );
+        let mut query = PrivateStorageOutcomeRequest {
+            original_request_id: vec![id; 16],
+            include_append_timing: true,
+            include_tls_close_failure: enabled,
+        };
+        let result = runtime.private_storage_outcome(&query, &socket).unwrap();
+        result.validate().unwrap();
+        assert_eq!(result.tls_close_failure.is_some(), enabled);
+        assert!(result.append_timing.is_none());
+        query.include_tls_close_failure = true;
+        let consumed = runtime.private_storage_outcome(&query, &socket).unwrap();
+        assert_eq!(consumed.status, Status::Missing as i32);
+        assert!(consumed.tls_close_failure.is_none());
+    }
+}
+
 #[test]
 fn terminal_route_receipt_retains_exact_fields_and_no_custody_claim() {
     let provider = PeerId::random();
@@ -34,6 +71,7 @@ async fn outcome_query_uses_actual_unix_peer_uid_and_consumes_only_its_request()
     sibling.enter(OutcomePhase::LocalRequestRead);
     drop(sibling);
     let query = |id| PrivateStorageOutcomeRequest {
+        include_tls_close_failure: false,
         original_request_id: vec![id; 16],
         include_append_timing: false,
     };
@@ -82,6 +120,7 @@ async fn append_timing_query_opt_in_is_caller_bound_and_consumes_the_same_origin
             Status::Missing as i32
         );
         let mut query = PrivateStorageOutcomeRequest {
+            include_tls_close_failure: false,
             original_request_id: vec![id; 16],
             include_append_timing: enabled,
         };

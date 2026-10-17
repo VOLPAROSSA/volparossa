@@ -26,12 +26,75 @@ fn snapshot() -> StorageFixtureCorrelationResponse {
         state: State::Observed as i32,
         incomplete: false,
         records: vec![StorageFixtureCorrelationRecord {
+            flow_acquire: None,
             role: Role::Provider as i32,
             fingerprint: Some(vec![0xcd; 32]),
             phase: Phase::StorageChallengeWriteFlush as i32,
             terminal: Terminal::Active as i32,
         }],
     }
+}
+
+#[test]
+fn fixture_v2_cli_closed_summary_is_not_a_raw_code_or_provider_match() {
+    use volparossa_local_control::PrivateStorageFlowAcquireFailure;
+    let failure = StorageFixtureAcquireFailure {
+        failure: Some(PrivateStorageFlowAcquireFailure {
+            stage: PrivateStorageFlowAcquireStage::HelperAcquire as i32,
+            reason: PrivateStorageFlowAcquireReason::HelperCleanupIncomplete as i32,
+        }),
+        helper_diagnostic: Some(StorageFixtureHelperDiagnostic::FlowIdentityUnavailable as i32),
+    };
+    let mut response = snapshot();
+    response.version = 2;
+    response.records[0] = StorageFixtureCorrelationRecord {
+        role: Role::Client as i32,
+        fingerprint: None,
+        phase: Phase::FlowAcquire as i32,
+        terminal: Terminal::OperationError as i32,
+        flow_acquire: Some(StorageFixtureAcquireSummary {
+            rounds: 1,
+            first: Some(failure),
+            last: Some(failure),
+        }),
+    };
+    let mut value = input("clients");
+    value["version"] = json!(2);
+    let request = parse(&value).unwrap();
+    let projected = project(&response, &request).unwrap();
+    assert_eq!(projected["version"], 2);
+    assert_eq!(projected["records"][0]["fingerprint"], Value::Null);
+    assert_eq!(
+        projected["records"][0]["flow_acquire"]["first"],
+        json!({
+            "stage": "helper_acquire", "reason": "helper_cleanup_incomplete",
+            "helper_diagnostic": "flow_identity_unavailable",
+        })
+    );
+    assert!(
+        !String::from_utf8(render(&projected).unwrap())
+            .unwrap()
+            .contains("MPTCP_FLOW_IDENTITY_UNAVAILABLE")
+    );
+    response.records[0].flow_acquire = None;
+    assert_eq!(
+        project(&response, &request).unwrap()["records"][0]["flow_acquire"],
+        Value::Null
+    );
+}
+
+#[test]
+fn fixture_v2_cli_rejects_downgrade_and_unknown_enum_before_rendering() {
+    let mut value = input("providers");
+    value["version"] = json!(2);
+    let request = parse(&value).unwrap();
+    assert!(project(&snapshot(), &request).is_err());
+    value["version"] = json!(3);
+    assert!(parse(&value).is_err());
+    let mut response = snapshot();
+    response.version = 2;
+    response.records[0].phase = 999;
+    assert!(project(&response, &request).is_err());
 }
 
 #[test]
@@ -165,6 +228,7 @@ fn fixture_cli_null_client_and_maximum_reply_remain_bounded() {
     let request = parse(&input("clients")).unwrap();
     let mut response = snapshot();
     response.records[0] = StorageFixtureCorrelationRecord {
+        flow_acquire: None,
         role: Role::Client as i32,
         fingerprint: None,
         phase: Phase::FlowAcquire as i32,

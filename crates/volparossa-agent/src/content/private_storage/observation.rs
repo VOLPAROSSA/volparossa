@@ -83,6 +83,7 @@ impl Observation {
     }
 
     pub(super) fn reset(&self) {
+        self.fixture.flow_acquire(None);
         self.challenge.reset();
         self.flow_acquire.reset();
         self.stage
@@ -134,6 +135,8 @@ impl Observation {
                 == PrivateStorageStreamFailure::FlowAcquire as i32
         {
             self.flow_acquire.record(summary);
+            self.fixture
+                .flow_acquire(summary.map(flow_acquire::fixture_detail));
         }
     }
 
@@ -223,6 +226,7 @@ impl Observation {
             if let Ok(result) = operation.await {
                 result
             } else {
+                self.fixture.flow_acquire(None);
                 self.fixture.finish(FixtureTerminal::OperationError);
                 self.challenge.fail();
                 self.flow_acquire.reset();

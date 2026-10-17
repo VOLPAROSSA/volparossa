@@ -14,6 +14,9 @@ pub struct PrivateStorageOutcomeRequest {
     /// Explicitly include coarse APPEND timing in this same one-use query.
     #[prost(bool, tag = "2")]
     pub include_append_timing: bool,
+    /// Explicitly include the closed outer TLS failure in this same one-use query.
+    #[prost(bool, tag = "3")]
+    pub include_tls_close_failure: bool,
 }
 
 impl PrivateStorageOutcomeRequest {
@@ -127,7 +130,7 @@ pub enum PrivateStorageOutcomeCategory {
 #[serde(rename_all = "snake_case")]
 #[repr(i32)]
 pub enum PrivateStorageOutcomeDeadline {
-    /// No local timeout was observed.
+    /// No operation/exchange/bridge/wire timeout was observed (legacy projection).
     None = 0,
     /// Whole agent operation budget.
     Operation = 1,
@@ -157,6 +160,26 @@ pub struct PrivateStorageOutcome {
     /// Optional local APPEND timing, returned only on an explicit query opt-in.
     #[prost(message, optional, tag = "5")]
     pub append_timing: Option<PrivateStorageAppendTiming>,
+    /// Opt-in outer TLS close detail; does not change the legacy coarse projection.
+    #[prost(enumeration = "PrivateStorageTlsCloseFailure", optional, tag = "6")]
+    pub tls_close_failure: Option<i32>,
+}
+
+/// Exactly which local outer TLS close boundary failed; never a remote-cause claim.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(i32)]
+pub enum PrivateStorageTlsCloseFailure {
+    /// Not an observation; rejected when the optional field is present.
+    Unspecified = 0,
+    /// The shutdown future returned an I/O error.
+    ShutdownIo = 1,
+    /// The read future returned an I/O error, including abrupt EOF.
+    ReadIo = 2,
+    /// A byte followed the expected end of the application stream.
+    TrailingData = 3,
+    /// The existing internal TLS close budget elapsed.
+    InternalDeadline = 4,
 }
 
 /// Coarse local APPEND progress, never provider arrival, custody or reservation proof.
@@ -220,6 +243,7 @@ impl PrivateStorageOutcome {
                 && self.category == 0
                 && self.deadline == 0
                 && self.append_timing.is_none()
+                && self.tls_close_failure.is_none()
             {
                 Ok(())
             } else {
@@ -240,6 +264,17 @@ impl PrivateStorageOutcome {
         if let Some(timing) = self.append_timing {
             timing.validate(phase)?;
         }
+        if let Some(failure) = self.tls_close_failure {
+            if PrivateStorageTlsCloseFailure::try_from(failure).map_err(|_| invalid())?
+                == PrivateStorageTlsCloseFailure::Unspecified
+                || phase != PrivateStorageOutcomePhase::TransportTlsClose
+                || category != PrivateStorageOutcomeCategory::Unavailable
+                || deadline != PrivateStorageOutcomeDeadline::None
+                || self.append_timing.is_some()
+            {
+                return Err(invalid());
+            }
+        }
         Ok(())
     }
 }
@@ -253,9 +288,123 @@ mod tests {
         encode_request, encode_response,
     };
 
+    fn close_outcome(failure: i32) -> PrivateStorageOutcome {
+        PrivateStorageOutcome {
+            status: PrivateStorageOutcomeStatus::Observed as i32,
+            phase: PrivateStorageOutcomePhase::TransportTlsClose as i32,
+            category: PrivateStorageOutcomeCategory::Unavailable as i32,
+            deadline: PrivateStorageOutcomeDeadline::None as i32,
+            append_timing: None,
+            tls_close_failure: Some(failure),
+        }
+    }
+
+    #[test]
+    fn tls_close_v9_opt_in_keeps_exact_historical_wire_bytes() {
+        let mut query = PrivateStorageOutcomeRequest {
+            original_request_id: vec![7; 16],
+            include_append_timing: false,
+            include_tls_close_failure: false,
+        };
+        let mut old = vec![10, 16];
+        old.extend_from_slice(&[7; 16]);
+        assert_eq!(query.encode_to_vec(), old);
+        query.include_tls_close_failure = true;
+        old.extend_from_slice(&[24, 1]);
+        assert_eq!(query.encode_to_vec(), old);
+        assert_eq!(
+            PrivateStorageOutcomeRequest::decode(old.as_slice()).unwrap(),
+            query
+        );
+        let mut outcome = close_outcome(2);
+        outcome.tls_close_failure = None;
+        assert_eq!(outcome.encode_to_vec(), [8, 2, 16, 17, 24, 10]);
+        for reason in 1..=4 {
+            outcome.tls_close_failure = Some(reason);
+            let encoded = outcome.encode_to_vec();
+            assert_eq!(
+                encoded,
+                [8, 2, 16, 17, 24, 10, 48, u8::try_from(reason).unwrap()]
+            );
+            let decoded = PrivateStorageOutcome::decode(encoded.as_slice()).unwrap();
+            decoded.validate().unwrap();
+            assert_eq!(decoded, outcome);
+        }
+    }
+
+    #[test]
+    fn tls_close_v9_wire_accepts_only_four_exact_outer_failure_states() {
+        let mut accepted = 0;
+        for status in 0..=3 {
+            for phase in 0..=21 {
+                for category in 0..=11 {
+                    for deadline in 0..=4 {
+                        for failure in 0..=5 {
+                            let value = PrivateStorageOutcome {
+                                status,
+                                phase,
+                                category,
+                                deadline,
+                                append_timing: None,
+                                tls_close_failure: Some(failure),
+                            };
+                            let expected = status == 2
+                                && phase == 17
+                                && category == 10
+                                && deadline == 0
+                                && (1..=4).contains(&failure);
+                            assert_eq!(value.validate().is_ok(), expected);
+                            accepted += usize::from(expected);
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(accepted, 4);
+    }
+
+    #[test]
+    fn tls_close_v9_wire_rejects_unknown_values_and_append_timing_overlap() {
+        for invalid in [i32::MIN, -1, 0, 5, i32::MAX] {
+            assert!(close_outcome(invalid).validate().is_err());
+        }
+        let mut value = close_outcome(2);
+        value.append_timing = Some(PrivateStorageAppendTiming {
+            before_payload: 1,
+            in_payload_write_flush: 1,
+            in_receipt_read: None,
+        });
+        assert!(value.validate().is_err());
+        for phase in [9, 10] {
+            value.phase = phase;
+            assert!(value.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn tls_close_v9_closed_names_do_not_change_legacy_enum_domains() {
+        for (value, name) in [
+            (1, "shutdown_io"),
+            (2, "read_io"),
+            (3, "trailing_data"),
+            (4, "internal_deadline"),
+        ] {
+            let failure = PrivateStorageTlsCloseFailure::try_from(value).unwrap();
+            assert_eq!(serde_json::to_value(failure).unwrap(), name);
+        }
+        assert!(PrivateStorageOutcomePhase::try_from(22).is_err());
+        assert!(PrivateStorageOutcomeCategory::try_from(12).is_err());
+        assert!(PrivateStorageOutcomeDeadline::try_from(5).is_err());
+        let mut old = close_outcome(4);
+        old.tls_close_failure = None;
+        old.category = PrivateStorageOutcomeCategory::Timeout as i32;
+        assert!(old.validate().is_err());
+    }
+
     #[test]
     fn append_timing_opt_in_preserves_original_protobuf_bytes_and_tags() {
         let mut query = PrivateStorageOutcomeRequest {
+            include_tls_close_failure: false,
             original_request_id: vec![1; 16],
             include_append_timing: false,
         };
@@ -275,6 +424,7 @@ mod tests {
             query
         );
         let mut outcome = PrivateStorageOutcome {
+            tls_close_failure: None,
             status: PrivateStorageOutcomeStatus::Observed as i32,
             phase: PrivateStorageOutcomePhase::RemoteReceiptRead as i32,
             category: PrivateStorageOutcomeCategory::Timeout as i32,
@@ -377,6 +527,7 @@ mod tests {
             request_id: vec![2; 16],
             operation: Some(Operation::PrivateStorageOutcome(
                 PrivateStorageOutcomeRequest {
+                    include_tls_close_failure: false,
                     original_request_id: vec![1; 16],
                     include_append_timing: false,
                 },
@@ -392,6 +543,7 @@ mod tests {
             diagnostic_code: "PRIVATE_STORAGE_OUTCOME".into(),
             private_storage_remote_detail: None,
             payload: Some(Payload::PrivateStorageOutcome(PrivateStorageOutcome {
+                tls_close_failure: None,
                 status: PrivateStorageOutcomeStatus::Observed as i32,
                 phase: PrivateStorageOutcomePhase::RemoteReceiptRead as i32,
                 category: PrivateStorageOutcomeCategory::Io as i32,
@@ -440,6 +592,7 @@ mod tests {
         for length in [0, 15, 17, 4096] {
             assert!(
                 PrivateStorageOutcomeRequest {
+                    include_tls_close_failure: false,
                     original_request_id: vec![0; length],
                     include_append_timing: false,
                 }
@@ -448,6 +601,7 @@ mod tests {
             );
         }
         let valid = PrivateStorageOutcome {
+            tls_close_failure: None,
             status: PrivateStorageOutcomeStatus::Observed as i32,
             phase: PrivateStorageOutcomePhase::RemoteReceiptRead as i32,
             category: PrivateStorageOutcomeCategory::Io as i32,

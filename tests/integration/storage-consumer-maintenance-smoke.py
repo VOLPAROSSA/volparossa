@@ -238,13 +238,16 @@ def validate_flow_acquire(value):
 def validate_agent_outcome(value, stage, version=4, operation=None):
     if value is None:
         return
-    keys(value, ('status', 'detail', *(('append_timing',) if version in (7, 8) else ())))
+    keys(value, ('status', 'detail', *(('append_timing',) if version in (7, 8, 9) else ()),
+        *(('tls_close_failure',) if version == 9 else ())))
     require(stage in ('wire_receipt', 'agent_terminal', 'deadline')
         and value['status'] in ('observed', 'missing', 'pending', 'expired', 'query_failed', 'query_timeout'), 'deposit_diagnostics')
     if value['status'] != 'observed':
         require(value['detail'] is None, 'deposit_diagnostics')
-        if version in (7, 8):
+        if version in (7, 8, 9):
             require(value['append_timing'] is None, 'deposit_diagnostics')
+        if version == 9:
+            require(value['tls_close_failure'] is None, 'deposit_diagnostics')
         return
     detail = value['detail']
     keys(detail, ('phase', 'category', 'deadline_scope'))
@@ -254,7 +257,7 @@ def validate_agent_outcome(value, stage, version=4, operation=None):
         and ((detail['category'] == 'timeout') == (detail['deadline_scope'] != 'none'))
         and (detail['deadline_scope'] != 'bridge' or detail['phase'] in OUTCOME_PHASES[1:15])
         and (detail['deadline_scope'] != 'remote_wire' or detail['phase'] in OUTCOME_PHASES[6:13]), 'deposit_diagnostics')
-    if version in (7, 8) and value['append_timing'] is not None:
+    if version in (7, 8, 9) and value['append_timing'] is not None:
         timing = value['append_timing']
         keys(timing, ('before_payload', 'in_payload_write_flush', 'in_receipt_read'))
         buckets = ('under_1s', '1_to_5s', '5_to_15s', '15_to_30s',
@@ -263,10 +266,15 @@ def validate_agent_outcome(value, stage, version=4, operation=None):
             and timing['before_payload'] in buckets and timing['in_payload_write_flush'] in buckets
             and (timing['in_receipt_read'] is None if detail['phase'] == 'remote_payload_write'
                 else timing['in_receipt_read'] in buckets), 'deposit_diagnostics')
+    if version == 9:
+        require(value['tls_close_failure'] is None or (
+            value['tls_close_failure'] in ('shutdown_io', 'read_io', 'trailing_data', 'internal_deadline')
+            and detail['phase'] == 'transport_tls_close' and detail['category'] == 'unavailable'
+            and detail['deadline_scope'] == 'none' and value['append_timing'] is None), 'deposit_diagnostics')
 
 
 def validate_deposit_diagnostics(value, version=1):
-    require(type(version) is int and version in (1, 2, 3, 4, 5, 6, 7, 8), 'deposit_diagnostics')
+    require(type(version) is int and version in (1, 2, 3, 4, 5, 6, 7, 8, 9), 'deposit_diagnostics')
     keys(value, ('version', 'failures', 'omitted_failures'))
     require(type(value['version']) is int and value['version'] == version
         and type(value['omitted_failures']) is int and value['omitted_failures'] == 0
@@ -286,7 +294,7 @@ def validate_deposit_diagnostics(value, version=1):
             detail = failure['agent_detail']
             keys(detail, ('stage', 'deadline_scope', *(('tls_failure',) if version >= 3 else ()),
                 *(('stream_failure',) if version >= 5 else ()), *(('challenge',) if version >= 6 else ()),
-                *(('flow_acquire',) if version == 8 else ())))
+                *(('flow_acquire',) if version >= 8 else ())))
             require(failure['stage'] == 'agent_ready' and failure['category'] == 'agent_rejected'
                 and failure['agent_code'] in ('CONTENT_INVALID', 'CONTENT_UNAVAILABLE', 'CONTENT_BUSY', 'CONTENT_POLICY')
                 and detail['stage'] in ('unobserved', 'route_connect', 'control_selection', 'provider_lookup',
@@ -318,7 +326,7 @@ def validate_deposit_diagnostics(value, version=1):
                     and detail['stage'] == 'challenge' and detail['tls_failure'] is None
                     and detail['stream_failure'] is None and failure['agent_code'] == 'CONTENT_UNAVAILABLE',
                     'deposit_diagnostics')
-            if version == 8 and detail['flow_acquire'] is not None:
+            if version >= 8 and detail['flow_acquire'] is not None:
                 validate_flow_acquire(detail['flow_acquire'])
                 require(detail['stage'] == 'stream_open' and detail['deadline_scope'] == 'none'
                     and detail['stream_failure'] == 'flow_acquire' and detail['tls_failure'] is None
@@ -340,7 +348,7 @@ def validate_node_report(value, phase, provision, prepared=None, *, profile_vers
             fields += ('publish_observation',)
             observed = value['publish_observation']
             require(type(observed) is dict and type(observed.get('version')) is int
-                and observed['version'] in (1, 2, 3, 4, 5, 6, 7, 8, 9), 'publish_profile')
+                and observed['version'] in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10), 'publish_profile')
             observation_version = observed['version']
             diagnostic = observation_version >= 2
             expected_version = observation_version + 1
@@ -378,8 +386,9 @@ def validate_node_report(value, phase, provision, prepared=None, *, profile_vers
             fields += ('publish_cleanup',)
             cleanup = value['publish_cleanup']
             keys(cleanup, ('app', 'state'))
-            lifecycle_profile = 9 if type(value['version']) is int and value['version'] == 11 else 8
+            lifecycle_profile = value['version'] - 2 if type(value['version']) is int else None
             require(phase == 'publish' and profile_version in (None, lifecycle_profile)
+                and lifecycle_profile in (8, 9, 10)
                 and cleanup['app'] in ('image', 'cloud') and cleanup['state'] in ('complete', 'failed'),
                 'publish_cleanup')
             app = cleanup['app']
@@ -558,7 +567,7 @@ def validate_locations(root, binary, client, providers=None):
 
 def node_phase(root, phase, provision, deadline):
     command = [NODE, HERE / 'storage-consumer-maintenance.mjs', phase, root]
-    if PROFILE_VERSION in (2, 3, 4, 5, 6, 7, 8, 9):
+    if PROFILE_VERSION in (2, 3, 4, 5, 6, 7, 8, 9, 10):
         command += ['--profile-version', str(PROFILE_VERSION)]
     status, output, _ = run_child(command, deadline)
     value = json.loads(output)
@@ -609,6 +618,8 @@ def prepare(root, binary, client, providers, provider_keys, provision, deadline)
             config['appendDiagnosticsV7'] = True
         elif PROFILE_VERSION == 9:
             config['flowAcquireDiagnosticsV8'] = True
+        elif PROFILE_VERSION == 10:
+            config['tlsCloseDiagnosticsV9'] = True
         policy = dict(enrollment=str(app / 'maintenance'), fromProviderKey=provider_keys[0], providers=selected[1:],
             authorizationSeconds=6000, lifetimeSeconds=3600, renewBeforeSeconds=7200,
             maximumChargedBytes=3 * size, maximumTurnBytes=8388608)
@@ -630,7 +641,7 @@ def phase(root, selected, exit_socket, flow_root, provision, deadline):
     require(image['coreBinary'] == cloud['coreBinary'] and image['controlSocket'] == cloud['controlSocket'], 'shared_core')
     binary, client = validate_locations(root, image['coreBinary'], image['controlSocket'])
     correlation = CORRELATION['capture'](binary, root.parents[1], root, selected) if (
-        FIXTURE_CORRELATION and PROFILE_VERSION == 9 and NETWORK_VERSION == 2) else nullcontext()
+        FIXTURE_CORRELATION and PROFILE_VERSION in (9, 10) and NETWORK_VERSION == 2) else nullcontext()
     # Fix the original application/network/deadline outcome before optional
     # diagnostic shutdown. Its query/disarm latency is not acceptance authority.
     with correlation:
@@ -656,7 +667,7 @@ def phase_with_core(root, selected, exit_socket, flow_root, provision, deadline,
     minimum, diagnostic = FLOW_MINIMUM[selected], {}
     sampler_failure = sampler['SamplerFailure'] if NETWORK_VERSION == 1 else sampler['OLD']['SamplerFailure']
     activity = ACTIVITY['capture'](binary, root.parents[1], root, selected) if (
-        PROFILE_VERSION in (7, 8, 9) and NETWORK_VERSION == 2) else nullcontext()
+        PROFILE_VERSION in (7, 8, 9, 10) and NETWORK_VERSION == 2) else nullcontext()
     try:
         with activity, sampler['capture'](
                 binary, Path(exit_socket), baseline, minimum, client=client,
@@ -766,10 +777,10 @@ def main(arguments):
     if len(arguments) >= 2 and arguments[-2:] == ['--network-version', '2']:
         NETWORK_VERSION = 2
         arguments = arguments[:-2]
-    if len(arguments) >= 2 and arguments[-2] == '--profile-version' and arguments[-1] in ('2', '3', '4', '5', '6', '7', '8', '9'):
+    if len(arguments) >= 2 and arguments[-2] == '--profile-version' and arguments[-1] in ('2', '3', '4', '5', '6', '7', '8', '9', '10'):
         PROFILE_VERSION = int(arguments[-1])
         arguments = arguments[:-2]
-    require(not FIXTURE_CORRELATION or (PROFILE_VERSION == 9 and NETWORK_VERSION == 2
+    require(not FIXTURE_CORRELATION or (PROFILE_VERSION in (9, 10) and NETWORK_VERSION == 2
         and arguments and arguments[0] in CORRELATION['PHASES']), 'fixture_correlation_scope')
     if len(arguments) == 2 and arguments[0] == 'flow-minimum':
         require(arguments[1] in FLOW_MINIMUM, 'phase')

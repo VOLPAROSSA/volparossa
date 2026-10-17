@@ -18,12 +18,23 @@ use super::outcome::{AgentOutcome, AppendOutcome};
 
 #[path = "peer_flow_acquire.rs"]
 mod flow_acquire;
+#[path = "peer_tls_close.rs"]
+mod tls_close;
 
 const MAX_FAILURES: usize = 8;
 
 tokio::task_local! {
     static APPEND_TIMING: bool;
     static FLOW_ACQUIRE: bool;
+    static TLS_CLOSE: bool;
+}
+
+pub(super) fn tls_close_enabled() -> bool {
+    TLS_CLOSE.try_with(|enabled| *enabled).unwrap_or(false)
+}
+
+pub(super) async fn with_tls_close<F: Future>(enabled: bool, work: F) -> F::Output {
+    TLS_CLOSE.scope(enabled, work).await
 }
 
 pub(super) fn append_timing_enabled() -> bool {
@@ -482,10 +493,43 @@ pub(super) struct Diagnostics {
     omitted_failures: usize,
 }
 
+#[derive(Serialize)]
+#[serde(untagged)]
+enum CurrentFailure {
+    V8(flow_acquire::Failure),
+    V9(tls_close::Failure),
+}
+
+impl Diagnostics {
+    fn current_failure(&self, index: usize, failure: &Failure) -> CurrentFailure {
+        if self.version == 9 {
+            CurrentFailure::V9(tls_close::Failure::new(failure, self.flow_acquire[index]))
+        } else {
+            CurrentFailure::V8(flow_acquire::Failure::new(
+                failure,
+                self.flow_acquire[index],
+            ))
+        }
+    }
+}
+
+fn decode_current_failure(
+    version: u8,
+    value: serde_json::Value,
+) -> Result<(Failure, Option<flow_acquire::Detail>), serde_json::Error> {
+    if version == 9 {
+        tls_close::Failure::decode(value)
+    } else {
+        flow_acquire::Failure::decode(value)
+    }
+}
+
 impl Default for Diagnostics {
     fn default() -> Self {
         Self {
-            version: if flow_acquire_enabled() {
+            version: if tls_close_enabled() {
+                9
+            } else if flow_acquire_enabled() {
                 8
             } else if append_timing_enabled() {
                 7
@@ -578,14 +622,12 @@ impl Serialize for Diagnostics {
         } else if self.version == 7 {
             let current: Vec<_> = self.failures.iter().map(AppendFailure::from).collect();
             value.serialize_field("failures", &current)?;
-        } else if self.version == 8 {
+        } else if matches!(self.version, 8 | 9) {
             let current: Vec<_> = self
                 .failures
                 .iter()
                 .enumerate()
-                .map(|(index, failure)| {
-                    flow_acquire::Failure::new(failure, self.flow_acquire[index])
-                })
+                .map(|(index, failure)| self.current_failure(index, failure))
                 .collect();
             value.serialize_field("failures", &current)?;
         } else {
@@ -632,7 +674,7 @@ impl<'de> Deserialize<'de> for Diagnostics {
             omitted_failures: usize,
         }
         let wire = Wire::deserialize(deserializer)?;
-        if !matches!(wire.version, 1..=8) || wire.failures.len() > MAX_FAILURES {
+        if !matches!(wire.version, 1..=9) || wire.failures.len() > MAX_FAILURES {
             return Err(serde::de::Error::custom(
                 "diagnostic version or failure bound",
             ));
@@ -643,8 +685,8 @@ impl<'de> Deserialize<'de> for Diagnostics {
             .into_iter()
             .enumerate()
             .map(|(index, value)| {
-                let failure = if wire.version == 8 {
-                    let (failure, detail) = flow_acquire::Failure::decode(value)?;
+                let failure = if wire.version >= 8 {
+                    let (failure, detail) = decode_current_failure(wire.version, value)?;
                     flow_acquire[index] = detail;
                     failure
                 } else if wire.version == 1 {
@@ -747,7 +789,7 @@ impl Diagnostics {
         )
         .then(|| error.downcast_ref::<AgentOutcome>().copied())
         .flatten();
-        if self.version == 8 && matches!(boundary.stage, Stage::AgentReady) {
+        if self.version >= 8 && matches!(boundary.stage, Stage::AgentReady) {
             self.flow_acquire[self.failures.len()] = error
                 .downcast_ref::<crate::control::AgentRejected>()
                 .and_then(|rejected| {
@@ -850,3 +892,7 @@ fn classify(error: &Error) -> (Category, Option<AgentCode>) {
 #[cfg(test)]
 #[path = "peer_diagnostics_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "peer_tls_close_tests.rs"]
+mod tls_close_tests;

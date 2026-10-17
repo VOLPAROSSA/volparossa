@@ -839,7 +839,7 @@ while [ "$#" -gt 0 ]; do
                 private-storage-replicas) scenario=content-custody; private_storage_replicas=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-handoff) scenario=content-custody; private_storage_handoff=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-fragments) scenario=content-custody; private_storage_fragments=yes; wifi_link=no; uplink_link=no ;;
-                private-storage-maintenance) scenario=content-custody; private_storage_fragments=yes; private_storage_maintenance=yes; storage_consumer_profile_version=9; storage_fixture_correlation=yes; wifi_link=no; uplink_link=no ;;
+                private-storage-maintenance) scenario=content-custody; private_storage_fragments=yes; private_storage_maintenance=yes; storage_consumer_profile_version=10; storage_fixture_correlation=yes; wifi_link=no; uplink_link=no ;;
                 image-snapshot) scenario=content-custody; private_storage_fragments=yes; image_snapshot=yes; wifi_link=no; uplink_link=no ;;
                 cloud-private-file) scenario=content-custody; private_storage_fragments=yes; cloud_private_file=yes; wifi_link=no; uplink_link=no ;;
                 cloud-private-upload) scenario=content-custody; private_storage_fragments=yes; cloud_private_upload=yes; wifi_link=no; uplink_link=no ;;
@@ -1191,7 +1191,7 @@ if [ "$private_storage_maintenance" = yes ]; then
         storage-consumer-maintenance.mjs storage-consumer-maintenance-pins.json storage-consumer-maintenance-pins-v2.json \
         storage-consumer-maintenance-pins-v3.json storage-consumer-maintenance-pins-v4.json storage-consumer-maintenance-pins-v5.json \
         storage-consumer-maintenance-pins-v6.json storage-consumer-maintenance-pins-v7.json \
-        storage-consumer-maintenance-pins-v8.json storage-consumer-maintenance-pins-v9.json \
+        storage-consumer-maintenance-pins-v8.json storage-consumer-maintenance-pins-v9.json storage-consumer-maintenance-pins-v10.json \
         storage-consumer-control-underlay.sh storage-consumer-control-underlay.py \
         storage-consumer-network.sh storage-consumer-network.py storage-consumer-route-sampler.py \
         storage-consumer-maintenance-evidence.py storage-consumer-maintenance-provision.py \
@@ -3126,6 +3126,8 @@ if [ "$private_storage_maintenance" = yes ]; then
         "$WORK/bin/storage-consumer-maintenance-pins-v8.json"
     install -o root -g root -m 0444 "$source_directory/tests/integration/storage-consumer-maintenance-pins-v9.json" \
         "$WORK/bin/storage-consumer-maintenance-pins-v9.json"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/storage-consumer-maintenance-pins-v10.json" \
+        "$WORK/bin/storage-consumer-maintenance-pins-v10.json"
     install -o root -g root -m 0444 "$source_directory/tests/integration/agent-private-task-code-pins.json" \
         "$WORK/bin/agent-private-task-code-pins.json"
 fi

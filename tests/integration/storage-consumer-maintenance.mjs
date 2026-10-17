@@ -37,6 +37,8 @@ const APPEND_REVISIONS = Object.freeze({ image: '10c46b9d6424929748e324fdd188a2f
   cloud: 'dda7a21818ece774445cf63d6e9a01fe0f2803b2' });
 const FLOW_REVISIONS = Object.freeze({ image: '9694a2b9dcb40aceefd78dbc0ab34303071a0ffd',
   cloud: '47b0f03b84913761570c3de7037ba5509b848c23' });
+const TLS_CLOSE_REVISIONS = Object.freeze({ image: '1e812ec6424a539a336d230b99ae1c11a494ca29',
+  cloud: '35598609d3fedb5d1241a479c1930c8a6b831661' });
 const CHECKPOINTS = new Set(['enrolled', 'owner_locked', 'waiting_for_core', 'working', 'paused',
   'enrollment_expired', 'core_unavailable', 'core_turn_revoked', 'turn_completed', 'retry_pending']);
 const SQL = Buffer.from('-- VOLPAROSSA synthetic quiesced snapshot\nCREATE TABLE fixture (id integer);\nINSERT INTO fixture VALUES (1);\n');
@@ -124,12 +126,15 @@ function flowAcquire(value) {
 function agentOutcome(value, stage, version = 4, operation = null) {
   if (value === null) return null;
   check(['wire_receipt', 'agent_terminal', 'deadline'].includes(stage)
-    && closedKeys(value, ['status', 'detail', ...([7, 8].includes(version) ? ['append_timing'] : [])])
+    && closedKeys(value, ['status', 'detail', ...([7, 8, 9].includes(version) ? ['append_timing'] : []),
+      ...(version === 9 ? ['tls_close_failure'] : [])])
     && ['observed', 'missing', 'pending', 'expired', 'query_failed', 'query_timeout'].includes(value.status), 'deposit_diagnostics');
   if (value.status !== 'observed') {
     check(value.detail === null, 'deposit_diagnostics');
-    if ([7, 8].includes(version)) check(value.append_timing === null, 'deposit_diagnostics');
-    return { status: value.status, detail: null, ...([7, 8].includes(version) ? { append_timing: null } : {}) };
+    if ([7, 8, 9].includes(version)) check(value.append_timing === null, 'deposit_diagnostics');
+    if (version === 9) check(value.tls_close_failure === null, 'deposit_diagnostics');
+    return { status: value.status, detail: null, ...([7, 8, 9].includes(version) ? { append_timing: null } : {}),
+      ...(version === 9 ? { tls_close_failure: null } : {}) };
   }
   const d = value.detail;
   check(closedKeys(d, ['phase', 'category', 'deadline_scope']) && OUTCOME_PHASES.includes(d.phase)
@@ -139,7 +144,7 @@ function agentOutcome(value, stage, version = 4, operation = null) {
     && (d.deadline_scope !== 'bridge' || OUTCOME_PHASES.slice(1, 15).includes(d.phase))
     && (d.deadline_scope !== 'remote_wire' || OUTCOME_PHASES.slice(6, 13).includes(d.phase)), 'deposit_diagnostics');
   let timing = null;
-  if ([7, 8].includes(version) && value.append_timing !== null) {
+  if ([7, 8, 9].includes(version) && value.append_timing !== null) {
     const t = value.append_timing;
     check(closedKeys(t, ['before_payload', 'in_payload_write_flush', 'in_receipt_read'])
       && operation === 'append' && ['remote_payload_write', 'remote_receipt_read'].includes(d.phase)
@@ -149,14 +154,21 @@ function agentOutcome(value, stage, version = 4, operation = null) {
     timing = { before_payload: t.before_payload, in_payload_write_flush: t.in_payload_write_flush,
       in_receipt_read: t.in_receipt_read };
   }
+  if (version === 9) {
+    check(value.tls_close_failure === null || (
+      ['shutdown_io', 'read_io', 'trailing_data', 'internal_deadline'].includes(value.tls_close_failure)
+      && d.phase === 'transport_tls_close' && d.category === 'unavailable' && d.deadline_scope === 'none'
+      && value.append_timing === null), 'deposit_diagnostics');
+  }
   return { status: value.status, detail: { phase: d.phase, category: d.category, deadline_scope: d.deadline_scope },
-    ...([7, 8].includes(version) ? { append_timing: timing } : {}) };
+    ...([7, 8, 9].includes(version) ? { append_timing: timing } : {}),
+    ...(version === 9 ? { tls_close_failure: value.tls_close_failure } : {}) };
 }
 
 // This proof has exactly four fragments/two initial copies. The bridge already
 // checks general archive geometry; revalidate the narrower exported trial here.
 export function depositDiagnostic(value, version = 1) {
-  check([1, 2, 3, 4, 5, 6, 7, 8].includes(version), 'deposit_diagnostics');
+  check([1, 2, 3, 4, 5, 6, 7, 8, 9].includes(version), 'deposit_diagnostics');
   check(closedKeys(value, ['version', 'failures', 'omitted_failures']) && value.version === version
     && Array.isArray(value.failures) && value.failures.length <= 8 && value.omitted_failures === 0, 'deposit_diagnostics');
   const seen = new Set(), failures = value.failures.map(failure => {
@@ -174,7 +186,7 @@ export function depositDiagnostic(value, version = 1) {
         && AGENT_CODES.has(failure.agent_code) && failure.agent_code !== 'unknown'
         && closedKeys(value, ['stage', 'deadline_scope', ...(version >= 3 ? ['tls_failure'] : []),
           ...(version >= 5 ? ['stream_failure'] : []), ...(version >= 6 ? ['challenge'] : []),
-          ...(version === 8 ? ['flow_acquire'] : [])])
+          ...(version >= 8 ? ['flow_acquire'] : [])])
         && AGENT_STAGES.has(value.stage)
         && ['none', 'operation', 'exchange'].includes(value.deadline_scope)
         && (value.stage !== 'unobserved' || value.deadline_scope === 'operation')
@@ -203,7 +215,7 @@ export function depositDiagnostic(value, version = 1) {
         detail.challenge = c === null ? null : { phase: c.phase,
           before_challenge: c.before_challenge, in_challenge: c.in_challenge };
       }
-      if (version === 8) {
+      if (version >= 8) {
         const flow = value.flow_acquire;
         check(flow === null || (value.stage === 'stream_open' && value.deadline_scope === 'none'
           && value.stream_failure === 'flow_acquire' && value.tls_failure === null && value.challenge === null
@@ -232,7 +244,7 @@ class PublishFailure extends Error {
 // copy its raw storage report, paths, exceptions or private journal to evidence.
 export function requirePublishComplete(value, app, operation, profileVersion = 1) {
   check(['image', 'cloud'].includes(app) && ['create', 'deposit'].includes(operation), 'arguments');
-  check([1, 2, 3, 4, 5, 6, 7, 8, 9].includes(profileVersion), 'arguments');
+  check([1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(profileVersion), 'arguments');
   const report = value?.storage;
   const present = report !== null && typeof report === 'object' && !Array.isArray(report);
   let state = 'not_applicable', diagnostic = null;
@@ -261,13 +273,13 @@ export function requirePublishComplete(value, app, operation, profileVersion = 1
 
 export function consumerFailureReport(ctx, phase, error) {
   if (error instanceof PublishLifecycleFailure) {
-    return { ...error.primary, version: ctx.profileVersion === 9 ? 11 : 10, publish_cleanup: error.cleanup };
+    return { ...error.primary, version: ctx.profileVersion + 2, publish_cleanup: error.cleanup };
   }
   const publish = error instanceof PublishFailure;
   return { version: publish ? error.observation.version + 1 : 1, kind: 'storage-consumer-maintenance', phase, passed: false,
     provision_sha256: ctx.provision, stage: ctx.stage,
     code: ctx.signal.aborted ? 'phase_deadline' : FAILURE_CODES.has(error?.code)
-      || ([8, 9].includes(ctx.profileVersion) && phase === 'publish' && PUBLISH_FAILURE_CODES.has(error?.code))
+      || ([8, 9, 10].includes(ctx.profileVersion) && phase === 'publish' && PUBLISH_FAILURE_CODES.has(error?.code))
       ? error.code : 'application_failed',
     ...(publish ? { publish_observation: error.observation } : {}), cleanup_confirmed: false };
 }
@@ -283,7 +295,7 @@ class PublishLifecycleFailure extends Error {
 // This observation covers only the existing client close() call. It does not
 // prove remote provider cleanup, private-directory removal or a successful phase.
 export async function withPublishCore(ctx, app, core, operation) {
-  if (![8, 9].includes(ctx.profileVersion)) {
+  if (![8, 9, 10].includes(ctx.profileVersion)) {
     try { return await operation(); } finally { await core.close(); }
   }
   check(['image', 'cloud'].includes(app), 'arguments');
@@ -311,11 +323,11 @@ export async function withPublishCore(ctx, app, core, operation) {
 }
 
 export async function createPublishCatalog(ctx, m, request, options) {
-  if ([8, 9].includes(ctx.profileVersion)) ctx.stage = 'cloud_catalog_create';
+  if ([8, 9, 10].includes(ctx.profileVersion)) ctx.stage = 'cloud_catalog_create';
   let created;
   try { created = await m.createPrivateCatalog(request, options); }
   catch (error) {
-    if ([8, 9].includes(ctx.profileVersion) && typeof m.PrivateCatalogError === 'function'
+    if ([8, 9, 10].includes(ctx.profileVersion) && typeof m.PrivateCatalogError === 'function'
       && error instanceof m.PrivateCatalogError
       && Object.hasOwn(CATALOG_CODES, error.code)) {
       const code = CATALOG_CODES[error.code];
@@ -323,7 +335,7 @@ export async function createPublishCatalog(ctx, m, request, options) {
     }
     throw error;
   }
-  if ([8, 9].includes(ctx.profileVersion)) ctx.stage = 'cloud_catalog_validate';
+  if ([8, 9, 10].includes(ctx.profileVersion)) ctx.stage = 'cloud_catalog_validate';
   check(created.encrypted === true && created.sourceFallback === false && created.files === 1, 'catalog_creation');
   return created;
 }
@@ -664,7 +676,7 @@ async function guard(root, profileVersion) {
     && provision.kind === 'storage-consumer-maintenance-runtime-provision'
     && provision.success === true && provision.guest_only === true && provision.shared_adapter_verified === true,
   'provision');
-  const revisions = profileVersion === 9 ? FLOW_REVISIONS : profileVersion === 8 ? APPEND_REVISIONS : profileVersion === 7 ? CHALLENGE_REVISIONS : profileVersion === 6 ? STREAM_REVISIONS : profileVersion === 5 ? OUTCOME_REVISIONS
+  const revisions = profileVersion === 10 ? TLS_CLOSE_REVISIONS : profileVersion === 9 ? FLOW_REVISIONS : profileVersion === 8 ? APPEND_REVISIONS : profileVersion === 7 ? CHALLENGE_REVISIONS : profileVersion === 6 ? STREAM_REVISIONS : profileVersion === 5 ? OUTCOME_REVISIONS
     : profileVersion === 4 ? TLS_REVISIONS : profileVersion === 3 ? DETAIL_REVISIONS
     : profileVersion === 2 ? DIAGNOSTIC_REVISIONS : REVISIONS;
   for (const [name, source] of Object.entries(provision.pins.sources)) {
@@ -694,9 +706,10 @@ async function receipt(app, name) {
   return r;
 }
 export function validateAppendProfile(value, profileVersion) {
-  check([1, 2, 3, 4, 5, 6, 7, 8, 9].includes(profileVersion)
+  check([1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(profileVersion)
     && (profileVersion === 8 ? value.appendDiagnosticsV7 === true : !Object.hasOwn(value, 'appendDiagnosticsV7'))
-    && (profileVersion === 9 ? value.flowAcquireDiagnosticsV8 === true : !Object.hasOwn(value, 'flowAcquireDiagnosticsV8')),
+    && (profileVersion === 9 ? value.flowAcquireDiagnosticsV8 === true : !Object.hasOwn(value, 'flowAcquireDiagnosticsV8'))
+    && (profileVersion === 10 ? value.tlsCloseDiagnosticsV9 === true : !Object.hasOwn(value, 'tlsCloseDiagnosticsV9')),
   'configuration');
 }
 async function config(app, profileVersion) {
@@ -758,13 +771,13 @@ export async function publish(ctx, m) {
         if (operation === 'deposit') deposited = validateStorage(value, r.cipher_bytes, 'published');
       }
       if (name === 'cloud') {
-        ctx.stage = [8, 9].includes(ctx.profileVersion) ? 'cloud_catalog_prepare' : 'cloud_catalog';
+        ctx.stage = [8, 9, 10].includes(ctx.profileVersion) ? 'cloud_catalog_prepare' : 'cloud_catalog';
         await fresh(join(app, 'work'));
         await createPublishCatalog(ctx, m, { selection: [{ segments: ['synthetic-space', 'synthetic.bin'],
           bundle: join(app, 'bundle'), config: join(app, 'storage.json') }], output: join(app, 'catalog'),
         workDirectory: join(app, 'work'), maxTotalBytes: 4 * MAX_CIPHER }, { signal: ctx.signal, storageFactory: factory });
       }
-      if ([8, 9].includes(ctx.profileVersion)) ctx.stage = `${name}_policy_read`;
+      if ([8, 9, 10].includes(ctx.profileVersion)) ctx.stage = `${name}_policy_read`;
       const policy = await json(join(app, 'maintenance-policy.json'), 32768);
       ctx.stage = `${name}_enroll`;
       check(policy.enrollment === join(app, 'maintenance') && policy.fromProviderKey === c.providers[0].key
@@ -905,7 +918,7 @@ async function finish(ctx, m) {
 
 export async function main(argv) {
   let profileVersion = 1;
-  if (argv.length === 4 && argv[2] === '--profile-version' && ['2', '3', '4', '5', '6', '7', '8', '9'].includes(argv[3])) {
+  if (argv.length === 4 && argv[2] === '--profile-version' && ['2', '3', '4', '5', '6', '7', '8', '9', '10'].includes(argv[3])) {
     profileVersion = Number(argv[3]); argv = argv.slice(0, 2);
   }
   check(argv.length === 2 && PHASES.includes(argv[0]), 'arguments');

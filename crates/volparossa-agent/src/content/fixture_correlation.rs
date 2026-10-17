@@ -15,10 +15,11 @@ use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 use volparossa_content::provider::activity::{Observer, Stage};
 use volparossa_local_control::{
-    StorageFixtureCorrelationAction as Action, StorageFixtureCorrelationPhase as Phase,
-    StorageFixtureCorrelationRecord as WireRecord, StorageFixtureCorrelationRequest as Request,
-    StorageFixtureCorrelationResponse as Response, StorageFixtureCorrelationRole as Role,
-    StorageFixtureCorrelationState as State, StorageFixtureCorrelationTerminal as Terminal,
+    StorageFixtureAcquireSummary, StorageFixtureCorrelationAction as Action,
+    StorageFixtureCorrelationPhase as Phase, StorageFixtureCorrelationRecord as WireRecord,
+    StorageFixtureCorrelationRequest as Request, StorageFixtureCorrelationResponse as Response,
+    StorageFixtureCorrelationRole as Role, StorageFixtureCorrelationState as State,
+    StorageFixtureCorrelationTerminal as Terminal,
 };
 use zeroize::Zeroize;
 
@@ -52,6 +53,7 @@ struct Bank {
 }
 
 struct Epoch {
+    version: u32,
     owner: u32,
     bytes: [u8; 16],
     expires: Instant,
@@ -75,6 +77,8 @@ struct Record {
     prefix_complete: Arc<AtomicBool>,
     hash: Option<Sha256>,
     bytes: usize,
+    flow_acquire: Option<StorageFixtureAcquireSummary>,
+    acquire_valid: Arc<AtomicBool>,
 }
 
 impl Drop for Record {
@@ -139,12 +143,12 @@ impl Correlation {
     ) -> Result<Response, ContentError> {
         request.validate().map_err(|_| ContentError::Invalid)?;
         let Ok(mut cleanup) = self.cleanup.try_lock() else {
-            return Ok(Response::unavailable());
+            return Ok(unavailable(request.version));
         };
         if request.action == Action::Arm as i32 {
             {
                 let Ok(mut bank) = self.bank.try_lock() else {
-                    return Ok(Response::unavailable());
+                    return Ok(unavailable(request.version));
                 };
                 bank.expire(Instant::now());
                 if bank.epoch.is_some() {
@@ -213,7 +217,7 @@ impl Correlation {
             .try_into()
             .map_err(|_| ContentError::Invalid)?;
         let Ok(mut bank) = self.bank.try_lock() else {
-            return Ok(Response::unavailable());
+            return Ok(unavailable(request.version));
         };
         let now = Instant::now();
         bank.expire(now);
@@ -229,23 +233,24 @@ impl Correlation {
             });
             *cleanup = Some(self.cleanup_task(Arc::downgrade(&life)));
             bank.epoch = Some(Epoch {
+                version: request.version,
                 owner: uid,
                 bytes,
                 expires: now + EPOCH_TTL,
                 life,
                 records: std::array::from_fn(|_| None),
             });
-            return Ok(empty(State::Armed));
+            return Ok(empty(State::Armed, request.version));
         }
         let Some(epoch) = &bank.epoch else {
-            return Ok(Response::unavailable());
+            return Ok(unavailable(request.version));
         };
-        if epoch.owner != uid || epoch.bytes != bytes {
+        if epoch.owner != uid || epoch.bytes != bytes || epoch.version != request.version {
             return Err(ContentError::Invalid);
         }
         if action == Action::Disarm {
             bank.epoch = None;
-            return Ok(empty(State::Disarmed));
+            return Ok(empty(State::Disarmed, request.version));
         }
         let role = if action == Action::Clients {
             Role::Client
@@ -280,11 +285,16 @@ impl Correlation {
                     fingerprint: fingerprint.map(|value| value.to_vec()),
                     phase: record.phase as i32,
                     terminal: record.terminal as i32,
+                    flow_acquire: record.flow_acquire.filter(|_| {
+                        request.version == 2
+                            && record.terminal == Terminal::OperationError
+                            && record.acquire_valid.load(Relaxed)
+                    }),
                 })
             })
             .collect();
         let response = Response {
-            version: 1,
+            version: request.version,
             state: State::Observed as i32,
             incomplete: epoch.life.incomplete.load(Relaxed) || self.missed_begin.load(Relaxed),
             records,
@@ -293,7 +303,7 @@ impl Correlation {
         Ok(if response.validate_for(request).is_ok() {
             response
         } else {
-            Response::unavailable()
+            unavailable(request.version)
         })
     }
 
@@ -350,6 +360,7 @@ impl Correlation {
         };
         let prefix_valid = Arc::new(AtomicBool::new(true));
         let prefix_complete = Arc::new(AtomicBool::new(false));
+        let acquire_valid = Arc::new(AtomicBool::new(false));
         let mut hash = Sha256::new();
         hash.update(DOMAIN);
         hash.update(epoch.bytes);
@@ -368,6 +379,8 @@ impl Correlation {
             prefix_complete: Arc::clone(&prefix_complete),
             hash: Some(hash),
             bytes: 0,
+            flow_acquire: None,
+            acquire_valid: Arc::clone(&acquire_valid),
         });
         Guard(Some(Tracking {
             owner: Arc::clone(self),
@@ -376,16 +389,26 @@ impl Correlation {
             prefix_complete,
             index,
             token,
+            version: epoch.version,
+            acquire_valid,
+            terminal_recorded: AtomicBool::new(false),
         }))
     }
 }
 
-fn empty(state: State) -> Response {
+fn empty(state: State, version: u32) -> Response {
     Response {
-        version: 1,
+        version,
         state: state as i32,
         incomplete: false,
         records: Vec::new(),
+    }
+}
+
+fn unavailable(version: u32) -> Response {
+    Response {
+        version,
+        ..Response::unavailable()
     }
 }
 
@@ -394,6 +417,9 @@ fn empty(state: State) -> Response {
 pub(super) struct Guard(Option<Tracking>);
 
 struct Tracking {
+    version: u32,
+    acquire_valid: Arc<AtomicBool>,
+    terminal_recorded: AtomicBool,
     owner: Arc<Correlation>,
     life: Arc<Life>,
     prefix_valid: Arc<AtomicBool>,
@@ -432,15 +458,53 @@ impl Guard {
     }
 
     pub(super) fn enter(&self, phase: Phase) {
-        self.update(|record| record.phase = phase);
+        self.invalidate_acquire();
+        self.update(|record| {
+            record.phase = phase;
+            record.flow_acquire = None;
+        });
+    }
+
+    pub(super) fn flow_acquire(&self, summary: Option<StorageFixtureAcquireSummary>) {
+        if self.0.as_ref().is_none_or(|track| track.version != 2) {
+            return;
+        }
+        self.invalidate_acquire();
+        self.update(|record| {
+            if record.role == Role::Client && record.phase == Phase::FlowAcquire {
+                record.flow_acquire = summary;
+                record.acquire_valid.store(summary.is_some(), Relaxed);
+            }
+        });
+    }
+
+    fn invalidate_acquire(&self) {
+        if let Some(track) = &self.0 {
+            // Missing the bank lock must not leave a previously recorded detail exportable.
+            track.acquire_valid.store(false, Relaxed);
+        }
     }
 
     pub(super) fn finish(&self, terminal: Terminal) {
-        self.update(|record| {
+        let Some(track) = &self.0 else {
+            return;
+        };
+        if track.terminal_recorded.load(Relaxed) {
+            return;
+        }
+        if terminal != Terminal::OperationError {
+            self.invalidate_acquire();
+        }
+        if self.update(|record| {
             record.terminal = terminal;
+            if terminal != Terminal::OperationError {
+                record.flow_acquire = None;
+            }
             record.finished = Some(Instant::now());
             record.hash = None;
-        });
+        }) {
+            track.terminal_recorded.store(true, Relaxed);
+        }
     }
 
     fn bytes(&self, bytes: &[u8]) {

@@ -11,6 +11,35 @@ use crate::mptcp_transport::{ClientMptcpTransport, retirement::Retirements};
 const CANARY: &str = "private-path-peer-address-error-canary";
 
 #[test]
+fn fixture_acquire_history_keeps_codes_for_the_same_rounds_and_resets() {
+    use volparossa_local_control::StorageFixtureHelperDiagnostic as Code;
+    let mut observation = Observation::default();
+    let mut history = History::default();
+    observation.record(Stage::HelperAcquire, Reason::HelperKernel);
+    observation.helper_diagnostic(Some(Code::TransportUnavailable));
+    history.record_round(observation.failure());
+    observation.reset();
+    assert_eq!(observation.failure(), None);
+    observation.record(Stage::HelperAcquire, Reason::HelperCleanupIncomplete);
+    observation.helper_diagnostic(Some(Code::FlowIdentityUnavailable));
+    history.record_round(observation.failure());
+    let summary = history.summary().unwrap();
+    assert_eq!(summary.rounds, 2);
+    assert_eq!(
+        summary.first.helper_diagnostic,
+        Some(Code::TransportUnavailable)
+    );
+    assert_eq!(
+        summary.last.helper_diagnostic,
+        Some(Code::FlowIdentityUnavailable)
+    );
+    observation.reset();
+    observation.record(Stage::SlotReservation, Reason::Unconfirmed);
+    observation.helper_diagnostic(Some(Code::Unknown));
+    assert_eq!(observation.failure().unwrap().helper_diagnostic, None);
+}
+
+#[test]
 fn flow_acquire_helper_reasons_are_typed_and_erase_private_error_content() {
     let errors = [
         (
@@ -115,6 +144,7 @@ fn flow_acquire_observation_freezes_first_failure_and_reset_discards_it() {
         Some(Failure {
             stage: Stage::HelperAcquire,
             reason: Reason::HelperTimeout,
+            helper_diagnostic: None,
         }),
     );
     observation.reset();
@@ -133,10 +163,12 @@ fn flow_acquire_history_keeps_order_and_exact_one_to_eight_rounds() {
     let first = Failure {
         stage: Stage::HelperAcquire,
         reason: Reason::HelperKernel,
+        helper_diagnostic: None,
     };
     let last = Failure {
         stage: Stage::SlotReservation,
         reason: Reason::LocalCapacity,
+        helper_diagnostic: None,
     };
     let mut history = History::default();
     assert_eq!(history.summary(), None);
@@ -169,6 +201,7 @@ fn flow_acquire_history_keeps_order_and_exact_one_to_eight_rounds() {
 #[test]
 fn flow_acquire_history_omits_missing_or_out_of_bound_observations() {
     let failure = Failure {
+        helper_diagnostic: None,
         stage: Stage::SourcePort,
         reason: Reason::Entropy,
     };

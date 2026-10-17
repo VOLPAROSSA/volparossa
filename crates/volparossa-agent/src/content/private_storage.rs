@@ -70,6 +70,9 @@ impl ContentRuntime {
         if !request.include_append_timing {
             outcome.append_timing = None;
         }
+        if !request.include_tls_close_failure {
+            outcome.tls_close_failure = None;
+        }
         Ok(outcome)
     }
 
@@ -602,9 +605,12 @@ async fn exchange(
         .map_err(|_| ContentError::Unavailable)?;
     drop(remote);
     outcome.enter(OutcomePhase::TransportTlsClose);
-    tls::finish(flow.stream_mut())
+    tls::finish_classified(flow.stream_mut())
         .await
-        .map_err(|_| ContentError::Unavailable)?;
+        .map_err(|failure| {
+            outcome.tls_close_failure(failure);
+            ContentError::Unavailable
+        })?;
     flow.shutdown();
     outcome.enter(OutcomePhase::FinalRouteCheck);
     route_current(context, &policy, control, request.peer).await?;

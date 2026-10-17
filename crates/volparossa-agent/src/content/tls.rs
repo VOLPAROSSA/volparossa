@@ -21,7 +21,7 @@ use tokio_rustls::{
     TlsAcceptor, TlsConnector, client::TlsStream as ClientStream, server::TlsStream as ServerStream,
 };
 use volparossa_content::provider::VerifiedProviderOffer;
-use volparossa_local_control::PrivateStorageTlsFailure;
+use volparossa_local_control::{PrivateStorageTlsCloseFailure, PrivateStorageTlsFailure};
 
 const CONTENT_ALPN: &[u8] = b"volparossa-content/1";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -210,29 +210,46 @@ pub(super) async fn finish<S>(stream: &mut S) -> Result<(), ContentTlsError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    finish_classified(stream)
+        .await
+        .map_err(|_| ContentTlsError::Close)
+}
+
+/// The same close operation, retaining only its local failure boundary.
+pub(super) async fn finish_classified<S>(
+    stream: &mut S,
+) -> Result<(), PrivateStorageTlsCloseFailure>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     timeout(CLOSE_TIMEOUT, async {
         stream
             .shutdown()
             .await
-            .map_err(|_| ContentTlsError::Close)?;
+            .map_err(|_| PrivateStorageTlsCloseFailure::ShutdownIo)?;
         let count = stream
             .read(&mut [0_u8; 1])
             .await
-            .map_err(|_| ContentTlsError::Close)?;
+            .map_err(|_| PrivateStorageTlsCloseFailure::ReadIo)?;
         if count != 0 {
-            return Err(ContentTlsError::Close);
+            return Err(PrivateStorageTlsCloseFailure::TrailingData);
         }
         Ok(())
     })
     .await
-    .map_err(|_| ContentTlsError::Close)?
+    .map_err(|_| PrivateStorageTlsCloseFailure::InternalDeadline)?
 }
+
+#[cfg(test)]
+mod close_diagnostic_tests;
 
 #[cfg(test)]
 mod diagnostic_tests;
 
 #[cfg(test)]
 mod tests {
+    mod kernel_close;
+
     use super::*;
     use ed25519_dalek::SigningKey;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};

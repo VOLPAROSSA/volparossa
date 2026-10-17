@@ -78,6 +78,54 @@ const flowDiagnostics = () => ({ version: 8, omitted_failures: 0, failures: [{
       first: { stage: 'helper_acquire', reason: 'helper_io' }, last: { stage: 'helper_acquire', reason: 'helper_io' } } },
 }] });
 
+const closeDiagnostics = (reason = null) => ({ version: 9, omitted_failures: 0, failures: [{
+  ...transferFailure(), agent_detail: null, agent_outcome: { status: 'observed',
+    detail: { phase: 'transport_tls_close', category: 'unavailable', deadline_scope: 'none' },
+    append_timing: null, tls_close_failure: reason },
+}] });
+
+test('profile10 selects only close diagnostics and preserves bounded v8 detail', () => {
+  assert.doesNotThrow(() => validateAppendProfile({ tlsCloseDiagnosticsV9: true }, 10));
+  for (const value of [false, null, 1, 'true', {}, []]) {
+    assert.throws(() => validateAppendProfile({ tlsCloseDiagnosticsV9: value }, 10), /configuration/u);
+  }
+  assert.throws(() => validateAppendProfile({}, 10), /configuration/u);
+  for (const prior of ['appendDiagnosticsV7', 'flowAcquireDiagnosticsV8']) {
+    assert.throws(() => validateAppendProfile({ tlsCloseDiagnosticsV9: true, [prior]: true }, 10), /configuration/u);
+  }
+  for (let profile = 1; profile <= 9; profile++) {
+    const old = profile === 8 ? { appendDiagnosticsV7: true } : profile === 9 ? { flowAcquireDiagnosticsV8: true } : {};
+    assert.throws(() => validateAppendProfile({ ...old, tlsCloseDiagnosticsV9: true }, profile), /configuration/u);
+  }
+  for (const reason of [null, 'shutdown_io', 'read_io', 'trailing_data', 'internal_deadline']) {
+    const value = closeDiagnostics(reason);
+    assert.deepEqual(depositDiagnostic(value, 9), value);
+    assert.throws(() => depositDiagnostic(value, 8), /deposit_diagnostics/u);
+  }
+  for (const old of [flowDiagnostics(), appendDiagnostics()]) {
+    old.version = 9;
+    if (old.failures[0].agent_outcome) old.failures[0].agent_outcome.tls_close_failure = null;
+    assert.deepEqual(depositDiagnostic(old, 9), old);
+  }
+});
+
+test('v9 close observations reject unknown, missing, private and incorrectly scoped detail', () => {
+  const invalid = [closeDiagnostics('PRIVATE'), closeDiagnostics({}), closeDiagnostics(1)];
+  for (const mutation of [v => { delete v.tls_close_failure; }, v => { delete v.append_timing; },
+    v => { v.raw = 'PRIVATE'; }, v => { v.detail.phase = 'provider_tls_close'; },
+    v => { v.detail.category = 'io'; }, v => { v.detail.deadline_scope = 'operation'; },
+    v => { v.append_timing = {}; }]) {
+    const value = closeDiagnostics('read_io'); mutation(value.failures[0].agent_outcome); invalid.push(value);
+  }
+  for (const status of ['missing', 'pending', 'expired', 'query_failed', 'query_timeout']) {
+    const value = closeDiagnostics();
+    Object.assign(value.failures[0].agent_outcome, { status, detail: null });
+    assert.deepEqual(depositDiagnostic(value, 9), value);
+    value.failures[0].agent_outcome.tls_close_failure = 'read_io'; invalid.push(value);
+  }
+  for (const value of invalid) assert.throws(() => depositDiagnostic(value, 9), /deposit_diagnostics/u);
+});
+
 test('profile9 alone selects flow diagnostics and never combines opt-ins', () => {
   assert.doesNotThrow(() => validateAppendProfile({ flowAcquireDiagnosticsV8: true }, 9));
   for (const value of [false, null, 1, 'true', {}, []]) {
@@ -780,14 +828,15 @@ test('profiles1 through7 preserve original finally precedence and legacy failure
 });
 
 test('real publish driver distinguishes missing policy read and still closes once', async () => {
-  for (const profileVersion of [8, 9]) {
+  for (const profileVersion of [8, 9, 10]) {
   const root = await mkdtemp(join(tmpdir(), 'vp-publish-'));
   try {
     await mkdir(join(root, 'image'), { mode: 0o700 });
     await mkdir(join(root, 'image/bundle'), { mode: 0o700 });
     const c = { version: 1, stateDirectory: join(root, 'image/archive'), deadlineMs: 100,
       providers: keys.map(key => ({ key })), fragmentBytes: 25,
-      ...(profileVersion === 9 ? { flowAcquireDiagnosticsV8: true } : { appendDiagnosticsV7: true }) };
+      ...(profileVersion === 10 ? { tlsCloseDiagnosticsV9: true }
+        : profileVersion === 9 ? { flowAcquireDiagnosticsV8: true } : { appendDiagnosticsV7: true }) };
     await writeFile(join(root, 'image/storage.json'), JSON.stringify(c), { mode: 0o600 });
     await writeFile(join(root, 'image/bundle/receipt.json'), JSON.stringify({ cipher_bytes: 100,
       cipher_sha256: 'a'.repeat(64), cipher_file: 'snapshot.pgp' }), { mode: 0o600 });
@@ -842,23 +891,27 @@ test('actual JS v10 failures pass the unchanged Python orchestration entry bound
   assert.equal(child.status, 0, child.stderr); assert.equal(child.stdout, '');
 });
 
-test('actual profile9 JS node10 and lifecycle11 pass Python only with exact profile9 binding', async () => {
+test('actual profiles9 and10 JS failures pass Python only with their exact generation binding', async () => {
   const records = [];
+  for (const profile of [9, 10]) {
   for (const app of ['image', 'cloud']) {
     const value = { status: 'incomplete', code: 'retained_operation_incomplete', local_process_joined: true,
-      storage: { operation_complete: false, deposit_diagnostics: flowDiagnostics() } };
-    records.push(publishFailure(value, app, 'deposit', false, 9));
+      storage: { operation_complete: false, deposit_diagnostics: profile === 10 ? closeDiagnostics('read_io') : flowDiagnostics() } };
+    records.push(publishFailure(value, app, 'deposit', false, profile));
     for (const closeFailed of [false, true]) {
-      const ctx = { ...publishContext(9), stage: `${app}_publish` };
-      records.push((await lifecycleFailure(ctx, () => requirePublishComplete(value, app, 'deposit', 9),
+      const ctx = { ...publishContext(profile), stage: `${app}_publish` };
+      records.push((await lifecycleFailure(ctx, () => requirePublishComplete(value, app, 'deposit', profile),
         async () => { if (closeFailed) throw new Error('PRIVATE'); }, app)).report);
     }
+  }
   }
   const source = 'import json, runpy, sys\n' +
     'm = runpy.run_path(sys.argv[1])\n' +
     'for v in json.load(sys.stdin):\n' +
-    '    assert m["validate_node_report"](v, "publish", "a" * 64, profile_version=9) == v\n' +
-    '    for old in range(1, 9):\n' +
+    '    profile = v["publish_observation"]["version"]\n' +
+    '    assert m["validate_node_report"](v, "publish", "a" * 64, profile_version=profile) == v\n' +
+    '    for old in range(1, 11):\n' +
+    '        if old == profile: continue\n' +
     '        try: m["validate_node_report"](v, "publish", "a" * 64, profile_version=old)\n' +
     '        except ValueError: pass\n' +
     '        else: raise AssertionError("historical profile accepted new failure")\n';

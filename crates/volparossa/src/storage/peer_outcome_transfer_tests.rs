@@ -125,6 +125,7 @@ async fn wire_failure_case(timed: bool) {
                 diagnostic_code: "PRIVATE_STORAGE_OUTCOME".into(),
                 private_storage_remote_detail: None,
                 payload: Some(Payload::PrivateStorageOutcome(PrivateStorageOutcome {
+                    tls_close_failure: None,
                     status: PrivateStorageOutcomeStatus::Observed as i32,
                     phase: PrivateStorageOutcomePhase::RemoteReceiptRead as i32,
                     category: PrivateStorageOutcomeCategory::Io as i32,

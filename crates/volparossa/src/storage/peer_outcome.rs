@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use volparossa_local_control::{
     PrivateStorageAppendTiming, PrivateStorageElapsedBucket, PrivateStorageOutcome,
     PrivateStorageOutcomeCategory, PrivateStorageOutcomeDeadline, PrivateStorageOutcomePhase,
-    PrivateStorageOutcomeRequest, PrivateStorageOutcomeStatus, control_request::Operation,
-    control_response::Payload,
+    PrivateStorageOutcomeRequest, PrivateStorageOutcomeStatus, PrivateStorageTlsCloseFailure,
+    control_request::Operation, control_response::Payload,
 };
 
 const QUERY_BUDGET: Duration = Duration::from_secs(1);
@@ -43,6 +43,8 @@ pub(super) struct AgentOutcome {
     // The original v4/v5/v6 serde shape stays exact; v7 has a separate explicit DTO.
     #[serde(skip)]
     append_timing: Option<AppendTiming>,
+    #[serde(skip)]
+    tls_close_failure: Option<PrivateStorageTlsCloseFailure>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -106,6 +108,42 @@ impl From<AppendOutcome> for AgentOutcome {
             status: value.status,
             detail: value.detail,
             append_timing: value.append_timing,
+            tls_close_failure: None,
+        }
+    }
+}
+
+/// Explicit v9 DTO; historical outcome decoders never admit the new key.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CloseOutcome {
+    status: Status,
+    #[serde(deserialize_with = "Option::deserialize")]
+    detail: Option<Detail>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    append_timing: Option<AppendTiming>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    tls_close_failure: Option<PrivateStorageTlsCloseFailure>,
+}
+
+impl From<AgentOutcome> for CloseOutcome {
+    fn from(value: AgentOutcome) -> Self {
+        Self {
+            status: value.status,
+            detail: value.detail,
+            append_timing: value.append_timing,
+            tls_close_failure: value.tls_close_failure,
+        }
+    }
+}
+
+impl From<CloseOutcome> for AgentOutcome {
+    fn from(value: CloseOutcome) -> Self {
+        Self {
+            status: value.status,
+            detail: value.detail,
+            append_timing: value.append_timing,
+            tls_close_failure: value.tls_close_failure,
         }
     }
 }
@@ -116,6 +154,7 @@ impl AgentOutcome {
             status,
             detail: None,
             append_timing: None,
+            tls_close_failure: None,
         }
     }
 
@@ -135,6 +174,11 @@ impl AgentOutcome {
                             .ok()?,
                     }),
                     append_timing: outcome.append_timing.and_then(AppendTiming::from_wire),
+                    tls_close_failure: outcome
+                        .tls_close_failure
+                        .map(PrivateStorageTlsCloseFailure::try_from)
+                        .transpose()
+                        .ok()?,
                 },
             },
         )
@@ -143,6 +187,7 @@ impl AgentOutcome {
     pub(super) fn valid(self) -> bool {
         match (self.status, self.detail) {
             (Status::Observed, Some(detail)) => PrivateStorageOutcome {
+                tls_close_failure: self.tls_close_failure.map(|failure| failure as i32),
                 status: PrivateStorageOutcomeStatus::Observed as i32,
                 phase: detail.phase as i32,
                 category: detail.category as i32,
@@ -152,7 +197,7 @@ impl AgentOutcome {
             .validate()
             .is_ok(),
             (Status::Observed, None) | (_, Some(_)) => false,
-            (_, None) => self.append_timing.is_none(),
+            (_, None) => self.append_timing.is_none() && self.tls_close_failure.is_none(),
         }
     }
 
@@ -173,11 +218,13 @@ impl std::error::Error for AgentOutcome {}
 /// at capacity; it proves neither provider failure nor absent custody. Older agents may reject.
 pub(super) async fn query(socket: &Path, original_request_id: &[u8]) -> AgentOutcome {
     let include_append_timing = super::diagnostics::append_timing_enabled();
+    let include_tls_close_failure = super::diagnostics::tls_close_enabled();
     tokio::time::timeout(QUERY_BUDGET, async {
         for attempt in 0..MAX_QUERIES {
             let response = crate::control::request(
                 socket,
                 Operation::PrivateStorageOutcome(PrivateStorageOutcomeRequest {
+                    include_tls_close_failure,
                     original_request_id: original_request_id.to_vec(),
                     include_append_timing,
                 }),
@@ -186,7 +233,9 @@ pub(super) async fn query(socket: &Path, original_request_id: &[u8]) -> AgentOut
             let outcome = match response {
                 Ok(response) => match response.payload {
                     Some(Payload::PrivateStorageOutcome(outcome)) => {
-                        if !include_append_timing && outcome.append_timing.is_some() {
+                        if (!include_append_timing && outcome.append_timing.is_some())
+                            || (!include_tls_close_failure && outcome.tls_close_failure.is_some())
+                        {
                             None
                         } else {
                             AgentOutcome::from_wire(outcome)

@@ -12,9 +12,349 @@ detailed evidence ledger, including historical failures—not an installation gu
 [Original v1 scorecard](#fixed-alpha-v1-scorecard) ·
 [Completion requirements](#definition-of-done)
 
-Last updated: 2026-10-16
+Last updated: 2026-10-18
 
 ## Current integration and active work
+
+### Latest storage consumer outcome
+
+Original source run
+[`38915098088`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38915098088)
+passes on `acba3244`: 147 Rust tests, including two isolated kernel cases,
+296 Python tests, 50 Node tests and 48 normalizer checks, with compilation,
+strict lint, formatting, exact source and host-state checks. Subsequent original
+actual run
+[`38917106698`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38917106698)
+fails Cloud publication at RESERVE fragment 0/copy 1: provider TLS reaches its
+handshake deadline. Consumer maintenance, repeated restoration, deletion and
+remote cleanup remain unproven. Owned topology cleanup and unchanged guest-root
+network state pass; those do not prove remote consumer-data cleanup.
+
+The bounded correlation record matches a client and provider-B connection whose
+two TLS handshakes both time out. Matching covers the first 64 ClientHello bytes,
+not complete delivery or the return handshake flight. The collection is
+incomplete and has no fragment/copy binding, so it cannot establish that this
+connection is the failing copy or identify the cause. Original artifact/log CRC
+checks and the API artifact digest pass; their ZIP SHA-256 values are
+`90711701e55a011b362058ee1577ccd8b276131cae15aa977d4b5c7842a72340`
+and `1f28e0f3e71f29d29fad1d1ab6f4d30344117fbeeec1c22618dbfb329ba17cec`.
+
+### Repeated storage reservations through production egress
+
+The targeted regression covers a gap in the earlier TLS-close tests, which
+preconnect the provider socket and bypass production SNI inspection, DNS,
+connection setup and ClientHello replay. It performs three distinct signed
+RESERVE exchanges through `ExitService::run_tcp_egress`, reusing the verified
+route, listeners and provider store. Each connection negotiates genuine kernel
+MPTCP and nested TLS; partial reads and bounded writes exercise the real proxy.
+Success requires three verified distinct reservation receipts, completed closes,
+joined tasks and no surviving owned socket descriptors.
+
+A synthetic DNS-over-TCP fixture supplies the exact permitted hostname through
+the existing fallback path with caching disabled. Its provider address is added
+only to loopback inside the explicitly checked disposable namespace before
+privileges are dropped; no host route or production egress permission changes.
+This is not a DNSSEC/Unbound implementation test, activated route admission,
+deployed WireGuard relays or proof of multiple live subflows. Production
+handshake/setup deadlines and privacy controls remain unchanged.
+
+Original hosted source run
+[`39073538705`](https://github.com/VOLPAROSSA/volparossa/actions/runs/39073538705)
+on `40348fe5ce6b8ed2172b2e6b7bfb848de677d07c`, tree
+`4b446c82863c7ef86189b4fd6a04639ed304b1ef`, compiles and passes strict lint,
+148 unique Rust tests, 296 Python tests, 50 Node tests and 48 normalizer checks.
+All three exact kernel cases pass; the new production-egress case takes 1.86
+seconds. All 62 source bindings, 21 unchanged dependency blobs, the separately
+pinned namespace runner and final source/host-state comparisons pass.
+
+The workflow fails only one formatter hunk in the new test. The follow-up applies
+that exact whitespace change; unchanged-source acceptance of the correction is
+still required. Original artifact/log CRC checks and the API artifact digest
+pass, with ZIP SHA-256 values
+`53e344421ca48090fd9e1b50f17d8b7f55c387fe9321d16effd88067f6ae9d9c`
+and `8f65b0f54204a497ea4c94eece4217249d47b1c6ee2506c60865a15ff1891ee5`.
+These passing exchanges do not establish the original consumer timeout's cause
+or replace complete Image/Cloud maintenance acceptance. Activated reusable routes,
+real relay subflows and daemon lifetime handling remain outside this regression;
+the dependent upload lifecycle stays deferred.
+
+### Earlier storage consumer outcome
+
+Source run
+[`38898873084`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38898873084)
+passes on `2ce38aa9e336f48f11f21d9ffdd7c95ddc9083fb`: 47 unique Rust tests
+(21 existing contracts, 24 TLS-v9 cases and two explicitly executed kernel cases),
+290 Python tests, 50 Node tests and 48 firewall-normalizer checks. Compilation,
+strict lint, formatting, final source and host-state comparisons pass. Original
+source artifact and log ZIP SHA-256 values are
+`bf2c850bee6b5cfac785b3407e3081486b6a2cf63c8ffe59959f731c5770f27f`
+and `db24795af5be0c8d27560681ca0b28a8b3f61fa2b71bb469f3c450f1a16004ee`.
+
+Actual run
+[`38900639690`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38900639690)
+uses that exact source, tree `52630940c62af032612c8ae97158cfa1b9080565`,
+consumer profile 10 and the unchanged Image `1e812ec6` / Cloud `35598609` pins.
+The separate core lifecycle passes loss/resume, two hash-verified non-consuming
+restores, three verified replacements, deletion of all eleven retained copies
+and the foreground copy, and zero final usage at all three base providers.
+
+The combined consumer gate fails Cloud FINALIZE, fragment 0/copy 0, at
+`stream_open / flow_acquire`. Two acquisition rounds report `helper_kernel`
+then `helper_cleanup_incomplete`; there is no TLS-close outcome for this failure.
+The separate helper sidecar contains one `poll / timed_out` observation without
+an errno. It is not request-bound and cannot establish this failure's cause.
+Image publication precedes Cloud by the tested source's control flow, but no
+separate completed Image receipt was exported. Consumer repair, restoration and
+final deletion are not reached; remote consumer cleanup and usage remain unknown.
+
+Local consumer cleanup, guest cleanup with zero owned objects, normalized
+guest-root network-state equality and normal QEMU stop/join pass. There is no
+independent scratch-removal receipt. The conditional double Debian-package build
+is skipped, not passed. Both original ZIP CRC checks and the artifact API digest
+pass; artifact and log SHA-256 values are
+`2c07ad288397cbd1e8b275d809cd79ffa4c5b62cb6cf1aaacdba72219c73ab0b`
+and `1b08929555cfb09bdcf08affd0330c81610aa4fc384ef3d675103be36ae9cd0e`.
+
+### Request-bound helper diagnostics in the development fixture
+
+The next candidate retains a closed helper rejection category after checking
+the helper's credentials, request identifier and operation digest. It records
+the original first/last acquisition failures and round count in fixture schema
+2. Missing authenticated detail remains absent; an authenticated but unrecognized
+token becomes `unknown`, never raw text. The two expired-cleanup categories refer
+to the helper's global reap boundary, not proof that this request's route expired.
+
+Only a client acquisition ending in an operation error can expose that summary.
+Stage changes, cancellation and non-error completion invalidate it, including
+when a contended observation lock prevents clearing the retained record. The
+existing caller-owned epoch binds the selected fixture version. Version-1 wire
+and JSON, production diagnostics 7–9, helper results, deadlines, retry limits,
+route retirement, descriptor ownership and application pins remain unchanged.
+
+This fixture-only detail is request-local, not a TLS fingerprint or a binding to
+a provider, fragment or copy. It does not establish a cause or remote cleanup.
+The bounded sampler keeps the existing query and record limits; no extra helper
+operation or network probe is added. Hosted compilation, lint and targeted
+contracts must pass before another full consumer trial. Image/Cloud maintenance
+and the dependent upload-to-repair-to-restore trial remain incomplete.
+
+The local inert checks pass 296 Python tests and 50 Node tests, including the
+33 sampler cases and existing maintenance exporters. Independent source review
+passes. Original hosted source run
+[`38913088623`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38913088623)
+on `4e2e6a760598009dadb3c9ab5d8bc76722888d68` compiles and passes all 147
+distinct Rust cases: 17 new fixture cases, 128 existing contracts and two isolated
+kernel tests. It also passes 296 Python, 50 Node and 48 normalizer checks, all
+source/dependency bindings, and unchanged final source and host-state comparisons.
+It fails only strict lint on one `nonminimal_bool` condition and six formatter
+hunks. The follow-up applies those exact formatting changes and the equivalent
+`is_none_or` predicate; it still needs unchanged-source acceptance before an
+actual consumer trial. Original artifact and log ZIP SHA-256 values are
+`b8459641f3f2167f56694b1b62d34141c9ec18d5555e3c0c2114bfd37491f170`
+and `e862446781fc60475a8c1315ddc3b4ea778bd2f1fa299549116906c94ceff5eb`.
+These contracts do not establish a fix for the consumer runtime failure.
+
+### Earlier storage TLS close outcome
+
+Original actual run
+[`38884826395`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38884826395)
+fails on exact `33faa7449ee982f8114c001107692eedf03cb5d5`, tree
+`2bfdb093e2783bad00419c22ede27edeef5fd9a0`. The base storage lifecycle passes:
+eight uploaded copies, repair after provider withdrawal, two restores, deletion
+of all eleven copies and zero remaining usage at all three base providers.
+The strict base evidence and real two-path MPTCP/privacy checks pass. Those
+results do not accept the separate application-consumer lifecycle.
+
+Cloud RESERVE fragment 0/copy 0 fails at `agent_terminal`, with outcome phase
+`transport_tls_close`, category `unavailable` and no enclosing deadline expiry.
+The source reaches that phase only after the admitted bridge and inner provider
+TLS closure succeed. The outer TLS close function combines shutdown, read,
+trailing-byte and its own timeout failures; the specific cause is not yet known.
+Final route/grant/lifetime validation and `CONTENT_OK` are not reached. This is
+not the earlier handshake failure, and does not prove that its cause is fixed.
+The helper bind observation and matched fixture-closing records are not bound
+to this exact copy and cannot establish its cause.
+
+Guest cleanup reports zero owned objects and unchanged host network state;
+QEMU stop/join and local fixture cleanup are supported by the original run.
+Remote consumer cleanup and usage remain unproved, as do complete Image/Cloud
+repair and restoration. Original application pins remain unchanged: Image
+`9694a2b9` and Cloud `47b0f03b`; all 23 provisioned app blobs match. The workflow,
+consumer profiles and acceptance validators also match the previous trial.
+Original artifact API digest and both ZIP CRCs pass; artifact and log SHA-256 are
+`537c75bd4de2f3239073633671d96023394569ece23921a20b202d91f24ef759`
+and `c999e511e28b15437007ff7e883bb427e2bdb5d3ab6c0c9c83f43b9f147607c0`.
+The next step is to distinguish and reproduce the outer TLS close failure before
+another actual consumer run; do not extend deadlines or accept abrupt EOF.
+
+### Isolated kernel test for nested TLS closure
+
+Two new test-only cases exercise a signed RESERVE through negotiated loopback
+kernel MPTCP, the production bidirectional proxy and a real TCP storage provider.
+The normal case closes and drops the provider, then joins and drops the proxy
+before the client explicitly finishes its outer TLS stream. The negative case
+aborts the proxy before its outer close notification and must reject an actual
+EOF/reset, not merely expire a test timer. Both retain one ten-second scenario
+deadline and join owned tasks before checking that all four sockets are gone.
+
+Original hosted run
+[`38893288966`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38893288966)
+on `fd4ba6a3cfb81c1ac28ab1c349fe532e8ac2f291` compiles the agent and passes strict
+lint, the 21 existing contracts and both explicitly selected kernel cases, with
+none failed or ignored. The normal case completes in 0.78 seconds and the abrupt
+negative control in 0.77 seconds. Both run in disposable network/PID namespaces;
+host route, DNS and normalized firewall snapshots are identical. All seven source
+blobs, twelve unchanged dependencies and the isolation runner match. The 48
+firewall-normalizer cases and final source-preservation check also pass.
+
+The run fails only one formatter hunk. The follow-up applies that exact layout
+change without changing behavior. Original artifact and log ZIP SHA-256 are
+`e35f38c2403a64415f0c5330302df29739e98ac76c0477c1c476985a418e4939`
+and `0771c2d8d8aabcc91cb7b0ab4a87be7a54c1769c29924cbdde0bc0fb5d1e4a4a`;
+the artifact API digest and both ZIP CRC checks pass.
+
+These scoped results do not reproduce the consumer failure or prove a deployed
+WireGuard/multipath route. Production closure behavior, deadlines and consumer
+validation remain unchanged. Next, preserve the actual outer-close failure class
+in the existing caller-bound diagnostic, without exposing payloads or changing
+success criteria, before another full Image/Cloud trial.
+
+The next source candidate implements that opt-in diagnostic end to end. Version
+9 retains every version-8 field and adds one nullable, closed outer-close reason:
+`shutdown_io`, `read_io`, `trailing_data` or `internal_deadline`. It is tied to the
+same caller/request/fragment/copy and existing one-use outcome query, not inferred
+from another flow or raw logs. Older encodings and selectors remain unchanged.
+The production close sequence, ten-second internal budget, three-query/one-second
+observation limit and transfer success criteria are preserved. An I/O timeout
+is not relabeled as expiry of the internal TLS budget. No payload, URL, raw error
+or private operation identifier is exported.
+
+Consumer profile 10 pins Image `1e812ec6424a539a336d230b99ae1c11a494ca29` and
+Cloud `35598609d3fedb5d1241a479c1930c8a6b831661`. Its 23 source files include the
+same byte-identical shared adapter and explicit provenance; historical profiles
+1–9 and the Node runtime stay unchanged. Both applications' actual script/config
+paths are tested with an inert child; 117 targeted application tests pass.
+The core's 290 Python and 50 Node harness tests pass, including strict profile
+binding, failure preservation and the original network/custody/cleanup gates.
+Original hosted run
+[`38896943885`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38896943885)
+on exact `7cf5f3e489e9d82cf32e26341487344501d4baff`, tree
+`4d5538de8c51b21cd72ede189e8021e71fb6ac12`, compiles all three affected packages
+and passes the 21 existing Rust contracts, 24 new diagnostics contracts and both
+explicitly selected kernel cases. The 290 Python and 50 Node harness tests also
+pass, with no failures or skips. The 48 firewall-normalizer cases, unchanged
+host network snapshots and final source-preservation check pass.
+
+The overall run fails strict lint on three large futures in the new CLI tests
+and seven formatter hunks in five files. The follow-up boxes only those test
+futures and applies the reported layout changes, preserving assertions, timers
+and production behavior. No lint is suppressed. The revised source still needs
+hosted acceptance before the full consumer trial. Original artifact and log ZIP
+SHA-256 values are
+`b857c35061f74d077c058bf933955a139f09e26c418590e52fc309d0afe0b9c6`
+and `eb0c4c8ae7a8347aaf187dba2a410ce51b0ec8e1daa206f382a4176e29c5f4d8`.
+These scoped checks neither accept Image/Cloud network maintenance nor explain
+the earlier consumer failure.
+
+### Fresh TCP admission after route-slot waits
+
+The preceding actual consumer trial
+[`38860289559`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38860289559)
+on `08ba6b21b79bef8fb0f124f114fb5ba3df7d93b7` still fails Cloud publication.
+The first copy fails during the provider TLS handshake; the next fails flow
+acquisition with `helper_cleanup_incomplete`. Base restart, repair, two restores
+and deletion pass, with all three base providers returning to zero usage.
+Complete Image/Cloud consumer maintenance and remote consumer cleanup remain
+unproved. Guest/local cleanup, QEMU shutdown and host-state checks pass.
+The bounded observations do not bind the timeout to an exact Cloud operation or
+prove a shared cause for both failures. `helper_cleanup_incomplete` can also
+represent a stale operation whose rollback succeeded; it does not by itself
+prove that resources remain allocated.
+
+Source inspection identified a separate admission gap: TCP flow acquisition
+sampled expiry before awaiting the route-state lock. Lock waiting or an existing
+acquisition attempt could cross the original deadline before the next helper
+call. The candidate now samples wall and monotonic clocks after taking that
+lock and before each subsequent attempt. Expired routes enter retained
+retirement under the same lock; cancellation cannot discard their cleanup
+owner. Material validation uses the freshly sampled time.
+
+Eight new contracts cover live admission, expiry during lock waiting, monotonic
+expiry despite wall-clock rollback, expiry between attempts, cancellation,
+failed cleanup, an existing retirement and production callsite binding. They use
+inert affine-owner fixtures, not a substitute MPTCP datapath. The original
+eight-attempt limit, helper budgets, route lifetimes and storage-consumer pins
+are unchanged. This correction is not yet proof that the original TLS timeout
+or complete consumer lifecycle is fixed.
+
+Original source run
+[`38882687116`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38882687116)
+on exact `6c817ccc6dcc2130fc3df823fea23948dba032c7` passes compilation,
+21 unique Rust cases (eight admission, seven retirement and six historical),
+strict lint and source preservation, with none failed or ignored. Five source
+blobs and twelve unchanged dependencies match. The overall run fails only six
+formatter hunks in two files. The follow-up applies those exact hunks, with no
+behavioral change. No local Rust execution is claimed. Original artifact and log
+ZIP SHA-256 values are
+`b36a814b451cc69b8dc83c4653cad4ba25db6ca240e610a752964500e75b5cee`
+and `5c10d94b54b0991883e588ece4960a00d2213992227e3b766ce88c3dc2e688e7`.
+
+Corrected source run
+[`38883801795`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38883801795)
+on `33faa744` passes compilation, all 21 contracts, strict lint, formatting and
+final source preservation. Five changed blobs and twelve dependency identities
+are verified. Artifact and log SHA-256 are
+`b5e7d1fce35d45d24a4027fb87bc599f5816243e78ce5f932031281bf955fcb9`
+and `c7752a29d12860ae102e0e3600e26f0428f025b15525887c4ef910d5ea0ab482`.
+
+### Retained route retirement after helper loss
+
+Source inspection following actual `38851643524` found a separate cleanup race.
+When MPTCP acquisition loses helper-route ownership, the controller publishes
+`Idle` before awaiting route shutdown. Another request can therefore see an
+available controller before cleanup finishes, and cancellation can drop the
+caller-owned shutdown future. That path also discards the shutdown result.
+This contradicts the retained `CleanupPending` contract already used by explicit
+disconnect and signed route expiry; it does not prove why the original connection
+poll timed out.
+
+The correction keeps the exact retiring route in `CleanupPending` before
+unlocking admission. It reuses the existing retained cleanup task and bounded
+confirmation, so caller cancellation cannot acknowledge or cancel retirement.
+Only confirmed cleanup of that same owner may publish `Idle`; failure remains
+pending. The original flow-acquisition failure and its diagnostic history remain
+the caller's result. No route lifetime, retry count, helper timeout, consumer pin
+or storage-operation replay policy changes.
+
+Six behavioral regressions target that failure branch, concurrent admission,
+caller cancellation, quarantine recovery, terminal cleanup failure and delayed
+completion against a different owner. A seventh test guards the production
+callsite. Independent source review and local workflow syntax/diff checks pass;
+Rust has not been executed locally. The dedicated hosted source gate compiles
+and tests the affected agent, runs six existing disconnect/expiry/classification
+contracts alongside those seven new cases, and checks strict lint, formatting
+and exact source bindings. Original hosted run
+[`38858477859`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38858477859)
+on exact `392ace51bd589258a708f483532c9872b5378550` passes compilation,
+all 13 unique Rust cases, strict Clippy and source preservation, with no failed
+or ignored tests. Four source blobs and twelve unchanged dependencies match.
+The run remains failed solely because seven layouts in the new test file do not
+match the formatter. The correction applies those exact layouts only; production
+bytes and test behavior are unchanged. The corrected original hosted run
+[`38859556567`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38859556567)
+passes on exact `08ba6b21b79bef8fb0f124f114fb5ba3df7d93b7`: compilation, all
+13 unique Rust cases, strict lint, formatting and source preservation. Four
+source blobs and twelve unchanged dependencies match. Its original artifact
+and log ZIP SHA-256 values are
+`4d3fa36c1ce643aa8eec8c89525e440fb6ca5282239cdd7d776f1d450073bfe0`
+and `2a07541089aa680bf1b1822a9a22585872c7cf8d53950f19ea40642171784521`.
+For the earlier failed `38858477859`, original artifact and log ZIP SHA-256 values are
+`b927a7621d4dbba497d1dbed28780f73b651b780ee73b908f8b7c04d2a22921a`
+and `078d19281d6002efeb515a7f6de36c9f6a9a025b7cbb29b30060a05c7c4e3517`.
+These are targeted controller contracts, not a full distributed datapath trial.
+The near-expiry route-selection hypothesis remains unresolved.
+Complete Image/Cloud publication, maintenance and remote cleanup must still pass
+the actual consumer trial after the source correction is verified.
 
 ### Closed helper acquisition diagnostic candidate
 
@@ -205,20 +545,18 @@ order or change count. Develop core functions with their actual consumers.
 
 The immediate milestones build on the retained candidates and evidence below:
 
-The prepared integration candidate combines native core `a410b015` and Storage
-`728db40b`. Their production changes occupy separate paths; the shared Quality
-workflow and license notices retain both sides. Only this status ledger required
-conflict resolution. The combined source still needs its own verification before
-acceptance for main. Original actual trials keep their dispatched
-sources; this preparation does not replace either trial or change its pins.
+Core main now contains the native coding backend through PR277. This Storage
+candidate remains separate and still requires complete Image/Cloud acceptance.
+Original actual trials retain their exact dispatched sources and application pins;
+neither source checks nor this diagnostic extension replace those trials.
 
 | Workstream and repositories | Next demonstrable milestone | Dependencies and remaining blockers |
 | --- | --- | --- |
 | Integrated cache and Weather delivery — `volparossa`, `volparossa-weather` | Preserve the real provider sequence and both joined web-client proofs. | Core PR227, PR229 and PR230, and Weather PR14–PR18 are merged. Drizz.li run `38228710535` and Overmorrow run `38241212407` pass actual acquisition, separate protected cold transfers and exact initial/refresh UI checks. Independent reconstruction, Quality and CodeQL pass. Automatic acquisition, browser-initiated cold retrieval and the complete weather service remain open. |
 | Native Overmorrow — `volparossa`, `volparossa-weather` | Preserve actual app-triggered core delivery and verify expiry behavior with real products. | Actual `38717988016` passes on exact core `aac5be7f` / Weather `3b90442a`: initial cold peer retrieval, two cache-backed refreshes, joined native tables, background/resume and cleanup. Source Quality `38714089083` and CodeQL `38714082172` pass. Actual expiry, physical devices, iOS and the complete service remain open. |
-| Persistent private storage maintenance — `volparossa`, then Image/Cloud | Complete consumer publication, repair and restoration after provider loss. | The listener correction passes targeted run `38815471227`, including a real Linux MPTCP rejection/reuse test. Actual `38816407455` on `728db40b` instead fails at Image FINALIZE fragment 0/copy 1 while reading the provider challenge; Cloud publication is not reached. Its standalone core lifecycle and two restores pass, but consumer repair, restoration and remote retirement remain unproved. Trace the challenge stall without extending the operation deadline. Earlier `38804192575` retains its separate unresolved flow-acquisition failure. |
+| Persistent private storage maintenance — `volparossa`, then Image/Cloud | Resolve the TLS publication blocker, then complete repair, repeated restoration, deletion and confirmed provider cleanup. | Actual `38917106698` still fails Cloud RESERVE at the TLS-handshake deadline. Source `39073538705` on `40348fe5` passes compilation, lint and all 148 Rust/296 Python/50 Node cases, including repeated production-egress reservations; only one formatter hunk fails and is corrected here. Investigate the remaining activated-route/daemon boundary without extending deadlines. Full consumer acceptance and remote cleanup remain unconfirmed. |
 | Automatic private uploads — `volparossa`, Image/Cloud | Enroll a new encrypted upload under finite service authority, then resume maintenance and restore it after provider loss. | Core PR233 adds an absolute authorization ceiling; Image PR7 forwards it without rebasing. Cloud PR14 implements finite shared admission budgets, durable reservation/enrollment, restart reconciliation and an encrypted empty catalog for a first upload. Actual OpenCloud SDK upload/list/read checks pass with a synthetic core; this does not prove peer maintenance. Join these candidates to the real upload-to-repair-to-restore trial after the existing storage milestone; its pinned consumers stay unchanged. |
-| Native coding execution — `volparossa`, `volparossa-code` | Build on the accepted bounded coding lifecycle with native editor operation and protected remote execution. | Actual `38824828727` passes on Code `fd4ff968` / core `7d0f9f0b`: two reads, approved edit/test, independent verification, task-resource and input-integrity checks, and cleanup. Code PR11 is merged, retaining that immutable core dependency; the native/Storage core candidate is not merged into core `main`. General coding quality, competitive performance, native editor UI and protected-peer execution remain open. Earlier failures retain their original outcomes. |
+| Native coding execution — `volparossa`, `volparossa-code` | Build on the accepted coding lifecycle and native backend now integrated into core main. | Actual `38824828727` passes on Code `fd4ff968` / core `7d0f9f0b`: two reads, approved edit/test, independent verification, task-resource and input-integrity checks, and cleanup. Code PR11 retains that immutable core pin. Core PR277 integrates the native-only composition after source checks; it does not transfer the model trial to that new binary. General coding quality, competitive performance, native editor UI and protected-peer execution remain open. |
 | Protected remote compute — `volparossa`, then Code/Browser | Join an authorized immutable guest, the resident coding worker and a guest-terminated TLS 1.3 session. | PR258's authenticated refusal path has actual route evidence; PR262 integrates explicit same-connection key confirmation. The next implementation reuses the native worker lifecycle and existing TLS stack, rather than extending the probe into task authority. Boot/runtime/model integrity, production roots and current vendor appraisal must be checked before private input; task authority needs its own finite grant. Those functions and actual protected execution remain open; suitable confidential-computing hardware is unavailable. |
 
 Detailed earlier Android and storage checkpoints remain in the

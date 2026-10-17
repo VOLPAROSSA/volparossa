@@ -9,11 +9,12 @@ use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use volparossa_local_control::{
-    StorageFixtureCorrelationAction as Action, StorageFixtureCorrelationPhase as Phase,
-    StorageFixtureCorrelationRequest, StorageFixtureCorrelationResponse,
-    StorageFixtureCorrelationRole as Role, StorageFixtureCorrelationState as State,
-    StorageFixtureCorrelationTerminal as Terminal, control_request::Operation,
-    control_response::Payload,
+    PrivateStorageFlowAcquireReason, PrivateStorageFlowAcquireStage, StorageFixtureAcquireFailure,
+    StorageFixtureAcquireSummary, StorageFixtureCorrelationAction as Action,
+    StorageFixtureCorrelationPhase as Phase, StorageFixtureCorrelationRequest,
+    StorageFixtureCorrelationResponse, StorageFixtureCorrelationRole as Role,
+    StorageFixtureCorrelationState as State, StorageFixtureCorrelationTerminal as Terminal,
+    StorageFixtureHelperDiagnostic, control_request::Operation, control_response::Payload,
 };
 
 const MAX_REQUEST_BYTES: usize = 4096;
@@ -115,22 +116,47 @@ fn project(
         .records
         .iter()
         .map(|record| {
-            Ok(json!({
+            let mut value = json!({
                 "role": Role::try_from(record.role)?,
                 "fingerprint": record.fingerprint.as_ref().map(hex::encode),
                 "phase": Phase::try_from(record.phase)?,
                 "terminal": Terminal::try_from(record.terminal)?,
-            }))
+            });
+            if response.version == 2 {
+                value["flow_acquire"] = record
+                    .flow_acquire
+                    .map(project_acquire)
+                    .transpose()?
+                    .unwrap_or(Value::Null);
+            }
+            Ok(value)
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(json!({
-        "version": 1,
+        "version": response.version,
         "kind": "storage-fixture-correlation",
         "state": State::try_from(response.state)?,
         "incomplete": response.incomplete,
         "records": records,
         "diagnostic_only": true,
         "acceptance_evidence": false,
+    }))
+}
+
+fn project_acquire(value: StorageFixtureAcquireSummary) -> Result<Value> {
+    let project = |value: Option<StorageFixtureAcquireFailure>| -> Result<Value> {
+        let value = value.ok_or_else(invalid_input)?;
+        let failure = value.failure.ok_or_else(invalid_input)?;
+        Ok(json!({
+            "stage": PrivateStorageFlowAcquireStage::try_from(failure.stage)?,
+            "reason": PrivateStorageFlowAcquireReason::try_from(failure.reason)?,
+            "helper_diagnostic": value.helper_diagnostic.map(StorageFixtureHelperDiagnostic::try_from).transpose()?,
+        }))
+    };
+    Ok(json!({
+        "rounds": value.rounds,
+        "first": project(value.first)?,
+        "last": project(value.last)?,
     }))
 }
 

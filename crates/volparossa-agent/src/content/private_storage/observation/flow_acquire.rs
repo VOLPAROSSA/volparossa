@@ -114,5 +114,20 @@ fn failure(value: source::Failure) -> Failure {
     }
 }
 
+pub(super) fn fixture_detail(
+    value: source::Summary,
+) -> volparossa_local_control::StorageFixtureAcquireSummary {
+    use volparossa_local_control::{StorageFixtureAcquireFailure, StorageFixtureAcquireSummary};
+    let project = |value: source::Failure| StorageFixtureAcquireFailure {
+        failure: Some(failure(value)),
+        helper_diagnostic: value.helper_diagnostic.map(|code| code as i32),
+    };
+    StorageFixtureAcquireSummary {
+        rounds: u32::from(value.rounds),
+        first: Some(project(value.first)),
+        last: Some(project(value.last)),
+    }
+}
+
 #[cfg(test)]
 mod tests;

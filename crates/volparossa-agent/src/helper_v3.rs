@@ -40,6 +40,7 @@ use volparossa_linux_uapi::{
     IngressSocketFamily as KernelIngressSocketFamily, IngressSocketKind as KernelIngressSocketKind,
     receive_fd_with_binding, validate_ingress_socket, validate_ingress_udp_reply_socket,
 };
+use volparossa_local_control::StorageFixtureHelperDiagnostic as AcquireDiagnostic;
 use volparossa_routing::{
     AcquireIngressReplySocket, AcquireIngressSocket, AcquireTransportSocket,
     ActivateClientIngress as ActivateClientIngressRequest, ActivateLeaseBatch, ActivatedLeaseBatch,
@@ -1412,6 +1413,16 @@ impl HelperClient {
         &self,
         value: AcquireTransportSocket,
     ) -> Result<AcquiredTransportSocket, HelperClientError> {
+        self.acquire_transport_socket_observed(value, &mut None)
+            .await
+    }
+
+    pub(crate) async fn acquire_transport_socket_observed(
+        &self,
+        value: AcquireTransportSocket,
+        diagnostic: &mut Option<AcquireDiagnostic>,
+    ) -> Result<AcquiredTransportSocket, HelperClientError> {
+        *diagnostic = None;
         let mut expected = TransportSocketReady {
             path_id: value.path_id,
             role: value.role,
@@ -1421,9 +1432,10 @@ impl HelperClient {
             mptcp_flow_handle: Vec::new(),
         };
         let execution = self
-            .execute_operation(
+            .execute_operation_observed(
                 helper_request::Operation::AcquireTransportSocket(value),
                 DescriptorExpectation::Transport,
+                Some(diagnostic),
             )
             .await?;
         let helper_response::Outcome::TransportSocketReady(actual) = execution.outcome else {
@@ -1643,6 +1655,16 @@ impl HelperClient {
         operation: helper_request::Operation,
         descriptor_expectation: DescriptorExpectation,
     ) -> Result<ClientExecution, HelperClientError> {
+        self.execute_operation_observed(operation, descriptor_expectation, None)
+            .await
+    }
+
+    async fn execute_operation_observed(
+        &self,
+        operation: helper_request::Operation,
+        descriptor_expectation: DescriptorExpectation,
+        diagnostic: Option<&mut Option<AcquireDiagnostic>>,
+    ) -> Result<ClientExecution, HelperClientError> {
         let mut request_id = [0_u8; 16];
         OsRng.fill_bytes(&mut request_id);
         let mut request = HelperRequest {
@@ -1675,6 +1697,11 @@ impl HelperClient {
             let result = HelperResult::try_from(response.result)
                 .map_err(|_| HelperClientError::Correlation)?;
             if result != HelperResult::Ok {
+                // Only this already authenticated and request/digest-correlated response.
+                // Keep the old rejection and its cleanup semantics exactly unchanged.
+                if let Some(diagnostic) = diagnostic {
+                    *diagnostic = Some(acquire_diagnostic(&response.diagnostic_code));
+                }
                 return Err(HelperClientError::Rejected(result));
             }
             let actual_descriptor = match response.outcome.as_ref() {
@@ -1714,6 +1741,22 @@ impl HelperClient {
         .map_err(|_| HelperClientError::Timeout)??;
         frame.zeroize();
         Ok(execution)
+    }
+}
+
+fn acquire_diagnostic(code: &str) -> AcquireDiagnostic {
+    match code {
+        "BACKEND_RESULT_AMBIGUOUS" => AcquireDiagnostic::BackendResultAmbiguous,
+        "STALE_BACKEND_RESULT" => AcquireDiagnostic::StaleBackendResult,
+        "MPTCP_FLOW_IDENTITY_UNAVAILABLE" => AcquireDiagnostic::FlowIdentityUnavailable,
+        "TRANSPORT_SOCKET_UNAVAILABLE" => AcquireDiagnostic::TransportUnavailable,
+        "CLEANUP_INCOMPLETE" => AcquireDiagnostic::CleanupIncomplete,
+        "TRANSPORT_REPLAY_COMMIT_INCONSISTENT" => AcquireDiagnostic::ReplayCommitInconsistent,
+        "EXPIRED_CLEANUP_INCOMPLETE" => AcquireDiagnostic::ExpiredContextCleanupIncomplete,
+        "EXPIRED_EXTENSION_CLEANUP_INCOMPLETE" => {
+            AcquireDiagnostic::ExpiredExtensionCleanupIncomplete
+        }
+        _ => AcquireDiagnostic::Unknown,
     }
 }
 
@@ -3757,11 +3800,24 @@ mod tests {
         result: HelperResult,
         alter: fn(&mut HelperResponse),
     ) -> HelperClientError {
+        acquire_transport_rejection_observed(result, alter, true)
+            .await
+            .0
+    }
+
+    async fn acquire_transport_rejection_observed(
+        result: HelperResult,
+        alter: fn(&mut HelperResponse),
+        trusted: bool,
+    ) -> (HelperClientError, Option<AcquireDiagnostic>) {
         let directory = tempfile::tempdir().expect("tempdir");
         let socket = directory.path().join("helper.sock");
         let listener = UnixListener::bind(&socket).expect("bind");
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
+            if !trusted {
+                return;
+            }
             let request = read_request(&mut stream).await.expect("request");
             assert!(matches!(
                 request.operation,
@@ -3795,15 +3851,140 @@ mod tests {
             stream.write_all(&frame).await.expect("write response");
             stream.flush().await.expect("flush response");
         });
-        let response =
-            HelperClient::new_for_test(socket, directory.path().join("unused"), geteuid().as_raw())
-                .acquire_transport_socket(transport_request(TransportSocketKind::MptcpConnected))
-                .await;
+        let mut diagnostic = Some(AcquireDiagnostic::StaleBackendResult);
+        let response = HelperClient::new_for_test(
+            socket,
+            directory.path().join("unused"),
+            geteuid().as_raw() + u32::from(!trusted),
+        )
+        .acquire_transport_socket_observed(
+            transport_request(TransportSocketKind::MptcpConnected),
+            &mut diagnostic,
+        )
+        .await;
         server.await.expect("server");
         match response {
-            Err(error) => error,
+            Err(error) => (error, diagnostic),
             Ok(_) => panic!("rejected Acquire must not return a descriptor"),
         }
+    }
+
+    #[test]
+    fn fixture_acquire_codes_are_closed_and_unknown_is_not_absent() {
+        for (raw, expected) in [
+            (
+                "BACKEND_RESULT_AMBIGUOUS",
+                AcquireDiagnostic::BackendResultAmbiguous,
+            ),
+            (
+                "STALE_BACKEND_RESULT",
+                AcquireDiagnostic::StaleBackendResult,
+            ),
+            (
+                "MPTCP_FLOW_IDENTITY_UNAVAILABLE",
+                AcquireDiagnostic::FlowIdentityUnavailable,
+            ),
+            (
+                "TRANSPORT_SOCKET_UNAVAILABLE",
+                AcquireDiagnostic::TransportUnavailable,
+            ),
+            ("CLEANUP_INCOMPLETE", AcquireDiagnostic::CleanupIncomplete),
+            (
+                "TRANSPORT_REPLAY_COMMIT_INCONSISTENT",
+                AcquireDiagnostic::ReplayCommitInconsistent,
+            ),
+            ("PRIVATE_CANARY", AcquireDiagnostic::Unknown),
+            (
+                "EXPIRED_CLEANUP_INCOMPLETE",
+                AcquireDiagnostic::ExpiredContextCleanupIncomplete,
+            ),
+            (
+                "EXPIRED_EXTENSION_CLEANUP_INCOMPLETE",
+                AcquireDiagnostic::ExpiredExtensionCleanupIncomplete,
+            ),
+            ("BACKEND_RESULT_AMBIGUOUS_EXTRA", AcquireDiagnostic::Unknown),
+        ] {
+            assert_eq!(acquire_diagnostic(raw), expected);
+            assert!(!format!("{:?}", acquire_diagnostic(raw)).contains("PRIVATE_CANARY"));
+        }
+    }
+
+    #[tokio::test]
+    async fn fixture_acquire_observes_only_correlated_rejection_without_changing_error() {
+        for (alter, expected) in [
+            (
+                (|_: &mut HelperResponse| {}) as fn(&mut HelperResponse),
+                AcquireDiagnostic::TransportUnavailable,
+            ),
+            (
+                |response| response.diagnostic_code = "PRIVATE_CANARY".into(),
+                AcquireDiagnostic::Unknown,
+            ),
+            (
+                |response| response.diagnostic_code = "EXPIRED_CLEANUP_INCOMPLETE".into(),
+                AcquireDiagnostic::ExpiredContextCleanupIncomplete,
+            ),
+            (
+                |response| response.diagnostic_code = "EXPIRED_EXTENSION_CLEANUP_INCOMPLETE".into(),
+                AcquireDiagnostic::ExpiredExtensionCleanupIncomplete,
+            ),
+        ] {
+            let (error, diagnostic) =
+                acquire_transport_rejection_observed(HelperResult::Kernel, alter, true).await;
+            assert!(matches!(
+                error,
+                HelperClientError::Rejected(HelperResult::Kernel)
+            ));
+            assert_eq!(diagnostic, Some(expected));
+        }
+        for alter in [
+            (|response: &mut HelperResponse| response.request_id[0] ^= 1)
+                as fn(&mut HelperResponse),
+            |response: &mut HelperResponse| response.operation_digest[0] ^= 1,
+            |response: &mut HelperResponse| {
+                response.outcome = Some(helper_response::Outcome::Empty(Empty {}));
+            },
+        ] {
+            let (error, diagnostic) =
+                acquire_transport_rejection_observed(HelperResult::Kernel, alter, true).await;
+            assert!(matches!(
+                error,
+                HelperClientError::Correlation | HelperClientError::Protocol(_)
+            ));
+            assert_eq!(diagnostic, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn fixture_acquire_wrong_server_uid_never_observes_detail() {
+        let (error, diagnostic) =
+            acquire_transport_rejection_observed(HelperResult::Kernel, |_| {}, false).await;
+        assert!(matches!(error, HelperClientError::UntrustedServer));
+        assert_eq!(diagnostic, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fixture_acquire_timeout_never_observes_or_retries() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("helper.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_request(&mut stream).await.unwrap();
+            tokio::time::sleep(HELPER_TIMEOUT * 2).await;
+        });
+        let mut diagnostic = Some(AcquireDiagnostic::Unknown);
+        let result =
+            HelperClient::new_for_test(socket, directory.path().join("unused"), geteuid().as_raw())
+                .acquire_transport_socket_observed(
+                    transport_request(TransportSocketKind::MptcpConnected),
+                    &mut diagnostic,
+                )
+                .await;
+        assert!(matches!(result, Err(HelperClientError::Timeout)));
+        assert_eq!(diagnostic, None);
+        server.abort();
+        let _ = server.await;
     }
 
     #[tokio::test]

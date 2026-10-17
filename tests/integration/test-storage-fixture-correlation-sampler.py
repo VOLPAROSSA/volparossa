@@ -33,22 +33,25 @@ def row(role='client', fingerprint=FINGERPRINT, phase=None, terminal='active'):
         phase=phase or ('client_challenge' if role == 'client' else 'storage_grant_read_verify'), terminal=terminal)
 
 
-def reply(action='clients', records=None, incomplete=False):
-    return dict(version=1, kind='storage-fixture-correlation',
+def reply(action='clients', records=None, incomplete=False, version=1):
+    records = copy.deepcopy(records or [])
+    if version == 2:
+        for record in records: record.setdefault('flow_acquire', None)
+    return dict(version=version, kind='storage-fixture-correlation',
         state=dict(arm='armed', clients='observed', providers='observed', disarm='disarmed')[action],
-        records=records or [], incomplete=incomplete, diagnostic_only=True, acceptance_evidence=False)
+        records=records, incomplete=incomplete, diagnostic_only=True, acceptance_evidence=False)
 
 
 def query_fixture(provider_records=None, client_records=None, incomplete=False):
-    def query(binary, control, action, epoch, fingerprints, stopped):
-        M['request'](action, epoch, fingerprints)
+    def query(binary, control, action, epoch, fingerprints, stopped, version=1):
+        M['request'](action, epoch, fingerprints, version)
         records = []
         if action == 'clients': records = client_records if client_records is not None else [row()]
         elif action == 'providers':
             records = (provider_records or {}).get(str(control), [])
             records = [record for record in records if record['fingerprint'] in fingerprints]
-        value = reply(action, records, incomplete and action == 'providers')
-        M['reply'](value, action, fingerprints)
+        value = reply(action, records, incomplete and action == 'providers', version)
+        M['reply'](value, action, fingerprints, version)
         return value['state'], value, True
     return query
 
@@ -211,6 +214,115 @@ class Contracts(unittest.TestCase):
             with self.assertRaises(ValueError): M['read_file'](path, 'publish', os.geteuid())
             link.unlink(); path.chmod(0o644)
             with self.assertRaises(ValueError): M['read_file'](path, 'publish', os.geteuid())
+
+
+class FixtureV2(unittest.TestCase):
+    @staticmethod
+    def summary():
+        first = dict(stage='helper_acquire', reason='helper_kernel', helper_diagnostic='transport_unavailable')
+        last = dict(stage='helper_acquire', reason='helper_cleanup_incomplete', helper_diagnostic='flow_identity_unavailable')
+        return dict(rounds=2, first=first, last=last)
+
+    def client(self):
+        return dict(row(fingerprint=None, phase='flow_acquire', terminal='operation_error'), flow_acquire=self.summary())
+
+    def test_closed_matrix_all_codes_and_unknown_are_not_raw_strings(self):
+        self.assertEqual(len(M['ACQUIRE_PAIRS']), 35)
+        for stage, reason in M['ACQUIRE_PAIRS']:
+            failure = dict(stage=stage, reason=reason, helper_diagnostic=None)
+            value = dict(rounds=1, first=failure, last=failure)
+            M['acquire_summary'](value, 'flow_acquire', 'operation_error')
+            for code in M['HELPER_DIAGNOSTICS']:
+                failure['helper_diagnostic'] = code
+                if stage == 'helper_acquire' and reason in M['HELPER_REASONS'][:6]:
+                    M['acquire_summary'](value, 'flow_acquire', 'operation_error')
+                else:
+                    with self.assertRaises(ValueError): M['acquire_summary'](value, 'flow_acquire', 'operation_error')
+
+    def test_strict_summary_fields_bounds_and_no_private_canary(self):
+        invalid = []
+        for rounds in (True, 0, 9, '2', None): invalid.append(dict(self.summary(), rounds=rounds))
+        invalid.append(dict(self.summary(), rounds=1))
+        invalid.append(dict(self.summary(), raw='PRIVATE_CANARY'))
+        for key, value in (('stage', 'PRIVATE_CANARY'), ('reason', 'PRIVATE_CANARY'),
+                ('helper_diagnostic', 'MPTCP_FLOW_IDENTITY_UNAVAILABLE'), ('helper_diagnostic', {}),
+                ('helper_diagnostic', 0), ('request_id', 'PRIVATE_CANARY')):
+            summary = self.summary(); summary['last'][key] = value; invalid.append(summary)
+        for summary in invalid:
+            with self.assertRaises(ValueError) as caught:
+                M['acquire_summary'](summary, 'flow_acquire', 'operation_error')
+            self.assertNotIn('PRIVATE_CANARY', str(caught.exception))
+        for phase, terminal in (('tls_handshake', 'operation_error'), ('flow_acquire', 'cancelled'), ('flow_acquire', 'active')):
+            with self.assertRaises(ValueError): M['acquire_summary'](self.summary(), phase, terminal)
+
+    def test_versions_are_explicit_and_legacy_bytes_unchanged(self):
+        legacy = reply(records=[row()])
+        raw = M['encoded'](legacy)
+        self.assertEqual(M['encoded'](M['reply'](legacy, 'clients', [])), raw)
+        value = reply(records=[self.client()], version=2)
+        self.assertEqual(M['reply'](value, 'clients', [], 2), value)
+        for item, version in ((legacy, 2), (value, 1)):
+            with self.assertRaises(ValueError): M['reply'](item, 'clients', [], version)
+        value['records'][0].pop('flow_acquire')
+        with self.assertRaises(ValueError): M['reply'](value, 'clients', [], 2)
+        linked = reply(records=[dict(self.client(), fingerprint=FINGERPRINT)], version=2)
+        with self.assertRaises(ValueError): M['reply'](linked, 'clients', [], 2)
+        provider = reply('providers', [dict(row('provider'), flow_acquire=self.summary())], version=2)
+        with self.assertRaises(ValueError): M['reply'](provider, 'providers', [FINGERPRINT], 2)
+
+    def test_unmatchable_request_detail_never_queries_provider_or_exports_identity(self):
+        calls = []
+        original = query_fixture(client_records=[self.client()])
+        def query(*args):
+            calls.append(args[2]); return original(*args)
+        samples = M['Samples']('publish', version=2)
+        with patch.dict(G, query=query): samples.round('/fixed/core', CONTROLS, EPOCH, threading.Event())
+        self.assertEqual(calls, ['clients'])
+        report = samples.report()
+        record = report['records'][0]
+        self.assertEqual((record['match_status'], record['provider_role']), ('unmatchable', None))
+        self.assertEqual(record['flow_acquire'], self.summary())
+        for status in ('matched', 'matched_incomplete'):
+            forged = copy.deepcopy(report)
+            forged['records'][0].update(match_status=status, provider_role='a',
+                provider_phase='storage_operation', provider_terminal='operation_error')
+            with self.assertRaises(ValueError): M['validate'](forged)
+        self.assertTrue(report['incomplete'])
+        for value in (EPOCH, FINGERPRINT, 'fingerprint', 'request_id', 'MPTCP_FLOW_IDENTITY_UNAVAILABLE'):
+            self.assertNotIn(value, M['encoded'](report).decode())
+        for flag in ('acceptance_evidence', 'causal_attribution', 'fragment_copy_binding', 'remote_cleanup_proven'):
+            self.assertFalse(report[flag])
+
+    def test_v2_export_remains_bounded_deduplicated_and_accepts_historical_v1(self):
+        samples = M['Samples']('publish', version=2)
+        for first in M['HELPER_DIAGNOSTICS']:
+            for last in M['HELPER_DIAGNOSTICS']:
+                client = self.client()
+                client['flow_acquire']['first']['helper_diagnostic'] = first
+                client['flow_acquire']['last']['helper_diagnostic'] = last
+                samples.add(client, 'unmatchable')
+        report = samples.report()
+        self.assertLessEqual(len(report['records']), 32)
+        self.assertLessEqual(len(M['encoded'](report)), 16384)
+        self.assertTrue(report['incomplete'])
+        for report in (report, M['Samples']('publish').report()):
+            result = subprocess.run([sys.executable, '-I', '-B', str(HERE / 'storage-fixture-correlation-sampler.py'),
+                'validate-stdin'], input=M['encoded'](report), capture_output=True, timeout=5)
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b'', b''))
+
+    def test_v2_downgrade_does_not_replace_original_consumer_failure(self):
+        primary = ValueError('PRIVATE_PRIMARY')
+        def query(*args): return 'armed' if args[2] == 'arm' else 'disarmed', reply(args[2]), True
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); root.chmod(0o700)
+            with patch.dict(G, controls_for=lambda _: CONTROLS, query=query), self.assertRaises(ValueError) as caught:
+                with M['capture']('/fixed/core', Path('/fixed/work'), root, 'publish'): raise primary
+            self.assertIs(caught.exception, primary)
+            value = M['read_file'](root / M['private_name']('publish'), 'publish', os.geteuid())
+            self.assertEqual(value['version'], 2)
+            self.assertTrue(value['sampling_failed'] and value['incomplete'])
+            self.assertFalse(value['armed'])
+            self.assertNotIn('PRIVATE_PRIMARY', M['encoded'](value).decode())
 
 
 class OwnedQueries(unittest.TestCase):

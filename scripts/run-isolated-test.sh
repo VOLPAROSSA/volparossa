@@ -10,7 +10,7 @@ fail() {
 
 test_mode=exact
 if [ "${1:-}" = --command ]; then test_mode='command'; shift; fi
-[ "$#" -ge 4 ] || fail 'expected [--command] EXECUTABLE LABEL PARENT_NETNS_MARKER none|loopback [COMMAND_ARGS...]'
+[ "$#" -ge 4 ] || fail 'expected [--command] EXECUTABLE LABEL PARENT_NETNS_MARKER none|loopback|content-egress [COMMAND_ARGS...]'
 test_executable=$1
 test_name=$2
 test_marker=$3
@@ -32,11 +32,19 @@ case "$test_marker" in
     VOLPAROSSA_HANDOFF_TEST_PARENT_NETNS|VOLPAROSSA_DNS_COLLECTOR_PARENT_NETNS|VOLPAROSSA_DNS_CACHE_PARENT_NETNS|VOLPAROSSA_DNS_FIXTURE_PARENT_NETNS|VOLPAROSSA_EXACT_CONTENT_PARENT_NETNS|VOLPAROSSA_RECONTRIBUTE_PARENT_NETNS) ;;
     *) fail 'unsupported namespace marker' ;;
 esac
-case "$test_network" in none|loopback) ;; *) fail 'unsupported disposable network setup' ;; esac
+case "$test_network" in
+    none|loopback) ;;
+    content-egress)
+        case "$test_mode:$test_marker:$test_name" in
+            command:VOLPAROSSA_EXACT_CONTENT_PARENT_NETNS:content::tls::tests::kernel_close::repeated_egress::three_signed_reserves_use_reusable_production_egress_and_fragmented_hello) ;;
+            *) fail 'content-egress is restricted to its exact production-egress regression' ;;
+        esac ;;
+    *) fail 'unsupported disposable network setup' ;;
+esac
 for test_tool in /usr/bin/unshare /usr/bin/setpriv /usr/bin/readlink /usr/bin/id /usr/bin/env /usr/bin/timeout /bin/sh; do
     [ -x "$test_tool" ] || fail "required tool is unavailable: $test_tool"
 done
-if [ "$test_network" = loopback ]; then
+if [ "$test_network" != none ]; then
     if [ ! -x /usr/bin/ip ] && [ ! -x /usr/sbin/ip ]; then fail 'iproute2 is required for disposable loopback setup'; fi
 fi
 test_parent=$(/usr/bin/readlink /proc/self/ns/net)
@@ -95,9 +103,15 @@ verify=$8
 group_mode=$9
 shift 9
 [ "$(/usr/bin/readlink /proc/self/ns/net)" != "$parent_net" ] || exit 120
-if [ "$network" = loopback ]; then
+if [ "$network" != none ]; then
     if [ -x /usr/bin/ip ]; then /usr/bin/ip link set dev lo up
     else /usr/sbin/ip link set dev lo up; fi
+fi
+if [ "$network" = content-egress ]; then
+    # One fixed synthetic provider address, only in this newly checked namespace.
+    # No veth, default route, host mutation or production egress exception.
+    if [ -x /usr/bin/ip ]; then /usr/bin/ip address add 93.184.216.34/32 dev lo
+    else /usr/sbin/ip address add 93.184.216.34/32 dev lo; fi
 fi
 expected_groups=
 case "$group_mode" in
@@ -121,6 +135,9 @@ exec /usr/bin/setpriv --reuid="$target_uid" --regid="$target_gid" "$group_option
 
 printf 'isolated-test: new disposable user/network/PID namespaces; loopback=%s; preserve kernel-restricted mapped groups, clear capabilities; %s %s\n' \
     "$test_network" "$test_mode" "$test_name"
+if [ "$test_network" = content-egress ]; then
+    printf 'isolated-test: add only synthetic 93.184.216.34/32 to disposable lo before dropping privileges; no external interface or default route\n'
+fi
 # Probe only namespace creation, never the actual test: a test failure cannot cause a rerun.
 if /usr/bin/timeout --kill-after=1s 5s /usr/bin/unshare --user --map-root-user --net --pid --fork --kill-child=KILL -- /usr/bin/true; then
     exec /usr/bin/timeout --kill-after=5s 120s /usr/bin/unshare --user --map-root-user --net --pid --fork --kill-child=KILL -- \

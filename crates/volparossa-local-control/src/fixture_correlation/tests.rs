@@ -26,6 +26,7 @@ fn request(action: Action) -> StorageFixtureCorrelationRequest {
 
 fn record() -> StorageFixtureCorrelationRecord {
     StorageFixtureCorrelationRecord {
+        flow_acquire: None,
         role: Role::Client as i32,
         fingerprint: None,
         phase: Phase::ClientChallenge as i32,
@@ -40,6 +41,104 @@ fn snapshot() -> StorageFixtureCorrelationResponse {
         incomplete: false,
         records: vec![record()],
     }
+}
+
+fn acquire_summary() -> StorageFixtureAcquireSummary {
+    let failure = StorageFixtureAcquireFailure {
+        failure: Some(crate::PrivateStorageFlowAcquireFailure {
+            stage: crate::PrivateStorageFlowAcquireStage::HelperAcquire as i32,
+            reason: crate::PrivateStorageFlowAcquireReason::HelperCleanupIncomplete as i32,
+        }),
+        helper_diagnostic: Some(StorageFixtureHelperDiagnostic::Unknown as i32),
+    };
+    StorageFixtureAcquireSummary {
+        rounds: 1,
+        first: Some(failure),
+        last: Some(failure),
+    }
+}
+
+#[test]
+fn fixture_v2_summary_is_closed_bounded_and_unknown_differs_from_absent() {
+    let valid = acquire_summary();
+    valid.validate().unwrap();
+    for code in 0..=8 {
+        let mut value = valid;
+        value.rounds = 2;
+        value.last.as_mut().unwrap().helper_diagnostic = Some(code);
+        value.validate().unwrap();
+        assert_eq!(
+            StorageFixtureAcquireSummary::decode(value.encode_to_vec().as_slice()).unwrap(),
+            value
+        );
+    }
+    for code in [-1, 9, i32::MAX] {
+        let mut value = valid;
+        value.first.as_mut().unwrap().helper_diagnostic = Some(code);
+        assert!(value.validate().is_err());
+    }
+    for rounds in [0, 9, u32::MAX] {
+        assert!(
+            StorageFixtureAcquireSummary { rounds, ..valid }
+                .validate()
+                .is_err()
+        );
+    }
+    let mut absent = valid;
+    absent.first.as_mut().unwrap().helper_diagnostic = None;
+    assert!(absent.validate().is_err()); // One round must be the identical observation.
+    absent.last = absent.first;
+    absent.validate().unwrap();
+    assert_ne!(valid.encode_to_vec(), absent.encode_to_vec());
+    absent.first.as_mut().unwrap().failure = None;
+    assert!(absent.validate().is_err());
+}
+
+#[test]
+fn fixture_v2_detail_is_only_returned_client_flow_failure() {
+    let mut value = snapshot();
+    value.version = 2;
+    value.records[0].phase = Phase::FlowAcquire as i32;
+    value.records[0].terminal = Terminal::OperationError as i32;
+    value.records[0].flow_acquire = Some(acquire_summary());
+    value.validate().unwrap();
+    value.version = 1;
+    assert!(value.validate().is_err());
+    value.version = 2;
+    for phase in [Phase::TlsHandshake, Phase::Closing] {
+        let mut invalid = value.clone();
+        invalid.records[0].phase = phase as i32;
+        assert!(invalid.validate().is_err());
+    }
+    for terminal in [Terminal::Active, Terminal::Cancelled, Terminal::Complete] {
+        let mut invalid = value.clone();
+        invalid.records[0].terminal = terminal as i32;
+        assert!(invalid.validate().is_err());
+    }
+    value.records[0].role = Role::Provider as i32;
+    assert!(value.validate().is_err());
+}
+
+#[test]
+fn fixture_v2_request_response_versions_cannot_silently_downgrade() {
+    let mut request = request(Action::Clients);
+    request.version = 2;
+    request.validate().unwrap();
+    let mut response = snapshot();
+    assert!(response.validate_for(&request).is_err());
+    response.version = 2;
+    response.validate_for(&request).unwrap();
+    request.version = 1;
+    assert!(response.validate_for(&request).is_err());
+}
+
+#[test]
+fn fixture_v1_record_has_exact_original_wire_bytes() {
+    assert_eq!(record().encode_to_vec(), vec![8, 1, 24, 9, 32, 1]);
+    assert_eq!(
+        snapshot().encode_to_vec(),
+        vec![8, 1, 16, 2, 34, 6, 8, 1, 24, 9, 32, 1]
+    );
 }
 
 fn envelope(snapshot: StorageFixtureCorrelationResponse) -> ControlResponse {
@@ -63,7 +162,7 @@ fn fixture_actions_and_private_argument_bounds_are_closed() {
     ] {
         let valid = request(action);
         valid.validate().unwrap();
-        for version in [0, 2, u32::MAX] {
+        for version in [0, 3, u32::MAX] {
             assert!(
                 StorageFixtureCorrelationRequest {
                     version,
@@ -168,6 +267,7 @@ fn fixture_role_phase_terminal_matrix_is_exact() {
         for phase in 0..=13 {
             for terminal in 0..=7 {
                 let value = StorageFixtureCorrelationRecord {
+                    flow_acquire: None,
                     role,
                     phase,
                     terminal,
@@ -196,6 +296,7 @@ fn fixture_snapshot_is_bounded_and_provider_records_match_lookup() {
     response.records.push(record());
     assert!(response.validate().is_err());
     response.records = vec![StorageFixtureCorrelationRecord {
+        flow_acquire: None,
         role: Role::Provider as i32,
         fingerprint: Some(vec![8; 32]),
         phase: Phase::StorageChallengeWriteFlush as i32,
@@ -264,7 +365,7 @@ fn fixture_wrong_envelope_unknown_wire_values_and_versions_fail_closed() {
     };
     let error = encode_response(&wrong).unwrap_err().to_string();
     assert!(!error.contains("PRIVATE_CANARY"));
-    for version in [0, 2] {
+    for version in [0, 3] {
         let invalid = envelope(StorageFixtureCorrelationResponse {
             version,
             ..snapshot()

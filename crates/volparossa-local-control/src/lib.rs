@@ -36,10 +36,11 @@ pub use custody::{
     ContentCustodyReady, ContentCustodyRequest,
 };
 pub use fixture_correlation::{
-    StorageFixtureCorrelationAction, StorageFixtureCorrelationPhase,
-    StorageFixtureCorrelationRecord, StorageFixtureCorrelationRequest,
-    StorageFixtureCorrelationResponse, StorageFixtureCorrelationRole,
-    StorageFixtureCorrelationState, StorageFixtureCorrelationTerminal,
+    StorageFixtureAcquireFailure, StorageFixtureAcquireSummary, StorageFixtureCorrelationAction,
+    StorageFixtureCorrelationPhase, StorageFixtureCorrelationRecord,
+    StorageFixtureCorrelationRequest, StorageFixtureCorrelationResponse,
+    StorageFixtureCorrelationRole, StorageFixtureCorrelationState,
+    StorageFixtureCorrelationTerminal, StorageFixtureHelperDiagnostic,
 };
 pub use mailbox::{MailboxReady, MailboxRemoteRequest, MailboxServeRequest};
 pub use private_storage::{
@@ -56,7 +57,7 @@ pub use private_storage_detail::{
 pub use private_storage_outcome::{
     PrivateStorageAppendTiming, PrivateStorageOutcome, PrivateStorageOutcomeCategory,
     PrivateStorageOutcomeDeadline, PrivateStorageOutcomePhase, PrivateStorageOutcomeRequest,
-    PrivateStorageOutcomeStatus,
+    PrivateStorageOutcomeStatus, PrivateStorageTlsCloseFailure,
 };
 pub use provider_activity::{
     ContentProviderActivity, MAX_PROVIDER_SESSIONS, ProviderActivityElapsedBucket,

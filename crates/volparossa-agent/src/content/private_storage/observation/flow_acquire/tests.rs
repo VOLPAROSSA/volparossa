@@ -10,10 +10,12 @@ fn summary() -> source::Summary {
     source::Summary {
         rounds: 2,
         first: source::Failure {
+            helper_diagnostic: None,
             stage: source::Stage::HelperAcquire,
             reason: source::Reason::HelperCapacity,
         },
         last: source::Failure {
+            helper_diagnostic: None,
             stage: source::Stage::SlotReservation,
             reason: source::Reason::LocalCapacity,
         },
@@ -62,7 +64,11 @@ fn flow_acquire_projection_maps_every_internal_variant_without_strings() {
     let mut count = 0;
     for (index, stage) in stages.into_iter().enumerate() {
         for (reason_index, reason) in reasons.into_iter().enumerate() {
-            let source = source::Failure { stage, reason };
+            let source = source::Failure {
+                stage,
+                reason,
+                helper_diagnostic: None,
+            };
             let expected = Failure {
                 stage: i32::try_from(index + 1).unwrap(),
                 reason: i32::try_from(reason_index + 1).unwrap(),

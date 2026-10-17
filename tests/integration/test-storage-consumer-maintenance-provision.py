@@ -17,6 +17,34 @@ M = runpy.run_path(str(HERE / 'storage-consumer-maintenance-provision.py'))
 
 
 class ConsumerProvision(unittest.TestCase):
+    def test_profile_ten_pins_exact_close_adapters_without_changing_historical_runtime(self):
+        previous, current = M['load_pins'](9), M['load_pins'](10)
+        self.assertEqual(current['version'], 10)
+        self.assertEqual(current['runtime'], previous['runtime'])
+        self.assertEqual(len({M['pins_path'](v) for v in range(1, 11)}), 10)
+        node = (HERE / 'storage-consumer-maintenance.mjs').read_text()
+        for name in ('image', 'cloud'):
+            self.assertEqual(current['sources'][name]['revision'], M['TLS_CLOSE_REVISIONS'][name])
+            self.assertIn(current['sources'][name]['revision'], node)
+            self.assertNotEqual(current['sources'][name]['revision'], previous['sources'][name]['revision'])
+            self.assertEqual(set(current['sources'][name]['files']), set(previous['sources'][name]['files']))
+            changed = {p for p, record in current['sources'][name]['files'].items()
+                if record != previous['sources'][name]['files'][p]}
+            self.assertEqual(changed, {'src/core-storage.mjs'} if name == 'image' else {
+                'vendor/volparossa-image/core-storage.mjs', 'third_party/volparossa-image-source.json', 'THIRD_PARTY_LICENSES.md'})
+        invalids = [M['load_pins'](v) for v in range(1, 10)]
+        for name in ('image', 'cloud'):
+            value = copy.deepcopy(current); value['sources'][name]['revision'] = previous['sources'][name]['revision']
+            invalids.append(value)
+        value = copy.deepcopy(current)
+        value['sources']['cloud']['files']['vendor/volparossa-image/core-storage.mjs']['sha256'] = '0' * 64
+        invalids.append(value)
+        for invalid in invalids:
+            with tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / 'pins.json'; path.write_text(json.dumps(invalid))
+                with patch.dict(M['load_pins'].__globals__, PINS_V10=path), self.assertRaises(ValueError):
+                    M['load_pins'](10)
+
     def test_profile_nine_pins_only_flow_adapters_and_preserves_all_historical_sources(self):
         previous, current = M['load_pins'](8), M['load_pins'](9)
         self.assertEqual(current['version'], 9)
@@ -166,7 +194,7 @@ class ConsumerProvision(unittest.TestCase):
         self.assertEqual(set(old['sources']['cloud']['files']) - set(current['sources']['cloud']['files']), set())
         self.assertEqual(set(current['sources']['image']['files']), set(old['sources']['image']['files']))
         self.assertNotEqual(M['pins_path'](), M['pins_path'](2))
-        for version in (True, 0, 10, '2'):
+        for version in (True, 0, 11, '2'):
             with self.assertRaises(ValueError):
                 M['load_pins'](version)
         for changed in (old, dict(current, version=1)):

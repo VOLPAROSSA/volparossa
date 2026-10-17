@@ -344,11 +344,12 @@ private_storage_maintenance_run() {
 
 private_storage_maintenance_finalize_report() {
     maintenance_status=$1
-    # The explicit new trial selects v9; default/historical v7 remains unchanged.
+    # The explicit new trial selects v10; default/historical v7 remains unchanged.
     case ${storage_consumer_profile_version-7} in
         7) maintenance_diagnostic_command=route-diagnostic; maintenance_schema=6; maintenance_report_command=report-consumer-v7 ;;
         8) maintenance_diagnostic_command=route-diagnostic-v3; maintenance_schema=7; maintenance_report_command=report-consumer-v8 ;;
         9) maintenance_diagnostic_command=route-diagnostic-v3; maintenance_schema=8; maintenance_report_command=report-consumer-v9 ;;
+        10) maintenance_diagnostic_command=route-diagnostic-v3; maintenance_schema=9; maintenance_report_command=report-consumer-v10 ;;
         *) return 1 ;;
     esac
     # Already published at the original supervisor gate, before TERM/cleanup.

@@ -8,6 +8,7 @@ use volparossa_local_control::{
 
 fn observed() -> PrivateStorageOutcome {
     PrivateStorageOutcome {
+        tls_close_failure: None,
         status: PrivateStorageOutcomeStatus::Observed as i32,
         phase: PrivateStorageOutcomePhase::RemoteReceiptRead as i32,
         category: PrivateStorageOutcomeCategory::Timeout as i32,

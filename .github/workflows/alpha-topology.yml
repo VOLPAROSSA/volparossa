@@ -1231,7 +1231,7 @@ jobs:
           set -euo pipefail
           test "$TOPOLOGY_EXIT_CODE" = 0
           report="$VOLPAROSSA_ALPHA_OUTPUT/private-storage-maintenance-smoke.json"
-          python3 -B tests/integration/private-storage-maintenance-smoke.py report-consumer-v9 "$report" "$GITHUB_SHA"
+          python3 -B tests/integration/private-storage-maintenance-smoke.py report-consumer-v10 "$report" "$GITHUB_SHA"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.before_sha256' "$report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \

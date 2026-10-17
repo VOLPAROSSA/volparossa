@@ -104,10 +104,12 @@ mod tests {
         history.record_round(Some(Failure {
             stage: Stage::HelperAcquire,
             reason: Reason::HelperCapacity,
+            helper_diagnostic: None,
         }));
         history.record_round(Some(Failure {
             stage: Stage::RetirementDrain,
             reason: Reason::Unconfirmed,
+            helper_diagnostic: None,
         }));
         let original = ClientRouteConnectError::TransportRuntimeUnavailable;
         let failure = ContentStreamOpenFailure::from_flow_acquire(original, history.summary());

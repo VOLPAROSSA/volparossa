@@ -62,7 +62,7 @@ impl Detail {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct AgentDetail {
+pub(super) struct AgentDetail {
     stage: PrivateStorageRemoteStage,
     deadline_scope: PrivateStorageDeadlineScope,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -76,7 +76,22 @@ struct AgentDetail {
 }
 
 impl AgentDetail {
-    fn validate_flow(&self, code: Option<AgentCode>) -> Result<(), serde_json::Error> {
+    pub(super) fn new(value: &super::AgentDetail, flow: Option<Detail>) -> Self {
+        Self {
+            stage: value.stage,
+            deadline_scope: value.deadline_scope,
+            tls_failure: value.tls_failure,
+            stream_failure: value.stream_failure,
+            challenge: value.challenge.clone(),
+            flow_acquire: flow,
+        }
+    }
+
+    pub(super) fn flow(&self) -> Option<Detail> {
+        self.flow_acquire
+    }
+
+    pub(super) fn validate_flow(&self, code: Option<AgentCode>) -> Result<(), serde_json::Error> {
         let Some(flow) = self.flow_acquire else {
             return Ok(());
         };
@@ -137,14 +152,10 @@ impl Failure {
             stage: value.stage,
             category: value.category,
             agent_code: value.agent_code,
-            agent_detail: value.agent_detail.as_ref().map(|detail| AgentDetail {
-                stage: detail.stage,
-                deadline_scope: detail.deadline_scope,
-                tls_failure: detail.tls_failure,
-                stream_failure: detail.stream_failure,
-                challenge: detail.challenge.clone(),
-                flow_acquire: flow,
-            }),
+            agent_detail: value
+                .agent_detail
+                .as_ref()
+                .map(|detail| AgentDetail::new(detail, flow)),
             agent_outcome: value.agent_outcome.map(AppendOutcome::from),
         }
     }

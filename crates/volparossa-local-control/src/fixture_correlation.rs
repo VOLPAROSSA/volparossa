@@ -113,10 +113,99 @@ pub enum StorageFixtureCorrelationTerminal {
     Cancelled = 6,
 }
 
+/// Closed projection of an authenticated Acquire rejection, never its raw token.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(i32)]
+pub enum StorageFixtureHelperDiagnostic {
+    /// A validated rejection carried another token; not an absent observation.
+    Unknown = 0,
+    /// Ambiguous backend result, not necessarily a deadline.
+    BackendResultAmbiguous = 1,
+    /// Backend completion no longer matched the live context.
+    StaleBackendResult = 2,
+    /// No valid flow identity could be issued.
+    FlowIdentityUnavailable = 3,
+    /// Transport acquisition was unavailable; not a syscall diagnosis.
+    TransportUnavailable = 4,
+    /// The helper reported incomplete cleanup; not a remote cleanup receipt.
+    CleanupIncomplete = 5,
+    /// Transport replay state could not be committed consistently.
+    ReplayCommitInconsistent = 6,
+    /// A global expired-context reap was incomplete, not necessarily this route.
+    ExpiredContextCleanupIncomplete = 7,
+    /// A global expired-extension reap was incomplete, not necessarily this route.
+    ExpiredExtensionCleanupIncomplete = 8,
+}
+
+/// One request's first/last acquisition failure, not a provider or copy binding.
+#[derive(Clone, Copy, PartialEq, Eq, Message)]
+pub struct StorageFixtureAcquireFailure {
+    /// Existing closed failure stage/reason, unchanged in production diagnostics.
+    #[prost(message, optional, tag = "1")]
+    pub failure: Option<crate::PrivateStorageFlowAcquireFailure>,
+    /// Absent without a validated helper rejection; zero is explicitly unknown.
+    #[prost(enumeration = "StorageFixtureHelperDiagnostic", optional, tag = "2")]
+    pub helper_diagnostic: Option<i32>,
+}
+
+/// Bounded request-local history exposed only in fixture schema two.
+#[derive(Clone, Copy, PartialEq, Eq, Message)]
+pub struct StorageFixtureAcquireSummary {
+    /// Original loop rounds, one through eight, not extra helper requests.
+    #[prost(uint32, tag = "1")]
+    pub rounds: u32,
+    /// First returned failure.
+    #[prost(message, optional, tag = "2")]
+    pub first: Option<StorageFixtureAcquireFailure>,
+    /// Last returned failure.
+    #[prost(message, optional, tag = "3")]
+    pub last: Option<StorageFixtureAcquireFailure>,
+}
+
+impl StorageFixtureAcquireSummary {
+    fn validate(&self) -> Result<(), ControlProtocolError> {
+        use crate::{
+            PrivateStorageFlowAcquireReason as Reason, PrivateStorageFlowAcquireStage as Stage,
+        };
+        let first = self.first.ok_or_else(invalid)?;
+        let last = self.last.ok_or_else(invalid)?;
+        crate::PrivateStorageFlowAcquireDetail {
+            rounds: self.rounds,
+            first: first.failure,
+            last: last.failure,
+        }
+        .validate()?;
+        if self.rounds == 1 && first != last {
+            return Err(invalid());
+        }
+        for value in [first, last] {
+            if let Some(code) = value.helper_diagnostic {
+                StorageFixtureHelperDiagnostic::try_from(code).map_err(|_| invalid())?;
+                let failure = value.failure.ok_or_else(invalid)?;
+                if failure.stage != Stage::HelperAcquire as i32
+                    || !matches!(
+                        Reason::try_from(failure.reason),
+                        Ok(Reason::HelperKernel
+                            | Reason::HelperCapacity
+                            | Reason::HelperUnavailable
+                            | Reason::HelperNotFound
+                            | Reason::HelperCleanupIncomplete
+                            | Reason::HelperOtherRejection)
+                    )
+                {
+                    return Err(invalid());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Bounded private command, subject to an additional agent-side development/UID gate.
 #[derive(Clone, PartialEq, Eq, Message)]
 pub struct StorageFixtureCorrelationRequest {
-    /// Exactly one.
+    /// One for legacy records; two explicitly enables closed Acquire details.
     #[prost(uint32, tag = "1")]
     pub version: u32,
     /// One explicit action.
@@ -136,7 +225,10 @@ impl StorageFixtureCorrelationRequest {
     /// # Errors
     /// Returns a fixed error without reflecting any private input.
     pub fn validate(&self) -> Result<(), ControlProtocolError> {
-        if self.version != 1 || self.epoch.len() != 16 || self.encoded_len() > MAX_FIXTURE_MESSAGE {
+        if !matches!(self.version, 1 | 2)
+            || self.epoch.len() != 16
+            || self.encoded_len() > MAX_FIXTURE_MESSAGE
+        {
             return Err(invalid());
         }
         match StorageFixtureCorrelationAction::try_from(self.action) {
@@ -176,6 +268,9 @@ pub struct StorageFixtureCorrelationRecord {
     /// Finite local terminal observation.
     #[prost(enumeration = "StorageFixtureCorrelationTerminal", tag = "4")]
     pub terminal: i32,
+    /// Schema-two client-only returned acquisition failure; never a raw helper token.
+    #[prost(message, optional, tag = "5")]
+    pub flow_acquire: Option<StorageFixtureAcquireSummary>,
 }
 
 impl StorageFixtureCorrelationRecord {
@@ -222,6 +317,16 @@ impl StorageFixtureCorrelationRecord {
         {
             return Err(invalid());
         }
+        if let Some(summary) = &self.flow_acquire {
+            if role != Role::Client
+                || phase != Phase::FlowAcquire
+                || terminal != Terminal::OperationError
+                || self.fingerprint.is_some()
+            {
+                return Err(invalid());
+            }
+            summary.validate()?;
+        }
         Ok(())
     }
 }
@@ -229,7 +334,7 @@ impl StorageFixtureCorrelationRecord {
 /// Bounded private response; no acceptance or absence proof.
 #[derive(Clone, PartialEq, Eq, Message)]
 pub struct StorageFixtureCorrelationResponse {
-    /// Exactly one.
+    /// Matches the requesting fixture schema, one or two.
     #[prost(uint32, tag = "1")]
     pub version: u32,
     /// Finite availability/lifecycle state.
@@ -261,7 +366,7 @@ impl StorageFixtureCorrelationResponse {
     pub fn validate(&self) -> Result<(), ControlProtocolError> {
         use StorageFixtureCorrelationState as State;
 
-        if self.version != 1
+        if !matches!(self.version, 1 | 2)
             || self.records.len() > MAX_FIXTURE_RECORDS
             || self.encoded_len() > MAX_FIXTURE_MESSAGE
         {
@@ -274,6 +379,9 @@ impl StorageFixtureCorrelationResponse {
             _ => return Err(invalid()),
         }
         for record in &self.records {
+            if self.version == 1 && record.flow_acquire.is_some() {
+                return Err(invalid());
+            }
             record.validate()?;
         }
         Ok(())
@@ -293,6 +401,9 @@ impl StorageFixtureCorrelationResponse {
 
         request.validate()?;
         self.validate()?;
+        if self.version != request.version {
+            return Err(invalid());
+        }
         if self.state == State::Unavailable as i32 {
             return Ok(());
         }

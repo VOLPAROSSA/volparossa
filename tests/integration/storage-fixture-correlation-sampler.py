@@ -37,6 +37,19 @@ PROVIDER_PHASES = ('tls_handshake', 'registry_snapshot', 'selector_read', 'stora
     'storage_challenge_write_flush', 'storage_request_read_verify', 'storage_operation', 'other_protocol', 'closing')
 TERMINALS = ('active', 'complete', 'tls_timeout', 'tls_error', 'operation_error', 'cancelled')
 MATCHES = ('matched', 'matched_incomplete', 'missing', 'ambiguous', 'incomplete', 'unmatchable')
+HELPER_DIAGNOSTICS = ('unknown', 'backend_result_ambiguous', 'stale_backend_result',
+    'flow_identity_unavailable', 'transport_unavailable', 'cleanup_incomplete', 'replay_commit_inconsistent',
+    'expired_context_cleanup_incomplete', 'expired_extension_cleanup_incomplete')
+HELPER_REASONS = ('helper_kernel', 'helper_capacity', 'helper_unavailable', 'helper_not_found',
+    'helper_cleanup_incomplete', 'helper_other_rejection', 'helper_timeout', 'helper_io',
+    'helper_validation', 'helper_authority', 'helper_correlation', 'helper_runtime_changed')
+ACQUIRE_PAIRS = frozenset([('source_port', 'entropy'), ('descriptor_clone', 'io'),
+    ('flow_metadata', 'metadata')] + [('retirement_drain', value) for value in
+    ('unconfirmed', 'io') + tuple(value for value in HELPER_REASONS if value != 'helper_not_found')]
+    + [('material', value) for value in ('metadata', 'topology')]
+    + [('slot_reservation', value) for value in ('unconfirmed', 'local_capacity', 'local_unavailable')]
+    + [('helper_acquire', value) for value in HELPER_REASONS]
+    + [('descriptor_adoption', value) for value in ('metadata', 'io')])
 
 
 def require(value):
@@ -68,12 +81,13 @@ def hexadecimal(value, length):
     return type(value) is str and re.fullmatch('[0-9a-f]{' + str(length) + '}', value) is not None
 
 
-def request(action, epoch, fingerprints):
+def request(action, epoch, fingerprints, version=1):
+    require(type(version) is int and version in (1, 2))
     require(action in ('arm', 'clients', 'providers', 'disarm') and hexadecimal(epoch, 32)
         and type(fingerprints) is list)
     require(all(hexadecimal(item, 64) for item in fingerprints) and len(set(fingerprints)) == len(fingerprints))
     require(1 <= len(fingerprints) <= 8 if action == 'providers' else fingerprints == [])
-    value = dict(version=1, action=action, epoch=epoch, fingerprints=fingerprints)
+    value = dict(version=version, action=action, epoch=epoch, fingerprints=fingerprints)
     require(len(encoded(value)) <= MAX_REQUEST)
     return value
 
@@ -83,9 +97,25 @@ def phase_terminal(phase, terminal, role):
     require(terminal not in ('tls_timeout', 'tls_error') or phase == 'tls_handshake')
 
 
-def reply(value, action, fingerprints):
+def acquire_summary(value, phase, terminal):
+    if value is None: return
+    require(phase == 'flow_acquire' and terminal == 'operation_error')
+    exact(value, ('rounds', 'first', 'last'))
+    require(type(value['rounds']) is int and 1 <= value['rounds'] <= 8)
+    require(value['rounds'] != 1 or value['first'] == value['last'])
+    for failure in (value['first'], value['last']):
+        exact(failure, ('stage', 'reason', 'helper_diagnostic'))
+        require(type(failure['stage']) is str and type(failure['reason']) is str
+            and (failure['stage'], failure['reason']) in ACQUIRE_PAIRS)
+        code = failure['helper_diagnostic']
+        require(code is None or (type(code) is str and code in HELPER_DIAGNOSTICS
+            and failure['stage'] == 'helper_acquire' and failure['reason'] in HELPER_REASONS[:6]))
+
+
+def reply(value, action, fingerprints, version=1):
     exact(value, ('version', 'kind', 'state', 'incomplete', 'records', 'diagnostic_only', 'acceptance_evidence'))
-    require(type(value['version']) is int and value['version'] == 1
+    require(type(version) is int and version in (1, 2)
+        and type(value['version']) is int and value['version'] == version
         and value['kind'] == 'storage-fixture-correlation' and type(value['incomplete']) is bool
         and value['diagnostic_only'] is True and value['acceptance_evidence'] is False
         and type(value['records']) is list and len(value['records']) <= MAX_RECORDS)
@@ -95,20 +125,24 @@ def reply(value, action, fingerprints):
         require(value['records'] == [] and value['incomplete'] is (value['state'] == 'unavailable'))
     role = 'client' if action == 'clients' else 'provider'
     for row in value['records']:
-        exact(row, ('role', 'fingerprint', 'phase', 'terminal'))
+        exact(row, ('role', 'fingerprint', 'phase', 'terminal') + (('flow_acquire',) if version == 2 else ()))
         require(row['role'] == role)
         fingerprint = row['fingerprint']
         require(fingerprint is None and role == 'client' or hexadecimal(fingerprint, 64))
         require(role != 'provider' or fingerprint in fingerprints)
         phase_terminal(row['phase'], row['terminal'], role)
+        if version == 2:
+            require(role == 'client' or row['flow_acquire'] is None)
+            require(row['flow_acquire'] is None or fingerprint is None)
+            acquire_summary(row['flow_acquire'], row['phase'], row['terminal'])
     return value
 
 
-def query(binary, control, action, epoch, fingerprints, stopped):
+def query(binary, control, action, epoch, fingerprints, stopped, version=1):
     """Bounded private stdin/stdout; argv/env/stderr never carry reply content."""
     process = selector = None
     state, value, joined = 'failed', None, True
-    outgoing = bytearray(encoded(request(action, epoch, fingerprints)))
+    outgoing = bytearray(encoded(request(action, epoch, fingerprints, version)))
     incoming = bytearray()
     try:
         if stopped.is_set(): return 'cancelled', None, True
@@ -140,7 +174,7 @@ def query(binary, control, action, epoch, fingerprints, stopped):
                         if len(incoming) > MAX_REPLY: raise ValueError('fixture_correlation_invalid')
         else:
             if process.returncode == 0:
-                value = reply(decode(bytes(incoming), MAX_REPLY), action, fingerprints)
+                value = reply(decode(bytes(incoming), MAX_REPLY), action, fingerprints, version)
                 state = value['state']
     except (ValueError, TypeError, KeyError, RecursionError, UnicodeError):
         state, value = 'rejected', None
@@ -176,7 +210,7 @@ def validate(value):
     exact(value, ('version', 'kind', 'phase', 'armed', 'disarmed', 'sampler_joined', 'children_joined',
         'sampling_failed', 'incomplete', 'records', 'diagnostic_only', 'acceptance_evidence',
         'causal_attribution', 'fragment_copy_binding', 'remote_cleanup_proven'))
-    require(type(value['version']) is int and value['version'] == 1
+    require(type(value['version']) is int and value['version'] in (1, 2)
         and value['kind'] == 'private-storage-fixture-correlation' and value['phase'] in PHASES
         and value['diagnostic_only'] is True and value['acceptance_evidence'] is False
         and value['causal_attribution'] is False and value['fragment_copy_binding'] is False
@@ -188,7 +222,11 @@ def validate(value):
     require(type(value['records']) is list and len(value['records']) <= MAX_PUBLIC_RECORDS)
     previous = b''
     for row in value['records']:
-        exact(row, ('client_phase', 'client_terminal', 'match_status', 'provider_role', 'provider_phase', 'provider_terminal'))
+        exact(row, ('client_phase', 'client_terminal', 'match_status', 'provider_role', 'provider_phase', 'provider_terminal')
+            + (('flow_acquire',) if value['version'] == 2 else ()))
+        if value['version'] == 2:
+            acquire_summary(row['flow_acquire'], row['client_phase'], row['client_terminal'])
+            require(row['flow_acquire'] is None or row['match_status'] == 'unmatchable')
         phase_terminal(row['client_phase'], row['client_terminal'], 'client')
         require(row['match_status'] in MATCHES)
         if row['match_status'] in ('matched', 'matched_incomplete'):
@@ -205,18 +243,20 @@ def validate(value):
 
 
 class Samples:
-    def __init__(self, phase):
+    def __init__(self, phase, version=1):
         require(phase in PHASES)
+        require(type(version) is int and version in (1, 2))
+        self.version = version
         self.phase, self.rows, self.cursor, self.rounds = phase, {}, 0, 0
         self.armed = self.disarmed = False
         self.joined = True
         self.failed = self.incomplete = False
 
     def checked(self, binary, control, action, epoch, fingerprints, stopped):
-        state, value, joined = query(binary, control, action, epoch, fingerprints, stopped)
+        state, value, joined = query(binary, control, action, epoch, fingerprints, stopped, self.version)
         self.joined &= joined
         expected = dict(arm='armed', clients='observed', providers='observed', disarm='disarmed')[action]
-        if state != expected or not joined:
+        if state != expected or not joined or value['version'] != self.version:
             self.failed = self.incomplete = True
             return None
         self.incomplete |= value['incomplete']
@@ -226,6 +266,8 @@ class Samples:
         row = dict(client_phase=client['phase'], client_terminal=client['terminal'], match_status=status,
             provider_role=matched[0] if matched else None, provider_phase=matched[1]['phase'] if matched else None,
             provider_terminal=matched[1]['terminal'] if matched else None)
+        if self.version == 2:
+            row['flow_acquire'] = client['flow_acquire']
         key = encoded(row)
         if key in self.rows or len(self.rows) < MAX_PUBLIC_RECORDS: self.rows[key] = row
         else:
@@ -239,6 +281,9 @@ class Samples:
                     del self.rows[replace]
                     self.rows[key] = row
         self.incomplete |= status in ('matched_incomplete', 'incomplete', 'unmatchable')
+        if sum(len(item) for item in self.rows) > MAX_BYTES - 1024:
+            self.rows.pop(key, None)
+            self.incomplete = True
 
     def round(self, binary, controls, epoch, stopped):
         if self.rounds >= MAX_ROUNDS:
@@ -274,7 +319,7 @@ class Samples:
 
     def report(self):
         incomplete = self.incomplete or self.failed or not (self.armed and self.disarmed and self.joined)
-        return validate(dict(version=1, kind='private-storage-fixture-correlation', phase=self.phase,
+        return validate(dict(version=self.version, kind='private-storage-fixture-correlation', phase=self.phase,
             armed=self.armed, disarmed=self.disarmed, sampler_joined=True, children_joined=self.joined,
             sampling_failed=self.failed, incomplete=incomplete, records=[self.rows[key] for key in sorted(self.rows)],
             diagnostic_only=True, acceptance_evidence=False, causal_attribution=False,
@@ -312,7 +357,7 @@ def controls_for(work):
 @contextmanager
 def capture(binary, work, root, phase):
     """All observer failures are optional; always yield the original consumer."""
-    samples, stopped = Samples(phase), threading.Event()
+    samples, stopped = Samples(phase, version=2), threading.Event()
     epoch, controls, attempted, thread = None, (), [], None
     deadline = time.monotonic() + MAX_SECONDS
 

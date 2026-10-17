@@ -138,7 +138,7 @@ class Wiring(unittest.TestCase):
             'storage-consumer-maintenance-pins-v3.json', 'storage-consumer-maintenance-pins-v4.json',
             'storage-consumer-maintenance-pins-v5.json', 'storage-consumer-maintenance-pins-v6.json',
             'storage-consumer-maintenance-pins-v7.json', 'storage-consumer-maintenance-pins-v8.json',
-            'storage-consumer-maintenance-pins-v9.json',
+            'storage-consumer-maintenance-pins-v9.json', 'storage-consumer-maintenance-pins-v10.json',
             'storage-consumer-control-underlay.sh', 'storage-consumer-control-underlay.py',
             'storage-consumer-network.sh', 'storage-consumer-network.py', 'storage-consumer-route-sampler.py',
             'storage-consumer-maintenance-evidence.py', 'storage-consumer-maintenance-provision.py',
@@ -256,7 +256,7 @@ private_storage_fragments_run() {
         start = workflow.index('      - name: Require actual owner-private storage maintenance')
         gate = workflow[start:workflow.index('\n      - name:', start + 1)]
         self.assertIn('test "$TOPOLOGY_EXIT_CODE" = 0', gate)
-        self.assertIn('private-storage-maintenance-smoke.py report-consumer-v9 "$report" "$GITHUB_SHA"', gate)
+        self.assertIn('private-storage-maintenance-smoke.py report-consumer-v10 "$report" "$GITHUB_SHA"', gate)
         self.assertIn('host-state-before.json', gate)
         self.assertIn('host-state-after.json', gate)
 

@@ -76,7 +76,7 @@ def diagnostic_failure(profile_version=2):
             deposit_diagnostics_state='observed', deposit_diagnostics=dict(version=1, omitted_failures=0,
                 failures=[dict(fragment_index=2, copy_index=1, operation='reserve', stage='agent_terminal',
                     category='io', agent_code=None)])))
-    if profile_version in (3, 4, 5, 6, 7, 8, 9):
+    if profile_version in (3, 4, 5, 6, 7, 8, 9, 10):
         value['version'] = profile_version + 1
         observed = value['publish_observation']
         observed['version'] = profile_version
@@ -112,10 +112,47 @@ def diagnostic_failure(profile_version=2):
                 agent_detail=dict(stage='stream_open', deadline_scope='none', tls_failure=None,
                     stream_failure='flow_acquire', challenge=None,
                     flow_acquire=dict(rounds=1, first=dict(boundary), last=dict(boundary))))
+        if profile_version == 10:
+            observed['deposit_diagnostics']['failures'][0].update(stage='agent_terminal', category='io',
+                agent_code=None, agent_detail=None, agent_outcome=dict(status='observed',
+                    detail=dict(phase='transport_tls_close', category='unavailable', deadline_scope='none'),
+                    append_timing=None, tls_close_failure='read_io'))
     return value
 
 
 class ConsumerReceipts(unittest.TestCase):
+    def test_profile10_closed_close_reasons_and_nullable_outcomes(self):
+        for reason in (None, 'shutdown_io', 'read_io', 'trailing_data', 'internal_deadline'):
+            value = diagnostic_failure(10)
+            value['publish_observation']['deposit_diagnostics']['failures'][0]['agent_outcome']['tls_close_failure'] = reason
+            self.assertEqual(M['validate_node_report'](value, 'publish', PROVISION, profile_version=10), value)
+            with self.assertRaises(ValueError): M['validate_node_report'](value, 'publish', PROVISION, profile_version=9)
+        for status in ('missing', 'pending', 'expired', 'query_failed', 'query_timeout'):
+            value = diagnostic_failure(10)
+            outcome = value['publish_observation']['deposit_diagnostics']['failures'][0]['agent_outcome']
+            outcome.update(status=status, detail=None, tls_close_failure=None)
+            M['validate_node_report'](value, 'publish', PROVISION, profile_version=10)
+            outcome['tls_close_failure'] = 'read_io'
+            with self.assertRaises(ValueError): M['validate_node_report'](value, 'publish', PROVISION, profile_version=10)
+
+    def test_profile10_refuses_malformed_close_scope_and_preserves_historical_details(self):
+        for mutation in (lambda v: v.pop('tls_close_failure'), lambda v: v.pop('append_timing'),
+                lambda v: v.update(tls_close_failure='PRIVATE'), lambda v: v.update(raw='PRIVATE'),
+                lambda v: v['detail'].update(phase='provider_tls_close'),
+                lambda v: v['detail'].update(category='io'), lambda v: v['detail'].update(deadline_scope='operation'),
+                lambda v: v.update(append_timing={})):
+            value = diagnostic_failure(10)
+            mutation(value['publish_observation']['deposit_diagnostics']['failures'][0]['agent_outcome'])
+            with self.assertRaises(ValueError): M['validate_node_report'](value, 'publish', PROVISION, profile_version=10)
+        for profile in (8, 9):
+            value = diagnostic_failure(profile)
+            value['version'] = 11
+            observed = value['publish_observation']; observed['version'] = 10
+            observed['deposit_diagnostics']['version'] = 9
+            outcome = observed['deposit_diagnostics']['failures'][0]['agent_outcome']
+            if outcome is not None: outcome['tls_close_failure'] = None
+            M['validate_node_report'](value, 'publish', PROVISION, profile_version=10)
+
     def test_profile9_closed_flow_matrix_all_rounds_and_scope(self):
         helper = {'helper_kernel', 'helper_capacity', 'helper_unavailable', 'helper_not_found',
             'helper_cleanup_incomplete', 'helper_other_rejection', 'helper_timeout', 'helper_io',
@@ -1030,13 +1067,13 @@ class ConsumerOrchestration(unittest.TestCase):
         import io
         from contextlib import redirect_stdout
         with redirect_stdout(io.StringIO()):
-            for profile in (2, 3, 4, 5, 6, 7, 8, 9):
+            for profile in (2, 3, 4, 5, 6, 7, 8, 9, 10):
                 M['main'](['flow-minimum', 'publish', '--profile-version', str(profile)])
                 self.assertEqual(G['PROFILE_VERSION'], profile)
             M['main'](['flow-minimum', 'publish'])
             self.assertEqual(G['PROFILE_VERSION'], 1)
         with self.assertRaises(ValueError):
-            M['main'](['flow-minimum', 'publish', '--profile-version', '10'])
+            M['main'](['flow-minimum', 'publish', '--profile-version', '11'])
 
     def test_preparation_creates_only_original_finite_authority_from_exact_cipher_size(self):
         self.assert_preparation(1)
@@ -1047,6 +1084,9 @@ class ConsumerOrchestration(unittest.TestCase):
 
     def test_preparation_enables_only_flow_opt_in_for_explicit_profile_nine(self):
         self.assert_preparation(9)
+
+    def test_preparation_enables_only_close_opt_in_for_explicit_profile_ten(self):
+        self.assert_preparation(10)
 
     def assert_preparation(self, profile):
         original, calls, owners = prepared(), [], iter(('4' * 64, '5' * 64))
@@ -1091,6 +1131,10 @@ class ConsumerOrchestration(unittest.TestCase):
                     self.assertIs(config.pop('flowAcquireDiagnosticsV8'), True)
                 else:
                     self.assertNotIn('flowAcquireDiagnosticsV8', config)
+                if profile == 10:
+                    self.assertIs(config.pop('tlsCloseDiagnosticsV9'), True)
+                else:
+                    self.assertNotIn('tlsCloseDiagnosticsV9', config)
                 policy = M['private_json'](root / name / 'maintenance-policy.json')
                 self.assertEqual(config['fragmentBytes'], (size + 3) // 4)
                 self.assertEqual((config['lifetimeSeconds'], config['deadlineMs']), (1800, 1800000))

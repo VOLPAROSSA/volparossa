@@ -87,6 +87,7 @@ impl Reason {
 pub(crate) struct Failure {
     pub(crate) stage: Stage,
     pub(crate) reason: Reason,
+    pub(crate) helper_diagnostic: Option<volparossa_local_control::StorageFixtureHelperDiagnostic>,
 }
 
 /// This stack-local observer never retains the original error or any runtime identifier.
@@ -101,7 +102,22 @@ impl Observation {
     pub(super) fn record(&mut self, stage: Stage, reason: Reason) {
         // Capture before the original error is propagated or mapped by cleanup ownership.
         // A later observation must not replace the first returned failing boundary.
-        self.0.get_or_insert(Failure { stage, reason });
+        self.0.get_or_insert(Failure {
+            stage,
+            reason,
+            helper_diagnostic: None,
+        });
+    }
+
+    pub(super) fn helper_diagnostic(
+        &mut self,
+        diagnostic: Option<volparossa_local_control::StorageFixtureHelperDiagnostic>,
+    ) {
+        if let Some(failure) = &mut self.0 {
+            if failure.stage == Stage::HelperAcquire {
+                failure.helper_diagnostic = diagnostic;
+            }
+        }
     }
 
     pub(super) fn transport_error(

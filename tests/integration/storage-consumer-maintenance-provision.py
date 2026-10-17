@@ -25,6 +25,7 @@ PINS_V6 = HERE / 'storage-consumer-maintenance-pins-v6.json'
 PINS_V7 = HERE / 'storage-consumer-maintenance-pins-v7.json'
 PINS_V8 = HERE / 'storage-consumer-maintenance-pins-v8.json'
 PINS_V9 = HERE / 'storage-consumer-maintenance-pins-v9.json'
+PINS_V10 = HERE / 'storage-consumer-maintenance-pins-v10.json'
 BASE = runpy.run_path(str(HERE / 'image-snapshot-provision.py'))
 require, digest, verify_files = (BASE[key] for key in ('require', 'digest', 'verify_files'))
 SOURCES = {name: Path('/opt') / ('volparossa-' + name) for name in ('image', 'cloud')}
@@ -48,6 +49,8 @@ APPEND_REVISIONS = dict(image='10c46b9d6424929748e324fdd188a2f5ca77851a',
     cloud='dda7a21818ece774445cf63d6e9a01fe0f2803b2')
 FLOW_REVISIONS = dict(image='9694a2b9dcb40aceefd78dbc0ab34303071a0ffd',
     cloud='47b0f03b84913761570c3de7037ba5509b848c23')
+TLS_CLOSE_REVISIONS = dict(image='1e812ec6424a539a336d230b99ae1c11a494ca29',
+    cloud='35598609d3fedb5d1241a479c1930c8a6b831661')
 FILES = {
     'image': frozenset(('scripts/immich_snapshot.py', 'scripts/snapshot-storage.mjs',
         'src/core-storage.mjs', 'LICENSE')),
@@ -66,14 +69,14 @@ VENDORED = {'scripts/immich_snapshot.py': 'vendor/volparossa-image/immich_snapsh
 
 
 def pins_path(profile_version=1):
-    require(type(profile_version) is int and profile_version in (1, 2, 3, 4, 5, 6, 7, 8, 9))
-    return {1: PINS, 2: PINS_V2, 3: PINS_V3, 4: PINS_V4, 5: PINS_V5, 6: PINS_V6, 7: PINS_V7, 8: PINS_V8, 9: PINS_V9}[profile_version]
+    require(type(profile_version) is int and profile_version in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10))
+    return {1: PINS, 2: PINS_V2, 3: PINS_V3, 4: PINS_V4, 5: PINS_V5, 6: PINS_V6, 7: PINS_V7, 8: PINS_V8, 9: PINS_V9, 10: PINS_V10}[profile_version]
 
 
 def source_revisions(profile_version=1):
     pins_path(profile_version)  # Reject bools and unknown profile selectors first.
     return {1: REVISIONS, 2: DIAGNOSTIC_REVISIONS, 3: DETAIL_REVISIONS, 4: TLS_REVISIONS,
-        5: OUTCOME_REVISIONS, 6: STREAM_REVISIONS, 7: CHALLENGE_REVISIONS, 8: APPEND_REVISIONS, 9: FLOW_REVISIONS}[profile_version]
+        5: OUTCOME_REVISIONS, 6: STREAM_REVISIONS, 7: CHALLENGE_REVISIONS, 8: APPEND_REVISIONS, 9: FLOW_REVISIONS, 10: TLS_CLOSE_REVISIONS}[profile_version]
 
 
 def load_pins(profile_version=1):
@@ -162,7 +165,7 @@ def main():
     parser.add_argument('action', choices=('provision',))
     parser.add_argument('--download', action='store_true', required=True,
         help='explicit guest-only pinned Image/Cloud sources and Node runtime download')
-    parser.add_argument('--profile-version', type=int, choices=(1, 2, 3, 4, 5, 6, 7, 8, 9), default=1)
+    parser.add_argument('--profile-version', type=int, choices=(1, 2, 3, 4, 5, 6, 7, 8, 9, 10), default=1)
     args = parser.parse_args()
     revisions = source_revisions(args.profile_version)
     print(json.dumps(dict(plan='guest-only-pinned-storage-consumers', revisions=revisions,

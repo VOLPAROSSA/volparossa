@@ -1,5 +1,114 @@
 use super::*;
 
+#[test]
+fn tls_close_v9_guard_retains_only_completed_outer_failure_and_same_uid_slot() {
+    let owner = Arc::new(Outcomes::default());
+    for (id, failure) in [
+        PrivateStorageTlsCloseFailure::ShutdownIo,
+        PrivateStorageTlsCloseFailure::ReadIo,
+        PrivateStorageTlsCloseFailure::TrailingData,
+        PrivateStorageTlsCloseFailure::InternalDeadline,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = [u8::try_from(id).unwrap(); 16];
+        let guard = owner.begin(7, &id).unwrap();
+        guard.enter(Phase::TransportTlsClose);
+        guard.tls_close_failure(failure);
+        guard.finish(
+            &Err(ContentError::Unavailable),
+            PrivateStorageDeadlineScope::None,
+        );
+        assert_eq!(owner.take(8, &id).unwrap(), status(Status::Missing));
+        let observed = owner.take(7, &id).unwrap();
+        observed.validate().unwrap();
+        assert_eq!(observed.tls_close_failure, Some(failure as i32));
+        assert_eq!(observed.category, Category::Unavailable as i32);
+        assert_eq!(observed.deadline, Deadline::None as i32);
+        assert_eq!(owner.take(7, &id).unwrap(), status(Status::Missing));
+    }
+}
+
+#[test]
+fn tls_close_v9_guard_discards_detail_on_cancel_outer_timeout_and_later_phase() {
+    let owner = Arc::new(Outcomes::default());
+    for case in 0..6 {
+        let id = [case; 16];
+        let guard = owner.begin(1, &id).unwrap();
+        guard.enter(Phase::TransportTlsClose);
+        guard.tls_close_failure(PrivateStorageTlsCloseFailure::ReadIo);
+        match case {
+            0 => drop(guard),
+            1 => guard.finish(
+                &Err(ContentError::Unavailable),
+                PrivateStorageDeadlineScope::Operation,
+            ),
+            2 => guard.finish(
+                &Err(ContentError::Unavailable),
+                PrivateStorageDeadlineScope::Exchange,
+            ),
+            3 => {
+                guard.cancelled();
+                guard.finish(
+                    &Err(ContentError::Unavailable),
+                    PrivateStorageDeadlineScope::None,
+                );
+            }
+            4 => {
+                guard.enter(Phase::FinalRouteCheck);
+                guard.finish(
+                    &Err(ContentError::Unavailable),
+                    PrivateStorageDeadlineScope::None,
+                );
+            }
+            _ => guard.finish(&Ok(()), PrivateStorageDeadlineScope::None),
+        }
+        let observed = owner.take(1, &id).unwrap();
+        observed.validate().unwrap();
+        assert!(observed.tls_close_failure.is_none());
+    }
+}
+
+#[test]
+fn tls_close_v9_provider_close_and_nonclose_phases_never_gain_outer_detail() {
+    let owner = Arc::new(Outcomes::default());
+    for phase in [
+        Phase::ProviderTlsClose,
+        Phase::RemoteReceiptRead,
+        Phase::TerminalWrite,
+    ] {
+        let guard = owner.begin(1, &[1; 16]).unwrap();
+        guard.enter(phase);
+        guard.tls_close_failure(PrivateStorageTlsCloseFailure::ReadIo);
+        guard.finish(
+            &Err(ContentError::Unavailable),
+            PrivateStorageDeadlineScope::None,
+        );
+        let result = owner.take(1, &[1; 16]).unwrap();
+        result.validate().unwrap();
+        assert!(result.tls_close_failure.is_none());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn tls_close_v9_expiry_and_capacity_keep_existing_bounds() {
+    let owner = Arc::new(Outcomes::default());
+    for id in 0..=64 {
+        let guard = owner.begin(1, &[id; 16]).unwrap();
+        guard.enter(Phase::TransportTlsClose);
+        guard.tls_close_failure(PrivateStorageTlsCloseFailure::ReadIo);
+        guard.finish(
+            &Err(ContentError::Unavailable),
+            PrivateStorageDeadlineScope::None,
+        );
+    }
+    assert_eq!(owner.0.lock().unwrap().len(), 64);
+    assert_eq!(owner.take(1, &[64; 16]).unwrap(), status(Status::Missing));
+    tokio::time::advance(Duration::from_secs(120)).await;
+    assert_eq!(owner.take(1, &[0; 16]).unwrap(), status(Status::Expired));
+}
+
 fn failed(owner: &Arc<Outcomes>, uid: u32, id: &[u8]) {
     let guard = owner.begin(uid, id).unwrap();
     guard.enter(Phase::RemoteReceiptRead);

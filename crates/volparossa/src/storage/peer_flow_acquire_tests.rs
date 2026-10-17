@@ -622,6 +622,7 @@ async fn flow_acquire_v8_reuses_the_same_bounded_append_outcome_query() {
                     diagnostic_code: "PRIVATE_STORAGE_OUTCOME".into(),
                     private_storage_remote_detail: None,
                     payload: Some(Payload::PrivateStorageOutcome(PrivateStorageOutcome {
+                        tls_close_failure: None,
                         status: PrivateStorageOutcomeStatus::Observed as i32,
                         phase: PrivateStorageOutcomePhase::RemoteReceiptRead as i32,
                         category: PrivateStorageOutcomeCategory::Io as i32,
