@@ -4,7 +4,12 @@
 # shellcheck disable=SC2154,SC2034
 
 private_storage_sequence_private() {
-    set -- timeout --signal=TERM --kill-after=5s 900s setpriv \
+    sequence_owner_budget=900
+    if [ "${private_storage_natural_expiry:-no}" = yes ] && [ "$1" = prepare ]; then
+        sequence_owner_budget=$(python3 -B "$WORK/bin/private-storage-natural-expiry.py" remaining "$expiry_start") || return 1
+        [ "$sequence_owner_budget" -gt 0 ] || return 1
+    fi
+    set -- timeout --signal=TERM --kill-after=5s "${sequence_owner_budget}s" setpriv \
         --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$custody_control_gid" \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- python3 -B "$WORK/bin/private-storage-deposit-sequence-smoke.py" "$@"
@@ -18,7 +23,7 @@ private_storage_sequence_cleanup() {
         >"$WORK/private-storage-deposit-sequence-private_cleanup.json"
 }
 
-private_storage_sequence_run() {
+private_storage_sequence_prepare() {
     PHASE=private-storage-deposit-sequence-prepare
     custody_control_gid=$(getent group volparossa-users | cut -d: -f3)
     case $custody_control_gid in ''|*[!0-9]*) fail SEQUENCE_CONTROL_GROUP_INVALID ;; esac
@@ -29,13 +34,20 @@ private_storage_sequence_run() {
     # One route selection only. Every CLI operation uses the production agent's
     # reusable route and helper-owned per-flow transport/retirement machinery.
     benchmark_select_route private-storage-deposit-sequence mptcp || fail SEQUENCE_ROUTE_UNAVAILABLE
+    if [ "${private_storage_natural_expiry:-no}" = yes ]; then
+        expiry_start=$(python3 -B "$WORK/bin/private-storage-natural-expiry.py" clock) || fail EXPIRY_CLOCK_FAILED
+    fi
     benchmark_bind_slots "$WORK/private-storage-deposit-sequence-selection.json" || fail SEQUENCE_ROUTE_INVALID
     storage_context=$(jq -er '.route_context_id' "$WORK/private-storage-deposit-sequence-selection.json")
     provider_control_peer=$(content_custody_cli client content status | jq -er \
         '.control_relay_peer_id | select(type == "string" and length > 0)') || fail SEQUENCE_CONTROL_UNAVAILABLE
     jq -e --arg peer "$provider_control_peer" '[.relay0,.relay1,.relay2] | index($peer) != null' \
         "$WORK/a01-expected-peers.json" >/dev/null || fail SEQUENCE_CONTROL_NOT_ROUTE_DISTINCT
-    content_provider_adaptive_control_underlay "$provider_control_peer" || fail SEQUENCE_CONTROL_UNDERLAY_FAILED
+    if [ "${private_storage_natural_expiry:-no}" = yes ]; then
+        private_storage_expiry_matrix_prepare || fail EXPIRY_MATRIX_FAILED
+    else
+        content_provider_adaptive_control_underlay "$provider_control_peer" || fail SEQUENCE_CONTROL_UNDERLAY_FAILED
+    fi
     storage_key_a=$(private_storage_replicas_key relay4) || fail SEQUENCE_KEY_FAILED
     storage_key_b=$(private_storage_replicas_key relay5) || fail SEQUENCE_KEY_FAILED
     storage_key_c=$(private_storage_replicas_key relay3) || fail SEQUENCE_KEY_FAILED
@@ -83,7 +95,10 @@ PY
         "$WORK/runtime-relay5/control/agent.sock" "$WORK/runtime-relay3/control/agent.sock" \
         "$storage_key_a" "$storage_key_b" "$storage_key_c" \
         >"$WORK/private-storage-deposit-sequence-prepare.json" || fail SEQUENCE_PREPARE_FAILED
+}
 
+private_storage_sequence_run() {
+    private_storage_sequence_prepare
     PHASE=private-storage-deposit-sequence-run
     capture_product_logs
     provider_baseline_ms=$(client_log_baseline_ms) || fail SEQUENCE_EVENT_BASELINE_UNAVAILABLE

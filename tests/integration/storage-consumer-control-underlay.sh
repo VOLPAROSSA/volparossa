@@ -123,6 +123,19 @@ storage_consumer_control_prepare() {
         "$WORK/consumer-control-candidate.private" >"$WORK/consumer-control-next.private" || return 1
     mv -- "$WORK/consumer-control-next.private" "$WORK/consumer-control-candidate.private" || return 1
     storage_consumer_control_check detached || return 1
+    storage_control_matrix_install || return 1
+    storage_consumer_control_snapshot after || return 1
+    jq -cSj --slurpfile after "$WORK/consumer-control-after.private" '.after=$after[0]' \
+        "$WORK/consumer-control-candidate.private" >"$WORK/consumer-control-next.private" || return 1
+    [ "$(wc -c <"$WORK/consumer-control-next.private")" -le 131072 ] || return 1
+    mv -- "$WORK/consumer-control-next.private" "$WORK/consumer-control-candidate.private" || return 1
+    storage_consumer_control_check complete || return 1
+    mv -- "$WORK/consumer-control-candidate.private" "$WORK/storage-consumer-control-underlay.json"
+}
+
+storage_control_matrix_install() {
+    # Caller must first verify its own empty/detached owned topology. This only
+    # builds the existing nine UDP-only links; it makes no lifecycle claim.
     for consumer_b in 0 1 2; do
         content_provider_node "relay$consumer_b" || return 1
         consumer_broker_ns=$provider_ns; consumer_broker_ip=$provider_ip
@@ -146,11 +159,4 @@ storage_consumer_control_prepare() {
                 via "10.247.$consumer_segment.1" dev "$consumer_right" src "$provider_ip" || return 1
         done
     done
-    storage_consumer_control_snapshot after || return 1
-    jq -cSj --slurpfile after "$WORK/consumer-control-after.private" '.after=$after[0]' \
-        "$WORK/consumer-control-candidate.private" >"$WORK/consumer-control-next.private" || return 1
-    [ "$(wc -c <"$WORK/consumer-control-next.private")" -le 131072 ] || return 1
-    mv -- "$WORK/consumer-control-next.private" "$WORK/consumer-control-candidate.private" || return 1
-    storage_consumer_control_check complete || return 1
-    mv -- "$WORK/consumer-control-candidate.private" "$WORK/storage-consumer-control-underlay.json"
 }

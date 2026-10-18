@@ -283,77 +283,87 @@ def valid_pair_receipt(value, operation, pair, provider_keys):
         require(closed_diagnostic(value["deposit_diagnostics"])["failures"] == [], "success contains failures")
 
 
-def run(root, binary, client, keys):
-    result = dict(success=False, completed_deposits=0, attempted_deposits=0,
+def sequence_result():
+    return dict(success=False, completed_deposits=0, attempted_deposits=0,
         target_ordinal=10, target_provider="B", target_reserve_nominal_flow=28,
         target_reserve_receipt_confirmed=False, target_deposit_committed=False,
         failure=None, owner_verified_committed_receipts=0, deleted_copies=0,
         unknown_reservation=False, remote_cleanup_complete=False, cli_children_joined=True)
-    identities = set()
-    try:
-        for pair in range(5):
-            result["attempted_deposits"] = 2 * pair + 2
-            failure = dict(pair_ordinal=pair + 1, diagnostics_state="unavailable", diagnostics=None)
-            def observe(_status, stdout, _stderr):
-                nonlocal failure
-                try:
-                    failure = failure_report(stdout, pair)
-                except (KeyError, TypeError, ValueError):
-                    failure = dict(pair_ordinal=pair + 1, diagnostics_state="invalid", diagnostics=None)
-            pair_ok = False
+def deposit_pairs(root, binary, client, keys, result, identities, pairs):
+    """Fixture phases only; every operation remains the unchanged production CLI."""
+    for pair in pairs:
+        result["attempted_deposits"] = 2 * pair + 2
+        failure = dict(pair_ordinal=pair + 1, diagnostics_state="unavailable", diagnostics=None)
+        def observe(_status, stdout, _stderr):
+            nonlocal failure
             try:
-                value = invoke(binary, client, ["storage", "replicas", "--tls-close-diagnostics-v9", "deposit",
-                    *existing(root, pair), "--input", root / f"input-{pair}.bin", "--already-encrypted"],
-                    failure_observer=observe)
-                valid_pair_receipt(value, "deposit", pair, keys)
-                pair_ok = True
-            except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError) as error:
-                result["failure"] = failure
-                # The shared invocation helper may fail while joining after
-                # termination. Do not claim a joined child from that ambiguity.
-                if isinstance(error, (OSError, subprocess.SubprocessError)):
-                    result["cli_children_joined"] = False
-            for index in range(2 * pair, 2 * pair + 2):
-                try:
-                    retained = journal(root, index)
-                    confirmed = retained["lease"] is not None
-                    committed = confirmed and retained["last_state"] == 3
-                    if committed:
-                        identity = (keys[ORDER[index]], retained["lease"])
-                        require(identity not in identities and retained["last_stored_bytes"] == LENGTHS[index],
-                                "fresh committed lease missing")
-                        identities.add(identity)
-                        result["completed_deposits"] += 1
-                        result["owner_verified_committed_receipts"] += 1
-                    if index == 9:
-                        result["target_reserve_receipt_confirmed"] = confirmed
-                        result["target_deposit_committed"] = committed
-                    if not confirmed:
-                        result["unknown_reservation"] = True
-                except (KeyError, TypeError, ValueError, OSError):
-                    result["unknown_reservation"] = True
-                    pair_ok = False
-            if not pair_ok:
-                break
-    finally:
-        cleanup_ok = not result["unknown_reservation"]
-        for index in range(result["attempted_deposits"]):
+                failure = failure_report(stdout, pair)
+            except (KeyError, TypeError, ValueError):
+                failure = dict(pair_ordinal=pair + 1, diagnostics_state="invalid", diagnostics=None)
+        pair_ok = False
+        try:
+            value = invoke(binary, client, ["storage", "replicas", "--tls-close-diagnostics-v9", "deposit",
+                *existing(root, pair), "--input", root / f"input-{pair}.bin", "--already-encrypted"],
+                failure_observer=observe)
+            valid_pair_receipt(value, "deposit", pair, keys)
+            pair_ok = True
+        except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError) as error:
+            result["failure"] = failure
+            # The shared invocation helper may fail while joining after
+            # termination. Do not claim a joined child from that ambiguity.
+            if isinstance(error, (OSError, subprocess.SubprocessError)):
+                result["cli_children_joined"] = False
+        for index in range(2 * pair, 2 * pair + 2):
             try:
                 retained = journal(root, index)
-                if retained["lease"] is None:
-                    cleanup_ok = False
-                    continue
-                value = invoke(binary, client, ["storage", "replicas", "delete", *existing(root, index // 2),
-                    "--provider-key", keys[ORDER[index]]])
-                valid_pair_receipt(value, "delete", index // 2, keys)
-                require(value["copies"][index % 2]["charge"] == "deleted"
-                        and value["deleted_provider_key"] == keys[ORDER[index]], "copy deletion unconfirmed")
-                result["deleted_copies"] += 1
-            except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError) as error:
+                confirmed = retained["lease"] is not None
+                committed = confirmed and retained["last_state"] == 3
+                if committed:
+                    identity = (keys[ORDER[index]], retained["lease"])
+                    require(identity not in identities and retained["last_stored_bytes"] == LENGTHS[index],
+                            "fresh committed lease missing")
+                    identities.add(identity)
+                    result["completed_deposits"] += 1
+                    result["owner_verified_committed_receipts"] += 1
+                if index == 9:
+                    result["target_reserve_receipt_confirmed"] = confirmed
+                    result["target_deposit_committed"] = committed
+                if not confirmed:
+                    result["unknown_reservation"] = True
+            except (KeyError, TypeError, ValueError, OSError):
+                result["unknown_reservation"] = True
+                pair_ok = False
+        if not pair_ok:
+            break
+
+
+def delete_copies(root, binary, client, keys, result):
+    cleanup_ok = not result["unknown_reservation"]
+    for index in range(result["attempted_deposits"]):
+        try:
+            retained = journal(root, index)
+            if retained["lease"] is None:
                 cleanup_ok = False
-                if isinstance(error, (OSError, subprocess.SubprocessError)):
-                    result["cli_children_joined"] = False
-        result["remote_cleanup_complete"] = cleanup_ok
+                continue
+            value = invoke(binary, client, ["storage", "replicas", "delete", *existing(root, index // 2),
+                "--provider-key", keys[ORDER[index]]])
+            valid_pair_receipt(value, "delete", index // 2, keys)
+            require(value["copies"][index % 2]["charge"] == "deleted"
+                    and value["deleted_provider_key"] == keys[ORDER[index]], "copy deletion unconfirmed")
+            result["deleted_copies"] += 1
+        except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError) as error:
+            cleanup_ok = False
+            if isinstance(error, (OSError, subprocess.SubprocessError)):
+                result["cli_children_joined"] = False
+    result["remote_cleanup_complete"] = cleanup_ok
+
+
+def run(root, binary, client, keys):
+    result = sequence_result()
+    try:
+        deposit_pairs(root, binary, client, keys, result, set(), range(5))
+    finally:
+        delete_copies(root, binary, client, keys, result)
     result["success"] = (result["completed_deposits"] == result["deleted_copies"] == 10
         and result["failure"] is None and result["remote_cleanup_complete"] and result["cli_children_joined"])
     return result
@@ -421,6 +431,18 @@ def validate_result(value):
 def validate_evidence(value):
     require(value["scope"] == SCOPE and value["success"] is True, "scope changed")
     validate_result(value["sequence"])
+    validate_owner_evidence(value)
+    # Reuse the generic three-provider/no-withdrawal network checks, not the
+    # fragments lifecycle claim. Our independent completion bound is 40 flows.
+    FRAG["validate_network"](value["network"], value["expected_peers"], value["layout"], "finish")
+    FRAG["validate_flow_gates"](value["network"]["gates"], 40)
+    selected = value["network"]["selected_route"]
+    require(value["layout"]["route_scope"] == dict(exit_peer_id=selected["exact_selected_exit"],
+        paths=[{key: path[key] for key in ("path_id", "relay_peer_id")} for path in selected["paths"]]),
+        "selected exit or original path identities changed")
+
+
+def validate_owner_evidence(value):
     require(value["prepare"] == dict(success=True, order=[LABELS[p] for p in ORDER], lengths=list(LENGTHS),
         owner_distinct_from_providers=True, owner_secrets_exported=False,
         provider_payload_limits=list(TOTALS), provider_lease_limits=[4, 4, 2]), "preparation changed")
@@ -434,14 +456,6 @@ def validate_evidence(value):
                 "client_cannot_read_any_provider_store", "agent_mount_positive_control",
                 "all_provider_keys_match_independent_fixture_peers", "three_provider_namespaces_distinct")),
             "owner/provider isolation missing")
-    # Reuse the generic three-provider/no-withdrawal network checks, not the
-    # fragments lifecycle claim. Our independent completion bound is 40 flows.
-    FRAG["validate_network"](value["network"], value["expected_peers"], value["layout"], "finish")
-    FRAG["validate_flow_gates"](value["network"]["gates"], 40)
-    selected = value["network"]["selected_route"]
-    require(value["layout"]["route_scope"] == dict(exit_peer_id=selected["exact_selected_exit"],
-        paths=[{key: path[key] for key in ("path_id", "relay_peer_id")} for path in selected["paths"]]),
-        "selected exit or original path identities changed")
 
 
 def evidence(work):
