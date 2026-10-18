@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "kind": "protected-resident-public-model",
+  "public_fixture_only": true,
+  "guest_uid": 985,
+  "guest_gid": 985,
+  "model_profile": "qwen3-4b-instruct-2507-v1",
+  "inference_backend": "llama_cpp_bf16_v1",
+  "transport": "/dev/virtio-ports/org.volparossa.resident",
+  "required_kernel_module": "virtio_console",
+  "required_guest_executables": [
+    "/usr/bin/bwrap",
+    "/usr/bin/prlimit",
+    "/usr/bin/nice",
+    "/usr/bin/ionice",
+    "/usr/bin/python3.13"
+  ],
+  "readonly_roots": [
+    "/usr",
+    "/opt/volparossa/runtime",
+    "/opt/volparossa/model",
+    "/opt/volparossa/native-backend",
+    "/etc/volparossa-resident"
+  ],
+  "volatile_lease_bind": "/opt/volparossa/runtime/.volparossa-compute.lock",
+  "volatile_work_parent": "/run/volparossa-resident/work",
+  "maximum_requests": 2,
+  "maximum_turn_seconds": 600,
+  "maximum_task_seconds": 2400,
+  "maximum_idle_seconds": 300,
+  "threads": 2,
+  "hardware_attestation": false,
+  "private_inputs": false,
+  "production_approval": false,
+  "guest_key_origin_proven": false
+}

@@ -121,6 +121,20 @@ A distributable guest requires a separate complete notice/source-compliance and
 release review. Observed hosted build-tool hashes are not a reproducible or
 independently approved production toolchain.
 
+### Resident model build package addition
+
+The separate [resident model package lock](tests/integration/protected-resident-model-debian-lock-v1.json)
+records exact Debian package versions, official download origins, sizes, hashes
+and authenticated index provenance. Its reviewed build-only addition is
+`curl 8.14.1-2+deb13u7`, SHA-256
+`135636bd8b713c582d33e50ec4e36ea55cc3c5da3f12bbeb6b87d2bcbd3a0649`,
+from Debian's Trixie security archive. It matches the already selected libcurl;
+the existing package pins and runtime selection are unchanged.
+Upstream curl 8.14.1 uses the [curl permission notice](https://github.com/curl/curl/blob/curl-8_14_1/COPYING).
+The Debian package retains its distribution patches and complete per-file
+copyright notices; VOLPAROSSA adds no patch to this binary and does not replace
+those notices. This is an isolated build input, not a published client update.
+
 ## Public SNP verifier fixture trial
 
 The disposable public-fixture workflow selects

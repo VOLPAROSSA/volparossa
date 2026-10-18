@@ -4903,9 +4903,12 @@ dependencies = [
  "httparse",
  "libc",
  "nix",
+ "prost",
  "rand_core 0.6.4",
+ "rcgen",
  "rpassword",
  "rustix",
+ "rustls",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -4913,6 +4916,7 @@ dependencies = [
  "socket2 0.6.5",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "tracing-subscriber",
  "volparossa-config",
@@ -4922,6 +4926,7 @@ dependencies = [
  "volparossa-mptcp",
  "volparossa-policy",
  "volparossa-quic",
+ "x509-cert",
  "zeroize",
 ]
 

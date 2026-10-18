@@ -18,9 +18,11 @@ hex.workspace = true
 httparse = "=1.10.1"
 libc.workspace = true
 nix.workspace = true
+prost.workspace = true
 rand_core.workspace = true
 rpassword = "7.4.0"
 rustix = { workspace = true, features = ["time"] }
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
@@ -28,6 +30,7 @@ sha2.workspace = true
 socket2.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 volparossa-config = { path = "../volparossa-config", version = "=0.1.0" }
@@ -38,8 +41,10 @@ volparossa-mptcp = { path = "../volparossa-mptcp", version = "=0.1.0" }
 volparossa-policy = { path = "../volparossa-policy", version = "=0.1.0" }
 volparossa-quic = { path = "../volparossa-quic", version = "=0.1.0" }
 zeroize.workspace = true
+x509-cert.workspace = true
 
 [dev-dependencies]
+rcgen.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
