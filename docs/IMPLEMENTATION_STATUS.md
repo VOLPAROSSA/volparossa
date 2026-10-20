@@ -40,6 +40,19 @@ The immediate milestones build on the retained candidates and evidence below:
 | Native coding execution — `volparossa`, `volparossa-code` | Build on the accepted coding lifecycle and the native backend now integrated into core main. | Actual `38824828727` passes on Code `fd4ff968` / core `7d0f9f0b`: two reads, approved edit/test, independent verification, task-resource and input-integrity checks, and cleanup. Code PR11 keeps that immutable core pin. Core PR277 integrates the native-only composition after Quality and CodeQL pass; this main composition has not had a new model trial. General coding quality, competitive performance, native editor UI and protected-peer execution remain open. Earlier failures retain their original outcomes. |
 | Protected remote compute — `volparossa`, then Code/Browser | Resolve the guest builder/export blocker, construct the sealed runtime and execute two public model turns before joining approved private workloads. | Actual `39078833292` on `fabfa849` verifies all 199 build and 65 runtime packages, then fails in export. Diagnostic source `39081437862` passes on `3a1a1593`; subsequent actual `39082065142` passes contracts but fails public-model execution. The original artifact now identifies an export inventory pathname rejection; the exact pathname and failing rule remain unknown. Model execution, production approval, vendor appraisal and confidential hardware remain open. |
 
+### Organization-wide maintenance — 2026-10-20
+
+The maintenance audit covers all 14 organization repositories and 11 local primary
+repositories. Verified cleanup retired 102 old Cargo profiles, 120 integrated
+worktrees, 207 stale worktree records, 205 local branches and six remote branches.
+Unique work, models, VM/cache state and original acceptance evidence remain
+preserved with recovery manifests; all 11 repositories pass Git integrity checks.
+The [separate maintenance ledger](development/MAINTENANCE_20261020.md) records
+security fixes, dependency updates, exact checks, PR decisions, measured disk
+changes and retention limits. Core PR292 is integrated at `3cac793e` after Quality
+`39465279385` and all four CodeQL analyses pass on the identical source tree. Net
+space recovered is about 340 GiB; runtime acceptance and the full goal remain open.
+
 ### Organization-wide efficiency work — 2026-10-20
 
 The explicit follow-up authorizes optimization alongside the milestones above;

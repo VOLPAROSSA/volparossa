@@ -183,3 +183,20 @@ metadata: principal `gpt-6-astra`/Ultra, `volparossa_implementer`
 `gpt-6.1-sol`/High and `volparossa_support` `gpt-6-luna`/Medium, each child bound
 to that principal. Both custom roles performed real repository/GitHub inspections.
 This verifies this session's delegation, not future account availability.
+
+## Worktree and generated-artifact lifecycle
+
+Create temporary worktrees beneath `.volparossa-dev/worktrees/`, outside Git's
+`.git` administration directory. Do not copy a checkout's `target/` or `.git/`
+into snapshots or backups. Preserve shared pinned build caches and their
+provenance; remove only verified generated build outputs when their exact scope
+is understood.
+
+Before retiring a snapshot, verify it is clean, contains no ignored or untracked
+unique evidence, and is fully integrated. Retire it with `git worktree remove`
+so Git updates its registry; a prunable record alone does not authorize removal.
+Keep failing reports, model/evidence artifacts, and recovery refs with a manifest
+that identifies their source and purpose. Before pruning administration records,
+inspect staged or missing-index state, preserve any recovery material, and confirm
+all expected repositories remain readable. Do not automate deletion of ambiguous
+checkouts or artifacts.

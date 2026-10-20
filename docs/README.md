@@ -96,6 +96,7 @@ or go directly to a topic when you already know what you need.
 - [Operations](development/OPERATIONS.md): configuration, commands, packaging and removal.
 - [Testing](development/TESTING.md): focused checks, disposable topologies and acceptance requirements.
 - [Implementation status](IMPLEMENTATION_STATUS.md): detailed evidence ledger, including failed trials.
+- [2026-10-20 repository maintenance](development/MAINTENANCE_20261020.md): measured cleanup outcomes and retained recovery state.
 - [Execution plan](IMPLEMENTATION_STATUS.md#execution-priorities-and-next-milestones): next milestones, shared dependencies and current blockers.
 - [Applications](applications/APPLICATIONS.md): boundaries and links for the application repositories.
 - [Contributing](../CONTRIBUTING.md): how to propose and verify a useful change.
