@@ -41,7 +41,7 @@ EXACT_FEATURE_EDGES = {
         '9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292'),
     ('num-traits', '0.2.19', REGISTRY): (('libm', '0.2.16', REGISTRY),
         '071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841'),
-    ('generic-array', '0.14.7', REGISTRY): (('zeroize', '1.9.0', REGISTRY),
+    ('generic-array', '0.14.7', REGISTRY): (('zeroize', '1.9.1', REGISTRY),
         '85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a'),
     ('lazy_static', '1.5.0', REGISTRY): (('spin', '0.9.9', REGISTRY),
         'bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe'),
