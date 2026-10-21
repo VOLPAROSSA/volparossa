@@ -337,6 +337,10 @@ OBSERVED_BLOCKER=NOT_REACHED
 . "$source_directory/tests/integration/private-storage-natural-expiry.sh"
 optional_json_evidence() { if [ -f "$1" ]; then cat "$1"; else printf 'null\n'; fi; }
 fail() { OBSERVED_BLOCKER=$1; exit 1; }
+python3() {
+    if [ "$CASE" = diagnostic-failed ] && [ "${3:-}" = initial-route-selection ]; then return 1; fi
+    command python3 "$@"
+}
 trap 'status=$?; trap - EXIT; private_storage_expiry_finalize_report "$status"' EXIT
 '''
         after = r'''
@@ -347,7 +351,7 @@ if [ "$CASE" = cleanup-failed ]; then
     exit 1
 fi
 '''
-        for case in ('success', 'evidence-failed', 'cleanup-failed', 'old-marker'):
+        for case in ('success', 'evidence-failed', 'cleanup-failed', 'old-marker', 'diagnostic-failed'):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
                 work, output = Path(temporary) / 'work', Path(temporary) / 'output'
                 work.mkdir(); output.mkdir()
@@ -358,10 +362,13 @@ fi
                 completion = tail if case != 'old-marker' else tail.replace('    OBSERVED_BLOCKER=NONE\n', '')
                 result = subprocess.run(['sh', '-c', script + completion + after, 'inert-finalizer',
                     str(work), str(output), str(HERE.parents[1]), case], capture_output=True, timeout=10)
-                self.assertEqual(result.returncode, 0 if case == 'success' else 1, result.stderr)
+                self.assertEqual(result.returncode, 0 if case in ('success', 'diagnostic-failed') else 1, result.stderr)
                 report = json.loads((output / f"{C['PREFIX']}-smoke.json").read_text())
                 self.assertTrue(set(p.name for p in output.iterdir()) <= set(C['EXPORT_NAMES']))
-                if case == 'success':
+                if case in ('success', 'diagnostic-failed'):
+                    if case == 'diagnostic-failed':
+                        self.assertEqual(report['initial_route_selection'],
+                            dict(schema_version=1, status='invalid', route=None))
                     C['validate_report'](report, 'a' * 40)
                 else:
                     with self.assertRaises((ValueError, KeyError)):
@@ -390,6 +397,134 @@ fi
             self.assertTrue(all('work-1/' + name in files for name in C['EXPORT_NAMES']))
             self.assertFalse(any(b'PRIVATE-MUST-NOT-EXPORT' in data for data in files.values()))
             self.assertFalse(json.loads(files['vm-incomplete.json'])['success'])
+
+    def test_initial_selection_failure_survives_actual_prepare_and_report_finalization(self):
+        # Real fixture shell control flow with fake CLI/status/clock inputs only.
+        # This reproduces the original failure phase, not a real route or cleanup.
+        script = r'''
+set -eu
+WORK=$1; output_directory=$2; source_directory=$3; mode=$4; kind=$5; capture=$6
+binary_directory=/unused
+WORKER_UID=$(id -u); WORKER_GID=$(id -g); AGENT_GID=999999
+OUTPUT_UID=$WORKER_UID; OUTPUT_GID=$WORKER_GID
+expected_commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+RUN_ID=inert-initial-selection
+CLEANUP_COMPLETE=true; REMAINING_OWNED_OBJECTS=0
+PHASE=initial; OBSERVED_BLOCKER=NOT_REACHED
+private_storage_deposit_sequence=no; private_storage_natural_expiry=no
+if [ "$capture" = yes ]; then
+    if [ "$kind" = fresh ]; then private_storage_deposit_sequence=yes
+    else private_storage_natural_expiry=yes; fi
+fi
+. "$source_directory/tests/integration/benchmark-selection.sh"
+. "$source_directory/tests/integration/private-storage-deposit-sequence-smoke.sh"
+. "$source_directory/tests/integration/private-storage-natural-expiry.sh"
+getent() { printf 'volparossa-users:x:123456:\n'; }
+date() { printf '0\n'; }
+sleep() { :; }
+timeout() {
+    printf 'connect\n' >>"$WORK/calls.private"
+    case $mode in
+        terminal) printf 'Error: agent rejected request: NO_ELIGIBLE_PATHS (Unavailable)\n' >&2; return 1 ;;
+        unknown) printf 'PRIVATE token=secret host=192.0.2.99\n' >&2; return 9 ;;
+        deadline) return 124 ;;
+    esac
+    return 0
+}
+benchmark_capture_paths() { return 3; }
+optional_json_evidence() { if [ -f "$1" ]; then cat "$1"; else printf 'null\n'; fi; }
+fail() { OBSERVED_BLOCKER=$1; exit 1; }
+finish() {
+    status=$?
+    trap - EXIT
+    if [ "$kind" = fresh ]; then private_storage_sequence_finalize_report "$status"
+    else private_storage_expiry_finalize_report "$status"; fi
+}
+trap finish EXIT
+private_storage_sequence_prepare
+exit 99
+'''
+        for kind in ('fresh', 'natural'):
+            for mode, reason, code, path_status in (
+                    ('terminal', 'CONNECT_REJECTED', 'NO_ELIGIBLE_PATHS', None),
+                    ('unknown', 'CONNECT_REJECTED', 'UNRECOGNIZED', None),
+                    ('deadline', 'CONNECT_TIMEOUT', 'UNRECOGNIZED', None),
+                    ('paths', 'PATHS_INVALID_OR_QUERY_FAILED', 'CONNECTED', 3)):
+                for capture in ('yes', 'no'):
+                    with self.subTest(kind=kind, mode=mode, capture=capture), tempfile.TemporaryDirectory() as temporary:
+                        work, output = Path(temporary) / 'work', Path(temporary) / 'output'
+                        (work / 'client-fixtures').mkdir(parents=True); output.mkdir()
+                        (work / 'a15-evidence.json').write_text('{"unchanged":true}')
+                        result = subprocess.run(['sh', '-c', script, 'initial-selection', str(work),
+                            str(output), str(HERE.parents[1]), mode, kind, capture],
+                            capture_output=True, text=True, timeout=10)
+                        self.assertEqual(result.returncode, 1, result.stderr)
+                        prefix = SEQ['PREFIX'] if kind == 'fresh' else C['PREFIX']
+                        encoded = (output / f'{prefix}-smoke.json').read_text()
+                        report = json.loads(encoded)
+                        self.assertFalse(report['success'])
+                        self.assertEqual(report['runner_exit_status'], 1)
+                        self.assertEqual(report['phase'], f"{SEQ['PREFIX']}-prepare")
+                        self.assertEqual(report['observed_blocker'], 'SEQUENCE_ROUTE_UNAVAILABLE')
+                        self.assertIsNone(report['storage'])
+                        self.assertEqual(report['cleanup'], dict(complete=True, remaining_owned_objects=0))
+                        projection = report['initial_route_selection']
+                        SEQ['validate_initial_route_selection'](projection)
+                        self.assertEqual(projection['status'], 'observed' if capture == 'yes' else 'missing')
+                        if capture == 'yes':
+                            route = projection['route']
+                            self.assertEqual(route['reason'], reason)
+                            self.assertEqual(route['last_connect_reason'], code)
+                            self.assertEqual(route['path_status'], path_status)
+                            self.assertEqual(route['attempts'], 1)
+                        self.assertEqual((work / 'calls.private').read_text(), 'connect\n')
+                        self.assertTrue(set(p.name for p in output.iterdir()) <= set(
+                            SEQ['EXPORT_NAMES'] if kind == 'fresh' else C['EXPORT_NAMES']))
+                        for forbidden in ('PRIVATE', 'secret', '192.0.2.99', str(work)):
+                            self.assertNotIn(forbidden, encoded)
+
+    def test_diagnostic_dispatch_remains_exact_source_and_branch_bound(self):
+        import contextlib
+        import io
+        import textwrap
+        workflow = (HERE.parents[1] / '.github/workflows/alpha-topology.yml').read_text()
+        start = workflow.index('      - name: Bind natural-expiry sequence candidate')
+        block = workflow[start:workflow.index('\n      - name:', start + 1)]
+        self.assertIn('refs/heads/test/storage-natural-expiry-sequence|refs/heads/diagnostic/storage-route-selection-20261021', block)
+        self.assertNotIn('refs/heads/diagnostic/*', block)
+        code = textwrap.dedent(block.split("python3 -B - <<'PY'\n", 1)[1].split('\n          PY', 1)[0])
+        diagnostic = {'.github/workflows/alpha-topology.yml',
+            'tests/integration/benchmark-selection.sh', 'tests/integration/test-benchmark-selection.py',
+            'tests/integration/private-storage-deposit-sequence-smoke.py',
+            'tests/integration/private-storage-deposit-sequence-smoke.sh',
+            'tests/integration/test-private-storage-deposit-sequence.py',
+            'tests/integration/private-storage-natural-expiry.py',
+            'tests/integration/private-storage-natural-expiry.sh',
+            'tests/integration/test-private-storage-natural-expiry.py'}
+        original = {'.github/workflows/alpha-topology.yml', 'tests/integration/kvm-alpha-topology.sh',
+            'tests/integration/run-alpha-topology-vm.sh', 'tests/integration/private-storage-deposit-sequence-smoke.py',
+            'tests/integration/private-storage-deposit-sequence-smoke.sh',
+            'tests/integration/storage-consumer-control-underlay.sh', 'tests/integration/private-storage-natural-expiry.py',
+            'tests/integration/private-storage-natural-expiry.sh', 'tests/integration/test-private-storage-natural-expiry.py'}
+        for branch, allowed, base in (
+                ('diagnostic/storage-route-selection-20261021', diagnostic, 'b2b9c6b3483ba13ad02ee1c1b3b23e1eaf0b8fc9'),
+                ('test/storage-natural-expiry-sequence', original, 'd19f0246bf1ee8610e7cbc9bd52bdb973aedd289')):
+            for added in (None, 'crates/volparossa-agent/src/route_setup.rs'):
+                changed = sorted(allowed | ({added} if added else set()))
+                with (self.subTest(branch=branch, added=added), mock.patch.dict(os.environ,
+                        GITHUB_REF=f'refs/heads/{branch}'), mock.patch('subprocess.check_output',
+                        return_value='\n'.join(changed)) as output, mock.patch('subprocess.run') as run,
+                        contextlib.redirect_stdout(io.StringIO())):
+                    if added:
+                        with self.assertRaises(AssertionError):
+                            exec(compile(code, 'inert-source-gate', 'exec'), {})
+                    else:
+                        exec(compile(code, 'inert-source-gate', 'exec'), {})
+                    output.assert_called_once_with(['git', 'diff', '--name-only', base, 'HEAD'], text=True)
+                    if branch.startswith('diagnostic/'):
+                        run.assert_called_once_with(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], check=True)
+                    else:
+                        run.assert_not_called()
 
     def test_optional_dispatch_and_previews_preserve_fresh_and_other_storage(self):
         source = (HERE / 'kvm-alpha-topology.sh').read_text()

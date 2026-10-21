@@ -33,7 +33,13 @@ private_storage_sequence_prepare() {
     install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$storage_user"
     # One route selection only. Every CLI operation uses the production agent's
     # reusable route and helper-owned per-flow transport/retirement machinery.
-    benchmark_select_route private-storage-deposit-sequence mptcp || fail SEQUENCE_ROUTE_UNAVAILABLE
+    sequence_selection_status=0
+    benchmark_select_route private-storage-deposit-sequence mptcp || sequence_selection_status=$?
+    # Freeze only this first selector's outcome before fail invokes finalization.
+    # Projection failure remains metadata, never changes selection or its result.
+    python3 -B "$source_directory/tests/integration/private-storage-deposit-sequence-smoke.py" \
+        capture-initial-route-selection "$WORK" >/dev/null 2>&1 || true
+    [ "$sequence_selection_status" -eq 0 ] || fail SEQUENCE_ROUTE_UNAVAILABLE
     if [ "${private_storage_natural_expiry:-no}" = yes ]; then
         expiry_start=$(python3 -B "$WORK/bin/private-storage-natural-expiry.py" clock) || fail EXPIRY_CLOCK_FAILED
     fi
@@ -140,12 +146,16 @@ private_storage_sequence_finalize_report() {
     storage_status=$1
     optional_json_evidence "$WORK/private-storage-deposit-sequence-evidence.json" >"$WORK/sequence-evidence.part"
     optional_json_evidence "$WORK/a15-evidence.json" >"$WORK/sequence-host.part"
+    python3 -B "$source_directory/tests/integration/private-storage-deposit-sequence-smoke.py" \
+        initial-route-selection "$WORK" >"$WORK/sequence-initial-route.part" 2>/dev/null \
+        || printf '%s\n' '{"schema_version":1,"status":"invalid","route":null}' >"$WORK/sequence-initial-route.part"
     jq -cn --arg revision "$expected_commit" --arg run "$RUN_ID" --arg phase "$PHASE" --arg blocker "$OBSERVED_BLOCKER" \
         --argjson status "$storage_status" --slurpfile evidence "$WORK/sequence-evidence.part" \
         --slurpfile host "$WORK/sequence-host.part" --argjson complete "$CLEANUP_COMPLETE" \
-        --argjson remaining "$REMAINING_OWNED_OBJECTS" '
+        --argjson remaining "$REMAINING_OWNED_OBJECTS" \
+        --slurpfile initial_route "$WORK/sequence-initial-route.part" '
       {schema_version:1,report_kind:"volparossa-private-storage-deposit-sequence",source_revision:$revision,run_id:$run,
-       phase:$phase,runner_exit_status:$status,storage:$evidence[0],
+       phase:$phase,runner_exit_status:$status,storage:$evidence[0],initial_route_selection:$initial_route[0],
        success:($status == 0 and $evidence[0].success == true and $complete and $remaining == 0 and $host[0].unchanged == true),
        observed_blocker:(if $blocker == "NONE" then null else $blocker end),
        cleanup:{complete:$complete,remaining_owned_objects:$remaining},host_state:($host[0] | del(.acceptance_id)),

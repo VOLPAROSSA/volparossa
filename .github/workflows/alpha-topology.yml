@@ -156,13 +156,16 @@ jobs:
           test "$GITHUB_ACTIONS" = true
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
-          test "$GITHUB_REF" = refs/heads/test/storage-natural-expiry-sequence
+          case "$GITHUB_REF" in
+            refs/heads/test/storage-natural-expiry-sequence|refs/heads/diagnostic/storage-route-selection-20261021) ;;
+            *) exit 1 ;;
+          esac
           test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --porcelain --untracked-files=all)"
           git merge-base --is-ancestor d19f0246bf1ee8610e7cbc9bd52bdb973aedd289 HEAD
           python3 -B - <<'PY'
-          import subprocess
+          import os, subprocess
           base = 'd19f0246bf1ee8610e7cbc9bd52bdb973aedd289'
           allowed = {
               '.github/workflows/alpha-topology.yml',
@@ -175,13 +178,29 @@ jobs:
               'tests/integration/private-storage-natural-expiry.sh',
               'tests/integration/test-private-storage-natural-expiry.py',
           }
+          if os.environ['GITHUB_REF'] == 'refs/heads/diagnostic/storage-route-selection-20261021':
+              base = 'b2b9c6b3483ba13ad02ee1c1b3b23e1eaf0b8fc9'
+              subprocess.run(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], check=True)
+              allowed = {
+                  '.github/workflows/alpha-topology.yml',
+                  'tests/integration/benchmark-selection.sh',
+                  'tests/integration/test-benchmark-selection.py',
+                  'tests/integration/private-storage-deposit-sequence-smoke.py',
+                  'tests/integration/private-storage-deposit-sequence-smoke.sh',
+                  'tests/integration/test-private-storage-deposit-sequence.py',
+                  'tests/integration/private-storage-natural-expiry.py',
+                  'tests/integration/private-storage-natural-expiry.sh',
+                  'tests/integration/test-private-storage-natural-expiry.py',
+              }
           changed = subprocess.check_output(['git', 'diff', '--name-only', base, 'HEAD'], text=True).splitlines()
           assert len(changed) == len(allowed) and set(changed) == allowed
           print('Exact nine-file test-only candidate; production source, lifetimes and dependency/application pins unchanged.')
           PY
+          sh -n tests/integration/benchmark-selection.sh
           sh -n tests/integration/private-storage-natural-expiry.sh
           sh -n tests/integration/private-storage-deposit-sequence-smoke.sh
           sh -n tests/integration/storage-consumer-control-underlay.sh
+          python3 -B tests/integration/test-benchmark-selection.py
           python3 -B tests/integration/test-private-storage-deposit-sequence.py
           python3 -B tests/integration/test-private-storage-natural-expiry.py
 

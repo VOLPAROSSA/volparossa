@@ -471,7 +471,71 @@ def evidence(work):
     return value
 
 
+INITIAL_ROUTE_SELECTION = f"{PREFIX}-initial-route-selection.private"
+ROUTE_DIAGNOSTIC_LIMIT = 4096
+
+
+def validate_initial_route_selection(value):
+    require(type(value) is dict and set(value) == {'schema_version', 'status', 'route'}
+        and type(value['schema_version']) is int and value['schema_version'] == 1
+        and value['status'] in ('observed', 'missing', 'invalid'), 'initial route diagnostic shape')
+    if value['status'] == 'observed':
+        # Reuse the existing closed selection schema and fixed Connect-code allowlist.
+        # This is a root-side projection, never imported by the unprivileged driver.
+        maintenance = runpy.run_path(str(HERE / 'private-storage-maintenance-smoke.py'))
+        maintenance['validate_selection_route'](value['route'])
+    else:
+        require(value['route'] is None, 'initial route diagnostic absent data')
+
+
+def bounded_route_json(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, 'rb') as stream:
+        metadata = os.fstat(stream.fileno())
+        require(stat.S_ISREG(metadata.st_mode) and metadata.st_size <= ROUTE_DIAGNOSTIC_LIMIT,
+            'initial route diagnostic bound')
+        raw = stream.read(ROUTE_DIAGNOSTIC_LIMIT + 1)
+    require(len(raw) <= ROUTE_DIAGNOSTIC_LIMIT, 'initial route diagnostic bound')
+    return json.loads(raw)
+
+
+def initial_route_selection(work, *, capture=False):
+    """Freeze the first selector outcome; never export raw diagnostics or replace it later."""
+    work = Path(work)
+    target = work / INITIAL_ROUTE_SELECTION
+    absent = dict(schema_version=1, status='missing', route=None)
+    if not capture:
+        try:
+            value = bounded_route_json(target)
+            validate_initial_route_selection(value)
+            return value
+        except FileNotFoundError:
+            return absent
+        except (OSError, ValueError, TypeError, KeyError, RecursionError):
+            return dict(schema_version=1, status='invalid', route=None)
+    try:
+        route = bounded_route_json(work / f'{PREFIX}-route-diagnostic.json')
+        value = dict(schema_version=1, status='observed', route=route)
+        validate_initial_route_selection(value)
+    except FileNotFoundError:
+        value = absent
+    except (OSError, ValueError, TypeError, KeyError, RecursionError):
+        value = dict(schema_version=1, status='invalid', route=None)
+    try:
+        # Exclusive creation binds this to the first selection attempt only. A later
+        # benchmark helper invocation cannot replace that observation with its result.
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, 'w') as stream:
+            json.dump(value, stream, separators=(',', ':'))
+            stream.write('\n')
+    except OSError:
+        pass
+    return initial_route_selection(work)
+
+
 def validate_report(value, revision):
+    if 'initial_route_selection' in value:
+        validate_initial_route_selection(value['initial_route_selection'])
     require(re.fullmatch(r"[0-9a-f]{40}", revision) and value["source_revision"] == revision
             and value["schema_version"] == 1 and value["report_kind"] == f"volparossa-{PREFIX}"
             and value["success"] is True and value["runner_exit_status"] == 0
@@ -484,6 +548,10 @@ def validate_report(value, revision):
 def main(args):
     if args == ["export-names"]:
         print("\n".join(EXPORT_NAMES)); return 0
+    if len(args) == 2 and args[0] in ('initial-route-selection', 'capture-initial-route-selection'):
+        print(json.dumps(initial_route_selection(args[1], capture=args[0].startswith('capture-')),
+            separators=(',', ':')))
+        return 0
     if args[0] == "prepare" and len(args) == 10:
         result = prepare(private_root(args[1]), args[2], args[3], args[4:7], args[7:10])
     elif args[0] == "run" and len(args) == 7:

@@ -415,5 +415,96 @@ private_storage_fragments_run() { printf '%s\n' fragments; }
         self.assertIn("env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-deposit-sequence'", workflow)
 
 
+def selection_diagnostic():
+    return dict(schema_version=1, stage='connect', reason='CONNECT_REJECTED',
+        last_connect_reason='NO_ELIGIBLE_PATHS', connect_exit_status=1,
+        attempts=1, retries=0, redraws=0, path_polls=0, path_status=None)
+
+
+class InitialRouteSelection(unittest.TestCase):
+    def test_first_selection_projection_is_frozen_before_later_outcomes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            source = work / f"{CHECK['PREFIX']}-route-diagnostic.json"
+            initial = selection_diagnostic()
+            source.write_text(json.dumps(initial))
+            observed = CHECK['initial_route_selection'](work, capture=True)
+            self.assertEqual(observed, dict(schema_version=1, status='observed', route=initial))
+            frozen = work / CHECK['INITIAL_ROUTE_SELECTION']
+            self.assertEqual(frozen.stat().st_mode & 0o777, 0o600)
+            source.write_text(json.dumps(dict(initial, stage='complete', reason='SELECTED',
+                last_connect_reason='CONNECTED', connect_exit_status=0, path_status=0)))
+            self.assertEqual(CHECK['initial_route_selection'](work, capture=True), observed)
+            self.assertEqual(CHECK['initial_route_selection'](work), observed)
+            self.assertNotIn(frozen.name, CHECK['EXPORT_NAMES'])
+
+    def test_absent_first_observation_cannot_be_replaced_by_later_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            missing = CHECK['initial_route_selection'](work, capture=True)
+            self.assertEqual(missing, dict(schema_version=1, status='missing', route=None))
+            (work / f"{CHECK['PREFIX']}-route-diagnostic.json").write_text(json.dumps(selection_diagnostic()))
+            self.assertEqual(CHECK['initial_route_selection'](work, capture=True), missing)
+
+    def test_missing_invalid_and_oversized_private_input_never_exports_untyped_data(self):
+        bad_inputs = [b'PRIVATE URL=https://private.example token=secret',
+            json.dumps(dict(selection_diagnostic(), private='secret')).encode(),
+            json.dumps(dict(selection_diagnostic(), reason='PRIVATE secret')).encode(),
+            json.dumps(dict(selection_diagnostic(), attempts=True)).encode(),
+            json.dumps(dict(selection_diagnostic(), path_status=256)).encode(),
+            json.dumps(dict(selection_diagnostic(), retries=1)).encode(),
+            b' ' * (CHECK['ROUTE_DIAGNOSTIC_LIMIT'] + 1), b'[' * 2000 + b']' * 2000]
+        for raw in bad_inputs:
+            with self.subTest(size=len(raw)), tempfile.TemporaryDirectory() as directory:
+                work = Path(directory)
+                (work / f"{CHECK['PREFIX']}-route-diagnostic.json").write_bytes(raw)
+                projection = CHECK['initial_route_selection'](work, capture=True)
+                self.assertEqual(projection, dict(schema_version=1, status='invalid', route=None))
+                encoded = json.dumps(projection)
+                self.assertNotIn('secret', encoded)
+                self.assertNotIn('PRIVATE', encoded)
+                self.assertNotIn('private.example', encoded)
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(CHECK['initial_route_selection'](directory),
+                dict(schema_version=1, status='missing', route=None))
+
+    def test_symlink_or_nonregular_diagnostics_are_not_followed_or_read(self):
+        for kind in ('symlink', 'directory', 'fifo'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                work = Path(directory)
+                source = work / f"{CHECK['PREFIX']}-route-diagnostic.json"
+                if kind == 'symlink':
+                    private = work / 'private-file'
+                    private.write_text('PRIVATE-MUST-NOT-EXPORT')
+                    source.symlink_to(private)
+                elif kind == 'directory':
+                    source.mkdir()
+                else:
+                    os.mkfifo(source)
+                self.assertEqual(CHECK['initial_route_selection'](work, capture=True),
+                    dict(schema_version=1, status='invalid', route=None))
+
+    def test_metadata_status_is_closed_and_does_not_replace_report_acceptance(self):
+        valid = dict(schema_version=1, status='observed', route=selection_diagnostic())
+        CHECK['validate_initial_route_selection'](valid)
+        for bad in (dict(valid, extra='PRIVATE'), dict(valid, status='guessed'),
+                dict(valid, schema_version=True), dict(valid, status='missing')):
+            with self.assertRaises(ValueError):
+                CHECK['validate_initial_route_selection'](bad)
+        for status in ('observed', 'missing', 'invalid'):
+            value = dict(schema_version=1, status=status,
+                route=selection_diagnostic() if status == 'observed' else None)
+            CHECK['validate_initial_route_selection'](value)
+            # Valid diagnostic metadata cannot make a failed storage report acceptable.
+            report = dict(source_revision='a' * 40, schema_version=1,
+                report_kind=f"volparossa-{CHECK['PREFIX']}", success=False,
+                runner_exit_status=1, phase=f"{CHECK['PREFIX']}-prepare",
+                observed_blocker='SEQUENCE_ROUTE_UNAVAILABLE', storage=None,
+                cleanup=dict(complete=True, remaining_owned_objects=0),
+                host_state=dict(unchanged=True), initial_route_selection=value)
+            with self.assertRaises(ValueError):
+                CHECK['validate_report'](report, 'a' * 40)
+
+
 if __name__ == "__main__":
     unittest.main()

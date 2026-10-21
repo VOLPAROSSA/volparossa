@@ -109,6 +109,11 @@ benchmark_route_diagnostic_prefix() {
         benchmark_diagnostic_prefix=cloud-private-file
     elif [ "${image_snapshot:-no}" = yes ]; then
         benchmark_diagnostic_prefix=image-snapshot
+    elif [ "${private_storage_deposit_sequence:-no}" = yes ] \
+        || [ "${private_storage_natural_expiry:-no}" = yes ]; then
+        # Private intermediate; the sequence freezes its first selection outcome
+        # and exports only a validated projection inside its existing report.
+        benchmark_diagnostic_prefix=private-storage-deposit-sequence
     elif [ "${private_storage_maintenance:-no}" = yes ]; then
         # Internal closed intermediate; only the validated combined projection
         # is exported by the maintenance finalizer, never these private markers.
@@ -124,6 +129,11 @@ benchmark_route_diagnostic_prefix() {
 
 benchmark_image_route_diagnostic() {
     benchmark_route_diagnostic_prefix || return 0
+    if [ "$benchmark_diagnostic_prefix" = private-storage-deposit-sequence ] && [ "$1" = initialize ]; then
+        # Do not let a failed diagnostic writer reuse a previous selection result.
+        (umask 077
+         : >"$WORK/private-storage-deposit-sequence-route-diagnostic.json") || true
+    fi
     if [ "$benchmark_diagnostic_prefix" = private-storage-maintenance-selection ]; then
         if [ "$1" = initialize ]; then
             (umask 077

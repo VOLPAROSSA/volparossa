@@ -458,6 +458,8 @@ def validate_evidence(value):
 
 
 def validate_report(value, revision):
+    if 'initial_route_selection' in value:
+        SEQ['validate_initial_route_selection'](value['initial_route_selection'])
     require(re.fullmatch('[0-9a-f]{40}', revision) and value['source_revision'] == revision
         and value['schema_version'] == 1 and value['report_kind'] == f'volparossa-{PREFIX}'
         and value['success'] is True and value['runner_exit_status'] == 0

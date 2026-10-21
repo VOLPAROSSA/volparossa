@@ -275,6 +275,8 @@ case $4 in
     agent-cooperative-browser) agent_cooperative_browser=yes ;;
     agent-cooperative-code) agent_cooperative_code=yes ;;
     private-storage-maintenance) private_storage_maintenance=yes ;;
+    private-storage-deposit-sequence) private_storage_deposit_sequence=yes ;;
+    private-storage-natural-expiry) private_storage_natural_expiry=yes ;;
     no) : ;;
     *) exit 98 ;;
 esac
@@ -317,7 +319,8 @@ printf '%s\n' "$result"
         fields = {"schema_version", "stage", "reason", "last_connect_reason", "connect_exit_status",
                   "attempts", "retries", "redraws", "path_polls", "path_status"}
         scenarios = ("image-snapshot", "cloud-private-file", "cloud-private-upload", "agent-cooperative-browser",
-                     "agent-cooperative-code", "private-storage-maintenance")
+                     "agent-cooperative-code", "private-storage-maintenance",
+                     "private-storage-deposit-sequence", "private-storage-natural-expiry")
         for scenario, case in ((scenario, case) for scenario in scenarios for case in cases):
             mode, status, stage, reason, connect_exit, attempts = case
             with self.subTest(scenario=scenario, mode=mode), tempfile.TemporaryDirectory(
@@ -326,7 +329,8 @@ printf '%s\n' "$result"
                 outcome = subprocess.run([*command, scenario], check=True, text=True,
                     capture_output=True, timeout=10, env={"PATH": "/usr/bin:/bin"})
                 self.assertEqual(int(outcome.stdout), status)
-                prefix = scenario + ('-selection' if scenario == 'private-storage-maintenance' else '')
+                prefix = ('private-storage-deposit-sequence' if scenario == 'private-storage-natural-expiry'
+                    else scenario + ('-selection' if scenario == 'private-storage-maintenance' else ''))
                 path = Path(directory, f"{prefix}-route-diagnostic.json")
                 encoded = path.read_text()
                 record = json.loads(encoded)
@@ -349,6 +353,22 @@ printf '%s\n' "$result"
                     capture_output=True, timeout=10, env={"PATH": "/usr/bin:/bin"})
                 self.assertEqual(int(ordinary.stdout), status)
                 self.assertFalse(path.exists())
+
+    def test_sequence_initialization_clears_stale_metadata_even_if_writer_fails(self):
+        script = r'''
+set -eu
+. "$1/benchmark-selection.sh"
+WORK=$2; private_storage_deposit_sequence=yes
+benchmark_connect_count=0; benchmark_connect_reason=NOT_STARTED
+benchmark_connect_exit=null; benchmark_draw=0; benchmark_poll=0; benchmark_snapshot_status=null
+printf '{"previous_selection":"PRIVATE"}\n' >"$WORK/private-storage-deposit-sequence-route-diagnostic.json"
+jq() { return 1; }
+benchmark_image_route_diagnostic initialize STARTED
+[ ! -s "$WORK/private-storage-deposit-sequence-route-diagnostic.json" ]
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run(['sh', '-c', script, 'inert-route-init', str(HERE), directory],
+                check=True, capture_output=True, timeout=5, env={'PATH': '/usr/bin:/bin'})
 
     def test_maintenance_window_resets_at_reconnect_without_an_extra_connect(self):
         script = r'''

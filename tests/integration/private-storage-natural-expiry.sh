@@ -202,11 +202,15 @@ private_storage_expiry_finalize_report() {
     expiry_status=$1
     optional_json_evidence "$WORK/private-storage-natural-expiry-evidence.json" >"$WORK/expiry-evidence.part"
     optional_json_evidence "$WORK/a15-evidence.json" >"$WORK/expiry-host.part"
+    python3 -B "$source_directory/tests/integration/private-storage-deposit-sequence-smoke.py" \
+        initial-route-selection "$WORK" >"$WORK/expiry-initial-route.part" 2>/dev/null \
+        || printf '%s\n' '{"schema_version":1,"status":"invalid","route":null}' >"$WORK/expiry-initial-route.part"
     jq -cn --arg revision "$expected_commit" --arg run "$RUN_ID" --arg phase "$PHASE" --arg blocker "$OBSERVED_BLOCKER" \
         --argjson status "$expiry_status" --slurpfile evidence "$WORK/expiry-evidence.part" --slurpfile host "$WORK/expiry-host.part" \
-        --argjson complete "$CLEANUP_COMPLETE" --argjson remaining "$REMAINING_OWNED_OBJECTS" '
+        --argjson complete "$CLEANUP_COMPLETE" --argjson remaining "$REMAINING_OWNED_OBJECTS" \
+        --slurpfile initial_route "$WORK/expiry-initial-route.part" '
       {schema_version:1,report_kind:"volparossa-private-storage-natural-expiry",source_revision:$revision,run_id:$run,
-       phase:$phase,runner_exit_status:$status,storage:$evidence[0],
+       phase:$phase,runner_exit_status:$status,storage:$evidence[0],initial_route_selection:$initial_route[0],
        success:($status == 0 and $evidence[0].success == true and $complete and $remaining == 0 and $host[0].unchanged == true),
        observed_blocker:(if $blocker == "NONE" then null else $blocker end),
        cleanup:{complete:$complete,remaining_owned_objects:$remaining},host_state:($host[0] | del(.acceptance_id)),
