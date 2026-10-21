@@ -25,8 +25,8 @@ only after checking the prerequisites of the relevant task.
 - Before removing or recovering a node, read [crash and cleanup](#crash-and-cleanup)
   and [uninstall and data removal](#uninstall-and-data-removal).
 
-Each command group states what it changes and what its evidence does **not** prove.
-Source-bound runs remain attached to the behavior they exercised; they are not
+Each command group states what it changes and what its evidence does **not** prove.  
+Source-bound runs remain attached to the behavior they exercised; they are not  
 blanket approval to enable every feature on a real host.
 
 ## Read-only prerequisites
@@ -37,30 +37,46 @@ Run the checker as an ordinary user:
 ./scripts/check-system.sh
 ```
 
-It reads OS, architecture, kernel feature/configuration, command/library availability, time status,
-and potentially conflicting VOLPAROSSA-reserved route/rule ranges. It does not load modules, write
-sysctls, create sockets/interfaces/namespaces, query external hosts, or alter networking.
+It reads OS, architecture, kernel feature/configuration, command/library availability, time status, and potentially conflicting VOLPAROSSA-reserved route/rule ranges. It does not load modules, write sysctls, create sockets/interfaces/namespaces, query external hosts, or alter networking.
+
+The checker prints one result for each inspected prerequisite:
+
+- `PASS` means the inspected condition was satisfied.
+- `WARN` means a non-fatal condition needs attention. This can indicate that an optional diagnostic tool or supporting evidence is unavailable.
+- `FAIL` means a required condition was not satisfied.
+
+The final summary reports the number of failures and warnings. A completed check exits with status `0` when there are no failures, even if warnings remain; it exits with status `1` when one or more failures occur. Invalid command-line usage is handled separately and exits with status `2`.
+
+For example, the following is illustrative output, not a transcript of an actual run:
+
+```text
+PASS operating system is Debian 13
+WARN diagnostic/native command missing: jq
+FAIL command missing: protoc
+
+Summary: 1 failure(s), 1 warning(s). No changes made.
+```
+
+A `PASS` only confirms the specific condition inspected. It does not prove that the project builds successfully, that real multipath traffic works, or that a deployment is supported. Review warnings and failures in context before proceeding.
+
+For development dependencies, see [Prepare development dependencies](#prepare-development-dependencies). The prerequisite checker is read-only; do not treat its results as permission to install packages or change host configuration.
 
 ## Prepare development dependencies
 
-This is the first step here that can install packages; it is not part of the
-read-only checker. For development, first preview exact Debian package candidates,
-then opt in:
+This is the first step here that can install packages; it is not part of the read-only checker. For development, first preview exact Debian package candidates, then opt in:
 
 ```sh
 ./scripts/bootstrap-debian13-dev.sh --print-only
 ./scripts/bootstrap-debian13-dev.sh
 ```
 
-The script does not run `apt update` or install optional mptcpd by default. It uses only Debian apt
-packages and asks before `apt-get install`. Review the complete command shown.
+The script does not run `apt update` or install optional mptcpd by default. It uses only Debian apt packages and asks before `apt-get install`. Review the complete command shown.
 
 ## Build and package
 
 ### Build and verify a candidate
 
-The following block combines a build, verification gates and an explicit package
-build. These write build outputs; they do not install or enable the services.
+The following block combines a build, verification gates and an explicit package build. These write build outputs; they do not install or enable the services.
 
 ```sh
 cargo build --locked --workspace --all-features
@@ -72,30 +88,17 @@ cargo test --workspace --all-features
 ./packaging/build-deb.sh --build
 ```
 
-The dependency gate is offline and requires `cargo-deny >= 0.18.6`,
-`cargo-audit >= 0.22.1`, and an existing local RustSec advisory checkout. It
-reconstructs and verifies the two
-Debian-Rust-compatible source backports plus the reviewed single-backend Yamux
-override before applying the documented scanner exemptions; see
-`third_party/rust/README.md`.
+The dependency gate is offline and requires `cargo-deny >= 0.18.6`, `cargo-audit >= 0.22.1`, and an existing local RustSec advisory checkout. It reconstructs and verifies the two Debian-Rust-compatible source backports plus the reviewed single-backend Yamux override before applying the documented scanner exemptions; see `third_party/rust/README.md`.
 
 ### Package outputs and reproducibility limits
 
-`just package-deb` and `./packaging/build-deb.sh` are non-writing previews. Building requires the
-explicit `./packaging/build-deb.sh --build` form and refuses to run as root or overwrite an existing
-candidate. A combined client/exit node runs two immutable-role native workers under one service;
-its Client socket is `VOLPAROSSA_MPQUIC_SOCKET`, and its Exit socket appends `.exit` to that path.
+`just package-deb` and `./packaging/build-deb.sh` are non-writing previews. Building requires the explicit `./packaging/build-deb.sh --build` form and refuses to run as root or overwrite an existing candidate. A combined client/exit node runs two immutable-role native workers under one service; its Client socket is `VOLPAROSSA_MPQUIC_SOCKET`, and its Exit socket appends `.exit` to that path.
 
-The candidate package build uses `Cargo.lock`, a caller-supplied or repository source timestamp,
-root-owned archive metadata, deterministic file ordering from `dpkg-deb`, and a clean temporary
-staging directory. It must fail if any required runtime binary is absent. Reproducibility is proven
-only by comparing two clean Debian 13 builds, not by these flags alone.
+The candidate package build uses `Cargo.lock`, a caller-supplied or repository source timestamp, root-owned archive metadata, deterministic file ordering from `dpkg-deb`, and a clean temporary staging directory. It must fail if any required runtime binary is absent. Reproducibility is proven only by comparing two clean Debian 13 builds, not by these flags alone.
 
 ### Inspect, then explicitly install
 
-The first two commands inspect the package. The final `sudo apt install` command
-installs it and creates the accounts/directories described below. Review the
-inspection results before choosing to run that last command:
+The first two commands inspect the package. The final `sudo apt install` command installs it and creates the accounts/directories described below. Review the inspection results before choosing to run that last command:
 
 ```sh
 dpkg-deb --info dist/volparossa_0.1.0_amd64.deb
