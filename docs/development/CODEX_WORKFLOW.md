@@ -49,6 +49,7 @@ or permission expansion.
 | Role | Model and initial effort | Responsibility |
 | --- | --- | --- |
 | Principal | `gpt-6-astra`, Ultra | Architecture, consequential decisions, prioritization, coordination and integration. |
+| `volparossa_implementer_medium` | `gpt-6.1-sol`, Medium | Bounded implementation within established, approved contracts; escalate ambiguity. |
 | `volparossa_implementer` | `gpt-6.1-sol`, High | Substantial implementation, integration and complex debugging. |
 | `volparossa_reviewer` | `gpt-6.1-sol`, High | Independent technical review of correctness, privacy and acceptance evidence. |
 | `volparossa_support` | `gpt-6-luna`, Medium | Bounded exploration, documentation and assigned focused checks. |
@@ -66,6 +67,80 @@ Subagents do not recursively delegate or publish/dispatch work unless assigned;
 the principal coordinates integration, branch protections and final claims.
 Review by an agent is not a release signature or authority to weaken privacy.
 
+### Task classification and escalation (approved Option A, 2026-10-22)
+
+Classify the assignment in a sentence; trivial edits need no separate document:
+
+- **Supporting:** Luna Medium handles bounded exploration, documentation and
+  focused checks.
+- **Implementation within established contracts:** Sol Medium may implement an
+  explicitly scoped task whose interfaces, invariants and trust assumptions are
+  already approved. Name those contracts and the acceptance criteria.
+- **Consequential or ambiguous engineering:** Astra Ultra decides the architecture;
+  Sol High handles suitable complex implementation, debugging and independent
+  review. Medium must stop the affected change and escalate if a contract or trust
+  assumption needs changing, compatibility is unclear, or passing requires relaxing
+  an invariant. Unrelated safe work may continue.
+
+Consequential triggers include networking protocols and shared wire contracts;
+cryptography and identity; security and authorization boundaries; distributed
+Storage and redundancy; confidential Compute and shared AI; Transaction and
+financial authorization; update authority; DPS positioning integrity; and Studio
+publication security and decentralized hosting. Record the principal decision,
+compatibility impact, independent review and relevant regression/runtime evidence.
+Independent review must come from a suitably capable agent other than the author;
+the principal resolves findings and retains integration responsibility. A service
+limit is a visible blocker, not permission to substitute author self-review.
+
+Option A changes engineering allocation only. The complete goal, all preserved
+payloads, DPS, Studio/hosting and existing security/host/authority rules remain in
+force. Astra remains principal; existing High and support roles stay available,
+and the two-child limit is unchanged. Do not change a live goal or reload the
+active build to introduce the new role. A client that has not discovered it may
+continue using High until an appropriate fresh session.
+
+### Context, diagnostics and evidence efficiency
+
+Inspect relevant files and current ledger sections before widening a search. Give
+one owner the initial exploration and reuse its exact-source findings; the
+principal assesses decisions and integration evidence without routinely repeating
+the worker's implementation. Independent reviewers still inspect the affected
+contracts, diff and evidence themselves.
+
+An assignment contains: objective, classification, exact source/dependencies,
+owned paths/worktree, approved contracts/invariants, permitted checks and acceptance
+criteria. A result contains: changed paths/behavior, source and original run/log
+locations, pass/fail with acceptance limits, review findings and unresolved risks.
+Return relevant error excerpts and summaries instead of large raw logs. Keep full
+diagnostic and cleanup evidence accessible with its source/run binding; do not
+discard or conceal errors to reduce context.
+
+Before rerunning CI, inspect completed or ongoing runs for that source and scope.
+Reuse trustworthy results only for identical sources and acceptance scopes, or
+document relevant tree/blob equivalence and why changed files cannot affect the
+claim. Changed dependencies, environments, configuration or acceptance conditions
+need new evidence. Reuse is evidence referencing, not caching a successful outcome.
+After an environmental failure, record its signature, source, failed precondition
+and next discriminating check. Retry only when an input/precondition changes or a
+bounded diagnostic can distinguish causes. Changing models alone does not fix an
+unchanged environment. Preserve all failed trials and required cleanup checks.
+
+For a controlled Medium pilot, select two or three genuine current-plan tasks
+with fixed contracts, clear acceptance and independent High review; begin with
+one small task. Check current worker ownership, PRs and external contributor
+issues first. Isolate worktrees and do not duplicate active work. If coordination
+cannot establish an independent scope, prepare the next-milestone handoff and
+defer execution. A routing marker is not an implementation pilot.
+
+For each completed pilot task, record actual thread model/effort, input and cached
+input (a subset), output, principal/reviewer involvement, verification, review
+findings/corrections, integration failures/rework and functional acceptance. Count
+principal, workers, review and repairs together. Use cumulative usage deltas without
+repeated snapshots; identify resets, inherited counters and model switches. Compare
+cautiously with representative High work; neither elapsed time nor routing success
+proves savings or equivalent quality. Revert task allocation to High if meaningful
+quality degradation appears; preserve the failing evidence.
+
 Before allocating or changing shared wire fields, inspect both main and retained
 active integration heads. A field absent from main may already belong to an
 unfinished service. Preserve existing assignments, record the selected unused
@@ -77,8 +152,10 @@ an older field or add aliases that collide with another service.
 On 2026-10-20 the VSCodium extension `26.5908.31748` used bundled
 `codex-cli 0.163.0`. There was no standalone `codex` on PATH; use the extension's
 bundled binary for diagnostics rather than installing another CLI.
-The user authorized only the relevant `~/.codex/config.toml` changes and new
+The user then authorized only the relevant `~/.codex/config.toml` changes and new
 specialist files under `~/.codex/agents/`, with a configuration backup.
+The following is the historical 2026-10-20 configuration, not a promise about the
+current saved default or an existing conversation's selected model.
 
 ```toml
 model = "gpt-6-astra"
@@ -124,6 +201,62 @@ was enabled. Missing `rg` remains a tooling limitation; use `git grep`/`grep`.
 Configuration semantics and custom-agent fields are documented in the official
 [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
 and [subagent guide](https://learn.chatgpt.com/docs/agent-configuration/subagents).
+
+### Option A installation and bounded verification — 2026-10-22
+
+The approved addition is `~/.codex/agents/volparossa-implementer-medium.toml`,
+whose `name` is `volparossa_implementer_medium`, model `gpt-6.1-sol` and effort
+`medium`. Its instructions require assigned ownership, established contracts,
+escalation, appropriate checks, retained failure/cleanup evidence and concise
+results. It forbids recursive delegation and permission expansion. Existing High
+implementation/review and Luna support definitions are unchanged.
+
+Before installation, the current config and three existing definitions were copied
+with a hash/mode manifest to
+`~/.codex/backups/volparossa-option-a-20261022T212017Z/`. Their byte hashes remained
+unchanged afterwards. The saved default remained Sol High, default children High,
+and the limit two; the separate active DICN principal still recorded Astra Ultra.
+No permissions, providers, service tier, billing settings or active goal changed.
+
+Strict bundled app-server initialization and TOML parsing passed. In a separate
+validation thread, Astra Ultra spawned the custom role by name with **no model or
+effort override**. Same-server `thread/read` metadata recorded parent
+`01a1657d-365e-73a0-930c-24c7f1bee8aa` as `gpt-6-astra`/`ultra` and child
+`01a1657d-4913-7900-8761-0d650ca8ca9d` as
+`volparossa_implementer_medium`, `gpt-6.1-sol`/`medium`, with the correct parent.
+Both turns completed without error; the child returned only its routing marker.
+This verifies custom-role discovery and delegation, not implementation quality.
+Local complete events, thread readbacks and the probe script are retained under
+`.volparossa-dev/model-efficiency-option-a-20261022T212017Z/`.
+
+The probe's final cumulative input/cached-input/output counters were
+66,648/51,072/128 for Astra and 27,522/6,912/8 for Medium. Cached input is a subset;
+the combined total is 94,306 tokens. These are configuration-validation costs,
+not a functional pilot or evidence of savings. Review/support overhead must be
+reported separately rather than hidden in a claim about the marker test.
+
+Implementation pilot execution is deferred: live ownership inspection found
+Storage tests owned by PR334/`storage_consumer_handshake`, resident-model work
+owned by PR332/`model_corruption_transition`, Studio export-pack work owned by
+PR330, and ledger/goal-verification updates owned by PR328. Contributor issue295
+is excluded. No independent current-plan implementation scope was established.
+Only this isolated branch owns AGENTS/workflow edits; it does not write those
+active worktrees or the shared ledger. At the next integration checkpoint,
+re-evaluate remaining Studio export-pack fixtures, bounded Storage diagnostics
+parser controls and resident-model closed-classification controls as candidate
+areas. Select two or three actual remaining gaps only after fresh source/ownership
+checks and explicit acceptance criteria; begin with the smallest fixed-contract
+task and independent High review. These are held areas, not ready assignments,
+implemented changes or promises that existing tests leave such gaps.
+
+Recovery: stop selecting the Medium role and use existing High. If removing the
+new file, first compare its recorded installation hash and preserve subsequent
+edits; it did not exist before this installation. Existing config/agents need no
+restoration because they were not changed. If later restoration is needed, compare
+the dated manifest and restore only intended files without overwriting newer
+preferences. Do not blindly restore the older 2026-10-20 backup, reload the active
+build or replace its goal. Repository instructions follow the reviewed PR path;
+recheck the integrated revision before applying them to subsequent assignments.
 
 ## Preserve checkouts and evidence
 
