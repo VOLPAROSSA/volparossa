@@ -1,0 +1,54 @@
+# Short presentation from the existing Weather recording
+
+This is a separate, unpublished presentation of the complete 65.579-second
+recording, at normal speed. It introduces no new Core, Android or network trial.
+The app occupies its native 720×1280 pixels, uncropped, on a 1280×1440 canvas.
+The original technical video and evidence remain unchanged in `technical-original/`.
+
+Run the inert preview from the checkout:
+
+```sh
+python3 scripts/weather-demo-0-short.py --output "$PWD/.cache/weather-demo-short"
+```
+
+Only the approved disposable GitHub-hosted Ubuntu 24.04 media job may add
+`--execute`. It needs the existing signed-APT media-tool setup; do not install or
+run native media tools on the development host. The script requires a new output
+directory, authenticates the exact successful source run and artifact through
+GET-only API calls, checks the full ZIP digest, compares the committed admission
+records, and copies only fixed, hash-checked presentation members. It does not
+extract archives generally or rerun the 490-frame/native timing admission.
+
+The pinned input is artifact `12529072030` from run `40017379373`, attempt 1,
+on verifier source `5c7c5470cef31c37d0cb4f961f221529bda080fb`. Its SHA-256 is
+`a6f012f993f6ed17fc2566c1fe3b84b20d9abc9e5c2c60c0f7b5896117922b06`.
+Original runtime source remains Core `6bc0abdb` / Weather `85e9eda9`, run
+`39998753810`, whose original duration-admission failure stays preserved.
+
+Seven explanatory cards follow already reviewed source PTS. Each remains visible
+for at least 2.7 seconds; brief transitions share a card instead of flashing
+separate labels. They distinguish
+on-screen temperature/PM2.5, first-refresh completion, HOME, and app-return
+animation from acceptance reports supporting two cache-backed refreshes and
+background/resume. They do not claim visible second-refresh completion, a settled
+resume view, complete wind/precipitation/PM10 columns, or pixel proof of networking.
+Card boundaries are explanatory; they are not exact OS input timestamps.
+
+Outputs include `weather-demo-0-short.mp4`, `captions.vtt`, `transcript.txt`, an
+actual frame-206 thumbnail, rendered previews at 29/40/65 seconds, original notices,
+attribution, and `short-presentation.json` binding every exported file's size and
+SHA-256. After authenticated selection, the temporary downloaded ZIP is removed;
+its exact digest and API receipt remain. The original retained evidence archive
+is untouched. Render text remains
+available for inspection. The full original clip uses 30-fps CFR resampling; source
+frames may repeat or be omitted by resampling. There is no speed change, cut,
+held ending, synthetic app event, or app-pixel retouching.
+
+The persistent banner reads **Android emulator • EXTERNAL Debian Core**.
+Data/app/font attribution names ECMWF, NOAA, Overmorrow and DejaVu; `NOTICES.md`
+is copied byte-for-byte. This is not a standalone phone release. The script's
+success establishes assembly and file bindings; actual rendered layout/readability
+still requires visual review. It never changes release draft `422278856`, publishes
+assets, or grants production/publication authority. Partial failed outputs remain
+available; `short-failure.json` exposes only fixed stages/categories and bounded
+profile facts, without raw diagnostics or credentials.

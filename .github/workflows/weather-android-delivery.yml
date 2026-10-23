@@ -4,6 +4,10 @@ run-name: Exact v6 inputs — installed Android through protected Weather peers
 on:
   workflow_dispatch:
     inputs:
+      short_presentation_only:
+        description: Assemble the short public presentation from verified footage only
+        type: boolean
+        default: false
       record_demo:
         description: Record genuine Android pixels for Weather Demo 0 after full acceptance
         type: boolean
@@ -74,7 +78,7 @@ env:
 
 jobs:
   media-tool-probe:
-    if: inputs.media_probe_only && inputs.review_run_id == '' && !inputs.review_quarantine && !inputs.review_scoped_demo
+    if: inputs.media_probe_only && inputs.review_run_id == '' && !inputs.review_quarantine && !inputs.review_scoped_demo && !inputs.short_presentation_only
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -101,24 +105,58 @@ jobs:
           include-hidden-files: true
           path: .cache/weather-media-tool-probe/probe.json
   retained-media-review:
-    if: inputs.review_run_id != '' || inputs.review_quarantine || inputs.review_scoped_demo
+    if: inputs.review_run_id != '' || inputs.review_quarantine || inputs.review_scoped_demo || inputs.short_presentation_only
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Validate presentation-only selection
+        if: inputs.short_presentation_only
+        env:
+          SHORT_RECORD: ${{ inputs.record_demo }}
+          SHORT_PROBE: ${{ inputs.media_probe_only }}
+          SHORT_REVIEW: ${{ inputs.review_run_id }}
+          SHORT_QUARANTINE: ${{ inputs.review_quarantine }}
+          SHORT_SCOPED: ${{ inputs.review_scoped_demo }}
+          SHORT_HOLD: ${{ inputs.review_hold_image }}
+        run: |
+          set -euo pipefail
+          test "$SHORT_RECORD" != true
+          test "$SHORT_PROBE" != true
+          test -z "$SHORT_REVIEW"
+          test "$SHORT_QUARANTINE" != true
+          test "$SHORT_SCOPED" != true
+          test -z "$SHORT_HOLD"
       - name: Install review tools only on the disposable hosted runner
         run: |
           set -euo pipefail
           bash scripts/weather-demo-0-media-tools.sh
       - name: Check retained-media contracts without API credentials
+        if: ${{ !inputs.short_presentation_only }}
         run: |
           set -euo pipefail
           python3 -B tests/integration/test-weather-demo-0-review.py
           python3 -B tests/integration/test-weather-demo-native-timing.py
           python3 -B tests/integration/test-weather-demo-0-presentation.py
+      - name: Check short-presentation contracts without API credentials
+        if: inputs.short_presentation_only
+        run: |
+          set -euo pipefail
+          python3 -B tests/integration/test-weather-demo-0-short.py
+          python3 -B tests/integration/test-weather-android-hosted-wiring.py
+      - name: Assemble short presentation without app or network execution
+        if: inputs.short_presentation_only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$GITHUB_WORKSPACE/.cache"
+          python3 -B scripts/weather-demo-0-short.py --output "$GITHUB_WORKSPACE/.cache/weather-demo-short" --execute
       - name: Inspect retained source-bound recording without rerunning Android
+        if: ${{ !inputs.short_presentation_only }}
         env:
           GH_TOKEN: ${{ github.token }}
           REVIEW_RUN_ID: ${{ inputs.review_run_id }}
@@ -157,7 +195,17 @@ jobs:
               --visual-review docs/demos/weather-demo-0/visual-review-39998753810.json)
           fi
           python3 -B scripts/weather-demo-0-review.py "${review_args[@]}"
+      - name: Retain short presentation for local review only
+        if: success() && inputs.short_presentation_only
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: weather-demo-0-short-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: error
+          include-hidden-files: true
+          path: .cache/weather-demo-short/
       - name: Retain actual sampled frames and review provenance
+        if: ${{ success() && !inputs.short_presentation_only }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: weather-demo-${{ inputs.review_scoped_demo && 'scoped-demo' || inputs.review_quarantine && 'quarantine-inspection' || 'visual-review' }}-${{ inputs.review_run_id }}-${{ inputs.review_attempt }}-${{ github.sha }}
@@ -178,8 +226,9 @@ jobs:
             .cache/weather-demo-visual-review/scoped-admission-failure.json
             .cache/weather-demo-visual-review/review.json
             .cache/weather-demo-visual-review/native-timing.json
+            .cache/weather-demo-short/short-failure.json
   joined:
-    if: ${{ !inputs.media_probe_only && inputs.review_run_id == '' && !inputs.review_quarantine && !inputs.review_scoped_demo }}
+    if: ${{ !inputs.media_probe_only && inputs.review_run_id == '' && !inputs.review_quarantine && !inputs.review_scoped_demo && !inputs.short_presentation_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:

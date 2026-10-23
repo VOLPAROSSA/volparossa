@@ -16,6 +16,20 @@ Last updated: 2026-10-15
 
 ## Current integration and active work
 
+### Weather Demo 0 presentation refinement — 2026-10-23
+
+A separate presentation-only branch derives from the completed technical package
+`a1f268d6`. Original footage, two-minute video, source-bound reports, manifests,
+validation and draft release remain unchanged. The new renderer uses the complete
+65.58-second authenticated clip at normal speed, a native-width 720x1280 app pane,
+seven concise phase cards, persistent external-Core disclosure and separate
+on-screen/report evidence labels. No Core/Android build or network trial repeats.
+
+Sol Medium implemented the bounded assembly; one independent Sol High integrity
+review found no blockers. Eight inert presentation tests and 28 workflow-isolation
+tests pass. Hosted rendering/readability checks remain pending. Publication and
+changes to the existing GitHub draft require separate user approval.
+
 ### Weather Demo 0 isolated execution — 2026-10-23
 
 This branch derives from accepted Android/Core source `aac5be7f` solely to
