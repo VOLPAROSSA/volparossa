@@ -1,0 +1,36 @@
+{
+  "artifact": {
+    "digest": "sha256:fedb773f134182f5bcf6eeb423cf4213b98e38b9f7d82683bc6358b1dcb3bff8",
+    "id": 12530349915,
+    "name": "weather-demo-0-short-980e61f596a11527397bb712a507e80e4eba3053",
+    "size_in_bytes": 12034993
+  },
+  "layout_review": {
+    "actual_previews_inspected": true,
+    "followup": "Shorten and wrap explanatory card text; keep raw footage and geometry unchanged.",
+    "native_app_values_readable": true,
+    "primary_presentation_ready": false,
+    "right_text_clipped": true
+  },
+  "new_runtime_executed": false,
+  "original_video_preserved": true,
+  "run": {
+    "conclusion": "success",
+    "head_sha": "980e61f596a11527397bb712a507e80e4eba3053",
+    "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/40023029768",
+    "id": 40023029768,
+    "run_attempt": 1,
+    "run_started_at": "2026-10-23T20:56:12Z",
+    "status": "completed",
+    "updated_at": "2026-10-23T20:57:10Z"
+  },
+  "schema": 1,
+  "source_bindings_verified": true,
+  "video": {
+    "codec": "h264",
+    "duration_seconds": 65.566667,
+    "height": 1440,
+    "width": 1280
+  },
+  "video_sha256": "513f3e125c43aae4ff6ef582d2a5342b7f0337db4ee6538ab7c5a8811682dd8c"
+}

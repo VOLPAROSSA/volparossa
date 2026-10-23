@@ -161,6 +161,11 @@ class ShortPresentation(unittest.TestCase):
         text = '\n'.join(p.read_text() for p in (self.root / 'text').iterdir())
         for phrase in ('EXTERNAL Debian Core', 'Acceptance reports', 'animation only', 'ECMWF / NOAA'):
             self.assertIn(phrase, text)
+        self.assertIn('Recorded technical demo', text)
+        self.assertIn('Core runs outside Android', text)
+        self.assertNotIn('Recorded pixels and acceptance reports', text)
+        for _, _, title, label, body, note in S.PHASES:
+            self.assertTrue(all(len(line) <= 24 for line in (title, label, *body, *note)))
         self.assertLessEqual(120 + 1280, 1416)  # attribution never overlays app pixels
 
     def test_font_data_identity_uses_pinned_bytes_not_executable_permissions(self):
@@ -184,7 +189,7 @@ class ShortPresentation(unittest.TestCase):
         self.assertTrue(vtt.startswith('WEBVTT\n'))
         self.assertIn('00:01:05.579', vtt)
         self.assertIn('No held ending', transcript)
-        self.assertIn('reports, not these pixels', transcript)
+        self.assertIn('in reports, not pixels', transcript)
         self.assertIn('No settled resume frame', transcript)
         self.assertEqual(S.PHASES[0][0], 0)
         self.assertEqual(S.PHASES[-1][1], S.DURATION)

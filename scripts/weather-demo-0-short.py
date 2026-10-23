@@ -32,26 +32,26 @@ STATE = {'stage': 'arguments', 'owned_output': False, 'facts': {}}
 # reviewed native PTS; no runtime inference is made by this presentation tool.
 PHASES = (
     (0, 8, 'Real forecasts', 'On screen',
-     ('Weather / Overmorrow', 'Actual installed Android app.'),
+     ('Weather / Overmorrow', 'Actual installed app.'),
      ('Recorded developer demo.', 'Core runs externally.')),
     (8, 18, 'From peers', 'On screen',
      ('The app opens and loads.',),
-     ('Acceptance reports', 'Real forecast products', 'retrieved through Core peers.')),
+     ('Acceptance reports', 'Real forecast products', 'via Core peers.')),
     (18, 28.536533, 'Two products', 'On screen',
-     ('The forecast view is loading.',),
-     ('Acceptance reports', 'Temperature and PM2.5', 'forecasts delivered to the app.')),
+     ('Forecast view loading.',),
+     ('Acceptance reports', 'Temperature and PM2.5', 'Delivered to the app.')),
     (28.536533, 31.266356, 'Real forecasts', 'On screen',
      ('Temperature, then PM2.5.', 'Native source validity.'),
-     ('Forecasts, not observations.', 'Read native units and times.')),
+     ('Model forecasts.', 'Read native times/units.')),
     (31.266356, 45.965578, 'Cached refresh', 'On screen',
-     ('Refresh in progress;', 'then the forecast returns.'),
-     ('Acceptance reports', 'Refresh can reuse a valid', 'forecast from the cache.')),
+     ('First refresh loading.', 'Then forecasts return.'),
+     ('Acceptance reports', 'Valid forecasts can be', 'reused from cache.')),
     (45.965578, 58.799733, 'Another refresh', 'On screen',
      ('Second refresh starts.',),
-     ('Acceptance reports', 'Its completion is verified', 'by reports, not these pixels.')),
+     ('Acceptance reports', 'Completion is verified', 'in reports, not pixels.')),
     (58.799733, DURATION, 'Background / return', 'On screen',
      ('HOME, then return', 'animation only.', 'No settled resume frame.'),
-     ('Acceptance reports', 'Background / resume checked.', 'Networking is report evidence.')),
+     ('Acceptance reports', 'Background / resume', 'checked in reports.')),
 )
 
 
@@ -146,6 +146,7 @@ def captions():
         lines.extend([f"{PACKAGE['timestamp'](start)} --> {PACKAGE['timestamp'](stop)}", text, ''])
         transcript.append(text)
     transcript.append('Data: ECMWF and NOAA. App: Overmorrow. Font: DejaVu. See NOTICES.md. '
+        'Core runs outside Android; this is not a standalone phone release or physical-device acceptance. '
         'This presentation grants no publication or production authority.')
     return '\n'.join(lines), '\n\n'.join(transcript) + '\n'
 
@@ -164,7 +165,7 @@ def overlay_graph(text_dir):
         overlays.append(part)
     draw('VOLPAROSSA Weather / Overmorrow', 32, 22, 36)
     draw('Android emulator  •  EXTERNAL Debian Core', 32, 78, 32, 'fbbf24')
-    draw('Recorded demo • normal speed • no held ending', 778, 160, 20, 'a7c6ed')
+    draw('Recorded technical demo', 778, 160, 20, 'a7c6ed')
     for start, stop, title, label, body, note in PHASES:
         enable = f'gte(t,{start:.6f})*lt(t,{stop:.6f})'
         draw(title, 778, 236, 30, enable=enable)
@@ -173,10 +174,8 @@ def overlay_graph(text_dir):
             draw(text, 778, 382 + i * 42, 25, enable=enable)
         for i, text in enumerate(note):
             draw(text, 778, 586 + i * 42, 25, 'cbd5e1', enable)
-    draw('Recorded pixels and acceptance reports', 778, 1010, 23, 'cbd5e1')
-    draw('are different kinds of evidence.', 778, 1050, 23, 'cbd5e1')
-    draw('Developer demo • external Core', 778, 1190, 26, 'fbbf24')
-    draw('Not a standalone phone release', 778, 1232, 25, 'fbbf24')
+    draw('Developer demo', 778, 1190, 26, 'fbbf24')
+    draw('Core runs outside Android', 778, 1232, 25, 'fbbf24')
     draw('Data: ECMWF / NOAA • App: Overmorrow • Font: DejaVu • See NOTICES.md', 32, 1416, 18, 'cbd5e1')
     return ('[0:v:0]setpts=PTS-STARTPTS,fps=30,setsar=1,'
             'pad=1280:1440:32:120:color=0x09111f,' + ','.join(overlays) + '[out]')
@@ -227,9 +226,11 @@ def render(output, original_manifest):
         and (video_info['width'], video_info['height']) == (1280, 1440)
         and video.stat().st_size <= REVIEW['MAX_ZIP'], 'short video profile rejected')
     STATE['stage'] = 'previews'
-    for second in (29, 40, 65):
+    for filename, second in (('preview-029.png', 29), ('preview-040.png', 40),
+            ('preview-065.png', 65), ('preview-weather.png', 28.55),
+            ('preview-return.png', 65.5)):
         command([ffmpeg, '-nostdin', '-v', 'error', '-ss', str(second), '-i', str(video),
-            '-frames:v', '1', '-threads', '1', str(output / f'preview-{second:03}.png')],
+            '-frames:v', '1', '-threads', '1', str(output / filename)],
             seconds=60, reject_stderr=True)
     STATE['stage'] = 'thumbnail'
     # Actual admitted native frame, rendered through the same labelled layout.

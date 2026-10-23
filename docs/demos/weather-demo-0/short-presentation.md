@@ -32,10 +32,15 @@ on-screen temperature/PM2.5, first-refresh completion, HOME, and app-return
 animation from acceptance reports supporting two cache-backed refreshes and
 background/resume. They do not claim visible second-refresh completion, a settled
 resume view, complete wind/precipitation/PM10 columns, or pixel proof of networking.
-Card boundaries are explanatory; they are not exact OS input timestamps.
+Card boundaries are explanatory; they are not exact OS input timestamps. Right-panel
+copy uses short manual lines (at most 24 characters in each phase card), with
+concise static labels; detailed acceptance boundaries stay in this note and the
+transcript.
 
 Outputs include `weather-demo-0-short.mp4`, `captions.vtt`, `transcript.txt`, an
-actual frame-206 thumbnail, rendered previews at 29/40/65 seconds, original notices,
+actual frame-206 thumbnail, rendered previews at 29/40/65 seconds, plus
+`preview-weather.png` at 28.55 seconds and `preview-return.png` at 65.5 seconds,
+original notices,
 attribution, and `short-presentation.json` binding every exported file's size and
 SHA-256. After authenticated selection, the temporary downloaded ZIP is removed;
 its exact digest and API receipt remain. The original retained evidence archive
