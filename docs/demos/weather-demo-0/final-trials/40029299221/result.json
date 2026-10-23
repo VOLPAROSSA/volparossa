@@ -1,0 +1,155 @@
+{
+  "existing_draft_modified": false,
+  "final_asset_root": ".volparossa-dev/evidence/weather-demo-final-20261023/final",
+  "kind": "weather-demo-final-presentation-result",
+  "preservation": {
+    "exact_file_sets_and_sha256_match": true,
+    "github_draft_asset_identity_size_digest_state_unchanged": true,
+    "github_draft_assets": 8,
+    "github_draft_fields_and_body_unchanged": true,
+    "historical_media_gate_failure_preserved": true,
+    "new_product_build_or_network_trial": false,
+    "previous_short_package_files_unchanged": 36,
+    "protected_archives": {
+      ".volparossa-dev/evidence/weather-demo-0-20261023/release-assets/weather-demo-0-evidence.zip": "a6f012f993f6ed17fc2566c1fe3b84b20d9abc9e5c2c60c0f7b5896117922b06",
+      ".volparossa-dev/evidence/weather-demo-0-20261023/release-assets/weather-demo-0.1.0-review.tar.gz": "4eb4840adba02332f3e9f9f9ed5dd428ae72c4a50b79ef9e0e0d8a05627e481e",
+      ".volparossa-dev/evidence/weather-demo-final-20261023/run-40029299221/artifact.zip": "02711d34705195b8a60dd784257cd2fdfb812db272c538839329fe5da7130513",
+      ".volparossa-dev/evidence/weather-demo-short-20261023/weather-demo-0-short-review.zip": "539eecee6094ed9cea8c5676cde3cd3fbe50694f91629e9fef2f88f14bc2dabb"
+    },
+    "release_mutation_performed": false,
+    "schema": 1,
+    "technical_package_files_unchanged": 121
+  },
+  "publication_authorized": false,
+  "publication_performed": false,
+  "recommendation": "Feature the final 60.57-second presentation on GitHub and volparossa.org after explicit approval; retain original technical and previous short videos and full evidence separately.",
+  "review_archive": {
+    "all_member_sha256_verified": true,
+    "bytes": 17128422,
+    "file": "weather-demo-0-final-review.zip",
+    "files": 119,
+    "payload_manifest_sha256": "edb0ef5588d3ffe41d29dfeda369b2e0fc243edb5268a7c6abb98b1c3a33942b",
+    "published": false,
+    "schema": 1,
+    "sha256": "9bb0af39e3a1b21fff451a13943958492fcfd09857c398fed1dc156628483a0d",
+    "zip_crc_verified": true
+  },
+  "run": {
+    "artifact_id": 12534137654,
+    "artifact_sha256": "02711d34705195b8a60dd784257cd2fdfb812db272c538839329fe5da7130513",
+    "conclusion": "success",
+    "core_android_jobs": "skipped",
+    "id": 40029299221,
+    "native_admission_job": "skipped",
+    "render_revision": "b78bdb79d997230b00aedaafebe03987b0daafa9",
+    "url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/40029299221"
+  },
+  "schema": 1,
+  "thumbnail": {
+    "png_dimensions": [
+      1920,
+      1080
+    ],
+    "png_sha256": "eb3b704cea6c6109d103df79205aeb60cc0a2d08bd9a701bce778648a31c237a",
+    "webp_dimensions": [
+      960,
+      540
+    ],
+    "webp_sha256": "6d77662a6e369b193477dbbc8c63aa4304497223338585c0a1cd6ffe6fa423c0"
+  },
+  "verification": {
+    "caption_only_postprocess": "Last cue capped from 60.579s to 60.566s inside encoded duration, no video change; transcript records 30fps rounding",
+    "caption_validation": [
+      {
+        "characters_per_second": 13.67,
+        "end": 3.0,
+        "lines": 1,
+        "max_line_chars": 41,
+        "start": 0.0
+      },
+      {
+        "characters_per_second": 10.29,
+        "end": 10.0,
+        "lines": 2,
+        "max_line_chars": 40,
+        "start": 3.0
+      },
+      {
+        "characters_per_second": 8.2,
+        "end": 15.0,
+        "lines": 1,
+        "max_line_chars": 41,
+        "start": 10.0
+      },
+      {
+        "characters_per_second": 9.71,
+        "end": 18.5,
+        "lines": 1,
+        "max_line_chars": 34,
+        "start": 15.0
+      },
+      {
+        "characters_per_second": 14.46,
+        "end": 21.266,
+        "lines": 1,
+        "max_line_chars": 40,
+        "start": 18.5
+      },
+      {
+        "characters_per_second": 5.03,
+        "end": 35.966,
+        "lines": 2,
+        "max_line_chars": 38,
+        "start": 21.266
+      },
+      {
+        "characters_per_second": 4.6,
+        "end": 48.8,
+        "lines": 2,
+        "max_line_chars": 37,
+        "start": 35.966
+      },
+      {
+        "characters_per_second": 10.77,
+        "end": 55.579,
+        "lines": 2,
+        "max_line_chars": 37,
+        "start": 48.8
+      },
+      {
+        "characters_per_second": 13.03,
+        "end": 60.566,
+        "lines": 2,
+        "max_line_chars": 39,
+        "start": 55.579
+      }
+    ],
+    "complete_decode": true,
+    "decoded_frames": 1817,
+    "human_full_realtime_playback": false,
+    "keyframe_visual_review": [
+      "opening",
+      "before-cut",
+      "after-cut",
+      "weather",
+      "refresh",
+      "return",
+      "closing"
+    ],
+    "normal_speed_and_cuts": "1x moving footage; explicitly labelled preview replay and 13s loading omission",
+    "product_or_network_checks_rerun": false,
+    "pts_cadence_verified": "30fps; 0.000000 through 60.533333",
+    "rendering_or_layout_blocker_found": false,
+    "schema": 1,
+    "source_review": "One brief independent Sol High review; no material integrity blockers",
+    "thumbnail_reduced_review": "960x540 WebP inspected; app, headline, subtitle, conceptual diagram and external Core qualification readable",
+    "whole_timeline_visual_review": "Both contact sheets, every integer second 0..60, inspected"
+  },
+  "video": {
+    "codec": "h264",
+    "duration_seconds": 60.566667,
+    "height": 1440,
+    "sha256": "aee031d680fd20d76045e40f2dcd18ed16ebdca5a58186b8e18ec7a681f2b2e1",
+    "width": 1280
+  }
+}

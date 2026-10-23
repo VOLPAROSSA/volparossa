@@ -10,7 +10,7 @@ The recording does not establish physical-device compatibility or production rea
 
 ## Presentation files
 
-- `weather-demo-0-final.mp4` — edited presentation video (target 60–75 seconds).
+- `weather-demo-0-final.mp4` — edited presentation video (60.57 seconds, 1280×1440 H.264).
 - `thumbnail-final.png` and the web-optimized thumbnail — presentation artwork using genuine app imagery; peer graphics are conceptual.
 - `captions.vtt` and the transcript — text accompanying the silent recording.
 - `SHA256SUMS` and the presentation manifest — file integrity and provenance for this asset set.

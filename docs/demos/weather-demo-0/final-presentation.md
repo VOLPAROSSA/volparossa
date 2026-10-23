@@ -5,7 +5,7 @@ using real weather and air-quality forecast products. Core runs externally in a
 Debian test environment. It does not establish standalone Android Core operation,
 physical-device compatibility or production readiness.
 
-The new edit targets about 60.6 seconds at 1280×1440 H.264. Moving app footage
+The final edit is 60.566667 seconds at 1280×1440 H.264. Moving app footage
 remains at normal speed in its unscaled, uncropped 720×1280 pane. A labelled
 three-second forecast preview replays footage shown later; it is not an extra
 retrieval. Earlier loading follows, then an explicit cut omits 13 seconds. This
@@ -70,3 +70,26 @@ forecasts shared through cooperating peers and an external Debian Core. This
 short development preview preserves the original evidence and clearly labels
 its editorial cuts. Standalone mobile Core and production readiness remain
 outside the demonstrated scope.
+
+## Verified final approval package
+
+Presentation-only run [40029299221](https://github.com/VOLPAROSSA/volparossa/actions/runs/40029299221)
+passed on render source `b78bdb79d997230b00aedaafebe03987b0daafa9`, with no
+Core/Android or native-admission execution. All 1817 frames decoded without error;
+30fps timestamps and every-second contact sheets were checked. Keyframes, cuts,
+closing and the 960×540 thumbnail were visually inspected. No full real-time human
+playback is claimed. Final captions contain nine cues, maximum 14.46 chars/s; the
+last cue was capped by 13 ms to the encoded duration without rerendering.
+
+The final approval folder is `.volparossa-dev/evidence/weather-demo-final-20261023/final`;
+the adjacent `weather-demo-0-final-review.zip` includes all 119 approval files and
+three unposted publication proposals. It is distinct from the unchanged CI-render
+ZIP. The final package retains that render manifest, source hashes and a separate
+visual-review/preservation report. All 121 original technical and 36 earlier-short
+files plus protected archives and eight draft asset identities match. The existing
+GitHub draft was not modified. [Result and final hashes](final-trials/40029299221/result.json).
+
+Feature the final 60.57-second edit and landscape thumbnail on GitHub and
+volparossa.org after explicit approval. Keep the original two-minute technical
+video, earlier 65-second edit and complete engineering evidence separately
+available. The package contains media and documentation, not a supported APK.

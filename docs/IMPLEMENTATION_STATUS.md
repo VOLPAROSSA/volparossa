@@ -28,9 +28,20 @@ VM/network trial, original admission rerun or draft-release mutation is permitte
 
 Sol Medium implemented the assets; one brief independent Sol High source review
 found no material integrity blocker. Six focused renderer tests and 29 workflow
-isolation tests pass. Hosted rendering, full media decode/PTS checks and visual
-inspection remain pending. Proposed publication text is prepared separately for
-approval; it does not publish or update the existing draft.
+isolation tests pass. Presentation-only CI [40029299221](https://github.com/VOLPAROSSA/volparossa/actions/runs/40029299221)
+passed on `b78bdb79`: Core/Android and native-admission jobs were skipped. The
+60.566667-second 1280x1440 H.264 output fully decodes (1817 frames), with verified
+30fps timestamps. Both contact sheets cover every second 0–60; opening, cuts,
+forecast/refresh/return frames, closing and the reduced thumbnail were inspected.
+Nine final captions pass timing/readability checks; the last cue was capped by
+13 ms without changing the video. All 121 original technical and 36 earlier-short
+files, the protected archive hashes and draft text/settings/eight assets match
+their snapshots. The final review ZIP is 17,128,422 bytes with verified CRC and
+all member hashes. [Final result](demos/weather-demo-0/final-trials/40029299221/result.json)
+records the new assets and hashes. Feature this 60.57-second version publicly,
+keeping both original videos and complete evidence available separately. Proposed
+publication text is prepared for approval; nothing was published and the existing
+draft remains unchanged.
 
 ### Weather Demo 0 presentation refinement — 2026-10-23
 
