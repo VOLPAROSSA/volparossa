@@ -18,6 +18,25 @@ Last updated: 2026-10-23
 
 ## Current integration and active work
 
+### Weather artifact preservation (F09) — 2026-10-23
+
+The seven original artifacts referenced by the decoder ABI and Weather v4/v5/v6
+admissions have been preserved locally before their first expiry on
+2026-10-26 at 06:56:04 UTC. All 319,070,901 ZIP bytes match their original
+admission digests; original run/source metadata and eleven decoder provenance
+receipts are retained. Inert reconstruction and readback pass all 216 v4, 208 v5
+and 39 v6 file references, plus the separate thirteen-file decoder input check.
+This preserves exact inputs and historical evidence, not a new runtime result.
+
+The scoped preservation helper and
+[recovery record](development/WEATHER_ARTIFACT_PRESERVATION.md) add authenticated
+capture and offline verification without changing historical admissions or the
+four hosted consumer workflows. **F09 remains partly open:** those workflows
+still require live, non-expired GitHub artifacts. Durable hosted availability
+needs an explicit storage/publication decision and a separately reviewed archive
+admission/consumer change. No artifact payload, private audit file, release or
+new storage service has been published, and no integration run was dispatched.
+
 ### Resumed full objective and dependency work — 2026-10-22
 
 The current conversation reads the existing full goal as active. Its objective
