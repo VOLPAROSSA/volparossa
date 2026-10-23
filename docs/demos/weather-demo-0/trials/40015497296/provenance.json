@@ -1,0 +1,21 @@
+{
+  "artifact": {
+    "digest": "sha256:748076d64b6f5ca68743f7d34dffcfcfb10bde31ce7721f1a9c884669a54d5ff",
+    "id": 12527653599,
+    "name": "weather-demo-review-failure-39998753810-1-6f5195e6fe0fea4ea9d6b0506132a0aef9a626aa",
+    "size_in_bytes": 38920
+  },
+  "attempt": "1",
+  "conclusion": "failure",
+  "core_commit": "6f5195e6fe0fea4ea9d6b0506132a0aef9a626aa",
+  "exact_presentation_cause": "not_observed",
+  "failure_stage": "scoped-presentation",
+  "inspection_preserved": true,
+  "native_timing_gate_returned_and_checked": true,
+  "new_runtime_executed": false,
+  "original_run_id": "39998753810",
+  "render_success_proven": false,
+  "run_id": "40015497296",
+  "schema": 1,
+  "standalone_timing_report_exported": false
+}

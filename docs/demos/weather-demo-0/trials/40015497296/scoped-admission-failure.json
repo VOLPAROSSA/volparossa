@@ -1,0 +1,28 @@
+{
+  "category": "value",
+  "completed_inspection_preserved": true,
+  "identity": {
+    "core_commit": "6bc0abdb524b79e5244f9381d2d8d45a9100b41d",
+    "run_attempt": "1",
+    "run_id": "39998753810",
+    "weather_commit": "85e9eda9bb6105866db2510758e76c9930fdde91"
+  },
+  "inspection_only": true,
+  "joined_media_acceptance": false,
+  "kind": "weather-demo-scoped-admission-failure",
+  "media_accepted": false,
+  "new_runtime_executed": false,
+  "original_run_conclusion": "failure",
+  "partial_output_removed": true,
+  "production_authority": false,
+  "publication_authorized": false,
+  "review_execution": {
+    "core_commit": "6f5195e6fe0fea4ea9d6b0506132a0aef9a626aa",
+    "run_attempt": "1",
+    "run_id": "40015497296"
+  },
+  "schema": 1,
+  "scoped_demo_admitted": false,
+  "stage": "scoped-presentation",
+  "visual_acceptance_claimed": false
+}

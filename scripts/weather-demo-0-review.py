@@ -785,7 +785,15 @@ def admit_scoped_demo(output, identity, capture, media, artifact, rendered, visu
             and technical.get('source_video_sha256') == SCOPED_VIDEO
             and all(technical.get(key) is False for key in ['media_accepted', 'visual_acceptance_claimed',
                 'publication_authorized', 'production_authority']), 'scoped technical coherence rejected')
-    STATE['stage'] = 'scoped-presentation'
+    timing_record = dict(schema=1, kind='weather-demo-validated-native-timing', identity=identity,
+        review_execution=packaging, original_run_conclusion='failure', original_recording_sha256=SCOPED_VIDEO,
+        timing_validator_sha256=digest(timing_path), technical_report=technical,
+        technical_coherence_passed=True, scoped_demo_admitted=False, media_accepted=False,
+        visual_acceptance_claimed=False, publication_authorized=False, production_authority=False)
+    timing_record_path = output / 'native-timing.json'
+    timing_record_path.write_text(json.dumps(timing_record, sort_keys=True, indent=2) + '\n')
+    timing_record_path.chmod(0o600)
+    STATE['stage'] = 'scoped-presentation-render'
     package = runpy.run_path(str(ROOT / 'scripts/weather-demo-0-package.py'))
     stage = output / 'presentation'
     stage.mkdir(mode=0o700)
@@ -796,11 +804,14 @@ def admit_scoped_demo(output, identity, capture, media, artifact, rendered, visu
     raw_info = {key: media['video'][key] for key in ['codec', 'width', 'height', 'duration_seconds']}
     duration = max(120, math.ceil(raw_info['duration_seconds'] + 1))
     require(duration <= 180, 'scoped presentation duration rejected')
+    STATE['presentation_facts'] = dict(requested_duration_ms=round(duration * 1000),
+        raw_duration_ms=round(raw_info['duration_seconds'] * 1000), held_frame_index=206)
     lines = package['presentation_lines'](identity, acceptance['observations']['products'], scoped_demo=True)
     hold = output / frames[206]['file']
     _, video_info = package['render_video'](video_path, stage, duration, raw_info, lines, hold_image=hold)
     require(digest(hold) == frames[206]['png_sha256'] and digest(video_path) == SCOPED_VIDEO,
             'scoped presentation source changed')
+    STATE['stage'] = 'scoped-presentation-preview'
     preview = stage / 'preview-090.png'
     command([tool('/usr/bin/ffmpeg'), '-nostdin', '-v', 'error', '-protocol_whitelist', 'file,pipe',
         '-i', str(stage / 'weather-demo-0.mp4'), '-ss', '90', '-frames:v', '1', '-threads', '2', str(preview)],
@@ -811,6 +822,7 @@ def admit_scoped_demo(output, identity, capture, media, artifact, rendered, visu
     require(len(prefix) == 24 and prefix[:8] == b'\x89PNG\r\n\x1a\n' and prefix[12:16] == b'IHDR'
             and tuple(int.from_bytes(prefix[index:index + 4], 'big') for index in [16, 20]) == (1920, 1080),
             'scoped presentation preview dimensions rejected')
+    STATE['stage'] = 'scoped-presentation-export'
     captions, transcript = package['scoped_captions'](duration, raw_info['duration_seconds'], '206')
     (stage / 'captions.vtt').write_text(captions, encoding='utf-8')
     (stage / 'transcript.txt').write_text(transcript, encoding='utf-8')
@@ -819,6 +831,7 @@ def admit_scoped_demo(output, identity, capture, media, artifact, rendered, visu
     (stage / 'screenshots').mkdir(mode=0o700)
     for index, frame in frames.items():
         shutil.copyfile(output / frame['file'], stage / 'screenshots' / f'frame-{index:03d}.png')
+    STATE['stage'] = 'scoped-presentation-provenance'
     files = {p.relative_to(stage).as_posix(): dict(bytes=p.stat().st_size, sha256=digest(p))
              for p in sorted(stage.rglob('*')) if p.is_file()}
     presentation = dict(schema=1, kind='weather-demo-scoped-presentation', identity=identity,
@@ -839,6 +852,7 @@ def admit_scoped_demo(output, identity, capture, media, artifact, rendered, visu
         font_sha256=digest(Path(tool(str(FONT)))),
         publication_authorized=False, production_authority=False, standalone_mobile_core=False,
         final_presentation_visual_review_required=True, includes_installable_binaries=False, files=files)
+    STATE['stage'] = 'scoped-presentation-export'
     (stage / 'presentation.json').write_text(json.dumps(presentation, sort_keys=True, indent=2) + '\n')
     record = dict(schema=1, kind='weather-demo-scoped-admission', identity=identity,
         review_execution=packaging, scope=review['scope'], original_run_conclusion='failure',
@@ -846,7 +860,7 @@ def admit_scoped_demo(output, identity, capture, media, artifact, rendered, visu
         original_acceptance_sha256=capture['original_acceptance_sha256'], original_core_acceptance_passed=True,
         original_encoded_duration_failure_preserved=True, original_duration_verify_called=False,
         visual_review_sha256=hashlib.sha256(raw_review).hexdigest(), technical_report=technical,
-        timing_validator_sha256=digest(timing_path),
+        timing_validator_sha256=digest(timing_path), native_timing_sha256=digest(timing_record_path),
         validated_witnesses=witnesses, held_frame=frames[206], scoped_demo_admitted=True,
         publication_authorized=False, production_authority=False, standalone_mobile_core=False,
         new_runtime_executed=False, final_presentation_visual_review_required=True,
@@ -873,6 +887,7 @@ def prepare(run_id, attempt, revision, output, execute=False, hold_image=None, *
             inspect_quarantine=False, sample_start=0, sample_stop=None, sample_fps=None, native_frames=False,
             admit_scoped=False, visual_review=None):
     STATE['stage'] = 'arguments'
+    STATE.pop('presentation_facts', None)
     hold_image = None if hold_image == '' else hold_image
     require(hold_image is None or type(hold_image) is str
             and re.fullmatch(r'screen-[0-9]{3}\.png', hold_image), 'strict held-image basename required')
@@ -988,7 +1003,33 @@ def prepare(run_id, attempt, revision, output, execute=False, hold_image=None, *
             failure.update(kind='weather-demo-scoped-admission-failure', scoped_demo_admitted=False,
                 completed_inspection_preserved=True)
             failure['stage'] = STATE['stage'] if STATE['stage'] in {
-                'scoped-visual-review', 'scoped-native-timing', 'scoped-presentation'} else 'unknown'
+                'scoped-visual-review', 'scoped-native-timing', 'scoped-presentation',
+                'scoped-presentation-render', 'scoped-presentation-preview',
+                'scoped-presentation-provenance', 'scoped-presentation-export'} else 'unknown'
+            if STATE['stage'].startswith('scoped-presentation-'):
+                rules = {'Demo presentation rejected': 'render-check',
+                    'A held image requires at least one second after the full raw clip': 'held-margin',
+                    'scoped original acceptance changed': 'original-acceptance',
+                    'scoped presentation duration rejected': 'duration',
+                    'scoped presentation source changed': 'source-binding',
+                    'scoped presentation preview size rejected': 'preview-size',
+                    'scoped presentation preview dimensions rejected': 'preview-dimensions',
+                    'root-owned distro tool required': 'trusted-file',
+                    'child emitted error diagnostics': 'child-stderr'}
+                failure['presentation_rejection'] = rules.get(str(error), category)
+                limits = dict(requested_duration_ms=180000, raw_duration_ms=180000, held_frame_index=899)
+                failure['presentation_facts'] = {key: value for key, value in STATE.get('presentation_facts', {}).items()
+                    if key in limits and type(value) is int and 0 <= value <= limits[key]}
+                detail = getattr(error, 'render_rejection', None)
+                if type(detail) is dict and set(detail) == {'phase', 'facts'} and type(detail['phase']) is str and detail['phase'] in {
+                        'probe-profile', 'probe-json', 'output-check'} and type(detail['facts']) is dict:
+                    render_limits = dict(duration_ms=86400000, requested_duration_ms=180000,
+                        width=16384, height=16384, stream_count=128, output_bytes=256 * 1024**2)
+                    if all(key in render_limits and type(value) is int and 0 <= value <= render_limits[key]
+                           for key, value in detail['facts'].items()):
+                        failure['render_rejection'] = detail
+            if (output / 'native-timing.json').is_file():
+                failure['native_timing_sha256'] = digest(output / 'native-timing.json')
             if isinstance(error, ValueError) and re.fullmatch(r'native_timing_[a-z0-9_]{1,80}', str(error)):
                 failure['native_timing_rejection'] = str(error)
                 if STATE['stage'] == 'scoped-native-timing' and hasattr(error, 'native_timing_observation'):

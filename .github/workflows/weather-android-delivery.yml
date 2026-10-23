@@ -177,6 +177,7 @@ jobs:
             .cache/weather-demo-visual-review/review-failure.json
             .cache/weather-demo-visual-review/scoped-admission-failure.json
             .cache/weather-demo-visual-review/review.json
+            .cache/weather-demo-visual-review/native-timing.json
   joined:
     if: ${{ !inputs.media_probe_only && inputs.review_run_id == '' && !inputs.review_quarantine && !inputs.review_scoped_demo }}
     runs-on: ubuntu-24.04

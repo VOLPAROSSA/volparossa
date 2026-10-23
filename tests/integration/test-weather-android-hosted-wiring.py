@@ -83,6 +83,7 @@ class AndroidHostedWiring(unittest.TestCase):
             input='\n'.join(paths + ['.cache/weather-android-delivery',
                 '.cache/weather-demo-visual-review/review-failure.json',
                 '.cache/weather-demo-visual-review/scoped-admission-failure.json',
+                '.cache/weather-demo-visual-review/native-timing.json',
                 '.cache/weather-demo-visual-review/review.json']) + '\n', text=True, capture_output=True, timeout=5)
         self.assertEqual(ignored.returncode, 0, ignored.stderr)
         self.assertIn('output="$GITHUB_WORKSPACE/.cache/weather-android-delivery"', SOURCE)
@@ -479,7 +480,8 @@ getfacl() { printf 'original inert ACL\\n'; }
         self.assertEqual([line.strip() for line in failure.split('path: |\n', 1)[1].splitlines() if line.strip()],
             ['.cache/weather-demo-visual-review/review-failure.json',
              '.cache/weather-demo-visual-review/scoped-admission-failure.json',
-             '.cache/weather-demo-visual-review/review.json'])
+             '.cache/weather-demo-visual-review/review.json',
+             '.cache/weather-demo-visual-review/native-timing.json'])
         for forbidden in ('*.json', '*.png', '*.mp4', 'path: .cache/weather-demo-visual-review/\n'):
             self.assertNotIn(forbidden, failure)
 

@@ -918,6 +918,12 @@ class Review(unittest.TestCase):
             record = R.admit_scoped_demo(output, R.SCOPED_IDENTITY, capture, media, artifact, rendered,
                                          Path('review.json'), dict(core_commit=REVIEW_CORE))
         self.assertTrue(record['scoped_demo_admitted'])
+        checkpoint = json.loads((output / 'native-timing.json').read_text())
+        self.assertEqual(checkpoint['technical_report'], technical)
+        self.assertEqual(checkpoint['identity'], R.SCOPED_IDENTITY)
+        self.assertFalse(checkpoint['scoped_demo_admitted'])
+        self.assertFalse(checkpoint['publication_authorized'])
+        self.assertEqual(record['native_timing_sha256'], R.digest(output / 'native-timing.json'))
         self.assertEqual(record['original_run_conclusion'], 'failure')
         self.assertFalse(record['original_duration_verify_called'])
         self.assertFalse(record['publication_authorized'])
@@ -934,6 +940,61 @@ class Review(unittest.TestCase):
         self.assertEqual((output / 'presentation/screen.mp4').read_bytes(), b'synthetic unit clip; never native runtime evidence')
         self.assertEqual({p.name for p in (output / 'presentation/screenshots').iterdir()},
                          {f'frame-{index:03d}.png' for index in R.SCOPED_SCREENSHOTS})
+
+    def test_validated_timing_checkpoint_precedes_failed_render(self):
+        output, source_hash, timeline, rendered, review, capture, media, artifact = self.scoped_fixture()
+        technical = dict(schema=1, kind='weather-demo-native-timing-coherence', technical_coherence_passed=True,
+            source_video_sha256=source_hash, media_accepted=False, visual_acceptance_claimed=False,
+            publication_authorized=False, production_authority=False)
+        def fail_render(*args, **kwargs):
+            self.assertTrue((output / 'native-timing.json').exists())
+            raise ValueError('Demo presentation rejected')
+        def module(path):
+            if str(path).endswith('weather-demo-native-timing.py'):
+                return {'validate': lambda *_: technical}
+            return dict(presentation_lines=lambda *args, **kwargs: [], render_video=fail_render)
+        with patch.object(R, 'SCOPED_VIDEO', source_hash), patch.object(R, 'hosted'), \
+                patch.object(R, 'committed_visual_review', return_value=(encoded(review), review)), \
+                patch.object(R.runpy, 'run_path', side_effect=module), self.assertRaises(ValueError):
+            R.admit_scoped_demo(output, R.SCOPED_IDENTITY, capture, media, artifact, rendered,
+                                Path('review.json'), dict(core_commit=REVIEW_CORE))
+        checkpoint = json.loads((output / 'native-timing.json').read_text())
+        self.assertEqual(checkpoint['technical_report'], technical)
+        self.assertEqual(checkpoint['original_recording_sha256'], source_hash)
+        self.assertFalse(checkpoint['media_accepted'])
+        self.assertEqual(R.STATE['stage'], 'scoped-presentation-render')
+
+    def test_presentation_failure_preserves_checkpoint_and_closed_render_facts(self):
+        output = self.root / 'inspection'
+        capture = dict(original_acceptance_sha256='e' * 64, capture={}, driver_window={})
+        media = dict(video={}, files={'screen.mp4': dict(sha256=R.SCOPED_VIDEO)})
+        def fail(*args):
+            (output / 'native-timing.json').write_bytes(encoded({'synthetic': 'closed checkpoint fixture'}))
+            (output / 'presentation').mkdir()
+            (output / 'presentation/partial.mp4').write_bytes(b'partial unit fixture')
+            R.STATE.update(stage='scoped-presentation-render', presentation_facts=dict(
+                raw_duration_ms=65579, requested_duration_ms=120000, held_frame_index=206, secret='drop'))
+            error = ValueError('Demo presentation rejected')
+            error.render_rejection = dict(phase='output-check', facts=dict(duration_ms=119000,
+                requested_duration_ms=120000, width=1920, height=1080, output_bytes=100))
+            raise error
+        with patch.object(R, 'ROOT', self.root), patch.object(R, 'hosted'), patch.dict(os.environ, ENV, clear=True), \
+                patch.object(R, 'selected_artifact', return_value={'original_run_conclusion': 'failure'}), \
+                patch.object(R, 'download', side_effect=lambda _, path: path.write_bytes(b'synthetic ZIP')), \
+                patch.object(R, 'quarantine_evidence', return_value=(capture, media, 'c' * 64)), \
+                patch.object(R, 'quarantine_samples', return_value={}), patch.object(R, 'admit_scoped_demo', side_effect=fail), \
+                self.assertRaises(ValueError):
+            R.prepare('39998753810', '1', R.SCOPED_IDENTITY['core_commit'], output, execute=True,
+                      inspect_quarantine=True, native_frames=True, admit_scoped=True, visual_review=Path('review.json'))
+        self.assertTrue((output / 'review.json').exists())
+        self.assertTrue((output / 'native-timing.json').exists())
+        self.assertFalse((output / 'presentation').exists())
+        failure = json.loads((output / 'scoped-admission-failure.json').read_text())
+        self.assertEqual(failure['stage'], 'scoped-presentation-render')
+        self.assertEqual(failure['presentation_rejection'], 'render-check')
+        self.assertEqual(failure['render_rejection']['facts']['duration_ms'], 119000)
+        self.assertNotIn('secret', failure['presentation_facts'])
+        self.assertEqual(failure['native_timing_sha256'], R.digest(output / 'native-timing.json'))
 
     def test_scoped_rejection_retains_inspection_and_fixed_native_timing_reason(self):
         output = self.root / 'inspection'

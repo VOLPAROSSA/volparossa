@@ -41,13 +41,27 @@ def command(args, *, seconds=30, capture=False):
 def video_info(path):
     value = json.loads(command(["/usr/bin/ffprobe", "-v", "error", "-select_streams", "v:0",
         "-show_entries", "stream=codec_name,width,height:format=duration", "-of", "json", str(path)], capture=True))
-    require(len(value["streams"]) == 1)
-    stream = value["streams"][0]
-    duration = float(value["format"]["duration"])
-    require(math.isfinite(duration) and 1 <= duration <= 185)
-    require(stream["codec_name"] == "h264" and all(type(stream[k]) is int
-        and 100 <= stream[k] <= 1920 for k in ("width", "height")))
-    return dict(duration_seconds=duration, codec="h264", width=stream["width"], height=stream["height"])
+    facts = {}
+    streams = value.get("streams") if type(value) is dict else None
+    if type(streams) is list:
+        facts["stream_count"] = min(len(streams), 128)
+        if len(streams) == 1 and type(streams[0]) is dict:
+            for key in ("width", "height"):
+                if type(streams[0].get(key)) is int and 0 <= streams[0][key] <= 16384:
+                    facts[key] = streams[0][key]
+    try:
+        require(len(value["streams"]) == 1)
+        stream = value["streams"][0]
+        duration = float(value["format"]["duration"])
+        if math.isfinite(duration) and 0 <= duration <= 86400:
+            facts["duration_ms"] = round(duration * 1000)
+        require(math.isfinite(duration) and 1 <= duration <= 185)
+        require(stream["codec_name"] == "h264" and all(type(stream[k]) is int
+            and 100 <= stream[k] <= 1920 for k in ("width", "height")))
+        return dict(duration_seconds=duration, codec="h264", width=stream["width"], height=stream["height"])
+    except ValueError as error:
+        error.render_rejection = dict(phase="probe-profile", facts=facts)
+        raise
 
 
 def filter_path(path):
@@ -151,8 +165,18 @@ def render_video(raw_video, stage, duration, raw_info, lines, hold_image=None):
         "-filter_complex", graph, "-map", "[out]", "-an", "-t", str(duration),
         "-c:v", "libx264", "-threads", "2", "-preset", "fast", "-crf", "20",
         "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-map_metadata", "-1", str(video)], seconds=1200)
-    info = video_info(video)
-    require(abs(info["duration_seconds"] - duration) < 0.1 and video.stat().st_size <= 128 * 1024**2)
+    try:
+        info = video_info(video)
+    except ValueError as error:
+        if not hasattr(error, "render_rejection"):
+            error.render_rejection = dict(phase="probe-json", facts={})
+        raise
+    if not (abs(info["duration_seconds"] - duration) < 0.1 and video.stat().st_size <= 128 * 1024**2):
+        error = ValueError("Demo presentation rejected")
+        error.render_rejection = dict(phase="output-check", facts=dict(duration_ms=round(info["duration_seconds"] * 1000),
+            requested_duration_ms=round(duration * 1000), width=info.get("width", 0), height=info.get("height", 0),
+            output_bytes=min(video.stat().st_size, 256 * 1024**2)))
+        raise error
     shutil.rmtree(text_dir)
     return video, info
 

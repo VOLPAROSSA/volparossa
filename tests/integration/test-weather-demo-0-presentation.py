@@ -134,6 +134,29 @@ class Presentation(unittest.TestCase):
                     P.render_video(base / "raw.mp4", base, 120, dict(duration_seconds=119.999), [], image)
                 command.assert_not_called()
 
+    def test_render_rejection_attaches_only_numeric_probe_and_output_facts(self):
+        profile = dict(streams=[dict(codec_name='h264', width=5000, height=1080)], format=dict(duration='120.0'))
+        with patch.object(P, 'command', return_value=json.dumps(profile).encode()):
+            with self.assertRaises(ValueError) as rejected:
+                P.video_info(Path('/inert/not-decoded.mp4'))
+        self.assertEqual(rejected.exception.render_rejection,
+            dict(phase='probe-profile', facts=dict(stream_count=1, width=5000, height=1080, duration_ms=120000)))
+        with tempfile.TemporaryDirectory() as name:
+            base = Path(name)
+            font = base / 'font.ttf'
+            font.write_bytes(b'inert font')
+            def rendered(args, **kwargs):
+                Path(args[-1]).write_bytes(b'synthetic movie')
+            with patch.object(P, 'FONT', font), patch.object(P, 'command', side_effect=rendered), \
+                    patch.object(P, 'video_info', return_value=dict(duration_seconds=119, width=1920, height=1080)):
+                with self.assertRaises(ValueError) as rejected:
+                    P.render_video(base / 'raw.mp4', base, 120, dict(duration_seconds=65.579), [])
+            detail = rejected.exception.render_rejection
+            self.assertEqual(detail['phase'], 'output-check')
+            self.assertEqual(detail['facts']['duration_ms'], 119000)
+            self.assertEqual(detail['facts']['requested_duration_ms'], 120000)
+            self.assertEqual(detail['facts']['width'], 1920)
+
     def test_shared_panel_remains_a_completed_run_summary(self):
         identity = dict(core_commit="a" * 40, weather_commit="b" * 40, run_id="123")
         products = dict(weather=dict(cold_peer_bytes=1234), air_quality=dict(cold_peer_bytes=5678))
