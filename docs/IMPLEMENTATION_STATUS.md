@@ -16,6 +16,22 @@ Last updated: 2026-10-15
 
 ## Current integration and active work
 
+### Weather Demo 0 final visual polish — 2026-10-23
+
+An approved presentation-only follow-up reuses the existing Weather demo worktree
+on `demo/weather-0-final-polish-20261023`, preserving its prior branch and all
+technical/65-second outputs. The new edit opens with a labelled recorded excerpt,
+marks an abbreviated loading sequence, keeps moving app footage at normal speed,
+and ends with a five-second development-preview card. New PNG/WebP thumbnails
+use genuine app imagery and a clearly conceptual topology. No Core/Android build,
+VM/network trial, original admission rerun or draft-release mutation is permitted.
+
+Sol Medium implemented the assets; one brief independent Sol High source review
+found no material integrity blocker. Six focused renderer tests and 29 workflow
+isolation tests pass. Hosted rendering, full media decode/PTS checks and visual
+inspection remain pending. Proposed publication text is prepared separately for
+approval; it does not publish or update the existing draft.
+
 ### Weather Demo 0 presentation refinement — 2026-10-23
 
 A separate presentation-only branch derives from the completed technical package
