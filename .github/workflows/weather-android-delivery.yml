@@ -3,6 +3,11 @@ run-name: Exact v6 inputs — installed Android through protected Weather peers
 
 on:
   workflow_dispatch:
+    inputs:
+      archive_inputs_only:
+        description: Verify historical archive inputs only; no runtime acceptance
+        type: boolean
+        default: false
   push:
     branches: [feature/weather-android-core]
     paths:
@@ -10,7 +15,6 @@ on:
 
 permissions:
   contents: read
-  actions: read
 
 concurrency:
   group: weather-android-delivery-${{ github.ref }}
@@ -25,6 +29,7 @@ env:
 
 jobs:
   joined:
+    name: ${{ inputs.archive_inputs_only && 'Archive inputs only (no runtime acceptance)' || 'Full runtime trial' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
@@ -55,6 +60,9 @@ jobs:
           python3 -B tests/integration/test-weather-android-inner-diagnostic.py
           python3 -B tests/integration/test-weather-android-driver-diagnostic.py
           python3 -B tests/integration/test-weather-android-tunnel.py
+          python3 -B tests/integration/test-weather-release-archive.py
+          python3 -B tests/integration/test-weather-release-archive-protocol.py
+          python3 -B tests/integration/test-weather-release-archive-wiring.py
           sh -n tests/integration/run-alpha-topology-vm.sh
           sh -n tests/integration/weather-android-delivery.sh
           record=tests/integration/weather-public-android-v6.json
@@ -68,7 +76,6 @@ jobs:
           output="$GITHUB_WORKSPACE/.cache/weather-android-delivery"
           test ! -e "$inputs"
           test ! -e "$output"
-          install -d -m 0700 "$inputs" "$inputs/provenance" "$output"
           printf 'WEATHER_INPUTS=%s\nWEATHER_OUTPUT=%s\n' "$inputs" "$output" >> "$GITHUB_ENV"
       - name: Retrieve the exact reviewed Weather source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -77,9 +84,20 @@ jobs:
           ref: 3b90442a9d5be4db73ccf83cba2028364980c3ca
           path: .cache/weather-android-source
           persist-credentials: false
-      - name: Check combined resources before acquiring toolchains
+      - name: Verify fixed historical release archive inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          umask 077
+          inputs="$WEATHER_INPUTS"
+          python3 -B scripts/fetch-weather-archive.py fetch --consumer android-v6 --output "$inputs"
+          printf 'WEATHER_ARCHIVE_INPUTS=%s\n' "$inputs" >> "$GITHUB_ENV"
+      - name: Check combined resources before acquiring toolchains
+        if: ${{ !inputs.archive_inputs_only }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "$WEATHER_OUTPUT"
           python3 -B - "$WEATHER_OUTPUT" <<'PY'
           # BEGIN COMBINED_RESOURCES
           import os, re, shutil, stat, sys
@@ -95,92 +113,11 @@ jobs:
           assert len(os.fsencode(socket)) < 104
           # END COMBINED_RESOURCES
           PY
-      - name: Retrieve only the admitted decoder and ABI artifacts
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          umask 077
-          record=tests/integration/weather-public-android-v6.json
-          for kind in decoder abi; do
-            repository=$(jq -er --arg kind "$kind" '.artifacts[$kind].repository' "$record")
-            run_id=$(jq -er --arg kind "$kind" '.artifacts[$kind].run_id' "$record")
-            artifact_id=$(jq -er --arg kind "$kind" '.artifacts[$kind].id' "$record")
-            case "$repository" in VOLPAROSSA/volparossa|VOLPAROSSA/volparossa-weather) ;; *) exit 1 ;; esac
-            case "$run_id:$artifact_id" in *[!0-9:]*|:*|*:) exit 1 ;; esac
-            timeout 60s gh api "repos/$repository/actions/runs/$run_id" \
-              --jq '{id,run_attempt,head_sha,status,conclusion}' > "$WEATHER_INPUTS/provenance/$kind-run.json"
-            timeout 60s gh api "repos/$repository/actions/artifacts/$artifact_id" \
-              --jq '{id,name,size_in_bytes,digest,expired,workflow_run}' > "$WEATHER_INPUTS/provenance/$kind-artifact.json"
-            python3 -B - "$record" "$kind" "$WEATHER_INPUTS/provenance" <<'PY'
-          # BEGIN PUBLIC_ARTIFACT_METADATA
-          import json, re, sys
-          from pathlib import Path
-          record, kind, directory = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
-          assert kind in {'decoder', 'abi'}
-          pin = json.loads(record.read_text())['artifacts'][kind]
-          run = json.loads((directory / (kind + '-run.json')).read_text())
-          artifact = json.loads((directory / (kind + '-artifact.json')).read_text())
-          assert set(pin) == {'repository', 'run_id', 'commit', 'id', 'name', 'sha256', 'bytes'}
-          assert pin['repository'] in {'VOLPAROSSA/volparossa', 'VOLPAROSSA/volparossa-weather'}
-          assert all(type(pin[key]) is int and pin[key] > 0 for key in ('run_id', 'id', 'bytes'))
-          assert pin['bytes'] <= 256 * 1024**2 and re.fullmatch(r'[0-9a-f]{40}', pin['commit'])
-          assert re.fullmatch(r'[0-9a-f]{64}', pin['sha256'])
-          assert re.fullmatch(r'[a-z0-9-]{1,160}', pin['name'])
-          assert run == dict(id=pin['run_id'], run_attempt=1, head_sha=pin['commit'], status='completed', conclusion='success')
-          assert artifact['id'] == pin['id'] and artifact['name'] == pin['name']
-          assert artifact['size_in_bytes'] == pin['bytes'] and artifact['expired'] is False
-          assert artifact['digest'] == 'sha256:' + pin['sha256']
-          assert artifact['workflow_run']['id'] == pin['run_id']
-          assert artifact['workflow_run']['head_sha'] == pin['commit']
-          # END PUBLIC_ARTIFACT_METADATA
-          PY
-            test ! -e "$WEATHER_INPUTS/$kind.zip"
-            timeout 300s gh api "repos/$repository/actions/artifacts/$artifact_id/zip" > "$WEATHER_INPUTS/$kind.zip"
-            python3 -B - "$record" "$kind" "$WEATHER_INPUTS" <<'PY'
-          # BEGIN VERIFIED_ARTIFACT_EXTRACTION
-          import hashlib, json, os, stat, sys, zipfile
-          from pathlib import Path, PurePosixPath
-          record, kind, root = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
-          assert kind in {'decoder', 'abi'}
-          pin = json.loads(record.read_text())['artifacts'][kind]
-          archive, target = root / (kind + '.zip'), root / kind
-          info = archive.lstat()
-          assert archive.resolve(strict=True) == archive and stat.S_ISREG(info.st_mode) and info.st_nlink == 1
-          assert info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o600
-          assert info.st_size == pin['bytes'] <= 256 * 1024**2
-          with archive.open('rb') as incoming:
-              assert hashlib.file_digest(incoming, 'sha256').hexdigest() == pin['sha256']
-          assert not target.exists() and not target.is_symlink()
-          with zipfile.ZipFile(archive) as source:
-              rows = source.infolist()
-              assert 0 < len(rows) <= 20000 and len({row.filename for row in rows}) == len(rows)
-              assert sum(row.file_size for row in rows) <= 512 * 1024**2
-              for row in rows:
-                  name = PurePosixPath(row.filename)
-                  assert not name.is_absolute() and '..' not in name.parts and '\\' not in row.filename
-                  assert str(name) == row.filename.rstrip('/') and str(name) != '.'
-                  assert not any(ord(c) < 32 or ord(c) == 127 for c in row.filename)
-                  assert stat.S_IFMT(row.external_attr >> 16) in (0, stat.S_IFDIR if row.is_dir() else stat.S_IFREG)
-                  assert 0 <= row.file_size <= 256 * 1024**2 and not row.flag_bits & 1
-              target.mkdir(mode=0o700)
-              for row in rows:
-                  path = target / row.filename
-                  if row.is_dir(): path.mkdir(mode=0o700, parents=True, exist_ok=True); continue
-                  path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                  with source.open(row) as incoming, path.open('xb') as outgoing:
-                      count = 0
-                      while chunk := incoming.read(65536):
-                          count += len(chunk); assert count <= row.file_size
-                          outgoing.write(chunk)
-                      assert count == row.file_size
-                  path.chmod(0o600)
-          # END VERIFIED_ARTIFACT_EXTRACTION
-          PY
-          done
       - name: Install declared tools only on this disposable hosted runner
+        if: ${{ !inputs.archive_inputs_only }}
         run: |
           set -euo pipefail
+          install -d -m 0700 "$WEATHER_OUTPUT"
           test "$GITHUB_ACTIONS" = true
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$(id -u)" != 0
@@ -194,6 +131,7 @@ jobs:
           test "$(stat -Lc '%u' /dev/kvm)" = 0
           qemu-system-x86_64 -accel help | grep -Fx kvm
       - name: Prepare exact native inputs without executing Android tools
+        if: ${{ !inputs.archive_inputs_only }}
         run: |
           set -euo pipefail
           umask 077
@@ -205,6 +143,7 @@ jobs:
           python3 -B "$weather/scripts/prepare_hosted_runtime.py" --with-npm --fetch --output "$weather/build/hosted-client-runtime"
           python3 -B "$weather/scripts/prepare_hosted_android.py" --fetch --output "$weather/build/hosted-android-inputs"
       - name: Capture and verify exact v6 inputs without executing them
+        if: ${{ !inputs.archive_inputs_only }}
         run: |
           set -euo pipefail
           umask 077
@@ -223,6 +162,7 @@ jobs:
           jq -e '.bundle_version == 6 and .runtime_executed == false' "$WEATHER_INPUTS/provenance/runtime-version.json"
           printf 'WEATHER_ARCHIVE=%s\nWEATHER_MANIFEST=%s\n' "$archive" "$manifest" >> "$GITHUB_ENV"
       - name: Grant only this disposable runner temporary KVM access
+        if: ${{ !inputs.archive_inputs_only }}
         run: |
           set -euo pipefail
           test "$RUNNER_ENVIRONMENT" = github-hosted
@@ -247,6 +187,7 @@ jobs:
           printf '%s\n' 'Temporarily grant the existing runner-private primary group KVM access; restore the exact original ACL afterward.'
           sudo -n setfacl -m "g:$group:rw" /dev/kvm
       - name: Prepare offline Android APK before any guest publication
+        if: ${{ !inputs.archive_inputs_only }}
         timeout-minutes: 60
         run: |
           set -euo pipefail
@@ -258,6 +199,7 @@ jobs:
             --kvm-output "$WEATHER_OUTPUT" \
             > "$WEATHER_INPUTS/provenance/native-preparation.json"
       - name: Build the existing exact pinned mqvpn runtime
+        if: ${{ !inputs.archive_inputs_only }}
         run: |
           set -euo pipefail
           native/volparossa-mpquic/scripts/fetch-upstream.sh --yes
@@ -269,6 +211,7 @@ jobs:
           test "$(stat -Lc '%s' "$binary")" -le 67108864
           printf 'WEATHER_MPQUIC=%s\n' "$binary" >> "$GITHUB_ENV"
       - name: Retrieve and verify the existing pinned Debian 13 image
+        if: ${{ !inputs.archive_inputs_only }}
         run: |
           set -euo pipefail
           image="$RUNNER_TEMP/debian-13-genericcloud-amd64-20260826-2582.qcow2"
@@ -282,6 +225,7 @@ jobs:
             "$image" | sha512sum --check --strict -
           printf 'WEATHER_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
       - name: Run actual Android-triggered protected delivery
+        if: ${{ !inputs.archive_inputs_only }}
         run: |
           set -euo pipefail
           python3 -B - <<'PY'
@@ -303,7 +247,7 @@ jobs:
             --weather-android-source "$GITHUB_WORKSPACE/.cache/weather-android-source" \
             --output "$WEATHER_OUTPUT" --expected-commit "$GITHUB_SHA"
       - name: Restore exact original hosted KVM ACL
-        if: always() && env.WEATHER_INPUTS != ''
+        if: ${{ !inputs.archive_inputs_only && always() && env.WEATHER_INPUTS != '' }}
         run: |
           set -euo pipefail
           test "$GITHUB_ACTIONS" = true
@@ -354,7 +298,7 @@ jobs:
           PY
           fi
       - name: Project closed early or late guest-driver failure observations
-        if: always() && env.WEATHER_OUTPUT != ''
+        if: ${{ !inputs.archive_inputs_only && always() && env.WEATHER_OUTPUT != '' }}
         run: |
           set -euo pipefail
           umask 077
@@ -363,6 +307,7 @@ jobs:
             --output "$WEATHER_OUTPUT" --core-commit "$GITHUB_SHA" \
             --weather-commit "$VOLPAROSSA_WEATHER_SOURCE_SHA"
       - name: Require joined Android observations and completed VM cleanup
+        if: ${{ !inputs.archive_inputs_only }}
         run: |
           set -euo pipefail
           umask 077
@@ -371,7 +316,7 @@ jobs:
             --core-commit "$GITHUB_SHA" --weather-commit "$VOLPAROSSA_WEATHER_SOURCE_SHA" \
             --manifest "$WEATHER_MANIFEST" --kvm-cleanup "$WEATHER_INPUTS/kvm-cleanup.json"
       - name: Upload only closed evidence and pinned-input provenance
-        if: always() && env.WEATHER_OUTPUT != ''
+        if: ${{ !inputs.archive_inputs_only && always() && env.WEATHER_OUTPUT != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: weather-android-delivery-${{ github.sha }}
@@ -390,16 +335,13 @@ jobs:
             ${{ env.WEATHER_OUTPUT }}/weather-android-vm-cleanup.json
             ${{ env.WEATHER_OUTPUT }}/weather-android-hosted-acceptance.json
             ${{ env.WEATHER_INPUTS }}/kvm-cleanup.json
-            ${{ env.WEATHER_INPUTS }}/provenance/decoder-run.json
-            ${{ env.WEATHER_INPUTS }}/provenance/decoder-artifact.json
-            ${{ env.WEATHER_INPUTS }}/provenance/abi-run.json
-            ${{ env.WEATHER_INPUTS }}/provenance/abi-artifact.json
+            ${{ env.WEATHER_INPUTS }}/provenance/archive-report.json
             ${{ env.WEATHER_INPUTS }}/provenance/capture.json
             ${{ env.WEATHER_INPUTS }}/provenance/verify-runtime.json
             ${{ env.WEATHER_INPUTS }}/provenance/runtime-version.json
             ${{ env.WEATHER_INPUTS }}/provenance/native-preparation.json
       - name: State the precise trial boundary
-        if: always()
+        if: ${{ !inputs.archive_inputs_only && always() }}
         run: |
           printf '%s\n' \
             'Acceptance requires current public acquisition, actual Android-triggered protected cold transfers, two refreshes and resume without another fetch.' \
@@ -408,3 +350,17 @@ jobs:
             'Guest publication expiry is never renewed. VM destruction, process drain and original hosted KVM ACL restoration must be established.' \
             'No raw receipts, private configuration, SSH keys, native logs, SDKs, APKs, caches or emulator userdata are exported; no physical-device or production release claim.' \
             >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain archive input verification only
+        if: success() && inputs.archive_inputs_only
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: weather-archive-inputs-android-v6-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: error
+          path: ${{ env.WEATHER_ARCHIVE_INPUTS }}/provenance/archive-report.json
+      - name: State archive input verification scope
+        if: success() && inputs.archive_inputs_only
+        run: |
+          printf '%s\n' \
+            'Historical archive input integrity only; runtime_executed: false.' \
+            'No current origin acquisition, joined delivery, mobile release or network datapath acceptance.' >> "$GITHUB_STEP_SUMMARY"

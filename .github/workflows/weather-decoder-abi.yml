@@ -3,6 +3,11 @@ run-name: Exact source-built Weather decoder in disposable Debian 13
 
 on:
   workflow_dispatch:
+    inputs:
+      archive_inputs_only:
+        description: Verify historical archive inputs only; no runtime acceptance
+        type: boolean
+        default: false
   push:
     branches: [feature/weather-decoder-abi]
     paths:
@@ -15,7 +20,6 @@ on:
 
 permissions:
   contents: read
-  actions: read
 
 concurrency:
   group: weather-decoder-abi-${{ github.ref }}
@@ -27,6 +31,7 @@ defaults:
 
 jobs:
   debian13:
+    name: ${{ inputs.archive_inputs_only && 'Archive inputs only (no runtime acceptance)' || 'Full runtime trial' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -38,10 +43,34 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --short --untracked-files=all)"
+          python3 -B tests/integration/test-weather-release-archive.py
+          python3 -B tests/integration/test-weather-release-archive-protocol.py
+          python3 -B tests/integration/test-weather-release-archive-wiring.py
           sh -n tests/integration/run-alpha-topology-vm.sh
           python3 -B tests/integration/test-weather-decoder-abi.py
           python3 -B tests/integration/test-weather-decoder-abi-wiring.py
+      - name: Verify fixed historical release archive inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          inputs="$RUNNER_TEMP/weather-decoder-archive"
+          python3 -B scripts/fetch-weather-archive.py fetch --consumer decoder-abi --output "$inputs"
+          python3 -B tests/integration/weather-decoder-abi.py verify-inputs "$inputs/decoder"
+          printf 'WEATHER_ARCHIVE_INPUTS=%s\nVOLPAROSSA_ABI_INPUTS=%s\n' "$inputs" "$inputs/decoder" >> "$GITHUB_ENV"
+      - name: Initialize private ABI runtime output
+        if: ${{ !inputs.archive_inputs_only }}
+        run: |
+          set -euo pipefail
+          umask 077
+          output="$RUNNER_TEMP/weather-decoder-abi"
+          test ! -e "$output"
+          test ! -L "$output"
+          install -d -m 0700 "$output"
+          printf 'VOLPAROSSA_ABI_OUTPUT=%s\n' "$output" >> "$GITHUB_ENV"
       - name: Install VM tools only on this disposable runner
+        if: ${{ !inputs.archive_inputs_only }}
         run: |
           set -euo pipefail
           test "$GITHUB_ACTIONS" = true
@@ -57,37 +86,9 @@ jobs:
           test "$(getent group "$kvm_gid" | awk -F: -v gid="$kvm_gid" \
             '$1 == "kvm" && $3 == gid { print $1 ":" $3 }')" = "kvm:$kvm_gid"
           qemu-system-x86_64 -accel help | grep -Fx kvm
-          output="$RUNNER_TEMP/weather-decoder-abi"
-          install -d -m 0700 "$output"
-          printf 'VOLPAROSSA_ABI_OUTPUT=%s\nVOLPAROSSA_KVM_GID=%s\n' "$output" "$kvm_gid" >> "$GITHUB_ENV"
-      - name: Retrieve only the reviewed public decoder artifact
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          umask 077
-          record=tests/helper/weather-decoder-abi-v1.json
-          test "$(jq -r '.hosted_run.id' "$record")" = 38214736539
-          gh api repos/VOLPAROSSA/volparossa-weather/actions/runs/38214736539 \
-            --jq '{id,run_attempt,head_sha,status,conclusion}' > "$RUNNER_TEMP/weather-build-run.json"
-          jq -e --arg commit "$(jq -r '.weather_commit' "$record")" \
-            '.id == 38214736539 and .run_attempt == 1 and .head_sha == $commit and
-             .status == "completed" and .conclusion == "success"' "$RUNNER_TEMP/weather-build-run.json"
-          gh api repos/VOLPAROSSA/volparossa-weather/actions/artifacts/11731895956 \
-            --jq '{id,name,size_in_bytes,digest,expired,workflow_run}' > "$RUNNER_TEMP/weather-decoder-artifact.json"
-          jq -e --arg digest "sha256:$(jq -r '.evidence.artifacts.decoder.sha256' "$record")" \
-            --arg commit "$(jq -r '.weather_commit' "$record")" \
-            '.id == 11731895956 and .name == ("hosted-decoder-unadmitted-" + $commit) and
-             .digest == $digest and .expired == false and .size_in_bytes == 14057646 and
-             .workflow_run.id == 38214736539 and .workflow_run.head_sha == $commit' \
-            "$RUNNER_TEMP/weather-decoder-artifact.json"
-          inputs="$RUNNER_TEMP/weather-decoder-inputs"
-          test ! -e "$inputs"
-          gh run download 38214736539 --repo VOLPAROSSA/volparossa-weather \
-            --name hosted-decoder-unadmitted-7d61077aa415de8f46f79384a1dd08f403c4898c --dir "$inputs"
-          python3 -B tests/integration/weather-decoder-abi.py verify-inputs "$inputs"
-          printf 'VOLPAROSSA_ABI_INPUTS=%s\n' "$inputs" >> "$GITHUB_ENV"
+          printf 'VOLPAROSSA_KVM_GID=%s\n' "$kvm_gid" >> "$GITHUB_ENV"
       - name: Fetch and verify the existing pinned Debian 13 image
+        if: ${{ !inputs.archive_inputs_only }}
         run: |
           set -euo pipefail
           manifest=tests/helper/debian13-amd64-image-v1.json
@@ -102,6 +103,7 @@ jobs:
             "$image" | sha512sum --check --strict -
           printf 'VOLPAROSSA_ABI_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
       - name: Run the exact decoder unprivileged and offline inside Debian 13
+        if: ${{ !inputs.archive_inputs_only }}
         run: |
           set -euo pipefail
           runner_uid=$(id -u)
@@ -114,7 +116,7 @@ jobs:
             --image "$VOLPAROSSA_ABI_IMAGE" --output "$VOLPAROSSA_ABI_OUTPUT" \
             --expected-commit "$GITHUB_SHA"
       - name: Retain bounded ABI results only
-        if: always() && env.VOLPAROSSA_ABI_OUTPUT != ''
+        if: ${{ !inputs.archive_inputs_only && always() && env.VOLPAROSSA_ABI_OUTPUT != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: weather-decoder-debian13-${{ github.sha }}
@@ -123,9 +125,23 @@ jobs:
           path: |
             ${{ env.VOLPAROSSA_ABI_OUTPUT }}
       - name: State the scope
-        if: always()
+        if: ${{ !inputs.archive_inputs_only && always() }}
         run: |
           printf '%s\n' \
             'ABI trial only: inspect original step results and guest report.' \
             'No weather-origin request, browser execution, model, private bundle or production decoder admission.' \
             'A passing relocated decoder probe is not joined Weather delivery.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain archive input verification only
+        if: success() && inputs.archive_inputs_only
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: weather-archive-inputs-decoder-abi-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: error
+          path: ${{ env.WEATHER_ARCHIVE_INPUTS }}/provenance/archive-report.json
+      - name: State archive input verification scope
+        if: success() && inputs.archive_inputs_only
+        run: |
+          printf '%s\n' \
+            'Historical archive input integrity only; runtime_executed: false.' \
+            'No current origin acquisition, joined delivery, mobile release or network datapath acceptance.' >> "$GITHUB_STEP_SUMMARY"

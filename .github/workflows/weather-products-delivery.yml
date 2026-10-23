@@ -3,6 +3,11 @@ run-name: Exact public v4 inputs — real two-product peer delivery and Drizz.li
 
 on:
   workflow_dispatch:
+    inputs:
+      archive_inputs_only:
+        description: Verify historical archive inputs only; no runtime acceptance
+        type: boolean
+        default: false
   push:
     branches: [feature/weather-v4-public]
     paths:
@@ -17,7 +22,6 @@ on:
 
 permissions:
   contents: read
-  actions: read
 
 concurrency:
   group: weather-products-delivery-${{ github.ref }}
@@ -29,6 +33,7 @@ defaults:
 
 jobs:
   joined:
+    name: ${{ inputs.archive_inputs_only && 'Archive inputs only (no runtime acceptance)' || 'Full runtime trial' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -47,6 +52,9 @@ jobs:
           python3 -B tests/integration/test-weather-products-delivery.py
           python3 -B tests/integration/test-weather-products-delivery-shell.py
           python3 -B tests/integration/test-weather-client-runner.py
+          python3 -B tests/integration/test-weather-release-archive.py
+          python3 -B tests/integration/test-weather-release-archive-protocol.py
+          python3 -B tests/integration/test-weather-release-archive-wiring.py
           sh -n tests/integration/run-alpha-topology-vm.sh
           sh -n tests/integration/weather-products-delivery.sh
           record=tests/integration/weather-public-drizzli-v4.json
@@ -62,7 +70,6 @@ jobs:
           output="$RUNNER_TEMP/weather-products-delivery"
           test ! -e "$inputs"
           test ! -e "$output"
-          install -d -m 0700 "$inputs" "$inputs/provenance" "$output"
           printf 'WEATHER_INPUTS=%s\nWEATHER_OUTPUT=%s\n' "$inputs" "$output" >> "$GITHUB_ENV"
       - name: Retrieve exact reviewed Weather consumer sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -78,51 +85,17 @@ jobs:
           ref: ${{ env.BROWSER_SOURCE_COMMIT }}
           path: .cache/browser-public-source
           persist-credentials: false
-      - name: Retrieve only admitted public artifacts
+      - name: Verify fixed historical release archive inputs
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           umask 077
-          record=tests/integration/weather-public-drizzli-v4.json
-          for kind in assets proof decoder abi; do
-            repository=$(jq -er --arg kind "$kind" '.artifacts[$kind].repository' "$record")
-            run_id=$(jq -er --arg kind "$kind" '.artifacts[$kind].run_id' "$record")
-            artifact_id=$(jq -er --arg kind "$kind" '.artifacts[$kind].id' "$record")
-            artifact_name=$(jq -er --arg kind "$kind" '.artifacts[$kind].name' "$record")
-            case "$repository" in VOLPAROSSA/volparossa|VOLPAROSSA/volparossa-weather) ;; *) exit 1 ;; esac
-            case "$run_id:$artifact_id" in *[!0-9:]*|:*|*:) exit 1 ;; esac
-            gh api "repos/$repository/actions/runs/$run_id" \
-              --jq '{id,run_attempt,head_sha,status,conclusion}' > "$WEATHER_INPUTS/provenance/$kind-run.json"
-            gh api "repos/$repository/actions/artifacts/$artifact_id" \
-              --jq '{id,name,size_in_bytes,digest,expired,workflow_run}' > "$WEATHER_INPUTS/provenance/$kind-artifact.json"
-            python3 -B - "$record" "$kind" "$WEATHER_INPUTS/provenance" <<'PY'
-          # BEGIN PUBLIC_ARTIFACT_METADATA
-          import json, re, sys
-          from pathlib import Path
-          record, kind, directory = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
-          pin = json.loads(record.read_text())["artifacts"][kind]
-          run = json.loads((directory / (kind + "-run.json")).read_text())
-          artifact = json.loads((directory / (kind + "-artifact.json")).read_text())
-          assert set(pin) == {"repository", "run_id", "commit", "id", "name", "sha256", "bytes"}
-          assert pin["repository"] in {"VOLPAROSSA/volparossa", "VOLPAROSSA/volparossa-weather"}
-          assert all(type(pin[key]) is int and pin[key] > 0 for key in ("run_id", "id", "bytes"))
-          assert pin["bytes"] <= 256 * 1024**2 and re.fullmatch(r"[0-9a-f]{40}", pin["commit"])
-          assert re.fullmatch(r"[0-9a-f]{64}", pin["sha256"])
-          assert re.fullmatch(r"[a-z0-9-]{1,160}", pin["name"])
-          assert run == dict(id=pin["run_id"], run_attempt=1, head_sha=pin["commit"],
-                             status="completed", conclusion="success")
-          assert artifact["id"] == pin["id"] and artifact["name"] == pin["name"]
-          assert artifact["size_in_bytes"] == pin["bytes"] and artifact["expired"] is False
-          assert artifact["digest"] == "sha256:" + pin["sha256"]
-          assert artifact["workflow_run"]["id"] == pin["run_id"]
-          assert artifact["workflow_run"]["head_sha"] == pin["commit"]
-          # END PUBLIC_ARTIFACT_METADATA
-          PY
-            test ! -e "$WEATHER_INPUTS/$kind"
-            gh run download "$run_id" --repo "$repository" --name "$artifact_name" --dir "$WEATHER_INPUTS/$kind"
-          done
+          inputs="$WEATHER_INPUTS"
+          python3 -B scripts/fetch-weather-archive.py fetch --consumer drizzli-v4 --output "$inputs"
+          printf 'WEATHER_ARCHIVE_INPUTS=%s\n' "$inputs" >> "$GITHUB_ENV"
       - name: Capture and fully verify v4 without executing its runtimes
+        if: ${{ !inputs.archive_inputs_only }}
         run: |
           set -euo pipefail
           umask 077
@@ -141,8 +114,10 @@ jobs:
           jq -e '.bundle_version == 4 and .runtime_executed == false' "$WEATHER_INPUTS/provenance/runtime-version.json"
           printf 'WEATHER_ARCHIVE=%s\nWEATHER_MANIFEST=%s\n' "$archive" "$manifest" >> "$GITHUB_ENV"
       - name: Install tools only on this disposable hosted runner
+        if: ${{ !inputs.archive_inputs_only }}
         run: |
           set -euo pipefail
+          install -d -m 0700 "$WEATHER_OUTPUT"
           test "$GITHUB_ACTIONS" = true
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$(id -u)" != 0
@@ -159,6 +134,7 @@ jobs:
           qemu-system-x86_64 -accel help | grep -Fx kvm
           printf 'WEATHER_KVM_GID=%s\n' "$kvm_gid" >> "$GITHUB_ENV"
       - name: Build the existing exact pinned mqvpn runtime
+        if: ${{ !inputs.archive_inputs_only }}
         run: |
           set -euo pipefail
           native/volparossa-mpquic/scripts/fetch-upstream.sh --yes
@@ -170,6 +146,7 @@ jobs:
           test "$(stat -Lc '%s' "$binary")" -le 67108864
           printf 'WEATHER_MPQUIC=%s\n' "$binary" >> "$GITHUB_ENV"
       - name: Retrieve and verify the existing pinned Debian 13 image
+        if: ${{ !inputs.archive_inputs_only }}
         run: |
           set -euo pipefail
           image="$RUNNER_TEMP/debian-13-genericcloud-amd64-20260826-2582.qcow2"
@@ -182,6 +159,7 @@ jobs:
             "$image" | sha512sum --check --strict -
           printf 'WEATHER_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
       - name: Run actual protected cold peer delivery and both Drizz.li products
+        if: ${{ !inputs.archive_inputs_only }}
         run: |
           set -euo pipefail
           python3 -B - <<'PY'
@@ -209,6 +187,7 @@ jobs:
             --weather-client-bundle "$WEATHER_ARCHIVE" --weather-client-manifest-sha256 "$WEATHER_MANIFEST" \
             --output "$WEATHER_OUTPUT" --expected-commit "$GITHUB_SHA"
       - name: Require current aggregate and joined two-product evidence
+        if: ${{ !inputs.archive_inputs_only }}
         run: |
           set -euo pipefail
           python3 -B tests/integration/content-provider-smoke.py report \
@@ -268,7 +247,7 @@ jobs:
           # END JOINED_EVIDENCE
           PY
       - name: Retain bounded original evidence, never the input bundle or profiles
-        if: always() && env.WEATHER_OUTPUT != ''
+        if: ${{ !inputs.archive_inputs_only && always() && env.WEATHER_OUTPUT != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: weather-products-delivery-${{ github.sha }}
@@ -278,10 +257,24 @@ jobs:
             ${{ env.WEATHER_OUTPUT }}
             ${{ env.WEATHER_INPUTS }}/provenance/*.json
       - name: State exact scope and failure visibility
-        if: always()
+        if: ${{ !inputs.archive_inputs_only && always() }}
         run: |
           printf '%s\n' \
             'Inspect original reports: success requires real acquisition, two protected cold transfers, and exact initial/refresh UI data.' \
             'Origin HTTPS acquisition is outside the overlay; publications keep independent runs, native times and expiry.' \
             'No private legacy bundle, decoder-admission-only success, browser-triggered cold-fetch claim, mobile proof or production release authority.' \
             'Failure, including source rate limiting, is retained without automatic retry.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain archive input verification only
+        if: success() && inputs.archive_inputs_only
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: weather-archive-inputs-drizzli-v4-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: error
+          path: ${{ env.WEATHER_ARCHIVE_INPUTS }}/provenance/archive-report.json
+      - name: State archive input verification scope
+        if: success() && inputs.archive_inputs_only
+        run: |
+          printf '%s\n' \
+            'Historical archive input integrity only; runtime_executed: false.' \
+            'No current origin acquisition, joined delivery, mobile release or network datapath acceptance.' >> "$GITHUB_STEP_SUMMARY"

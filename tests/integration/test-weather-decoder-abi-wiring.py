@@ -160,6 +160,18 @@ python3() { printf '%s\n' "$*"; return 0; }
         self.assertEqual(failed.returncode, 23, failed.stderr)
 
 
+class AbiArchiveWiring(unittest.TestCase):
+    def test_fixed_archive_directory_still_passes_original_input_verifier(self):
+        workflow = (HERE.parents[1] / '.github/workflows/weather-decoder-abi.yml').read_text()
+        section = workflow.split('- name: Verify fixed historical release archive inputs', 1)[1].split('      - name: ', 1)[0]
+        self.assertIn('scripts/fetch-weather-archive.py fetch --consumer decoder-abi --output "$inputs"', section)
+        self.assertIn('weather-decoder-abi.py verify-inputs "$inputs/decoder"', section)
+        self.assertLess(section.index('fetch-weather-archive.py fetch'), section.index('weather-decoder-abi.py verify-inputs'))
+        self.assertIn('"$inputs/decoder" >> "$GITHUB_ENV"', section)
+        self.assertNotIn('/actions/', workflow)
+        self.assertNotIn('gh run download', workflow)
+
+
 class AbiFinalization(unittest.TestCase):
     def run_finalizer(self, *, status=0, report=True, fault=None):
         temporary = tempfile.TemporaryDirectory(prefix="decoder-finalize-")

@@ -40,17 +40,19 @@ class AndroidHostedWiring(unittest.TestCase):
     def test_only_explicit_or_exact_workflow_branch_bounded_hosted_execution(self):
         self.assertIn('name: Weather Android protected core delivery\n', SOURCE)
         self.assertEqual(SOURCE.split('on:\n', 1)[1].split('\npermissions:', 1)[0].strip(),
-            'workflow_dispatch:\n  push:\n    branches: [feature/weather-android-core]\n    paths:\n'
+            'workflow_dispatch:\n    inputs:\n      archive_inputs_only:\n'
+            '        description: Verify historical archive inputs only; no runtime acceptance\n'
+            '        type: boolean\n        default: false\n  push:\n    branches: [feature/weather-android-core]\n    paths:\n'
             '      - .github/workflows/weather-android-delivery.yml')
         for item in ('    runs-on: ubuntu-24.04', '    timeout-minutes: 150', '  cancel-in-progress: false',
-                '  contents: read', '  actions: read'):
+                '  contents: read'):
             self.assertIn(item, SOURCE)
         for forbidden in ('secrets.', 'continue-on-error:', '--retry', 'pull_request:', 'schedule:'):
             self.assertNotIn(forbidden, SOURCE)
 
     def test_all_actions_and_weather_source_are_exact(self):
         actions = re.findall(r'uses: ([^\s]+)', SOURCE)
-        self.assertEqual(len(actions), 3)
+        self.assertEqual(len(actions), 4)
         self.assertTrue(all(re.fullmatch(r'actions/(?:checkout|upload-artifact)@[a-f0-9]{40}', item) for item in actions))
         self.assertEqual(SOURCE.count('persist-credentials: false'), 2)
         self.assertIn('  VOLPAROSSA_WEATHER_SOURCE_SHA: ' + WEATHER, SOURCE)
@@ -110,86 +112,14 @@ class AndroidHostedWiring(unittest.TestCase):
             with self.assertRaises(AssertionError): self.resources(long, 10 * gib, 32 * gib)
         self.assertIn('(4 + 4 + 2) * 1024**3', embedded('FINAL_SOURCE_PREFLIGHT'))
 
-    @staticmethod
-    def metadata():
-        pin = dict(repository='VOLPAROSSA/volparossa-weather', run_id=101, commit='a' * 40,
-            id=202, name='admitted-decoder', sha256='b' * 64, bytes=1234)
-        run = dict(id=101, run_attempt=1, head_sha='a' * 40, status='completed', conclusion='success')
-        artifact = dict(id=202, name=pin['name'], size_in_bytes=1234, digest='sha256:' + 'b' * 64,
-            expired=False, workflow_run=dict(id=101, head_sha='a' * 40))
-        return pin, run, artifact
-
-    def check_metadata(self, pin, run, artifact):
-        with tempfile.TemporaryDirectory(prefix='wa-input-') as temporary:
-            root = Path(temporary)
-            for name, value in (('record.json', dict(artifacts=dict(decoder=pin))), ('decoder-run.json', run),
-                    ('decoder-artifact.json', artifact)):
-                (root / name).write_text(json.dumps(value))
-            with patch.object(sys, 'argv', ['guard', str(root / 'record.json'), 'decoder', str(root)]):
-                exec(compile(embedded('PUBLIC_ARTIFACT_METADATA'), 'PUBLIC_ARTIFACT_METADATA', 'exec'), {})
-
-    def test_actual_metadata_guard_rejects_replaced_or_unfinished_artifacts(self):
-        pin, run, artifact = self.metadata(); self.check_metadata(pin, run, artifact)
-        for section, key, value in (
-                ('run', 'run_attempt', 2), ('run', 'head_sha', 'c' * 40), ('run', 'id', 999),
-                ('run', 'status', 'in_progress'), ('run', 'conclusion', 'failure'),
-                ('artifact', 'id', 999), ('artifact', 'name', 'latest'), ('artifact', 'size_in_bytes', 1235),
-                ('artifact', 'digest', 'sha256:' + 'c' * 64), ('artifact', 'expired', True),
-                ('pin', 'repository', 'unknown/repository'), ('pin', 'bytes', 256 * 1024**2 + 1),
-                ('pin', 'name', '../outside'), ('pin', 'run_id', True)):
-            values = dict(zip(('pin', 'run', 'artifact'), copy.deepcopy((pin, run, artifact))))
-            values[section][key] = value
-            with self.subTest(section=section, key=key), self.assertRaises(AssertionError): self.check_metadata(**values)
-        for key, value in (('id', 999), ('head_sha', 'c' * 40)):
-            changed = copy.deepcopy(artifact); changed['workflow_run'][key] = value
-            with self.assertRaises(AssertionError): self.check_metadata(pin, run, changed)
-
-    def extract(self, root, members, *, wrong_hash=False):
-        archive = root / 'decoder.zip'
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', UserWarning)
-            with zipfile.ZipFile(archive, 'w') as stream:
-                for name, raw, mode in members:
-                    info = zipfile.ZipInfo(name); info.create_system = 3; info.external_attr = mode << 16
-                    stream.writestr(info, raw)
-        archive.chmod(0o600)
-        raw = archive.read_bytes()
-        pin = dict(bytes=len(raw), sha256='f' * 64 if wrong_hash else hashlib.sha256(raw).hexdigest())
-        record = root / 'record.json'; record.write_text(json.dumps(dict(artifacts=dict(decoder=pin))))
-        with patch.object(sys, 'argv', ['extract', str(record), 'decoder', str(root)]):
-            exec(compile(embedded('VERIFIED_ARTIFACT_EXTRACTION'), 'VERIFIED_ARTIFACT_EXTRACTION', 'exec'), {})
-
-    def test_artifact_bytes_are_checked_before_safe_private_extraction(self):
-        with tempfile.TemporaryDirectory(prefix='wa-zip-') as temporary:
-            root = Path(temporary)
-            self.extract(root, [('decoder/grib_ls', b'non-executable fixture', stat.S_IFREG | 0o755)])
-            target = root / 'decoder/decoder/grib_ls'
-            self.assertEqual(target.read_bytes(), b'non-executable fixture')
-            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
-        for members, mismatch in (
-                ([('../outside', b'x', stat.S_IFREG | 0o600)], False),
-                ([('/absolute', b'x', stat.S_IFREG | 0o600)], False),
-                ([('x//y', b'x', stat.S_IFREG | 0o600)], False),
-                ([('x\\y', b'x', stat.S_IFREG | 0o600)], False),
-                ([('link', b'/etc/passwd', stat.S_IFLNK | 0o777)], False),
-                ([('pipe', b'', stat.S_IFIFO | 0o600)], False),
-                ([('same', b'1', stat.S_IFREG | 0o600), ('same', b'2', stat.S_IFREG | 0o600)], False),
-                ([('okay', b'x', stat.S_IFREG | 0o600)], True)):
-            with self.subTest(names=[name for name, _, _ in members], mismatch=mismatch), \
-                    tempfile.TemporaryDirectory(prefix='wa-zip-') as temporary:
-                root = Path(temporary)
-                with self.assertRaises(AssertionError): self.extract(root, members, wrong_hash=mismatch)
-                self.assertFalse((root / 'decoder').exists())
-
-    def test_only_two_admitted_artifacts_download_by_exact_id(self):
-        section = block('Retrieve only the admitted decoder and ABI artifacts')
-        self.assertIn('for kind in decoder abi; do', section)
-        self.assertLess(section.index('# END PUBLIC_ARTIFACT_METADATA'), section.index('/artifacts/$artifact_id/zip'))
-        self.assertIn('timeout 300s gh api "repos/$repository/actions/artifacts/$artifact_id/zip"', section)
-        self.assertNotIn('gh run download', section)
-        self.assertNotIn('assets', section)
-        self.assertNotIn('proof', section)
-        self.assertNotIn('historical', section)
+    def test_only_fixed_android_role_mapping_downloads_verified_inputs(self):
+        section = block('Verify fixed historical release archive inputs')
+        self.assertIn('scripts/fetch-weather-archive.py fetch --consumer android-v6 --output "$inputs"', section)
+        self.assertIn('python3 -B tests/integration/test-weather-release-archive-protocol.py', SOURCE)
+        self.assertNotIn('/actions/', SOURCE)
+        self.assertNotIn('gh run download', SOURCE)
+        self.assertLess(SOURCE.index('- name: Verify fixed historical release archive inputs'),
+                        SOURCE.index('- name: Check combined resources before acquiring toolchains'))
 
     def test_capture_uses_exact_five_paths_and_cannot_authorize_itself(self):
         section = block('Capture and verify exact v6 inputs without executing them')
@@ -333,7 +263,7 @@ getfacl() { printf 'original inert ACL\\n'; }
 
     def test_final_acceptance_requires_restoration_and_never_writes_its_own_success_stamp(self):
         cleanup = block('Restore exact original hosted KVM ACL')
-        self.assertIn("if: always() && env.WEATHER_INPUTS != ''", cleanup)
+        self.assertIn("if: ${{ !inputs.archive_inputs_only && always() && env.WEATHER_INPUTS != '' }}", cleanup)
         self.assertIn('sudo -n setfacl --restore="$WEATHER_INPUTS/kvm.acl"', cleanup)
         self.assertIn('getfacl --absolute-names /dev/kvm > "$WEATHER_INPUTS/kvm-restored.acl"', cleanup)
         self.assertIn('cmp "$WEATHER_INPUTS/kvm.acl" "$WEATHER_INPUTS/kvm-restored.acl"', cleanup)
@@ -342,7 +272,7 @@ getfacl() { printf 'original inert ACL\\n'; }
         self.assertIn('content-provider-smoke.py report', section)
         self.assertIn('weather-android-owner.py accept --output "$WEATHER_OUTPUT"', section)
         self.assertIn('--manifest "$WEATHER_MANIFEST" --kvm-cleanup "$WEATHER_INPUTS/kvm-cleanup.json"', section)
-        self.assertNotIn('if:', section)  # Default success() requires VM return0 and successful ACL restoration.
+        self.assertIn('if: ${{ !inputs.archive_inputs_only }}', section)  # Implicit success() still requires VM and ACL restoration.
         self.assertNotIn('> "$WEATHER_OUTPUT/weather-android-hosted-acceptance.json"', section)
 
     def test_artifact_upload_is_closed_not_a_directory_or_glob(self):
@@ -361,7 +291,7 @@ getfacl() { printf 'original inert ACL\\n'; }
             '${{ env.WEATHER_OUTPUT }}/weather-android-hosted-acceptance.json',
             '${{ env.WEATHER_INPUTS }}/kvm-cleanup.json',
             *['${{ env.WEATHER_INPUTS }}/provenance/' + name + '.json' for name in (
-                'decoder-run', 'decoder-artifact', 'abi-run', 'abi-artifact', 'capture',
+                'archive-report', 'capture',
                 'verify-runtime', 'runtime-version', 'native-preparation')]])
         for forbidden in ('*', '.log', '.acl', '.zip', '.tar', 'private', 'sdk', 'apk', 'proof/', 'run_directory', 'config'):
             self.assertNotIn(forbidden, '\n'.join(paths).lower())
@@ -379,7 +309,7 @@ getfacl() { printf 'original inert ACL\\n'; }
     def test_early_or_late_driver_projection_is_bounded_local_only_after_cleanup(self):
         name = 'Project closed early or late guest-driver failure observations'
         section = block(name)
-        self.assertIn("if: always() && env.WEATHER_OUTPUT != ''", section)
+        self.assertIn("if: ${{ !inputs.archive_inputs_only && always() && env.WEATHER_OUTPUT != '' }}", section)
         self.assertIn('timeout --signal=TERM --kill-after=1s 10s python3 -B '
             'tests/integration/weather-android-driver-diagnostic.py export', section)
         self.assertIn('--output "$WEATHER_OUTPUT" --core-commit "$GITHUB_SHA"', section)
@@ -401,8 +331,7 @@ getfacl() { printf 'original inert ACL\\n'; }
             self.assertNotIn(raw, block('Upload only closed evidence and pinned-input provenance'))
 
     def test_embedded_python_and_every_run_block_are_syntactically_valid(self):
-        for name in ('COMBINED_RESOURCES', 'PUBLIC_ARTIFACT_METADATA', 'VERIFIED_ARTIFACT_EXTRACTION',
-                'FINAL_SOURCE_PREFLIGHT', 'ACL_CLEANUP'):
+        for name in ('COMBINED_RESOURCES', 'FINAL_SOURCE_PREFLIGHT', 'ACL_CLEANUP'):
             compile(embedded(name), name, 'exec')
         scripts = re.findall(r'^        run: \|\n((?:(?:^          .*|^)$\n?)*)', SOURCE, re.M)
         self.assertGreaterEqual(len(scripts), 12)

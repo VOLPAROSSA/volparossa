@@ -40,14 +40,14 @@ class HostedOvermorrowWiring(unittest.TestCase):
         self.assertIn("    timeout-minutes: 120", SOURCE)
         self.assertIn("  cancel-in-progress: false", SOURCE)
         self.assertIn("contents: read", SOURCE)
-        self.assertIn("actions: read", SOURCE)
+        self.assertNotIn("actions: read", SOURCE)
         self.assertNotIn("secrets.", SOURCE)
         self.assertNotIn("continue-on-error:", SOURCE)
         self.assertNotIn("--retry", SOURCE)
 
     def test_all_actions_pinned_and_sources_use_admission_not_mutable_branches(self):
         actions = re.findall(r"uses: ([^\s]+)", SOURCE)
-        self.assertEqual(len(actions), 5)
+        self.assertEqual(len(actions), 6)
         self.assertTrue(all(re.fullmatch(r"actions/(?:checkout|upload-artifact)@[0-9a-f]{40}", value)
                             for value in actions))
         self.assertEqual(SOURCE.count("persist-credentials: false"), 4)
@@ -112,56 +112,15 @@ class HostedOvermorrowWiring(unittest.TestCase):
     || { printf '%s\\n' 'source worktree must be clean' >&2; exit 64; }'''
         self.assertEqual(runner.count(guard), 1)
 
-    def metadata(self):
-        pin = dict(repository="VOLPAROSSA/volparossa-weather", run_id=101, commit="a" * 40,
-                   id=202, name="hosted-overmorrow-assets-unadmitted-" + "a" * 40,
-                   sha256="b" * 64, bytes=1234)
-        run = dict(id=101, run_attempt=1, head_sha="a" * 40, status="completed", conclusion="success")
-        artifact = dict(id=202, name=pin["name"], size_in_bytes=1234, digest="sha256:" + "b" * 64,
-                        expired=False, workflow_run=dict(id=101, head_sha="a" * 40))
-        return pin, run, artifact
-
-    def check_metadata(self, pin, run, artifact):
-        with tempfile.TemporaryDirectory(prefix="weather-hosted-wiring-") as temporary:
-            root = Path(temporary)
-            for path, value in (("record.json", dict(artifacts=dict(assets=pin))),
-                                ("assets-run.json", run), ("assets-artifact.json", artifact)):
-                (root / path).write_text(json.dumps(value))
-            return subprocess.run([sys.executable, "-B", "-", str(root / "record.json"), "assets", str(root)],
-                                  input=embedded("PUBLIC_ARTIFACT_METADATA"), text=True,
-                                  capture_output=True, timeout=5)
-
-    def test_actual_metadata_guard_rejects_stale_or_different_artifacts(self):
-        pin, run, artifact = self.metadata()
-        self.assertEqual(self.check_metadata(pin, run, artifact).returncode, 0)
-        for section, key, value in (
-            ("run", "run_attempt", 2), ("run", "head_sha", "c" * 40),
-            ("run", "status", "in_progress"), ("run", "conclusion", "failure"),
-            ("run", "id", 999), ("artifact", "id", 999),
-            ("artifact", "name", "latest-assets"), ("artifact", "size_in_bytes", 1235),
-            ("artifact", "digest", "sha256:" + "c" * 64), ("artifact", "expired", True),
-            ("pin", "repository", "untrusted/volparossa-weather"),
-            ("pin", "bytes", 256 * 1024**2 + 1), ("pin", "name", "../outside"),
-        ):
-            with self.subTest(section=section, key=key):
-                values = dict(zip(("pin", "run", "artifact"), copy.deepcopy((pin, run, artifact))))
-                values[section][key] = value
-                self.assertNotEqual(self.check_metadata(**values).returncode, 0)
-        for key, value in (("id", 999), ("head_sha", "c" * 40)):
-            changed = copy.deepcopy(artifact)
-            changed["workflow_run"][key] = value
-            self.assertNotEqual(self.check_metadata(pin, run, changed).returncode, 0)
-
-    def test_four_public_inputs_are_verified_before_download_and_capture(self):
-        self.assertIn("for kind in assets proof decoder abi; do", SOURCE)
-        self.assertIn('gh api "repos/$repository/actions/runs/$run_id"', SOURCE)
-        self.assertIn('gh api "repos/$repository/actions/artifacts/$artifact_id"', SOURCE)
-        self.assertLess(SOURCE.index("# END PUBLIC_ARTIFACT_METADATA"), SOURCE.index('gh run download "$run_id"'))
-        self.assertIn('--repo "$repository" --name "$artifact_name" --dir "$WEATHER_INPUTS/$kind"', SOURCE)
-        self.assertIn('test ! -e "$WEATHER_INPUTS/$kind"', SOURCE)
-        self.assertIn("weather-public-overmorrow-v5.json", SOURCE)
-        self.assertNotIn(".codex/", SOURCE)
-        self.assertNotIn(".git/ci-evidence", SOURCE)
+    def test_fixed_archive_consumer_replaces_actions_without_fallback(self):
+        self.assertIn('scripts/fetch-weather-archive.py fetch --consumer overmorrow-v5 --output "$inputs"', SOURCE)
+        self.assertIn('python3 -B tests/integration/test-weather-release-archive-protocol.py', SOURCE)
+        self.assertNotIn('/actions/', SOURCE)
+        self.assertNotIn('gh run download', SOURCE)
+        self.assertLess(SOURCE.index('scripts/fetch-weather-archive.py fetch'), SOURCE.index('- name: Capture and fully verify'))
+        self.assertIn('weather-public-overmorrow-v5.json', SOURCE)
+        self.assertNotIn('.codex/', SOURCE)
+        self.assertNotIn('.git/ci-evidence', SOURCE)
 
     def test_capture_is_inert_and_eight_path_contract_is_exact(self):
         block = SOURCE.split("- name: Capture and fully verify v5", 1)[1].split("- name: Install tools", 1)[0]
@@ -348,7 +307,7 @@ checker["B"]["public_overmorrow_admission"]()
 
     def test_inputs_profiles_and_unbounded_source_artifacts_are_not_exported(self):
         export = SOURCE.split("- name: Retain bounded original evidence", 1)[1].split("- name: State exact scope", 1)[0]
-        self.assertIn("if: always() && env.WEATHER_OUTPUT != ''", export)
+        self.assertIn("if: ${{ !inputs.archive_inputs_only && always() && env.WEATHER_OUTPUT != '' }}", export)
         self.assertIn("${{ env.WEATHER_OUTPUT }}", export)
         self.assertIn("${{ env.WEATHER_INPUTS }}/provenance/*.json", export)
         for forbidden in ("weather-client-v5.tar", ".cache/weather-public-source", ".cache/weather-historical-source", ".cache/browser-public-source",
@@ -359,13 +318,13 @@ checker["B"]["public_overmorrow_admission"]()
 
     def test_embedded_shell_and_python_are_valid_without_execution(self):
         blocks = re.findall(r"(?m)^        run: \|\n((?:          .*\n|\n)+)", SOURCE)
-        self.assertEqual(len(blocks), 9)
+        self.assertEqual(len(blocks), 10)
         for i, block in enumerate(blocks):
             with self.subTest(block=i):
                 result = subprocess.run(["bash", "-n"], input=textwrap.dedent(block),
                                         text=True, capture_output=True, timeout=5)
                 self.assertEqual(result.returncode, 0, result.stderr)
-        for name in ("PUBLIC_ARTIFACT_METADATA", "FINAL_SOURCE_PREFLIGHT", "JOINED_EVIDENCE"):
+        for name in ("FINAL_SOURCE_PREFLIGHT", "JOINED_EVIDENCE"):
             compile(embedded(name), name, "exec")
 
 
