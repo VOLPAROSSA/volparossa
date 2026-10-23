@@ -198,6 +198,26 @@ class ShortPresentation(unittest.TestCase):
         for left, right in zip(S.PHASES, S.PHASES[1:]):
             self.assertEqual(left[1], right[0])
 
+    def test_caption_line_lengths_reading_speed_and_actual_duration(self):
+        duration = 65.566667
+        vtt, transcript = S.captions(duration)
+        self.assertIn('00:01:05.567', vtt)
+        self.assertIn('00:01:05.567', transcript)
+        def seconds(timestamp):
+            hours, minutes, rest = timestamp.split(':')
+            return int(hours) * 3600 + int(minutes) * 60 + float(rest)
+        cues = [block.splitlines() for block in vtt.split('\n\n') if ' --> ' in block]
+        self.assertEqual(len(cues), 7)
+        for interval, *text in cues:
+            start, stop = (seconds(t) for t in interval.split(' --> '))
+            self.assertLessEqual(len(text), 2)
+            self.assertTrue(all(len(line) <= 48 for line in text))
+            self.assertLessEqual(len(' '.join(text)) / (stop - start), 20)
+            self.assertNotIn('..', ' '.join(text))
+        self.assertIn('Descriptive captions for a silent recording', vtt)
+        with self.assertRaises(ValueError):
+            S.captions(60)
+
 
 if __name__ == '__main__':
     unittest.main()

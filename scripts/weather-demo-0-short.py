@@ -136,15 +136,47 @@ def extract_selected(archive_path, output):
     return manifest
 
 
-def captions():
-    lines = ['WEBVTT', '', 'NOTE Explanatory summaries, not exact action timestamps.', '']
+def captions(duration=DURATION):
+    require(type(duration) in (int, float) and abs(duration - DURATION) < 0.1,
+        'caption duration must match the full original recording')
+    cues = (
+        (0, 8, ('VOLPAROSSA Weather / Overmorrow.',
+                'Android emulator; Core runs externally.')),
+        (8, 18, ('The app opens and loads.',
+                 'Reports verify delivery through peers.')),
+        (18, 28.536533, ('Temperature and PM2.5 forecast products.',
+                        'Reports verify delivery to the app.')),
+        (28.536533, 31.266356, ('Forecast values and validity times.',)),
+        (31.266356, 45.965578, ('Refreshing the forecast.',
+                              'Reports verify reuse of cached products.')),
+        (45.965578, 58.799733, ('Another refresh begins.',
+                              'Reports verify both cached refreshes.')),
+        (58.799733, duration, ('HOME, then a brief return animation.',
+                              'Reports verify background/resume.')),
+    )
+    lines = ['WEBVTT', '',
+        'NOTE Descriptive captions for a silent recording; no spoken audio is implied.',
+        'Cue boundaries are explanatory, not exact OS input timestamps.',
+        'Pixels show app activity; peer/cache and lifecycle conclusions come from reports.',
+        'Second-refresh completion and a settled resume view are not established by pixels.', '']
     transcript = ['VOLPAROSSA Weather / Overmorrow. Android emulator; EXTERNAL Debian Core.',
+        'Descriptive transcript of a silent recorded demonstration; no spoken audio is implied.',
         'Full original recording, normal speed, resampled to 30 fps. No held ending.',
+        'Source: admitted artifact 12529072030, run 40017379373 attempt 1, verifier '
+        + SOURCE + '. Original runtime: run 39998753810 attempt 1, Core '
+        '6bc0abdb524b79e5244f9381d2d8d45a9100b41d, Weather '
+        '85e9eda9bb6105866db2510758e76c9930fdde91. Original recording SHA-256: ' + RAW_SHA + '.',
         'The original runtime failed its duration admission gate. Separate scoped media admission passed.']
-    for start, stop, title, label, body, note in PHASES:
-        text = '. '.join((title, label + ': ' + ' '.join(body), ' '.join(note)))
-        lines.extend([f"{PACKAGE['timestamp'](start)} --> {PACKAGE['timestamp'](stop)}", text, ''])
-        transcript.append(text)
+    for start, stop, text in cues:
+        interval = f"{PACKAGE['timestamp'](start)} --> {PACKAGE['timestamp'](stop)}"
+        lines.extend([interval, *text, ''])
+        transcript.append(interval + '\n' + ' '.join(text))
+    transcript.append('Evidence boundaries: pixels show temperature/PM2.5, source validity, '
+        'first-refresh completion, HOME and a brief app-return animation. The acceptance reports '
+        'verify two cache-backed refreshes per product and background/resume lifecycle behavior. '
+        'Second-refresh completion is supported in reports, not pixels. No settled resume frame '
+        'is shown. Complete wind, precipitation and PM10 columns are not claimed; pixels alone '
+        'do not prove networking. Forecasts are not observations; native units and validity matter.')
     transcript.append('Data: ECMWF and NOAA. App: Overmorrow. Font: DejaVu. See NOTICES.md. '
         'Core runs outside Android; this is not a standalone phone release or physical-device acceptance. '
         'This presentation grants no publication or production authority.')
@@ -241,7 +273,7 @@ def render(output, original_manifest):
     STATE['stage'] = 'font-after-render'
     check_font(font, original_manifest['font_sha256'])
     STATE['stage'] = 'export'
-    vtt, transcript = captions()
+    vtt, transcript = captions(video_info['duration_seconds'])
     (output / 'captions.vtt').write_text(vtt, encoding='utf-8')
     (output / 'transcript.txt').write_text(transcript, encoding='utf-8')
     (output / 'NOTICES.md').write_bytes((DOCS / 'NOTICES.md').read_bytes())
