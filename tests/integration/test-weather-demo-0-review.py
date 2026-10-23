@@ -911,12 +911,17 @@ class Review(unittest.TestCase):
                         scoped_captions=lambda *args: ('scoped captions', 'scoped transcript'))
         font = self.root / 'synthetic-font.ttf'
         font.write_bytes(b'synthetic font fixture; never actual render evidence')
+        font.chmod(0o600)
+        def executable_only(path):
+            self.assertEqual(path, '/usr/bin/ffmpeg')
+            return str(path)
         with patch.object(R, 'SCOPED_VIDEO', source_hash), patch.object(R, 'hosted'), \
                 patch.object(R, 'committed_visual_review', return_value=(encoded(review), review)), \
-                patch.object(R.runpy, 'run_path', side_effect=module), patch.object(R, 'tool', side_effect=str), \
+                patch.object(R.runpy, 'run_path', side_effect=module), patch.object(R, 'tool', side_effect=executable_only) as tools, \
                 patch.object(R, 'FONT', font), patch.object(R, 'command', side_effect=preview):
             record = R.admit_scoped_demo(output, R.SCOPED_IDENTITY, capture, media, artifact, rendered,
                                          Path('review.json'), dict(core_commit=REVIEW_CORE))
+        self.assertEqual([call.args[0] for call in tools.call_args_list], ['/usr/bin/ffmpeg', '/usr/bin/ffmpeg'])
         self.assertTrue(record['scoped_demo_admitted'])
         checkpoint = json.loads((output / 'native-timing.json').read_text())
         self.assertEqual(checkpoint['technical_report'], technical)

@@ -832,6 +832,7 @@ def admit_scoped_demo(output, identity, capture, media, artifact, rendered, visu
     for index, frame in frames.items():
         shutil.copyfile(output / frame['file'], stage / 'screenshots' / f'frame-{index:03d}.png')
     STATE['stage'] = 'scoped-presentation-provenance'
+    require(FONT.is_file() and not FONT.is_symlink(), 'fixed distro font required')
     files = {p.relative_to(stage).as_posix(): dict(bytes=p.stat().st_size, sha256=digest(p))
              for p in sorted(stage.rglob('*')) if p.is_file()}
     presentation = dict(schema=1, kind='weather-demo-scoped-presentation', identity=identity,
@@ -849,7 +850,7 @@ def admit_scoped_demo(output, identity, capture, media, artifact, rendered, visu
         pixel_scope=sorted(SCOPED_CLAIMS), report_only_scope=['second-refresh-completion', 'background-resume-lifecycle-and-mounted-tables'],
         ffmpeg_version=command([tool('/usr/bin/ffmpeg'), '-version'], maximum=16384, seconds=10,
             reject_stderr=True).decode('ascii').splitlines()[0],
-        font_sha256=digest(Path(tool(str(FONT)))),
+        font_sha256=digest(FONT),
         publication_authorized=False, production_authority=False, standalone_mobile_core=False,
         final_presentation_visual_review_required=True, includes_installable_binaries=False, files=files)
     STATE['stage'] = 'scoped-presentation-export'

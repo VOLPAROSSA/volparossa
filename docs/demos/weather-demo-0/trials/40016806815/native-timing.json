@@ -1,0 +1,144 @@
+{
+  "identity": {
+    "core_commit": "6bc0abdb524b79e5244f9381d2d8d45a9100b41d",
+    "run_attempt": "1",
+    "run_id": "39998753810",
+    "weather_commit": "85e9eda9bb6105866db2510758e76c9930fdde91"
+  },
+  "kind": "weather-demo-validated-native-timing",
+  "media_accepted": false,
+  "original_recording_sha256": "bca54a8f677238f26daff6921bb3af0c661e1b39d0aada5ce3f161fda380d5c8",
+  "original_run_conclusion": "failure",
+  "production_authority": false,
+  "publication_authorized": false,
+  "review_execution": {
+    "core_commit": "5526bd102418bc0356f846f2e22c86246263458f",
+    "run_attempt": "1",
+    "run_id": "40016806815"
+  },
+  "schema": 1,
+  "scoped_demo_admitted": false,
+  "technical_coherence_passed": true,
+  "technical_report": {
+    "clock_domain": "relative encoded video PTS and guest elapsed clock; no host UTC calibration",
+    "decoded_frame_count": 490,
+    "derived_format_bound_seconds": {
+      "denominator": 9000000,
+      "numerator": 1009
+    },
+    "derived_prior_timeline_bound_seconds": {
+      "denominator": 549755813888000000,
+      "numerator": 549755860763
+    },
+    "derived_pts_error_bound_seconds": {
+      "denominator": 90000,
+      "numerator": 1
+    },
+    "exact_os_action_timestamps_claimed": false,
+    "ffprobe_version": "6.1.1-3ubuntu5",
+    "format_duration_seconds": {
+      "denominator": 1000000,
+      "numerator": 65578911
+    },
+    "frame_timeline_sha256": "11c3dfb55beeeac9c316da5f66d6db55f028cab2b129b18360b9cc3daacd875b",
+    "host_wall_clock_coverage_claimed": false,
+    "kind": "weather-demo-native-timing-coherence",
+    "max_prior_timeline_error_seconds": {
+      "denominator": 791648371998720000,
+      "numerator": 351843723647
+    },
+    "max_relative_pts_elapsed_error_seconds": {
+      "denominator": 180000,
+      "numerator": 1
+    },
+    "media_accepted": false,
+    "metadata_association_method": "mp4_sample_tables",
+    "metadata_relative_arrays_agree_exactly": true,
+    "metadata_tracks": [
+      {
+        "frame_count": 490,
+        "kind": "legacy",
+        "native_packet_count": 0,
+        "packet_bytes": 3940,
+        "packet_duration": null,
+        "packet_offset": 2764660,
+        "packet_pts": null,
+        "packet_sha256": "67bba52ccd02cc22f33fd563a159b0eb609c312b5b69d18578ef4172e1c00016",
+        "raw_sample_dts": 0,
+        "raw_sample_duration": 0,
+        "stream_index": 1,
+        "summary_duration_basis": "format-inferred",
+        "summary_duration_ticks": 5902102,
+        "time_base": {
+          "denominator": 90000,
+          "numerator": 1
+        },
+        "track_id": 2
+      },
+      {
+        "frame_count": 490,
+        "kind": "v2",
+        "native_packet_count": 0,
+        "packet_bytes": 3952,
+        "packet_duration": null,
+        "packet_offset": 2760708,
+        "packet_pts": null,
+        "packet_sha256": "5ef0b1aa36e77761ee18f6103d263db08722277f10414705e8c6bbdfe12d5aa6",
+        "raw_sample_dts": 0,
+        "raw_sample_duration": 0,
+        "stream_index": 2,
+        "summary_duration_basis": "format-inferred",
+        "summary_duration_ticks": 5902102,
+        "time_base": {
+          "denominator": 90000,
+          "numerator": 1
+        },
+        "track_id": 3
+      }
+    ],
+    "movie_duration_seconds": {
+      "denominator": 10000,
+      "numerator": 655789
+    },
+    "movie_quantum_seconds": {
+      "denominator": 10000,
+      "numerator": 1
+    },
+    "native_metadata_packet_count": 0,
+    "native_packet_count": 490,
+    "packet_end_seconds": {
+      "denominator": 45000,
+      "numerator": 2951051
+    },
+    "prior_timeline_bound_basis": "two six-decimal timestamp roundings plus three bounded binary64 ulps",
+    "prior_timeline_frame_count": 490,
+    "production_authority": false,
+    "pts_bound_basis": "two half-tick nearest-integer endpoint quantizations",
+    "publication_authorized": false,
+    "relative_elapsed_span_seconds": {
+      "denominator": 200000,
+      "numerator": 13105361
+    },
+    "relative_pts_span_seconds": {
+      "denominator": 2500,
+      "numerator": 163817
+    },
+    "schema": 1,
+    "source_video_bytes": 3097781,
+    "source_video_sha256": "bca54a8f677238f26daff6921bb3af0c661e1b39d0aada5ce3f161fda380d5c8",
+    "stream_duration_seconds": {
+      "denominator": 45000,
+      "numerator": 2951051
+    },
+    "technical_coherence_passed": true,
+    "video_packet_count": 490,
+    "video_stream_index": 0,
+    "video_time_base": {
+      "denominator": 90000,
+      "numerator": 1
+    },
+    "visual_acceptance_claimed": false
+  },
+  "timing_validator_sha256": "f211b0f4c6e6b2ab0d89d2d6bf6746675269ae534844370e0cfa068a2417e5d1",
+  "visual_acceptance_claimed": false
+}

@@ -1,0 +1,21 @@
+{
+  "artifact": {
+    "digest": "sha256:984faebc9d23a4aa7930e1d04593b547511c51ef1813e00c1fd4e2910d41cdc5",
+    "id": 12529061487,
+    "name": "weather-demo-review-failure-39998753810-1-5526bd102418bc0356f846f2e22c86246263458f",
+    "size_in_bytes": 40597
+  },
+  "attempt": "1",
+  "conclusion": "failure",
+  "core_commit": "5526bd102418bc0356f846f2e22c86246263458f",
+  "failure_stage": "scoped-presentation-provenance",
+  "inspection_preserved": true,
+  "new_runtime_executed": false,
+  "original_run_id": "39998753810",
+  "presentation_rejection": "trusted-file",
+  "run_id": "40016806815",
+  "schema": 1,
+  "specific_font_owner_or_resolution_failure": "not_observed",
+  "technical_coherence_passed": true,
+  "video_asset_exported": false
+}
