@@ -20,6 +20,16 @@ Last updated: 2026-10-23
 
 ### Weather artifact preservation (F09) — 2026-10-23
 
+The follow-up publication is conditionally authorized, but remains blocked by
+redistribution review of the unchanged binary asset set. No release or tag has
+been created. The separately prepared
+[archive consumer candidate](development/WEATHER_ARCHIVE_CONTINUITY.md) uses an
+explicit blocked admission with no invented release/asset IDs. Its workflow
+hooks and protocol checks are preparation, not evidence of hosted availability.
+Keep that candidate draft until rights clearance, immutable publication/readback,
+independent review and actual hosted input checks are complete. Preservation
+PR345's full Quality run `40021914629` passes; it remains unmerged.
+
 The seven original artifacts referenced by the decoder ABI and Weather v4/v5/v6
 admissions have been preserved locally before their first expiry on
 2026-10-26 at 06:56:04 UTC. All 319,070,901 ZIP bytes match their original

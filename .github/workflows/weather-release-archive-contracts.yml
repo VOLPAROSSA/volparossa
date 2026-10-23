@@ -1,0 +1,58 @@
+name: Weather archive source contracts
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/weather-*.yml
+      - scripts/fetch-weather-archive.py
+      - scripts/preserve-weather-artifacts.py
+      - tests/helper/weather-*.json
+      - tests/integration/weather-client-bundle.py
+      - tests/integration/weather-public-*.json
+      - tests/integration/test-weather-release-archive*.py
+      - tests/integration/test-weather-*wiring.py
+      - tests/integration/test-weather-client-bundle.py
+      - tests/integration/test-weather-android-bundle.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weather-archive-contracts-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  contracts:
+    name: Inert archive protocol and consumer contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check archive authority, protocol and extraction fixtures
+        run: |
+          python3 -B tests/integration/test-weather-artifact-preservation.py
+          python3 -B tests/integration/test-weather-release-archive.py
+          python3 -B tests/integration/test-weather-release-archive-protocol.py
+          python3 -B tests/integration/test-weather-release-archive-wiring.py
+          python3 -B scripts/fetch-weather-archive.py validate
+      - name: Check existing source, bundle and consumer boundaries
+        run: |
+          python3 -B tests/integration/test-weather-decoder-abi.py
+          python3 -B tests/integration/test-weather-decoder-abi-wiring.py
+          python3 -B tests/integration/test-weather-products-hosted-wiring.py
+          python3 -B tests/integration/test-weather-overmorrow-hosted-wiring.py
+          python3 -B tests/integration/test-weather-android-hosted-wiring.py
+          python3 -B tests/integration/test-weather-client-bundle.py
+          python3 -B tests/integration/test-weather-android-bundle.py
+      - name: State the verification scope
+        run: |
+          printf '%s\n' \
+            'Source and synthetic protocol fixture checks only.' \
+            'No actual archive availability, runtime execution or product acceptance is established.' \
+            >> "$GITHUB_STEP_SUMMARY"

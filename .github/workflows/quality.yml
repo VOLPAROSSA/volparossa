@@ -272,6 +272,9 @@ jobs:
 
       - name: Check Weather artifact preservation without network access
         run: python3 -B tests/integration/test-weather-artifact-preservation.py
+      - run: python3 -B tests/integration/test-weather-release-archive.py
+      - run: python3 -B tests/integration/test-weather-release-archive-protocol.py
+      - run: python3 -B tests/integration/test-weather-release-archive-wiring.py
 
       - name: Check formatting and shell sources
         run: |

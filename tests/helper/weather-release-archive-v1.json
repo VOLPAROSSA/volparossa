@@ -1,0 +1,163 @@
+{
+  "assets": {
+    "abi": {
+      "admission_path": null,
+      "bytes": 22790,
+      "id": null,
+      "name": "15622809d9aa7c46eb6b80ac76f9a6252966d25478dfeddd4262238846f1b586.zip",
+      "origin": {
+        "artifact_id": 11732188075,
+        "artifact_name": "weather-decoder-debian13-be2977ac6d1d520caea29c96df759ea2d90c943c",
+        "commit": "be2977ac6d1d520caea29c96df759ea2d90c943c",
+        "repository": "VOLPAROSSA/volparossa",
+        "run_attempt": 1,
+        "run_id": 38216142236
+      },
+      "sha256": "15622809d9aa7c46eb6b80ac76f9a6252966d25478dfeddd4262238846f1b586"
+    },
+    "decoder": {
+      "admission_path": null,
+      "bytes": 14057646,
+      "id": null,
+      "name": "e9a8a6b3530ae5fadf19d4f9bf0271013f8d1fdcd4ac3745723644b5d9372197.zip",
+      "origin": {
+        "artifact_id": 11731895956,
+        "artifact_name": "hosted-decoder-unadmitted-7d61077aa415de8f46f79384a1dd08f403c4898c",
+        "commit": "7d61077aa415de8f46f79384a1dd08f403c4898c",
+        "repository": "VOLPAROSSA/volparossa-weather",
+        "run_attempt": 1,
+        "run_id": 38214736539
+      },
+      "sha256": "e9a8a6b3530ae5fadf19d4f9bf0271013f8d1fdcd4ac3745723644b5d9372197"
+    },
+    "decoder-provenance": {
+      "admission_path": null,
+      "bytes": 35901,
+      "id": null,
+      "name": "f858cf8819b01a5f6d0cfdca5d4399854ed55f353e865cd21411f800694d0b0b.zip",
+      "origin": {
+        "artifact_id": 11732430773,
+        "artifact_name": "hosted-input-provenance-7d61077aa415de8f46f79384a1dd08f403c4898c",
+        "commit": "7d61077aa415de8f46f79384a1dd08f403c4898c",
+        "repository": "VOLPAROSSA/volparossa-weather",
+        "run_attempt": 1,
+        "run_id": 38214736539
+      },
+      "sha256": "f858cf8819b01a5f6d0cfdca5d4399854ed55f353e865cd21411f800694d0b0b"
+    },
+    "drizzli-assets": {
+      "admission_path": null,
+      "bytes": 147157200,
+      "id": null,
+      "name": "4b4f65e2f21f4f1cf61f94d60245f57e438e83d5b1716049b72fa21618fcf599.zip",
+      "origin": {
+        "artifact_id": 11735448641,
+        "artifact_name": "hosted-weather-client-assets-unadmitted-397693c40fba9e457e8f51ebe77b4295f3a9d228",
+        "commit": "397693c40fba9e457e8f51ebe77b4295f3a9d228",
+        "repository": "VOLPAROSSA/volparossa-weather",
+        "run_attempt": 1,
+        "run_id": 38224151028
+      },
+      "sha256": "4b4f65e2f21f4f1cf61f94d60245f57e438e83d5b1716049b72fa21618fcf599"
+    },
+    "drizzli-proof": {
+      "admission_path": null,
+      "bytes": 125048,
+      "id": null,
+      "name": "26b9b84b45c22b48cb0e84688d33bd06a65bd0c54885e35c8263a294413918d5.zip",
+      "origin": {
+        "artifact_id": 11735263794,
+        "artifact_name": "hosted-weather-client-proof-397693c40fba9e457e8f51ebe77b4295f3a9d228",
+        "commit": "397693c40fba9e457e8f51ebe77b4295f3a9d228",
+        "repository": "VOLPAROSSA/volparossa-weather",
+        "run_attempt": 1,
+        "run_id": 38224151028
+      },
+      "sha256": "26b9b84b45c22b48cb0e84688d33bd06a65bd0c54885e35c8263a294413918d5"
+    },
+    "overmorrow-assets": {
+      "admission_path": null,
+      "bytes": 157533229,
+      "id": null,
+      "name": "985e5677ceb52f11a15794ebc02b7d698bcefa85edc64888c6c728a6775af7ba.zip",
+      "origin": {
+        "artifact_id": 11741150955,
+        "artifact_name": "hosted-overmorrow-assets-unadmitted-06672c54a8394e8ab850730a56631808d752c7db",
+        "commit": "06672c54a8394e8ab850730a56631808d752c7db",
+        "repository": "VOLPAROSSA/volparossa-weather",
+        "run_attempt": 1,
+        "run_id": 38235992570
+      },
+      "sha256": "985e5677ceb52f11a15794ebc02b7d698bcefa85edc64888c6c728a6775af7ba"
+    },
+    "overmorrow-proof": {
+      "admission_path": null,
+      "bytes": 139087,
+      "id": null,
+      "name": "ea7f622dada77f4f67d86c1f071cceaaf5479434d88bfaeeffcff98ce02f3e0b.zip",
+      "origin": {
+        "artifact_id": 11741385637,
+        "artifact_name": "hosted-overmorrow-proof-06672c54a8394e8ab850730a56631808d752c7db",
+        "commit": "06672c54a8394e8ab850730a56631808d752c7db",
+        "repository": "VOLPAROSSA/volparossa-weather",
+        "run_attempt": 1,
+        "run_id": 38235992570
+      },
+      "sha256": "ea7f622dada77f4f67d86c1f071cceaaf5479434d88bfaeeffcff98ce02f3e0b"
+    },
+    "preservation-manifest": {
+      "admission_path": null,
+      "bytes": 15987,
+      "id": null,
+      "name": "manifest.json",
+      "origin": null,
+      "sha256": "0201e6187e1aa0e0d50dbd1537449cd8b39c59615c97d3cb1eeef4c84b1a6795"
+    },
+    "snapshot-android-v6": {
+      "admission_path": "tests/integration/weather-public-android-v6.json",
+      "bytes": 7576,
+      "id": null,
+      "name": "weather-public-android-v6.json",
+      "origin": null,
+      "sha256": "e29df84c31447d32727526e926ba96c0c9975326c972069ef619de8faf6efd4d"
+    },
+    "snapshot-decoder-abi": {
+      "admission_path": "tests/helper/weather-decoder-abi-v1.json",
+      "bytes": 3748,
+      "id": null,
+      "name": "weather-decoder-abi-v1.json",
+      "origin": null,
+      "sha256": "d3e676fd67f9c2930dc4d65524b37fa6d53868c3ba1b425ca5719190a3aeed29"
+    },
+    "snapshot-drizzli-v4": {
+      "admission_path": "tests/integration/weather-public-drizzli-v4.json",
+      "bytes": 43151,
+      "id": null,
+      "name": "weather-public-drizzli-v4.json",
+      "origin": null,
+      "sha256": "2011e08002cf756683e8d3c195c6116957005cd65f5b0ab51a28499673bae5d3"
+    },
+    "snapshot-overmorrow-v5": {
+      "admission_path": "tests/integration/weather-public-overmorrow-v5.json",
+      "bytes": 40443,
+      "id": null,
+      "name": "weather-public-overmorrow-v5.json",
+      "origin": null,
+      "sha256": "ae5737106fa68f9da706e360181b5b46066a867d7b970341e4d2b31bfa4e5a6e"
+    }
+  },
+  "blocked_reason": "redistribution-review-incomplete",
+  "historical_core_commit": "89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1",
+  "kind": "volparossa-weather-release-archive-admission",
+  "release": {
+    "id": null,
+    "repository": "VOLPAROSSA/volparossa",
+    "repository_id": null,
+    "tag": "evidence/weather-inputs-2026-10-23",
+    "tag_object": null,
+    "target_commit": "89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1"
+  },
+  "schema": 1,
+  "scope": "historical-weather-ci-inputs-only",
+  "state": "blocked"
+}
