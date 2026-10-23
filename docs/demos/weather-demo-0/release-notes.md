@@ -19,6 +19,12 @@ failed. The new [scoped media admission](media-admission.md) separately verifies
 the unchanged clip, native timing and committed visual witnesses; it does not
 rewrite that result or claim a new runtime execution.
 
+Final media admission/export: [40017379373](https://github.com/VOLPAROSSA/volparossa/actions/runs/40017379373),
+verifier/presentation source `5c7c5470cef31c37d0cb4f961f221529bda080fb`.
+Video: 119.966667 seconds, 1920x1080 H.264, with no narration audio.
+Independent review inspected the actual 90-second layout, captions, source
+witnesses and hash bindings; full encoded playback remains for user review.
+
 ## Evidence and assets
 
 The review-ready bundle's `release-manifest.json` identifies the final verifier

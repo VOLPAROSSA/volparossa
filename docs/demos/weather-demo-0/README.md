@@ -35,6 +35,27 @@ New media must be bound to the new run's own final acceptance. The separate
 [scoped media contract](media-admission.md) preserves the failed original workflow
 conclusion while checking coherent source media and explicitly reviewed scenes.
 
+
+## Recorded result and review package
+
+[Final media run 40017379373](https://github.com/VOLPAROSSA/volparossa/actions/runs/40017379373)
+succeeded on verifier/presentation source `5c7c5470cef31c37d0cb4f961f221529bda080fb`.
+The `demo/weather-0-video-20261023` branch is frozen at this revision. The separate
+release-draft branch adds final documentation/evidence without changing executable
+sources. The video is 119.966667 seconds, H.264, 1920x1080; SHA-256
+`e4f72aa6d8236c56ef9d638d5f40563d7865b5411b6d3e7510dd43cee42c4d40`.
+See the [exact new records](trials/40017379373/) and
+[independent final review](trials/40017379373/final-presentation-review.json).
+
+The complete CI evidence ZIP has 546 verified files and remains a separate release
+asset; the source/review bundle includes selected screenshots and closed records.
+Inspection-record paths describe that original ZIP, not a promise that every one
+of its 490 PNG frames is duplicated in the smaller bundle. `SHA256SUMS` describes
+exactly the files included in the bundle. Load `captions.vtt` alongside the video;
+the video has explanatory text and no narration audio. Full encoded playback
+remains for user review. Forecast freshness is historical at the original capture,
+not a current-weather claim when replayed later.
+
 ## Reproduce on a disposable hosted runner
 
 Requirements: repository Actions execution rights, the exact pushed demo source,

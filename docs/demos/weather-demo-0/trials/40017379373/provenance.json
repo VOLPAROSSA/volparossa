@@ -1,0 +1,22 @@
+{
+  "all_546_manifest_files_verified": true,
+  "artifact": {
+    "digest": "sha256:a6f012f993f6ed17fc2566c1fe3b84b20d9abc9e5c2c60c0f7b5896117922b06",
+    "id": 12529072030,
+    "name": "weather-demo-scoped-demo-39998753810-1-5c7c5470cef31c37d0cb4f961f221529bda080fb",
+    "size_in_bytes": 94136114
+  },
+  "new_runtime_executed": false,
+  "original_run_conclusion_preserved": "failure",
+  "run": {
+    "conclusion": "success",
+    "head_sha": "5c7c5470cef31c37d0cb4f961f221529bda080fb",
+    "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/40017379373",
+    "id": 40017379373,
+    "run_attempt": 1,
+    "run_started_at": "2026-10-23T20:12:12Z",
+    "status": "completed",
+    "updated_at": "2026-10-23T20:14:07Z"
+  },
+  "schema": 1
+}

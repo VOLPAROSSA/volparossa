@@ -31,7 +31,7 @@ run `38717988016` remain immutable historical evidence.
   changing product contracts, required guards, deadlines or original acceptance.
 - [x] Execute new real-product delivery, recording and joined cleanup in the
   approved disposable hosted environment; retain any failed trial unchanged.
-- [ ] Inspect actual media and assemble the approximately two-minute video,
+- [x] Inspect actual media and assemble the approximately two-minute video,
   captions, source archives and provenance for user review.
 - [ ] Publish `weather-demo-0.1.0` only after separate explicit user approval.
 
@@ -82,8 +82,19 @@ The old host-wall duration proxy is not a calibrated guest-video coverage test.
 Its failure remains preserved. A separate narrowly scoped admission validates
 actual metadata-track samples, integer relative video timing and committed scene
 witnesses; it does not extend driver deadlines or relabel the failed original run.
-See [the contract](demos/weather-demo-0/media-admission.md). Final hosted admission,
-rendered-layout review and review-ready package remain pending at this source.
+See [the contract](demos/weather-demo-0/media-admission.md). Separate hosted admission and video export
+[40017379373](https://github.com/VOLPAROSSA/volparossa/actions/runs/40017379373)
+on verifier source `5c7c5470cef31c37d0cb4f961f221529bda080fb` passed. Its exact
+archive is artifact `12529072030`, SHA-256
+`a6f012f993f6ed17fc2566c1fe3b84b20d9abc9e5c2c60c0f7b5896117922b06`.
+All 546 exported-file manifest bindings were verified after download. The edited
+H.264 video is 119.966667 seconds at 1920x1080; its full raw clip is unchanged,
+with native frame 206 held and labelled afterward. Independent High reviewed
+the actual 90-second layout, captions, source witnesses and hash bindings. Full
+encoded playback is left for user review; no publication is authorized. Original
+run failure and all failed admission attempts remain under `trials/`. The source
+branch `demo/weather-0-video-20261023` is frozen at the verified source; the
+separate release-draft branch adds only documentation/evidence.
 
 
 [Demo runbook](demos/weather-demo-0/README.md) records exact baseline, boundaries

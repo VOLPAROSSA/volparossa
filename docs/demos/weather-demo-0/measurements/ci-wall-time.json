@@ -1,0 +1,239 @@
+{
+  "baseline_reused_run_not_counted": "38717988016",
+  "kind": "weather-demo-ci-wall-time",
+  "not_billed_runner_time": true,
+  "runs": [
+    {
+      "conclusion": "failure",
+      "elapsed_seconds": 2515,
+      "head_sha": "3b1e625f1cbb961379fd8bf49564e951067950cf",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/39864237681",
+      "id": 39864237681,
+      "run_attempt": 1,
+      "run_started_at": "2026-10-22T22:20:35Z",
+      "status": "completed",
+      "updated_at": "2026-10-22T23:02:30Z"
+    },
+    {
+      "conclusion": "success",
+      "elapsed_seconds": 27,
+      "head_sha": "dddd50244ae07727005385ae80cf04ef5d0416ca",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/39869565948",
+      "id": 39869565948,
+      "run_attempt": 1,
+      "run_started_at": "2026-10-22T23:06:16Z",
+      "status": "completed",
+      "updated_at": "2026-10-22T23:06:43Z"
+    },
+    {
+      "conclusion": "success",
+      "elapsed_seconds": 65,
+      "head_sha": "0eaff79d0bd5ca7c785f5e20ea4512fd9ca92d39",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/39870350875",
+      "id": 39870350875,
+      "run_attempt": 1,
+      "run_started_at": "2026-10-22T23:13:24Z",
+      "status": "completed",
+      "updated_at": "2026-10-22T23:14:29Z"
+    },
+    {
+      "conclusion": "failure",
+      "elapsed_seconds": 655,
+      "head_sha": "0eaff79d0bd5ca7c785f5e20ea4512fd9ca92d39",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/39870500157",
+      "id": 39870500157,
+      "run_attempt": 1,
+      "run_started_at": "2026-10-22T23:14:46Z",
+      "status": "completed",
+      "updated_at": "2026-10-22T23:25:41Z"
+    },
+    {
+      "conclusion": "failure",
+      "elapsed_seconds": 2195,
+      "head_sha": "0eaff79d0bd5ca7c785f5e20ea4512fd9ca92d39",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/39870500157",
+      "id": 39870500157,
+      "run_attempt": 2,
+      "run_started_at": "2026-10-22T23:27:02Z",
+      "status": "completed",
+      "updated_at": "2026-10-23T00:03:37Z"
+    },
+    {
+      "conclusion": "failure",
+      "elapsed_seconds": 62,
+      "head_sha": "1d000e684508dc120575a1e447db65dda12255df",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/39874201029",
+      "id": 39874201029,
+      "run_attempt": 1,
+      "run_started_at": "2026-10-22T23:48:41Z",
+      "status": "completed",
+      "updated_at": "2026-10-22T23:49:43Z"
+    },
+    {
+      "conclusion": "failure",
+      "elapsed_seconds": 319,
+      "head_sha": "2425798036875d02aba0252f69acbf176fb67d36",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/39874591752",
+      "id": 39874591752,
+      "run_attempt": 1,
+      "run_started_at": "2026-10-22T23:52:25Z",
+      "status": "completed",
+      "updated_at": "2026-10-22T23:57:44Z"
+    },
+    {
+      "conclusion": "success",
+      "elapsed_seconds": 74,
+      "head_sha": "f396fd36ac81ec98eac8d17c45b54e6cb419ba60",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/39875572392",
+      "id": 39875572392,
+      "run_attempt": 1,
+      "run_started_at": "2026-10-23T00:01:51Z",
+      "status": "completed",
+      "updated_at": "2026-10-23T00:03:05Z"
+    },
+    {
+      "conclusion": "failure",
+      "elapsed_seconds": 45,
+      "head_sha": "1b834d729234a361635fc0aa2ba43a9228f9ec69",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/39877357053",
+      "id": 39877357053,
+      "run_attempt": 1,
+      "run_started_at": "2026-10-23T00:18:45Z",
+      "status": "completed",
+      "updated_at": "2026-10-23T00:19:30Z"
+    },
+    {
+      "conclusion": "success",
+      "elapsed_seconds": 213,
+      "head_sha": "6bc0abdb524b79e5244f9381d2d8d45a9100b41d",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/39878061508",
+      "id": 39878061508,
+      "run_attempt": 1,
+      "run_started_at": "2026-10-23T00:25:49Z",
+      "status": "completed",
+      "updated_at": "2026-10-23T00:29:22Z"
+    },
+    {
+      "conclusion": "failure",
+      "elapsed_seconds": 2093,
+      "head_sha": "6bc0abdb524b79e5244f9381d2d8d45a9100b41d",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/39998753810",
+      "id": 39998753810,
+      "run_attempt": 1,
+      "run_started_at": "2026-10-23T17:53:14Z",
+      "status": "completed",
+      "updated_at": "2026-10-23T18:28:07Z"
+    },
+    {
+      "conclusion": "success",
+      "elapsed_seconds": 71,
+      "head_sha": "abce16a640a18d2d8f41cd5720056e695fad9305",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/40002878865",
+      "id": 40002878865,
+      "run_attempt": 1,
+      "run_started_at": "2026-10-23T18:23:24Z",
+      "status": "completed",
+      "updated_at": "2026-10-23T18:24:35Z"
+    },
+    {
+      "conclusion": "failure",
+      "elapsed_seconds": 59,
+      "head_sha": "3bb03969fcb4bac61de0d1b3413409b1a50f484d",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/40006021627",
+      "id": 40006021627,
+      "run_attempt": 1,
+      "run_started_at": "2026-10-23T18:46:13Z",
+      "status": "completed",
+      "updated_at": "2026-10-23T18:47:12Z"
+    },
+    {
+      "conclusion": "failure",
+      "elapsed_seconds": 63,
+      "head_sha": "904a6ad04e85c8f4775c17c34f3ab76966025e7a",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/40006615568",
+      "id": 40006615568,
+      "run_attempt": 1,
+      "run_started_at": "2026-10-23T18:50:35Z",
+      "status": "completed",
+      "updated_at": "2026-10-23T18:51:38Z"
+    },
+    {
+      "conclusion": "success",
+      "elapsed_seconds": 62,
+      "head_sha": "253d48d73e16323f8266948a26e2bb368ec438bf",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/40008276524",
+      "id": 40008276524,
+      "run_attempt": 1,
+      "run_started_at": "2026-10-23T19:02:49Z",
+      "status": "completed",
+      "updated_at": "2026-10-23T19:03:51Z"
+    },
+    {
+      "conclusion": "failure",
+      "elapsed_seconds": 69,
+      "head_sha": "827c5568c9dc6d891c6837416a5d91adf3833483",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/40012166360",
+      "id": 40012166360,
+      "run_attempt": 1,
+      "run_started_at": "2026-10-23T19:32:07Z",
+      "status": "completed",
+      "updated_at": "2026-10-23T19:33:16Z"
+    },
+    {
+      "conclusion": "failure",
+      "elapsed_seconds": 55,
+      "head_sha": "b3bf581df6679d4e8ba09573666af10f036ceed1",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/40012815166",
+      "id": 40012815166,
+      "run_attempt": 1,
+      "run_started_at": "2026-10-23T19:37:08Z",
+      "status": "completed",
+      "updated_at": "2026-10-23T19:38:03Z"
+    },
+    {
+      "conclusion": "failure",
+      "elapsed_seconds": 56,
+      "head_sha": "de560614f66cc4e698b49999a51794ec5cb3a30b",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/40014033949",
+      "id": 40014033949,
+      "run_attempt": 1,
+      "run_started_at": "2026-10-23T19:46:20Z",
+      "status": "completed",
+      "updated_at": "2026-10-23T19:47:16Z"
+    },
+    {
+      "conclusion": "failure",
+      "elapsed_seconds": 121,
+      "head_sha": "6f5195e6fe0fea4ea9d6b0506132a0aef9a626aa",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/40015497296",
+      "id": 40015497296,
+      "run_attempt": 1,
+      "run_started_at": "2026-10-23T19:57:45Z",
+      "status": "completed",
+      "updated_at": "2026-10-23T19:59:46Z"
+    },
+    {
+      "conclusion": "failure",
+      "elapsed_seconds": 108,
+      "head_sha": "5526bd102418bc0356f846f2e22c86246263458f",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/40016806815",
+      "id": 40016806815,
+      "run_attempt": 1,
+      "run_started_at": "2026-10-23T20:07:47Z",
+      "status": "completed",
+      "updated_at": "2026-10-23T20:09:35Z"
+    },
+    {
+      "conclusion": "success",
+      "elapsed_seconds": 115,
+      "head_sha": "5c7c5470cef31c37d0cb4f961f221529bda080fb",
+      "html_url": "https://github.com/VOLPAROSSA/volparossa/actions/runs/40017379373",
+      "id": 40017379373,
+      "run_attempt": 1,
+      "run_started_at": "2026-10-23T20:12:12Z",
+      "status": "completed",
+      "updated_at": "2026-10-23T20:14:07Z"
+    }
+  ],
+  "schema": 1
+}

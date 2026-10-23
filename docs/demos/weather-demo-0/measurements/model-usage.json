@@ -1,0 +1,197 @@
+{
+  "billing_estimate": false,
+  "kind": "weather-demo-recorded-model-usage",
+  "notes": [
+    "Recorded cumulative-counter deltas only; duplicate snapshots add zero.",
+    "Reasoning output is a subset of output and is not added again.",
+    "Cache writes are reported separately; no subscription-cost inference.",
+    "CI machine time and human review are not model tokens.",
+    "Missing counter fields in a selected delta or its baseline use legacy zero defaults; these zeros and derived uncached input are not confirmed measurements.",
+    "Selected-window deltas can include unselected work when no intermediate counter snapshot separates the work.",
+    "This projection is not exact task consumption or billed consumption; missing records can cause overcount as well as undercount.",
+    "Unlisted threads and later work are outside this incomplete snapshot."
+  ],
+  "root_turn_ids": [
+    "01a165a6-a9c8-7b03-9913-a9cadefe5401",
+    "01a169e4-75e7-7350-be6b-0e4ed4131aed",
+    "01a169eb-084f-7ec0-b97d-dd37f6747bc6"
+  ],
+  "schema": 1,
+  "snapshot_incomplete": true,
+  "threads": [
+    {
+      "counter_availability": {
+        "cache_write_input_tokens": "observed_in_delta_snapshots",
+        "cached_input_tokens": "observed_in_delta_snapshots",
+        "input_tokens": "observed_in_delta_snapshots",
+        "output_tokens": "observed_in_delta_snapshots",
+        "reasoning_output_tokens": "observed_in_delta_snapshots"
+      },
+      "latest_usage_timestamp": "2026-10-23T20:17:08.208Z",
+      "missing_counter_fields": [],
+      "models": [
+        {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 124636032,
+          "effort": "high",
+          "input_tokens": 126711850,
+          "model": "gpt-6.1-sol",
+          "output_tokens": 390091,
+          "reasoning_output_tokens": 256020,
+          "uncached_input_tokens": 2075818
+        }
+      ],
+      "nonzero_usage_events": 615,
+      "role": "principal",
+      "thread_id": "01a1659c-447e-75f2-b931-4131036e94d9"
+    },
+    {
+      "counter_availability": {
+        "cache_write_input_tokens": "observed_in_delta_snapshots",
+        "cached_input_tokens": "observed_in_delta_snapshots",
+        "input_tokens": "observed_in_delta_snapshots",
+        "output_tokens": "observed_in_delta_snapshots",
+        "reasoning_output_tokens": "observed_in_delta_snapshots"
+      },
+      "latest_usage_timestamp": "2026-10-23T19:56:27.745Z",
+      "missing_counter_fields": [],
+      "models": [
+        {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 35639296,
+          "effort": "high",
+          "input_tokens": 36407182,
+          "model": "gpt-6.1-sol",
+          "output_tokens": 150559,
+          "reasoning_output_tokens": 51316,
+          "uncached_input_tokens": 767886
+        }
+      ],
+      "nonzero_usage_events": 174,
+      "role": "volparossa_reviewer",
+      "thread_id": "01a1659c-af74-7081-a52e-0f3e43fc2e9e"
+    },
+    {
+      "counter_availability": {
+        "cache_write_input_tokens": "observed_in_delta_snapshots",
+        "cached_input_tokens": "observed_in_delta_snapshots",
+        "input_tokens": "observed_in_delta_snapshots",
+        "output_tokens": "observed_in_delta_snapshots",
+        "reasoning_output_tokens": "observed_in_delta_snapshots"
+      },
+      "latest_usage_timestamp": "2026-10-23T19:04:12.715Z",
+      "missing_counter_fields": [],
+      "models": [
+        {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 28835712,
+          "effort": "medium",
+          "input_tokens": 29207039,
+          "model": "gpt-6-luna",
+          "output_tokens": 66380,
+          "reasoning_output_tokens": 22966,
+          "uncached_input_tokens": 371327
+        }
+      ],
+      "nonzero_usage_events": 330,
+      "role": "volparossa_support",
+      "thread_id": "01a1659c-c424-7961-906c-84b14a5aa9bf"
+    },
+    {
+      "counter_availability": {
+        "cache_write_input_tokens": "legacy_zero_default_used",
+        "cached_input_tokens": "legacy_zero_default_used",
+        "input_tokens": "legacy_zero_default_used",
+        "output_tokens": "legacy_zero_default_used",
+        "reasoning_output_tokens": "legacy_zero_default_used"
+      },
+      "latest_usage_timestamp": "2026-10-23T20:11:43.719Z",
+      "missing_counter_fields": [
+        "cache_write_input_tokens",
+        "cached_input_tokens",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens"
+      ],
+      "models": [
+        {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 19553792,
+          "effort": "medium",
+          "input_tokens": 20127320,
+          "model": "gpt-6.1-sol",
+          "output_tokens": 111185,
+          "reasoning_output_tokens": 38492,
+          "uncached_input_tokens": 573528
+        }
+      ],
+      "nonzero_usage_events": 118,
+      "role": "volparossa_implementer_medium",
+      "thread_id": "01a165ab-0d61-76c3-a788-794ca99cb7c2"
+    },
+    {
+      "counter_availability": {
+        "cache_write_input_tokens": "legacy_zero_default_used",
+        "cached_input_tokens": "legacy_zero_default_used",
+        "input_tokens": "legacy_zero_default_used",
+        "output_tokens": "legacy_zero_default_used",
+        "reasoning_output_tokens": "legacy_zero_default_used"
+      },
+      "latest_usage_timestamp": "2026-10-23T20:17:43.312Z",
+      "missing_counter_fields": [
+        "cache_write_input_tokens",
+        "cached_input_tokens",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens"
+      ],
+      "models": [
+        {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 30124800,
+          "effort": "high",
+          "input_tokens": 32004144,
+          "model": "gpt-6.1-sol",
+          "output_tokens": 70971,
+          "reasoning_output_tokens": 36488,
+          "uncached_input_tokens": 1879344
+        }
+      ],
+      "nonzero_usage_events": 167,
+      "role": "volparossa_reviewer",
+      "thread_id": "01a165ae-2a66-72b1-8c2c-f7b3f25f485d"
+    },
+    {
+      "counter_availability": {
+        "cache_write_input_tokens": "legacy_zero_default_used",
+        "cached_input_tokens": "legacy_zero_default_used",
+        "input_tokens": "legacy_zero_default_used",
+        "output_tokens": "legacy_zero_default_used",
+        "reasoning_output_tokens": "legacy_zero_default_used"
+      },
+      "latest_usage_timestamp": "2026-10-23T19:49:41.631Z",
+      "missing_counter_fields": [
+        "cache_write_input_tokens",
+        "cached_input_tokens",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens"
+      ],
+      "models": [
+        {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 2251392,
+          "effort": "ultra",
+          "input_tokens": 2398292,
+          "model": "gpt-6-astra",
+          "output_tokens": 15706,
+          "reasoning_output_tokens": 5293,
+          "uncached_input_tokens": 146900
+        }
+      ],
+      "nonzero_usage_events": 26,
+      "role": "default",
+      "thread_id": "01a16a08-6bbd-7a81-b171-cc284ee99256"
+    }
+  ]
+}

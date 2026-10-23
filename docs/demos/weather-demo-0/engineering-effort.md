@@ -19,7 +19,10 @@ No defensible exact billing total or error bar can be inferred from these logs.
 
 An intermediate six-thread projection, before final independent review and CI,
 was approximately **194 million cached input, 5.28 million uncached input and
-604 thousand output tokens**. The final retained snapshot supersedes it. The
+604 thousand output tokens**. The [retained snapshot](measurements/model-usage.json), taken after final media export
+and before final packaging/upload, supersedes it: approximately **241 million
+cached input, 5.81 million uncached input and 805 thousand output tokens**.
+Later final-review/packaging/upload tokens are outside that snapshot. The
 original planning range (5–25 million cached, 0.25–1.2 million uncached and
 30–120 thousand output) was substantially optimistic relative to this recorded
 projection. Repeated long-context coordination, diagnosis and review dominate
@@ -55,7 +58,7 @@ installed-app, peer/cache and cleanup checks, then failed additional media gates
 These are approximately 113 minutes of completed workflow elapsed time, not
 billed runner minutes. The first attempt of `39870500157` separately spent about
 10m 55s on package-download failure before Android. The quota interruption was
-elapsed calendar time, not engineering or CI work. `ci-wall-time.json` records
+elapsed calendar time, not engineering or CI work. [ci-wall-time.json](measurements/ci-wall-time.json) records
 individual later probes/reviews; do not sum parallel job times as billed usage.
 
 Necessary corrections included ffprobe's empty `programs` serialization,
@@ -65,7 +68,13 @@ in inert CI tests and PNG-encoder time-base handling. Failed probes are retained
 under `trials/`; synthetic probes establish tool behavior, never Android/Core
 acceptance. Two early full trials could not retain pixels; dedicated quarantine
 was then added so later failures preserved the original source-bound recording.
-The final scoped timing admission replaces the invalid host-wall coverage proxy
+Additional scoped admission attempts rejected recursive ffprobe field selection,
+format-inferred DATA durations and missing native DATA packets. Source analysis
+proved FFmpeg deliberately discards all-zero-STTS DATA tracks; bounded MP4 sample
+tables now bind their metadata independently. Later presentation diagnostics
+preserved the successful timing checkpoint and identified a reintroduced font
+provenance/tool-data guard; the already verified font-data check was reused.
+These failures and corrections remain in `trials/`. The final scoped timing admission replaces the invalid host-wall coverage proxy
 without altering the original delivery deadlines or failed workflow conclusion.
 
 The retained-source review avoids another expensive Core/APK rebuild. Native
@@ -79,7 +88,9 @@ gate identify; publication remains the user's decision. No further Core rewrite
 or standalone packaging is implied. Before final rendering, the bounded remaining
 review/render/package work was estimated at roughly 1–4 engineering hours,
 0.5–5 million cached input, 30–200 thousand uncached input and 5–35 thousand output.
-These are planning ranges, with approximately factor-two uncertainty; they are
+That remaining-stage range also proved optimistic after the additional native
+format/parser and provenance corrections. It was a planning range with roughly
+factor-two uncertainty, not a reliable bound; these figures are
 not measured savings or a token commitment. New serializer or rendering failures
 can add a CI cycle and further diagnosis.
 
@@ -95,3 +106,12 @@ that target, contribution/privacy enforcement and device evidence. These are
 separate projects; this demonstration does not establish a reliable schedule or
 model-token estimate for them. Renewed native input admission after Actions
 artifact expiry is an explicit reproduction dependency, not a free cache hit.
+
+The retained CI ledger contains 21 completed workflow executions/attempts,
+approximately 151 minutes of summed elapsed time including the infrastructure-only
+attempt. This is not billed runner time. The final media run succeeded; original
+runtime/admission failures remain failures. The independent review thread projects
+approximately 30.1 million cached input, 1.88 million uncached input and 71 thousand
+output; its missing-baseline caveats still apply. CI execution itself consumes
+runner time; model calls inspecting CI belong to their recorded thread counters.
+No causal per-bug token split or controlled model-routing savings is established.

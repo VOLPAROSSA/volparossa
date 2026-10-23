@@ -1,0 +1,125 @@
+{
+  "edits": {
+    "exact_action_timestamps_asserted": false,
+    "full_original_clip": true,
+    "held_frame_after_seconds": 65.578911,
+    "held_frame_label": "Held app frame from this run",
+    "network_and_cache_facts": "completed-run evidence",
+    "original_capture_preserved": true,
+    "phone_geometry": "fit within 480x960 padded pane on 1920x1080 canvas",
+    "presentation_cadence": "30fps CFR; source display frames may be repeated or omitted by resampling",
+    "raw_clip_trimmed": false,
+    "speed": 1
+  },
+  "ffmpeg_version": "ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers",
+  "files": {
+    "captions.vtt": {
+      "bytes": 1263,
+      "sha256": "8571ef42adfdfcc630053b74b0153d49c1a62a10406b02feb1ee32ef27f0286a"
+    },
+    "preview-090.png": {
+      "bytes": 495671,
+      "sha256": "4a88f8e9e237cadcf272a8f6cce7abdf8fec2267c17a30b4e55f732eecb5fbf0"
+    },
+    "screen.mp4": {
+      "bytes": 3097781,
+      "sha256": "bca54a8f677238f26daff6921bb3af0c661e1b39d0aada5ce3f161fda380d5c8"
+    },
+    "screenshots/frame-206.png": {
+      "bytes": 215138,
+      "sha256": "d168b03343caa9e5c9cdbfc684397686f7ec2f23369fe1b43de856d8d4892aca"
+    },
+    "screenshots/frame-215.png": {
+      "bytes": 285750,
+      "sha256": "9931da16e9a69853cbc2f02dc2c5b0ebc665f7d2a8fe9651163ab063085367bd"
+    },
+    "screenshots/frame-240.png": {
+      "bytes": 314506,
+      "sha256": "1a62357922d22658baefbead5043f894b621e945b0d9d72ca8d6a8719af66975"
+    },
+    "screenshots/frame-348.png": {
+      "bytes": 220371,
+      "sha256": "08529dfdc9d8b005b4706081c48d8593ad9021d52aab13a183dcc331ae0855b3"
+    },
+    "screenshots/frame-439.png": {
+      "bytes": 185711,
+      "sha256": "7defaf4fedb72136dcb9349cb663354e938af959b751ef81e367d404538822e6"
+    },
+    "screenshots/frame-489.png": {
+      "bytes": 231872,
+      "sha256": "611fa92d54edded13e33283dd1a4da6afc23e61620a364c0b8b3bf7d8156cd30"
+    },
+    "transcript.txt": {
+      "bytes": 1109,
+      "sha256": "2b712a4838e1d6ea38bf59e6953b10dcc543921f6d5fbbe55dd09bdacb5e50d2"
+    },
+    "visual-review.json": {
+      "bytes": 1665,
+      "sha256": "45bbbd399735f70753d2cdaacb1a3b43c6ebec443166ceb38995e8793210823e"
+    },
+    "weather-demo-0.mp4": {
+      "bytes": 3318698,
+      "sha256": "e4f72aa6d8236c56ef9d638d5f40563d7865b5411b6d3e7510dd43cee42c4d40"
+    }
+  },
+  "final_presentation_visual_review_required": true,
+  "font_sha256": "ae7b7855e115a5966d8b1b3f80f254ccc117ec86f9965e202ee2940453837280",
+  "hold_frame": {
+    "bytes": 215138,
+    "file": "screenshots/frame-206.png",
+    "frame_index": 206,
+    "png_sha256": "d168b03343caa9e5c9cdbfc684397686f7ec2f23369fe1b43de856d8d4892aca",
+    "source_inspection_file": "samples/frame-206.png",
+    "source_pts_seconds": 28.536533
+  },
+  "identity": {
+    "core_commit": "6bc0abdb524b79e5244f9381d2d8d45a9100b41d",
+    "run_attempt": "1",
+    "run_id": "39998753810",
+    "weather_commit": "85e9eda9bb6105866db2510758e76c9930fdde91"
+  },
+  "includes_installable_binaries": false,
+  "kind": "weather-demo-scoped-presentation",
+  "layout_preview": {
+    "file": "preview-090.png",
+    "final_layout_visual_review_required": true,
+    "presentation_time_seconds": 90
+  },
+  "original_recording_sha256": "bca54a8f677238f26daff6921bb3af0c661e1b39d0aada5ce3f161fda380d5c8",
+  "original_run_conclusion": "failure",
+  "original_video": {
+    "codec": "h264",
+    "duration_seconds": 65.578911,
+    "height": 1280,
+    "width": 720
+  },
+  "pixel_scope": [
+    "app-return-animation",
+    "first-refresh-completes",
+    "home-visible",
+    "pm25-visible",
+    "source-validity-visible",
+    "temperature-visible"
+  ],
+  "production_authority": false,
+  "publication_authorized": false,
+  "report_only_scope": [
+    "second-refresh-completion",
+    "background-resume-lifecycle-and-mounted-tables"
+  ],
+  "review_execution": {
+    "core_commit": "5c7c5470cef31c37d0cb4f961f221529bda080fb",
+    "run_attempt": "1",
+    "run_id": "40017379373"
+  },
+  "schema": 1,
+  "scope": "weather-demo-0-native-timing-v1",
+  "standalone_mobile_core": false,
+  "video": {
+    "codec": "h264",
+    "duration_seconds": 119.966667,
+    "height": 1080,
+    "width": 1920
+  },
+  "visual_review_sha256": "45bbbd399735f70753d2cdaacb1a3b43c6ebec443166ceb38995e8793210823e"
+}

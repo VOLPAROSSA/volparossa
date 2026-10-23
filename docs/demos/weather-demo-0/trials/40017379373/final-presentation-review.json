@@ -1,0 +1,31 @@
+{
+  "checks": {
+    "all_presentation_member_hashes_verified": true,
+    "captions_and_transcript_reviewed": true,
+    "completed_run_counter_label_visible": true,
+    "external_core_label_visible": true,
+    "held_frame_label_visible": true,
+    "native_490_frame_timing_binding_verified": true,
+    "original_video_hash_unchanged": true,
+    "rendered_90_second_preview_inspected": true,
+    "temperature_and_source_validity_readable": true
+  },
+  "kind": "weather-demo-final-presentation-review",
+  "limits": [
+    "Final encoded video has not been reviewed in full real-time playback by the reviewing agents.",
+    "Wind, precipitation and PM10 columns are outside the reviewed viewport.",
+    "Return animation is visible; settled post-resume pixels and visible second-refresh completion are not claimed.",
+    "Host-wall coverage is not asserted; the original failed run remains failed."
+  ],
+  "presentation_manifest_sha256": "ec69f97dc17c103f750c9e62667e6af5b745118621e24d7dbed5c4fd2292527b",
+  "preview_sha256": "4a88f8e9e237cadcf272a8f6cce7abdf8fec2267c17a30b4e55f732eecb5fbf0",
+  "production_authority": false,
+  "publication_authorized": false,
+  "ready_for_user_review": true,
+  "review_type": "independent-model-assisted-review",
+  "reviewer_effort": "high",
+  "reviewer_model": "gpt-6.1-sol",
+  "schema": 1,
+  "standalone_mobile_core": false,
+  "video_sha256": "e4f72aa6d8236c56ef9d638d5f40563d7865b5411b6d3e7510dd43cee42c4d40"
+}
