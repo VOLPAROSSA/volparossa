@@ -121,6 +121,20 @@ A distributable guest requires a separate complete notice/source-compliance and
 release review. Observed hosted build-tool hashes are not a reproducible or
 independently approved production toolchain.
 
+### Resident model build package addition
+
+The separate [resident model package lock](tests/integration/protected-resident-model-debian-lock-v1.json)
+records exact Debian package versions, official download origins, sizes, hashes
+and authenticated index provenance. Its reviewed build-only addition is
+`curl 8.14.1-2+deb13u7`, SHA-256
+`135636bd8b713c582d33e50ec4e36ea55cc3c5da3f12bbeb6b87d2bcbd3a0649`,
+from Debian's Trixie security archive. It matches the already selected libcurl;
+the existing package pins and runtime selection are unchanged.
+Upstream curl 8.14.1 uses the [curl permission notice](https://github.com/curl/curl/blob/curl-8_14_1/COPYING).
+The Debian package retains its distribution patches and complete per-file
+copyright notices; VOLPAROSSA adds no patch to this binary and does not replace
+those notices. This is an isolated build input, not a published client update.
+
 ## Public SNP verifier fixture trial
 
 The disposable public-fixture workflow selects
@@ -485,6 +499,25 @@ The fixed Rust supervisor uses Debian's installed Bubblewrap and util-linux reso
 tools as separate executables, not vendored copies. The sandbox argument vector is part of our
 source; [upstream Bubblewrap](https://github.com/containers/bubblewrap) explicitly makes its
 security policy the caller's responsibility. No development-host package installation occurs.
+
+For the optional public-fixture startup stage classifier, the inspected source is
+[Bubblewrap v0.12.0](https://github.com/containers/bubblewrap/tree/2a76602a8c71f36c1527cf9fc3417d9149822e0c),
+commit `2a76602a8c71f36c1527cf9fc3417d9149822e0c` (annotated tag object
+`014a04330642e5c870418beb621532cb896e0002`). The inspected `bubblewrap.c` is
+SPDX `LGPL-2.0-or-later`, SHA-256
+`3f17ee26057cae9d660801ca8d9ba84722f1bafdcd072d5151ee1c64eeeb15f4`.
+It byte-matches the orig source for Debian `0.12.0-1~deb13u1` in the existing model lock.
+[Debian's source declaration](https://security.debian.org/pool/main/b/bubblewrap/bubblewrap_0.12.0-1~deb13u1.dsc)
+records `bubblewrap_0.12.0.orig.tar.xz`, 126452 bytes, SHA-256
+`9760d007363e3abba7c747489910f9f82d9fca53ba3bd3282e396fa3c97a3314`, and
+`bubblewrap_0.12.0-1~deb13u1.debian.tar.xz`, 13728 bytes, SHA-256
+`7b54f121aebf5d4b38360ea728274c26fa471582bc3e6658379b679ecd8b5a2f`.
+Both archives were checked against that declaration. Its sole patch changes the
+namespace-permission explanatory suffix; the classifier's stable prefix is unchanged.
+The source diagnostic emitters are `bubblewrap.c`, `utils.c` and `bind-mount.c`.
+Only closed source-family labels are projected: no upstream code is imported,
+no original license/notice is changed, and matching a prefix proves neither the
+actual failing branch nor its errno, timing or underlying cause.
 
 ## Native MPQUIC audit state
 
@@ -982,3 +1015,45 @@ The package does not depend on or start the standalone Unbound daemon.
 This table is descriptive rather than a claim that every transitive Rust
 dependency has already been approved. Never replace the native provenance
 record with an unverified version tag or a downloaded executable.
+
+
+## Resident model host-observation diagnostics
+
+The pure IPv6 proc-row parser/comparator in
+`tests/integration/protected-resident-model-host-observation.py` reuses original
+VOLPAROSSA Map code from `https://github.com/VOLPAROSSA/volparossa-map`, commit
+`8a227709e99f25b1b07ed0eaf88999e1a0dfc1fc`, `integrations/dps-native/hosted.py`
+blob `d7e8015f8a0aa26e946e97890adb1259c43167fa`, file SHA-256
+`6cc55f6d28ebe56e7b097e58c4cd0eb9737c46d04e69ce4c53ccb84875ea8b96`.
+The Map repository's unchanged GPLv3 license remains authoritative. The reused
+function bodies are unchanged; only the snapshot docstring describes the
+non-accepting fingerprints and separate configuration policy. New surrounding code is GPL-3.0-only.
+No Map configuration-acceptance exception or upstream Linux code is imported.
+
+Primary renderer evidence is `net/ipv6/ip6_fib.c` at these exact upstream commits:
+
+- [Linux v6.8](https://github.com/torvalds/linux/blob/e8f897f4afef0031fe618a8e94127a0934896aba/net/ipv6/ip6_fib.c),
+  whole-file SHA-256 `85d34af1d3fee187c8da53989c3e143ac9b4be2e20f78fe85b8831b07319fdb6`.
+- [Linux v6.17](https://github.com/torvalds/linux/blob/e5f0a698b34ed76002dc5cff3804a61c80233a7a/net/ipv6/ip6_fib.c),
+  whole-file SHA-256 `45d20b9c0713d7173909424b760e0ddd1e7ae9aae8e9f9f735bee9f26f9ba5a2`.
+- [Linux v7.0](https://github.com/torvalds/linux/blob/028ef9c96e96197026887c0f092424679298aae8/net/ipv6/ip6_fib.c),
+  whole-file SHA-256 `05b965a73f3e07dd110530a751e847ebb1314cb6bd574a5050d9e130bc8e8dc8`.
+
+These files retain SPDX `GPL-2.0-or-later`. The exact 918-byte
+`ipv6_route_native_seq_show` function slices are identical, SHA-256
+`93ca160d4d293117f2064e48065d5d6b75956d177744cf0a5ea2fdbd518ab120`.
+The selected column reads `fib6_ref` through `refcount_read`; retained Map source
+review also binds its `refcount_t` declaration and atomic-read helper. This
+supports the three narrow renderer profiles, with strict observed-layout checks.
+It does not verify Ubuntu Azure's downstream patch lineage, attest the running
+kernel's source or identify a historical changed field/actor. The legacy diagnostic
+projection remains diagnostic-only, including its truthful raw-equality result.
+A separate versioned configuration checkpoint now derives eligibility from complete,
+validated captures with identical supported full renderer descriptors, exact IPv4/DNS
+fingerprints and exact ordered IPv6 non-reference bytes and row count. It permits
+only unchanged configuration or reference-metadata-only differences; raw-only
+inconsistency and all other or unavailable observations fail closed. Trial acceptance
+also requires normal workload, corruption and source checks, joined VM/tool/scratch
+cleanup, and a terminal cancellation/deadline guard. Historical failed trials remain
+failed. This bounded checkpoint makes no firewall, leak, transient-state, route-lineage,
+Ubuntu vendor verification or running-kernel attestation claim.

@@ -180,7 +180,7 @@ class Closure:
             else:
                 raise ValueError("initrd_library_missing")
 
-    def modules(self, version: str) -> None:
+    def modules(self, version: str, required: tuple[str, ...] = MODULES) -> None:
         base = "/lib/modules/" + version
         dependencies = read_source(self.root, base + "/modules.dep").decode("ascii")
         builtin = read_source(self.root, base + "/modules.builtin").decode("ascii")
@@ -207,7 +207,7 @@ class Closure:
             for child in mapping[name]:
                 collect(child)
 
-        for module in MODULES:
+        for module in required:
             candidates = [name for name in mapping.keys() | builtins
                           if PurePosixPath(name).name.split(".ko", 1)[0].replace("-", "_") == module]
             require(len(candidates) == 1, "initrd_module_missing")

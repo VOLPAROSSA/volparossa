@@ -12,7 +12,7 @@ detailed evidence ledger, including historical failures—not an installation gu
 [Original v1 scorecard](#fixed-alpha-v1-scorecard) ·
 [Completion requirements](#definition-of-done)
 
-Last updated: 2026-10-16
+Last updated: 2026-10-18
 
 ## Current integration and active work
 
@@ -29,22 +29,760 @@ order or change count. Develop core functions with their actual consumers.
 
 The immediate milestones build on the retained candidates and evidence below:
 
-The prepared integration candidate combines native core `a410b015` and Storage
-`728db40b`. Their production changes occupy separate paths; the shared Quality
-workflow and license notices retain both sides. Only this status ledger required
-conflict resolution. Its Quality run `38819466450` passes on candidate `dcdf7cfb`,
-but the failing actual Storage consumer trial still prevents acceptance for main.
-Original actual trials keep their dispatched sources; this preparation does not
-replace either trial or change its pins.
+The earlier combined native/Storage candidate `dcdf7cfb` passes Quality
+`38819466450`, but its actual Storage consumer trial still fails. Native-only
+PR277 is now merged as main `28b59840`, without a Storage maintenance parent.
+Its accepted candidate `f5e127c5` combines main with native `a410b015` and the exact
+adaptive prefill change from `7d0f9f0b`; its 61 worker files match that accepted
+Code-trial source. Quality `38869904099` and CodeQL `38869900439` pass for the
+composition, whose accepted tree matches the merge. This integrates native work
+without discarding or accepting unfinished Storage work. Original actual trials
+retain their dispatched sources, and Code retains its existing immutable pin;
+the merged binary has not been rerun through the model trial.
 
 | Workstream and repositories | Next demonstrable milestone | Dependencies and remaining blockers |
 | --- | --- | --- |
 | Integrated cache and Weather delivery — `volparossa`, `volparossa-weather` | Preserve the real provider sequence and both joined web-client proofs. | Core PR227, PR229 and PR230, and Weather PR14–PR18 are merged. Drizz.li run `38228710535` and Overmorrow run `38241212407` pass actual acquisition, separate protected cold transfers and exact initial/refresh UI checks. Independent reconstruction, Quality and CodeQL pass. Automatic acquisition, browser-initiated cold retrieval and the complete weather service remain open. |
 | Native Overmorrow — `volparossa`, `volparossa-weather` | Preserve actual app-triggered core delivery and verify expiry behavior with real products. | Actual `38717988016` passes on exact core `aac5be7f` / Weather `3b90442a`: initial cold peer retrieval, two cache-backed refreshes, joined native tables, background/resume and cleanup. Source Quality `38714089083` and CodeQL `38714082172` pass. Actual expiry, physical devices, iOS and the complete service remain open. |
-| Persistent private storage maintenance — `volparossa`, then Image/Cloud | Complete consumer publication, repair and restoration after provider loss. | Actual `38851643524` on `878c2aa9` passes the base maintenance lifecycle but fails Cloud FINALIZE during flow acquisition; the prior Cloud APPEND failure and Image challenge stall remain distinct. The new helper diagnostic records one connection poll timeout, without request/fragment binding or a proven network cause. Source run `38850938318` passes compilation, 33 Rust and 185 Python tests, strict lint and formatting. Investigate connection setup and failure cleanup without extending deadlines or treating diagnostics as acceptance. Consumer remote cleanup remains unproven. |
+| Persistent private storage maintenance — `volparossa`, then Image/Cloud | Complete consumer publication, repair and restoration after provider loss. | Actual `38860289559` on `08ba6b21` passes the base maintenance lifecycle but fails Cloud RESERVE: first the inner provider TLS handshake expires, then a second flow acquisition reports incomplete helper cleanup. The retained-route cleanup fix has not resolved consumer acceptance. Investigate bounded route lifetime and failure cleanup without extending deadlines or treating diagnostics as acceptance. Consumer remote cleanup remains unproven; earlier trials retain their separate outcomes. |
 | Automatic private uploads — `volparossa`, Image/Cloud | Enroll a new encrypted upload under finite service authority, then resume maintenance and restore it after provider loss. | Core PR233 adds an absolute authorization ceiling; Image PR7 forwards it without rebasing. Cloud PR14 implements finite shared admission budgets, durable reservation/enrollment, restart reconciliation and an encrypted empty catalog for a first upload. Actual OpenCloud SDK upload/list/read checks pass with a synthetic core; this does not prove peer maintenance. Join these candidates to the real upload-to-repair-to-restore trial after the existing storage milestone; its pinned consumers stay unchanged. |
-| Native coding execution — `volparossa`, `volparossa-code` | Build on the accepted bounded coding lifecycle with native editor operation and protected remote execution. | Actual `38824828727` passes on Code `fd4ff968` / core `7d0f9f0b`: two reads, approved edit/test, independent verification, task-resource and input-integrity checks, and cleanup. Code PR11 is merged, retaining that immutable core dependency; the native/Storage core candidate is not merged into core `main`. General coding quality, competitive performance, native editor UI and protected-peer execution remain open. Earlier failures retain their original outcomes. |
-| Protected remote compute — `volparossa`, then Code/Browser | Join an authorized immutable guest, the resident coding worker and a guest-terminated TLS 1.3 session. | PR258 has refusal-path evidence and PR262 adds same-connection key confirmation. The resident worker budget passes compile, 72 contracts, lint and formatting in `38839509355`. Public immutable boot `38860629051` now passes on exact `888d79fc`: verified read-only boot, write denial, fixed entrypoint, corrupted-disk rejection and cleanup, alongside 179 contracts. This does not execute a model or establish private/TEE protection. Next join two public model turns to one guest TLS session under a separate finite task grant and an explicitly sized model profile. Production roots, vendor appraisal and protected execution remain open; suitable confidential-computing hardware is unavailable. |
+| Native coding execution — `volparossa`, `volparossa-code` | Build on the accepted bounded coding lifecycle with native editor operation and protected remote execution. | Actual `38824828727` passes on Code `fd4ff968` / core `7d0f9f0b`: two reads, approved edit/test, independent verification, task-resource and input-integrity checks, and cleanup. Code PR11 and native-only core PR277 are merged. Code retains its immutable core dependency; source acceptance of the new core composition is not a repeat model trial. General coding quality, competitive performance, native editor UI and protected-peer execution remain open. Earlier failures retain their original outcomes. |
+| Protected remote compute — `volparossa`, then Code/Browser | Complete immutable asset export, then join an authorized guest, resident coding worker and guest-terminated TLS 1.3 session. | Original actual `39078833292` on `fabfa849` again verifies 199 build and 65 runtime packages. Its closed builder receipt reaches `export`, after native build/provision validation, but does not identify which export or final recheck failed. VM/tool joining and scratch removal pass. The candidate adds bounded export-operation labels, not a demonstrated fix. Completed asset export, runtime boot, two turns, protected execution and production approval remain open. Integrate resident-only work separately from inherited unfinished Storage code; suitable confidential-computing hardware remains unavailable. |
+
+### Public model inventory compatibility — 2026-10-21
+
+This retained compute branch preserves the earlier trials below. Main's ledger
+remains the current cross-repository plan, including the separate DPS extension
+and active Storage integration; this correction does not replace that goal.
+
+Original `39082065142` on `3a1a1593` remains failed at export inventory validation.
+The preflight diagnostic and hosted Protobuf setup corrections are merged through
+PR301/PR303 into `f571e17cad9ad619f6e440190c247418b7a9797d`. Its actual public-model
+run `39617784665` passes source contracts, then fails `guest_model_build` with
+`guest_unit_failed`: export operation `inventory`, closed reason
+`inventory_path_character_or_separator`. Artifact SHA-256
+`7111131420f9d4f70ebbbdc0b7945eedf25ca9eccf2b67cf9e2d3ede504d419f` matches the
+hosted digest and ZIP integrity passes. Outer scratch/tool/VM cleanup is confirmed;
+complete cleanup within the guest before VM teardown remains unconfirmed.
+
+A separate inert audit verifies all 39 pinned public wheels, 253,241,299 bytes,
+against their original size/SHA-256 pins. One regular member fails the current
+path predicate: `setuptools/script (dev).tmpl` in setuptools 84.0.0, wheel SHA-256
+`51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670`. Its purelib
+mapping can place the file in the exported runtime. This establishes a concrete
+compatibility defect; the actual rejected guest pathname remains undisclosed.
+
+The correction accepts literal parentheses in bounded relative paths. Original
+names, contents, dependency pins and notices stay unchanged. No-follow opens,
+relative-path and symlink containment, digest/size checks, archive scope and
+fixed JSON-quoted guestfish operations retain their existing checks. Inert tests
+exercise this filename through export, staging and mocked guest assembly, plus
+rejection of traversal, command-substitution tokens, controls, long paths and
+altered contents.
+The workload suite has 33 tests; builder and assembly retain 42 and 29 tests.
+Hosted source checks and a new exact-source public-model execution remain required.
+No model turn, confidential execution or private-peer acceptance is established.
+
+### Public resident model integration candidate
+
+The next candidate adds a guest-side `compute resident-guest` command. It accepts
+one TLS 1.3 channel through a fixed virtio console port and requires a separately
+signed, single-use public task grant. The grant binds the requester, TLS key and
+channel, workload descriptor, two preapproved public inputs and finite execution
+limits. It cannot be obtained from quote evidence or authorize private peer input.
+The adapter calls the existing resident worker with the original grant deadline;
+disconnect, invalid requests and expiry cancel the same worker and await cleanup.
+The local Unix-socket service and accepted boot fixture remain unchanged.
+
+Initial source run
+[`38863535350`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38863535350)
+on `a68cc4e7` compiles both affected crates and passes 92 unique tests: 22 grant,
+10 guest-channel, 30 resident-worker and 30 local-service cases, with none failed
+or ignored. The run fails strict lint on two private parameters passed by value.
+It tested an explicitly recorded formatter copy, not unchanged committed bytes.
+Revision `423173f3` applies that exact formatter patch, fixes the two borrows and
+adds explicit expired-frame checks. Its original source run
+[`38865229585`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38865229585)
+passes compilation, all 93 unique Rust tests and 28 workload-staging tests, with
+no failures or skips. The formatter patch is empty, the final source check passes,
+and the 560 package identities and versions are unchanged. The run still fails
+strict lint on one import placed after statements; `cac4e0e0` moves that import
+to module scope. The later unchanged-source acceptance is recorded below.
+The guest tests use real TLS and signatures with an inert worker; they are not
+evidence of inference or guest execution.
+The workload stager passes 28 inert tests. It verifies the caller-bound asset
+inventory, original model pins, native manifests and fixed guest launch paths;
+it neither downloads assets nor runs the model. Partial-output cleanup preserves
+an output that another owner has replaced.
+The initial hosted workload step was a no-op because these files were absent;
+the corrected run above actually executes their mandatory tests.
+
+The current candidate adds a matching `compute resident-public-trial` requester.
+It can submit only two fixed public prompts, checks the selected certificate key
+after normal TLS verification, and signs a grant bounded by its original parent
+deadline. Success requires both expected answers, token counters, retained-session
+receipts and the final joined-cleanup receipt. Seven new requester tests include
+a real TLS exchange with an inert worker; they do not execute a model.
+
+A separate model initrd stages fixed launch code for a complete caller-supplied
+OS image. It verifies the read-only root, drops privileges to UID 985, exposes only
+the fixed virtio channel, and supplies real read-only cgroup observations to the
+unchanged resource guards. Its readiness marker precedes TLS; process exit alone
+does not prove model execution or worker cleanup. The 27 new initrd, 21 preserved
+boot and 28 workload contracts pass locally and in the hosted run below with inert
+inputs and no skipped tests. The old boot profile is unchanged. The model controller must enforce its
+explicit 12 GiB guest, 13 GiB host-side QEMU cap and 14 GiB available-host-memory
+requirement. The accepted Code trial `38824828727` used the same 12/13/14 GiB
+profile; its original host-memory admission margin was only 467.4 MiB.
+The next acceptance gate must execute two real model turns inside the sealed
+guest, preserve one model lifetime, reject excess/replayed requests and confirm
+cleanup. The model image also needs the complete Python/native/OS closure and a
+separately sized disk budget: the accepted small boot image cannot contain both
+the original Qwen weights and BF16 execution weights. Workload descriptor binding
+in a fixture is not independent production approval or proof of guest key origin.
+
+Original source run
+[`38867886273`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38867886273)
+on `cac4e0e0` compiles both crates and passes strict lint, all 100 unique Rust
+tests (22 grant, 18 guest/requester, 30 resident, 30 local) and all 76 Python
+staging contracts. It fails only the final source-equality assertion: the
+formatter changed the two new requester files. Revision `a7d04050` applies that
+verified 29,343-byte formatter patch without changing behavior.
+
+Original run
+[`38869077020`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38869077020)
+passes on exact `a7d0405074744ce2ceca209fded0e7b1344b0883`: both crates compile,
+strict lint passes, all 100 unique Rust tests and all 76 Python staging contracts
+pass, with none failed or skipped. The formatter patch is empty and the final
+commit/tree checks pass. All 560 package identities, versions, origins and
+checksums remain unchanged. Original artifact and log ZIP SHA-256 values are
+`8b884a51a08e2d9cbcd608461bf27baf84bae718ebd29e0069b1ccb319530857`
+and `688bfb9195a8330e573a1e1087fbef9d222af2c20b22a4f623385d779c8b91db`.
+These source checks do not execute a model inside the sealed guest.
+
+The Debian model package lock records 198 build packages and a 65-package runtime
+selection from the signed Trixie, security and updates indexes. Three original
+InRelease signatures, the uncompressed index hashes and every selected package's
+version, architecture, download size and SHA-256 were independently verified.
+Resolution downloaded only public indexes into isolated workspace directories;
+it did not download or install packages. Runtime selection supplements the pinned
+Debian OS image; it is not a replacement for its base/Essential packages.
+The image controller must verify exact package bytes before guest installation
+and bind the complete resulting root. A version/status query alone does not
+establish installed payload integrity.
+
+The guest-only asset builder joins the exact core archive and the accepted Code
+validator to native compilation, pinned model provisioning and workload export.
+It retains the original phase deadlines and provisioning budget. The export
+contains only the approved runtime, model, native backend, core executable and
+public TLS/policy fixture; the requester's signing seed is not a guest input.
+Thirty-two inert builder tests pass, including export through the existing
+workload stager, an actual hardlinked executable fixture and interrupted cleanup
+observation. Sixteen lock/parser tests pass, including refusal of APT configuration
+hooks, includes and path overrides before any APT process starts.
+
+Original source run
+[`38871387523`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38871387523)
+passes on exact `9162f855bcf7e9013bd446faf656b0f32d08d95f`: both crates compile,
+strict lint passes, all 100 unique Rust tests and all 124 Python contracts pass,
+with none failed or skipped. The formatter patch is empty, final source equality
+passes and all 560 dependency records remain unchanged. Original artifact and log
+ZIP SHA-256 values are
+`65956095ef2a1620e95ce1462d1d759e62cc4081e5f004867d04f9251fccffc6`
+and `eb38015f3f4ef7d60d3965a175ff1ed84fc9144f204595b0761169158a46c0cc`.
+This validates the builder and staging source, not a built model image or VM run.
+
+Revision `d6169a82` connects the offline installer, immutable-image assembly and
+hosted controller. It adds 31 installer, 29 assembly and 35 controller tests;
+all 95 pass locally with inert fixtures and no skips. Independent source reviews
+cover the installer, assembly, controller and workflow. These checks do not
+install packages, launch a VM, compile a native backend or execute a model.
+
+The installer verifies locked package bytes and uses offline APT in a disposable
+guest namespace. It preserves the base OS packages and checks configuration,
+triggers and unmounting. The controller runs installation and compilation in
+finite guest cgroups, requires their cleanup, stops and joins the build VM, then
+verifies the exported assets. Assembly stages those assets into a separate OS
+root before sealing it. The runtime guest has no NIC or SSH service; its only
+request channel is the fixed guest-terminated TLS connection over virtio.
+
+The explicit `public-model` workflow scenario requires an exact reviewed source
+commit. Its controller joins two fixed public model turns, final worker cleanup,
+read-only boot and deliberate corruption rejection under one finite controller
+deadline. Process and cgroup cleanup are distinct from scratch-file deletion:
+the controller currently reports `scratch_removed: false`. Only an explicit list
+of public JSON receipts may be uploaded; keys, filesystems and model payloads are
+excluded. A complete built model image and the actual two-turn model trial remain
+open. Neither source checks nor a public VM trial establish confidential
+execution or guest-key origin.
+
+Original source run
+[`38877212272`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38877212272)
+passes on exact `d6169a82931b58bc133148e313de3fce4343a27f`: compilation, strict
+lint, 100 unique Rust tests and 219 Python contracts, with no failures or skips.
+The formatter patch is empty, final source checks pass and all 560 dependency
+identities, versions, origins and checksums remain unchanged. The public-model
+job is intentionally skipped on this push. Original artifact and log ZIP
+SHA-256 values are
+`4453e203587cff1aa2e1f4dc68e57fe4ac35e01411251e64a47b0659777be80f`
+and `2acf7b0e41311cba1127bd742ccc3860bd202dff23931f60622e700c1d99340d`.
+
+The first actual
+[`38878112559`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38878112559)
+on that same commit passes source contracts but fails `host_memory_headroom`
+during disk preparation, before the build or model QEMU process starts. The
+required 14 GiB of available host memory was not present at admission; the
+original report does not preserve the measured amount or establish its cause.
+This is not a model failure or evidence of an OOM kill. Earlier libguestfs
+appliance activity is not model execution.
+
+The original report keeps model execution, private inputs, attestation and
+confidential execution false. Its VM-cleanup flag applies to the absence of a
+started build/model child; scratch deletion and the final host route/DNS
+comparison are not proved. User-manager restoration and final source checks
+pass. Original trial artifact and log ZIP SHA-256 values are
+`d589e7e68c1f5f581bdec6d679825664a0599db5cd65cede0fe3cc76ee503ee8`
+and `73451c98e16d5c51ef1d1ef66b5519df5d12a3e11444d149a0b1675e51c455bd`.
+The model, memory limits and original task deadlines are not reduced to make
+this trial pass.
+
+The follow-up preserves four bounded kernel counters (`MemTotal`,
+`MemAvailable`, `Dirty`, `Writeback`) before disk preparation and before each
+of the three existing VM admissions. The baseline is observation only; an
+unavailable or low baseline does not replace the original admission check.
+Each actual admission records its outcome before refusal or process launch.
+Unreadable admission data fails closed. No raw process data, new retries,
+waiting, cache reclamation or weaker memory guard is introduced. All 46
+controller contracts pass locally with inert fixtures, including execution
+through the final result writer. This adds evidence for the next trial, not a
+demonstrated memory fix.
+
+Original source run
+[`38882738504`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38882738504)
+on `0f8b555fe16c8afda2fe353be0f15d1c9f640457` passes compilation, strict lint,
+100 unique Rust tests and 184 Python tests. It fails before running the 46
+controller cases: their new fixture exceeds the hosted Python interpreter's
+static nesting limit. This is a test-module syntax failure, not 46 failed
+assertions or a model result. The formatter patch is empty; all 35 source blobs,
+560 dependency identities and final source checks match. Original artifact
+and log ZIP SHA-256 values are
+`614085c21750bd30dda20a6030ddc02f8dadd30b5d886da8583a1aef133127a2`
+and `70ecd9df670df28786367f7f11ebed8fa6f7817a27b10f1b8156c72b2bb8004a`.
+The narrow correction uses an exit stack for the same fixture patches without
+changing production code, test assertions or the required case count.
+
+Corrected source run
+[`38884241688`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38884241688)
+passes on exact `e8ead3c9a72c75bba0a6564c3847ba8954725963`, tree
+`ebfb4c25b5ab30f7a6b83505641272a7f3c43e98`: compilation, strict Clippy,
+100 unique Rust cases and 230 Python cases (124 existing, 31 installer,
+29 assembly and 46 controller), with no failures or skips. The formatter patch
+is empty; all 35 source blobs, 560 dependency identities and final source
+preservation match. The public-model job is intentionally skipped on this push.
+Original artifact and log ZIP SHA-256 values are
+`dfdc499efc3c4510305d1ff6298d193ac3a99a51b06b067977e254baa6791bbb`
+and `43d3e29c5674b48fbfe42719e5fd54dcbbe3e6b6079b14d6a07edb922301531e`.
+
+The next original actual
+[`38885192379`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38885192379)
+on that same commit/tree repeats the 100 Rust and 230 Python source checks
+successfully, but fails `prepare_disks / host_memory_headroom`. Build admission
+records **14,665,232,384 available bytes against 15,032,385,536 required bytes**.
+Only the build admission is attempted and it refuses before process launch;
+no build/model VM, guest TLS session or model turn starts. Earlier libguestfs
+appliance activity is not a model-guest boot.
+
+Before disk preparation, available memory was 15,555,989,504 bytes and Dirty was
+1,371,762,688 bytes. At admission, Dirty was 1,761,280 bytes. Both snapshots report
+MemTotal 16,765,378,560 bytes and Writeback zero. These counters locate a change
+between observations, not its cause; they do not establish an OOM kill. The
+12 GiB guest, 13 GiB QEMU cap, 14 GiB admission requirement, zero swap, model and
+deadlines remain unchanged.
+
+The actual artifact contains only `result.json`. Its `vm_cleanup_confirmed: true`
+applies to the no-spawn build/model scope; `scratch_removed: false` remains
+explicit. User-manager restoration and final source checks pass, but the final
+host route/DNS comparison is not reached. There are no installer, model-build,
+sealed-runtime, requester, model-boot or corruption receipts. Private inputs,
+hardware attestation, confidential execution and production approval remain
+false. Original source-contract, trial and log ZIP SHA-256 values are respectively
+`af21ffa0e82b67e003b29040753447b8135d60edb6e5b40aba9800544055c9c0`,
+`8c534cac9167d1296dae0b9c6c3597a9df29dce90e4f8648df9ac8db2bf121c0`
+and `fd18096ab8203e6ac3cec10baeb50b630606254ac40964c5c2598053102d1b2b`.
+All original ZIP CRC checks and both artifact API digests pass. The earlier
+`38878112559` failure retains its own source and absent memory measurements;
+neither failure is replaced by the successful source gate.
+
+Preparation candidate `0b376457` removes a duplicate host-side `resize2fs`.
+The raw disk still grows to 32 GiB and receives a distinct, checked filesystem
+UUID before both disks are attached. Filesystem growth remains in the existing
+offline runtime installer's `e2fsck`, `resize2fs`, then mount sequence; no package,
+model, guest-memory or final disk-capacity requirement is reduced. This removes
+redundant work, but is not a proven explanation of the measured memory decrease.
+
+Seven fixed observations follow the existing, joined disk-preparation operations:
+root inspection, detail validation, root export, raw resize, UUID validation,
+build overlay and seed creation. Each retains only the existing four bounded
+memory counters. Unavailable readings stay explicit; these observations never
+admit a VM or trigger a retry. The original baseline and three ordered admission
+checks remain separate, with unchanged deadlines and resource limits.
+All 54 inert controller and 32 installer cases pass locally without skips,
+including the new phase-order, failure-prefix, UUID and installer-growth checks.
+Original hosted source run
+[`38889754275`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38889754275)
+on exact `0b3764576bc8018241983c896ec003a83659c719`, tree
+`9ce78147019c93e840f7246d244e1bb7dd63562c`, passes compilation, all 100 Rust
+and 239 Python cases, strict lint, an empty formatter patch and the final source
+check. All 35 changed source blobs and 560 dependency identities are verified.
+The original artifact's API digest and both ZIP CRCs pass; artifact and log SHA-256
+are `2fa0a088e0e8e86b2594d78720e3890c65681223e48fb0ae4c484b7ec3ea770b`
+and `d92a827f38e41cd09198f78b76c3f19555ba079fa99fdcb3e7f398982142ba42`.
+This source-only run does not launch a guest or execute a model.
+
+The next candidate separates disposable payloads from public evidence and tracks
+unconfirmed tool-process groups for the entire controller execution. Scratch can
+be removed only after tool groups and any active VM scope are confirmed stopped.
+Removal is bound to the original payload directory; keys, images and downloaded
+inputs are not retained on a safely completed cleanup path. Failure to prove
+process cleanup preserves the payload and remains a failed result. Script-removal
+errors no longer replace an original guestfish failure. All 76 inert controller
+tests pass locally with no skips, including 22 new cleanup and kernel-layout
+cases. These exercise real small temporary-file deletion with mocked processes,
+not a model VM. Original source run
+[`38891781257`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38891781257)
+on `bf652806752dfaae8bcaf875215ead1109217877`, tree
+`3b7a2b058abf4fbd182d93c3e0c2e137fafcee87`, passes compilation, strict lint,
+100 Rust and 261 Python cases, an empty formatter patch and source preservation.
+
+Original actual run
+[`38893010738`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38893010738)
+repeats those source checks but again refuses build admission during disk
+preparation: **14,682,869,760 available bytes against 15,032,385,536 required**,
+a shortfall of 349,515,776 bytes. No build/model VM, guest TLS session or model
+turn starts. The largest observed preparation decrease follows root export:
+15,530,643,456 to 14,611,501,056 available bytes. This locates a change, not its
+cause; it proves neither a leaked appliance nor an OOM event.
+
+The new cleanup path succeeds on this early failure: owned tool groups are
+confirmed joined and the validated payload directory is removed, while public
+evidence remains. The VM-cleanup flag still covers a no-spawn path. User-manager
+restoration and final source checks pass; final host route/DNS comparison is
+not reached. All 35 source blobs, 560 package identities and original artifact
+API digests match, and all ZIP CRC checks pass. Source-contract, trial and log
+ZIP SHA-256 values are respectively
+`88e4de947b51a80b3e7e48b087eda3252f5c22b3e0bb896e69005daa440daf29`,
+`2a4f925495d0fe67205ecf9c4dfea04bb140375f02d3cc91ed96a28aa342e749`
+and `02e43da90216742c8e6460973188d897ae682edbdf438a6df8280e15e87cd375`.
+
+The follow-up replaces the third libguestfs appliance's full root-block export
+with a bounded QEMU sparse conversion of the same authenticated image and
+inspected partition. It validates partition geometry, source identity and the
+absence of external backing/data sources, then checks exact output size and
+byte-equivalence before resizing. Conversion and comparison share the original
+600-second export budget and joined process ownership. The 12 GiB guest,
+13 GiB QEMU cap, 14 GiB admission requirement, zero swap and model pins remain
+unchanged. This removes an appliance and its FileOut copy stream. Independent
+source review and 96 inert controller tests pass without skips. Original source
+run [`38896828458`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38896828458)
+on `a893a10e53d6fd4fd70c129ea426d0cfb1d249c5`, tree
+`ff7fd4d76d9800f1df38c6a8d68dbea9164adadb`, passes compilation, strict lint,
+100 Rust and 281 Python cases, an empty formatter patch and final source equality.
+
+Original actual run
+[`38897698650`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38897698650)
+repeats those source checks and completes the authenticated root export and byte
+comparison before resizing. Build admission passes with **15,660,908,544 bytes
+available against 15,032,385,536 required**, a margin of 628,523,008 bytes. The
+before-disks observation was 15,653,896,192 bytes; no disk-allocation measurement
+or general host-memory guarantee is inferred from this single successful admission.
+
+The run fails later at `guest_boot / build_boot_timeout`: the build scope has
+started and its 13 GiB memory cap and zero-swap setting are verified, but SSH is
+not ready within the unchanged 300-second gate. Package installation, model
+construction, guest TLS and the two model turns are not reached. The original
+result does not retain the last SSH failure or a console classification, so it
+cannot distinguish early boot, network setup or authentication failures.
+
+The original build process and scope are stopped and joined, owned tools are
+joined, and payload removal succeeds. User-manager restoration and final source
+checks pass; the final host route/DNS comparison is not reached. All 35 source
+blobs and 560 dependency identities match. Original artifact API digests and ZIP
+CRCs pass. Source-contract, trial and log ZIP SHA-256 values are respectively
+`6e50c999c0395c1d43e70529aa2966558e047c5234bcf5a7fc4d5dace9384f40`,
+`8918b27ca62414fc19e458c168a5db50e39b525ad873dc6fc25f25db4de95956`
+and `f351ec2cd132ff14e15cff0ed9e2b81b6c98b79a5c7eb02f6d13c88bc77c2910`.
+Earlier actual failures retain their original results.
+
+Revision `bedd63a2` adds the fixed VGA device already used by the accepted
+legacy-BIOS build fixtures, while keeping the display headless. This aligns
+the build hardware profile; it does not establish the cause of the failed run.
+The immutable runtime guest's separate direct-kernel profile is unchanged.
+The controller also retains closed SSH failure categories from its existing
+readiness attempts and bounded console-marker observations after the build
+scope is stopped. Neither raw console text nor key material is exported;
+missing evidence stays unknown. These diagnostic observations cannot authorize
+acceptance, replace the primary failure or prevent cleanup. Authentication,
+network configuration, resource limits and the 300-second readiness gate stay
+unchanged.
+
+All 113 inert controller tests pass without skips, including the original 96
+cases and 17 new diagnostic/profile cases. The new cases cover primary-failure
+preservation, cancelled or expired operations, cleanup ordering, closed output,
+bounded reads, unsafe files and replacement races. Original source run
+[`38901209892`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38901209892)
+passes on exact `bedd63a2ccac56b845f1fa7e6e2db7dc81bf383c`, tree
+`950783f77a30412ecef1f3b8894674f1ef23458b`: compilation, strict lint,
+100 Rust and 298 Python cases, no failed or skipped tests, an empty formatter
+patch and unchanged final source. All 35 source blobs and 560 package identities
+match. Source artifact and log ZIP SHA-256 values are
+`b53503fc8ef3c0e568ea628e4b817afb112c42211faaa29892bd313c0efb6940`
+and `79e711d2d0743cf0a0a3893c9d55eded9b0d251435b6037dd7732c5d9f783c96`.
+
+Original actual run
+[`38902275667`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38902275667)
+on that same source repeats the source checks and passes build-memory admission:
+**15,659,687,936 bytes available against 15,032,385,536 required**. It again fails
+`guest_boot / build_boot_timeout`. The existing SSH loop records 55 attempts;
+the first and last fall in the closed `connect_timeout` category, which includes
+connection and banner-exchange timeouts. Intermediate attempt categories are not
+retained. The console was observed but none of the six selected markers matched;
+this does not establish an empty console, absence of boot or a specific cause.
+
+The build process and scope are stopped and joined, tool cleanup is confirmed,
+and the owned payload is removed. User-manager restoration and final source
+checks pass. Final host route/DNS comparison, package installation, model
+construction, guest TLS and the two model turns are not reached. Artifact API
+digests and ZIP CRCs pass. Source-contract, trial and log ZIP SHA-256 values are
+`8ba1c3f0ab1c64dcf221cd1caf2f99d092d7d28e96a9dd59957701f8fed0d44e`,
+`d9ef19ef4db645c93abc49b2d74957e8d070cfc89971aa21554d289e0bf96410`
+and `3f6d140d589f5090dd01406e5d92ddf18e559c4168a4dec6db7deb8c31aaa525`.
+
+#### Explicit build disk selection
+
+The build VM mixed implicit `if=virtio` build/seed disks with an explicit runtime
+device. QEMU creates those implicit devices later, so their earlier argument
+position does not establish the disk order. Unspecified boot priority can leave
+the exported, non-bootable runtime filesystem ahead of the actual build disk.
+This is a source-level configuration defect, not proof of which firmware path
+the failed original trial took.
+[QEMU device construction](https://github.com/qemu/qemu/blob/v8.2.2/blockdev.c#L907-L914) ·
+[Firmware boot selection](https://www.qemu.org/docs/master/system/bootindex.html)
+
+The correction uses three explicit disk backends and devices, gives only the
+build disk `bootindex=1`, and enables strict boot selection. The seed stays
+read-only and the runtime serial stays unchanged; the installer selects it by
+that serial, not by a fixed device letter. The separate direct-kernel model VM,
+SSH policy, model pins, resource limits and original deadlines are unchanged.
+All 115 inert controller tests pass, including two new boot-selection and
+runtime-preservation cases. Original source run
+[`38905737305`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38905737305)
+on exact `707c46ad5f528ff5d6488129331585c6cd1a4429` passes 100 Rust and
+300 Python tests, compilation, strict lint, an empty formatter patch and unchanged
+final source. All 35 source blobs and 560 dependency identities match. Original
+source artifact and log ZIP SHA-256 values are
+`03c46c3fb80674f25f090a6e6ca81918db51209ec86f984ce1385b0f2d7e5a75`
+and `7621a9f08465ccde571fb90ac91080064496a7abbeb5c60a3d3efba3f12d142c`.
+
+Original actual
+[`38906693746`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38906693746)
+on the same source repeats those source gates and passes build-memory admission:
+15,615,213,568 bytes available against 15,032,385,536 required. The third existing
+SSH readiness attempt succeeds; cloud-init completion and source/package bundle
+hash checks also pass. It then fails `guest_packages / guest_unit_failed` in the
+first build-package unit, before runtime-package installation or model construction.
+The unit exit status and installer phase are not retained, so no particular
+package, systemd or installation cause is established.
+
+The build VM and tool groups join, the scope is empty, owned payload removal and
+user-manager restoration pass, and tracked source remains unchanged. Final host
+route/DNS comparison, guest TLS, the two model turns and model-image corruption
+checks are not reached. This passes the previous readiness boundary without
+identifying the earlier boot-timeout's cause. Original source-contract, trial and
+log ZIP SHA-256 values are
+`f2bbf1ce362caed4a603af2f7e41b3258b9ebe32fd93d9d43865e8204e0123eb`,
+`dd1ce6b27dc6cf2af203a4525a3dd9cd653814b5868552950e67d669e04effe2`
+and `bca99131d7eac806e9b4d58842bed7b4c352c7e2b15bb3e5d276f36b1019ac61`.
+
+#### Bounded package failure observations
+
+The next controller change retains at most one diagnostic for a failed build or
+runtime package unit. It projects only the existing unit-status response and the
+existing fixed installer receipt after unit stop and proof of an empty cgroup.
+The status is the last observed snapshot, not automatically a terminal result.
+The optional receipt read has a five-second cap within the existing cleanup
+grace and strict ownership, no-follow, size, schema and enum checks. Missing,
+malformed, cancelled or stalled observations remain unknown. No raw journal,
+package output, command arguments or paths enter the diagnostic.
+
+The successful command sequence, original failure, cleanup obligations, package
+pins, memory caps and work deadlines stay unchanged. All 133 inert controller
+tests pass: the original 115 test bodies are unchanged and 18 new cases cover
+the closed projection, failure preservation, unsafe files and cleanup ordering.
+An unjoined diagnostic SSH process remains registered for mandatory outer cleanup;
+an optional diagnostic failure cannot silently discard that obligation.
+This diagnoses the next original attempt; it does not repair or accept the failed
+installation. The hosted gate now requires 100 Rust and 318 Python cases.
+
+Original source run
+[`38910175198`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38910175198)
+passes on exact `6ba9cb7207e3df1df12203766830bf9dd143a71c`: compilation,
+strict lint, 100 unique Rust and 318 Python cases, an empty formatter patch and
+unchanged final source. All 35 source blobs and 560 dependency identities match.
+Original source artifact and log ZIP SHA-256 values are
+`73f14183c6ddc5d7a84ef06ebc4d3fe0a6361a3e60f76ac2c4b6a12baa458b4a`
+and `5a815378e92a7e93953c5e75fe4affcd8f61cd67327bab5610c924def2aa519c`.
+
+Original actual
+[`38911735085`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38911735085)
+on the same source repeats those source gates and reaches build-guest SSH
+readiness. It fails the first build-package unit with `guest_packages /
+guest_unit_failed`. The last unit observation is `failed / failed`, `exit-code`,
+with main code 1 and status 1; this is not a post-cleanup terminal snapshot.
+The installer receipt narrows the boundary to `package_plan`: archives were
+verified, zero installed packages were verified, and the fixed failure remains
+`installation_failed`. This phase includes both the offline APT simulation and
+validation of its proposed changes; the original receipt does not distinguish
+those failures or identify a package. Runtime installation, model construction,
+guest TLS and both model turns are not reached.
+
+The receipt confirms namespace joining, direct-child-group joining, policy
+restoration and unmounting. VM/tool groups join, owned scratch removal and
+user-manager restoration pass, and tracked source is unchanged. The final host
+route/DNS comparison is not reached. These results do not retroactively identify
+the earlier trial's package failure. Original source-contract, trial and log ZIP
+SHA-256 values are
+`9eaa345c5a084371a1fdb7bbb45873f85bf4d1d78bded23b2e9d0fd950d21d04`,
+`d5ecc81f10398493a0fa99160aaff0ce62842c58daaa7ff9143c97e3a10aff50`
+and `857496fe719f6ce76713726b017150030d4596bf3d20adf96d90d915673089ca`.
+
+The next diagnostic change classifies only failures of the existing plan command
+or its validator. It uses fixed labels in the existing failure field, preserves
+the original exception and cleanup, and exports no package output or exception
+text. The controller accepts these labels only for a failed `package_plan`.
+All 40 installer and 136 controller inert tests pass, including 11 new cases.
+The diagnostic-only change preserves the previous test behavior and successful
+receipt shape; the lock correction updates the bound digest and build count.
+APT arguments, execution limits and the number of probes are unchanged.
+
+#### Base image and package selection compatibility
+
+The pinned [Debian image inventory](https://cloud.debian.org/images/cloud/trixie/20260826-2582/debian-13-genericcloud-amd64-20260826-2582.json)
+contains `curl 8.14.1-2+deb13u4`. Its package metadata requires exactly the same
+version of `libcurl4t64`, whereas the build lock selects `libcurl4t64
+8.14.1-2+deb13u7` and initially left curl outside the selection. An offline plan
+cannot retain both requirements while preserving every unselected package and
+forbidding removals. This is a static incompatibility, not proof of the original
+run's precise APT error. The lock was resolved against an empty package status,
+not the 322-package base image; matching its forward dependencies alone does not
+establish compatibility with packages already installed in that image.
+
+The correction adds only matching `curl 8.14.1-2+deb13u7` to the build selection,
+using the already authenticated security index. It leaves all 198 existing pins
+and the 65-package runtime selection unchanged. A separate reviewed-addition
+record identifies this change without claiming a new APT resolution. The build
+selection becomes 199 packages; exact archive hashes, offline plan validation,
+no-removal policy and preservation of unselected packages remain enforced.
+The metadata comparison establishes this specific conflict, not a complete
+dependency solution: historical metadata for 15 retained build packages and
+19 retained runtime packages was not fully available. The corrected offline plan
+and installation still need to pass in the actual pinned guest before model
+construction can proceed.
+
+Independent review and 256 targeted inert tests pass: 19 lock/resolver, 32 build,
+40 installer, 29 assembly and 136 controller cases, with no failures or skips.
+The next hosted gate requires 100 Rust and 332 Python cases. These checks retain
+the package-installation and guest-execution acceptance gates; they do not run
+APT, construct a model image or execute a model on the development host.
+
+#### Offline archive installation correction
+
+Original source run
+[`38916171428`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38916171428)
+passes on `315ddb3e`: 100 Rust and 332 Python tests, compilation, strict Clippy,
+an empty formatter patch and exact final source checks. Its subsequent original
+actual run
+[`38917448052`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38917448052)
+passes build-guest readiness, archive authentication and package-plan validation,
+then fails in `package_install`. The installer verifies no installed packages.
+Its receipt confirms direct-child, namespace, policy and mount cleanup; the
+controller confirms VM/tool cleanup and removal of its scratch payload. Model
+construction and execution are not reached. The retained trial ZIP has verified
+API digest and CRC, with SHA-256
+`145e4162e5fd366a49d89c550e8dd89b714ca8550b6ca18b8a0498c8f9c21f83`.
+
+The pinned APT 3.0.3 implementation explains a concrete offline-path defect:
+[`--no-download` shuts down acquisition before local file completion](https://github.com/Debian/apt/blob/45bebdfb891535d15e66e860aab1ee7c7b2ecaab/apt-private/private-install.cc#L256),
+whereas an existing
+[archive-cache hit resolves the absolute path beforehand](https://github.com/Debian/apt/blob/45bebdfb891535d15e66e860aab1ee7c7b2ecaab/apt-pkg/acquire-item.cc#L3527).
+Without that hit, installation can retain a relative archive name that the dpkg
+driver rejects. The previous run retained no raw package error, so this source
+finding does not conclusively identify its historical failure.
+
+The correction places fresh, streamed, hash-verified regular copies in the
+private APT cache before planning or installation. Names follow APT's canonical
+version/architecture convention, including lowercase epoch escaping. Metadata,
+file identity, byte bounds and the original deadline remain checked; symlinks,
+hardlinks and prepopulated caches are rejected. The exact 199/65-package lock,
+offline/no-removal options, command runner, guest isolation and cleanup logic are
+unchanged. Closed install-failure labels distinguish exit failure, deadline,
+output bound and unconfirmed command cleanup without exporting raw logs.
+
+Independent local inert checks pass **52 installer, 139 controller and 29 assembly
+tests**. They exercise fresh cache bytes and adversarial inputs without running
+APT, a VM or a model. Original source run
+[`39072782650`](https://github.com/VOLPAROSSA/volparossa/actions/runs/39072782650)
+passes on `c58d39104dfb937617c5920269e8286749718399`, tree
+`6235102a6b2bbd3f62b63dcd0931b38cdbce67ca`: 100 unique Rust and 347 Python
+tests, compilation, strict Clippy, an empty formatter patch and exact final
+source. All 36 source blobs, 560 dependency identities and the package/model
+pins bind. These source checks also pass in the subsequent original actual run.
+
+Original actual
+[`39073431997`](https://github.com/VOLPAROSSA/volparossa/actions/runs/39073431997)
+now completes offline build-package installation: all **199 exact packages** are
+configured and verified, with clear audits/triggers and policy restoration,
+namespace joining and direct-child cleanup. This is actual guest installation,
+not merely a simulated APT plan.
+
+The same run fails during runtime preparation with `guest_unit_failed`; the
+runtime installer reports `runtime_device / installation_failed`. That phase
+covers disk identity checks, filesystem check/growth, mounting and bootstrap,
+so the exact failed substep remains unknown. Runtime archives are authenticated,
+but runtime package planning and installation are not reached. Its namespace,
+direct-child and mount cleanup flags pass. Controller VM/tool joining, scratch
+removal, user-manager restoration and final source checks also pass; the final
+host route/DNS comparison is not reached. Model construction, sealed runtime
+boot and both model turns remain unproven.
+
+Both original artifact API digests and all three ZIP CRC checks pass. Actual
+source-contract, trial and log ZIP SHA-256 values are respectively
+`1f4b178db7ee0ae591bd4d39f91fc0ad00161f24f7588ce935b6e6aa493bc88e`,
+`b5d2d3b1233722b00c36b1f307ebac59b646af18e4103e4b95a18487ce68435c`
+and `0810ae6ae6fe7b5e0f6b8d6286c3d2b55f7a0249fb48bc05661ab62f021c1818`.
+The earlier installation failure retains its original outcome and unproven cause.
+
+The follow-up corrects a concrete disk-identity mismatch: Linux's
+[`virtio_blk` serial attribute](https://github.com/gregkh/linux/blob/v6.12.105/drivers/block/virtio_blk.c#L835-L852)
+returns the serial without a newline. The installer previously required a
+newline, and its inert fixture repeated that incorrect assumption. It now
+requires the exact serial bytes; whitespace, NUL, prefix/suffix additions and
+oversized values remain rejected before the filesystem probe. This source defect
+is established, but the previous broad receipt cannot prove it was the first
+runtime failure or that no further problem remains.
+
+Fixed preparation phases now distinguish device validation, filesystem check,
+growth, mount, bootstrap and archive mounting. Only closed failure categories
+are exported, without device paths, raw output or exception text. The controller
+rejects inconsistent mode, phase and verification claims. Device/root/mount/size
+guards, subprocess commands, allowed exit codes, resource limits, package pins
+and cleanup remain unchanged. Independent inert runs pass **58 installer,
+142 controller and 29 assembly tests**. Original source run
+[`39075173513`](https://github.com/VOLPAROSSA/volparossa/actions/runs/39075173513)
+passes on `6d0feec7271cf419d92c8202f6624f7006d4e9be`, tree
+`93eb14b7d60c8152d2756ee9e52d37bf17946701`: 100 unique Rust and 356 Python
+tests, compilation, strict Clippy, an empty formatter patch and exact final
+source. All 36 source blobs, 560 dependency identities and package/model pins
+bind. The subsequent original actual repeats these source checks successfully.
+
+Original actual
+[`39075796147`](https://github.com/VOLPAROSSA/volparossa/actions/runs/39075796147)
+completes both package installations: **199 exact build packages and 65 exact
+runtime packages** are configured and verified. Both receipts finish at
+`complete`, with clear audits/triggers, policy restoration, namespace joining,
+mount cleanup and direct-child cleanup. Runtime preparation therefore progresses
+beyond the previous failed boundary.
+
+The same run then fails at `guest_model_build / guest_unit_failed`. Its retained
+trial contains the two successful installation receipts and the failed controller
+result, but no builder receipt. The exact failed source, package-verification,
+compilation, model-provisioning or export substep remains unknown. No compiler,
+dependency or model-pin change is justified by this evidence alone. Controller
+VM/tool joining, scratch removal, user-manager restoration and final source
+checks pass; the final host route/DNS comparison is not reached. Completed model
+construction, sealed runtime boot, both model turns and protected execution
+remain unproven.
+
+Both artifact API digests and all three ZIP CRC checks pass. Actual
+source-contract, trial and log ZIP SHA-256 values are respectively
+`1ac9fef304fa9ac5e8290a779f5126fd57e733e9d317d9d61e5cab00b2b980fd`,
+`30c0e386152fcefd71b49238c29cf8e3f5fa10e594f8df89846160e07b35450c`
+and `55e97745df60b0994963a970c073b388176729630193707668e033aeba4998eb`.
+The retained trial audit has SHA-256
+`9b175dd1cb75621bd149ccfea33d596e18ebfc05c310288e0771400803ca847a`.
+Earlier runs retain their separate outcomes and unknown historical substeps.
+
+The follow-up retains only closed, failure-only builder diagnostics, read after
+successful unit stop and an empty-cgroup check. It uses the existing fixed
+builder receipt, with bounded size, expected ownership, private modes,
+no-follow/single-link checks and stable file and parent identities. A strict,
+stage-dependent schema binds available source identity and package verification
+without exporting raw output, paths, model contents or nested metadata. Missing,
+malformed or inconsistent receipts remain unknown. Optional observation cannot
+replace the original failure or erase pending tool cleanup; the diagnostic is
+not acceptance evidence or a claim of complete guest cleanup.
+
+Builder subprocesses, phase granularity, deadlines, resource limits and all
+package/native/core dependency pins remain unchanged. Focused inert checks pass
+**58 installer, 156 controller and 29 assembly tests**, including 14 new builder
+diagnostic cases. The expected hosted source inventory is now 100 Rust and
+370 Python tests. Original source
+[`39078193265`](https://github.com/VOLPAROSSA/volparossa/actions/runs/39078193265)
+passes that inventory, compilation, strict Clippy, formatting and exact final
+source checks on `fabfa8494585fc4bcd91ec452389ec77c743e81f`, tree
+`e253f01d4b3f0e96b1b27a56fd9d49f06c79f0a7`.
+
+Original actual
+[`39078833292`](https://github.com/VOLPAROSSA/volparossa/actions/runs/39078833292)
+repeats the source checks and both **199/65-package installations**, then fails
+with `guest_model_build / guest_unit_failed`. The new diagnostic identifies
+builder phase `export` and exit status 1, with source binding and direct-child
+joining confirmed. The bound builder source reaches that phase only after
+native compilation, provisioning and their validation return. The phase still
+covers asset export and final source/deadline rechecks; the exact failed operation
+and cause remain unknown. Controller VM/tool joining, scratch removal and
+workflow restoration pass. Runtime boot, model turns and the final host route/DNS
+comparison are not reached. Both artifact API digests and all three ZIP CRC
+checks pass; the trial ZIP SHA-256 is
+`3369301879d00e7f4c10cc93dc07dc28b68b75a658a6a2068e078d51c2772425`,
+and its retained audit SHA-256 is
+`00a0a14398edae00ec20334bb71a98c20916d5f733ad090a896951976ad3f436`.
+
+The next correction labels nine existing export operations and retains only
+known, operation-specific validation codes or closed exception categories. It
+distinguishes an export return from final source/deadline checks, preserves the
+successful receipt schema and accepts older failure receipts without these
+labels. Raw exception text, paths and model data remain excluded. Commands,
+mutation order, validation, pins, budgets and cleanup are unchanged. Inert
+checks pass **39 builder, 160 controller, 58 installer and 29 assembly tests**;
+the expected hosted inventory is 100 Rust and 381 Python tests, retaining all
+370 prior cases. This diagnostic change still needs its own hosted source check
+and actual trial; it is not a fix for the unproven export cause.
+
+Main integration must isolate the resident-only changes: this candidate's
+parent chain also contains unfinished Storage production code. Preserve main's
+accepted native worker and existing application pins, explicitly include the
+resident tests' inherited Tokio `test-util` feature, and validate the resulting
+composition. A new main commit, binary or sealed image needs its own provenance;
+the candidate's runtime results cannot be relabeled as proof of that new image.
+
+### Latest shared-storage consumer trial
+
+Original actual run
+[`38860289559`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38860289559)
+on exact `08ba6b21b79bef8fb0f124f114fb5ba3df7d93b7` fails consumer publication.
+The base lifecycle passes restart, repair and deletion, with all three base
+providers returning to zero usage. Cloud's first RESERVE fails inside the
+provider TLS handshake; the next copy fails during flow acquisition with
+`helper_cleanup_incomplete`. The complete Image/Cloud maintenance and restore
+reports are absent, not successful.
+
+Guest/local cleanup, stopping and reaping the original QEMU process, source
+integrity and host-state checks pass. Remote consumer cleanup is not established.
+The bounded diagnostics include a client/provider TLS timeout pair, but do not
+bind it to an exact Cloud fragment or prove its cause. Empty helper diagnostic
+records do not establish that no helper failure occurred. The package-build step
+was skipped. No longer timeout or repeated actual run is used as a substitute
+for understanding this failure.
 
 ### Finite resident execution candidate
 

@@ -303,6 +303,122 @@ pub(super) struct Detail {
     stderr_class: Option<&'static str>,
 }
 
+impl Detail {
+    // Only the sealed public-fixture accessor uses this copy. Ordinary Detail
+    // serialization, StartupClass and StartupFailure remain unchanged.
+    pub(super) fn with_public_bubblewrap_stage(
+        mut self,
+        stage: Option<super::BubblewrapStage>,
+    ) -> Self {
+        if let Some(stage) = stage.filter(|_| {
+            self.code == "compute_native_session_stdout_closed"
+                && self.stderr_class == Some("bubblewrap")
+        }) {
+            self.stderr_class = Some(stage.label());
+        }
+        self
+    }
+
+    pub(super) fn with_native_stdout_close(
+        mut self,
+        status_before_cleanup: Option<std::process::ExitStatus>,
+        stderr_class: &'static str,
+    ) -> Self {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        // Preserve the primary failure and every other code's existing shape.
+        // These are observations, not successful execution or causal attribution.
+        if self.code == "compute_native_session_stdout_closed" {
+            if let Some(status) = status_before_cleanup {
+                self.exit_code = Some(status.code().unwrap_or(-1));
+                self.signal = Some(status.signal().unwrap_or(0));
+            }
+            self.stderr_class = Some(stderr_class);
+        }
+        self
+    }
+}
+
+/// Exact closed vocabulary shared by the public-fixture writer and reader.
+/// This validates a projection, never constructs cleanup or execution authority.
+pub(in crate::compute) fn public_fixture_detail(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object.len() != 5
+        || !["code", "io_kind", "exit_code", "signal", "stderr_class"]
+            .iter()
+            .all(|key| object.contains_key(*key))
+    {
+        return false;
+    }
+    let code = value["code"].as_str().unwrap_or("");
+    let known = FIXED_CODES
+        .iter()
+        .chain(WORKER_CODES)
+        .chain(SESSION_CODES)
+        .chain(SESSION_WORKER_CODES)
+        .copied()
+        .any(|known| code == known)
+        || ["unclassified", "worker_other", "startup_missing_result"].contains(&code);
+    let io = value["io_kind"].as_str().is_some_and(|kind| {
+        [
+            "none",
+            "not_found",
+            "permission_denied",
+            "unexpected_eof",
+            "broken_pipe",
+            "interrupted",
+            "invalid_data",
+            "other",
+        ]
+        .contains(&kind)
+    });
+    let no_status = value["exit_code"].is_null()
+        && value["signal"].is_null()
+        && value["stderr_class"].is_null();
+    let status = value["exit_code"]
+        .as_i64()
+        .zip(value["signal"].as_i64())
+        .is_some_and(|(exit, signal)| {
+            ((0..=255).contains(&exit) && signal == 0) || (exit == -1 && (1..=64).contains(&signal))
+        });
+    let stderr_class = value["stderr_class"].as_str().is_some_and(|class| {
+        [
+            "none",
+            "bubblewrap",
+            "user_namespace",
+            "proc_mount",
+            "exec_denied",
+            "python_startup",
+            "other",
+        ]
+        .contains(&class)
+    });
+    let public_stage = value["stderr_class"].as_str().is_some_and(|class| {
+        [
+            "bubblewrap_namespace_setup",
+            "bubblewrap_root_setup",
+            "bubblewrap_source_setup",
+            "bubblewrap_destination_setup",
+            "bubblewrap_bind_mount",
+        ]
+        .contains(&class)
+    });
+    let no_exit = value["exit_code"].is_null() && value["signal"].is_null();
+    known
+        && io
+        && if code == "startup_missing_result" {
+            status && stderr_class
+        } else if code == "compute_native_session_stdout_closed" {
+            // Old all-null messages remain exact. New observations require the
+            // updated Rust/controller readers; older readers reject this shape.
+            no_status || ((stderr_class || public_stage) && (no_exit || status))
+        } else {
+            no_status
+        }
+}
+
 pub(super) fn describe(error: &Error) -> Detail {
     if let Some(detail) = super::native_session::diagnostic(error) {
         return detail;
