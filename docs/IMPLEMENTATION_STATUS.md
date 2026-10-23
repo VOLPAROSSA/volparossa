@@ -26,9 +26,17 @@ seven concise phase cards, persistent external-Core disclosure and separate
 on-screen/report evidence labels. No Core/Android build or network trial repeats.
 
 Sol Medium implemented the bounded assembly; one independent Sol High integrity
-review found no blockers. Eight inert presentation tests and 28 workflow-isolation
-tests pass. Hosted rendering/readability checks remain pending. Publication and
-changes to the existing GitHub draft require separate user approval.
+review found no blockers. The final ten inert presentation/caption tests and 28 workflow-isolation tests
+pass. Presentation-only CI [40023879699](https://github.com/VOLPAROSSA/volparossa/actions/runs/40023879699)
+passed on render source `5aa1bf0f`; Core/Android and old native admission were
+skipped. Actual weather/PM2.5, refresh, return-animation previews and the genuine
+thumbnail were inspected after shortening clipped panel text. The final edit is
+65.566667 seconds, 1280x1440 H.264, with no held ending. Caption-only source
+`2ab782b8` adds seven concise cues without another native render. All 121 original
+package files and the draft's body/settings/eight asset identities match their
+pre-refinement snapshots. New hashes, manifests and recommendation are in
+[the result](demos/weather-demo-0/short-trials/40023879699/result.json).
+Publication and changes to the existing GitHub draft still require user approval.
 
 ### Weather Demo 0 isolated execution — 2026-10-23
 

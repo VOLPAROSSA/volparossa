@@ -1,0 +1,50 @@
+{
+  "caption_source_commit": "2ab782b84b49edd3c61c496e22136b7fb95686ac",
+  "captions_sha256": "e58340fbe49e3db82864fd3e57c3619c4b9cbc1f94299ca914b2f8e0f783a128",
+  "conclusion": "success",
+  "draft_modified": false,
+  "final_manifest_sha256": "b961ca5704cf1fd7785cab2622659298b19d417caaafc78e9031774a0bd5f234",
+  "new_runtime_executed": false,
+  "originals_preserved": {
+    "draft_metadata_and_eight_assets_unchanged": true,
+    "original_draft_id": 422278856,
+    "original_package_files_unchanged": 121,
+    "original_technical_manifest_sha256": "ec69f97dc17c103f750c9e62667e6af5b745118621e24d7dbed5c4fd2292527b",
+    "original_technical_video_sha256": "e4f72aa6d8236c56ef9d638d5f40563d7865b5411b6d3e7510dd43cee42c4d40",
+    "schema": 1
+  },
+  "publication_authorized": false,
+  "recommended_primary": "short video on GitHub and volparossa.org; original full demo and evidence as separate technical documentation",
+  "render_source_commit": "5aa1bf0f42b93385132ba3abe61703c2fe10d412",
+  "review_package": {
+    "archive": "weather-demo-0-short-review.zip",
+    "bytes": 24534005,
+    "sha256": "539eecee6094ed9cea8c5676cde3cd3fbe50694f91629e9fef2f88f14bc2dabb"
+  },
+  "run_id": "40023879699",
+  "schema": 1,
+  "source_artifact": {
+    "digest": "sha256:3ece641e7d88e68e04bfa7d1e9bc48c464a14a78ea538a453ef128163ce344c4",
+    "id": 12532550426,
+    "name": "weather-demo-0-short-5aa1bf0f42b93385132ba3abe61703c2fe10d412",
+    "size_in_bytes": 12665548
+  },
+  "thumbnail_sha256": "f7b90f2b091d9461ac10bdac42dc741135abd20e2629e3148d26418bd8a7a101",
+  "transcript_sha256": "baa33675a5532ffe1d850392635bf33605f91b5e9d20181d2c673a123b4824f5",
+  "video": {
+    "codec": "h264",
+    "duration_seconds": 65.566667,
+    "height": 1440,
+    "width": 1280
+  },
+  "video_sha256": "b1a95bbddcdb249759483749756d6c4d3ee6ba8a8cc21204742b40c18d15d725",
+  "visual_review": {
+    "external_core_banner_visible": true,
+    "full_real_time_playback_reviewed": false,
+    "genuine_thumbnail_reviewed": true,
+    "phase_text_fits": true,
+    "pm25_values_readable": true,
+    "return_animation_visible": true,
+    "weather_values_readable": true
+  }
+}
