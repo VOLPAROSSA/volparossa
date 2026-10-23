@@ -1,0 +1,13 @@
+{
+  "category": "validation",
+  "facts": {
+    "font_not_group_world_writable": false,
+    "font_regular": true,
+    "font_root_owned": true,
+    "font_sha256_matches": true
+  },
+  "new_runtime_executed": false,
+  "publication_authorized": false,
+  "schema": 1,
+  "stage": "tool-and-font"
+}

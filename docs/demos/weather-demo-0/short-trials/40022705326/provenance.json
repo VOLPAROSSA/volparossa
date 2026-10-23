@@ -1,0 +1,15 @@
+{
+  "artifact": {
+    "digest": "sha256:c522ebb8d28084ebecccb8bdc99abdfd2ff160f23aaf83f73290d9894fcca900",
+    "id": 12531327189,
+    "name": "weather-demo-review-failure--1-fa1a57e73c00ac70cde5ebcf3f256541b6f7af7a",
+    "size_in_bytes": 365
+  },
+  "conclusion": "failure",
+  "new_runtime_executed": false,
+  "observed_font_bytes_match_original": true,
+  "observed_font_group_or_world_writable": true,
+  "run_id": "40022705326",
+  "schema": 1,
+  "source_commit": "fa1a57e73c00ac70cde5ebcf3f256541b6f7af7a"
+}

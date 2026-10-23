@@ -163,6 +163,22 @@ class ShortPresentation(unittest.TestCase):
             self.assertIn(phrase, text)
         self.assertLessEqual(120 + 1280, 1416)  # attribution never overlays app pixels
 
+    def test_font_data_identity_uses_pinned_bytes_not_executable_permissions(self):
+        font = self.root / 'font.ttf'
+        font.write_bytes(b'synthetic inert font data')
+        font.chmod(0o666)
+        expected = S.digest(font)
+        S.check_font(font, expected)
+        with self.assertRaises(ValueError):
+            S.check_font(font, '0' * 64)
+        link = self.root / 'font-link.ttf'
+        link.symlink_to(font)
+        with self.assertRaises(ValueError):
+            S.check_font(link, expected)
+        font.write_bytes(b'changed after render')
+        with self.assertRaises(ValueError):
+            S.check_font(font, expected)
+
     def test_captions_cover_whole_clip_and_scope_report_evidence(self):
         vtt, transcript = S.captions()
         self.assertTrue(vtt.startswith('WEBVTT\n'))

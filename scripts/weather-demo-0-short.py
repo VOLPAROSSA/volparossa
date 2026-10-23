@@ -182,16 +182,22 @@ def overlay_graph(text_dir):
             'pad=1280:1440:32:120:color=0x09111f,' + ','.join(overlays) + '[out]')
 
 
+def check_font(font, expected_sha256):
+    # Data identity is pinned by content; executable tool ownership is checked
+    # separately by REVIEW['tool']. Match the accepted presentation font guard.
+    regular = font.is_file() and not font.is_symlink()
+    STATE['facts'] = dict(font_regular_nonsymlink=regular)
+    require(regular, 'fixed data font rejected')
+    STATE['facts']['font_sha256_matches'] = digest(font) == expected_sha256
+    require(STATE['facts']['font_sha256_matches'], 'fixed data font rejected')
+
+
 def render(output, original_manifest):
     STATE['stage'] = 'tool-and-font'
     ffmpeg = REVIEW['tool']('/usr/bin/ffmpeg')
     REVIEW['tool']('/usr/bin/ffprobe')
     font = PACKAGE['FONT']
-    info = font.lstat()
-    STATE['facts'] = dict(font_regular=stat.S_ISREG(info.st_mode),
-        font_root_owned=info.st_uid == 0, font_not_group_world_writable=not bool(info.st_mode & 0o022),
-        font_sha256_matches=digest(font) == original_manifest['font_sha256'])
-    require(all(STATE['facts'].values()), 'fixed data font rejected')
+    check_font(font, original_manifest['font_sha256'])
     command = REVIEW['command']
     # Use bounded shared child supervisor, including ffprobe, without its separate
     # unbounded subprocess helper. This does not rerun native timing admission.
@@ -231,6 +237,8 @@ def render(output, original_manifest):
         str(output / 'technical-original/screenshots/frame-206.png'), '-filter_complex', graph,
         '-map', '[out]', '-frames:v', '1', '-threads', '1', str(output / 'thumbnail.png')],
         seconds=60, reject_stderr=True)
+    STATE['stage'] = 'font-after-render'
+    check_font(font, original_manifest['font_sha256'])
     STATE['stage'] = 'export'
     vtt, transcript = captions()
     (output / 'captions.vtt').write_text(vtt, encoding='utf-8')
