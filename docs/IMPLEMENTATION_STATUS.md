@@ -70,6 +70,28 @@ log `120136495649` is 1,957,650 bytes, SHA-256
 `a5d03f3520c3c85c3483d58c3548d361ea2df41fe319d138b68cbaab1210d57a`, under
 `.git/ci-evidence/resumption-quality-39868445020/`. New ledger updates retain
 these exact-source results and require their own applicable checks.
+Checkpoint `24ea4b663b08b8889ccbd66bee0b34988e16640b` passes Quality
+`39871791765`, all four CodeQL analyses in `39871788266` and their aggregate.
+The literal checked merge is `dbdbba959d2e670bd73f62e6b09d3798dcb7942f`, tree
+`7b6484e32a8759e3ddb5f5627c8ac823a8b68539`, with parents main 18b96ff3 and 24ea4b66.
+All 4,250 top-level workspace tests pass, 0 fail and 18 are ignored across 100
+summary rows; six nested one-pass results explain 4,256 across the 106 printed
+rows. The raw log is 2,038,044 bytes, SHA-256
+`42d16c0ed1ecdf6b9f55413813d472114742322801d1440f625b933f4f03c352`, under
+`.git/ci-evidence/resumption-quality-39871791765/`. Literal checkout output was
+matched to exact Git commit/tree/parent metadata; PR source-head metadata is not
+substituted for that tested merge. PR328 is merged as
+`89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1` with that exact tested tree.
+Committed-blob goal preservation passes again on the fetched merge. Root main is
+fast-forwarded, preserving unrelated `error.log`. Newer unpublished evidence is
+retained in the same resumed-integration worktree on the separate follow-up branch
+`docs/integration-evidence-20261023`, based on 89d3aea5.
+The earlier main 18b96ff3 composition separately passes Quality `39870399653` and
+all four CodeQL analyses in `39870399676`, with the same 4,250/0/18 top-level
+workspace count. Its raw log is 2,039,353 bytes, SHA-256
+`f78c4f94caa568f0d5916729ede78b5db78316df73e658b3ae72877667a82e0a`, retained under
+`.git/ci-evidence/main-quality-39870399653/`. This resolves that composition's
+ordinary-check gap, not any separate actual runtime acceptance requirement.
 
 The bounded real Studio edit/export/Core packing milestone now passes and is
 integrated, as detailed below. Next functional targets are full private Storage
@@ -126,6 +148,106 @@ The existing registry supports trait-object hosting connectors, but `build_app`
 currently constructs its own default registry; preserve that default while adding
 an explicit preparation-only injection path. No production adapter is implemented
 by the completed browser fixture or this source inspection.
+The next bounded production prerequisite is isolated in
+`.volparossa-dev/worktrees/studio-reviewed-input-20261023`, branch
+`feature/studio-reviewed-input-20261023`, based on main 18b96ff3. The principal's
+contract is an optional expected-input SHA-256 check over a bounded owned snapshot,
+with rejection before signer unlock/cache/signing/IPC and publication from those
+same captured bytes. A prehash followed by rereading a mutable input is insufficient.
+Omitting the pin must preserve the current streaming/default behavior; the new
+snapshot path must retain the existing object-size limit and fallible allocation.
+PR340 publishes source `9ef4ca25a96f64a1d56862214adf9b4ff1c1381c`, tree
+`0de2fe6ba17eb0e6691555b773237575a12361f3`. Independent Sol High review accepts
+the four-file 18,805-byte diff, SHA-256
+`57aa0b2be57930545acc39eac34712433f9a3ddead98a51505140c107e31e266`.
+Installed rustfmt and inert scope/order checks pass. The optional snapshot uses
+fallible allocation and zeroizing owned storage; it costs up to 256 MiB plus
+existing chunk buffers and one additional hash pass. The pinned reader retains
+neither the original file nor a path to reopen. Four component tests and an
+isolated actual-CLI case cover captured-byte mutation, matching/empty inputs,
+oversize/truncation/growth, malformed/mismatched pins, rejection before credentials,
+unchanged fresh/reused/locked caches and no contribution IPC on failure. These
+authored tests have not yet executed; hosted compilation, Clippy, tests and CodeQL
+remain pending. The frozen patch is retained under
+`.git/ci-evidence/studio-reviewed-input-source-20261023/`. Allocation failure is
+handled in source but has no injected-failure test. This is byte binding, not
+native review authorization or hosting.
+Initial Quality `39873065947` fails strict Clippy before workspace tests: test
+bindings `signer`/`signed` trigger `similar_names`. The retained log is 1,340,249
+bytes, SHA-256 `55de48b270b4a790a467aec5ae0398656caa2d2ac4703c126eda5200ac79b838`,
+under `.git/ci-evidence/studio-reviewed-input-quality-39873065947/`. Corrected
+PR340 source `4c0e11a2b349f04a12a8a91f1a605367b5db8ca3`, tree
+`6802c497e89941bf062fa59ffc5aabe1dcf129f6`, only renames that test binding to
+`manifest` in two lines. Production bytes and assertions are unchanged; installed
+rustfmt and whitespace checks pass. New hosted checks remain pending.
+The next functional Studio fixture is isolated in Core
+`studio-local-viewer-20261023` on 9ef4ca25 and Studio
+`studio-local-viewer-app-20261023` on 06cfb56c. Sol Medium implements the established
+contract, with independent High review required: pass the exact real Silex-packed
+bundle through production signing/verification, a fresh in-memory fixture identity
+and explicitly mocked local named transfer into actual `content site open`, then
+observe its rendered marker and computed style in a fresh independent Chrome
+context. It retains the existing disposable namespace/sandbox, bounded resources,
+all-asset integrity and process cleanup, with no public contribution or CSP change.
+Source implementation and actual execution remain pending. This will test local
+viewer compatibility, not independent peer hosting, saved-project persistence,
+native GUI authorization or the complete Studio goal.
+Independent High review rejects the initial viewer fixture before execution:
+the fixed namespace wrapper admits only `runtime.py`, so `viewer_runtime.py`
+would be rejected; the new context reader's metadata-size check is followed by
+an unbounded JSON read, allowing concurrent growth beyond its intended bound.
+The original Core 17,066-byte diff (SHA-256
+`7f7dfcd8fa404fc9a25103abac8236ec8a0dcb9252e79bd1d2b3feead6368fa8`) and Studio
+31,007-byte standard diff (SHA-256
+`113037240dada568ded173e71da15efe2bcad4354774ec9725343920bcceddee`) remain under
+`.git/ci-evidence/studio-local-viewer-source-20261023/`. Corrections admit only
+the second fixed runtime basename with identical guards and use a bounded read
+plus post-read rejection; additional failure/timeout/cancellation controls are
+required. The Core fixture base advances to 4c0e11a2 for the unrelated two-line
+Clippy correction above. No actual browser or lifecycle acceptance is claimed.
+The corrected fixture passes independent High re-review: Core's four-file
+20,370-byte diff has SHA-256
+`0339d45e93a2ef2c555dff1ad05cb4f5f88607c720a46090701c4241cd95a794`; Studio's
+eight-file 48,084-byte diff has SHA-256
+`f47a3c30d96416548eb0a14d961c70f770564a9fd06fc523ecb279838ba9cb0c`.
+All 49 focused inert checks pass (27 contract, 3 original context, 10 viewer
+context/lifecycle and 9 wrapper), as do formatting and syntax checks. The corrected
+source adds hosted-only child early-exit/panic/timeout reap controls before actual
+viewer execution; those controls have not executed locally. Core PR342 is stacked
+on PR340 at `c815483c48e53e7aee47f54b7feb5734d6a0b77b`, tree
+`e807904fc799e2ba72bb331db19ca26abe760493`; Studio PR4 publishes
+`65ab59b81b3cd15d3218c65b006af1da64fb82f0`, tree
+`6bf9fa398a74f56d00db8b095d4da31252938109`. Exact-source actual viewer trial
+`39875855784` fails at `viewer-runtime/exit_nonzero`. The actual Silex manual
+page/text/style/preview and 1,477-byte DownloadConnector export pass again; the
+Core viewer test compiles. The retained receipt confirms editor/browser/Core
+groups joined/drained and temporary outputs removed, but does not localize the
+failed Core/browser stage. No viewer, child-control or independent browser pass
+is inferred. Artifact `12469020135` is 912 bytes, SHA-256
+`029f528c717ce944fe276eb58806899eb994a0374405a02edd15e3e3681c4f46`; its 1,672-byte
+receipt has SHA-256 `baaad00a7680e05dbed040a9d3b27d69a2827bbd26998aa7b36714d014e3fb58`.
+Raw job `120161171384` is 120,779 bytes, SHA-256
+`5882b34b6b667ae8ce25bcf9352cdf0ba7a760976f640fcfb0cd89525ba0ade1`, retained
+under `.git/ci-evidence/studio-local-viewer-39875855784/`. A narrow closed-stage
+diagnostic is being implemented before any runtime correction; raw errors/logs
+remain private and deleted. The existing ordinary Quality job, acquisition pins,
+editor deadlines and generic namespace modes remain unchanged.
+The closed-stage diagnostic now passes independent High review. Core's three-file
+9,016-byte diff has SHA-256
+`911cbdde03d2010589fc88d7b504120fa2dad2155ee69f40bf3921f34407a2e6`; Studio's
+five-file 16,622-byte diff has SHA-256
+`b19701c83ce8ac6a7de257352e42016fb5ab4c38e4c8cf8c2487d29e5d71ea09`.
+It projects fixed attempted stages from the exclusively created invocation log
+through bounded no-follow readers; malformed/unavailable diagnostics cannot
+change failure into success. Browser failure receipts expose only closed stages.
+All 13 inert diagnostic tests pass without skips. Review caught a missing hosted
+Core-source environment assignment that would skip the writer-reader contract;
+the single test invocation is corrected. Published Core
+`81ecc1a7956146c5a48ab5afefa0d79a86b23c15`, tree
+`7b45abc5afeba9379b428e483f6f1b6c0011b4c8`, pairs with Studio
+`164e08dfa487f065e1ff590b684b3bed833f3690`, tree
+`4baf35929a231bc7d66e93d76accfa2a74b0efd9`. Exact-source actual trial
+`39877380401` is pending. No actual viewer cause or acceptance is established.
 
 The initial read-only inventory covered 126 registered core worktrees and the
 application checkouts. Dirty files, untracked proof scripts, unpublished Map
@@ -479,7 +601,61 @@ under `.git/ci-evidence/resident-connect-source-39866709823/`. The actual model
 job was skipped. After fresh PR/check-state verification, PR338 is merged into
 the retained feature as `ce438c27df80cdba46e990b157b3e5c52e94543c`; the fetched
 tree exactly matches the tested `7a169c73` tree. Canonical public trial
-`39868428738` is separately dispatched on this exact merged source and pending.
+`39868428738` is separately dispatched on this exact merged source and fails at
+the strict final `host_network_observation_changed` gate. Both public turns return
+the expected READY/4 answers; corruption fails at `verity_read` before entrypoint,
+and VM/tool/scratch cleanup are confirmed. The final aggregate still reports
+`state=failed` and `model_execution=false`; it is not a passed acceptance run.
+The new observation on Linux 6.17.0-1022-azure identifies
+`REFERENCE_METADATA_ONLY`: renderer identity, IPv4 routes, DNS, six IPv6 rows and
+all IPv6 non-reference-count bytes are unchanged. Only the reference-count
+projection and raw IPv6 fingerprint differ. The unchanged non-reference projection
+has SHA-256 `fbe95f11154414dd6898122ea62f27f2a92882605c636fe81679bbd7366f6542`.
+This localizes this run's difference, not its actor or the cause of earlier runs.
+Artifact `12467400868` is 9,349 bytes, SHA-256
+`acdce4bc0ba864f433231018d439a216a30e65b428f0c1856969aeb3c09ad27f`; the final JSON
+is 9,665 bytes, SHA-256
+`8e56dd51eda1c2af80c8ed22720aeba7e20cb29382aaa73b7a0e28f5249e85b5`.
+Raw job log `120139512311` is 130,622 bytes, SHA-256
+`3685451a30605a0ba23d45ee91dba27e99edb7d50373e1258163b29df73db654`, retained under
+`.git/ci-evidence/resident-public-39868428738/`. A separate configuration-checkpoint
+proposal is under independent source/evidence review: retain raw-equality false,
+allow only the supported unchanged renderer and exactly equal route/DNS configuration
+after bounded successful parsing, and reject all other differences/unavailability.
+Independent High review verifies the retained artifact, exact primary Linux field
+meaning and the narrow checkpoint proposal. It also identifies two existing
+controller hazards: cancellation arriving during `Scope.stop` can be overwritten,
+and late capture/cleanup cancellation can escape the terminal success decision.
+There is no evidence those hazards occurred in this run. The High implementation
+assignment includes sticky cancellation with finite cleanup grace, success only
+after all cleanup and terminal cancellation/deadline checks, truthful raw equality,
+a separately versioned configuration checkpoint and exhaustive focused rejection
+controls. No revised acceptance rule or fresh passed actual run is established yet.
+The isolated candidate worktree is `resident-host-config-20261023`, based on ce438c27.
+Reviewed PR341 publishes `81c6b6a5522b0f1cadf98345a7180974f46a2344`, tree
+`411c728475a8adf77a5a7273a86084c597775c44`. Independent High review passes the
+six-file 45,745-byte diff, SHA-256
+`0e7e0bfe090851f0cb8b6240095e5daae2799103ebd72e939c83d2d45221d32e`, 241 inert
+controller and 20 host tests. All 17 dependency blobs and the 7,067-byte actual
+job remain unchanged. Exact-source hosted gate `39875150717` passes 137 Rust and
+494 Python tests, formatting, compilation, strict Clippy and source-unchanged
+checks; actual execution is skipped. Artifact `12468810710` is 38,373 bytes,
+SHA-256 `1bb38378a6a76405c5ab86ef9341d1f73e86e66d41877493faeae009cfadfd65`, with
+29 CRC/path-validated members and exact source/tree binding. Raw job
+`120158848817` is 296,797 bytes, SHA-256
+`70f0082c14b4d8746fee16485bf6b33bf76ff28555172eda363c73e4cc8486eb`, under
+`.git/ci-evidence/resident-host-config-contracts-39875150717/`.
+PR341 is merged into the retained feature as
+`2d004c2466ef8b76bfa66fdee397ddc67721bcf2`, with the identical tested tree.
+Fresh canonical actual public-model trial `39876860833` is dispatched against
+that exact merged SHA and remains pending. Redundant automatic source-only
+push run `39876837183` is cancelled after the same tree passed source contracts;
+the explicit actual workflow repeats its required source checks before execution.
+The terminal post-cleanup guard is the success decision point; this slice does
+not promise cancellation-atomic serialization/publication of the final receipt.
+Independent review confirms cancellation injected at receipt-write entry after
+that guard can still leave the already selected pass result. This bounded
+semantics does not reclassify the old run or establish a fresh actual acceptance.
 Redundant automatic source-only push run `39868382640` is cancelled after the
 same tree passed the scoped gate and the explicit actual trial was accepted.
 No historical-cause, public-answer or host-equality acceptance follows from the source gate.
@@ -499,8 +675,44 @@ dependencies. Artifact `12465443003` is 38,976 bytes, SHA-256
 `120138170115` is 296,647 bytes, SHA-256
 `fbdc1aeb9b169b391632de33dbf4caea8ec326763b8da7d2f164fff58e8e390c`, under
 `.git/ci-evidence/resident-main-connect-source-39868938187/`. The actual-model job
-is skipped. New ordinary Quality/CodeQL and actual feature trial 39868428738
-remain separate pending gates; source tests do not replace them.
+is skipped. New ordinary Quality `39868882810` and all four CodeQL analyses in
+`39868876355`, plus the aggregate, pass on af9ecc3c. The actual Quality checkout is
+merge `2d11a7778786d3d155a184464568c7f9184128ea`, tree
+`9550ea68f3445e27677ea9c1681a47f2a14f995c`, with parents main a68b805a and af9ecc3c.
+It passes 4,345 top-level workspace tests, with 0 failed and 17 ignored across
+99 top-level result lines; the 105 printed lines sum to 4,351 because six nested
+child-process results are repeated. Twelve relevant resident diagnostic cases
+pass. The raw log is 1,979,422 bytes, SHA-256
+`815da3e1a713ea7632ee470bff9ccd60d84f657b4929bcd85d7f54515b7fcb28`, retained under
+`.git/ci-evidence/resident-main-quality-39868882810/`. Against current main18b96ff3,
+the 52 candidate paths and 24 subsequent main paths have no overlap; the clean
+prospective composition is tree `b976292f75617247c27f5ff89156be701a349a2e`.
+That composition is inspected, not executed by the preceding run. Actual feature
+trial 39868428738 separately fails its strict host observation gate as recorded
+above; source/Quality tests do not replace it, and PR332 remains draft.
+The separate six-file checkpoint reconciliation is independently High-reviewed
+and published as `c29f67c5a884d607e283e664dee1d249b1e39160`, tree
+`10b4bb01e73bdad0319a22511b3b2059132b5612`. Its 58,750-byte diff against af9ecc3c
+has SHA-256 `4f2b0841f6f4d24eb532fe4213473e2a44f82cd45ad6ac7e71c5689e292c5746`.
+All 243 inert controller and 20 host tests pass. Independently executed workflow
+source binding verifies 52 included paths, 46 exact copies from feature 81c6b6a,
+six reconciliations, eight preserved main blobs, 17 dependencies and 560 unchanged
+non-CLI lock records. The sanitized certificate boundary and canonical actual-job
+bytes are unchanged. Hosted source gate `39876866868` and new ordinary checks
+are pending. This has not executed actual model inference with main's dependency
+composition; a separately reviewed narrow workflow route is needed for that proof.
+The principal stages current main 89d3aea5 into c29f67c5 in the separate
+`resident-main-runtime-20261023` worktree, local merge
+`a9c3cc61a8bcde9dc7666b9189977ad52fc7fb44`, tree
+`70a03e3f0e20b8f5f65b07ce8ff6c10603a8136f`. All 29 subsequent main paths are
+disjoint from the 52 candidate paths. This clean composition is not execution
+proof: the old baseline/preserved-main source assertions require explicit
+reconciliation. A bounded implementation is assigned to bind the current main
+baseline and add a separate exact-ref/exact-SHA main public-model job before the
+unchanged canonical feature job. The controller must honestly allow the main ref;
+its changed source becomes a seventh reconciliation, leaving 45 exact feature
+copies. No workflow dispatch or acceptance is authorized by that staging commit
+alone; independent review and hosted checks remain required before actual use.
 The guest READY marker precedes exec and is not proof its TLS listener opened.
 Its redundant automatic source-only push run `39855573131` was cancelled after
 this tree passed the guarded source gate and the explicit trial was accepted.
@@ -1913,9 +2125,18 @@ wiring tests pass; worker, authority budget, custody guard and export-name list
 remain unchanged. The rejected and corrected patches are retained under
 `.git/ci-evidence/storage-rotation-source-20261023/`.
 Reviewed PR339 is published at `145c49e35ac875da60cd7ad366fabf4842500d96`, tree
-`a0bc4b2eec1df8e7b5b205addd9959da1b7721ba`. Ordinary Quality and exact-source
-actual Alpha `39871646877` are pending. No actual rotation convergence, catalog
-restoration or independent remote cleanup is inferred from simulated controls.
+`a0bc4b2eec1df8e7b5b205addd9959da1b7721ba`. Ordinary Quality `39871649767`
+and CodeQL `39871645927` pass. The literal Quality checkout is merge
+`d78c02be1003ec915abd647ac2ad914a9f7b7396`, tree
+`b6a107651409423e264b2235747d112e557c8763`, combining main 18b96ff3 and
+source 145c49e3. Workspace tests pass 4,250/0 failed/18 ignored, excluding six
+nested one-pass summaries; the focused Storage Python suites pass 334 tests and
+Node passes 66. Raw job `120147247191` is 2,037,629 bytes, SHA-256
+`27327dd1747c98dbad79e3227debc027bece338985ec8683fe47413a83664cc4`, retained
+under `.git/ci-evidence/storage-rotation-quality-39871649767/`.
+Exact-source actual Alpha `39871646877` is still pending. No actual rotation
+convergence, catalog restoration or independent remote cleanup is inferred from
+simulated controls.
 The diagnostic captures existing
 bounded agent logs before cleanup stops providers and uses closed route/provider
 projections. It adds no product telemetry and does not establish per-request
