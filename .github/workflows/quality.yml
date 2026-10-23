@@ -87,6 +87,7 @@ jobs:
           python3 -B studio/integration/silex-export/test_contract.py
           python3 -B studio/integration/silex-export/test_lifecycle.py
           python3 -B studio/integration/silex-export/test_runtime_context.py
+          STUDIO_DIAGNOSTIC_CORE_SOURCE="$GITHUB_WORKSPACE/core" python3 -B studio/integration/silex-export/test_viewer_receipt.py
           python3 -B studio/integration/silex-export/test_wrapper_guard.py core
           sh -n core/scripts/run-isolated-test.sh
           shellcheck core/scripts/run-isolated-test.sh
@@ -107,13 +108,13 @@ jobs:
             libprotobuf32t64=3.21.12-8.2ubuntu0.4
           test "$(protoc --version)" = 'libprotoc 3.21.12'
 
-      - name: Acquire locked Core dependencies and compile only the pack proof
+      - name: Acquire locked Core dependencies and compile only the Studio fixture
         working-directory: core
         run: |
           cargo fetch --locked
           cargo test --locked --offline -p volparossa --test studio_site_pack --no-run
 
-      - name: Real pinned editor manual edit preview ZIP then actual offline pack and decode
+      - name: Real pinned editor export then actual signed local viewer and independent browser
         env:
           STUDIO_CORE_REVISION: ${{ inputs.core_revision }}
           STUDIO_REVISION: ${{ inputs.studio_revision }}
