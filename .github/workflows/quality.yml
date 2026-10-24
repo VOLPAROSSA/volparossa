@@ -431,10 +431,16 @@ jobs:
           test "$(git -C "$RUSTSEC_ADVISORY_DB" rev-parse HEAD)" = \
             "$RUSTSEC_ADVISORY_DB_REVISION"
 
+      # Run the actual configuration boundary before advisory scans, so an
+      # unrelated denied dependency cannot hide the YAML migration's test result.
+      - name: Test configuration parsing and safety validation
+        run: cargo test --locked --offline -p volparossa-config
+
       - name: Check locked dependencies and licenses
         env:
           RUSTSEC_ADVISORY_DB: ${{ runner.temp }}/rustsec-advisory-db
         run: |
+          python3 -B scripts/test-dependency-scan-aggregation.py
           ./scripts/check-rust-dependencies.sh
           ./packaging/test-collect-cargo-licenses.sh
 

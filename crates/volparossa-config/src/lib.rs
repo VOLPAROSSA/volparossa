@@ -1602,6 +1602,60 @@ mod tests {
     }
 
     #[test]
+    fn yaml_parser_rejects_ambiguous_fields_scalar_types_and_documents() {
+        for input in [
+            "runtime_mode: production\nruntime_mode: development\n",
+            "routing:\n  kill_switch: true\n  kill_switch: false\n",
+            "routing:\n  kill_switch: \"false\"\n",
+            "network:\n  protocol_version: 4.0\n",
+            "routing: [",
+            "{}\n---\n{}\n",
+        ] {
+            assert!(
+                matches!(Config::from_yaml(input), Err(ConfigError::Yaml(_))),
+                "ambiguous or malformed configuration must fail: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn yaml_aliases_still_pass_through_safety_validation() {
+        let safe = "routing:\n  kill_switch: &enabled true\npolicy:\n  fail_closed: *enabled\n";
+        assert_eq!(
+            Config::from_yaml(safe).expect("boolean alias"),
+            Config::default()
+        );
+
+        let unsafe_config = "network:\n  name: private-example-value\nrouting:\n  kill_switch: &disabled false\npolicy:\n  fail_closed: *disabled\n";
+        let error = Config::from_yaml(unsafe_config).expect_err("aliases cannot bypass validation");
+        assert!(matches!(
+            error,
+            ConfigError::Validation {
+                field: "routing.kill_switch",
+                ..
+            }
+        ));
+        assert!(!error.to_string().contains("private-example-value"));
+    }
+
+    #[test]
+    fn shipped_yaml_fragments_load_from_files_and_round_trip() {
+        for example in [
+            include_str!("../../../config/examples/default.yaml"),
+            include_str!("../../../config/examples/unbound-exit.yaml"),
+            include_str!("../../../config/examples/unbound-private-exit.yaml"),
+        ] {
+            let directory = tempfile::tempdir().expect("temporary configuration directory");
+            let path = directory.path().join("config.yaml");
+            std::fs::write(&path, example).expect("write configuration");
+            let config = Config::from_path(&path).expect("shipped configuration");
+            let yaml = config.to_yaml().expect("validated export");
+            assert_eq!(Config::from_yaml(&yaml).expect("export round trip"), config);
+            assert!(!config.roles.client && !config.roles.relay && !config.roles.exit);
+        }
+    }
+
+    #[test]
     fn v1_v2_v3_and_unknown_wire_versions_are_rejected() {
         for version in [1, 2, 3, 5] {
             let yaml = format!("network:\n  protocol_version: {version}\n");

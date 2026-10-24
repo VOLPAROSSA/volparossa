@@ -14,9 +14,39 @@ detailed evidence ledger, including historical failures—not an installation gu
 [Original v1 scorecard](#fixed-alpha-v1-scorecard) ·
 [Completion requirements](#definition-of-done)
 
-Last updated: 2026-10-23
+Last updated: 2026-10-24
 
 ## Current integration and active work
+
+### F04 maintained YAML migration candidate — 2026-10-24
+
+PR347's bounded follow-up replaces the workspace `serde_yaml` dependency with
+an alias for exact `yaml_serde` 0.10.7 and locks its maintained `libyaml-rs`
+dependency to 0.3.0. Original upstream notices and source provenance are retained
+in `THIRD_PARTY_LICENSES.md`. Config's YAML error variant, parsing/validation
+order and serialization code remain unchanged; the CLI's unused direct YAML
+dependency is removed. Targeted parser fixtures additionally cover duplicate
+fields, scalar types, malformed/multiple documents, aliases through validation,
+and shipped configuration file/export round trips.
+
+Locked offline root and fuzz metadata resolve using workspace-local Cargo data;
+the fuzz lockfile does not change. These are source-resolution checks, not
+compiled configuration or security acceptance. Quality now runs the actual
+Config tests before advisory scans, so denied unrelated dependencies cannot hide
+that result. After all existing source/vendor/tool preconditions, the dependency
+checker runs root and fuzz cargo-deny and cargo-audit, retains every failure,
+and exits unsuccessfully if any scan fails. Inert scanner-control-flow tests
+cover all sixteen pass/fail combinations and failing tool preconditions; they
+do not run real advisory scans. The existing collector passes for the two actual
+YAML package metadata entries with byte-exact notices. Full root metadata license
+collection fails at unchanged `jni` 0.22.4, whose archive lacks a distributable
+top-level notice; that separate existing dependency remains unresolved. Hosted
+Rust 1.85 Config tests and all four actual scans remain pending for this candidate.
+Quality 40045545897 on prior source `72af4bb1` failed at root cargo-deny with
+unsafe-libyaml plus the three zbus-family maintenance findings; its later scans
+and workspace tests did not run. The YAML change addresses that dependency path
+only. The zbus-family findings remain open under the existing Rust 1.85 baseline;
+no advisory ignores, toolchain migration or D-Bus rewrite are introduced.
 
 ### Resumed full objective and dependency work — 2026-10-22
 

@@ -347,6 +347,12 @@ check_single_path_package \
 check_single_registry_package "$fuzz_metadata" yamux 0.13.10
 pass 'root and fuzz graphs contain one reviewed Yamux wrapper and only fixed yamux 0.13.10'
 
+check_single_registry_package "$root_metadata" yaml_serde 0.10.7
+check_single_registry_package "$root_metadata" libyaml-rs 0.3.0
+jq -e '[.packages[] | select(.name == "serde_yaml" or .name == "unsafe-libyaml")] | length == 0' \
+    "$root_metadata" >/dev/null || fail 'the root graph still contains the unmaintained YAML stack'
+pass 'root configuration uses only the pinned maintained YAML Organization packages'
+
 hickory_features="$audit_tmp/hickory-features.txt"
 time_features="$audit_tmp/time-features.txt"
 fuzz_hickory_features="$audit_tmp/fuzz-hickory-features.txt"
@@ -421,14 +427,6 @@ deny_version=$(CARGO_HOME="$deny_cargo_home" cargo deny --version | awk '{print 
 check_deny_version "$deny_version" ||
     fail "cargo-deny $deny_version cannot parse the current CVSS 4.0 advisories; require >= 0.18.6"
 
-CARGO_HOME="$deny_cargo_home" cargo deny --locked --offline check --config "$root_deny_config"
-CARGO_HOME="$deny_cargo_home" cargo deny \
-    --manifest-path fuzz/Cargo.toml \
-    --locked \
-    --offline \
-    check
-pass 'cargo-deny checked root and fuzz advisories, licenses, bans, and sources without fetching'
-
 audit_command=${CARGO_AUDIT:-cargo-audit}
 case "$audit_command" in
     */*) [ -x "$audit_command" ] || fail "cargo-audit executable is unavailable: $audit_command" ;;
@@ -440,7 +438,31 @@ audit_version=$("$audit_command" --version | awk '{print $2}')
 check_audit_version "$audit_version" ||
     fail "cargo-audit $audit_version cannot parse the current CVSS 4.0 advisories; require >= 0.22.1"
 
-"$audit_command" audit \
+# All source, vendor, graph, database and tool preconditions above remain fatal.
+# At the scan stage only, collect every result while keeping any failure fatal.
+scan_status=0
+run_scan() {
+    scan_label=$1
+    shift
+    if "$@"; then
+        pass "$scan_label"
+    else
+        scan_exit=$?
+        printf 'FAIL  %s (exit %s)\n' "$scan_label" "$scan_exit" >&2
+        if [ "$scan_status" -eq 0 ]; then
+            scan_status=$scan_exit
+        fi
+    fi
+}
+
+run_scan 'root cargo-deny: advisories, licenses, bans and sources' \
+    env CARGO_HOME="$deny_cargo_home" cargo deny \
+    --locked --offline check --config "$root_deny_config"
+run_scan 'fuzz cargo-deny: advisories, licenses, bans and sources' \
+    env CARGO_HOME="$deny_cargo_home" cargo deny \
+    --manifest-path fuzz/Cargo.toml --locked --offline check
+run_scan 'root cargo-audit: guarded root-only exceptions' \
+    "$audit_command" audit \
     --db "$advisory_database" \
     --no-fetch \
     --file Cargo.lock \
@@ -448,11 +470,16 @@ check_audit_version "$audit_version" ||
     --ignore RUSTSEC-2026-0009 \
     --ignore RUSTSEC-2026-0118 \
     --ignore RUSTSEC-2026-0119
-"$audit_command" audit \
+run_scan 'fuzz cargo-audit: locally patched version matches only' \
+    "$audit_command" audit \
     --db "$advisory_database" \
     --no-fetch \
     --file fuzz/Cargo.lock \
     --ignore RUSTSEC-2026-0009 \
     --ignore RUSTSEC-2026-0118 \
     --ignore RUSTSEC-2026-0119
-pass 'cargo-audit passed: three version matches locally patched; guarded root-only RSA private-key advisory non-applicable, NOT patched; fuzz has no RSA exception'
+if [ "$scan_status" -ne 0 ]; then
+    printf '%s\n' 'FAIL  dependency scans completed with findings or scanner errors; see all four results above' >&2
+    exit "$scan_status"
+fi
+pass 'all four offline dependency scans passed; existing guarded exceptions unchanged'
