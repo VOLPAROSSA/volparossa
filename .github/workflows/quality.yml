@@ -9,6 +9,10 @@ on:
       - main
   workflow_dispatch:
     inputs:
+      ctutils_compatibility:
+        description: 'Opt in to reviewed ctutils Rust 1.85/32-bit tests and linked codegen capture'
+        type: boolean
+        default: false
       studio_export_pack:
         description: 'Opt in to reviewed, synthetic Silex editor/export and offline Core pack proof'
         type: boolean
@@ -26,8 +30,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.studio_export_pack && github.run_id || github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ !(github.event_name == 'workflow_dispatch' && inputs.studio_export_pack) }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility) && github.run_id || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility)) }}
 
 defaults:
   run:
@@ -38,6 +42,53 @@ env:
   RUSTSEC_ADVISORY_DB_REVISION: 84d943a6deeb8cc6c6f632531aaf4f1c62275239
 
 jobs:
+  ctutils-compatibility:
+    name: Opt-in ctutils Rust 1.85 compatibility and codegen evidence
+    if: github.event_name == 'workflow_dispatch' && inputs.ctutils_compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Bind exact reviewed revision on disposable hosted runner
+        env:
+          CTUTILS_CORE_REVISION: ${{ inputs.core_revision }}
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          [[ "$CTUTILS_CORE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          test "$CTUTILS_CORE_REVISION" = "$GITHUB_SHA"
+      - name: Check out exact reviewed proof source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.core_revision }}
+          persist-credentials: false
+      - name: Test location guard without compiling
+        run: python3 -B scripts/test-ctutils-hosted.py
+      - name: Prepare reviewed Protobuf compiler on the disposable runner
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(dpkg --print-architecture)" = amd64
+          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+            -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update
+          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+            -o Acquire::Retries=2 install --yes --no-install-recommends \
+            protobuf-compiler=3.21.12-8.2ubuntu0.4 \
+            libprotoc32t64=3.21.12-8.2ubuntu0.4 \
+            libprotobuf32t64=3.21.12-8.2ubuntu0.4
+          test "$(protoc --version)" = 'libprotoc 3.21.12'
+      - name: Rust 1.85 functional execution and linked codegen capture against original 1.87
+        env:
+          CTUTILS_CORE_REVISION: ${{ inputs.core_revision }}
+        run: python3 -B scripts/run-ctutils-hosted.py "$RUNNER_TEMP/ctutils-proof"
+      - name: Preserve exact-source results and failures for independent codegen review
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ctutils-compatibility-${{ github.run_id }}
+          path: ${{ runner.temp }}/ctutils-proof
+          if-no-files-found: error
+          retention-days: 14
+
   studio-export-pack:
     name: Opt-in real Studio editor export and offline Core packaging
     if: github.event_name == 'workflow_dispatch' && inputs.studio_export_pack
@@ -133,7 +184,7 @@ jobs:
 
   quality:
     name: Unprivileged quality gates
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.studio_export_pack) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
@@ -364,6 +415,8 @@ jobs:
           RUSTSEC_ADVISORY_DB: ${{ runner.temp }}/rustsec-advisory-db
         run: |
           python3 -B scripts/test-rustsec-pin-review.py
+          python3 -B scripts/test-ctutils-scope.py
+          python3 -B scripts/test-ctutils-hosted.py
           git init "$RUSTSEC_ADVISORY_DB"
           git -C "$RUSTSEC_ADVISORY_DB" remote add origin \
             https://github.com/RustSec/advisory-db.git

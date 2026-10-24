@@ -2,6 +2,7 @@
 resolver = "2"
 members = ["crates/*"]
 exclude = [
+  "third_party/rust/vendor/ctutils-0.4.4",
   "third_party/rust/vendor/hickory-proto-0.25.2",
   "third_party/rust/vendor/hickory-resolver-0.25.2",
   "third_party/rust/vendor/libp2p-yamux-0.47.0",
@@ -9,6 +10,7 @@ exclude = [
 ]
 
 [patch.crates-io]
+ctutils = { path = "third_party/rust/vendor/ctutils-0.4.4" }
 hickory-proto = { path = "third_party/rust/vendor/hickory-proto-0.25.2" }
 hickory-resolver = { path = "third_party/rust/vendor/hickory-resolver-0.25.2" }
 libp2p-yamux = { path = "third_party/rust/vendor/libp2p-yamux-0.47.0" }

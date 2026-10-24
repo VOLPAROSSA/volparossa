@@ -975,3 +975,20 @@ versions, locked upstream dependencies and audit/license obligations are retaine
   distribution/network-source obligations and asset licenses before activation.
 - Primary files and adapter/telemetry/update boundaries are linked in
   [Studio hosting](docs/services/STUDIO_HOSTING.md#silex-source-selection-and-interfaces).
+
+## ctutils 0.4.4 Rust 1.85 compatibility adaptation
+
+Origin: [RustCrypto/utils](https://github.com/RustCrypto/utils), exact release
+commit `a993c0ba50db6510d8db15a6219572de65115438`;
+crates.io source archive SHA-256
+`12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865`.
+The complete source is retained under `third_party/rust/vendor/ctutils-0.4.4`
+with its original **Apache-2.0 OR MIT** notices unchanged. The package notice
+collector includes those exact files and labels the source as locally adapted.
+
+Local patch `third_party/rust/patches/ctutils-0.4.4-rust1.85.patch` adapts the
+manifest MSRV, same-width casts and twenty public const qualifications for
+Rust 1.85; it preserves upstream's runtime security fixes and algorithms.
+Exact hashes, compile-time API limitations, reconstruction/scope guards and
+pending hosted/codegen acceptance are documented in `third_party/rust/README.md`.
+This is modified upstream source, not an unchanged official 0.4.4 release.

@@ -85,8 +85,8 @@ verify_vendor() {
         *) fail "invalid embedded lock policy for $crate_directory" ;;
     esac
 
-    git -C "$extracted" apply --recount --check "$repository_root/$patch"
-    git -C "$extracted" apply --recount "$repository_root/$patch"
+    GIT_CEILING_DIRECTORIES="$audit_tmp" git -C "$extracted" apply --recount --check "$repository_root/$patch"
+    GIT_CEILING_DIRECTORIES="$audit_tmp" git -C "$extracted" apply --recount "$repository_root/$patch"
 
     vendor="$repository_root/third_party/rust/vendor/$crate_directory"
     [ -d "$vendor" ] || fail "vendored dependency is missing: $vendor"
@@ -189,6 +189,15 @@ check_single_registry_package() {
 audit_tmp=$(mktemp -d "${TMPDIR:-/tmp}/volparossa-rustsec.XXXXXX")
 
 verify_vendor \
+    third_party/rust/sources/ctutils-0.4.4.crate \
+    12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865 \
+    third_party/rust/patches/ctutils-0.4.4-rust1.85.patch \
+    1e6bf3aac8e37c897e88a59fe5f60aaa6c3d7090f6c2a2d629015a20d5967ac6 \
+    ctutils-0.4.4 \
+    4c18cd159e5013b4ed127137ca157dc8fb6fd2f3239ab9b90602765d41273635
+python3 -B scripts/check-ctutils-scope.py
+
+verify_vendor \
     third_party/rust/sources/hickory-proto-0.25.2.crate \
     f8a6fe56c0038198998a6f217ca4e7ef3a5e51f46163bd6dd60b5c71ca6c6502 \
     third_party/rust/patches/hickory-proto-0.25.2-rustsec.patch \
@@ -249,6 +258,12 @@ check_sha256 \
 check_sha256 \
     ec353d4fecf7963b4c054384557e5dbc3c7a717997eb4a3815b315721a6aa75a \
     third_party/rust/licenses/yamux-0.13.10/LICENSE-MIT
+check_sha256 \
+    91585c36e4fb9ab4ca0d3dfac5d66d3c0c62cc51f640a0e1196542daf2267eae \
+    third_party/rust/vendor/ctutils-0.4.4/LICENSE-MIT
+check_sha256 \
+    cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30 \
+    third_party/rust/vendor/ctutils-0.4.4/LICENSE-APACHE
 pass 'upstream Apache-2.0 and MIT license files are unchanged'
 
 check_sha256 \
@@ -299,6 +314,11 @@ python3 -B scripts/check-public-rsa-scope.py \
     "$root_metadata" "$fuzz_metadata" "$root_deny_config"
 
 for graph in "$root_metadata" "$fuzz_metadata"; do
+    check_single_path_package \
+        "$graph" \
+        ctutils \
+        0.4.4 \
+        "$repository_root/third_party/rust/vendor/ctutils-0.4.4/Cargo.toml"
     check_single_path_package \
         "$graph" \
         hickory-resolver \
