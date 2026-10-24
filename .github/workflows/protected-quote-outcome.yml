@@ -45,15 +45,15 @@ jobs:
       - name: Install the declared compiler on this disposable runner only
         run: |
           set -euo pipefail
-          timeout --signal=TERM --kill-after=15s 300s rustup toolchain install 1.85.0 \
-            --profile minimal --component rustfmt --component clippy --no-self-update
-          rustc +1.85.0 --version --verbose
-          cargo +1.85.0 --version --verbose
+          python3 -B scripts/provision-rust199.py runner
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.99.1/bin:$PATH"
+          rustc --version --verbose
+          cargo --version --verbose
       - name: Check formatting and unchanged historical evidence contracts
         run: |
           set -euo pipefail
           python3 -B scripts/test-public-rsa-scope.py
-          cargo +1.85.0 fmt --all -- --check
+          cargo fmt --all -- --check
           python3 -B tests/integration/test-protected-compute-admission.py
           python3 -B tests/integration/test-protected-compute-guest.py
           python3 -B tests/integration/test-protected-compute-quote.py
@@ -68,32 +68,32 @@ jobs:
       - name: Fetch locked dependencies without modifying source
         run: |
           set -euo pipefail
-          timeout --signal=TERM --kill-after=15s 600s cargo +1.85.0 fetch --locked
+          timeout --signal=TERM --kill-after=15s 600s cargo fetch --locked
           test -z "$(git status --porcelain --untracked-files=all)"
       - name: Exercise guest and signed outcome software contracts offline
         run: |
           set -euo pipefail
-          timeout --signal=TERM --kill-after=15s 1200s cargo +1.85.0 test --locked --offline \
+          timeout --signal=TERM --kill-after=15s 1200s cargo test --locked --offline \
             -p volparossa-content --lib provider::compute::guest:: -- --test-threads=1
-          timeout --signal=TERM --kill-after=15s 300s cargo +1.85.0 test --locked --offline \
+          timeout --signal=TERM --kill-after=15s 300s cargo test --locked --offline \
             -p volparossa-content --lib provider::compute::quote:: -- --test-threads=1
-          timeout --signal=TERM --kill-after=15s 300s cargo +1.85.0 test --locked --offline \
+          timeout --signal=TERM --kill-after=15s 300s cargo test --locked --offline \
             -p volparossa-content --lib private_message::confirmation:: -- --test-threads=1
-          timeout --signal=TERM --kill-after=15s 300s cargo +1.85.0 test --locked --offline \
+          timeout --signal=TERM --kill-after=15s 300s cargo test --locked --offline \
             -p volparossa-content --lib provider::compute::attestation::session::outcome_tests:: -- --test-threads=1
       - name: Exercise agent handoff and CLI refusal semantics offline
         run: |
           set -euo pipefail
-          timeout --signal=TERM --kill-after=15s 300s cargo +1.85.0 test --locked --offline \
+          timeout --signal=TERM --kill-after=15s 300s cargo test --locked --offline \
             -p volparossa-local-control --lib quote:: -- --test-threads=1
-          timeout --signal=TERM --kill-after=15s 1200s cargo +1.85.0 test --locked --offline \
+          timeout --signal=TERM --kill-after=15s 1200s cargo test --locked --offline \
             -p volparossa-agent --lib quote_ -- --test-threads=1
-          timeout --signal=TERM --kill-after=15s 600s cargo +1.85.0 test --locked --offline \
+          timeout --signal=TERM --kill-after=15s 600s cargo test --locked --offline \
             -p volparossa --bin volparossa quote_ -- --test-threads=1
       - name: Check the four affected packages with strict Clippy
         run: |
           set -euo pipefail
-          timeout --signal=TERM --kill-after=15s 900s cargo +1.85.0 clippy --locked --offline \
+          timeout --signal=TERM --kill-after=15s 900s cargo clippy --locked --offline \
             -p volparossa-content -p volparossa-agent -p volparossa-local-control -p volparossa --all-targets -- -D warnings
       - name: Recheck source and lockfile after execution
         if: always()

@@ -125,7 +125,8 @@ jobs:
         id: toolchain
         run: |
           set -euo pipefail
-          rustup toolchain install 1.85.0 --profile minimal --component clippy --component rustfmt
+          python3 -B scripts/provision-rust199.py runner
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.99.1/bin:$PATH"
           rustc --version --verbose
           cargo --version --verbose
       - name: Install reviewed Protobuf on disposable hosted runner

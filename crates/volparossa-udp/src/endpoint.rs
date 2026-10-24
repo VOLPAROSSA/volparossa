@@ -47,7 +47,7 @@ impl EndpointTaskGuard {
     fn new(state: Arc<EndpointTaskState>) -> Self {
         state
             .active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 active.checked_add(1)
             })
             .unwrap_or_else(|_| std::process::abort());

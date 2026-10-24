@@ -70,6 +70,7 @@ class AdmissionTests(unittest.TestCase):
 
     def test_both_native_and_real_32bit_targets_and_secret_entrypoints_are_named(self):
         self.assertEqual(M.TARGETS, ("x86_64-unknown-linux-gnu", "i686-unknown-linux-musl"))
+        self.assertEqual(M.COMPILERS, ("1.85.0", "1.87.0", "1.99.1"))
         self.assertEqual(len(M.SYMBOLS), 17)
         self.assertIn("ct_digest_output_eq", M.SYMBOLS)
         self.assertIn("ct_poly1305_verify", M.SYMBOLS)

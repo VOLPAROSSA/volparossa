@@ -3564,6 +3564,37 @@ retire_failure_stage_is_safe() {
     esac
 }
 
+production_retirement_diagnostic_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        affine-state|unit-not-collected|runtime-fence) return 0 ;;
+        *) retire_failure_stage_is_safe "$1" ;;
+    esac
+}
+
+report_production_retirement_diagnostic() {
+    [ "$#" -eq 1 ] || return 1
+    [ "${driver_phase:-}" = production-retirement ] || return 1
+    production_retirement_diagnostic_stage_is_safe "$1" || return 1
+    if [ -n "${proof_failure_reason:-}" ]; then
+        proof_failure_reason_is_safe "$proof_failure_reason" || return 1
+        [ "${proof_ok:-}" = no ] || return 1
+    fi
+    printf 'VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_DIAGNOSTIC_V1=%s\n' "$1" >&2
+    if [ -n "${proof_failure_reason:-}" ]; then
+        printf 'VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1=%s\n' \
+            "$proof_failure_reason" >&2
+        if [ "$proof_failure_reason" = production-launch-status ]; then
+            # Reuse only the existing validated fixed-stage reporter. Discard
+            # partial/error output when its private capture is unavailable.
+            if production_retirement_launch_detail=$(report_production_launch_diagnostic 2>&1); then
+                printf '%s\n' "$production_retirement_launch_detail" >&2
+            fi
+        fi
+    fi
+    return 0
+}
+
 retire_unit() {
     retire_failure_stage=adoption
     if [ "$unit_owned" = no ] && [ "$unit_may_own" = yes ]; then
@@ -5306,12 +5337,16 @@ if [ "$proof_ok" = yes ]; then
     if ! retire_unit; then
         cleanup_error=yes
         record_proof_failure 'production-retirement'
+        report_production_retirement_diagnostic "$retire_failure_stage" \
+            || failed 'production retirement diagnostic is invalid'
         failed 'production unit retirement did not settle'
     fi
     if [ -n "$unit_name" ] || [ "$unit_owned" != no ] \
         || [ "$unit_may_own" != no ] || [ -n "$unit_invocation_id" ] \
         || [ -n "$unit_ownership_marker" ]; then
         record_proof_failure 'production-retirement'
+        report_production_retirement_diagnostic affine-state \
+            || failed 'production retirement diagnostic is invalid'
         failed 'production unit retirement retained affine ownership state'
     fi
     unit_name=$production_unit_name
@@ -5321,6 +5356,14 @@ if [ "$proof_ok" = yes ]; then
             "$production_control_group" "$production_main_pid" \
             "$identity_starttime_value"; then
         record_proof_failure 'production-retirement'
+        # Classify the already observed short-circuit failure; never resample or
+        # retry retirement to manufacture a more favorable observation.
+        production_retirement_diagnostic_stage=runtime-fence
+        if [ "$production_retired_load_state" != not-found ]; then
+            production_retirement_diagnostic_stage=unit-not-collected
+        fi
+        report_production_retirement_diagnostic "$production_retirement_diagnostic_stage" \
+            || failed 'production retirement diagnostic is invalid'
         failed 'production unit retirement fence did not settle'
     fi
     forget_unit_ownership

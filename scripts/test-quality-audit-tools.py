@@ -35,17 +35,22 @@ class CacheTests(unittest.TestCase):
     def runner(self, command, **kwargs):
         self.calls.append(command)
         self.assertTrue(kwargs["check"])
-        if command[0] == "rustup":
-            self.assertEqual(command, ["rustup", "toolchain", "install", "1.88.0", "--profile", "minimal"])
-        elif command[0] == "cargo":
+        if command[:2] == ["rustup", "toolchain"]:
+            self.assertIn(command[3], {compiler for compiler, _ in CACHE.TOOLS.values()})
+            self.assertEqual(command[4:], ["--profile", "minimal"])
+        elif command[:2] == ["rustup", "which"]:
+            self.assertEqual(command[2], "--toolchain")
+            self.assertEqual(command[4], "rustc")
+            return subprocess.CompletedProcess(command, 0, "/inert/" + command[3] + "/rustc\n")
+        elif command[:2] == ["rustup", "run"]:
             name = command[-1]
             compiler, version = CACHE.TOOLS[name]
-            self.assertEqual(command[1:5], ["+" + compiler, "install", "--locked", "--root"])
-            self.assertEqual(command[6:], ["--version", "=" + version, name])
-            destination = Path(command[5]) / "bin"
+            self.assertEqual(command[2:7], [compiler, "cargo", "install", "--locked", "--root"])
+            self.assertEqual(command[8:], ["--version", "=" + version, name])
+            self.assertEqual(kwargs["env"]["RUSTC"], "/inert/" + compiler + "/rustc")
+            destination = Path(command[7]) / "bin"
             destination.mkdir(parents=True, exist_ok=True)
             (destination / name).write_bytes(b"inert tool fixture: " + name.encode())
-            # Cargo's install metadata must never enter the cache.
             (destination.parent / ".crates.toml").write_text("inert metadata")
         else:
             name = Path(command[0]).name
@@ -62,7 +67,7 @@ class CacheTests(unittest.TestCase):
         outcome, size = CACHE.install(self.root, self.expected, False, self.runner)
         self.assertEqual(outcome, "miss-source-built")
         self.assertGreater(size, 0)
-        self.assertEqual(len(self.calls), 5)
+        self.assertEqual(len(self.calls), 8)
         self.assertEqual({p.name for p in self.root.iterdir()}, CACHE.FILES)
         self.assertEqual([p.name for p in self.root.parent.iterdir()], ["cache"])
 

@@ -1,0 +1,62 @@
+[
+  {
+    "package": "zbus",
+    "version": "6.1.0",
+    "crate_sha256": "fcff5faa63a63d5b81051740f7382017f10b3440b3f401d97f0cf0b3b39c62d9",
+    "vcs": {
+      "git": {
+        "sha1": "90b4de2d6fa7d7f5b0cb8dd955709d3e765fd2b2"
+      },
+      "path_in_vcs": "zbus"
+    },
+    "local_patches": []
+  },
+  {
+    "package": "zbus_macros",
+    "version": "6.1.0",
+    "crate_sha256": "5bba6e2bfe19571dc81b3e0be9f8daec6e5422db3e2eea2e766a859553e7bd37",
+    "vcs": {
+      "git": {
+        "sha1": "90b4de2d6fa7d7f5b0cb8dd955709d3e765fd2b2"
+      },
+      "path_in_vcs": "zbus_macros"
+    },
+    "local_patches": []
+  },
+  {
+    "package": "zbus_utils",
+    "version": "6.0.0",
+    "crate_sha256": "c27a055b114bd9fc3686e90f62bd1fe612d523fc5f620bac3b1d2f42d3f6cab8",
+    "vcs": {
+      "git": {
+        "sha1": "4cd1829b16d2e95e2903ddfb7b59cf85509459bd"
+      },
+      "path_in_vcs": "zbus_utils"
+    },
+    "local_patches": []
+  },
+  {
+    "package": "zcheapstr",
+    "version": "1.0.0",
+    "crate_sha256": "769381976ea05c1f0abde0ca527b02e415bccbdbad148534a2b0c1901c9ab934",
+    "vcs": {
+      "git": {
+        "sha1": "38aaf94713db7c560dc93e9813d53ec2c5fb1892"
+      },
+      "path_in_vcs": ""
+    },
+    "local_patches": []
+  },
+  {
+    "package": "zruntime",
+    "version": "0.2.0",
+    "crate_sha256": "467fd80a2014d186319f14b81aef027aa466712f355c90158a0e6b39de60726d",
+    "vcs": {
+      "git": {
+        "sha1": "cf3b321959f21428ae58e32e1a0bd1dd9edf4a9a"
+      },
+      "path_in_vcs": ""
+    },
+    "local_patches": []
+  }
+]

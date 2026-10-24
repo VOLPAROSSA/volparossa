@@ -1994,6 +1994,10 @@ esac
 case $scenario in weather-decoder-abi|alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|transaction-abci|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|protected-quote|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|private-storage-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
+prepare_current_compiler() {
+    python3 -B scripts/provision-rust199.py alpha-guest
+    export PATH="/home/vpci/.local/volparossa-rust-1.99.1/bin:$PATH"
+}
 guest_phase verify-source
 printf '%s  source.tar.gz\n' "$source_sha256" | sha256sum --check --strict -
 if [ "$scenario" = weather-decoder-abi ]; then
@@ -2082,6 +2086,7 @@ if [ "$scenario" = agent-reasoning ]; then
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/agent-reasoning-smoke.sh --execute --yes --expected-commit "$expected_commit"
 fi
 if [ "$scenario" = agent-private-conversation ]; then
@@ -2090,6 +2095,7 @@ if [ "$scenario" = agent-private-conversation ]; then
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/agent-private-conversation.sh --execute --yes --expected-commit "$expected_commit"
 fi
 if [ "$scenario" = agent-private-code ]; then
@@ -2098,6 +2104,7 @@ if [ "$scenario" = agent-private-code ]; then
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/agent-private-task-smoke.sh --execute --yes --expected-commit "$expected_commit" --code
 fi
 if [ "$scenario" = agent-private-browser ]; then
@@ -2106,6 +2113,7 @@ if [ "$scenario" = agent-private-browser ]; then
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/agent-private-task-smoke.sh --execute --yes --expected-commit "$expected_commit" --browser
 fi
 if [ "$scenario" = agent-private-task ]; then
@@ -2114,6 +2122,7 @@ if [ "$scenario" = agent-private-task ]; then
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/agent-private-task-smoke.sh --execute --yes --expected-commit "$expected_commit"
 fi
 if [ "$scenario" = agent-training ] || [ "$scenario" = agent-owner-priority ] || [ "$scenario" = agent-owner-cancel ]; then
@@ -2122,6 +2131,7 @@ if [ "$scenario" = agent-training ] || [ "$scenario" = agent-owner-priority ] ||
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/agent-training-smoke.sh --execute --yes --expected-commit "$expected_commit" --scenario "$scenario"
 fi
 if [ "$scenario" = transaction-abci ]; then
@@ -2130,6 +2140,7 @@ if [ "$scenario" = transaction-abci ]; then
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/transaction-abci-vm-guest.sh "$expected_commit"
 fi
 if [ "$scenario" = wifi-mesh ]; then
@@ -2138,12 +2149,13 @@ if [ "$scenario" = wifi-mesh ]; then
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/wifi-mesh-vm-guest.sh "$expected_commit"
 fi
 if [ "$scenario" = wifi-link ]; then
     guest_phase wifi-kernel
     tar -xzf source.tar.gz
-    (cd source && sh tests/integration/wifi-mesh-vm-guest.sh "$expected_commit" kernel-only)
+    (cd source && prepare_current_compiler && sh tests/integration/wifi-mesh-vm-guest.sh "$expected_commit" kernel-only)
 fi
 printf '%s  volparossa-mpquic\n' "$mpquic_sha256" | sha256sum --check --strict -
 [ "$(stat -Lc '%s' volparossa-mpquic)" -le 67108864 ]
@@ -2202,6 +2214,7 @@ if [ "$scenario" = reciprocity-private-dns ]; then
 fi
 tar -xzf source.tar.gz
 cd source
+prepare_current_compiler
 test -x tests/integration/kvm-alpha-topology.sh
 if [ "$browser_filter_manifest_sha256" != none ]; then
     guest_phase browser-filter-inputs

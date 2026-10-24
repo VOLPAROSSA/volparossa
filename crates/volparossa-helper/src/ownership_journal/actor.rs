@@ -904,7 +904,7 @@ impl LifecycleState {
     fn transition(&self, next: Lifecycle) {
         let _ = self
             .0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 let current = match current {
                     1 => Lifecycle::Starting,
                     2 => Lifecycle::Running,
@@ -1286,7 +1286,7 @@ impl ActorClient {
         ensure_deadline_before_acceptance(deadline)?;
         self.admission
             .accepted
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |accepted| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |accepted| {
                 (accepted < MAX_ACCEPTED_OPERATIONS).then_some(accepted + 1)
             })
             .map_err(|_| DurableOwnershipError::Capacity)?;

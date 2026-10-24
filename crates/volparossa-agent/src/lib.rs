@@ -44,13 +44,14 @@ use std::{
 
 use thiserror::Error;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt, unix::AsyncFd},
+    io::{AsyncReadExt, AsyncWriteExt},
     sync::{RwLock, Semaphore, watch},
     task::{JoinHandle, JoinSet},
 };
 use volparossa_config::Config;
 use volparossa_identity::IdentityStore;
 use volparossa_inspection::InspectionError;
+use volparossa_linux_uapi::OwnedAsyncFd;
 use volparossa_local_control::LogLevel;
 use volparossa_metrics::{LocalMetricsEndpoint, MetricsRegistry};
 use volparossa_peerstore::PeerStore;
@@ -760,9 +761,10 @@ async fn run_client_udp_ingress(
             .log(LogLevel::Error, "INGRESS_UDP_POLL_FAILED", unix_millis());
         return;
     };
-    let (Ok(ipv4_poll), Ok(ipv6_poll)) =
-        (AsyncFd::new(ipv4_descriptor), AsyncFd::new(ipv6_descriptor))
-    else {
+    let (Ok(ipv4_poll), Ok(ipv6_poll)) = (
+        OwnedAsyncFd::register(ipv4_descriptor),
+        OwnedAsyncFd::register(ipv6_descriptor),
+    ) else {
         state
             .write()
             .await
@@ -1102,9 +1104,10 @@ async fn run_client_dns_ingress(
             .log(LogLevel::Error, "INGRESS_DNS_POLL_FAILED", unix_millis());
         return;
     };
-    let (Ok(ipv4_poll), Ok(ipv6_poll)) =
-        (AsyncFd::new(ipv4_descriptor), AsyncFd::new(ipv6_descriptor))
-    else {
+    let (Ok(ipv4_poll), Ok(ipv6_poll)) = (
+        OwnedAsyncFd::register(ipv4_descriptor),
+        OwnedAsyncFd::register(ipv6_descriptor),
+    ) else {
         state
             .write()
             .await

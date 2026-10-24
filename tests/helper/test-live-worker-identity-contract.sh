@@ -8586,5 +8586,122 @@ if grep -Ei 'capabilit(y|ies)[_-]?state|state[_-]?capabilit(y|ies)' "$ipc_hook" 
     exit 1
 fi
 
+
+# Production retirement diagnostics classify the existing guard only. Exercise
+# exact source helpers/phase with inert ownership/manager fixtures, never systemd.
+production_retirement_functions=$temporary_directory/production-retirement-functions.sh
+for production_retirement_function in production_retirement_diagnostic_stage_is_safe \
+    report_production_retirement_diagnostic; do
+    sed -n "/^$production_retirement_function() {$/,/^}$/p" "$gate" \
+        >>"$production_retirement_functions"
+done
+# shellcheck source=/dev/null
+. "$production_retirement_functions"
+proof_failure_reason=
+for production_stage in adoption identity initial-snapshot stop-request stop-wait \
+    reset-failed reset-wait fdstore-clean post-clean final-reset collection \
+    affine-state unit-not-collected runtime-fence; do
+    driver_phase=production-retirement
+    expect_status 0 report_production_retirement_diagnostic "$production_stage"
+    test ! -s "$last_stdout"
+    test "$(cat "$last_stderr")" = \
+        "VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_DIAGNOSTIC_V1=$production_stage"
+done
+for production_stage in '' unknown '/private/session' 'identity extra'; do
+    expect_status 1 report_production_retirement_diagnostic "$production_stage"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
+driver_phase=worker-retirement
+expect_status 1 report_production_retirement_diagnostic identity
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+expect_status 1 report_production_retirement_diagnostic
+expect_status 1 report_production_retirement_diagnostic identity extra
+driver_phase=production-retirement
+for invalid_first in unknown 'production-launch-status/private/session'; do
+    proof_failure_reason=$invalid_first proof_ok=no
+    expect_status 1 report_production_retirement_diagnostic runtime-fence
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
+proof_failure_reason=production-launch-status proof_ok=yes
+expect_status 1 report_production_retirement_diagnostic runtime-fence
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+proof_failure_reason=
+production_retirement_block=$temporary_directory/production-retirement-block.sh
+sed -n '/^    production_retirement_confirmed=no$/,/^    production_retirement_confirmed=yes$/p' \
+    "$gate" >"$production_retirement_block"
+exercise_production_retirement_diagnostic() (
+    production_fixture=$1
+    proof_failure_reason=${2:-}
+    proof_ok=yes
+    [ -z "$proof_failure_reason" ] || proof_ok=no
+    temporary_stage=$temporary_directory/retirement-fixture-$production_fixture-${2:-none}-${3:-none}
+    mkdir -m 0700 "$temporary_stage" "$temporary_stage/production-output"
+    if [ -n "${3:-}" ]; then
+        printf 'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=%s\n' "$3" \
+            >"$temporary_stage/production-output/start.failure"
+    fi
+    unit_name=private-fixture
+    unit_owned=yes unit_may_own=no unit_invocation_id=private unit_ownership_marker=private
+    production_control_group=private production_main_pid=1 identity_starttime_value=1
+    forget_unit_ownership() {
+        unit_name='' unit_owned=no unit_may_own=no unit_invocation_id='' unit_ownership_marker=''
+    }
+    retire_unit() {
+        retire_failure_stage=stop-wait
+        [ "$production_fixture" != retire-failed ] || return 1
+        [ "$production_fixture" = affine-retained ] || forget_unit_ownership
+    }
+    unit_load_state() {
+        if [ "$production_fixture" = not-collected ]; then printf '%s\n' loaded
+        else printf '%s\n' not-found; fi
+    }
+    retired_runtime_is_absent() {
+        [ "$1:$2:$3:$4" = "private-fixture:$production_control_group:$production_main_pid:$identity_starttime_value" ] \
+            && [ "$production_fixture" != runtime-present ]
+    }
+    failed() { printf '%s\n' fixture-failed >&2; exit 1; }
+    # shellcheck source=/dev/null
+    . "$production_retirement_block"
+    test "$production_retirement_confirmed" = yes
+)
+for production_pair in retire-failed:stop-wait affine-retained:affine-state \
+    not-collected:unit-not-collected runtime-present:runtime-fence; do
+    expect_status 1 exercise_production_retirement_diagnostic "${production_pair%%:*}"
+    test ! -s "$last_stdout"
+    test "$(sed -n '1p' "$last_stderr")" = \
+        "VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_DIAGNOSTIC_V1=${production_pair#*:}"
+    test "$(sed -n '2p' "$last_stderr")" = \
+        'VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1=production-retirement'
+    test "$(sed -n '3p' "$last_stderr")" = fixture-failed
+done
+expect_status 0 exercise_production_retirement_diagnostic success
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+# Earlier first reasons survive the later runtime-fence failure. Only the fixed
+# start.failure diagnostic is reused; absent/invalid private captures add no text.
+for earlier_reason in production-launch-status production-process-identity; do
+    expect_status 1 exercise_production_retirement_diagnostic runtime-present "$earlier_reason"
+    test ! -s "$last_stdout"
+    test "$(cat "$last_stderr")" = \
+        "VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_DIAGNOSTIC_V1=runtime-fence
+VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1=$earlier_reason
+fixture-failed"
+done
+for earlier_stage in identity-process unknown-stage; do
+    expect_status 1 exercise_production_retirement_diagnostic runtime-present \
+        production-launch-status "$earlier_stage"
+    test ! -s "$last_stdout"
+    test "$(sed -n '2p' "$last_stderr")" = \
+        'VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1=production-launch-status'
+    if [ "$earlier_stage" = identity-process ]; then
+        test "$(sed -n '3p' "$last_stderr")" = \
+            'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=identity-process'
+        test "$(sed -n '4p' "$last_stderr")" = fixture-failed
+    else
+        test "$(sed -n '3p' "$last_stderr")" = fixture-failed
+        test "$(wc -l <"$last_stderr")" -eq 3
+    fi
+done
+
 printf '%s\n' \
     'PASS: live helper identity/fdstore and production IPC plus sequential Client/Exit and cross-leg Relay forwarding, bidirectional nft/WireGuard growth, Commit retry, exact peer reap, retirement, root refusal, confinement, and no-host-mutation contracts are exact.'

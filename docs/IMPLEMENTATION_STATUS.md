@@ -18,6 +18,43 @@ Last updated: 2026-10-24
 
 ## Current integration and active work
 
+### F04 maintained zbus / Rust1.99.1 source candidate — 2026-10-24
+
+The isolated `fix/f04-maintained-zbus-rust199` candidate stacks on PR347 head
+`18d2c49ba9081b3604b95027400f103502466617`. It implements exact zbus6.1.0
+(Tokio + proxy only), the maintained object-path export and the five existing
+builder chains' deferred setter errors, preserving the terminal build checks,
+unique-owner binding, uncached reads, deadlines and descriptor-custody state.
+The locked root resolver removes the retired zbus family. Only the necessary
+bitflags/futures-core/futures-io closure changes; rustix and fixed security
+backports remain unchanged. Root/fuzz MSRV and current build compiler selection
+are1.99.1; lower independent upstream/backport/ctutils reference fixtures retain
+their original scope. Rust1.85 was the prior declared baseline, not a permanent
+goal requirement.
+
+A fixed-hash component provisioner restricts new compiler installation to the
+already authorized disposable hosted runner/KVM accounts. The actual new compiler
+has not been executed. New version-two helper VM environment records bind the
+reviewed component hashes and full measured tool output. Original v1 evidence,
+fixtures and validators stay unchanged. An explicitly selected Quality phase
+(`maintained_zbus`, exact `core_revision`) is prepared for actual Config,
+helper/systemd_fdstore, helper-entry and private D-Bus marshalling/error tests.
+The private bus complements the required real systemd257 VM proof; it does not
+replace it. The existing ctutils capture adds the new compiler while preserving
+1.85-adapted/1.87-upstream references, real32-bit targets, seventeen linked
+entrypoints and the unchanged vendor/patch bytes. New linked-codegen review is
+still required before security acceptance.
+
+Inert compiler/environment authority tests, existing helper VM/restart contract
+tests and current protected-compute compiler-contract tests pass. Locked offline
+metadata is source-resolution evidence only. Both exact JNI notice fallbacks
+pass negative archive/VCS/version/license tests; full all-platform collection
+then stops at pre-existing `jni-sys-macros`0.4.1 and has additional old notice gaps.
+No full license-closure claim is made. No compiler/native test, actual advisory
+scan, VM/runtime/cleanup or ABI acceptance has yet run for this source. Hosted
+execution and independent review remain required; F04/F02 are not accepted by
+these source checks.
+
 ### F04 maintained YAML migration candidate — 2026-10-24
 
 PR347's bounded follow-up replaces the workspace `serde_yaml` dependency with
