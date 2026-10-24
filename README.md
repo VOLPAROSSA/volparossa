@@ -172,6 +172,15 @@ flowchart LR
     class E,D endpoint;
 ```
 
+The diagram starts with your node in the client role: Path 1 reaches Peer A over local
+Wi-Fi, Path 2 reaches Peer B over the existing Internet, and Path 3 reaches Peer C over
+local Ethernet. These different relays each connect over WireGuard to the same selected
+exit peer. The dotted route shows additional local or Internet paths through further
+relays and WireGuard links to that same exit, when useful and supported. The exit's
+independent uplink reaches the allowed Internet destination. Each normal path remains
+client → exactly one relay → exit → destination, with payloads encrypted from client
+to exit; local links do not permit a direct client-to-exit dataplane.
+
 The diagram shows **several parallel routes**. Within each route, one WireGuard link
 connects your node to its relay, and a second connects that relay to the selected exit.
 These two links are sometimes called the route's **two legs**; that does not limit the
