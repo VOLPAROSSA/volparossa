@@ -1647,7 +1647,7 @@ mod tests {
         ] {
             let directory = tempfile::tempdir().expect("temporary configuration directory");
             let path = directory.path().join("config.yaml");
-            std::fs::write(&path, example).expect("write configuration");
+            fs::write(&path, example).expect("write configuration");
             let config = Config::from_path(&path).expect("shipped configuration");
             let yaml = config.to_yaml().expect("validated export");
             assert_eq!(Config::from_yaml(&yaml).expect("export round trip"), config);
