@@ -979,6 +979,8 @@ branch_failure_functions=$temporary_directory/branch-failure-functions.sh
     sed -n '/^non_retained_restart_readiness_stage_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_restart_readiness_failure_detail_category() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_restart_retirement_failure_detail_category() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_production_retirement_stage_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_production_retirement_diagnostic() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_restart_launch_failure_category() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_restart_initial_hook_failure_stage_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_restart_initial_driver_failure_stage_is_safe() {$/,/^}$/p' "$runner"
@@ -994,7 +996,7 @@ branch_failure_functions=$temporary_directory/branch-failure-functions.sh
     sed -n '/^non_retained_functional_probe_failure_value_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_production_launch_diagnostic() {$/,/^}$/p' "$runner"
 } >"$branch_failure_functions"
-test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 29
+test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 31
 sh -n "$branch_failure_functions"
 # shellcheck disable=SC1090
 . "$branch_failure_functions"
@@ -2504,6 +2506,57 @@ if [ "$uses_count" -ne 4 ]; then
     printf 'expected exactly four pinned action uses, got %s\n' "$uses_count" >&2
     exit 1
 fi
+
+
+# No private raw proof log is published by the production-retirement parser.
+production_marker=VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_DIAGNOSTIC_V1=
+production_phase=VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=production-retirement
+for production_stage in adoption identity initial-snapshot stop-request stop-wait \
+    reset-failed reset-wait fdstore-clean post-clean final-reset collection \
+    affine-state unit-not-collected runtime-fence; do
+    printf '%s%s\n%s\n' "$production_marker" "$production_stage" "$production_phase" \
+        >"$branch_failure_diagnostic"
+    expect_status 0 report_non_retained_production_retirement_diagnostic "$branch_failure_diagnostic"
+    test ! -s "$last_stdout"
+    test "$(cat "$last_stderr")" = \
+        "non-retained helper-boundary PR smoke failure category: production-retirement
+non-retained helper-boundary PR smoke production retirement stage: $production_stage"
+done
+for production_bad in absent-marker absent-phase duplicate-marker duplicate-phase \
+    wrong-phase prefix-junk suffix-junk private-marker oversized; do
+    case $production_bad in
+        absent-marker) printf '%s\n' "$production_phase" ;;
+        absent-phase) printf '%sidentity\n' "$production_marker" ;;
+        duplicate-marker) printf '%sidentity\n%sidentity\n%s\n' \
+            "$production_marker" "$production_marker" "$production_phase" ;;
+        duplicate-phase) printf '%sidentity\n%s\n%s\n' \
+            "$production_marker" "$production_phase" "$production_phase" ;;
+        wrong-phase) printf '%sidentity\n%s\n' "$production_marker" \
+            'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=restart-retirement' ;;
+        prefix-junk) printf 'private%sidentity\n%s\n' "$production_marker" "$production_phase" ;;
+        suffix-junk) printf '%sidentity/private/session\n%s\n' "$production_marker" "$production_phase" ;;
+        private-marker) printf '%sidentity\n%s\n%s\n' "$production_marker" "$production_phase" \
+            '-----BEGIN PRIVATE KEY-----' ;;
+        oversized) head -c 1048577 /dev/zero ;;
+    esac >"$branch_failure_diagnostic"
+    expect_status 1 report_non_retained_production_retirement_diagnostic "$branch_failure_diagnostic"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
+printf '%sidentity\n%s\n' "$production_marker" "$production_phase" >"$branch_failure_diagnostic"
+chmod 0660 "$branch_failure_diagnostic"
+expect_status 1 report_non_retained_production_retirement_diagnostic "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+chmod 0600 "$branch_failure_diagnostic"
+production_capture_alias=$temporary_directory/production-capture-alias
+ln "$branch_failure_diagnostic" "$production_capture_alias"
+expect_status 1 report_non_retained_production_retirement_diagnostic "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+rm "$production_capture_alias"
+ln -s "$branch_failure_diagnostic" "$production_capture_alias"
+expect_status 1 report_non_retained_production_retirement_diagnostic "$production_capture_alias"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+expect_status 1 report_non_retained_production_retirement_diagnostic
+expect_status 1 report_non_retained_production_retirement_diagnostic "$branch_failure_diagnostic" extra
 
 printf '%s\n' \
     'PASS: helper-boundary VM preview, retained-main, non-retained branch smoke, and KVM contracts are exact.'

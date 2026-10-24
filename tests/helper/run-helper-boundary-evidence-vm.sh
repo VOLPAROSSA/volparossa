@@ -618,6 +618,45 @@ non_retained_restart_retirement_failure_detail_category() {
     printf '%s\n' "$non_retained_retirement_detail"
 }
 
+non_retained_production_retirement_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        affine-state|unit-not-collected|runtime-fence) return 0 ;;
+        *) non_retained_restart_retirement_stage_is_safe "$1" ;;
+    esac
+}
+
+report_non_retained_production_retirement_diagnostic() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_production_retirement_capture=$1
+    [ -f "$non_retained_production_retirement_capture" ] \
+        && [ ! -L "$non_retained_production_retirement_capture" ] || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_production_retirement_capture" \
+        2>/dev/null || true)" = "1:$(id -u):600" ] || return 1
+    non_retained_production_retirement_size=$(stat -Lc '%s' \
+        "$non_retained_production_retirement_capture" 2>/dev/null) || return 1
+    [ "$non_retained_production_retirement_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_production_retirement_capture" >/dev/null 2>&1 || return 1
+    [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=' \
+        "$non_retained_production_retirement_capture" 2>/dev/null)" -eq 1 ] || return 1
+    grep -Fxq 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=production-retirement' \
+        "$non_retained_production_retirement_capture" 2>/dev/null || return 1
+    non_retained_production_retirement_prefix=VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_DIAGNOSTIC_V1=
+    [ "$(grep -Fc "$non_retained_production_retirement_prefix" \
+        "$non_retained_production_retirement_capture" 2>/dev/null)" -eq 1 ] || return 1
+    non_retained_production_retirement_line=$(grep -F "$non_retained_production_retirement_prefix" \
+        "$non_retained_production_retirement_capture" 2>/dev/null) || return 1
+    case $non_retained_production_retirement_line in
+        "$non_retained_production_retirement_prefix"*) ;;
+        *) return 1 ;;
+    esac
+    non_retained_production_retirement_stage=${non_retained_production_retirement_line#"$non_retained_production_retirement_prefix"}
+    non_retained_production_retirement_stage_is_safe "$non_retained_production_retirement_stage" || return 1
+    printf '%s\n' 'non-retained helper-boundary PR smoke failure category: production-retirement' >&2
+    printf 'non-retained helper-boundary PR smoke production retirement stage: %s\n' \
+        "$non_retained_production_retirement_stage" >&2
+}
+
 non_retained_restart_launch_failure_category() {
     [ "$#" -eq 1 ] || return 1
     case $1 in
@@ -2640,6 +2679,8 @@ if [ "$guest_status" -ne 0 ]; then
             :
         elif report_non_retained_boundary_validator_failure_category \
             "$proof_stderr_log"; then
+            :
+        elif report_non_retained_production_retirement_diagnostic "$proof_stderr_log"; then
             :
         elif report_non_retained_proof_failure_reason "$proof_stderr_log"; then
             if [ "$non_retained_failure_reason" = worker-launch-status ]; then
