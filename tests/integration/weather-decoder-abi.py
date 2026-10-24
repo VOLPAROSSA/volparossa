@@ -548,9 +548,15 @@ class SnapshotRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, response, code, message, headers, newurl):
         parsed = urllib.parse.urlsplit(newurl)
         original = urllib.parse.urlsplit(request.full_url)
+        basename = Path(original.path).name
+        # Snapshot percent-encodes literal '+' in Debian package filenames.
+        # Admit only that exact spelling, never general URL decoding (which
+        # could hide separators, traversal, or a different package name).
+        filenames = (basename, basename.replace("+", "%2B"))
         require(parsed.scheme == "https" and parsed.netloc == "snapshot.debian.org"
                 and not parsed.query and not parsed.fragment
-                and (re.fullmatch(r"/file/[0-9a-f]{40}/" + re.escape(Path(original.path).name), parsed.path)
+                and (any(re.fullmatch(r"/file/[0-9a-f]{40}/" + re.escape(name), parsed.path)
+                         for name in filenames)
                      or (self.expected_sha256 is not None and
                          re.fullmatch(r"/file/[0-9a-f]{40}/" + self.expected_sha256, parsed.path))),
                 "SNAPSHOT_REDIRECT_REJECTED")

@@ -45,6 +45,13 @@ def function(name):
     return name + "() {\n" + source().split(name + "() {\n", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
 
 
+def dispatch():
+    # Select the complete host dispatch immediately before status capture.
+    # Other explicit scenarios may precede content-provider in this case.
+    return "case $scenario in\n" + source().split("\nGUEST_STATUS=$?", 1)[0].rsplit(
+        "\ncase $scenario in\n", 1)[1]
+
+
 class ArgumentsAndResources(unittest.TestCase):
     def required(self, scenario="content-provider", bundle=True):
         result = ["--execute", "--yes", "--scenario", scenario, "--output", "/unread/output",
@@ -138,8 +145,7 @@ test() { printf 'test'; printf ' <%s>' "$@"; printf '\\n'; }
                 f"<tests/integration/weather-android-tunnel.py> <{fixed}>"])
 
     def test_real_dispatch_writes_exact_private_config_and_retains_legacy_driver(self):
-        fragment = "case $scenario in\n    content-provider)\n" + source().split(
-            "case $scenario in\n    content-provider)\n", 1)[1].split("\nGUEST_STATUS=$?", 1)[0]
+        fragment = dispatch()
         with tempfile.TemporaryDirectory(prefix="android-vm-wiring-", dir=HERE) as temporary:
             root = Path(temporary).resolve()
             for version in range(1, 7):
@@ -150,6 +156,7 @@ weather_client_version=$1
 RUN_DIRECTORY=$2
 HERE=$3
 scenario=content-provider
+decoder_mode=historical-v1
 weather_client_bundle=/inert/bundle
 browser_filter_bundle=
 driver_time_bound=2400s
@@ -189,6 +196,7 @@ ssh_bounded() { printf 'ssh_bounded\\n'; printf '%s\\n' "$@"; }
                 ("6", 0, 0, 0), ("6", 0, 1, 1)):
             script = '''set -eu
 weather_client_version=$1
+decoder_mode=historical-v1
 GUEST_STATUS=$2
 fixture_join_status=$3
 HERE=/inert/helpers
@@ -239,6 +247,7 @@ class CleanupReceipt(unittest.TestCase):
             script = '''set -eu
 umask 077
 scenario=content-provider
+decoder_mode=historical-v1
 RUN_DIRECTORY_PARENT=$1
 RUN_DIRECTORY=$1/weather-client-kvm.ABC123
 RUN_DIRECTORY_PREFIX=weather-client-kvm
@@ -319,6 +328,7 @@ FINISHED=no
                         script = '''set -eu
 umask 077
 scenario=content-provider
+decoder_mode=historical-v1
 RUN_DIRECTORY_PARENT=$1
 RUN_DIRECTORY=$1/weather-client-kvm.ABC123
 RUN_DIRECTORY_PREFIX=weather-client-kvm
@@ -378,6 +388,7 @@ exit "$GUEST_STATUS"
                     script = '''set -eu
 umask 077
 scenario=content-provider
+decoder_mode=historical-v1
 RUN_DIRECTORY_PARENT=$1
 RUN_DIRECTORY=$1/weather-client-kvm.ABC123
 RUN_DIRECTORY_PREFIX=weather-client-kvm
@@ -424,8 +435,7 @@ exit 143
                         process.communicate(timeout=5)
 
     def test_shell_only_term_reaches_owner_before_guest_and_private_state_cleanup(self):
-        fragment = "case $scenario in\n    content-provider)\n" + source().split(
-            "case $scenario in\n    content-provider)\n", 1)[1].split("\nGUEST_STATUS=$?", 1)[0]
+        fragment = dispatch()
         owner = '''import json, os, signal
 from pathlib import Path
 root = Path(os.environ['fixture_parent'])
@@ -462,6 +472,7 @@ PACKAGE_SHA256=none
 weather_client_version=6
 weather_android_source=/inert/prepared-weather
 scenario=content-provider
+decoder_mode=historical-v1
 QEMU_PID=
 QEMU_BIRTH=
 QEMU_STOP_ATTEMPTED=no
@@ -526,6 +537,7 @@ set +e
             script = '''set -eu
 umask 077
 scenario=content-provider
+decoder_mode=historical-v1
 RUN_DIRECTORY_PARENT=$1
 RUN_DIRECTORY=$1/weather-client-kvm.ABC123
 RUN_DIRECTORY_PREFIX=weather-client-kvm

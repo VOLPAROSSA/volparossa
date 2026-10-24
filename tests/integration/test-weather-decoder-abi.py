@@ -279,6 +279,21 @@ class SourceInventory(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'SNAPSHOT_REDIRECT_REJECTED'):
                 H['SnapshotRedirect'](pin).redirect_request(request, None, 302, '', {}, target)
 
+    def test_observed_debian_package_plus_encoding_does_not_decode_arbitrary_paths(self):
+        basename = 'ca-certificates_20250419+deb13u1_all.deb'
+        request = H['urllib'].request.Request('https://snapshot.debian.org/archive/debian-security/20261023T000000Z/pool/updates/main/c/ca-certificates/' + basename)
+        prefix = 'https://snapshot.debian.org/file/5f7c51c2ab8fb7a6d49f2cd774e6ac19a692414d/'
+        redirects = H['SnapshotRedirect']('a' * 64)
+        for name in (basename, basename.replace('+', '%2B')):
+            self.assertEqual(redirects.redirect_request(request, None, 302, '', {}, prefix + name).full_url,
+                             prefix + name)
+        for name in (basename.replace('+', '%252B'), basename.replace('+', '%2F'),
+                     basename.replace('+', '%2b'), basename.replace('ca-', '%63a-'),
+                     '../' + basename, basename + '?other', basename + '#other',
+                     basename.replace('deb13u1', 'deb13u2')):
+            with self.assertRaisesRegex(ValueError, 'SNAPSHOT_REDIRECT_REJECTED'):
+                redirects.redirect_request(request, None, 302, '', {}, prefix + name)
+
     def test_snapshot_fetch_checks_content_digest_and_exact_size_before_success(self):
         raw = b'fixed signed index bytes'
         with tempfile.TemporaryDirectory() as temporary:
