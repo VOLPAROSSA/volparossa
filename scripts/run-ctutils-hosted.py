@@ -28,6 +28,27 @@ def admission(env, revision):
         raise ValueError("exact workflow/source revision mismatch")
 
 
+def artifact_files(output):
+    """Only the explicit upload payload; no source trees, binaries or Cargo homes."""
+    candidates = [output / "receipt.json", output / "REVIEW_REQUIRED.md"]
+    candidates.extend(output.glob("*.log"))
+    for directory in output.glob("codegen-*"):
+        if directory.is_symlink():
+            raise ValueError("codegen evidence directory must not be a symlink")
+        if directory.is_dir():
+            candidates.extend(directory.glob("*.s"))
+            candidates.extend(directory.glob("*.ll"))
+    selected = []
+    for path in candidates:
+        if path.name.startswith("."):
+            continue  # Match upload-artifact's default hidden-file exclusion.
+        if path.is_symlink():
+            raise ValueError("published evidence must not be a symlink")
+        if path.is_file():
+            selected.append(path)
+    return sorted(set(selected))
+
+
 def execute(output):
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     admission(os.environ, revision)  # Before any installation, fetch or compilation.
@@ -134,9 +155,6 @@ def execute(output):
     finally:
         receipt["profile"] = RELEASE
         receipt["review_entrypoints"] = SYMBOLS
-        receipt["artifacts"] = {str(p.relative_to(output)): hashlib.sha256(p.read_bytes()).hexdigest()
-                                for p in output.rglob("*") if p.is_file()}
-        (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
         (output / "REVIEW_REQUIRED.md").write_text(
             "Functional execution is separate from constant-time acceptance. Review adapted Rust 1.85 "
             "and unmodified Rust 1.87 linked assembly/LLVM for every named secret-input entrypoint, "
@@ -145,6 +163,11 @@ def execute(output):
             "This capture is not BINSEC or a universal cryptographic proof. Record findings and exact "
             "compiler/target/artifact hashes before accepting the adaptation. Hosted Quality audits "
             "are still required; known unmaintained advisories remain open.\n")
+        receipt["artifacts"] = {str(p.relative_to(output)): hashlib.sha256(p.read_bytes()).hexdigest()
+                                for p in artifact_files(output) if p.name != "receipt.json"}
+        receipt["published_files"] = ["receipt.json", *receipt["artifacts"]]
+        receipt["receipt_self_hash_excluded"] = True
+        (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
 
 
 if __name__ == "__main__":

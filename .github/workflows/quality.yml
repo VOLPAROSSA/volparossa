@@ -85,7 +85,12 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ctutils-compatibility-${{ github.run_id }}
-          path: ${{ runner.temp }}/ctutils-proof
+          path: |
+            ${{ runner.temp }}/ctutils-proof/receipt.json
+            ${{ runner.temp }}/ctutils-proof/REVIEW_REQUIRED.md
+            ${{ runner.temp }}/ctutils-proof/*.log
+            ${{ runner.temp }}/ctutils-proof/codegen-*/*.s
+            ${{ runner.temp }}/ctutils-proof/codegen-*/*.ll
           if-no-files-found: error
           retention-days: 14
 
@@ -183,7 +188,7 @@ jobs:
           retention-days: 14
 
   quality:
-    name: Unprivileged quality gates
+    name: ${{ github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility) && 'Quality gates skipped for opt-in proof' || 'Unprivileged quality gates' }}
     if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
