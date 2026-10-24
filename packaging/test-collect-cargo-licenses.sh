@@ -22,6 +22,7 @@ fail() {
 
 metadata=$test_tmp/metadata.json
 python3 -B packaging/test-pinned-sev-license.py
+python3 -B packaging/test-jni-license.py
 cargo metadata --locked --offline --format-version 1 >"$metadata"
 
 focused_metadata=$test_tmp/focused-metadata.json

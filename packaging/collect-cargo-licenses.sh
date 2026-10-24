@@ -161,6 +161,18 @@ while IFS="	" read -r crate_name crate_version license_expression license_file m
         if [ -n "$fallback" ]; then
             fallback_sha=$(printf '%s\n' "$fallback" | cut -f 4)
             fallback_directory=$(printf '%s\n' "$fallback" | cut -f 5)
+            fallback_archive_sha=$(printf '%s\n' "$fallback" | cut -f 6)
+            if [ -n "$fallback_archive_sha" ]; then
+                registry_name=$(basename -- "$(dirname -- "$crate_directory")")
+                registry_root=$(dirname -- "$(dirname -- "$(dirname -- "$crate_directory")")")
+                archive=$registry_root/cache/$registry_name/$crate_name-$crate_version.crate
+                if [ ! -f "$archive" ] || [ -L "$archive" ] ||
+                    [ "$(sha256sum "$archive" | awk '{print $1}')" != "$fallback_archive_sha" ]; then
+                    printf 'Reviewed license fallback archive mismatch: %s %s\n' \
+                        "$crate_name" "$crate_version" >&2
+                    exit 1
+                fi
+            fi
             vcs_info=$crate_directory/.cargo_vcs_info.json
             jq -e --arg sha "$fallback_sha" '.git.sha1 == $sha' "$vcs_info" \
                 >/dev/null 2>&1 || {
