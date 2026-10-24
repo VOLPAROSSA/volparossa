@@ -269,6 +269,34 @@ class SourceInventory(unittest.TestCase):
             'https://snapshot.debian.org/file/' + 'a' * 40 + '/InRelease')
         self.assertEqual(redirect.host, 'snapshot.debian.org')
 
+    def test_observed_index_content_hash_redirect_requires_verified_expected_digest(self):
+        checksum = '7778d3e3f303b7ddb8ce0fe7c8d57473a076c6bf2e8f241f75421d2396352498'
+        url = 'https://snapshot.debian.org/file/32fc3b1c3e78ef911b125ee266a7e73d5884083f/' + checksum
+        request = H['urllib'].request.Request('https://snapshot.debian.org/archive/debian/20261023T000000Z/dists/trixie/main/binary-amd64/Packages.xz')
+        self.assertEqual(H['SnapshotRedirect'](checksum).redirect_request(request, None, 302, '', {}, url).full_url, url)
+        for pin, target in [(None, url), ('0' * 64, url), (checksum, url.replace('snapshot.debian.org', 'elsewhere.invalid')),
+                             (checksum, url + '?other'), (checksum, url[:-1] + '0')]:
+            with self.assertRaisesRegex(ValueError, 'SNAPSHOT_REDIRECT_REJECTED'):
+                H['SnapshotRedirect'](pin).redirect_request(request, None, 302, '', {}, target)
+
+    def test_snapshot_fetch_checks_content_digest_and_exact_size_before_success(self):
+        raw = b'fixed signed index bytes'
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, size, checksum, accepted in [('valid', len(raw), H['digest'](raw), True),
+                ('digest', len(raw), '0' * 64, False), ('length', len(raw) + 1, H['digest'](raw), False)]:
+                opener = Mock()
+                opener.open.return_value = io.BytesIO(raw)
+                with patch.object(H['urllib'].request, 'build_opener', return_value=opener):
+                    if accepted:
+                        H['snapshot_fetch']('https://snapshot.debian.org/archive/debian/fixed/Packages.xz',
+                            root / name, size, time.monotonic() + 2, checksum)
+                        self.assertEqual((root / name).read_bytes(), raw)
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'SNAPSHOT_DIGEST'):
+                            H['snapshot_fetch']('https://snapshot.debian.org/archive/debian/fixed/Packages.xz',
+                                root / name, size, time.monotonic() + 2, checksum)
+
     def test_public_export_never_copies_debs_images_keys_or_index_binaries(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); source = root / 'private'; source.mkdir()
@@ -338,9 +366,9 @@ class SourceInventory(unittest.TestCase):
             REPOSITORIES={'debian': dict(inrelease_url='https://snapshot.debian.org/archive/debian/stamp/InRelease',
                 inrelease_bytes=100, archive_url='https://snapshot.debian.org/archive/debian/stamp/', codename='trixie')},
             inventory=lambda raw: [], capture_base=lambda directory: events.append('baseline'),
-            verify_release=lambda *_args: dict(index={'bytes': 100}), index_records=lambda *_args: iter([{}]),
+            verify_release=lambda *_args: dict(index={'bytes': 100, 'sha256': 'a' * 64}), index_records=lambda *_args: iter([{}]),
             resolver_inventory=lambda raw: [{'name': 'fixed-package'}],
-            indexed_packages=lambda *_args: [dict(repository='debian', filename='pool/main/f/fixed/package.deb', bytes=100)],
+            indexed_packages=lambda *_args: [dict(repository='debian', filename='pool/main/f/fixed/package.deb', bytes=100, sha256='b' * 64)],
             candidate=lambda directory: {'admitted': False}, validate_record=lambda value, admitted: value,
             canonical=canonical, write_candidate_file=H['write_new'])
         def verified(*_args):

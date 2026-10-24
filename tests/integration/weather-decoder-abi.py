@@ -475,25 +475,32 @@ def stage_source(source, destination):
 
 
 class SnapshotRedirect(urllib.request.HTTPRedirectHandler):
+    def __init__(self, expected_sha256=None):
+        super().__init__()
+        require(expected_sha256 is None or hex_value(expected_sha256), "SNAPSHOT_DIGEST_PIN")
+        self.expected_sha256 = expected_sha256
+
     def redirect_request(self, request, response, code, message, headers, newurl):
         parsed = urllib.parse.urlsplit(newurl)
         original = urllib.parse.urlsplit(request.full_url)
         require(parsed.scheme == "https" and parsed.netloc == "snapshot.debian.org"
                 and not parsed.query and not parsed.fragment
-                and re.fullmatch(r"/file/[0-9a-f]{40}/" + re.escape(Path(original.path).name), parsed.path),
+                and (re.fullmatch(r"/file/[0-9a-f]{40}/" + re.escape(Path(original.path).name), parsed.path)
+                     or (self.expected_sha256 is not None and
+                         re.fullmatch(r"/file/[0-9a-f]{40}/" + self.expected_sha256, parsed.path))),
                 "SNAPSHOT_REDIRECT_REJECTED")
         return super().redirect_request(request, response, code, message, headers, newurl)
 
 
-def snapshot_fetch(url, path, maximum, deadline):
+def snapshot_fetch(url, path, maximum, deadline, expected_sha256=None):
     parsed = urllib.parse.urlsplit(url)
     require(parsed.scheme == "https" and parsed.netloc == "snapshot.debian.org"
             and parsed.path.startswith("/archive/") and not parsed.query and not parsed.fragment,
             "SNAPSHOT_URL_REJECTED")
     remaining = min(90, deadline - time.monotonic())
     require(remaining > 0, "INVENTORY_DEADLINE")
-    opener = urllib.request.build_opener(SnapshotRedirect(), urllib.request.ProxyHandler({}))
-    total = 0
+    opener = urllib.request.build_opener(SnapshotRedirect(expected_sha256), urllib.request.ProxyHandler({}))
+    total, checksum = 0, hashlib.sha256()
     with opener.open(url, timeout=min(30, remaining)) as response, \
             os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "wb") as stream:
         while True:
@@ -502,8 +509,11 @@ def snapshot_fetch(url, path, maximum, deadline):
             if not chunk: break
             total += len(chunk)
             require(total <= maximum, "SNAPSHOT_SIZE_BOUND")
+            checksum.update(chunk)
             stream.write(chunk)
     require(total > 0, "SNAPSHOT_EMPTY")
+    if expected_sha256 is not None:
+        require(total == maximum and checksum.hexdigest() == expected_sha256, "SNAPSHOT_DIGEST")
 
 
 def inventory_boundary(commit):
@@ -590,7 +600,8 @@ def source_inventory(commit):
             repositories[name] = helper["verify_release"](root / (name + ".InRelease"), name)
             index_url = pin["archive_url"] + "dists/" + pin["codename"] + "/" + helper["INDEX_PATH"]
             phase(name + "-index-fetch")
-            snapshot_fetch(index_url, root / (name + ".Packages.xz"), repositories[name]["index"]["bytes"], deadline)
+            snapshot_fetch(index_url, root / (name + ".Packages.xz"), repositories[name]["index"]["bytes"],
+                           deadline, repositories[name]["index"]["sha256"])
             # Consume the stream now, before trusting APT or resolving packages.
             phase(name + "-index-verify")
             for _record in helper["index_records"](root / (name + ".Packages.xz"), repositories[name]["index"]):
@@ -610,7 +621,7 @@ def source_inventory(commit):
         for package in packages:
             pin = helper["REPOSITORIES"][package["repository"]]
             snapshot_fetch(pin["archive_url"] + package["filename"], root / "debs" / Path(package["filename"]).name,
-                           package["bytes"], deadline)
+                           package["bytes"], deadline, package["sha256"])
         # Every archive and payload member is verified before apt can install it.
         helper["verified_packages"](root, selected, repositories)
         phase("install")
