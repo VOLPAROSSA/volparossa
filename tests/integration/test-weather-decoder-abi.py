@@ -217,6 +217,17 @@ class ABI(unittest.TestCase):
 
 
 class SourceInventory(unittest.TestCase):
+    def test_checkout_before_apt_annotation_fix_is_rejected_before_reading_or_staging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            read = Mock(side_effect=AssertionError('stale checkout must not provide source bytes'))
+            stale = SimpleNamespace(stdout=b'b7151fd226df6624f788accbb3afaffa8991a5b4\n')
+            with patch.dict(G, source_files=read), patch.object(subprocess, 'run', return_value=stale):
+                with self.assertRaisesRegex(ValueError, 'SOURCE_COMMIT_MISMATCH'):
+                    H['stage_source'](root, root / 'staged')
+            read.assert_not_called()
+            self.assertFalse((root / 'staged').exists())
+
     def test_fixed_source_commit_and_files_before_guest_copy(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -37,9 +37,9 @@ SANDBOX_DECODER, SANDBOX_PROBE = "/case/bin/grib_ls", "/case/probe.grib2"
 ENV = {"LANG": "C.UTF-8", "RUST_LOG": "off"}
 SCOPE = dict(disposable_abi_test_only=True, production_decoder_authorized=False,
              origin_acquisition_proven=False, core_delivery_proven=False, browser_proven=False)
-SOURCE_COMMIT = "b7151fd226df6624f788accbb3afaffa8991a5b4"
+SOURCE_COMMIT = "268083a036affb65a7b5fabafa32d0049ea5b0ce"
 SOURCE_FILES = {
-    "scripts/prepare_hosted_decoder_environment.py": dict(bytes=29347, sha256="65e0bdf3a63aef4591ab794aa1e7673da63112ff593113ef8ce7b5fb5df7c6b7"),
+    "scripts/prepare_hosted_decoder_environment.py": dict(bytes=29828, sha256="9da24d32978ce3b15e54830451c3878ce097f2b931305e8bdf05c0a6c5cbcda1"),
     "scripts/prepare_hosted_decoder.py": dict(bytes=28940, sha256="4ed6355451f366f27ac7cc7b1ca9045449e1de5dcc7199817b5957392c2f2f0c"),
     "scripts/build_eccodes.py": dict(bytes=11634, sha256="5bcb6d58b34e5b45647feae836bfd086ff0adce0e30487430f5c50941f579827"),
     "third_party/eccodes-sources.json": dict(bytes=2087, sha256="f136020562a6ff0d2a83b948189c31f839afb8a00ea87565469f38640fb0dc86"),
