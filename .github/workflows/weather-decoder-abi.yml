@@ -5,11 +5,11 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Historical ABI trial or unadmitted source-input inventory
+        description: Historical ABI, source inventory/build, or reviewed source-v1 trial
         required: true
         type: choice
         default: historical-v1
-        options: [historical-v1, source-input-inventory, source-build]
+        options: [historical-v1, source-input-inventory, source-build, source-v1]
   push:
     branches: [feature/weather-decoder-abi]
     paths:
@@ -35,7 +35,7 @@ defaults:
 jobs:
   debian13:
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ inputs.mode == 'source-build' && 45 || inputs.mode == 'source-input-inventory' && 20 || 35 }}
+    timeout-minutes: ${{ inputs.mode == 'source-v1' && 80 || inputs.mode == 'source-build' && 45 || inputs.mode == 'source-input-inventory' && 20 || 35 }}
     env:
       DECODER_MODE: ${{ inputs.mode || 'historical-v1' }}
     steps:
@@ -49,7 +49,11 @@ jobs:
           test -z "$(git status --short --untracked-files=all)"
           sh -n tests/integration/run-alpha-topology-vm.sh
           python3 -B tests/integration/test-weather-decoder-abi.py
+          python3 -B tests/integration/test-weather-decoder-source-trial.py
           python3 -B tests/integration/test-weather-decoder-abi-wiring.py
+          if [ "$DECODER_MODE" = source-v1 ]; then
+            python3 -B tests/integration/weather-decoder-abi.py source-trial-info
+          fi
       - name: Install VM tools only on this disposable runner
         run: |
           set -euo pipefail
@@ -70,7 +74,7 @@ jobs:
           install -d -m 0700 "$output"
           printf 'VOLPAROSSA_ABI_OUTPUT=%s\nVOLPAROSSA_KVM_GID=%s\n' "$output" "$kvm_gid" >> "$GITHUB_ENV"
       - name: Retrieve only the reviewed public decoder artifact
-        if: inputs.mode != 'source-input-inventory' && inputs.mode != 'source-build'
+        if: inputs.mode != 'source-input-inventory' && inputs.mode != 'source-build' && inputs.mode != 'source-v1'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -98,7 +102,7 @@ jobs:
           python3 -B tests/integration/weather-decoder-abi.py verify-inputs "$inputs"
           printf 'VOLPAROSSA_ABI_INPUTS=%s\n' "$inputs" >> "$GITHUB_ENV"
       - name: Fetch only the fixed reviewed Weather source for inventory
-        if: inputs.mode == 'source-input-inventory' || inputs.mode == 'source-build'
+        if: inputs.mode == 'source-input-inventory' || inputs.mode == 'source-build' || inputs.mode == 'source-v1'
         run: |
           set -euo pipefail
           umask 077
@@ -110,7 +114,7 @@ jobs:
           git -C "$source" -c credential.helper= fetch --no-tags --depth=1 origin "$commit"
           git -C "$source" checkout --quiet --detach FETCH_HEAD
           test "$(git -C "$source" rev-parse HEAD)" = "$commit"
-          if [ "$DECODER_MODE" = source-build ]; then
+          if [ "$DECODER_MODE" = source-build ] || [ "$DECODER_MODE" = source-v1 ]; then
             python3 -B tests/integration/weather-decoder-abi.py verify-environment-lock "$source"
             python3 -B tests/integration/weather-decoder-abi.py fetch-source-archives "$source"
           fi
@@ -130,7 +134,7 @@ jobs:
             "$image" | sha512sum --check --strict -
           printf 'VOLPAROSSA_ABI_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
       - name: Run the exact decoder unprivileged and offline inside Debian 13
-        if: inputs.mode != 'source-input-inventory' && inputs.mode != 'source-build'
+        if: inputs.mode != 'source-input-inventory' && inputs.mode != 'source-build' && inputs.mode != 'source-v1'
         run: |
           set -euo pipefail
           runner_uid=$(id -u)
@@ -143,33 +147,69 @@ jobs:
             --image "$VOLPAROSSA_ABI_IMAGE" --output "$VOLPAROSSA_ABI_OUTPUT" \
             --expected-commit "$GITHUB_SHA"
       - name: Inventory signed source-build inputs in one clean Debian 13 guest
-        if: inputs.mode == 'source-input-inventory' || inputs.mode == 'source-build'
+        if: inputs.mode == 'source-input-inventory' || inputs.mode == 'source-build' || inputs.mode == 'source-v1'
         run: |
           set -euo pipefail
-          case "$DECODER_MODE" in source-input-inventory|source-build) ;; *) exit 1 ;; esac
+          case "$DECODER_MODE" in source-input-inventory|source-build|source-v1) ;; *) exit 1 ;; esac
+          build_mode=$DECODER_MODE
+          [ "$build_mode" != source-v1 ] || build_mode=source-build
           runner_uid=$(id -u)
           case "$runner_uid" in ''|0|0*|*[!0-9]*) exit 1 ;; esac
           sudo -n -- /usr/bin/setpriv --reuid "$runner_uid" --regid "$VOLPAROSSA_KVM_GID" \
             --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
             --no-new-privs --reset-env -- \
             "$GITHUB_WORKSPACE/tests/integration/run-alpha-topology-vm.sh" --execute --yes \
-            --scenario weather-decoder-abi --decoder-mode "$DECODER_MODE" \
+            --scenario weather-decoder-abi --decoder-mode "$build_mode" \
             --decoder-source "$VOLPAROSSA_DECODER_SOURCE" \
             --image "$VOLPAROSSA_ABI_IMAGE" --output "$VOLPAROSSA_ABI_OUTPUT" \
             --expected-commit "$GITHUB_SHA"
+      - name: Verify all fixed trial bytes and run ABI in a second fresh locked guest
+        if: inputs.mode == 'source-v1'
+        run: |
+          set -euo pipefail
+          python3 -B tests/integration/weather-decoder-abi.py verify-source-trial-build \
+            "$VOLPAROSSA_ABI_OUTPUT" "$VOLPAROSSA_ABI_OUTPUT.payload"
+          trial_output="$RUNNER_TEMP/weather-decoder-source-trial-abi"
+          install -d -m 0700 "$trial_output"
+          printf 'VOLPAROSSA_SOURCE_TRIAL_OUTPUT=%s\n' "$trial_output" >> "$GITHUB_ENV"
+          runner_uid=$(id -u)
+          case "$runner_uid" in ''|0|0*|*[!0-9]*) exit 1 ;; esac
+          sudo -n -- /usr/bin/setpriv --reuid "$runner_uid" --regid "$VOLPAROSSA_KVM_GID" \
+            --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
+            --no-new-privs --reset-env -- \
+            "$GITHUB_WORKSPACE/tests/integration/run-alpha-topology-vm.sh" --execute --yes \
+            --scenario weather-decoder-abi --decoder-mode source-v1 \
+            --decoder-source "$VOLPAROSSA_DECODER_SOURCE" --decoder-abi-inputs "$VOLPAROSSA_ABI_OUTPUT.payload" \
+            --image "$VOLPAROSSA_ABI_IMAGE" --output "$trial_output" --expected-commit "$GITHUB_SHA"
+      - name: Project only bounded source-trial ABI metadata
+        if: always() && inputs.mode == 'source-v1' && env.VOLPAROSSA_SOURCE_TRIAL_OUTPUT != ''
+        run: |
+          set -euo pipefail
+          public="$RUNNER_TEMP/weather-source-trial-artifacts"
+          python3 -B tests/integration/weather-decoder-abi.py stage-source-trial-public \
+            "$VOLPAROSSA_SOURCE_TRIAL_OUTPUT" "$public"
+          printf 'VOLPAROSSA_SOURCE_TRIAL_PUBLIC=%s\n' "$public" >> "$GITHUB_ENV"
+      - name: Retain only the closed source-trial ABI metadata projection
+        if: always() && inputs.mode == 'source-v1' && env.VOLPAROSSA_SOURCE_TRIAL_PUBLIC != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: weather-decoder-source-trial-abi-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: error
+          path: ${{ env.VOLPAROSSA_SOURCE_TRIAL_PUBLIC }}
       - name: Project bounded inventory metadata for upload
-        if: always() && (inputs.mode == 'source-input-inventory' || inputs.mode == 'source-build') && env.VOLPAROSSA_ABI_OUTPUT != ''
+        if: always() && (inputs.mode == 'source-input-inventory' || inputs.mode == 'source-build' || inputs.mode == 'source-v1') && env.VOLPAROSSA_ABI_OUTPUT != ''
         run: |
           set -euo pipefail
           public="$RUNNER_TEMP/weather-inventory-artifacts"
-          if [ "$DECODER_MODE" = source-build ]; then
+          if [ "$DECODER_MODE" = source-build ] || [ "$DECODER_MODE" = source-v1 ]; then
             python3 -B tests/integration/weather-decoder-abi.py stage-source-build-public "$VOLPAROSSA_ABI_OUTPUT" "$public" "$VOLPAROSSA_DECODER_SOURCE"
           else
             python3 -B tests/integration/weather-decoder-abi.py stage-inventory-public "$VOLPAROSSA_ABI_OUTPUT" "$public"
           fi
           printf 'VOLPAROSSA_INVENTORY_PUBLIC=%s\n' "$public" >> "$GITHUB_ENV"
       - name: Retain bounded ABI results only
-        if: always() && inputs.mode != 'source-input-inventory' && inputs.mode != 'source-build' && env.VOLPAROSSA_ABI_OUTPUT != ''
+        if: always() && inputs.mode != 'source-input-inventory' && inputs.mode != 'source-build' && inputs.mode != 'source-v1' && env.VOLPAROSSA_ABI_OUTPUT != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: weather-decoder-debian13-${{ github.sha }}
@@ -178,7 +218,7 @@ jobs:
           path: |
             ${{ env.VOLPAROSSA_ABI_OUTPUT }}
       - name: Retain only the closed source-input metadata projection
-        if: always() && (inputs.mode == 'source-input-inventory' || inputs.mode == 'source-build') && env.VOLPAROSSA_INVENTORY_PUBLIC != ''
+        if: always() && (inputs.mode == 'source-input-inventory' || inputs.mode == 'source-build' || inputs.mode == 'source-v1') && env.VOLPAROSSA_INVENTORY_PUBLIC != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: weather-source-inventory-unadmitted-${{ github.sha }}
@@ -186,13 +226,14 @@ jobs:
           if-no-files-found: error
           path: ${{ env.VOLPAROSSA_INVENTORY_PUBLIC }}
       - name: Remove private source inventory inputs from the runner
-        if: always() && (inputs.mode == 'source-input-inventory' || inputs.mode == 'source-build')
+        if: always() && (inputs.mode == 'source-input-inventory' || inputs.mode == 'source-build' || inputs.mode == 'source-v1')
         run: |
           set -euo pipefail
-          rm -rf -- "$RUNNER_TEMP/weather-decoder-source" "$RUNNER_TEMP/weather-inventory-artifacts" "$RUNNER_TEMP/weather-decoder-abi.payload"
+          rm -rf -- "$RUNNER_TEMP/weather-decoder-source" "$RUNNER_TEMP/weather-inventory-artifacts" "$RUNNER_TEMP/weather-decoder-abi.payload" "$RUNNER_TEMP/weather-source-trial-artifacts"
           test ! -e "$RUNNER_TEMP/weather-decoder-source"
           test ! -e "$RUNNER_TEMP/weather-inventory-artifacts"
           test ! -e "$RUNNER_TEMP/weather-decoder-abi.payload"
+          test ! -e "$RUNNER_TEMP/weather-source-trial-artifacts"
       - name: State the scope
         if: always()
         run: |

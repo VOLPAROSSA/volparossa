@@ -46,6 +46,13 @@ SOURCE_FILES = {
 }
 SOURCE_GUEST = Path("/home/vpci/weather-decoder-source")
 ENVIRONMENT_RECORD = Path(__file__).resolve().parents[1] / "helper/weather-source-build-environment-v1.json"
+SOURCE_TRIAL_RECORD = Path(__file__).resolve().parents[1] / "helper/weather-decoder-source-trial-v1.json"
+SOURCE_TRIAL_RECORD_SHA256 = "e87d339f069101d889cc45b3a7810e407252c1d32c9ef16bed0983feb09839be"
+SOURCE_ENVIRONMENT_SHA256 = "45c347dad35d0f908233423c57cf9a6fc34f0e37dc9de8c5e37790fed1497367"
+SOURCE_TRIAL_INPUTS = Path("/home/vpci/weather-decoder-source-trial-inputs")
+SOURCE_TRIAL_ABI_OUTPUT = Path("/home/vpci/weather-decoder-source-trial-abi")
+SOURCE_TRIAL_EXPORTS = {"source-trial-report.json": 65536, "source-abi-report.json": 65536,
+    **{"source-abi-" + name: 65536 for name in LOGS}}
 SOURCE_BUILD_ROOT = SOURCE_GUEST / "build/hosted-decoder-cold"
 SOURCE_PAYLOAD_ROOT = SOURCE_GUEST / "build/hosted-payload-cold"
 SOURCE_PAYLOAD_NAMES = {"build-manifest.json", "eccodes-build/bin/grib_ls", "eccodes-build/bin/grib_filter",
@@ -372,18 +379,85 @@ def validate_point(raw, latitude, longitude, expected):
                 "ABI_DECODE_INVALID")
 
 
-def execute(inputs, output, commit):
+def source_trial_record():
+    # This small source-reviewed trial record is immutable, not a captured receipt
+    # or final decoder admission. No caller may select another record/hash.
+    raw = read_file(SOURCE_TRIAL_RECORD, 32768)
+    require(digest(raw) == SOURCE_TRIAL_RECORD_SHA256, "SOURCE_TRIAL_RECORD_CHANGED")
+    value = decode(raw)
+    require(type(value) is dict and set(value) == {"schema", "kind", "id", "profile", "producer_core_commit",
+        "weather_commit", "source_files", "source_archives", "environment_lock_sha256", "payload_manifest",
+        "build_manifest", "files", "bytes", "evidence", "scope"}, "SOURCE_TRIAL_SCHEMA")
+    require(value["schema"] == 1 and type(value["schema"]) is int
+        and value["kind"] == "volparossa-weather-decoder-source-abi-trial"
+        and value["id"] == "weather-decoder-source-20261024-trial-v1" and value["profile"] == "source-v1"
+        and value["weather_commit"] == SOURCE_COMMIT and value["source_files"] == SOURCE_FILES
+        and value["environment_lock_sha256"] == SOURCE_ENVIRONMENT_SHA256
+        and set(value["files"]) == SOURCE_PAYLOAD_NAMES and len(value["files"]) == 14
+        and value["scope"] == dict(abi_trial_inputs_authorized=True, abi_proven=False,
+                                  production_decoder_authorized=False, consumer_fallback=False), "SOURCE_TRIAL_PROFILE")
+    require(sum(item["bytes"] for item in value["files"].values()) == value["bytes"] == 93841627,
+            "SOURCE_TRIAL_BOUND")
+    return value, digest(raw)
+
+
+def verify_source_trial_inputs(root):
+    record, record_sha = source_trial_record()
+    files = inventory(root, record["files"])
+    for name, expected in record["files"].items():
+        require(stat.S_IMODE((root / name).stat().st_mode) == expected["mode"], "SOURCE_TRIAL_MODE")
+    # The deterministic buildmanifest is one of the14 immutable inputs. There is
+    # deliberately no historical hosted-build receipt synthesized for these bytes.
+    require(digest(files["build-manifest.json"]) == record["build_manifest"]["sha256"], "SOURCE_TRIAL_MANIFEST")
+    return record, record_sha, files
+
+
+def verify_source_trial_build(output, inputs):
+    record, sha, files = verify_source_trial_inputs(inputs)
+    raw = read_file(output / "payload-manifest.json", 65536)
+    require(len(raw) == record["payload_manifest"]["bytes"]
+            and digest(raw) == record["payload_manifest"]["sha256"], "SOURCE_TRIAL_BUILD_MANIFEST")
+    manifest = decode(raw)
+    require(manifest["files"] == record["files"] and manifest["bytes"] == record["bytes"]
+            and manifest["environment_lock_sha256"] == SOURCE_ENVIRONMENT_SHA256, "SOURCE_TRIAL_BUILD_INPUTS")
+    return dict(kind="weather-decoder-source-trial-build-verified", trial_record_sha256=sha,
+                files=len(files), bytes=record["bytes"], abi_proven=False)
+
+
+def stage_source_trial_inputs(source, destination):
+    record, sha, files = verify_source_trial_inputs(source)
+    require(not destination.is_relative_to(source), "SOURCE_TRIAL_STAGE_PATH")
+    fresh_directory(destination)
+    for name, raw in files.items():
+        parent = destination
+        for part in Path(name).parts[:-1]:
+            parent /= part
+            parent.mkdir(mode=0o700, exist_ok=True)
+        write_new(destination / name, raw, record["files"][name]["mode"])
+    require(verify_source_trial_inputs(destination)[2] == files, "SOURCE_TRIAL_STAGE_CHANGED")
+    return dict(kind="weather-decoder-source-trial-inputs", trial_record_sha256=sha,
+                files=len(files), bytes=record["bytes"], abi_proven=False, runtime_executed=False)
+
+
+def execute(inputs, output, commit, *, profile="historical-v1"):
     guest = guest_boundary(commit)
-    record, record_sha, files = verify_inputs(inputs)
+    require(profile in ("historical-v1", "source-v1"), "ABI_PROFILE")
+    record, record_sha, files = (verify_inputs(inputs) if profile == "historical-v1"
+                               else verify_source_trial_inputs(inputs))
     require(not output.is_relative_to(inputs) and not inputs.is_relative_to(output))
     fresh_directory(output)
     started = time.monotonic()
     deadline = started + TOTAL_SECONDS
     commands = Commands()
-    report = dict(schema_version=1, kind="weather-decoder-abi", source_commit=commit,
-        admission_sha256=record_sha, weather_commit=record["weather_commit"], hosted_run=record["hosted_run"],
+    context = (dict(admission_sha256=record_sha, hosted_run=record["hosted_run"],
+                    inputs={name: record["files"][name] for name in (DECODER, PROBE, RECEIPT)})
+               if profile == "historical-v1" else
+               dict(trial_record_sha256=record_sha, producer_core_commit=record["producer_core_commit"],
+                    environment_lock_sha256=record["environment_lock_sha256"], inputs=record["files"]))
+    report = dict(schema_version=1, kind=("weather-decoder-abi" if profile == "historical-v1"
+                                       else "weather-decoder-source-trial-abi"), source_commit=commit,
+        weather_commit=record["weather_commit"], **context,
         guest=guest, success=False, phase="prepare", blocker=None, scope=dict(SCOPE),
-        inputs={name: record["files"][name] for name in (DECODER, PROBE, RECEIPT)},
         checks=dict(inputs_verified=True, elf_inspected=False, sandbox_isolated=False, version=False,
                     first_point=False, last_point=False, relocated_lone_decoder=False),
         cleanup=dict(process_drain_confirmed=False, scratch_removed=False), logs={})
@@ -425,6 +499,9 @@ def execute(inputs, output, commit):
         require(digest(read_file(scratch/"decoder/grib_ls", MAX_FILE)) == record["files"][DECODER]["sha256"])
         require(digest(read_file(scratch/"probe.grib2", MAX_FILE)) == record["files"][PROBE]["sha256"])
         report["checks"]["relocated_lone_decoder"] = True
+        if profile == "source-v1":
+            require(verify_source_trial_inputs(inputs)[2] == files, "SOURCE_TRIAL_INPUT_CHANGED")
+            report["checks"]["complete_source_payload_unchanged"] = True
         report["phase"] = "complete"
         report["success"] = True
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, Interrupted, KeyboardInterrupt, CleanupUnconfirmed) as error:
@@ -838,6 +915,73 @@ def source_cold_build(commit):
     return report
 
 
+def source_trial_environment():
+    helper = source_helper(SOURCE_GUEST)
+    environment = helper["check_environment"]()
+    require(environment["environment_lock_sha256"] == SOURCE_ENVIRONMENT_SHA256, "SOURCE_TRIAL_ENVIRONMENT")
+    required = {"libc6", "libstdc++6", "libgcc-s1", "libc-bin", "bubblewrap", "binutils", "util-linux", "python3"}
+    require(required <= {row["name"] for row in environment["inventory"]}, "ABI_PACKAGES_UNAVAILABLE")
+    development = helper["verify_development_files"](environment)
+    builder = source_builder(SOURCE_GUEST)
+    paths = dict(readelf="/usr/bin/readelf", python="/usr/bin/python3", bwrap="/usr/bin/bwrap",
+                 prlimit="/usr/bin/prlimit", loader="/lib64/ld-linux-x86-64.so.2")
+    # Expected bytes come from the reviewed package/base maps, never observations.
+    tools = {name: builder["tool_record"](path) for name, path in paths.items()}
+    bindings = helper["bind_tools"](tools, environment)
+    return dict(environment_lock_sha256=SOURCE_ENVIRONMENT_SHA256,
+                development_files_sha256=development, tool_package_bindings=bindings)
+
+
+def source_trial(commit):
+    inventory_boundary(commit)
+    verify_source_trial_inputs(SOURCE_TRIAL_INPUTS)  # Fail before installation on unreviewed payload.
+    source_files(SOURCE_GUEST)
+    require(load_source_lock(source_helper(SOURCE_GUEST))[1] == SOURCE_ENVIRONMENT_SHA256,
+            "SOURCE_TRIAL_ENVIRONMENT_LOCK")
+    record, sha = source_trial_record()
+    report = dict(schema=1, kind="weather-decoder-source-trial", profile="source-v1", success=False,
+                  abi_proven=False, admitted=False, compiled_in_abi_guest=False, core_commit=commit, scope=dict(SCOPE),
+                  weather_commit=SOURCE_COMMIT, trial_record_sha256=sha,
+                  environment_lock_sha256=SOURCE_ENVIRONMENT_SHA256, phase="environment", blocker=None)
+    before = None
+    try:
+        source_inventory(commit, build_mode=True)  # Same signed exact package lock; no compilation.
+        before = source_trial_environment()
+        report.update(phase="abi", environment_before=before)
+        result = execute(SOURCE_TRIAL_INPUTS, SOURCE_TRIAL_ABI_OUTPUT, commit, profile="source-v1")
+        report["abi_checks_passed"] = result["success"]
+        require(result["cleanup"]["process_drain_confirmed"], "SOURCE_TRIAL_CLEANUP_UNCONFIRMED")
+        report["phase"] = "after-check"
+        after = source_trial_environment()
+        require(after == before, "SOURCE_TRIAL_ENVIRONMENT_CHANGED")
+        require(verify_source_trial_inputs(SOURCE_TRIAL_INPUTS)[0] == record, "SOURCE_TRIAL_INPUT_CHANGED")
+        report.update(environment_after=after, complete_payload_after_verified=True)
+        require(result["success"], "SOURCE_TRIAL_ABI_FAILED")
+        report.update(success=True, abi_proven=True, phase="complete")
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, Interrupted, CleanupUnconfirmed) as error:
+        report["blocker"] = inventory_failure(error, "source-trial", report["phase"])
+        raise
+    finally:
+        if INVENTORY_ROOT.is_dir():
+            write_new(INVENTORY_ROOT / "source-trial-report.json", json.dumps(report, sort_keys=True).encode()+b"\n")
+    return report
+
+
+def export_source_trial(output):
+    result = export_inventory(output)
+    for name, maximum in SOURCE_TRIAL_EXPORTS.items():
+        path = (INVENTORY_ROOT / name if name == "source-trial-report.json" else
+                SOURCE_TRIAL_ABI_OUTPUT / ("report.json" if name == "source-abi-report.json"
+                                           else name.removeprefix("source-abi-")))
+        if not path.exists() and not path.is_symlink():
+            continue
+        raw = read_file(path, maximum, allow_empty=name.endswith('.log'))
+        if name.endswith('.json'): decode(raw)
+        write_new(output / name, raw)
+    return dict(kind="weather-decoder-source-trial-export", admitted=False, binaries_exported=False,
+                inventory_bytes=result["bytes"])
+
+
 def source_payload_manifest_bytes():
     _lock, lock_sha = load_source_lock(source_helper(SOURCE_GUEST))
     builder = source_builder(SOURCE_GUEST)
@@ -972,6 +1116,19 @@ def stage_inventory_public(source, output, extra_exports=None):
     return dict(admitted=False, compiled=None if extra_exports is not None else False, files=len(files), bytes=total)
 
 
+def stage_source_trial_public(source, output):
+    # The trial exports text metadata/logs only, even on a failed native probe.
+    for name, maximum in dict(INVENTORY_PUBLIC_EXPORTS, **SOURCE_TRIAL_EXPORTS).items():
+        path = source / name
+        if not path.exists() and not path.is_symlink():
+            continue
+        raw = read_file(path, maximum, allow_empty=name.endswith('.log') or name == "qemu.stderr")
+        require(b"\x00" not in raw and not raw.startswith((b"\x7fELF", b"PK\x03\x04", b"\x1f\x8b", b"!<arch>")),
+                "SOURCE_TRIAL_PUBLIC_BINARY")
+        raw.decode('utf-8', errors='strict')
+    return stage_inventory_public(source, output, SOURCE_TRIAL_EXPORTS)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
@@ -998,6 +1155,17 @@ def main():
     build_stage.add_argument("source", type=Path); build_stage.add_argument("destination", type=Path)
     commands.add_parser("verify-build-source").add_argument("directory", type=Path)
     commands.add_parser("source-build").add_argument("--expected-commit", required=True)
+    commands.add_parser("source-trial").add_argument("--expected-commit", required=True)
+    commands.add_parser("verify-source-trial-inputs").add_argument("directory", type=Path)
+    trial_build = commands.add_parser("verify-source-trial-build")
+    trial_build.add_argument("output", type=Path); trial_build.add_argument("inputs", type=Path)
+    trial_stage = commands.add_parser("stage-source-trial-inputs")
+    trial_stage.add_argument("source", type=Path); trial_stage.add_argument("destination", type=Path)
+    commands.add_parser("export-source-trial").add_argument("output", type=Path)
+    commands.add_parser("source-trial-export-names")
+    commands.add_parser("source-trial-info")
+    trial_public = commands.add_parser("stage-source-trial-public")
+    trial_public.add_argument("source", type=Path); trial_public.add_argument("output", type=Path)
     commands.add_parser("export-source-build").add_argument("output", type=Path)
     commands.add_parser("source-payload-manifest")
     commands.add_parser("source-payload-member").add_argument("name")
@@ -1035,6 +1203,22 @@ def main():
             inventory(args.directory, build_source_files(args.directory))
             value = dict(admitted=False, compiled=False, source_archives_verified=True)
         elif args.action == "source-build": value = source_cold_build(args.expected_commit)
+        elif args.action == "source-trial": value = source_trial(args.expected_commit)
+        elif args.action == "source-trial-info":
+            record, sha = source_trial_record()
+            value = dict(id=record["id"], profile="source-v1", trial_record_sha256=sha, abi_proven=False)
+        elif args.action == "verify-source-trial-inputs":
+            record, sha, files = verify_source_trial_inputs(args.directory)
+            value = dict(kind="weather-decoder-source-trial-inputs", trial_record_sha256=sha,
+                         files=len(files), bytes=record["bytes"], runtime_executed=False)
+        elif args.action == "verify-source-trial-build": value = verify_source_trial_build(args.output, args.inputs)
+        elif args.action == "stage-source-trial-inputs": value = stage_source_trial_inputs(args.source, args.destination)
+        elif args.action == "export-source-trial": value = export_source_trial(args.output)
+        elif args.action == "source-trial-export-names":
+            print('\n'.join(sorted(set(INVENTORY_PUBLIC_EXPORTS) | set(SOURCE_TRIAL_EXPORTS))))
+            return 0
+        elif args.action == "stage-source-trial-public":
+            value = stage_source_trial_public(args.source, args.output)
         elif args.action == "export-source-build": value = export_source_build(args.output)
         elif args.action == "source-payload-manifest":
             sys.stdout.buffer.write(source_payload_manifest_bytes()); return 0

@@ -260,8 +260,8 @@ class SourceInventoryWiring(unittest.TestCase):
 
     def test_inventory_workflow_has_no_free_inputs_and_uploads_only_projection(self):
         workflow = HERE.parents[1].joinpath('.github/workflows/weather-decoder-abi.yml').read_text()
-        self.assertIn('options: [historical-v1, source-input-inventory, source-build]', workflow)
-        self.assertIn("timeout-minutes: ${{ inputs.mode == 'source-build' && 45 || inputs.mode == 'source-input-inventory' && 20 || 35 }}", workflow)
+        self.assertIn('options: [historical-v1, source-input-inventory, source-build, source-v1]', workflow)
+        self.assertIn("timeout-minutes: ${{ inputs.mode == 'source-v1' && 80 || inputs.mode == 'source-build' && 45 || inputs.mode == 'source-input-inventory' && 20 || 35 }}", workflow)
         source_fetch = workflow.split('- name: Fetch only the fixed reviewed Weather source for inventory', 1)[1].split('      - name:', 1)[0]
         self.assertIn('source-info | jq -er .weather_commit', source_fetch)
         self.assertIn('https://github.com/VOLPAROSSA/volparossa-weather.git', source_fetch)
@@ -286,6 +286,66 @@ class SourceInventoryWiring(unittest.TestCase):
         self.assertNotIn('.payload', upload)
         self.assertLess(workflow.index('verify-environment-lock "$source"'), workflow.index('fetch-source-archives "$source"'))
 
+
+
+class SourceTrialRunnerWiring(unittest.TestCase):
+    def test_enum_and_missing_or_aliased_source_payload_fail_before_vm(self):
+        result = subprocess.run(['/bin/sh', str(RUNNER), '--preview', '--scenario', SCENARIO,
+            '--decoder-mode', 'source-v1'], capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b'second clean Debian13 guest', result.stdout)
+        base = ['--execute', '--yes', '--scenario', SCENARIO, '--image', '/unread/image',
+                '--output', '/unread/output', '--expected-commit', 'a' * 40]
+        for args in [('--decoder-mode', 'source-v2'), ('--decoder-mode', 'source-v1'),
+                     ('--decoder-mode', 'source-v1', '--decoder-source', '/source'),
+                     ('--decoder-mode', 'source-v1', '--decoder-source', '/source', '--decoder-abi-inputs', '/source'),
+                     ('--decoder-mode', 'source-v1', '--decoder-source', '/source', '--decoder-abi-inputs', '/source/payload')]:
+            with self.subTest(args=args):
+                value = subprocess.run(['/bin/sh', str(RUNNER), *base, *args], capture_output=True, timeout=5)
+                self.assertEqual(value.returncode, 64, value.stderr)
+
+    def test_stage_copies_only_fixed_source_and_reviewed_payload_separately(self):
+        fragment = 'DECODER_ABI_DIRECTORY=' + SOURCE.split('DECODER_ABI_DIRECTORY=', 1)[1].split('\nOVERLAY=', 1)[0]
+        script = 'set -eu\nscenario=weather-decoder-abi\nHERE=/reviewed/core\nRUN_DIRECTORY=/private/owned\ndecoder_mode=source-v1\ndecoder_source=/reviewed/weather\ndecoder_abi_inputs=/private/fresh.payload\ncalls=0\nfail_at=$1\npython3() { calls=$((calls + 1)); printf \'%s:%s:%s\\n\' "$3" "$4" "${5:-}"; [ "$calls" -ne "$fail_at" ] || return 23; }\n' + fragment
+        for failed in range(5):
+            value = shell(script, failed)
+            self.assertEqual(value.returncode, 0 if failed == 0 else 23, value.stderr)
+            lines = value.stdout.decode().splitlines()
+            self.assertEqual(len(lines), 4 if failed == 0 else failed)
+            self.assertEqual(lines[0], 'stage-source:/reviewed/weather:/private/owned/weather-decoder-inputs')
+            if len(lines) >= 3:
+                self.assertEqual(lines[2], 'stage-source-trial-inputs:/private/fresh.payload:/private/owned/weather-decoder-source-trial-inputs')
+
+    def test_scp_stages_two_verified_snapshots_at_distinct_fixed_guest_paths(self):
+        function = 'scp_decoder_abi_inputs() {\n' + SOURCE.split('scp_decoder_abi_inputs() {\n', 1)[1].split('\n}\n', 1)[0] + '\n}\n'
+        script = 'set -eu\nscenario=weather-decoder-abi\ndecoder_mode=source-v1\nSSH_KEY=/private/key\nKNOWN_HOSTS=/private/hosts\nDECODER_ABI_DIRECTORY=/private/source-snapshot\nDECODER_TRIAL_PAYLOAD_DIRECTORY=/private/payload-snapshot\nssh_bounded() { :; }\ntimeout() { printf \'%s\\n\' "$*"; }\n' + function + 'scp_decoder_abi_inputs\n'
+        value = shell(script)
+        self.assertEqual(value.returncode, 0, value.stderr)
+        lines = value.stdout.decode().splitlines(); self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].endswith('/private/source-snapshot vpci@127.0.0.1:/home/vpci/weather-decoder-source'))
+        self.assertTrue(lines[1].endswith('/private/payload-snapshot vpci@127.0.0.1:/home/vpci/weather-decoder-source-trial-inputs'))
+        self.assertTrue(all('StrictHostKeyChecking=yes' in line for line in lines))
+
+    def test_workflow_builds_then_verifies_then_uses_fresh_second_guest_without_fallback(self):
+        workflow = HERE.parents[1].joinpath('.github/workflows/weather-decoder-abi.yml').read_text()
+        self.assertIn("inputs.mode == 'source-v1' && 80", workflow)
+        self.assertIn('build_mode=source-build', workflow)
+        trial = workflow.split('- name: Verify all fixed trial bytes', 1)[1].split('      - name:', 1)[0]
+        self.assertLess(trial.index('verify-source-trial-build'), trial.index('--decoder-mode source-v1'))
+        self.assertIn('--decoder-abi-inputs "$VOLPAROSSA_ABI_OUTPUT.payload"', trial)
+        self.assertIn('trial_output="$RUNNER_TEMP/weather-decoder-source-trial-abi"', trial)
+        for title in ('Retrieve only the reviewed public decoder artifact',
+                      'Run the exact decoder unprivileged and offline inside Debian 13', 'Retain bounded ABI results only'):
+            block = workflow.split('- name: ' + title, 1)[1].split('      - name:', 1)[0]
+            self.assertIn("inputs.mode != 'source-v1'", block)
+        upload = workflow.split('- name: Retain only the closed source-trial ABI metadata projection', 1)[1].split('      - name:', 1)[0]
+        self.assertIn('path: ${{ env.VOLPAROSSA_SOURCE_TRIAL_PUBLIC }}', upload)
+        self.assertNotIn('payload', upload)
+        branch = GUEST.rsplit('elif [ "$decoder_mode" = source-v1 ]; then', 1)[1].split('        else\n', 1)[0]
+        self.assertIn('source-trial --expected-commit', branch)
+        self.assertIn('1110s python3', branch)
+        self.assertNotIn('build-source', branch)
+        self.assertIn('driver_time_bound=1500s', SOURCE)
 
 if __name__ == "__main__":
     unittest.main()
