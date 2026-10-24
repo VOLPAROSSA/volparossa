@@ -193,6 +193,17 @@ class ABI(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, error): owner.run([sys.executable, "-c", code], time.monotonic()+seconds)
             self.assertTrue(owner.drained)
 
+    def test_inert_timeout_preserves_original_partial_inventory_log(self):
+        with tempfile.TemporaryFile() as stream:
+            owner = H['Commands']()
+            owner.output_stream = stream
+            with self.assertRaisesRegex(ValueError, 'ABI_DEADLINE'):
+                owner.run([sys.executable, '-c', "import time; print('actual partial output',flush=True); time.sleep(5)"],
+                          time.monotonic() + .2)
+            stream.seek(0)
+            self.assertEqual(stream.read(), b'actual partial output\n')
+            self.assertTrue(owner.drained)
+
     def test_interrupt_during_cleanup_is_never_confirmed_drained(self):
         child = Mock(pid=99999)
         child.wait.side_effect = [0, H["Interrupted"]()]

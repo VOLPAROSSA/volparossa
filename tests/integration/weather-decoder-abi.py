@@ -312,6 +312,7 @@ class Commands:
         self.drained = True
         self.maximum = maximum
         self.environment = ENV if environment is None else environment
+        self.output_stream = None
 
     def run(self, argv, deadline):
         require(time.monotonic() < deadline, "ABI_DEADLINE")
@@ -329,6 +330,8 @@ class Commands:
                         if not chunk: selector.unregister(key.fileobj)
                         raw.extend(chunk)
                         require(len(raw) <= self.maximum, "ABI_OUTPUT_BOUND")
+                        if self.output_stream is not None:
+                            self.output_stream.write(chunk)
             status = child.wait(timeout=max(0.001, deadline-time.monotonic()))
             return status, bytes(raw)
         finally:
@@ -548,8 +551,16 @@ def source_inventory(commit):
         INVENTORY_PHASE.write_text("weather-source-" + name + "\n")
     def command(name, argv, seconds=180):
         report["commands"].append(dict(log=name, argv=argv))
-        code, raw = commands.run(argv, min(deadline, time.monotonic() + seconds))
-        write_new(root / name, raw or b"(no output)\n")
+        with os.fdopen(os.open(root / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), 'wb') as stream:
+            commands.output_stream = stream
+            try:
+                code, raw = commands.run(argv, min(deadline, time.monotonic() + seconds))
+                if stream.tell() == 0:
+                    stream.write(raw)
+            finally:
+                commands.output_stream = None
+                if stream.tell() == 0:
+                    stream.write(b"(no output)\n")
         require(code == 0, "INVENTORY_COMMAND_FAILED")
         return raw
     try:
