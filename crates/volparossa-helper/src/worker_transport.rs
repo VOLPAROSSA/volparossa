@@ -1839,7 +1839,7 @@ mod tests {
         env,
         io::{IoSlice, Read as _, Write as _},
         net::{Ipv6Addr, UdpSocket},
-        os::fd::{AsRawFd as _, IntoRawFd as _, OwnedFd},
+        os::fd::{IntoRawFd as _, OwnedFd},
         os::unix::net::UnixStream,
         process::{Command, Stdio},
         thread,

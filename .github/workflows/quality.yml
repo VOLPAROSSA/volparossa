@@ -85,6 +85,14 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           cargo fetch --locked
+          cargo test --locked --offline -p volparossa-linux-uapi --lib async_fd::tests:: -- --list \
+            2>&1 | tee "$RUNNER_TEMP/owned-async-fd-inventory.log"
+          cargo test --locked --offline -p volparossa-linux-uapi --lib async_fd::tests:: -- --test-threads=1 \
+            2>&1 | tee "$RUNNER_TEMP/owned-async-fd-tests.log"
+          grep -F 'test result: ok. 3 passed; 0 failed' "$RUNNER_TEMP/owned-async-fd-tests.log"
+          cargo test --locked --offline -p volparossa-linux-uapi --doc OwnedAsyncFd \
+            2>&1 | tee "$RUNNER_TEMP/owned-async-fd-doc-tests.log"
+          grep -F 'test result: ok. 2 passed; 0 failed' "$RUNNER_TEMP/owned-async-fd-doc-tests.log"
           for package in volparossa-config volparossa-helper-entry; do
             cargo test --locked --offline -p "$package" -- --list \
               2>&1 | tee "$RUNNER_TEMP/$package-inventory.log"

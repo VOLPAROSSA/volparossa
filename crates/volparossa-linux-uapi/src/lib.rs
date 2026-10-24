@@ -10,8 +10,9 @@
 //! [`ensure_waitable_sigchld_disposition`] and
 //! [`ensure_default_lifecycle_signal_dispositions`] queries, the fixed
 //! [`install_pid_one_lifecycle_signal_handlers`] and
-//! [`verify_pid_one_lifecycle_signal_handlers`] signal-action calls, and
-//! [`install_worker_confinement_filter`].
+//! [`verify_pid_one_lifecycle_signal_handlers`] signal-action calls,
+//! [`install_worker_confinement_filter`], and the ownership-sealed Tokio registration
+//! in [`OwnedAsyncFd`].
 //! The process hook performs exactly one async-signal-safe `close_range(2)` syscall between
 //! `fork` and `exec`. The seccomp wrapper installs one fixed amd64 classic-BPF program and accepts
 //! no caller-controlled filter, action, syscall number, flag, or pointer.
@@ -33,8 +34,10 @@
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+mod async_fd;
 mod egress;
 mod mptcp_subflows;
+pub use async_fd::OwnedAsyncFd;
 pub use egress::{
     EgressObservation, IndependentEgress, InterfaceTraffic, observe_interface_traffic,
 };
@@ -808,7 +811,7 @@ fn fixed_pid_one_lifecycle_action() -> io::Result<libc::sigaction> {
     // overwritten below, the signal set is initialized by `sigemptyset`, flags are overwritten,
     // and the optional restorer remains `None` for libc to supply internally where required.
     let mut action = unsafe { mem::zeroed::<libc::sigaction>() };
-    action.sa_sigaction = pid_one_lifecycle_emergency_exit as libc::sighandler_t;
+    action.sa_sigaction = pid_one_lifecycle_emergency_exit as *const () as libc::sighandler_t;
     action.sa_flags = libc::SA_RESTART;
     // SAFETY: `action.sa_mask` is writable storage of the exact libc signal-set type. Only the
     // fixed mask is constructed; no caller-provided signal number reaches libc.
@@ -871,7 +874,7 @@ fn read_signal_set_bits(mask: &libc::sigset_t) -> io::Result<u64> {
 }
 
 fn classify_pid_one_lifecycle_action(snapshot: SignalActionSnapshot) -> io::Result<()> {
-    if snapshot.handler != pid_one_lifecycle_emergency_exit as libc::sighandler_t
+    if snapshot.handler != pid_one_lifecycle_emergency_exit as *const () as libc::sighandler_t
         || snapshot.flags != LIBC_SIGACTION_READBACK_FLAGS
         || snapshot.mask_bits != PID_ONE_LIFECYCLE_MASK_BITS
     {
@@ -2808,7 +2811,7 @@ exec env LISTEN_PID=$$ LISTEN_FDS=2 LISTEN_FDNAMES=first:second VOLPAROSSA_UAPI_
             action.sa_sigaction = match mode.to_str() {
                 Some("ignore") => libc::SIG_IGN,
                 Some("nocldwait") => libc::SIG_DFL,
-                Some("handler") => sigchld_test_handler as libc::sighandler_t,
+                Some("handler") => sigchld_test_handler as *const () as libc::sighandler_t,
                 _ => panic!("unexpected SIGCHLD test mode"),
             };
             action.sa_flags = if mode == "nocldwait" {
@@ -2857,7 +2860,10 @@ exec env LISTEN_PID=$$ LISTEN_FDS=2 LISTEN_FDNAMES=first:second VOLPAROSSA_UAPI_
         };
         assert!(classify_default_lifecycle_action(exact).is_ok());
 
-        for handler in [libc::SIG_IGN, sigchld_test_handler as libc::sighandler_t] {
+        for handler in [
+            libc::SIG_IGN,
+            sigchld_test_handler as *const () as libc::sighandler_t,
+        ] {
             assert_eq!(
                 classify_default_lifecycle_action(SignalActionSnapshot { handler, ..exact })
                     .expect_err("non-default lifecycle handler")
@@ -2905,7 +2911,7 @@ exec env LISTEN_PID=$$ LISTEN_FDS=2 LISTEN_FDNAMES=first:second VOLPAROSSA_UAPI_
             let mut action = unsafe { mem::zeroed::<libc::sigaction>() };
             action.sa_sigaction = match property {
                 "ignore" => libc::SIG_IGN,
-                "handler" => sigchld_test_handler as libc::sighandler_t,
+                "handler" => sigchld_test_handler as *const () as libc::sighandler_t,
                 "flags" | "mask" => libc::SIG_DFL,
                 _ => panic!("unexpected lifecycle action test mode"),
             };
@@ -2968,7 +2974,7 @@ exec env LISTEN_PID=$$ LISTEN_FDS=2 LISTEN_FDNAMES=first:second VOLPAROSSA_UAPI_
     #[test]
     fn pid_one_lifecycle_action_classifier_is_exact() {
         let exact = SignalActionSnapshot {
-            handler: pid_one_lifecycle_emergency_exit as libc::sighandler_t,
+            handler: pid_one_lifecycle_emergency_exit as *const () as libc::sighandler_t,
             flags: LIBC_SIGACTION_READBACK_FLAGS,
             mask_bits: PID_ONE_LIFECYCLE_MASK_BITS,
         };
@@ -2977,7 +2983,7 @@ exec env LISTEN_PID=$$ LISTEN_FDS=2 LISTEN_FDNAMES=first:second VOLPAROSSA_UAPI_
         for handler in [
             libc::SIG_DFL,
             libc::SIG_IGN,
-            sigchld_test_handler as libc::sighandler_t,
+            sigchld_test_handler as *const () as libc::sighandler_t,
         ] {
             assert_eq!(
                 classify_pid_one_lifecycle_action(SignalActionSnapshot { handler, ..exact })

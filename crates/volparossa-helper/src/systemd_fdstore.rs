@@ -43,7 +43,7 @@ use nix::{
     },
     unistd::{pipe2, read},
 };
-use tokio::io::unix::AsyncFd;
+use volparossa_linux_uapi::OwnedAsyncFd;
 use zbus::{
     Connection, OwnedObjectPath, Proxy,
     names::OwnedUniqueName,
@@ -2655,7 +2655,7 @@ where
     let (barrier_read, barrier_write) = pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK)
         .map_err(nix_io)
         .map_err(RemovalFailure::before_send)?;
-    let barrier_read = AsyncFd::new(barrier_read)
+    let barrier_read = OwnedAsyncFd::register(barrier_read)
         .map_err(FdStoreError::Io)
         .map_err(RemovalFailure::before_send)?;
     let removal_message = fdstore_remove_message(custody_name);
@@ -2895,7 +2895,7 @@ where
     let (barrier_read, barrier_write) = pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK)
         .map_err(nix_io)
         .map_err(RemovalFailure::before_send)?;
-    let barrier_read = AsyncFd::new(barrier_read)
+    let barrier_read = OwnedAsyncFd::register(barrier_read)
         .map_err(FdStoreError::Io)
         .map_err(RemovalFailure::before_send)?;
     let removal_message = fdstore_remove_message(target.custody_name);
@@ -3096,7 +3096,7 @@ async fn publish_and_attest<S: DescriptorStoreInventorySource>(
     let (barrier_read, barrier_write) = pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK)
         .map_err(nix_io)
         .map_err(PublicationFailure::before_send)?;
-    let barrier_read = AsyncFd::new(barrier_read)
+    let barrier_read = OwnedAsyncFd::register(barrier_read)
         .map_err(FdStoreError::Io)
         .map_err(PublicationFailure::before_send)?;
     let fdstore_message = fdstore_message(custody_name);
@@ -3384,7 +3384,7 @@ async fn synchronize_manager(
     ensure_deadline(deadline)?;
     let (barrier_read, barrier_write) =
         pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).map_err(nix_io)?;
-    let barrier_read = AsyncFd::new(barrier_read).map_err(FdStoreError::Io)?;
+    let barrier_read = OwnedAsyncFd::register(barrier_read).map_err(FdStoreError::Io)?;
     sender.send_once(BARRIER_MESSAGE, &[barrier_write.as_raw_fd()])?;
     drop(barrier_write);
     wait_for_barrier(&barrier_read, deadline).await
@@ -3409,7 +3409,7 @@ fn fdstore_remove_message(custody_name: CustodyFdName) -> [u8; FDSTORE_REMOVE_ME
 }
 
 async fn wait_for_barrier(
-    descriptor: &AsyncFd<OwnedFd>,
+    descriptor: &OwnedAsyncFd,
     deadline: HardDeadline,
 ) -> Result<(), FdStoreError> {
     loop {
@@ -3469,7 +3469,7 @@ mod tests {
         fs::OpenOptions,
         io::{IoSliceMut, Write as _},
         os::{
-            fd::{AsFd as _, AsRawFd as _},
+            fd::AsFd as _,
             unix::{fs::MetadataExt as _, net::UnixDatagram},
         },
         sync::{
@@ -3490,9 +3490,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires explicitly assigned disposable runner and private dbus-daemon"]
     async fn private_dbus_typed_replies_and_errors_use_real_zbus() {
-        assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
+        assert_eq!(env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
         assert_eq!(
-            std::env::var("RUNNER_ENVIRONMENT").as_deref(),
+            env::var("RUNNER_ENVIRONMENT").as_deref(),
             Ok("github-hosted")
         );
         struct PrivateBus(std::process::Child);

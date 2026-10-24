@@ -5065,6 +5065,7 @@ dependencies = [
  "libc",
  "nix",
  "socket2 0.6.5",
+ "tokio",
 ]
 
 [[package]]
