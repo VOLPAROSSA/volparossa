@@ -83,6 +83,12 @@ print_plan() {
     esac
     if [ "$scenario" = weather-decoder-abi ]; then
         if [ "$decoder_mode" != historical-v1 ]; then
+            if [ "$decoder_mode" = source-v1 ]; then
+                printf '%s\n' 'Weather source-v1 ABI trial: fixed reviewed14-file payload and source record;' \
+                    '  a second clean Debian13 guest prepares the same signed package environment without compilation;' \
+                    '  relocated offline ABI, complete input/environment rechecks, no historical artifact fallback.'
+                return
+            fi
             if [ "$decoder_mode" = source-build ]; then
                 printf '%s\n' 'Weather source build: requires the checked-in reviewed environment lock;' \
                     '  exact image/packages/sources, offline unprivileged bwrap build and upstream libaec tests;' \
@@ -583,7 +589,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         --decoder-mode)
             [ "$#" -ge 2 ] && [ "$decoder_mode_set" = no ] || exit 64
-            case $2 in historical-v1|source-input-inventory|source-build) ;; *) exit 64 ;; esac
+            case $2 in historical-v1|source-input-inventory|source-build|source-v1) ;; *) exit 64 ;; esac
             decoder_mode=$2
             decoder_mode_set=yes
             shift
@@ -672,7 +678,14 @@ case $mpquic_path in ''|/*) ;; *) exit 64 ;; esac
 case $package_path in ''|/*) ;; *) exit 64 ;; esac
 if [ "$scenario" = weather-decoder-abi ]; then
     if [ "$decoder_mode" != historical-v1 ]; then
-        [ -z "$decoder_abi_inputs" ] || exit 64
+        if [ "$decoder_mode" = source-v1 ]; then
+            case $decoder_abi_inputs in /*) ;; *) exit 64 ;; esac
+            case $decoder_abi_inputs in /|*/|*//*|*/../*|*/./*|*/..|*/.|*[[:cntrl:]]*) exit 64 ;; esac
+            case $decoder_abi_inputs in "$decoder_source"|"$decoder_source"/*) exit 64 ;; esac
+            case $decoder_source in "$decoder_abi_inputs"/*) exit 64 ;; esac
+        else
+            [ -z "$decoder_abi_inputs" ] || exit 64
+        fi
         case $decoder_source in /*) ;; *) exit 64 ;; esac
         case $decoder_source in /|*/|*//*|*/../*|*/./*|*/..|*/.|*[[:cntrl:]]*) exit 64 ;; esac
     else
@@ -952,7 +965,7 @@ cleanup() {
         if ! (set -C
             jq -n --arg revision "$expected_commit" --arg started "$QEMU_STARTED" --arg joined "$QEMU_JOINED" \
                 --arg mode "$decoder_mode" --argjson removed "$decoder_private_removed" --argjson status "$status" \
-                '{schema:1,kind:(if $mode == "source-build" then "weather-source-build-vm-cleanup" else "weather-source-inventory-vm-cleanup" end),core_commit:$revision,
+                '{schema:1,kind:(if $mode == "source-build" then "weather-source-build-vm-cleanup" elif $mode == "source-v1" then "weather-source-trial-abi-vm-cleanup" else "weather-source-inventory-vm-cleanup" end),core_commit:$revision,
                   qemu_started:($started == "yes"),qemu_joined:($joined == "yes"),
                   private_guest_state_removed:$removed,owner_exit_status:$status,admitted:false,
                   compiled:(if $mode == "source-build" then null else false end)}' \
@@ -1028,6 +1041,7 @@ if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative
     CODE_MANIFEST_SHA256=$code_manifest_sha256
 fi
 DECODER_ABI_DIRECTORY=$RUN_DIRECTORY/weather-decoder-inputs
+DECODER_TRIAL_PAYLOAD_DIRECTORY=$RUN_DIRECTORY/weather-decoder-source-trial-inputs
 if [ "$scenario" = weather-decoder-abi ]; then
     # The reviewed source record, not a CLI hash or artifact receipt, chooses
     # every admitted byte. These operations never execute an input binary.
@@ -1038,6 +1052,10 @@ if [ "$scenario" = weather-decoder-abi ]; then
         else
             python3 -B "$HERE/weather-decoder-abi.py" stage-source "$decoder_source" "$DECODER_ABI_DIRECTORY"
             python3 -B "$HERE/weather-decoder-abi.py" verify-source "$DECODER_ABI_DIRECTORY"
+            if [ "$decoder_mode" = source-v1 ]; then
+                python3 -B "$HERE/weather-decoder-abi.py" stage-source-trial-inputs "$decoder_abi_inputs" "$DECODER_TRIAL_PAYLOAD_DIRECTORY"
+                python3 -B "$HERE/weather-decoder-abi.py" verify-source-trial-inputs "$DECODER_TRIAL_PAYLOAD_DIRECTORY"
+            fi
         fi
     else
         python3 -B "$HERE/weather-decoder-abi.py" verify-inputs "$decoder_abi_inputs"
@@ -2029,7 +2047,7 @@ decoder_mode=historical-v1
 case $scenario in
     weather-decoder-abi)
         if [ "$#" -eq 6 ]; then
-            case $6 in source-input-inventory|source-build) ;; *) exit 64 ;; esac
+            case $6 in source-input-inventory|source-build|source-v1) ;; *) exit 64 ;; esac
             decoder_mode=$6
         else
             [ "$#" -eq 5 ] || exit 64
@@ -2085,12 +2103,15 @@ if [ "$scenario" = weather-decoder-abi ]; then
             set +e
             decoder_export=export-source-inventory
             if [ "$decoder_mode" = source-build ]; then decoder_export=export-source-build; fi
+            if [ "$decoder_mode" = source-v1 ]; then decoder_export=export-source-trial; fi
             python3 -B tests/integration/weather-decoder-abi.py "$decoder_export" "$decoder_inventory_output" || exit 1
             printf '%s\n' "$decoder_inventory_status" >"$decoder_inventory_output/guest-exit-status" || exit 1
             cp /home/vpci/guest-phase.txt "$decoder_inventory_output/current-phase" || exit 1
             : >/home/vpci/weather-source-export.list || exit 1
             if [ "$decoder_mode" = source-build ]; then
                 python3 -B tests/integration/weather-decoder-abi.py source-build-export-names >/home/vpci/weather-source-allowed.list || exit 1
+            elif [ "$decoder_mode" = source-v1 ]; then
+                python3 -B tests/integration/weather-decoder-abi.py source-trial-export-names >/home/vpci/weather-source-allowed.list || exit 1
             else
                 printf '%s\n' candidate.json base-files.json before.tsv after.tsv resolver.log apt-update.log apt-install.log \
                 inventory-commands.json source-binding.json inventory-report.json inventory-export.json \
@@ -2116,6 +2137,12 @@ if [ "$scenario" = weather-decoder-abi ]; then
             python3 -B tests/integration/weather-decoder-abi.py verify-build-source /home/vpci/weather-decoder-source
             timeout --signal=TERM --kill-after=10s 2340s python3 -B tests/integration/weather-decoder-abi.py \
                 source-build --expected-commit "$expected_commit"
+        elif [ "$decoder_mode" = source-v1 ]; then
+            python3 -B tests/integration/weather-decoder-abi.py source-admission-info
+            python3 -B tests/integration/weather-decoder-abi.py verify-source /home/vpci/weather-decoder-source
+            python3 -B tests/integration/weather-decoder-abi.py verify-source-trial-inputs /home/vpci/weather-decoder-source-trial-inputs
+            timeout --signal=TERM --kill-after=10s 1110s python3 -B tests/integration/weather-decoder-abi.py \
+                source-trial --expected-commit "$expected_commit"
         else
             python3 -B tests/integration/weather-decoder-abi.py verify-source /home/vpci/weather-decoder-source
             timeout --signal=TERM --kill-after=10s 900s python3 -B tests/integration/weather-decoder-abi.py \
@@ -2758,7 +2785,22 @@ scp_decoder_abi_inputs() {
         -o ProxyCommand=none -o ProxyJump=none -o RequestTTY=no \
         -o StrictHostKeyChecking=yes -o Tunnel=no \
         -o UserKnownHostsFile="$KNOWN_HOSTS" "$DECODER_ABI_DIRECTORY" \
-        "vpci@127.0.0.1:$decoder_guest_target"
+        "vpci@127.0.0.1:$decoder_guest_target" || return
+    if [ "$decoder_mode" = source-v1 ]; then
+        ssh_bounded 15s test ! -e /home/vpci/weather-decoder-source-trial-inputs
+        ssh_bounded 15s test ! -L /home/vpci/weather-decoder-source-trial-inputs
+        timeout --signal=TERM --kill-after=10s 600s scp -r \
+            -F /dev/null -i "$SSH_KEY" -P 22223 \
+            -o BatchMode=yes -o ConnectTimeout=5 \
+            -o ClearAllForwardings=yes -o ControlMaster=no -o ForwardAgent=no \
+            -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=ssh-ed25519 \
+            -o IdentitiesOnly=yes -o IdentityAgent=none \
+            -o KbdInteractiveAuthentication=no -o PasswordAuthentication=no \
+            -o ProxyCommand=none -o ProxyJump=none -o RequestTTY=no \
+            -o StrictHostKeyChecking=yes -o Tunnel=no \
+            -o UserKnownHostsFile="$KNOWN_HOSTS" "$DECODER_TRIAL_PAYLOAD_DIRECTORY" \
+            "vpci@127.0.0.1:/home/vpci/weather-decoder-source-trial-inputs" || return
+    fi
 }
 
 retrieve_incomplete_output() {
@@ -2811,6 +2853,7 @@ driver_time_bound=2400s
 [ "$scenario" != weather-decoder-abi ] || driver_time_bound=720s
 [ "$decoder_mode" != source-input-inventory ] || driver_time_bound=960s
 [ "$decoder_mode" != source-build ] || driver_time_bound=2400s
+[ "$decoder_mode" != source-v1 ] || driver_time_bound=1500s
 # Includes source-building the original UI and two extra real peer-backed downloads.
 # Application exchange/lease bounds remain unchanged.
 [ "$scenario" != cloud-private-file ] || driver_time_bound=3600s
