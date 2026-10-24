@@ -37,14 +37,24 @@ SANDBOX_DECODER, SANDBOX_PROBE = "/case/bin/grib_ls", "/case/probe.grib2"
 ENV = {"LANG": "C.UTF-8", "RUST_LOG": "off"}
 SCOPE = dict(disposable_abi_test_only=True, production_decoder_authorized=False,
              origin_acquisition_proven=False, core_delivery_proven=False, browser_proven=False)
-SOURCE_COMMIT = "9fa43352a3a321e18247635311691647fa61cf30"
+SOURCE_COMMIT = "a45bc6e0df7756826fe7158cf0faf5146b9d6d2b"
 SOURCE_FILES = {
-    "scripts/prepare_hosted_decoder_environment.py": dict(bytes=31758, sha256="aa4f9b45ba10164ee8371676e2d5e5dc4956f9178f9b0cc0c35d12d3ba8080ee"),
-    "scripts/prepare_hosted_decoder.py": dict(bytes=28940, sha256="4ed6355451f366f27ac7cc7b1ca9045449e1de5dcc7199817b5957392c2f2f0c"),
+    "scripts/prepare_hosted_decoder_environment.py": dict(bytes=34153, sha256="d1aa95db3bedac4143a6cfbbea7eb5e2caf751e29ba279cfa506873074e21815"),
+    "scripts/prepare_hosted_decoder.py": dict(bytes=37718, sha256="8672ca01c52ecd3c5bc11e94396f926e492d95f33b86fa4c40774a9993446a51"),
     "scripts/build_eccodes.py": dict(bytes=11634, sha256="5bcb6d58b34e5b45647feae836bfd086ff0adce0e30487430f5c50941f579827"),
     "third_party/eccodes-sources.json": dict(bytes=2087, sha256="f136020562a6ff0d2a83b948189c31f839afb8a00ea87565469f38640fb0dc86"),
 }
 SOURCE_GUEST = Path("/home/vpci/weather-decoder-source")
+ENVIRONMENT_RECORD = Path(__file__).resolve().parents[1] / "helper/weather-source-build-environment-v1.json"
+SOURCE_BUILD_ROOT = SOURCE_GUEST / "build/hosted-decoder-cold"
+SOURCE_PAYLOAD_ROOT = SOURCE_GUEST / "build/hosted-payload-cold"
+SOURCE_PAYLOAD_NAMES = {"build-manifest.json", "eccodes-build/bin/grib_ls", "eccodes-build/bin/grib_filter",
+    "eccodes-build/bin/codes_info", "prefix/lib/libaec.a", "probe.grib2", "ecbuild-source/LICENSE",
+    "ecbuild-source/NOTICE", "ecbuild-source/COPYING", "libaec-source/LICENSE.txt", "eccodes-source/LICENSE",
+    "eccodes-source/NOTICE", "eccodes-source/COPYING", "eccodes-source/third_party/expected/COPYING"}
+SOURCE_BUILD_EXPORTS = {"source-build-report.json": 65536, "build-manifest.json": 1024**2,
+    "payload-manifest.json": 1024**2, "capture-source-toolchain.log": 1024**2,
+    "build-source.log": 1024**2, "stage-source-payload.log": 1024**2, "readback-report.json": 1024**2}
 INVENTORY_ROOT = Path("/home/vpci/weather-decoder-environment")
 INVENTORY_PHASE = Path("/home/vpci/guest-phase.txt")
 INVENTORY_EXPORTS = {
@@ -474,6 +484,61 @@ def stage_source(source, destination):
                 files=SOURCE_FILES, admitted=False, compiled=False)
 
 
+def load_source_lock(helper):
+    raw = read_file(ENVIRONMENT_RECORD, 32 * 1024**2)
+    return helper["validate_record"](decode(raw), True), digest(raw)
+
+
+def source_helper(root):
+    source_files(root)
+    return runpy.run_path(str(root / "scripts/prepare_hosted_decoder_environment.py"))
+
+
+def source_archives(root):
+    files = source_files(root)
+    return decode(files["third_party/eccodes-sources.json"])["sources"]
+
+
+class SourceRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *_args):
+        raise ValueError("SOURCE_ARCHIVE_REDIRECT_REJECTED")
+
+
+def fetch_source_archives(root):
+    source_checkout(root)
+    load_source_lock(source_helper(root))  # Fail before any download without the reviewed fixed lock.
+    destination = root / "build/source-archives"
+    destination.parent.mkdir(mode=0o700, exist_ok=True)
+    fresh_directory(destination)
+    opener = urllib.request.build_opener(SourceRedirect(), urllib.request.ProxyHandler({}))
+    for item in source_archives(root):
+        # The URL/length/hash originate only in the fixed source-pin JSON above.
+        with opener.open(item["url"], timeout=30) as response:
+            raw = response.read(item["bytes"] + 1)
+        require(len(raw) == item["bytes"] and digest(raw) == item["sha256"], "SOURCE_ARCHIVE_MISMATCH")
+        write_new(destination / item["archive"], raw, 0o400)
+    return dict(admitted=False, compiled=False, sources=3)
+
+
+def build_source_files(root):
+    expected = dict(SOURCE_FILES)
+    for item in source_archives(root):
+        expected["archives/" + item["archive"]] = dict(bytes=item["bytes"], sha256=item["sha256"])
+    return expected
+
+
+def stage_build_source(source, destination):
+    load_source_lock(source_helper(source))
+    stage_source(source, destination)
+    (destination / "archives").mkdir(mode=0o700)
+    for item in source_archives(source):
+        raw = read_file(source / "build/source-archives" / item["archive"], item["bytes"])
+        require(len(raw) == item["bytes"] and digest(raw) == item["sha256"], "SOURCE_ARCHIVE_MISMATCH")
+        write_new(destination / "archives" / item["archive"], raw, 0o400)
+    inventory(destination, build_source_files(destination))
+    return dict(admitted=False, compiled=False, sources_verified=True)
+
+
 class SnapshotRedirect(urllib.request.HTTPRedirectHandler):
     def __init__(self, expected_sha256=None):
         super().__init__()
@@ -554,10 +619,11 @@ def inventory_failure(error, action, phase):
     return value
 
 
-def source_inventory(commit):
+def source_inventory(commit, build_mode=False):
     inventory_boundary(commit)
     source_files(SOURCE_GUEST)
     helper = runpy.run_path(str(SOURCE_GUEST / "scripts/prepare_hosted_decoder_environment.py"))
+    lock, lock_sha = load_source_lock(helper) if build_mode else (None, None)
     root = INVENTORY_ROOT
     fresh_directory(root)
     (root / "debs").mkdir(mode=0o700)
@@ -598,6 +664,8 @@ def source_inventory(commit):
             snapshot_fetch(pin["inrelease_url"], root / (name + ".InRelease"), pin["inrelease_bytes"], deadline)
             phase(name + "-inrelease-verify")
             repositories[name] = helper["verify_release"](root / (name + ".InRelease"), name)
+            if build_mode:
+                require(repositories[name] == lock["repositories"][name], "LOCKED_REPOSITORY_MISMATCH")
             index_url = pin["archive_url"] + "dists/" + pin["codename"] + "/" + helper["INDEX_PATH"]
             phase(name + "-index-fetch")
             snapshot_fetch(index_url, root / (name + ".Packages.xz"), repositories[name]["index"]["bytes"],
@@ -613,9 +681,13 @@ def source_inventory(commit):
         sudo = ["/usr/bin/sudo", "-n", "/usr/bin/timeout", "--signal=TERM", "--kill-after=5s", "180s",
                 "/usr/bin/env", "DEBIAN_FRONTEND=noninteractive", "/usr/bin/apt-get"]
         phase("resolve")
-        command("apt-update.log", [*sudo, *options, "update"], 190)
-        resolver = command("resolver.log", ["/usr/bin/apt-get", *options, "--simulate", "install", *helper["ROOT_PACKAGES"]], 60)
-        selected = helper["resolver_inventory"](resolver)
+        if build_mode:
+            require(helper["inventory"](before) == lock["before"], "BASE_INVENTORY_MISMATCH")
+            selected = helper["package_delta"](lock["before"], lock["after"])
+        else:
+            command("apt-update.log", [*sudo, *options, "update"], 190)
+            resolver = command("resolver.log", ["/usr/bin/apt-get", *options, "--simulate", "install", *helper["ROOT_PACKAGES"]], 60)
+            selected = helper["resolver_inventory"](resolver)
         packages = helper["indexed_packages"](root, selected, repositories)
         phase("verify-debs")
         for package in packages:
@@ -624,15 +696,21 @@ def source_inventory(commit):
                            package["bytes"], deadline, package["sha256"])
         # Every archive and payload member is verified before apt can install it.
         helper["verified_packages"](root, selected, repositories)
+        if build_mode:
+            require(helper["verify_locked_inputs"](root)["environment_lock_sha256"] == lock_sha, "ENVIRONMENT_LOCK_CHANGED")
         phase("install")
         paths = [str(root / "debs" / Path(package["filename"]).name) for package in packages]
         require(paths, "INVENTORY_EMPTY_INSTALL")
         command("apt-install.log", [*sudo, *options, "--no-download", "install", *paths], 190)
         command("after.tsv", ["/usr/bin/dpkg-query", "--show", "--showformat=" + helper["STATUS_FORMAT"]], 20)
         phase("candidate")
-        value = helper["validate_record"](helper["candidate"](root), False)
-        helper["write_candidate_file"](root / "candidate.json", helper["canonical"](value))
-        report.update(success=True, candidate_sha256=digest(helper["canonical"](value)))
+        if build_mode:
+            require(helper["check_environment"]()["environment_lock_sha256"] == lock_sha, "ENVIRONMENT_LOCK_CHANGED")
+            report.update(success=True, environment_lock_sha256=lock_sha, environment_prepared=True)
+        else:
+            value = helper["validate_record"](helper["candidate"](root), False)
+            helper["write_candidate_file"](root / "candidate.json", helper["canonical"](value))
+            report.update(success=True, candidate_sha256=digest(helper["canonical"](value)))
         phase("complete")
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, Interrupted, CleanupUnconfirmed) as error:
         report["blocker"] = "SOURCE_INPUT_INVENTORY_FAILED"
@@ -665,20 +743,174 @@ def export_inventory(output):
     return dict(admitted=False, files=len(files), bytes=total)
 
 
-def stage_inventory_public(source, output):
+def source_builder(root):
+    source_files(root)
+    return runpy.run_path(str(root / "scripts/prepare_hosted_decoder.py"))
+
+
+def source_cold_build(commit):
+    inventory_boundary(commit)
+    inventory(SOURCE_GUEST, build_source_files(SOURCE_GUEST))
+    helper = source_helper(SOURCE_GUEST)
+    _lock, lock_sha = load_source_lock(helper)
+    report = dict(schema=1, kind="weather-decoder-source-cold-build", admitted=False, compiled=False,
+        success=False, core_commit=commit, weather_commit=SOURCE_COMMIT, environment_lock_sha256=lock_sha,
+        phase="environment", blocker=None)
+    deadline = time.monotonic() + 2280
+    try:
+        source_inventory(commit, build_mode=True)
+        commands = Commands(maximum=1024**2, environment={"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"})
+        script = str(SOURCE_GUEST / "scripts/prepare_hosted_decoder.py")
+        toolchain = SOURCE_GUEST / "build/hosted-toolchain-cold"
+        for action, arguments in [
+            ("capture-source-toolchain", ["--output-dir", str(toolchain)]),
+            ("build-source", ["--archives", str(SOURCE_GUEST / "archives"), "--output", str(SOURCE_BUILD_ROOT),
+                              "--toolchain-manifest", str(toolchain / "toolchain.json")]),
+            ("stage-source-payload", ["--build-output", str(SOURCE_BUILD_ROOT), "--output", str(SOURCE_PAYLOAD_ROOT)])]:
+            report["phase"] = action
+            INVENTORY_PHASE.write_text("weather-source-" + action + "\n")
+            with os.fdopen(os.open(INVENTORY_ROOT / (action + ".log"),
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), 'wb') as stream:
+                commands.output_stream = stream
+                try:
+                    code, raw = commands.run(["/usr/bin/python3", "-B", script, action, *arguments], deadline)
+                finally:
+                    commands.output_stream = None
+                    if stream.tell() == 0: stream.write(b"(no output)\n")
+            require(code == 0, "SOURCE_BUILD_COMMAND_FAILED")
+        source_payload_manifest_bytes()
+        report.update(success=True, compiled=True, phase="complete")
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, Interrupted, CleanupUnconfirmed) as error:
+        report["blocker"] = "SOURCE_BUILD_FAILED"
+        report["failure"] = inventory_failure(error, "source-build", report["phase"])
+        raise
+    finally:
+        if INVENTORY_ROOT.is_dir():
+            write_new(INVENTORY_ROOT / "source-build-report.json", json.dumps(report, sort_keys=True).encode() + b"\n")
+    return report
+
+
+def source_payload_manifest_bytes():
+    _lock, lock_sha = load_source_lock(source_helper(SOURCE_GUEST))
+    builder = source_builder(SOURCE_GUEST)
+    raw = read_file(SOURCE_BUILD_ROOT / "payload-manifest.json", 1024**2)
+    value = builder["validate_payload_manifest"](decode(raw), lock_sha)
+    builder["verify_source_payload_tree"](SOURCE_PAYLOAD_ROOT, value, lock_sha)
+    return raw
+
+
+def source_payload_member(name):
+    _lock, lock_sha = load_source_lock(source_helper(SOURCE_GUEST))
+    builder = source_builder(SOURCE_GUEST)
+    value = builder["validate_payload_manifest"](decode(read_file(SOURCE_BUILD_ROOT / "payload-manifest.json", 1024**2)), lock_sha)
+    require(name in value["files"] and member(name), "SOURCE_PAYLOAD_MEMBER")
+    expected = value["files"][name]
+    path = SOURCE_PAYLOAD_ROOT / name
+    require(path.resolve() == path and stat.S_IMODE(path.stat().st_mode) == expected["mode"], "SOURCE_PAYLOAD_MEMBER")
+    raw = read_file(path, expected["bytes"])
+    require(len(raw) == expected["bytes"] and digest(raw) == expected["sha256"], "SOURCE_PAYLOAD_BYTES")
+    return raw
+
+
+def source_ssh(run_directory):
+    require(run_directory.is_absolute() and run_directory.resolve() == run_directory
+            and re.fullmatch(r'weather-decoder-abi-kvm\.[A-Za-z0-9]{6}', run_directory.name), "SOURCE_READBACK_DIRECTORY")
+    info = run_directory.lstat()
+    require(info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700, "SOURCE_READBACK_DIRECTORY")
+    for name in ("guest-key", "known-hosts"):
+        info = (run_directory / name).lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
+                and stat.S_IMODE(info.st_mode) == 0o600, "SOURCE_READBACK_IDENTITY")
+    argv = ["/usr/bin/ssh", "-F", "/dev/null", "-i", str(run_directory / "guest-key"), "-p", "22223"]
+    for option in ("BatchMode=yes", "ConnectTimeout=5", "ClearAllForwardings=yes", "ControlMaster=no",
+        "ForwardAgent=no", "GlobalKnownHostsFile=/dev/null", "HostKeyAlgorithms=ssh-ed25519", "IdentitiesOnly=yes",
+        "IdentityAgent=none", "KbdInteractiveAuthentication=no", "PasswordAuthentication=no", "ProxyCommand=none",
+        "ProxyJump=none", "RequestTTY=no", "StrictHostKeyChecking=yes", "Tunnel=no",
+        "UserKnownHostsFile=" + str(run_directory / "known-hosts")):
+        argv += ["-o", option]
+    return argv + ["vpci@127.0.0.1", "/usr/bin/python3", "-B", "/home/vpci/source/tests/integration/weather-decoder-abi.py"]
+
+
+def readback_source_payload(source, run_directory, output):
+    source_checkout(source)
+    _lock, lock_sha = load_source_lock(source_helper(source))
+    builder = source_builder(source)
+    ssh = source_ssh(run_directory)
+    commands = Commands(maximum=1024**2)
+    deadline = time.monotonic() + 240
+    code, raw = commands.run([*ssh, "source-payload-manifest"], deadline)
+    require(code == 0, "SOURCE_READBACK_FAILED")
+    manifest = builder["validate_payload_manifest"](decode(raw), lock_sha)
+    fresh_directory(output)
+    for name, expected in sorted(manifest["files"].items()):
+        commands.maximum = expected["bytes"]
+        code, data = commands.run([*ssh, "source-payload-member", name], deadline)
+        require(code == 0 and len(data) == expected["bytes"] and digest(data) == expected["sha256"], "SOURCE_READBACK_BYTES")
+        destination = output / name
+        parent = output
+        for part in Path(name).parts[:-1]:
+            parent /= part
+            parent.mkdir(mode=0o700, exist_ok=True)
+        write_new(destination, data, expected["mode"])
+    commands.maximum = 1024**2
+    code, after = commands.run([*ssh, "source-payload-manifest"], deadline)
+    require(code == 0 and after == raw, "SOURCE_READBACK_CHANGED")
+    checked = builder["verify_source_payload_tree"](output, manifest, lock_sha)
+    return dict(checked, schema=1, kind="weather-source-payload-readback",
+                environment_lock_sha256=lock_sha, payload_manifest_sha256=digest(raw))
+
+
+def source_build_export_spec(builder):
+    names = {"version-" + name + ".log" for name in builder["VERSION_ARGS"]}
+    names |= {"resolve-" + name.replace('_', '-') + ".log" for name, *_ in builder["COMPILER_PROGRAMS"]}
+    names |= {name + ".log" for name, _ in builder["commands"]({name: {"path": "/unused"} for name in builder["TOOLS"]})}
+    exports = dict(SOURCE_BUILD_EXPORTS)
+    for prefix in ("native-", "toolchain-"):
+        exports.update({prefix + name: 16 * 1024**2 for name in names})
+    exports.update({"native-hosted-build-receipt.json": 1024**2, "toolchain-toolchain.json": 1024**2,
+                    "toolchain-source-toolchain-receipt.json": 1024**2})
+    return exports
+
+
+def export_source_build(output):
+    result = export_inventory(output)
+    # Only the fixed producer's log names are considered, never its native tree.
+    builder = source_builder(SOURCE_GUEST)
+    total = result["bytes"]
+    for name, maximum in source_build_export_spec(builder).items():
+        if name.startswith('native-'):
+            path = SOURCE_BUILD_ROOT / name.removeprefix('native-')
+        elif name.startswith('toolchain-'):
+            path = SOURCE_GUEST / 'build/hosted-toolchain-cold' / name.removeprefix('toolchain-')
+        elif name in ('build-manifest.json', 'payload-manifest.json'):
+            path = SOURCE_BUILD_ROOT / name
+        else:
+            path = INVENTORY_ROOT / name
+        if not path.exists() and not path.is_symlink(): continue
+        raw = read_file(path, maximum, allow_empty=name.endswith('.log'))
+        total += len(raw)
+        require(total <= 128 * 1024**2 and not re.search(br"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", raw), "SOURCE_BUILD_EXPORT_BOUND")
+        if name.endswith('.json'): decode(raw)
+        write_new(output / name, raw)
+    return dict(admitted=False, bytes=total, binaries_exported=False)
+
+
+def stage_inventory_public(source, output, extra_exports=None):
     require(source.is_absolute() and source.resolve() == source and not output.is_relative_to(source),
             "INVENTORY_PUBLIC_PATH")
     fresh_directory(output)
     files, total = {}, 0
-    for name, maximum in INVENTORY_PUBLIC_EXPORTS.items():
+    for name, maximum in dict(INVENTORY_PUBLIC_EXPORTS, **(extra_exports or {})).items():
         path = source / name
         if not path.exists() and not path.is_symlink(): continue
         try:
             # QEMU commonly has an empty stderr file on a quiet boot. Empty
             # plain runner logs are evidence; JSON/status inputs stay nonempty.
-            raw = read_file(path, maximum, allow_empty=name in {"qemu.stderr", "vm-console.log"})
+            raw = read_file(path, maximum, allow_empty=name in {"qemu.stderr", "vm-console.log"} or
+                            (extra_exports is not None and name.endswith('.log')))
             total += len(raw)
-            require(total <= 73 * 1024**2 and not re.search(br"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", raw),
+            require(total <= (128 if extra_exports is not None else 73) * 1024**2
+                    and not re.search(br"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", raw),
                     "INVENTORY_PUBLIC_BOUND")
             if name.endswith('.json'): decode(raw)
             write_new(output / name, raw)
@@ -688,8 +920,8 @@ def stage_inventory_public(source, output):
         files[name] = dict(bytes=len(raw), sha256=digest(raw))
     require(files, "INVENTORY_PUBLIC_EMPTY")
     write_new(output / "inventory-public-export.json", json.dumps(dict(schema=1, admitted=False,
-              compiled=False, files=files), sort_keys=True).encode() + b"\n")
-    return dict(admitted=False, compiled=False, files=len(files), bytes=total)
+              compiled=None if extra_exports is not None else False, files=files), sort_keys=True).encode() + b"\n")
+    return dict(admitted=False, compiled=None if extra_exports is not None else False, files=len(files), bytes=total)
 
 
 def main():
@@ -712,6 +944,22 @@ def main():
     source_export.add_argument("output", type=Path)
     public_export = commands.add_parser("stage-inventory-public")
     public_export.add_argument("source", type=Path); public_export.add_argument("output", type=Path)
+    for name in ("verify-environment-lock", "fetch-source-archives"):
+        commands.add_parser(name).add_argument("source", type=Path)
+    build_stage = commands.add_parser("stage-build-source")
+    build_stage.add_argument("source", type=Path); build_stage.add_argument("destination", type=Path)
+    commands.add_parser("verify-build-source").add_argument("directory", type=Path)
+    commands.add_parser("source-build").add_argument("--expected-commit", required=True)
+    commands.add_parser("export-source-build").add_argument("output", type=Path)
+    commands.add_parser("source-payload-manifest")
+    commands.add_parser("source-payload-member").add_argument("name")
+    commands.add_parser("source-build-export-names")
+    readback = commands.add_parser("readback-source-payload")
+    for name in ("source", "run-directory", "output"):
+        readback.add_argument("--" + name, required=True, type=Path)
+    build_public = commands.add_parser("stage-source-build-public")
+    for name in ("source", "output", "weather"):
+        build_public.add_argument(name, type=Path)
     args = parser.parse_args()
     def interrupted(_sig, _frame): raise Interrupted()
     previous = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGINT, signal.SIGTERM)}
@@ -729,6 +977,28 @@ def main():
         elif args.action == "source-input-inventory": value = source_inventory(args.expected_commit)
         elif args.action == "export-source-inventory": value = export_inventory(args.output)
         elif args.action == "stage-inventory-public": value = stage_inventory_public(args.source, args.output)
+        elif args.action == "verify-environment-lock":
+            source_checkout(args.source)
+            _lock, lock_sha = load_source_lock(source_helper(args.source))
+            value = dict(admitted=False, environment_lock_sha256=lock_sha, compiled=False)
+        elif args.action == "fetch-source-archives": value = fetch_source_archives(args.source)
+        elif args.action == "stage-build-source": value = stage_build_source(args.source, args.destination)
+        elif args.action == "verify-build-source":
+            inventory(args.directory, build_source_files(args.directory))
+            value = dict(admitted=False, compiled=False, source_archives_verified=True)
+        elif args.action == "source-build": value = source_cold_build(args.expected_commit)
+        elif args.action == "export-source-build": value = export_source_build(args.output)
+        elif args.action == "source-payload-manifest":
+            sys.stdout.buffer.write(source_payload_manifest_bytes()); return 0
+        elif args.action == "source-payload-member":
+            sys.stdout.buffer.write(source_payload_member(args.name)); return 0
+        elif args.action == "source-build-export-names":
+            print('\n'.join(sorted(set(INVENTORY_PUBLIC_EXPORTS) | set(source_build_export_spec(source_builder(SOURCE_GUEST))))))
+            return 0
+        elif args.action == "readback-source-payload": value = readback_source_payload(args.source, args.run_directory, args.output)
+        elif args.action == "stage-source-build-public":
+            source_checkout(args.weather)
+            value = stage_inventory_public(args.source, args.output, source_build_export_spec(source_builder(args.weather)))
         else: value = execute(args.inputs, args.output, args.expected_commit)
         print(json.dumps(value, sort_keys=True))
         return 0 if value.get("success", True) else 1

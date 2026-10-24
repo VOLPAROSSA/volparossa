@@ -357,7 +357,7 @@ class SourceInventory(unittest.TestCase):
         self.assertNotIn('secret', captured.getvalue())
         self.assertNotIn('private', captured.getvalue())
 
-    def run_inventory(self, root, fail_deb=False, fail_release=False):
+    def run_inventory(self, root, fail_deb=False, fail_release=False, build_mode=False):
         events = []
         def canonical(value): return (json.dumps(value, sort_keys=True) + '\n').encode()
         helper = dict(STATUS_FORMAT='fixed status format', SCOPE={'compiled': False}, KEYRING=Path('/fixed/image/keyring'),
@@ -370,6 +370,9 @@ class SourceInventory(unittest.TestCase):
             resolver_inventory=lambda raw: [{'name': 'fixed-package'}],
             indexed_packages=lambda *_args: [dict(repository='debian', filename='pool/main/f/fixed/package.deb', bytes=100, sha256='b' * 64)],
             candidate=lambda directory: {'admitted': False}, validate_record=lambda value, admitted: value,
+            package_delta=lambda *_args: [{'name': 'fixed-package'}],
+            verify_locked_inputs=lambda *_args: {'environment_lock_sha256': '1' * 64},
+            check_environment=lambda: {'environment_lock_sha256': '1' * 64},
             canonical=canonical, write_candidate_file=H['write_new'])
         def verified(*_args):
             events.append('verified-deb')
@@ -389,13 +392,16 @@ class SourceInventory(unittest.TestCase):
         state = dict(INVENTORY_ROOT=root / 'inventory', INVENTORY_PHASE=root / 'phase',
             inventory_boundary=lambda commit: None, source_files=lambda path: {},
             snapshot_fetch=lambda *_args: events.append('download-data'), Commands=InertCommands)
+        if build_mode:
+            state['load_source_lock'] = lambda _helper: (dict(before=[], after=[],
+                repositories={'debian': dict(index={'bytes': 100, 'sha256': 'a' * 64})}), '1' * 64)
         with patch.dict(G, **state), patch.object(H['runpy'], 'run_path', return_value=helper):
             if fail_deb or fail_release:
                 with self.assertRaisesRegex(ValueError, 'INRELEASE_SIGNATURE' if fail_release else 'DEB_DIGEST'):
-                    H['source_inventory']('a' * 40)
+                    H['source_inventory']('a' * 40, build_mode=build_mode)
                 value = json.loads((root / 'inventory/inventory-report.json').read_bytes())
             else:
-                value = H['source_inventory']('a' * 40)
+                value = H['source_inventory']('a' * 40, build_mode=build_mode)
         return value, events
 
     def test_inventory_installs_only_after_verified_package_data_and_stops_uncompiled(self):
@@ -423,6 +429,91 @@ class SourceInventory(unittest.TestCase):
             self.assertEqual(value['phase'], 'debian-inrelease-verify')
             self.assertEqual(value['failure']['code'], 'INRELEASE_SIGNATURE')
             self.assertEqual(json.loads(diagnostic.getvalue()), value['failure'])
+
+    def test_source_build_environment_uses_reviewed_closure_without_update_or_resolver(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            value, events = self.run_inventory(Path(temporary), build_mode=True)
+            commands = [event for event in events if isinstance(event, list)]
+            self.assertFalse(any('--simulate' in command or 'update' in command for command in commands))
+            self.assertTrue(any('--no-download' in command for command in commands))
+            self.assertTrue(value['environment_prepared'])
+            self.assertNotIn('candidate_sha256', value)
+            self.assertFalse((Path(temporary) / 'inventory/candidate.json').exists())
+
+    def test_source_build_missing_lock_fails_before_network_or_compiler(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            network = Mock(side_effect=AssertionError('must not download without fixed admission'))
+            helper = {'validate_record': Mock(side_effect=AssertionError('missing lock'))}
+            with patch.dict(G, ENVIRONMENT_RECORD=root / 'absent', source_checkout=lambda source: {},
+                            source_helper=lambda source: helper), patch.object(H['urllib'].request, 'build_opener', network):
+                with self.assertRaises(FileNotFoundError): H['fetch_source_archives'](root)
+            network.assert_not_called()
+            H['write_new'](root / 'candidate', b'{"admitted":false}')
+            validator = Mock(side_effect=ValueError('ENVIRONMENT_NOT_ADMITTED'))
+            with patch.dict(G, ENVIRONMENT_RECORD=root / 'candidate'), self.assertRaisesRegex(ValueError, 'ENVIRONMENT_NOT_ADMITTED'):
+                H['load_source_lock']({'validate_record': validator})
+            validator.assert_called_once_with({'admitted': False}, True)
+
+    def test_cold_build_executes_existing_builder_actions_in_order_without_admission(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); environment = root / 'environment'; calls = []
+            def provision(*_args, **kwargs):
+                self.assertTrue(kwargs['build_mode']); environment.mkdir()
+            class BuildCommands:
+                def __init__(self, **kwargs): self.output_stream = None
+                def run(self, argv, _deadline):
+                    calls.append(argv); self.output_stream.write(b'original synthetic builder output\n')
+                    return 0, b'{}'
+            with patch.dict(G, inventory_boundary=lambda commit: None, inventory=lambda *_args: {},
+                build_source_files=lambda source: {}, source_helper=lambda source: {}, load_source_lock=lambda helper: ({}, '1' * 64),
+                source_inventory=provision, source_payload_manifest_bytes=lambda: b'{}', Commands=BuildCommands,
+                INVENTORY_ROOT=environment, INVENTORY_PHASE=root / 'phase'):
+                value = H['source_cold_build']('a' * 40)
+            self.assertEqual([argv[3] for argv in calls], ['capture-source-toolchain', 'build-source', 'stage-source-payload'])
+            self.assertTrue(value['compiled']); self.assertTrue(value['success']); self.assertFalse(value['admitted'])
+            self.assertEqual((environment / 'build-source.log').read_bytes(), b'original synthetic builder output\n')
+
+    def test_readback_checks_every_member_hash_before_writing_and_never_executes_payload(self):
+        data = b'synthetic payload data'
+        manifest = {'files': {'probe.grib2': dict(bytes=len(data), mode=0o400, sha256=H['digest'](data))}}
+        raw = json.dumps(manifest).encode()
+        for corrupt in (False, True):
+            calls = []
+            class ReadbackCommands:
+                def __init__(self, **kwargs): self.maximum = kwargs['maximum']
+                def run(self, argv, _deadline):
+                    calls.append((argv, self.maximum))
+                    if argv[-1] == 'source-payload-manifest': return 0, raw
+                    return 0, b'corrupt' if corrupt else data
+            builder = dict(validate_payload_manifest=lambda value, lock_sha: value,
+                verify_source_payload_tree=lambda *_args: dict(admitted=False, decoder_executed=False, files=1, bytes=len(data)))
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                with patch.dict(G, source_checkout=lambda source: {}, source_helper=lambda source: {},
+                    load_source_lock=lambda helper: ({}, '1' * 64), source_builder=lambda source: builder,
+                    source_ssh=lambda directory: ['fixed-localhost-ssh'], Commands=ReadbackCommands):
+                    if corrupt:
+                        with self.assertRaisesRegex(ValueError, 'SOURCE_READBACK_BYTES'):
+                            H['readback_source_payload'](root, root, root / 'payload')
+                        self.assertFalse((root / 'payload/probe.grib2').exists())
+                    else:
+                        value = H['readback_source_payload'](root, root, root / 'payload')
+                        self.assertFalse(value['decoder_executed']); self.assertFalse(value['admitted'])
+                        self.assertEqual((root / 'payload/probe.grib2').read_bytes(), data)
+                self.assertEqual(calls[1][1], len(data))
+                self.assertEqual(calls[1][0][-2:], ['source-payload-member', 'probe.grib2'])
+
+    def test_readback_ssh_is_pinned_localhost_with_private_owned_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'weather-decoder-abi-kvm.abc123'; root.mkdir(mode=0o700)
+            for name in ('guest-key', 'known-hosts'): H['write_new'](root / name, b'fixture')
+            argv = H['source_ssh'](root)
+            for option in ('StrictHostKeyChecking=yes', 'IdentityAgent=none', 'ProxyCommand=none', 'RequestTTY=no'):
+                self.assertIn(option, argv)
+            self.assertIn('vpci@127.0.0.1', argv)
+            (root / 'guest-key').chmod(0o644)
+            with self.assertRaisesRegex(ValueError, 'SOURCE_READBACK_IDENTITY'): H['source_ssh'](root)
 
 
 if __name__ == "__main__":

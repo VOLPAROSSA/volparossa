@@ -247,21 +247,21 @@ class SourceInventoryWiring(unittest.TestCase):
         self.assertEqual(self.call('--preview', '--scenario', 'content-provider', '--decoder-mode', 'source-input-inventory').returncode, 64)
 
     def test_guest_inventory_uses_the_existing_boundary_and_exits_before_compilation(self):
-        branch = GUEST.split('if [ "$decoder_mode" = source-input-inventory ]; then\n', 1)[1].split('    decoder_abi_output=', 1)[0]
+        branch = GUEST.split('if [ "$decoder_mode" != historical-v1 ]; then\n', 1)[1].split('    decoder_abi_output=', 1)[0]
         self.assertIn('verify-source /home/vpci/weather-decoder-source', branch)
         self.assertIn('source-input-inventory --expected-commit "$expected_commit"', branch)
         self.assertIn('900s python3', branch)
         self.assertIn('export-source-inventory', branch)
         self.assertNotIn('capture-toolchain', branch)
-        self.assertNotIn('build-source', branch)
+        self.assertNotIn('source-build --expected-commit', branch.rsplit('        else\n', 1)[1])
         self.assertNotIn('cargo', branch)
         self.assertNotIn('.deb', branch)
         self.assertNotIn('.qcow2', branch)
 
     def test_inventory_workflow_has_no_free_inputs_and_uploads_only_projection(self):
         workflow = HERE.parents[1].joinpath('.github/workflows/weather-decoder-abi.yml').read_text()
-        self.assertIn('options: [historical-v1, source-input-inventory]', workflow)
-        self.assertIn("timeout-minutes: ${{ inputs.mode == 'source-input-inventory' && 20 || 35 }}", workflow)
+        self.assertIn('options: [historical-v1, source-input-inventory, source-build]', workflow)
+        self.assertIn("timeout-minutes: ${{ inputs.mode == 'source-build' && 45 || inputs.mode == 'source-input-inventory' && 20 || 35 }}", workflow)
         source_fetch = workflow.split('- name: Fetch only the fixed reviewed Weather source for inventory', 1)[1].split('      - name:', 1)[0]
         self.assertIn('source-info | jq -er .weather_commit', source_fetch)
         self.assertIn('https://github.com/VOLPAROSSA/volparossa-weather.git', source_fetch)
@@ -271,6 +271,20 @@ class SourceInventoryWiring(unittest.TestCase):
         self.assertIn('stage-inventory-public', workflow)
         self.assertIn("if: inputs.mode != 'source-input-inventory'", workflow)
         self.assertNotIn('actions/cache', workflow)
+
+    def test_source_build_preview_and_readback_stay_separate_from_public_upload(self):
+        value = self.call('--preview', '--scenario', SCENARIO, '--decoder-mode', 'source-build')
+        self.assertEqual(value.returncode, 0, value.stderr)
+        self.assertIn(b'checked-in reviewed environment lock', value.stdout)
+        self.assertIn(b'runner-local payload readback', value.stdout)
+        self.assertIn('--output "$output_directory.payload"', SOURCE)
+        self.assertLess(SOURCE.index('readback-source-payload --source'), SOURCE.index('ssh_bounded 15s sudo -n systemctl poweroff'))
+        workflow = HERE.parents[1].joinpath('.github/workflows/weather-decoder-abi.yml').read_text()
+        self.assertIn('stage-source-build-public', workflow)
+        self.assertIn('"$RUNNER_TEMP/weather-decoder-abi.payload"', workflow)
+        upload = workflow.split('- name: Retain only the closed source-input metadata projection', 1)[1].split('      - name:', 1)[0]
+        self.assertNotIn('.payload', upload)
+        self.assertLess(workflow.index('verify-environment-lock "$source"'), workflow.index('fetch-source-archives "$source"'))
 
 
 if __name__ == "__main__":
