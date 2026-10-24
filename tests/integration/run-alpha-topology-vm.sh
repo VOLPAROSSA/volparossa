@@ -29,6 +29,9 @@ weather_android_source=
 weather_android_commit=
 weather_client_version=
 decoder_abi_inputs=
+decoder_mode=historical-v1
+decoder_mode_set=no
+decoder_source=
 
 guest_memory_for_scenario() {
     # These fixtures co-locate two 360M providers in one guest. Production
@@ -53,7 +56,8 @@ usage() {
         '       content-provider optionally accepts --browser-filter-bundle ARCHIVE --browser-filter-manifest-sha256 SHA256.' \
         '       Or --weather-client-bundle ARCHIVE --weather-client-manifest-sha256 SHA256 (one joined client per run).' \
         '       Android profile 6 additionally requires --weather-android-source DIRECTORY (exact prepared hosted source).' \
-        '       weather-decoder-abi requires --decoder-abi-inputs DIRECTORY (source-admitted exact public files; no --mpquic).' \
+        '       weather-decoder-abi defaults to historical-v1 with --decoder-abi-inputs DIRECTORY.' \
+        '       --decoder-mode source-input-inventory requires --decoder-source DIRECTORY (fixed reviewed Weather source only).' \
         '       Native-editor, cooperative-code, content-provider and weather-decoder-abi accept --host-tools-directory PATH (verified workspace-only QEMU).'
 }
 
@@ -78,6 +82,12 @@ print_plan() {
         ;;
     esac
     if [ "$scenario" = weather-decoder-abi ]; then
+        if [ "$decoder_mode" = source-input-inventory ]; then
+            printf '%s\n' 'Weather source inventory: pinned Debian 13 guest and fixed signed snapshot;' \
+                '  verify indexes and every .deb before guest-only installation; no compiler execution;' \
+                '  export bounded unadmitted metadata and remove the disposable VM, package data and keys.'
+            return
+        fi
         printf '%s\n' \
             'Weather-decoder ABI: verify only the source-reviewed public artifact members before copying;' \
             '  install minimal Debian guest tools, then execute the admitted decoder unprivileged/offline;' \
@@ -565,6 +575,18 @@ while [ "$#" -gt 0 ]; do
             decoder_abi_inputs=$2
             shift
             ;;
+        --decoder-mode)
+            [ "$#" -ge 2 ] && [ "$decoder_mode_set" = no ] || exit 64
+            case $2 in historical-v1|source-input-inventory) ;; *) exit 64 ;; esac
+            decoder_mode=$2
+            decoder_mode_set=yes
+            shift
+            ;;
+        --decoder-source)
+            [ "$#" -ge 2 ] && [ -z "$decoder_source" ] && [ -n "$2" ] || exit 64
+            decoder_source=$2
+            shift
+            ;;
         --code-manifest-sha256)
             if [ "$#" -lt 2 ] || [ -n "$code_manifest_sha256" ]; then usage >&2; exit 64; fi
             code_manifest_sha256=$2
@@ -618,8 +640,9 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$mode" = preview ]; then
+    [ "$scenario" = weather-decoder-abi ] || [ "$decoder_mode_set" = no ] || exit 64
     if [ "$approval" != no ] \
-        || [ -n "$image_path$mpquic_path$package_path$native_runtime_path$host_tools_directory$output_directory$expected_commit$code_bundle$code_manifest_sha256$browser_filter_bundle$browser_filter_manifest_sha256$weather_client_bundle$weather_client_manifest_sha256$weather_android_source$decoder_abi_inputs" ]; then
+        || [ -n "$image_path$mpquic_path$package_path$native_runtime_path$host_tools_directory$output_directory$expected_commit$code_bundle$code_manifest_sha256$browser_filter_bundle$browser_filter_manifest_sha256$weather_client_bundle$weather_client_manifest_sha256$weather_android_source$decoder_abi_inputs$decoder_source" ]; then
         usage >&2
         exit 64
     fi
@@ -642,12 +665,19 @@ if [ "$scenario" != weather-decoder-abi ] && [ "$scenario" != wifi-mesh ] && [ "
 case $mpquic_path in ''|/*) ;; *) exit 64 ;; esac
 case $package_path in ''|/*) ;; *) exit 64 ;; esac
 if [ "$scenario" = weather-decoder-abi ]; then
-    case $decoder_abi_inputs in /*) ;; *) usage >&2; exit 64 ;; esac
-    case $decoder_abi_inputs in /|*/|*//*|*/../*|*/./*|*/..|*/.|*[[:cntrl:]]*) exit 64 ;; esac
+    if [ "$decoder_mode" = source-input-inventory ]; then
+        [ -z "$decoder_abi_inputs" ] || exit 64
+        case $decoder_source in /*) ;; *) exit 64 ;; esac
+        case $decoder_source in /|*/|*//*|*/../*|*/./*|*/..|*/.|*[[:cntrl:]]*) exit 64 ;; esac
+    else
+        [ -z "$decoder_source" ] || exit 64
+        case $decoder_abi_inputs in /*) ;; *) usage >&2; exit 64 ;; esac
+        case $decoder_abi_inputs in /|*/|*//*|*/../*|*/./*|*/..|*/.|*[[:cntrl:]]*) exit 64 ;; esac
+    fi
     # This is a distinct source-admitted ABI fixture, never a caller-selected
     # runtime or a disguised content-provider/browser/native scenario.
     [ -z "$mpquic_path$package_path$native_runtime_path$code_bundle$code_manifest_sha256$browser_filter_bundle$browser_filter_manifest_sha256$weather_client_bundle$weather_client_manifest_sha256" ] || exit 64
-elif [ -n "$decoder_abi_inputs" ]; then
+elif [ -n "$decoder_abi_inputs$decoder_source" ] || [ "$decoder_mode_set" = yes ]; then
     exit 64
 fi
 if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then
@@ -861,8 +891,11 @@ cleanup() {
         printf '%s\n' 'QEMU exit unconfirmed; private VM scratch retained' >&2
     fi
     if [ "$FINISHED" = no ] && [ -f "$RUN_DIRECTORY/console.log" ]; then
-        install -m 0600 "$RUN_DIRECTORY/console.log" "$output_directory/vm-console.log" \
-            2>/dev/null || true
+        if [ "$decoder_mode" = source-input-inventory ]; then
+            tail -c 131072 "$RUN_DIRECTORY/console.log" >"$output_directory/vm-console.log" 2>/dev/null || true
+        else
+            install -m 0600 "$RUN_DIRECTORY/console.log" "$output_directory/vm-console.log" 2>/dev/null || true
+        fi
     fi
     if [ -f "$RUN_DIRECTORY/qemu.stderr" ]; then
         tail -c 131072 "$RUN_DIRECTORY/qemu.stderr" >"$output_directory/qemu.stderr" \
@@ -905,6 +938,18 @@ cleanup() {
                   private_guest_state_removed:$private_guest_state_removed,owner_exit_status:$owner_exit_status,
                   joined_core_acceptance:false}' >"$output_directory/weather-android-vm-cleanup.json"
         ); then status=1; fi
+    fi
+    if [ "$decoder_mode" = source-input-inventory ]; then
+        decoder_private_removed=false
+        if [ ! -e "$RUN_DIRECTORY" ] && [ ! -L "$RUN_DIRECTORY" ]; then decoder_private_removed=true; fi
+        [ "$decoder_private_removed" = true ] || { [ "$status" -ne 0 ] || status=1; }
+        if ! (set -C
+            jq -n --arg revision "$expected_commit" --arg started "$QEMU_STARTED" --arg joined "$QEMU_JOINED" \
+                --argjson removed "$decoder_private_removed" --argjson status "$status" \
+                '{schema:1,kind:"weather-source-inventory-vm-cleanup",core_commit:$revision,
+                  qemu_started:($started == "yes"),qemu_joined:($joined == "yes"),
+                  private_guest_state_removed:$removed,owner_exit_status:$status,admitted:false,compiled:false}' \
+                >"$output_directory/inventory-vm-cleanup.json"); then status=1; fi
     fi
     if [ "$scenario" = protected-quote ]; then
         quote_private_removed=false
@@ -979,9 +1024,14 @@ DECODER_ABI_DIRECTORY=$RUN_DIRECTORY/weather-decoder-inputs
 if [ "$scenario" = weather-decoder-abi ]; then
     # The reviewed source record, not a CLI hash or artifact receipt, chooses
     # every admitted byte. These operations never execute an input binary.
-    python3 -B "$HERE/weather-decoder-abi.py" verify-inputs "$decoder_abi_inputs"
-    python3 -B "$HERE/weather-decoder-abi.py" stage-inputs "$decoder_abi_inputs" "$DECODER_ABI_DIRECTORY"
-    python3 -B "$HERE/weather-decoder-abi.py" verify-inputs "$DECODER_ABI_DIRECTORY"
+    if [ "${decoder_mode:-historical-v1}" = source-input-inventory ]; then
+        python3 -B "$HERE/weather-decoder-abi.py" stage-source "$decoder_source" "$DECODER_ABI_DIRECTORY"
+        python3 -B "$HERE/weather-decoder-abi.py" verify-source "$DECODER_ABI_DIRECTORY"
+    else
+        python3 -B "$HERE/weather-decoder-abi.py" verify-inputs "$decoder_abi_inputs"
+        python3 -B "$HERE/weather-decoder-abi.py" stage-inputs "$decoder_abi_inputs" "$DECODER_ABI_DIRECTORY"
+        python3 -B "$HERE/weather-decoder-abi.py" verify-inputs "$DECODER_ABI_DIRECTORY"
+    fi
 fi
 
 OVERLAY=$RUN_DIRECTORY/overlay.qcow2
@@ -1962,8 +2012,17 @@ browser_filter_archive_sha256=none
 browser_filter_manifest_sha256=none
 weather_client_archive_sha256=none
 weather_client_manifest_sha256=none
+decoder_mode=historical-v1
 # Native and cooperative bundles share positions only in disjoint scenarios.
 case $scenario in
+    weather-decoder-abi)
+        if [ "$#" -eq 6 ]; then
+            [ "$6" = source-input-inventory ] || exit 64
+            decoder_mode=$6
+        else
+            [ "$#" -eq 5 ] || exit 64
+        fi
+        ;;
     agent-native-coding|agent-native-editor)
         [ "$#" -eq 6 ] || exit 64
         native_runtime_sha256=${6:-none}
@@ -2006,6 +2065,39 @@ if [ "$scenario" = weather-decoder-abi ]; then
     test "$(dpkg --print-architecture)" = amd64
     tar -xzf source.tar.gz
     cd source
+    if [ "$decoder_mode" = source-input-inventory ]; then
+        decoder_inventory_output=/home/vpci/alpha-output
+        decoder_inventory_finalize() {
+            decoder_inventory_status=$?
+            trap - EXIT HUP INT TERM
+            set +e
+            python3 -B tests/integration/weather-decoder-abi.py export-source-inventory "$decoder_inventory_output" || exit 1
+            printf '%s\n' "$decoder_inventory_status" >"$decoder_inventory_output/guest-exit-status" || exit 1
+            cp /home/vpci/guest-phase.txt "$decoder_inventory_output/current-phase" || exit 1
+            : >/home/vpci/weather-source-export.list || exit 1
+            for name in candidate.json base-files.json before.tsv after.tsv resolver.log apt-update.log apt-install.log \
+                inventory-commands.json source-binding.json inventory-report.json inventory-export.json \
+                debian.InRelease debian-security.InRelease guest-exit-status current-phase; do
+                path=$decoder_inventory_output/$name
+                if [ -e "$path" ] || [ -L "$path" ]; then
+                    [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c '%u:%h' "$path")" = "$(id -u):1" ] || exit 1
+                    printf '%s\n' "$name" >>/home/vpci/weather-source-export.list || exit 1
+                fi
+            done
+            tar --no-recursion -C "$decoder_inventory_output" -czf /home/vpci/alpha-output.tar.gz \
+                -T /home/vpci/weather-source-export.list || exit 1
+            exit "$decoder_inventory_status"
+        }
+        trap decoder_inventory_finalize EXIT
+        trap 'exit 129' HUP
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        guest_phase weather-source-verify
+        python3 -B tests/integration/weather-decoder-abi.py verify-source /home/vpci/weather-decoder-source
+        timeout --signal=TERM --kill-after=10s 900s python3 -B tests/integration/weather-decoder-abi.py \
+            source-input-inventory --expected-commit "$expected_commit"
+        exit 0
+    fi
     decoder_abi_output=/home/vpci/alpha-output
     test ! -e "$decoder_abi_output" && test ! -L "$decoder_abi_output"
     decoder_abi_finalize() {
@@ -2625,8 +2717,12 @@ scp_decoder_abi_inputs() {
     # Only the private, already source-verified snapshot is copied recursively;
     # no arbitrary caller directory reaches scp or executes in the guest.
     [ "$scenario" = weather-decoder-abi ] || return 64
+    decoder_guest_target=/home/vpci/weather-decoder-inputs
+    if [ "$decoder_mode" = source-input-inventory ]; then decoder_guest_target=/home/vpci/weather-decoder-source; fi
     ssh_bounded 15s test ! -e /home/vpci/weather-decoder-inputs
     ssh_bounded 15s test ! -L /home/vpci/weather-decoder-inputs
+    ssh_bounded 15s test ! -e "$decoder_guest_target"
+    ssh_bounded 15s test ! -L "$decoder_guest_target"
     timeout --signal=TERM --kill-after=10s 600s scp -r \
         -F /dev/null -i "$SSH_KEY" -P 22223 \
         -o BatchMode=yes -o ConnectTimeout=5 \
@@ -2637,7 +2733,7 @@ scp_decoder_abi_inputs() {
         -o ProxyCommand=none -o ProxyJump=none -o RequestTTY=no \
         -o StrictHostKeyChecking=yes -o Tunnel=no \
         -o UserKnownHostsFile="$KNOWN_HOSTS" "$DECODER_ABI_DIRECTORY" \
-        vpci@127.0.0.1:/home/vpci/weather-decoder-inputs
+        "vpci@127.0.0.1:$decoder_guest_target"
 }
 
 retrieve_incomplete_output() {
@@ -2688,6 +2784,7 @@ driver_time_bound=2400s
 # Candidate compilation precedes the unchanged finite-authority peer trial.
 [ "$scenario" != private-storage-maintenance ] || driver_time_bound=7200s
 [ "$scenario" != weather-decoder-abi ] || driver_time_bound=720s
+[ "$decoder_mode" != source-input-inventory ] || driver_time_bound=960s
 # Includes source-building the original UI and two extra real peer-backed downloads.
 # Application exchange/lease bounds remain unchanged.
 [ "$scenario" != cloud-private-file ] || driver_time_bound=3600s
@@ -2721,6 +2818,15 @@ driver_time_bound=2400s
 [ "$scenario" != signal-backup ] || driver_time_bound=7200s
 [ "$scenario" != signal-backup-fragments ] || driver_time_bound=7200s
 case $scenario in
+    weather-decoder-abi)
+        if [ "$decoder_mode" = source-input-inventory ]; then
+            ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
+                "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" source-input-inventory
+        else
+            ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
+                "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario"
+        fi
+        ;;
     content-provider)
         if [ "$weather_client_version" = 6 ]; then
             # Own the driver and Android/tunnel children in one bounded process.
@@ -2808,7 +2914,11 @@ if grep -aERq -- '-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----' "$output_directory"
     exit 1
 fi
 if [ "$scenario" != signal-backup ] && [ "$scenario" != signal-backup-fragments ]; then
-    install -m 0600 "$CONSOLE" "$output_directory/vm-console.log"
+    if [ "$decoder_mode" = source-input-inventory ]; then
+        tail -c 131072 "$CONSOLE" >"$output_directory/vm-console.log"
+    else
+        install -m 0600 "$CONSOLE" "$output_directory/vm-console.log"
+    fi
 fi
 ssh_bounded 15s sudo -n systemctl poweroff >/dev/null 2>&1 || true
 if ! stop_qemu_child normal; then

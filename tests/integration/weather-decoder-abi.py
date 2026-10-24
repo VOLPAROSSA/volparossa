@@ -13,6 +13,7 @@ import math
 import os
 from pathlib import Path
 import re
+import runpy
 import selectors
 import signal
 import socket
@@ -22,6 +23,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
+import urllib.request
 
 RECORD = Path(__file__).resolve().parents[1] / "helper/weather-decoder-abi-v1.json"
 DECODER = "eccodes-build/bin/grib_ls"
@@ -34,6 +37,27 @@ SANDBOX_DECODER, SANDBOX_PROBE = "/case/bin/grib_ls", "/case/probe.grib2"
 ENV = {"LANG": "C.UTF-8", "RUST_LOG": "off"}
 SCOPE = dict(disposable_abi_test_only=True, production_decoder_authorized=False,
              origin_acquisition_proven=False, core_delivery_proven=False, browser_proven=False)
+SOURCE_COMMIT = "b7151fd226df6624f788accbb3afaffa8991a5b4"
+SOURCE_FILES = {
+    "scripts/prepare_hosted_decoder_environment.py": dict(bytes=29347, sha256="65e0bdf3a63aef4591ab794aa1e7673da63112ff593113ef8ce7b5fb5df7c6b7"),
+    "scripts/prepare_hosted_decoder.py": dict(bytes=28940, sha256="4ed6355451f366f27ac7cc7b1ca9045449e1de5dcc7199817b5957392c2f2f0c"),
+    "scripts/build_eccodes.py": dict(bytes=11634, sha256="5bcb6d58b34e5b45647feae836bfd086ff0adce0e30487430f5c50941f579827"),
+    "third_party/eccodes-sources.json": dict(bytes=2087, sha256="f136020562a6ff0d2a83b948189c31f839afb8a00ea87565469f38640fb0dc86"),
+}
+SOURCE_GUEST = Path("/home/vpci/weather-decoder-source")
+INVENTORY_ROOT = Path("/home/vpci/weather-decoder-environment")
+INVENTORY_PHASE = Path("/home/vpci/guest-phase.txt")
+INVENTORY_EXPORTS = {
+    "candidate.json": 32 * 1024**2, "base-files.json": 32 * 1024**2,
+    "before.tsv": 2 * 1024**2, "after.tsv": 2 * 1024**2,
+    "resolver.log": 1024**2, "apt-update.log": 1024**2, "apt-install.log": 1024**2,
+    "inventory-commands.json": 65536, "source-binding.json": 65536, "inventory-report.json": 65536,
+    "debian.InRelease": 256 * 1024, "debian-security.InRelease": 256 * 1024,
+}
+INVENTORY_PUBLIC_EXPORTS = dict(INVENTORY_EXPORTS, **{
+    "inventory-export.json": 65536, "inventory-vm-cleanup.json": 65536,
+    "vm-console.log": 131072, "qemu.stderr": 131072, "current-phase": 128, "guest-exit-status": 16,
+    "vm-incomplete.json": 65536})
 
 
 class Interrupted(Exception):
@@ -284,14 +308,16 @@ print(json.dumps(dict(uid=os.geteuid(),network_namespace=os.readlink('/proc/self
 
 
 class Commands:
-    def __init__(self):
+    def __init__(self, maximum=MAX_LOG, environment=None):
         self.drained = True
+        self.maximum = maximum
+        self.environment = ENV if environment is None else environment
 
     def run(self, argv, deadline):
         require(time.monotonic() < deadline, "ABI_DEADLINE")
         child, raw = None, bytearray()
         try:
-            child = subprocess.Popen(argv, env=ENV, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            child = subprocess.Popen(argv, env=self.environment, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, start_new_session=True)
             with selectors.DefaultSelector() as selector:
                 selector.register(child.stdout, selectors.EVENT_READ)
@@ -299,10 +325,10 @@ class Commands:
                     remaining = deadline - time.monotonic()
                     require(remaining > 0, "ABI_DEADLINE")
                     for key, _ in selector.select(min(remaining, 0.2)):
-                        chunk = os.read(key.fd, min(65536, MAX_LOG + 1 - len(raw)))
+                        chunk = os.read(key.fd, min(65536, self.maximum + 1 - len(raw)))
                         if not chunk: selector.unregister(key.fileobj)
                         raw.extend(chunk)
-                        require(len(raw) <= MAX_LOG, "ABI_OUTPUT_BOUND")
+                        require(len(raw) <= self.maximum, "ABI_OUTPUT_BOUND")
             status = child.wait(timeout=max(0.001, deadline-time.monotonic()))
             return status, bytes(raw)
         finally:
@@ -413,6 +439,212 @@ def execute(inputs, output, commit):
     return report
 
 
+def source_checkout(root):
+    require(root.is_absolute() and root.resolve() == root, "SOURCE_CHECKOUT_PATH")
+    result = subprocess.run(["/usr/bin/git", "-C", str(root), "rev-parse", "HEAD"],
+                            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, capture_output=True, timeout=5, check=True)
+    require(result.stdout == (SOURCE_COMMIT + "\n").encode(), "SOURCE_COMMIT_MISMATCH")
+    return source_files(root)
+
+
+def source_files(root):
+    # Only these four reviewed source files cross into the guest. No recursive
+    # checkout copy, private audit directory, binary, lock or receipt is input.
+    files = {}
+    for name, expected in SOURCE_FILES.items():
+        path = root / name
+        require(path.resolve() == path, "SOURCE_PATH_ALIAS")
+        raw = read_file(path, expected["bytes"])
+        require(len(raw) == expected["bytes"] and digest(raw) == expected["sha256"], "SOURCE_FILE_MISMATCH")
+        files[name] = raw
+    return files
+
+
+def stage_source(source, destination):
+    files = source_checkout(source)
+    fresh_directory(destination)
+    for name, raw in files.items():
+        (destination / name).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        write_new(destination / name, raw, 0o400)
+    require(inventory(destination, SOURCE_FILES) == files, "SOURCE_STAGE_MISMATCH")
+    return dict(schema=1, kind="weather-decoder-source-staged", weather_commit=SOURCE_COMMIT,
+                files=SOURCE_FILES, admitted=False, compiled=False)
+
+
+class SnapshotRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, newurl):
+        parsed = urllib.parse.urlsplit(newurl)
+        original = urllib.parse.urlsplit(request.full_url)
+        require(parsed.scheme == "https" and parsed.netloc == "snapshot.debian.org"
+                and not parsed.query and not parsed.fragment
+                and re.fullmatch(r"/file/[0-9a-f]{40}/" + re.escape(Path(original.path).name), parsed.path),
+                "SNAPSHOT_REDIRECT_REJECTED")
+        return super().redirect_request(request, response, code, message, headers, newurl)
+
+
+def snapshot_fetch(url, path, maximum, deadline):
+    parsed = urllib.parse.urlsplit(url)
+    require(parsed.scheme == "https" and parsed.netloc == "snapshot.debian.org"
+            and parsed.path.startswith("/archive/") and not parsed.query and not parsed.fragment,
+            "SNAPSHOT_URL_REJECTED")
+    remaining = min(90, deadline - time.monotonic())
+    require(remaining > 0, "INVENTORY_DEADLINE")
+    opener = urllib.request.build_opener(SnapshotRedirect(), urllib.request.ProxyHandler({}))
+    total = 0
+    with opener.open(url, timeout=min(30, remaining)) as response, \
+            os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "wb") as stream:
+        while True:
+            require(time.monotonic() < deadline, "INVENTORY_DEADLINE")
+            chunk = response.read(min(65536, maximum + 1 - total))
+            if not chunk: break
+            total += len(chunk)
+            require(total <= maximum, "SNAPSHOT_SIZE_BOUND")
+            stream.write(chunk)
+    require(total > 0, "SNAPSHOT_EMPTY")
+
+
+def inventory_boundary(commit):
+    require(hex_value(commit, 40) and os.getuid() == os.geteuid() != 0
+            and socket.gethostname() == "volparossa-alpha" and os.uname().machine == "x86_64",
+            "INVENTORY_DISPOSABLE_GUEST_REQUIRED")
+    result = subprocess.run(["/usr/bin/systemd-detect-virt", "--vm"], capture_output=True,
+                            env=ENV, timeout=2, check=True)
+    require(result.stdout.strip() == b"kvm", "INVENTORY_KVM_REQUIRED")
+    raw = read_file(Path("/etc/os-release").resolve(), 16384)
+    require(re.search(br'^ID=(?:"debian"|debian)$', raw, re.M)
+            and re.search(br'^VERSION_ID="13"$', raw, re.M), "INVENTORY_DEBIAN13_REQUIRED")
+
+
+def inventory_apt_options(root, helper):
+    # Override every source/list/cache path; never alter the image's /etc/apt.
+    return [*helper["APT_OPTIONS"], "-o", "Dir::Etc::sourcelist=" + str(root / "sources.list"),
+        "-o", "Dir::Etc::sourceparts=-", "-o", "Dir::State::lists=" + str(root / "apt-lists"),
+        "-o", "Dir::Cache::archives=" + str(root / "apt-cache"), "-o", "Dir::Cache::pkgcache=",
+        "-o", "Dir::Cache::srcpkgcache=", "-o", "APT::Get::List-Cleanup=0",
+        "-o", "Acquire::AllowInsecureRepositories=false", "-o", "Acquire::AllowDowngradeToInsecureRepositories=false",
+        "-o", "APT::Get::AllowUnauthenticated=false", "-o", "Acquire::https::Verify-Peer=true",
+        "-o", "Acquire::https::Verify-Host=true"]
+
+
+def source_inventory(commit):
+    inventory_boundary(commit)
+    source_files(SOURCE_GUEST)
+    helper = runpy.run_path(str(SOURCE_GUEST / "scripts/prepare_hosted_decoder_environment.py"))
+    root = INVENTORY_ROOT
+    fresh_directory(root)
+    (root / "debs").mkdir(mode=0o700)
+    for name in ("apt-cache", "apt-lists"):
+        (root / name).mkdir(mode=0o700)
+        (root / name / "partial").mkdir(mode=0o700)
+    report = dict(schema=1, kind="weather-decoder-source-input-inventory", admitted=False,
+        compiled=False, success=False, core_commit=commit, weather_commit=SOURCE_COMMIT,
+        phase="base-image", scope=helper["SCOPE"], commands=[], blocker=None)
+    write_new(root / "source-binding.json", json.dumps(dict(core_commit=commit, weather_commit=SOURCE_COMMIT,
+        files=SOURCE_FILES), sort_keys=True).encode() + b"\n")
+    deadline = time.monotonic() + 840
+    commands = Commands(maximum=1024**2, environment={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C"})
+    def phase(name):
+        report["phase"] = name
+        INVENTORY_PHASE.write_text("weather-source-" + name + "\n")
+    def command(name, argv, seconds=180):
+        report["commands"].append(dict(log=name, argv=argv))
+        code, raw = commands.run(argv, min(deadline, time.monotonic() + seconds))
+        write_new(root / name, raw or b"(no output)\n")
+        require(code == 0, "INVENTORY_COMMAND_FAILED")
+        return raw
+    try:
+        before = command("before.tsv", ["/usr/bin/dpkg-query", "--show", "--showformat=" + helper["STATUS_FORMAT"]], 20)
+        helper["inventory"](before)
+        helper["capture_base"](root)
+        phase("signed-metadata")
+        repositories = {}
+        for name, pin in helper["REPOSITORIES"].items():
+            snapshot_fetch(pin["inrelease_url"], root / (name + ".InRelease"), pin["inrelease_bytes"], deadline)
+            repositories[name] = helper["verify_release"](root / (name + ".InRelease"), name)
+            index_url = pin["archive_url"] + "dists/" + pin["codename"] + "/" + helper["INDEX_PATH"]
+            snapshot_fetch(index_url, root / (name + ".Packages.xz"), repositories[name]["index"]["bytes"], deadline)
+            # Consume the stream now, before trusting APT or resolving packages.
+            for _record in helper["index_records"](root / (name + ".Packages.xz"), repositories[name]["index"]):
+                pass
+        sources = ''.join("deb [arch=amd64 signed-by=" + str(helper["KEYRING"]) + "] " + pin["archive_url"] +
+                          " " + pin["codename"] + " main\n" for pin in helper["REPOSITORIES"].values())
+        write_new(root / "sources.list", sources.encode())
+        options = inventory_apt_options(root, helper)
+        sudo = ["/usr/bin/sudo", "-n", "/usr/bin/timeout", "--signal=TERM", "--kill-after=5s", "180s",
+                "/usr/bin/env", "DEBIAN_FRONTEND=noninteractive", "/usr/bin/apt-get"]
+        phase("resolve")
+        command("apt-update.log", [*sudo, *options, "update"], 190)
+        resolver = command("resolver.log", ["/usr/bin/apt-get", *options, "--simulate", "install", *helper["ROOT_PACKAGES"]], 60)
+        selected = helper["resolver_inventory"](resolver)
+        packages = helper["indexed_packages"](root, selected, repositories)
+        phase("verify-debs")
+        for package in packages:
+            pin = helper["REPOSITORIES"][package["repository"]]
+            snapshot_fetch(pin["archive_url"] + package["filename"], root / "debs" / Path(package["filename"]).name,
+                           package["bytes"], deadline)
+        # Every archive and payload member is verified before apt can install it.
+        helper["verified_packages"](root, selected, repositories)
+        phase("install")
+        paths = [str(root / "debs" / Path(package["filename"]).name) for package in packages]
+        require(paths, "INVENTORY_EMPTY_INSTALL")
+        command("apt-install.log", [*sudo, *options, "--no-download", "install", *paths], 190)
+        command("after.tsv", ["/usr/bin/dpkg-query", "--show", "--showformat=" + helper["STATUS_FORMAT"]], 20)
+        phase("candidate")
+        value = helper["validate_record"](helper["candidate"](root), False)
+        helper["write_candidate_file"](root / "candidate.json", helper["canonical"](value))
+        report.update(success=True, candidate_sha256=digest(helper["canonical"](value)))
+        phase("complete")
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, Interrupted, CleanupUnconfirmed):
+        report["blocker"] = "SOURCE_INPUT_INVENTORY_FAILED"
+        raise
+    finally:
+        # Keep original bounded logs even on failure; only this closed metadata
+        # projection is exported by the existing guest finalizer.
+        write_new(root / "inventory-commands.json", json.dumps(report["commands"], sort_keys=True).encode() + b"\n")
+        write_new(root / "inventory-report.json", json.dumps(report, sort_keys=True).encode() + b"\n")
+    return report
+
+
+def export_inventory(output):
+    fresh_directory(output)
+    total = 0
+    files = {}
+    for name, maximum in INVENTORY_EXPORTS.items():
+        path = INVENTORY_ROOT / name
+        if not path.exists() and not path.is_symlink(): continue
+        raw = read_file(path, maximum)
+        total += len(raw)
+        require(total <= 72 * 1024**2 and not re.search(br"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", raw),
+                "INVENTORY_EXPORT_BOUND")
+        if name.endswith('.json'): decode(raw)
+        write_new(output / name, raw)
+        files[name] = dict(bytes=len(raw), sha256=digest(raw))
+    require("inventory-report.json" in files, "INVENTORY_REPORT_MISSING")
+    write_new(output / "inventory-export.json", json.dumps(dict(schema=1, admitted=False, files=files), sort_keys=True).encode() + b"\n")
+    return dict(admitted=False, files=len(files), bytes=total)
+
+
+def stage_inventory_public(source, output):
+    require(source.is_absolute() and source.resolve() == source and not output.is_relative_to(source),
+            "INVENTORY_PUBLIC_PATH")
+    fresh_directory(output)
+    files, total = {}, 0
+    for name, maximum in INVENTORY_PUBLIC_EXPORTS.items():
+        path = source / name
+        if not path.exists() and not path.is_symlink(): continue
+        raw = read_file(path, maximum)
+        total += len(raw)
+        require(total <= 73 * 1024**2 and not re.search(br"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", raw),
+                "INVENTORY_PUBLIC_BOUND")
+        if name.endswith('.json'): decode(raw)
+        write_new(output / name, raw)
+        files[name] = dict(bytes=len(raw), sha256=digest(raw))
+    require(files, "INVENTORY_PUBLIC_EMPTY")
+    write_new(output / "inventory-public-export.json", json.dumps(dict(schema=1, admitted=False,
+              compiled=False, files=files), sort_keys=True).encode() + b"\n")
+    return dict(admitted=False, compiled=False, files=len(files), bytes=total)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
@@ -422,6 +654,17 @@ def main():
     run = commands.add_parser("execute")
     for name in ("inputs", "output"): run.add_argument("--"+name, required=True, type=Path)
     run.add_argument("--expected-commit", required=True)
+    commands.add_parser("source-info")
+    source_stage = commands.add_parser("stage-source")
+    source_stage.add_argument("source", type=Path); source_stage.add_argument("destination", type=Path)
+    source_verify = commands.add_parser("verify-source")
+    source_verify.add_argument("directory", type=Path)
+    source_run = commands.add_parser("source-input-inventory")
+    source_run.add_argument("--expected-commit", required=True)
+    source_export = commands.add_parser("export-source-inventory")
+    source_export.add_argument("output", type=Path)
+    public_export = commands.add_parser("stage-inventory-public")
+    public_export.add_argument("source", type=Path); public_export.add_argument("output", type=Path)
     args = parser.parse_args()
     def interrupted(_sig, _frame): raise Interrupted()
     previous = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGINT, signal.SIGTERM)}
@@ -431,10 +674,18 @@ def main():
             value = dict(schema=1, kind="weather-decoder-abi-inputs", admission_sha256=sha,
                          files=len(files), weather_commit=record["weather_commit"], runtime_executed=False)
         elif args.action == "stage-inputs": value = stage_inputs(args.source, args.destination)
+        elif args.action == "source-info": value = dict(weather_commit=SOURCE_COMMIT, files=SOURCE_FILES, admitted=False)
+        elif args.action == "stage-source": value = stage_source(args.source, args.destination)
+        elif args.action == "verify-source":
+            inventory(args.directory, SOURCE_FILES)
+            value = dict(admitted=False, source_verified=True, weather_commit=SOURCE_COMMIT)
+        elif args.action == "source-input-inventory": value = source_inventory(args.expected_commit)
+        elif args.action == "export-source-inventory": value = export_inventory(args.output)
+        elif args.action == "stage-inventory-public": value = stage_inventory_public(args.source, args.output)
         else: value = execute(args.inputs, args.output, args.expected_commit)
         print(json.dumps(value, sort_keys=True))
         return 0 if value.get("success", True) else 1
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, Interrupted):
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, Interrupted, CleanupUnconfirmed):
         print("WEATHER_DECODER_ABI_REJECTED", file=sys.stderr)
         return 1
     finally:

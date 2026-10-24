@@ -205,5 +205,128 @@ class ABI(unittest.TestCase):
         self.assertFalse(owner.drained)
 
 
+class SourceInventory(unittest.TestCase):
+    def test_fixed_source_commit_and_files_before_guest_copy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'source'; source.mkdir()
+            (source / 'scripts').mkdir()
+            (source / 'scripts/input.py').write_bytes(b'inert source\n')
+            (source / 'scripts/input.py').chmod(0o600)
+            expected = {'scripts/input.py': dict(bytes=13, sha256=H['digest'](b'inert source\n'))}
+            with patch.dict(G, SOURCE_FILES=expected), patch.object(subprocess, 'run', return_value=SimpleNamespace(stdout=(H['SOURCE_COMMIT'] + '\n').encode())):
+                value = H['stage_source'](source, root / 'staged')
+                self.assertFalse(value['admitted'])
+                self.assertEqual(set(H['inventory'](root / 'staged', expected)), set(expected))
+                (source / 'scripts/input.py').write_bytes(b'changed bytes')
+                with self.assertRaisesRegex(ValueError, 'SOURCE_FILE_MISMATCH'):
+                    H['stage_source'](source, root / 'rejected')
+            with patch.object(subprocess, 'run', return_value=SimpleNamespace(stdout=b'0' * 40 + b'\n')):
+                with self.assertRaisesRegex(ValueError, 'SOURCE_COMMIT_MISMATCH'): H['source_checkout'](source)
+
+    def test_candidate_or_old_binary_record_cannot_replace_recipe_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'candidate.json').write_bytes(b'{"admitted":false}')
+            with self.assertRaises((ValueError, OSError)): H['source_files'](root)
+        self.assertEqual(set(H['SOURCE_FILES']), {'scripts/prepare_hosted_decoder_environment.py',
+            'scripts/prepare_hosted_decoder.py', 'scripts/build_eccodes.py', 'third_party/eccodes-sources.json'})
+        self.assertNotIn('RECORD', H['source_files'].__code__.co_names)
+
+    def test_redirects_remain_exact_snapshot_files(self):
+        redirects = H['SnapshotRedirect']()
+        request = H['urllib'].request.Request('https://snapshot.debian.org/archive/debian/20261023T000000Z/dists/trixie/InRelease')
+        for url in ['http://snapshot.debian.org/file/' + 'a' * 40 + '/InRelease',
+                    'https://elsewhere.invalid/file/' + 'a' * 40 + '/InRelease',
+                    'https://snapshot.debian.org/file/' + 'a' * 40 + '/other',
+                    'https://snapshot.debian.org/file/' + 'a' * 40 + '/InRelease?different']:
+            with self.assertRaisesRegex(ValueError, 'SNAPSHOT_REDIRECT_REJECTED'):
+                redirects.redirect_request(request, None, 302, '', {}, url)
+        redirect = redirects.redirect_request(request, None, 302, '', {},
+            'https://snapshot.debian.org/file/' + 'a' * 40 + '/InRelease')
+        self.assertEqual(redirect.host, 'snapshot.debian.org')
+
+    def test_public_export_never_copies_debs_images_keys_or_index_binaries(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); source = root / 'private'; source.mkdir()
+            (source / 'inventory-report.json').write_bytes(b'{"admitted":false,"compiled":false}')
+            (source / 'inventory-report.json').chmod(0o600)
+            for name in ['package.deb', 'image.qcow2', 'guest-key', 'debian.Packages.xz', 'binary']:
+                (source / name).write_bytes(b'PRIVATE BINARY')
+            value = H['stage_inventory_public'](source, root / 'public')
+            self.assertEqual(value['files'], 1)
+            self.assertEqual({path.name for path in (root / 'public').iterdir()}, {'inventory-report.json', 'inventory-public-export.json'})
+            (source / 'inventory-report.json').write_bytes(b'{"value":"-----BEGIN PRIVATE KEY-----"}')
+            with self.assertRaisesRegex(ValueError, 'INVENTORY_PUBLIC_BOUND'):
+                H['stage_inventory_public'](source, root / 'bad')
+
+    def test_public_export_rejects_symlink_oversize_and_duplicate_json_keys(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); source = root / 'private'; source.mkdir()
+            path = source / 'inventory-report.json'
+            for raw in [b'{"a":1,"a":2}', b'x' * 65537]:
+                path.write_bytes(raw)
+                path.chmod(0o600)
+                with self.assertRaises(ValueError): H['stage_inventory_public'](source, root / ('bad' + str(len(raw))))
+            path.unlink(); path.symlink_to(source / 'absent')
+            with self.assertRaises(OSError): H['stage_inventory_public'](source, root / 'link')
+
+    def run_inventory(self, root, fail_deb=False):
+        events = []
+        def canonical(value): return (json.dumps(value, sort_keys=True) + '\n').encode()
+        helper = dict(STATUS_FORMAT='fixed status format', SCOPE={'compiled': False}, KEYRING=Path('/fixed/image/keyring'),
+            INDEX_PATH='main/binary-amd64/Packages.xz', ROOT_PACKAGES=['fixed-package'],
+            APT_OPTIONS=['--no-install-recommends', '--no-remove'],
+            REPOSITORIES={'debian': dict(inrelease_url='https://snapshot.debian.org/archive/debian/stamp/InRelease',
+                inrelease_bytes=100, archive_url='https://snapshot.debian.org/archive/debian/stamp/', codename='trixie')},
+            inventory=lambda raw: [], capture_base=lambda directory: events.append('baseline'),
+            verify_release=lambda *_args: dict(index={'bytes': 100}), index_records=lambda *_args: iter([{}]),
+            resolver_inventory=lambda raw: [{'name': 'fixed-package'}],
+            indexed_packages=lambda *_args: [dict(repository='debian', filename='pool/main/f/fixed/package.deb', bytes=100)],
+            candidate=lambda directory: {'admitted': False}, validate_record=lambda value, admitted: value,
+            canonical=canonical, write_candidate_file=H['write_new'])
+        def verified(*_args):
+            events.append('verified-deb')
+            if fail_deb: raise ValueError('DEB_DIGEST')
+        helper['verified_packages'] = verified
+        class InertCommands:
+            def __init__(self, **_kwargs): pass
+            def run(self, argv, _deadline):
+                events.append(argv)
+                if '--no-download' in argv:
+                    self_test.assertIn('verified-deb', events)
+                    self_test.assertNotIn('compile', events)
+                return 0, b'inert log\n'
+        self_test = self
+        state = dict(INVENTORY_ROOT=root / 'inventory', INVENTORY_PHASE=root / 'phase',
+            inventory_boundary=lambda commit: None, source_files=lambda path: {},
+            snapshot_fetch=lambda *_args: events.append('download-data'), Commands=InertCommands)
+        with patch.dict(G, **state), patch.object(H['runpy'], 'run_path', return_value=helper):
+            if fail_deb:
+                with self.assertRaisesRegex(ValueError, 'DEB_DIGEST'): H['source_inventory']('a' * 40)
+                value = json.loads((root / 'inventory/inventory-report.json').read_bytes())
+            else:
+                value = H['source_inventory']('a' * 40)
+        return value, events
+
+    def test_inventory_installs_only_after_verified_package_data_and_stops_uncompiled(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            value, events = self.run_inventory(Path(temporary))
+            self.assertTrue(value['success']); self.assertFalse(value['admitted']); self.assertFalse(value['compiled'])
+            commands = [event for event in events if isinstance(event, list)]
+            install = next(command for command in commands if '--no-download' in command)
+            self.assertTrue(install[-1].endswith('/debs/package.deb'))
+            self.assertNotIn('upgrade', sum(commands, []))
+            self.assertTrue(any('--simulate' in command for command in commands))
+            self.assertEqual(value['phase'], 'complete')
+
+    def test_corrupt_package_aborts_before_install_and_preserves_failure_report(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            value, events = self.run_inventory(Path(temporary), fail_deb=True)
+            self.assertFalse(value['success']); self.assertFalse(value['admitted'])
+            self.assertEqual(value['phase'], 'verify-debs')
+            self.assertFalse(any('--no-download' in event for event in events if isinstance(event, list)))
+
+
 if __name__ == "__main__":
     unittest.main()
