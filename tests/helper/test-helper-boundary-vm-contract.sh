@@ -2558,5 +2558,81 @@ test ! -s "$last_stdout" && test ! -s "$last_stderr"
 expect_status 1 report_non_retained_production_retirement_diagnostic
 expect_status 1 report_non_retained_production_retirement_diagnostic "$branch_failure_diagnostic" extra
 
+production_first_marker=VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1=
+production_launch_marker=VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=
+production_functional_marker=VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=
+for production_first in production-launch-status production-process-identity production-retirement; do
+    printf '%sruntime-fence\n%s\n%s%s\n' "$production_marker" "$production_phase" \
+        "$production_first_marker" "$production_first" >"$branch_failure_diagnostic"
+    expect_status 0 report_non_retained_production_retirement_diagnostic "$branch_failure_diagnostic"
+    test ! -s "$last_stdout"
+    test "$(sed -n '3p' "$last_stderr")" = \
+        "non-retained helper-boundary PR smoke first proof failure: $production_first"
+    if [ "$production_first" = production-launch-status ]; then
+        test "$(sed -n '4p' "$last_stderr")" = \
+            'non-retained helper-boundary PR smoke production launch diagnostic: unavailable'
+    else
+        test "$(wc -l <"$last_stderr")" -eq 3
+    fi
+done
+for production_launch in identity-process functional-probe-wait; do
+    printf '%sruntime-fence\n%s\n%sproduction-launch-status\n%s%s\n' \
+        "$production_marker" "$production_phase" "$production_first_marker" \
+        "$production_launch_marker" "$production_launch" >"$branch_failure_diagnostic"
+    if [ "$production_launch" = functional-probe-wait ]; then
+        printf '%sprepare,io\n' "$production_functional_marker" >>"$branch_failure_diagnostic"
+    fi
+    expect_status 0 report_non_retained_production_retirement_diagnostic "$branch_failure_diagnostic"
+    test ! -s "$last_stdout"
+    test "$(sed -n '4p' "$last_stderr")" = \
+        "non-retained helper-boundary PR smoke production launch diagnostic: $production_launch"
+    if [ "$production_launch" = functional-probe-wait ]; then
+        test "$(sed -n '5p' "$last_stderr")" = \
+            'non-retained helper-boundary PR smoke Client/Exit/Relay-pair lease diagnostic: prepare,io'
+    else
+        test "$(wc -l <"$last_stderr")" -eq 4
+    fi
+done
+for production_bad in unknown-first duplicate-first prefixed-first suffixed-first \
+    unknown-launch duplicate-launch prefixed-launch suffixed-launch contradictory-launch \
+    absent-first functional-without-launch functional-contradiction functional-unknown \
+    duplicate-functional prefixed-functional; do
+    printf '%sruntime-fence\n%s\n' "$production_marker" "$production_phase" >"$branch_failure_diagnostic"
+    case $production_bad in
+        unknown-first) printf '%sunknown\n' "$production_first_marker" ;;
+        duplicate-first) printf '%sproduction-launch-status\n%sproduction-process-identity\n' \
+            "$production_first_marker" "$production_first_marker" ;;
+        prefixed-first) printf 'private%sproduction-launch-status\n' "$production_first_marker" ;;
+        suffixed-first) printf '%sproduction-launch-status/private/session\n' "$production_first_marker" ;;
+        contradictory-launch) printf '%sproduction-process-identity\n%sidentity-process\n' \
+            "$production_first_marker" "$production_launch_marker" ;;
+        absent-first) printf '%sidentity-process\n' "$production_launch_marker" ;;
+        *)
+            printf '%sproduction-launch-status\n' "$production_first_marker"
+            case $production_bad in
+                unknown-launch) printf '%sunknown\n' "$production_launch_marker" ;;
+                duplicate-launch) printf '%sidentity-process\n%sidentity-socket\n' \
+                    "$production_launch_marker" "$production_launch_marker" ;;
+                prefixed-launch) printf 'private%sidentity-process\n' "$production_launch_marker" ;;
+                suffixed-launch) printf '%sidentity-process/private/session\n' "$production_launch_marker" ;;
+                functional-without-launch) printf '%sprepare,io\n' "$production_functional_marker" ;;
+                functional-contradiction) printf '%sidentity-process\n%sprepare,io\n' \
+                    "$production_launch_marker" "$production_functional_marker" ;;
+                *)
+                    printf '%sfunctional-probe-wait\n' "$production_launch_marker"
+                    case $production_bad in
+                        functional-unknown) printf '%sprepare,unknown\n' "$production_functional_marker" ;;
+                        duplicate-functional) printf '%sprepare,io\n%sprepare,timeout\n' \
+                            "$production_functional_marker" "$production_functional_marker" ;;
+                        prefixed-functional) printf 'private%sprepare,io\n' "$production_functional_marker" ;;
+                    esac
+                    ;;
+            esac
+            ;;
+    esac >>"$branch_failure_diagnostic"
+    expect_status 1 report_non_retained_production_retirement_diagnostic "$branch_failure_diagnostic"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
+
 printf '%s\n' \
     'PASS: helper-boundary VM preview, retained-main, non-retained branch smoke, and KVM contracts are exact.'

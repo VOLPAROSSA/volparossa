@@ -3576,7 +3576,23 @@ report_production_retirement_diagnostic() {
     [ "$#" -eq 1 ] || return 1
     [ "${driver_phase:-}" = production-retirement ] || return 1
     production_retirement_diagnostic_stage_is_safe "$1" || return 1
+    if [ -n "${proof_failure_reason:-}" ]; then
+        proof_failure_reason_is_safe "$proof_failure_reason" || return 1
+        [ "${proof_ok:-}" = no ] || return 1
+    fi
     printf 'VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_DIAGNOSTIC_V1=%s\n' "$1" >&2
+    if [ -n "${proof_failure_reason:-}" ]; then
+        printf 'VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1=%s\n' \
+            "$proof_failure_reason" >&2
+        if [ "$proof_failure_reason" = production-launch-status ]; then
+            # Reuse only the existing validated fixed-stage reporter. Discard
+            # partial/error output when its private capture is unavailable.
+            if production_retirement_launch_detail=$(report_production_launch_diagnostic 2>&1); then
+                printf '%s\n' "$production_retirement_launch_detail" >&2
+            fi
+        fi
+    fi
+    return 0
 }
 
 retire_unit() {

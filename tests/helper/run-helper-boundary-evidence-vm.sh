@@ -652,9 +652,63 @@ report_non_retained_production_retirement_diagnostic() {
     esac
     non_retained_production_retirement_stage=${non_retained_production_retirement_line#"$non_retained_production_retirement_prefix"}
     non_retained_production_retirement_stage_is_safe "$non_retained_production_retirement_stage" || return 1
+    non_retained_retirement_first_reason=
+    non_retained_retirement_launch_stage=
+    non_retained_retirement_functional_value=
+    for non_retained_retirement_optional_prefix in \
+        VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1= \
+        VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1= \
+        VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=; do
+        if non_retained_retirement_optional_count=$(grep -Fc "$non_retained_retirement_optional_prefix" \
+            "$non_retained_production_retirement_capture" 2>/dev/null); then
+            :
+        else
+            [ "$?" -eq 1 ] || return 1
+        fi
+        case $non_retained_retirement_optional_count in
+            0) continue ;;
+            1) ;;
+            *) return 1 ;;
+        esac
+        non_retained_retirement_optional_line=$(grep -F "$non_retained_retirement_optional_prefix" \
+            "$non_retained_production_retirement_capture" 2>/dev/null) || return 1
+        case $non_retained_retirement_optional_line in
+            "$non_retained_retirement_optional_prefix"*) ;;
+            *) return 1 ;;
+        esac
+        non_retained_retirement_optional_value=${non_retained_retirement_optional_line#"$non_retained_retirement_optional_prefix"}
+        case $non_retained_retirement_optional_prefix in
+            VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1=)
+                non_retained_proof_failure_reason_is_safe "$non_retained_retirement_optional_value" || return 1
+                non_retained_retirement_first_reason=$non_retained_retirement_optional_value ;;
+            VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=)
+                [ "$non_retained_retirement_first_reason" = production-launch-status ] || return 1
+                non_retained_production_launch_stage_is_safe "$non_retained_retirement_optional_value" || return 1
+                non_retained_retirement_launch_stage=$non_retained_retirement_optional_value ;;
+            VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=)
+                case $non_retained_retirement_launch_stage in
+                    functional-probe-wait|functional-client-release|functional-exit-release|functional-probe-finish) ;;
+                    *) return 1 ;;
+                esac
+                non_retained_functional_probe_failure_value_is_safe "$non_retained_retirement_optional_value" || return 1
+                non_retained_retirement_functional_value=$non_retained_retirement_optional_value ;;
+        esac
+    done
     printf '%s\n' 'non-retained helper-boundary PR smoke failure category: production-retirement' >&2
     printf 'non-retained helper-boundary PR smoke production retirement stage: %s\n' \
         "$non_retained_production_retirement_stage" >&2
+    if [ -n "$non_retained_retirement_first_reason" ]; then
+        printf 'non-retained helper-boundary PR smoke first proof failure: %s\n' \
+            "$non_retained_retirement_first_reason" >&2
+    fi
+    if [ "$non_retained_retirement_first_reason" = production-launch-status ]; then
+        printf 'non-retained helper-boundary PR smoke production launch diagnostic: %s\n' \
+            "${non_retained_retirement_launch_stage:-unavailable}" >&2
+    fi
+    if [ -n "$non_retained_retirement_functional_value" ]; then
+        printf 'non-retained helper-boundary PR smoke Client/Exit/Relay-pair lease diagnostic: %s\n' \
+            "$non_retained_retirement_functional_value" >&2
+    fi
 }
 
 non_retained_restart_launch_failure_category() {
