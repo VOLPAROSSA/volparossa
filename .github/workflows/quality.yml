@@ -35,7 +35,7 @@ defaults:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTSEC_ADVISORY_DB_REVISION: bf5c0d245a92671908518d7e765914d437954ed6
+  RUSTSEC_ADVISORY_DB_REVISION: 84d943a6deeb8cc6c6f632531aaf4f1c62275239
 
 jobs:
   studio-export-pack:
@@ -363,6 +363,7 @@ jobs:
         env:
           RUSTSEC_ADVISORY_DB: ${{ runner.temp }}/rustsec-advisory-db
         run: |
+          python3 -B scripts/test-rustsec-pin-review.py
           git init "$RUSTSEC_ADVISORY_DB"
           git -C "$RUSTSEC_ADVISORY_DB" remote add origin \
             https://github.com/RustSec/advisory-db.git

@@ -31,6 +31,17 @@ records the local RustSec database commit. See `third_party/rust/README.md` for
 the narrowly scoped local backports, single-backend Yamux hardening, and
 scanner exemptions.
 
+The read-only `RustSec pin review` workflow compares the Quality pin with official
+RustSec `main` weekly and on manual dispatch. It cross-checks Git and GitHub API
+commit identities and reports dates, API signature metadata and a candidate patch
+in the job summary. It exits unsuccessfully when review is needed or acquisition
+fails; it does not apply patches, create PRs or grant write permissions. Run its
+inert checks with `python3 -B scripts/test-rustsec-pin-review.py` and its live
+comparison with `python3 -B scripts/review-rustsec-pin.py`. The comparison does not
+scan dependencies. A reviewed pin update must pass hosted Quality's existing
+offline root/fuzz audits, exact vendor reconstruction and RSA scope checks; newly
+discovered vulnerabilities require remediation rather than new exceptions.
+
 The package-license regression proves all three reviewed path overrides and
 the exact `yamux 0.13.10` release-tag license fallback enter the distributable
 notices while workspace and arbitrary path packages do not.
