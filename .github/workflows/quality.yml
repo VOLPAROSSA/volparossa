@@ -488,7 +488,7 @@ jobs:
       - name: Lint standalone fuzz package
         run: |
           cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
-          cargo clippy \
+          cargo clippy --keep-going \
             --manifest-path fuzz/Cargo.toml \
             --locked \
             --offline \
@@ -528,7 +528,7 @@ jobs:
 
       - name: Run strict Clippy
         run: >-
-          cargo clippy --locked --offline --workspace --all-targets
+          cargo clippy --keep-going --locked --offline --workspace --all-targets
           --all-features -- -D warnings
 
       - name: Run workspace tests
