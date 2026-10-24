@@ -2148,10 +2148,7 @@ mod tests {
         env,
         fs::{self, File},
         io::{Read as _, Write as _},
-        os::{
-            fd::AsRawFd as _,
-            unix::{ffi::OsStringExt as _, fs::MetadataExt as _, net::UnixStream},
-        },
+        os::unix::{ffi::OsStringExt as _, fs::MetadataExt as _, net::UnixStream},
         process::{Command, Stdio},
     };
 
