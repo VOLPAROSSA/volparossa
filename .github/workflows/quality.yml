@@ -270,6 +270,9 @@ jobs:
           python3 -B tests/integration/test-storage-consumer-failure-boundary.py
           python3 -B tests/integration/test-storage-provider-usage-snapshot.py
 
+      - name: Check Weather artifact preservation without network access
+        run: python3 -B tests/integration/test-weather-artifact-preservation.py
+
       - name: Check formatting and shell sources
         run: |
           python3 -B scripts/test-diagnose-backport-lock.py
