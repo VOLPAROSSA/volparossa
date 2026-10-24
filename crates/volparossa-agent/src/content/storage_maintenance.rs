@@ -94,7 +94,7 @@ impl Turn {
     pub(super) async fn admit(&self, bytes: u64) -> bool {
         if self
             .remaining
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |left| {
                 left.checked_sub(bytes)
             })
             .is_err()

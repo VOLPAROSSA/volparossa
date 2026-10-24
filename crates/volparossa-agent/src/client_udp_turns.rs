@@ -2,10 +2,9 @@
 
 use std::{io, os::fd::OwnedFd};
 
-use tokio::{
-    io::unix::{AsyncFd, AsyncFdReadyGuard},
-    time::Interval,
-};
+use tokio::{io::unix::AsyncFdReadyGuard, time::Interval};
+
+use volparossa_linux_uapi::OwnedAsyncFd;
 
 use crate::{MAXIMUM_BROWSER_QUIC_RESPONSES_PER_TICK, helper::ClientIngressSocketFamily};
 
@@ -27,8 +26,8 @@ impl ClientUdpTurns {
     /// The outer actor retains shutdown/deadline selection and all datagram authorization.
     pub(super) async fn next<'a>(
         &mut self,
-        ipv4: &'a AsyncFd<OwnedFd>,
-        ipv6: &'a AsyncFd<OwnedFd>,
+        ipv4: &'a OwnedAsyncFd,
+        ipv6: &'a OwnedAsyncFd,
         reverse_poll: &mut Interval,
         browser_active: bool,
     ) -> io::Result<ClientUdpIoTurn<'a>> {
@@ -107,10 +106,10 @@ mod tests {
 
     use super::*;
 
-    fn socket_pair() -> (AsyncFd<OwnedFd>, UnixDatagram, UnixDatagram) {
+    fn socket_pair() -> (OwnedAsyncFd, UnixDatagram, UnixDatagram) {
         let (receiver, sender) = UnixDatagram::pair().unwrap();
         receiver.set_nonblocking(true).unwrap();
-        let poll = AsyncFd::new(receiver.try_clone().unwrap().into()).unwrap();
+        let poll = OwnedAsyncFd::register(receiver.try_clone().unwrap().into()).unwrap();
         (poll, receiver, sender)
     }
 
