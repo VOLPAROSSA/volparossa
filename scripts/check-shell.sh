@@ -47,8 +47,10 @@ set -- \
     tests/helper/test-qemu-pidfd-supervisor.sh \
     tests/helper/validate-helper-boundary-evidence-v1.sh \
     tests/helper/validate-helper-boundary-vm-environment-v1.sh \
+    tests/helper/validate-helper-boundary-vm-environment-v2.sh \
     tests/helper/validate-helper-restart-exact-present-evidence-v1.sh \
     tests/helper/validate-helper-restart-vm-environment-v1.sh \
+    tests/helper/validate-helper-restart-vm-environment-v2.sh \
     tests/integration/run.sh \
     tests/integration/dns-cache-proof.sh \
     tests/integration/dns-cache-smoke.sh \

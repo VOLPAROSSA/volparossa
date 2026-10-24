@@ -12,6 +12,7 @@ import sys
 import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
+COMPILERS = ("1.85.0", "1.87.0", "1.99.1")
 TARGETS = ("x86_64-unknown-linux-gnu", "i686-unknown-linux-musl")
 FEATURES = ((), ("alloc",), ("subtle",), ("alloc", "subtle"))
 RELEASE = {"codegen-units": 1, "lto": "thin", "opt-level": 3, "panic": "abort", "strip": "debuginfo"}
@@ -95,34 +96,45 @@ def execute(output):
         manifest = reference_fixture / "Cargo.toml"
         manifest.write_text(manifest.read_text().replace("../vendor/ctutils-0.4.4", str(reference / "ctutils-0.4.4")))
 
-        for compiler in ("1.85.0", "1.87.0"):
-            run(["rustup", "toolchain", "install", compiler, "--profile", "minimal",
-                 "--target", ",".join(TARGETS)], "install-" + compiler)
-            run(["rustc", "+" + compiler, "--version", "--verbose"], "compiler-" + compiler)
-            sysroot = subprocess.check_output(["rustc", "+" + compiler, "--print", "sysroot"], env=env, text=True).strip()
+        for compiler in COMPILERS:
+            compiler_env = env.copy()
+            if compiler == "1.99.1":
+                run(["python3", "-B", "scripts/provision-rust199.py", "runner"], "install-" + compiler)
+                prefix = Path(os.environ["RUNNER_TEMP"]) / "volparossa-rust-1.99.1"
+                compiler_env.update(PATH=str(prefix / "bin") + os.pathsep + env["PATH"],
+                                    RUSTC=str(prefix / "bin/rustc"), RUSTDOC=str(prefix / "bin/rustdoc"))
+                receipt["current_compiler"] = json.loads((prefix / "receipt.json").read_text())
+                rustc = [str(prefix / "bin/rustc")]
+                cargo = [str(prefix / "bin/cargo")]
+            else:
+                run(["rustup", "toolchain", "install", compiler, "--profile", "minimal",
+                     "--target", ",".join(TARGETS)], "install-" + compiler)
+                rustc, cargo = ["rustc", "+" + compiler], ["cargo", "+" + compiler]
+            run(rustc + ["--version", "--verbose"], "compiler-" + compiler, custom_env=compiler_env)
+            sysroot = subprocess.check_output(rustc + ["--print", "sysroot"], env=compiler_env, text=True).strip()
             linker = Path(sysroot) / "lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld"
             if not linker.is_file():
                 raise ValueError("pinned compiler's bundled rust-lld unavailable")
-            base = ROOT / "third_party/rust/vendor/ctutils-0.4.4" if compiler == "1.85.0" else reference / "ctutils-0.4.4"
-            harness = fixture if compiler == "1.85.0" else reference_fixture
+            base = ROOT / "third_party/rust/vendor/ctutils-0.4.4" if compiler != "1.87.0" else reference / "ctutils-0.4.4"
+            harness = fixture if compiler != "1.87.0" else reference_fixture
             for package, package_path in (("upstream", base), ("consumers", harness)):
-                run(["cargo", "+" + compiler, "fetch", "--locked", "--manifest-path", str(package_path / "Cargo.toml")],
-                    "fetch-" + compiler + "-" + package)
+                run(cargo + ["fetch", "--locked", "--manifest-path", str(package_path / "Cargo.toml")],
+                    "fetch-" + compiler + "-" + package, custom_env=compiler_env)
             for target in TARGETS:
                 tag = compiler + "-" + target
                 target_dir = output.parent / ("ctutils-target-" + tag)
-                build_env = dict(env, CARGO_TARGET_DIR=str(target_dir),
+                build_env = dict(compiler_env, CARGO_TARGET_DIR=str(target_dir),
                                  CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER=str(linker),
                                  PROPTEST_CASES="1024")
                 for features in FEATURES:
-                    command = ["cargo", "+" + compiler, "test", "--manifest-path", str(base / "Cargo.toml"),
+                    command = cargo + ["test", "--manifest-path", str(base / "Cargo.toml"),
                                "--locked", "--offline", "--target", target, "--no-default-features"]
                     if features:
                         command += ["--features", ",".join(features)]
                     run(command, "upstream-" + tag + "-" + ("-".join(features) or "no-std"), custom_env=build_env, tests=True)
-                run(["cargo", "+" + compiler, "test", "--manifest-path", str(harness / "Cargo.toml"),
+                run(cargo + ["test", "--manifest-path", str(harness / "Cargo.toml"),
                      "--locked", "--offline", "--target", target], "consumers-" + tag, custom_env=build_env, tests=True)
-                run(["cargo", "+" + compiler, "rustc", "--manifest-path", str(harness / "Cargo.toml"),
+                run(cargo + ["rustc", "--manifest-path", str(harness / "Cargo.toml"),
                      "--locked", "--offline", "--release", "--target", target,
                      "--bin", "volparossa-ctutils-regressions", "--", "--emit=asm,llvm-ir,link"],
                     "release-" + tag, custom_env=build_env)
@@ -145,18 +157,23 @@ def execute(output):
                         shutil.copyfile(path, codegen / path.name)
 
         # Actual Core HPKE callsites, not the codegen harness alone.
-        build_env = dict(env, CARGO_TARGET_DIR=str(output.parent / "ctutils-core-target"))
-        run(["cargo", "+1.85.0", "fetch", "--locked"], "fetch-core")
-        run(["cargo", "+1.85.0", "test", "--locked", "--offline", "-p", "volparossa-protocol", "native_route_credential"],
-            "core-hpke-route-credentials", custom_env=build_env, tests=True)
-        run(["cargo", "+1.85.0", "test", "--locked", "--offline", "-p", "volparossa-content", "private_message"],
-            "core-hpke-private-messages", custom_env=build_env, tests=True)
+        run(cargo + ["fetch", "--locked"], "fetch-core", custom_env=compiler_env)
+        for target in TARGETS:
+            build_env = dict(compiler_env,
+                CARGO_TARGET_DIR=str(output.parent / ("ctutils-core-target-" + target)),
+                CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER=str(linker))
+            for package, test_filter, label in (
+                    ("volparossa-protocol", "native_route_credential", "route-credentials"),
+                    ("volparossa-content", "private_message", "private-messages")):
+                run(cargo + ["test", "--locked", "--offline", "--target", target,
+                    "-p", package, test_filter], "core-hpke-" + label + "-" + target,
+                    custom_env=build_env, tests=True)
         receipt["functional_tests_passed"] = True
     finally:
         receipt["profile"] = RELEASE
         receipt["review_entrypoints"] = SYMBOLS
         (output / "REVIEW_REQUIRED.md").write_text(
-            "Functional execution is separate from constant-time acceptance. Review adapted Rust 1.85 "
+            "Functional execution is separate from constant-time acceptance. Review adapted Rust 1.85/1.99.1 "
             "and unmodified Rust 1.87 linked assembly/LLVM for every named secret-input entrypoint, "
             "including digest and universal-hash consumers, on both targets with opt-level3/thinLTO/one "
             "codegen unit. Check secret-dependent control flow and dataflow, not merely branch counts. "

@@ -45,10 +45,9 @@ use nix::{
 };
 use tokio::io::unix::AsyncFd;
 use zbus::{
-    Connection, Proxy,
+    Connection, OwnedObjectPath, Proxy,
     names::OwnedUniqueName,
     proxy::{Builder as ProxyBuilder, CacheProperties},
-    zvariant::OwnedObjectPath,
 };
 
 use crate::{
@@ -2060,9 +2059,9 @@ impl SystemdDescriptorStoreSource {
             let connection = Connection::system().await?;
             let manager_owner = systemd_manager_owner(&connection).await?;
             let manager: Proxy<'_> = ProxyBuilder::new(&connection)
-                .destination(manager_owner.clone())?
-                .path(SYSTEMD_MANAGER_PATH)?
-                .interface(SYSTEMD_MANAGER_INTERFACE)?
+                .destination(manager_owner.clone())
+                .path(SYSTEMD_MANAGER_PATH)
+                .interface(SYSTEMD_MANAGER_INTERFACE)
                 .cache_properties(CacheProperties::No)
                 .build()
                 .await?;
@@ -2094,9 +2093,9 @@ impl SystemdDescriptorStoreSource {
 
     async fn snapshot_unbounded(&self) -> Result<DescriptorStoreSnapshot, FdStoreError> {
         let service: Proxy<'_> = ProxyBuilder::new(&self.connection)
-            .destination(self.scope.manager_owner.clone())?
-            .path(self.scope.unit_path.clone())?
-            .interface(SYSTEMD_SERVICE_INTERFACE)?
+            .destination(self.scope.manager_owner.clone())
+            .path(self.scope.unit_path.clone())
+            .interface(SYSTEMD_SERVICE_INTERFACE)
             .cache_properties(CacheProperties::No)
             .build()
             .await?;
@@ -2135,9 +2134,9 @@ impl SystemdDescriptorStoreSource {
         &self,
     ) -> Result<ServiceCgroupIsolationSnapshot, FdStoreError> {
         let unit: Proxy<'_> = ProxyBuilder::new(&self.connection)
-            .destination(self.scope.manager_owner.clone())?
-            .path(self.scope.unit_path.clone())?
-            .interface(SYSTEMD_UNIT_INTERFACE)?
+            .destination(self.scope.manager_owner.clone())
+            .path(self.scope.unit_path.clone())
+            .interface(SYSTEMD_UNIT_INTERFACE)
             .cache_properties(CacheProperties::No)
             .build()
             .await?;
@@ -2146,9 +2145,9 @@ impl SystemdDescriptorStoreSource {
         drop(unit);
 
         let service: Proxy<'_> = ProxyBuilder::new(&self.connection)
-            .destination(self.scope.manager_owner.clone())?
-            .path(self.scope.unit_path.clone())?
-            .interface(SYSTEMD_SERVICE_INTERFACE)?
+            .destination(self.scope.manager_owner.clone())
+            .path(self.scope.unit_path.clone())
+            .interface(SYSTEMD_SERVICE_INTERFACE)
             .cache_properties(CacheProperties::No)
             .build()
             .await?;
@@ -2198,9 +2197,9 @@ impl SystemdDescriptorStoreSource {
 
 async fn systemd_manager_owner(connection: &Connection) -> Result<OwnedUniqueName, FdStoreError> {
     let bus: Proxy<'_> = ProxyBuilder::new(connection)
-        .destination(DBUS_DESTINATION)?
-        .path(DBUS_PATH)?
-        .interface(DBUS_INTERFACE)?
+        .destination(DBUS_DESTINATION)
+        .path(DBUS_PATH)
+        .interface(DBUS_INTERFACE)
         .cache_properties(CacheProperties::No)
         .build()
         .await?;
@@ -3487,6 +3486,106 @@ mod tests {
 
     use super::*;
     use crate::systemd_custody::CUSTODY_FD_NAME_PREFIX;
+
+    #[tokio::test]
+    #[ignore = "requires explicitly assigned disposable runner and private dbus-daemon"]
+    async fn private_dbus_typed_replies_and_errors_use_real_zbus() {
+        assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
+        assert_eq!(
+            std::env::var("RUNNER_ENVIRONMENT").as_deref(),
+            Ok("github-hosted")
+        );
+        struct PrivateBus(std::process::Child);
+        impl Drop for PrivateBus {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let directory = tempdir().expect("private bus directory");
+        let socket = directory.path().join("bus");
+        let address = format!("unix:path={}", socket.display());
+        let mut daemon = PrivateBus(
+            std::process::Command::new("dbus-daemon")
+                .args(["--session", "--nofork", &format!("--address={address}")])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("start only the private bus"),
+        );
+        for _ in 0..100 {
+            assert!(daemon.0.try_wait().expect("private bus status").is_none());
+            if socket.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(socket.exists(), "private bus must become ready");
+        let connection = tokio::time::timeout(
+            Duration::from_secs(3),
+            zbus::connection::Builder::address(address.as_str()).build(),
+        )
+        .await
+        .expect("connection deadline")
+        .expect("private connection");
+        let proxy: Proxy<'_> = ProxyBuilder::new(&connection)
+            .destination(DBUS_DESTINATION)
+            .path(DBUS_PATH)
+            .interface(DBUS_INTERFACE)
+            .cache_properties(CacheProperties::No)
+            .build()
+            .await
+            .expect("private proxy");
+        let owner = connection
+            .unique_name()
+            .expect("authenticated unique owner")
+            .clone();
+        let observed: OwnedUniqueName = proxy
+            .call("GetNameOwner", &(owner.as_str(),))
+            .await
+            .expect("real typed owner reply");
+        assert_eq!(observed, owner);
+        let process: u32 = proxy
+            .call("GetConnectionUnixProcessID", &(owner.as_str(),))
+            .await
+            .expect("real integer reply");
+        assert_eq!(process, std::process::id());
+        let _: Vec<String> = proxy
+            .get_property("Features")
+            .await
+            .expect("real property array");
+        assert!(proxy.get_property::<u32>("Features").await.is_err());
+        assert!(
+            proxy
+                .call::<_, _, OwnedObjectPath>("GetNameOwner", &(owner.as_str(),))
+                .await
+                .is_err()
+        );
+        let error = proxy
+            .call::<_, _, ()>("VolparossaMissingMethod", &())
+            .await
+            .expect_err("real typed D-Bus error");
+        assert_eq!(
+            FdStoreError::from(error).to_string(),
+            "systemd D-Bus operation failed"
+        );
+        let invalid: Result<Proxy<'_>, _> = ProxyBuilder::new(&connection)
+            .destination("invalid destination")
+            .destination(DBUS_DESTINATION)
+            .path(DBUS_PATH)
+            .interface(DBUS_INTERFACE)
+            .build()
+            .await;
+        assert!(
+            invalid.is_err(),
+            "a later setter cannot erase the first error"
+        );
+        drop(proxy);
+        connection.close().await.expect("close private connection");
+        daemon.0.kill().expect("stop private bus");
+        daemon.0.wait().expect("reap private bus");
+    }
 
     struct FakeInventorySource {
         scope: DescriptorStoreScope,

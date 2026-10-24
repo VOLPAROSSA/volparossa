@@ -103,10 +103,16 @@ def source_build(root, expected, run=subprocess.run):
     # the cache. A failed command propagates; it cannot become a cache success.
     with tempfile.TemporaryDirectory(prefix="audit-tools-build-", dir=root.parent) as directory:
         staging = Path(directory) / "install"
-        run(["rustup", "toolchain", "install", "1.88.0", "--profile", "minimal"], check=True)
         for name, (compiler, version) in TOOLS.items():
-            run(["cargo", "+" + compiler, "install", "--locked", "--root", str(staging),
-                 "--version", "=" + version, name], check=True)
+            run(["rustup", "toolchain", "install", compiler, "--profile", "minimal"], check=True)
+            rustc = run(["rustup", "which", "--toolchain", compiler, "rustc"],
+                        check=True, capture_output=True, text=True).stdout.strip()
+            require(Path(rustc).is_absolute())
+            # Core's verified compiler prefix precedes rustup shims on PATH.
+            # Bind both the tool Cargo and its child rustc to their own recipe.
+            run(["rustup", "run", compiler, "cargo", "install", "--locked", "--root", str(staging),
+                 "--version", "=" + version, name], check=True,
+                env=dict(os.environ, RUSTC=rustc))
         (root / "bin").mkdir(parents=True, mode=0o700)
         for name in TOOLS:
             shutil.copyfile(staging / "bin" / name, root / "bin" / name)

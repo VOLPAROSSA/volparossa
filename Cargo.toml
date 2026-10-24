@@ -19,7 +19,7 @@ time = { path = "third_party/rust/vendor/time-0.3.41" }
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.99.1"
 authors = ["VOLPAROSSA contributors"]
 license = "GPL-3.0-only"
 repository = "https://github.com/VOLPAROSSA/volparossa"
@@ -94,7 +94,7 @@ wireguard-uapi = "3.0.1"
 x25519-dalek = { version = "2.0.1", features = ["getrandom", "reusable_secrets", "serde", "static_secrets"] }
 x509-cert = { version = "=0.2.5", default-features = false, features = ["std"] }
 zeroize = { version = "1.8.1", features = ["derive", "serde"] }
-zbus = { version = "=5.13.2", default-features = false, features = ["tokio"] }
+zbus = { version = "=6.1.0", default-features = false, features = ["tokio", "proxy"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

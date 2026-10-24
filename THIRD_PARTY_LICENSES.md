@@ -931,6 +931,44 @@ Runtime transitive system dependencies are libc6, libevent and OpenSSL;
 `dns-root-data` supplies read-only root hints/anchors and retains its own notices.
 The package does not depend on or start the standalone Unbound daemon.
 
+### Maintained D-Bus client and pinned compiler candidate
+
+The workspace pins `zbus` 6.1.0 with default features disabled and only Tokio
+and client-proxy support. `zbus_names`, `zvariant` and `zvariant_derive` are
+merged into the maintained package; no compatibility fork or advisory ignore
+is added. Exact official crates.io archive SHA-256 values and upstream VCS
+metadata for zbus6.1.0, zbus_macros6.1.0, zbus_utils6.0.0, zcheapstr1.0.0 and
+zruntime0.2.0 are recorded in [the source pinset](third_party/rust/zbus6-sources.json).
+Their original MIT notices are retained unchanged under
+`third_party/rust/licenses/<package>-<version>/LICENSE`. No local upstream
+source patch is applied. The zbus/macros source commit is
+[`90b4de2d6fa7d7f5b0cb8dd955709d3e765fd2b2`](https://github.com/z-galaxy/zbus/tree/90b4de2d6fa7d7f5b0cb8dd955709d3e765fd2b2).
+
+The build candidate uses exact Rust1.99.1. The reviewed official distribution
+manifest is `https://static.rust-lang.org/dist/channel-rust-1.99.1.toml`, SHA-256
+`fb152be80975c194aa5fc684b2aec3a6e14e2b855efe2faa4e5f8ae6e590f463`.
+[Component metadata](scripts/rust199-components.json) binds the exact dated
+compiler/Cargo/standard-library/Clippy/rustfmt archive URLs and hashes,
+including real i686-musl std. The provisioning script accepts only that fixed
+profile on disposable hosted runners or the fixed KVM guest accounts, verifies
+archive hashes before extraction/install, and installs under a local prefix.
+Original distribution notices remain in the installed components. This uses
+published compiler binaries; it does not claim a compiler reproduced from source
+or local upstream-GPG verification. Full actual version output is retained;
+Cargo's manifest package version0.100.0 is not relabelled as an executable version.
+No new compiler was downloaded, installed or executed on the development host.
+
+The concrete `jni`0.22.4 and `jni-macros`0.22.4 registry archives omit top-level
+notices. The existing fallback table now binds each exact package/version/license,
+its own VCS commit and crate archive SHA-256. The original MIT and Apache-2.0
+texts were fetched independently at
+[`5ae9458a4ec44c5318f37ddc7569c1d4ae8a69e7`](https://github.com/jni-rs/jni-rs/tree/5ae9458a4ec44c5318f37ddc7569c1d4ae8a69e7)
+and [`33045a124105c939d1e2cbdcb5a39e5d868ffa03`](https://github.com/jni-rs/jni-rs/tree/33045a124105c939d1e2cbdcb5a39e5d868ffa03)
+respectively and retained with their own SHA256SUMS. Both texts compare equal
+only after independent retrieval. The collector rejects changed archives,
+VCS metadata, versions and license expressions. This exact correction does not
+claim closure of the separate full all-platform notice inventory.
+
 ### Maintained YAML configuration packages
 
 The workspace dependency named `serde_yaml` is a Cargo alias for exact registry

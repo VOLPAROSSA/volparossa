@@ -1406,8 +1406,8 @@ repository_directory=$(CDPATH='' cd -- "$script_directory/../.." && pwd -P)
 manifest=$script_directory/debian13-amd64-image-v1.json
 report_validator=$script_directory/validate-helper-boundary-evidence-v1.sh
 restart_report_validator=$script_directory/validate-helper-restart-exact-present-evidence-v1.sh
-environment_validator=$script_directory/validate-helper-boundary-vm-environment-v1.sh
-restart_environment_validator=$script_directory/validate-helper-restart-vm-environment-v1.sh
+environment_validator=$script_directory/validate-helper-boundary-vm-environment-v2.sh
+restart_environment_validator=$script_directory/validate-helper-restart-vm-environment-v2.sh
 qemu_supervisor=$script_directory/qemu-pidfd-supervisor.py
 manifest_sha256=c535c54e44f724aa05278fe2bfa7bf607ecd285b83f35e136f16b99d1b99392a
 image_sha512=184761b0dad0f9ace02f9298050ca96ce3caa39a461a47706d47ff9698b59933918b91b40177fbd4d392f6446af8b4d18ecb94caca988169b19641606bf34003
@@ -2045,9 +2045,9 @@ scrub_sensitive_run_state() {
         helper-boundary-proof.stderr.log helper-boundary-evidence-v1.json.sha256 \
         helper-restart-exact-present-evidence-v1.json \
         helper-restart-exact-present-evidence-v1.json.sha256 \
-        helper-restart-vm-environment-v1.json restart-validator.stdout \
+        helper-restart-vm-environment-v2.json compiler-receipt.json restart-validator.stdout \
         restart-validator.stderr restart-environment-validator.stdout \
-        restart-environment-validator.stderr vm-environment-v1.json \
+        restart-environment-validator.stderr vm-environment-v2.json \
         validator.stdout validator.stderr \
         environment-validator.stdout environment-validator.stderr vm-console.log \
         console.fifo console.done
@@ -2124,7 +2124,7 @@ chmod 0700 "$run_directory"
 console_log=$run_directory/vm-console.log
 published_console_log=$output_directory/vm-console.log
 proof_stderr_log=$output_directory/helper-boundary-proof.stderr.log
-environment_report=$output_directory/vm-environment-v1.json
+environment_report=$output_directory/vm-environment-v2.json
 : >"$console_log"
 : >"$proof_stderr_log"
 chmod 0600 "$console_log" "$proof_stderr_log"
@@ -2256,10 +2256,8 @@ case $archive_sha256 in *[!0-9a-f]*|'') exit 64 ;; esac
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
     --yes --no-install-recommends \
-    build-essential ca-certificates cargo cmake curl dbus gdb git iproute2 iputils-ping jq nftables \
-    pkg-config rustc sudo util-linux wireguard-tools
-test "$(rustc --version | awk '{print $2}')" = 1.85.0
-test "$(cargo --version | awk '{print $2}')" = 1.85.0
+    build-essential ca-certificates cmake curl dbus gdb git iproute2 iputils-ping jq nftables \
+    pkg-config python3 sudo util-linux wireguard-tools xz-utils
 # shellcheck disable=SC1091
 test "$(. /etc/os-release; printf '%s' "$ID:$VERSION_ID")" = debian:13
 test "$(dpkg --print-architecture)" = amd64
@@ -2274,6 +2272,8 @@ cd source
 test "$(git rev-parse HEAD)" = "$expected_commit"
 test -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)"
 test -z "$(git remote)"
+python3 -B scripts/provision-rust199.py guest
+export PATH="/home/volparossa/.local/volparossa-rust-1.99.1/bin:$PATH"
 cargo fetch --locked
 test -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)"
 GUEST_SETUP
@@ -2287,8 +2287,8 @@ umask 077
 expected_commit=$1
 case $expected_commit in *[!0-9a-f]*|'') exit 64 ;; esac
 cd /home/volparossa/source
-test "$(rustc --version | awk '{print $2}')" = 1.85.0
-test "$(cargo --version | awk '{print $2}')" = 1.85.0
+python3 -B scripts/provision-rust199.py guest-check
+export PATH="/home/volparossa/.local/volparossa-rust-1.99.1/bin:$PATH"
 # shellcheck disable=SC1091
 test "$(. /etc/os-release; printf '%s' "$ID:$VERSION_ID")" = debian:13
 test "$(dpkg --print-architecture)" = amd64
@@ -2678,6 +2678,14 @@ bounded_run retrieve-restart-report 2 guest_scp_from_raw \
     "$retrieved_restart_report" \
     || failed 'the canonical restart report could not be retrieved'
 
+bounded_run retrieve-compiler-receipt 2 guest_scp_from_raw \
+    /home/volparossa/.local/volparossa-rust-1.99.1/receipt.json "$run_directory/compiler-receipt.json" \
+    || failed 'the exact compiler observation could not be retrieved'
+if [ ! -f "$run_directory/compiler-receipt.json" ] || [ -L "$run_directory/compiler-receipt.json" ] \
+    || [ ! -s "$run_directory/compiler-receipt.json" ] \
+    || [ "$(stat -Lc '%s' "$run_directory/compiler-receipt.json")" -gt 32768 ]; then
+    failed 'the compiler observation is outside its fixed input bound'
+fi
 guest_ssh_raw sudo -n systemctl poweroff >/dev/null 2>&1 || true
 reap_qemu yes || failed 'the restricted proof VM did not power off cleanly'
 bounded_run proof-kvm-uevent-settle 1 udevadm settle --timeout=10 \
@@ -2750,39 +2758,43 @@ restart_report_hash=$(sha256sum "$retrieved_restart_report" | awk '{print $1}') 
 restart_report_hash_file=$run_directory/helper-restart-exact-present-evidence-v1.json.sha256
 printf '%s  helper-restart-exact-present-evidence-v1.json\n' \
     "$restart_report_hash" >"$restart_report_hash_file"
-successful_environment=$run_directory/vm-environment-v1.json
+successful_environment=$run_directory/vm-environment-v2.json
 jq -S -c -n \
     --arg commit "$expected_commit" \
     --arg image_sha512 "$image_sha512" \
     --arg report_sha256 "$report_hash" \
     --arg release_build 20260826-2582 \
+    --slurpfile toolchain "$run_directory/compiler-receipt.json" \
     '{expected_commit: $commit,
-      guest: {architecture: "amd64", cargo_version: "1.85.0",
-        debian_version: "13", rustc_version: "1.85.0", systemd_version: 257,
+      guest: {architecture: "amd64", cargo_commit: "5f94df478",
+        debian_version: "13", rustc_version: "1.99.1", systemd_version: 257,
         virtualization: "kvm"},
       image_release_build: $release_build,
       image_sha512: $image_sha512,
       proof_network: {external_https: "denied", mode: "qemu-user-restrict-on"},
       report_kind: "volparossa-helper-boundary-vm-environment",
       report_sha256: $report_sha256,
-      schema_version: 1,
+      toolchain: $toolchain[0],
+      schema_version: 2,
       status: "PASS"}' >"$successful_environment"
-successful_restart_environment=$run_directory/helper-restart-vm-environment-v1.json
+successful_restart_environment=$run_directory/helper-restart-vm-environment-v2.json
 jq -S -c -n \
     --arg commit "$expected_commit" \
     --arg image_sha512 "$image_sha512" \
     --arg report_sha256 "$restart_report_hash" \
     --arg release_build 20260826-2582 \
+    --slurpfile toolchain "$run_directory/compiler-receipt.json" \
     '{expected_commit: $commit,
-      guest: {architecture: "amd64", cargo_version: "1.85.0",
-        debian_version: "13", rustc_version: "1.85.0", systemd_version: 257,
+      guest: {architecture: "amd64", cargo_commit: "5f94df478",
+        debian_version: "13", rustc_version: "1.99.1", systemd_version: 257,
         virtualization: "kvm"},
       image_release_build: $release_build,
       image_sha512: $image_sha512,
       proof_network: {external_https: "denied", mode: "qemu-user-restrict-on"},
       report_kind: "volparossa-helper-restart-vm-environment",
       report_sha256: $report_sha256,
-      schema_version: 1,
+      toolchain: $toolchain[0],
+      schema_version: 2,
       status: "PASS"}' >"$successful_restart_environment"
 
 environment_validator_stdout=$run_directory/environment-validator.stdout
@@ -2825,7 +2837,7 @@ if [ "$proof_mode" = retained-main ]; then
     install -m 0600 -- "$restart_report_hash_file" \
         "$output_directory/helper-restart-exact-present-evidence-v1.json.sha256"
     install -m 0600 -- "$successful_restart_environment" \
-        "$output_directory/helper-restart-vm-environment-v1.json"
+        "$output_directory/helper-restart-vm-environment-v2.json"
     printf '%s\n' \
         'PASS: retained canonical helper-boundary evidence from the disposable Debian 13 KVM.' >&2
 else
