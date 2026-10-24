@@ -78,6 +78,9 @@ while IFS="	" read -r crate_name crate_version license_expression license_file m
             ;;
         path)
             case "$manifest_path" in
+                "$repository_root/third_party/rust/vendor/ctutils-0.4.4/Cargo.toml")
+                    source_label='vendored-crates.io+ctutils-0.4.4-rust1.85-compatibility'
+                    ;;
                 "$repository_root/third_party/rust/vendor/hickory-proto-0.25.2/Cargo.toml")
                     source_label='vendored-crates.io+hickory-proto-0.25.2-security-backport'
                     ;;

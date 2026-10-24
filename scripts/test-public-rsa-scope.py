@@ -255,9 +255,14 @@ class PublicRsaScope(unittest.TestCase):
         root_audit, fuzz_audit = script.split('"$audit_command" audit')[1:]
         self.assertIn("--ignore " + M.ADVISORY, root_audit)
         self.assertNotIn("--ignore " + M.ADVISORY, fuzz_audit)
-        self.assertLess(script.index("python3 -B scripts/check-public-rsa-scope.py"), script.index('cargo deny --locked'))
+        # Shell continuation lines preserve the actual CLI argv. Normalize only
+        # whitespace so the scan wrapper cannot hide a missing/relocated guard.
+        normalized = " ".join(script.replace("\\\n", " ").split())
+        root_deny = 'cargo deny --locked --offline check --config "$root_deny_config"'
+        self.assertLess(normalized.index("python3 -B scripts/check-public-rsa-scope.py"),
+                        normalized.index(root_deny))
         # Pinned cargo-deny 0.18.6 declares config on Check, not the global CLI.
-        self.assertIn('cargo deny --locked --offline check --config "$root_deny_config"', script)
+        self.assertIn(root_deny, normalized)
 
 
 if __name__ == "__main__":
