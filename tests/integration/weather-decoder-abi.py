@@ -48,6 +48,13 @@ SOURCE_GUEST = Path("/home/vpci/weather-decoder-source")
 ENVIRONMENT_RECORD = Path(__file__).resolve().parents[1] / "helper/weather-source-build-environment-v1.json"
 SOURCE_TRIAL_RECORD = Path(__file__).resolve().parents[1] / "helper/weather-decoder-source-trial-v1.json"
 SOURCE_TRIAL_RECORD_SHA256 = "e87d339f069101d889cc45b3a7810e407252c1d32c9ef16bed0983feb09839be"
+SOURCE_ADMISSION_RECORD = Path(__file__).resolve().parents[1] / "helper/weather-decoder-source-v1.json"
+SOURCE_ADMISSION_SHA256 = "b38262cbe95cef4aa31e54b677cd05ba9d95a5b90cefbb0e41f250c41b87a8e2"
+SOURCE_ADMISSION_SCOPE = dict(disposable_debian13_amd64_decoder_inputs_authorized=True,
+    abi_proven=True, ccsds_probe_proven=True, production_decoder_authorized=False,
+    origin_acquisition_proven=False, core_delivery_proven=False, browser_proven=False,
+    android_proven=False, full_eccodes_suite_proven=False, sanitizers_proven=False,
+    default_branch_accepted=False)
 SOURCE_ENVIRONMENT_SHA256 = "45c347dad35d0f908233423c57cf9a6fc34f0e37dc9de8c5e37790fed1497367"
 SOURCE_TRIAL_INPUTS = Path("/home/vpci/weather-decoder-source-trial-inputs")
 SOURCE_TRIAL_ABI_OUTPUT = Path("/home/vpci/weather-decoder-source-trial-abi")
@@ -401,6 +408,59 @@ def source_trial_record():
     return value, digest(raw)
 
 
+def source_admission():
+    # Fixed source authority; Actions IDs below are provenance, never retrieval inputs.
+    raw = read_file(SOURCE_ADMISSION_RECORD, 32768)
+    require(digest(raw) == SOURCE_ADMISSION_SHA256, "SOURCE_ADMISSION_CHANGED")
+    value = decode(raw)
+    trial, trial_sha = source_trial_record()
+    bound = ("profile", "producer_core_commit", "weather_commit", "source_files", "source_archives",
+             "environment_lock_sha256", "payload_manifest", "build_manifest", "files", "bytes")
+    require(type(value) is dict and set(value) == set(bound) | {
+        "schema", "kind", "id", "admitted", "trial", "scope", "evidence"}, "SOURCE_ADMISSION_SCHEMA")
+    require(type(value["schema"]) is int and value["schema"] == 1
+        and value["kind"] == "volparossa-weather-decoder-source-admission"
+        and value["id"] == "weather-decoder-source-20261024-v1" and value["admitted"] is True,
+        "SOURCE_ADMISSION_PROFILE")
+    # Canonical JSON comparison distinguishes booleans from integers at every depth.
+    def same(left, right):
+        return json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True)
+    require(same(value["trial"], dict(id=trial["id"], sha256=trial_sha))
+        and all(same(value[key], trial[key]) for key in bound)
+        and same(value["scope"], SOURCE_ADMISSION_SCOPE), "SOURCE_ADMISSION_BINDING")
+    require(digest(read_file(ENVIRONMENT_RECORD, 32 * 1024**2)) == SOURCE_ENVIRONMENT_SHA256,
+            "SOURCE_ADMISSION_ENVIRONMENT")
+    evidence = value["evidence"]
+    require(type(evidence) is dict and set(evidence) == {"cold_builds", "abi_run", "review"}
+        and same(evidence["cold_builds"], trial["evidence"]), "SOURCE_ADMISSION_EVIDENCE")
+    review = evidence["review"]
+    require(type(review) is dict and set(review) == {"id", "sha256"}
+        and review["id"] == "F09-SOURCE-ABI-40060819389-REVIEW" and hex_value(review["sha256"]),
+        "SOURCE_ADMISSION_REVIEW")
+    run = evidence["abi_run"]
+    require(type(run) is dict and set(run) == {"id", "job_id", "attempt", "core_commit", "artifacts", "reports"}
+        and all(type(run[key]) is int and run[key] > 0 for key in ("id", "job_id", "attempt"))
+        and run["core_commit"] == "382df4d5b4e6d7434828dec00bee6d7d620ed805",
+        "SOURCE_ADMISSION_RUN")
+    artifacts = run["artifacts"]
+    require(type(artifacts) is dict and set(artifacts) == {"abi", "build"}, "SOURCE_ADMISSION_ARTIFACTS")
+    for item in artifacts.values():
+        require(type(item) is dict and set(item) == {"id", "bytes", "sha256"}
+            and type(item["id"]) is int and item["id"] > 0
+            and type(item["bytes"]) is int and 0 < item["bytes"] <= 2 * 1024**2
+            and hex_value(item["sha256"]), "SOURCE_ADMISSION_ARTIFACT")
+    names = {"abi/evidence/source-trial-report.json", "abi/evidence/source-abi-report.json",
+             "build/evidence/inventory-vm-cleanup.json", "abi/evidence/inventory-vm-cleanup.json"}
+    names |= {"abi/evidence/source-abi-" + name for name in LOGS}
+    reports = run["reports"]
+    require(type(reports) is dict and set(reports) == names, "SOURCE_ADMISSION_REPORTS")
+    for item in reports.values():
+        require(type(item) is dict and set(item) == {"bytes", "sha256"}
+            and type(item["bytes"]) is int and 0 < item["bytes"] <= MAX_LOG
+            and hex_value(item["sha256"]), "SOURCE_ADMISSION_REPORT")
+    return value, digest(raw)
+
+
 def verify_source_trial_inputs(root):
     record, record_sha = source_trial_record()
     files = inventory(root, record["files"])
@@ -440,6 +500,7 @@ def stage_source_trial_inputs(source, destination):
 
 
 def execute(inputs, output, commit, *, profile="historical-v1"):
+    admitted = source_admission() if profile == "source-v1" else None
     guest = guest_boundary(commit)
     require(profile in ("historical-v1", "source-v1"), "ABI_PROFILE")
     record, record_sha, files = (verify_inputs(inputs) if profile == "historical-v1"
@@ -452,7 +513,8 @@ def execute(inputs, output, commit, *, profile="historical-v1"):
     context = (dict(admission_sha256=record_sha, hosted_run=record["hosted_run"],
                     inputs={name: record["files"][name] for name in (DECODER, PROBE, RECEIPT)})
                if profile == "historical-v1" else
-               dict(trial_record_sha256=record_sha, producer_core_commit=record["producer_core_commit"],
+               dict(source_admission_id=admitted[0]["id"], source_admission_sha256=admitted[1],
+                    trial_record_sha256=record_sha, producer_core_commit=record["producer_core_commit"],
                     environment_lock_sha256=record["environment_lock_sha256"], inputs=record["files"]))
     report = dict(schema_version=1, kind=("weather-decoder-abi" if profile == "historical-v1"
                                        else "weather-decoder-source-trial-abi"), source_commit=commit,
@@ -933,6 +995,7 @@ def source_trial_environment():
 
 
 def source_trial(commit):
+    admitted, admission_sha = source_admission()  # Before package preparation or execution.
     inventory_boundary(commit)
     verify_source_trial_inputs(SOURCE_TRIAL_INPUTS)  # Fail before installation on unreviewed payload.
     source_files(SOURCE_GUEST)
@@ -942,6 +1005,7 @@ def source_trial(commit):
     report = dict(schema=1, kind="weather-decoder-source-trial", profile="source-v1", success=False,
                   abi_proven=False, admitted=False, compiled_in_abi_guest=False, core_commit=commit, scope=dict(SCOPE),
                   weather_commit=SOURCE_COMMIT, trial_record_sha256=sha,
+                  source_admission_id=admitted["id"], source_admission_sha256=admission_sha,
                   environment_lock_sha256=SOURCE_ENVIRONMENT_SHA256, phase="environment", blocker=None)
     before = None
     try:
@@ -1164,6 +1228,7 @@ def main():
     commands.add_parser("export-source-trial").add_argument("output", type=Path)
     commands.add_parser("source-trial-export-names")
     commands.add_parser("source-trial-info")
+    commands.add_parser("source-admission-info")
     trial_public = commands.add_parser("stage-source-trial-public")
     trial_public.add_argument("source", type=Path); trial_public.add_argument("output", type=Path)
     commands.add_parser("export-source-build").add_argument("output", type=Path)
@@ -1204,6 +1269,10 @@ def main():
             value = dict(admitted=False, compiled=False, source_archives_verified=True)
         elif args.action == "source-build": value = source_cold_build(args.expected_commit)
         elif args.action == "source-trial": value = source_trial(args.expected_commit)
+        elif args.action == "source-admission-info":
+            record, sha = source_admission()
+            value = dict(id=record["id"], source_admission_sha256=sha, scope=record["scope"],
+                         profile="source-v1", admitted=True, runtime_executed=False)
         elif args.action == "source-trial-info":
             record, sha = source_trial_record()
             value = dict(id=record["id"], profile="source-v1", trial_record_sha256=sha, abi_proven=False)

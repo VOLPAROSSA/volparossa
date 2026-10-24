@@ -261,7 +261,7 @@ class SourceInventoryWiring(unittest.TestCase):
     def test_inventory_workflow_has_no_free_inputs_and_uploads_only_projection(self):
         workflow = HERE.parents[1].joinpath('.github/workflows/weather-decoder-abi.yml').read_text()
         self.assertIn('options: [historical-v1, source-input-inventory, source-build, source-v1]', workflow)
-        self.assertIn("timeout-minutes: ${{ inputs.mode == 'source-v1' && 80 || inputs.mode == 'source-build' && 45 || inputs.mode == 'source-input-inventory' && 20 || 35 }}", workflow)
+        self.assertIn("timeout-minutes: ${{ (inputs.mode || 'source-v1') == 'source-v1' && 80 || inputs.mode == 'source-build' && 45 || inputs.mode == 'source-input-inventory' && 20 || 35 }}", workflow)
         source_fetch = workflow.split('- name: Fetch only the fixed reviewed Weather source for inventory', 1)[1].split('      - name:', 1)[0]
         self.assertIn('source-info | jq -er .weather_commit', source_fetch)
         self.assertIn('https://github.com/VOLPAROSSA/volparossa-weather.git', source_fetch)
@@ -269,7 +269,7 @@ class SourceInventoryWiring(unittest.TestCase):
         self.assertIn('path: ${{ env.VOLPAROSSA_INVENTORY_PUBLIC }}', source_upload)
         self.assertNotIn('VOLPAROSSA_ABI_OUTPUT', source_upload)
         self.assertIn('stage-inventory-public', workflow)
-        self.assertIn("if: inputs.mode != 'source-input-inventory'", workflow)
+        self.assertIn("if: env.DECODER_MODE == 'historical-v1'", workflow)
         self.assertNotIn('actions/cache', workflow)
 
     def test_source_build_preview_and_readback_stay_separate_from_public_upload(self):
@@ -328,7 +328,7 @@ class SourceTrialRunnerWiring(unittest.TestCase):
 
     def test_workflow_builds_then_verifies_then_uses_fresh_second_guest_without_fallback(self):
         workflow = HERE.parents[1].joinpath('.github/workflows/weather-decoder-abi.yml').read_text()
-        self.assertIn("inputs.mode == 'source-v1' && 80", workflow)
+        self.assertIn("(inputs.mode || 'source-v1') == 'source-v1' && 80", workflow)
         self.assertIn('build_mode=source-build', workflow)
         trial = workflow.split('- name: Verify all fixed trial bytes', 1)[1].split('      - name:', 1)[0]
         self.assertLess(trial.index('verify-source-trial-build'), trial.index('--decoder-mode source-v1'))
@@ -337,15 +337,55 @@ class SourceTrialRunnerWiring(unittest.TestCase):
         for title in ('Retrieve only the reviewed public decoder artifact',
                       'Run the exact decoder unprivileged and offline inside Debian 13', 'Retain bounded ABI results only'):
             block = workflow.split('- name: ' + title, 1)[1].split('      - name:', 1)[0]
-            self.assertIn("inputs.mode != 'source-v1'", block)
+            self.assertIn("env.DECODER_MODE == 'historical-v1'", block)
         upload = workflow.split('- name: Retain only the closed source-trial ABI metadata projection', 1)[1].split('      - name:', 1)[0]
         self.assertIn('path: ${{ env.VOLPAROSSA_SOURCE_TRIAL_PUBLIC }}', upload)
         self.assertNotIn('payload', upload)
         branch = GUEST.rsplit('elif [ "$decoder_mode" = source-v1 ]; then', 1)[1].split('        else\n', 1)[0]
         self.assertIn('source-trial --expected-commit', branch)
+        self.assertLess(branch.index('source-admission-info'), branch.index('verify-source-trial-inputs'))
+        self.assertLess(branch.index('source-admission-info'), branch.index('1110s python3'))
         self.assertIn('1110s python3', branch)
         self.assertNotIn('build-source', branch)
         self.assertIn('driver_time_bound=1500s', SOURCE)
+
+    def test_manual_default_and_absent_push_mode_use_one_source_mode_for_all_guards(self):
+        import re
+        workflow = HERE.parents[1].joinpath('.github/workflows/weather-decoder-abi.yml').read_text()
+        self.assertEqual(re.findall(r'^        default: (.+)$', workflow, re.M), ['source-v1'])
+        self.assertIn("DECODER_MODE: ${{ inputs.mode || 'source-v1' }}", workflow)
+        self.assertIn("(inputs.mode || 'source-v1') == 'source-v1' && 80", workflow)
+        blocks = workflow.split('      - ')[1:]
+        guarded = []
+        for block in blocks:
+            conditions = re.findall(r'^        if: (.+)$', block, re.M)
+            if not conditions: continue
+            self.assertEqual(len(conditions), 1)
+            condition = conditions[0]
+            self.assertNotIn('inputs.mode', condition)
+            if 'DECODER_MODE' in condition:
+                self.assertIn('env.DECODER_MODE', condition)
+                guarded.append((block, condition))
+        self.assertEqual(len(guarded), 11)
+        for mode in (None, 'source-v1', 'historical-v1', 'source-build', 'source-input-inventory'):
+            effective = mode or 'source-v1'  # Absent push input uses the same fixed default.
+            for block, condition in guarded:
+                # Evaluate only the closed boolean comparisons written in this workflow.
+                expression = condition.replace('always()', 'True').replace('env.DECODER_MODE', repr(effective))
+                expression = re.sub(r'env\.VOLPAROSSA_[A-Z_]+', "'present'", expression)
+                active = eval(expression.replace('&&', ' and ').replace('||', ' or '), {'__builtins__': {}})
+                title = block.splitlines()[0]
+                if any(name in title for name in ('Retrieve only the reviewed public decoder artifact',
+                    'Run the exact decoder unprivileged and offline inside Debian 13', 'Retain bounded ABI results only')):
+                    self.assertEqual(active, effective == 'historical-v1')
+                elif title.startswith('name: Verify all fixed trial bytes'):
+                    self.assertEqual(active, effective == 'source-v1')
+                if 'gh api ' in block or 'gh run download ' in block:
+                    self.assertEqual(active, effective == 'historical-v1')
+        preflight = workflow.split('- name: Check the exact source and offline contracts', 1)[1].split('      - name:', 1)[0]
+        self.assertIn('weather-decoder-abi.py source-admission-info', preflight)
+        self.assertLess(workflow.index('- name: Check the exact source and offline contracts'),
+                        workflow.index('- name: Install VM tools only on this disposable runner'))
 
 if __name__ == "__main__":
     unittest.main()

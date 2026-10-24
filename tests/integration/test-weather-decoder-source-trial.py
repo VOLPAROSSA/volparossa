@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 
 H = runpy.run_path(str(Path(__file__).with_name('weather-decoder-abi.py')))
 G = H['execute'].__globals__
+ADMITTED, ADMISSION_SHA = H['source_admission']()
 
 
 def payload(root):
@@ -35,6 +36,83 @@ def payload(root):
             if parent.is_relative_to(root): parent.chmod(0o700)
         H['write_new'](path, raw, record['files'][name]['mode'])
     return record, files
+
+
+class SourceAdmission(unittest.TestCase):
+    def test_fixed_admission_binds_trial_full_payload_and_reviewed_native_evidence(self):
+        value, sha = H['source_admission']()
+        trial, trial_sha = H['source_trial_record']()
+        self.assertEqual(sha, H['SOURCE_ADMISSION_SHA256'])
+        self.assertEqual(value['trial'], dict(id=trial['id'], sha256=trial_sha))
+        self.assertIs(value['admitted'], True)
+        self.assertEqual(value['files'], trial['files'])
+        self.assertEqual((len(value['files']), value['bytes']), (14, 93841627))
+        self.assertEqual(value['producer_core_commit'], trial['producer_core_commit'])
+        self.assertEqual(value['evidence']['cold_builds'], trial['evidence'])
+        run = value['evidence']['abi_run']
+        self.assertEqual((run['id'], run['job_id'], run['attempt']), (40060819389, 120773716703, 1))
+        self.assertEqual({x['id'] for x in run['artifacts'].values()}, {12547626243, 12547069518})
+        self.assertEqual(len(run['reports']), 9)
+        self.assertEqual(value['evidence']['review']['sha256'],
+            '226fa7ca2de091c7ec8f90afd114c4663f38d2593373fd7c4a566cb8dfc79baf')
+        self.assertTrue(value['scope']['abi_proven']); self.assertTrue(value['scope']['ccsds_probe_proven'])
+        self.assertFalse(value['scope']['production_decoder_authorized'])
+        self.assertFalse(value['scope']['default_branch_accepted'])
+        self.assertNotIn('hosted_run', value)
+
+    def test_missing_changed_false_extra_scope_and_producer_receipt_rejected_before_execution(self):
+        mutations = [lambda x: x.update(admitted=False), lambda x: x.update(schema=True),
+            lambda x: x.update(profile='historical-v1'), lambda x: x.update(extra='override'),
+            lambda x: x['scope'].update(production_decoder_authorized=True),
+            lambda x: x['scope'].update(abi_proven=1),
+            lambda x: x.update(environment_lock_sha256='0' * 64),
+            lambda x: x['trial'].update(sha256='0' * 64),
+            lambda x: x['files'].pop('libaec-source/LICENSE.txt'),
+            lambda x: x['source_archives'][0].update(sha256='0' * 64),
+            lambda x: x['source_files'].pop('scripts/prepare_hosted_decoder.py'),
+            lambda x: x['evidence']['abi_run'].update(attempt=True),
+            lambda x: x['evidence']['abi_run']['reports'].pop('abi/evidence/inventory-vm-cleanup.json'),
+            lambda x: x['evidence'].update(extra='override')]
+        with tempfile.TemporaryDirectory() as directory, patch.object(H['subprocess'], 'Popen', side_effect=AssertionError('native')):
+            path = Path(directory) / 'admission'
+            with patch.dict(G, SOURCE_ADMISSION_RECORD=path):
+                with self.assertRaises(FileNotFoundError): H['source_admission']()
+                for mutate in mutations:
+                    value = copy.deepcopy(ADMITTED); mutate(value)
+                    raw = json.dumps(value).encode(); path.write_bytes(raw); path.chmod(0o600)
+                    with self.assertRaisesRegex(ValueError, 'SOURCE_ADMISSION_CHANGED'): H['source_admission']()
+                    # Exercise the closed schema beneath the immutable raw pin too.
+                    with patch.dict(G, SOURCE_ADMISSION_SHA256=H['digest'](raw)):
+                        with self.assertRaises(ValueError): H['source_admission']()
+                path.write_text('{"success":true,"compiled":true,"admitted":false}')
+                with self.assertRaisesRegex(ValueError, 'SOURCE_ADMISSION_CHANGED'): H['source_admission']()
+
+    def test_changed_actual_environment_lock_fails_before_any_package_or_native_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'environment'; path.write_bytes(b'changed lock'); path.chmod(0o600)
+            with patch.dict(G, ENVIRONMENT_RECORD=path), patch.object(H['subprocess'], 'Popen', side_effect=AssertionError('native')):
+                with self.assertRaisesRegex(ValueError, 'SOURCE_ADMISSION_ENVIRONMENT'): H['source_admission']()
+
+    def test_missing_authority_stops_both_guest_entries_before_boundary_install_or_execute(self):
+        boundary = Mock(side_effect=AssertionError('guest boundary'))
+        install = Mock(side_effect=AssertionError('package installation'))
+        with patch.dict(G, source_admission=Mock(side_effect=ValueError('missing authority')),
+                        guest_boundary=boundary, inventory_boundary=boundary, source_inventory=install):
+            with self.assertRaisesRegex(ValueError, 'missing authority'): H['source_trial']('a' * 40)
+            with self.assertRaisesRegex(ValueError, 'missing authority'):
+                H['execute'](Path('/inert/input'), Path('/inert/output'), 'a' * 40, profile='source-v1')
+        boundary.assert_not_called(); install.assert_not_called()
+
+    def test_cli_has_fixed_info_without_record_hash_or_evidence_retrieval_overrides(self):
+        helper = Path(__file__).with_name('weather-decoder-abi.py')
+        import subprocess, sys
+        result = subprocess.run([sys.executable, '-B', str(helper), 'source-admission-info'], capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        value = json.loads(result.stdout)
+        self.assertEqual(value['id'], ADMITTED['id']); self.assertFalse(value['runtime_executed'])
+        for flag in ('--record', '--sha256', '--artifact-id', '--run-id'):
+            result = subprocess.run([sys.executable, '-B', str(helper), 'source-admission-info', flag, 'arbitrary'], capture_output=True)
+            self.assertEqual(result.returncode, 2)
 
 
 class SourceTrial(unittest.TestCase):
@@ -118,7 +196,8 @@ class SourceTrial(unittest.TestCase):
                     method='nearest', neighbours=[dict(latitude=60 if first else 0, longitude=0 if first else 30,
                     value=0 if first else 495, distance=0, distance_unit='km')])]
                 return 0, json.dumps(value).encode()
-        with patch.dict(G, source_trial_record=lambda: (record, 'a' * 64), Commands=Commands,
+        with patch.dict(G, source_trial_record=lambda: (record, 'a' * 64),
+                        source_admission=lambda: (ADMITTED, ADMISSION_SHA), Commands=Commands,
                         guest_boundary=lambda _: {'inert': True}):
             return H['execute'](root / 'payload', root / 'output', 'b' * 40, profile='source-v1')
 
@@ -129,6 +208,8 @@ class SourceTrial(unittest.TestCase):
                 self.assertEqual(value['success'], not changed)
                 self.assertEqual(value['kind'], 'weather-decoder-source-trial-abi')
                 self.assertEqual(len(value['inputs']), 14)
+                self.assertEqual(value['source_admission_id'], ADMITTED['id'])
+                self.assertEqual(value['source_admission_sha256'], ADMISSION_SHA)
                 self.assertNotIn('admission_sha256', value); self.assertNotIn('hosted_run', value)
                 self.assertTrue(all(value['cleanup'].values()))
 
@@ -156,6 +237,7 @@ class SourceTrial(unittest.TestCase):
                 verifier = Mock(return_value=({'fixed-record': True}, 'a' * 64, {}))
                 with patch.dict(G, inventory_boundary=lambda _: None, source_files=lambda _: {}, source_inventory=prepare,
                     source_trial_record=lambda: ({'fixed-record': True}, 'a' * 64), verify_source_trial_inputs=verifier,
+                    source_admission=lambda: (ADMITTED, ADMISSION_SHA),
                     source_trial_environment=snapshots, execute=executor, INVENTORY_ROOT=root / 'env',
                     source_helper=lambda _: {}, load_source_lock=lambda _: ({}, H['SOURCE_ENVIRONMENT_SHA256']),
                     source_cold_build=Mock(side_effect=AssertionError('no compilation B'))):
@@ -167,6 +249,8 @@ class SourceTrial(unittest.TestCase):
                 report = json.loads((root / 'env/source-trial-report.json').read_bytes())
                 self.assertEqual(report['success'], not change and abi_success)
                 self.assertFalse(report['compiled_in_abi_guest'])
+                self.assertEqual(report['source_admission_id'], ADMITTED['id'])
+                self.assertEqual(report['source_admission_sha256'], ADMISSION_SHA)
 
     def test_changed_lock_fails_before_package_install_or_execution(self):
         installer = Mock(side_effect=AssertionError('install'))

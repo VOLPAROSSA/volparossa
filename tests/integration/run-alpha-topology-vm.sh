@@ -2138,6 +2138,7 @@ if [ "$scenario" = weather-decoder-abi ]; then
             timeout --signal=TERM --kill-after=10s 2340s python3 -B tests/integration/weather-decoder-abi.py \
                 source-build --expected-commit "$expected_commit"
         elif [ "$decoder_mode" = source-v1 ]; then
+            python3 -B tests/integration/weather-decoder-abi.py source-admission-info
             python3 -B tests/integration/weather-decoder-abi.py verify-source /home/vpci/weather-decoder-source
             python3 -B tests/integration/weather-decoder-abi.py verify-source-trial-inputs /home/vpci/weather-decoder-source-trial-inputs
             timeout --signal=TERM --kill-after=10s 1110s python3 -B tests/integration/weather-decoder-abi.py \
