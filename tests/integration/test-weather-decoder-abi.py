@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Pure fixtures/inert Python children only: never execute a decoder or bwrap."""
 import copy
+import io
 import json
 import os
 from pathlib import Path
@@ -293,7 +294,42 @@ class SourceInventory(unittest.TestCase):
             path.unlink(); path.symlink_to(source / 'absent')
             with self.assertRaises(OSError): H['stage_inventory_public'](source, root / 'link')
 
-    def run_inventory(self, root, fail_deb=False):
+    def test_quiet_qemu_logs_are_projected_while_empty_control_files_still_fail(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); source = root / 'private'; source.mkdir()
+            for name in ('qemu.stderr', 'vm-console.log'):
+                (source / name).touch(mode=0o600)
+            with self.assertRaises(ValueError): H['read_file'](source / 'qemu.stderr', 131072)
+            H['stage_inventory_public'](source, root / 'public')
+            manifest = json.loads((root / 'public/inventory-public-export.json').read_bytes())
+            for name in ('qemu.stderr', 'vm-console.log'):
+                self.assertEqual((root / 'public' / name).read_bytes(), b'')
+                self.assertEqual(manifest['files'][name], dict(bytes=0, sha256=H['digest'](b'')))
+            for name in ('inventory-report.json', 'guest-exit-status'):
+                (source / name).touch(mode=0o600)
+                captured = io.StringIO()
+                with patch.object(sys, 'stderr', captured), self.assertRaises(ValueError):
+                    H['stage_inventory_public'](source, root / ('bad-' + name))
+                failure = json.loads(captured.getvalue())
+                self.assertEqual(failure['phase'], name)
+                self.assertFalse(failure['admitted'])
+                (source / name).unlink()
+
+    def test_failure_diagnostic_keeps_machine_code_without_arbitrary_exception_text(self):
+        captured = io.StringIO()
+        with patch.object(sys, 'stderr', captured):
+            value = H['inventory_failure'](ValueError('INRELEASE_SIGNERS'), 'source-input-inventory', 'debian-inrelease-verify')
+        self.assertEqual(value['code'], 'INRELEASE_SIGNERS')
+        self.assertEqual(json.loads(captured.getvalue()), value)
+        captured = io.StringIO()
+        error = H['urllib'].error.HTTPError('https://private.invalid/token=secret', 503, 'private detail', None, None)
+        with patch.object(sys, 'stderr', captured):
+            value = H['inventory_failure'](error, 'source-input-inventory', 'debian-index-fetch')
+        self.assertEqual(value['http_status'], 503)
+        self.assertNotIn('secret', captured.getvalue())
+        self.assertNotIn('private', captured.getvalue())
+
+    def run_inventory(self, root, fail_deb=False, fail_release=False):
         events = []
         def canonical(value): return (json.dumps(value, sort_keys=True) + '\n').encode()
         helper = dict(STATUS_FORMAT='fixed status format', SCOPE={'compiled': False}, KEYRING=Path('/fixed/image/keyring'),
@@ -311,6 +347,8 @@ class SourceInventory(unittest.TestCase):
             events.append('verified-deb')
             if fail_deb: raise ValueError('DEB_DIGEST')
         helper['verified_packages'] = verified
+        if fail_release:
+            helper['verify_release'] = Mock(side_effect=ValueError('INRELEASE_SIGNATURE'))
         class InertCommands:
             def __init__(self, **_kwargs): pass
             def run(self, argv, _deadline):
@@ -324,8 +362,9 @@ class SourceInventory(unittest.TestCase):
             inventory_boundary=lambda commit: None, source_files=lambda path: {},
             snapshot_fetch=lambda *_args: events.append('download-data'), Commands=InertCommands)
         with patch.dict(G, **state), patch.object(H['runpy'], 'run_path', return_value=helper):
-            if fail_deb:
-                with self.assertRaisesRegex(ValueError, 'DEB_DIGEST'): H['source_inventory']('a' * 40)
+            if fail_deb or fail_release:
+                with self.assertRaisesRegex(ValueError, 'INRELEASE_SIGNATURE' if fail_release else 'DEB_DIGEST'):
+                    H['source_inventory']('a' * 40)
                 value = json.loads((root / 'inventory/inventory-report.json').read_bytes())
             else:
                 value = H['source_inventory']('a' * 40)
@@ -348,6 +387,14 @@ class SourceInventory(unittest.TestCase):
             self.assertFalse(value['success']); self.assertFalse(value['admitted'])
             self.assertEqual(value['phase'], 'verify-debs')
             self.assertFalse(any('--no-download' in event for event in events if isinstance(event, list)))
+
+    def test_signed_metadata_failure_preserves_exact_phase_and_error_code(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(sys, 'stderr', io.StringIO()) as diagnostic:
+            value, _events = self.run_inventory(Path(temporary), fail_release=True)
+            self.assertFalse(value['success'])
+            self.assertEqual(value['phase'], 'debian-inrelease-verify')
+            self.assertEqual(value['failure']['code'], 'INRELEASE_SIGNATURE')
+            self.assertEqual(json.loads(diagnostic.getvalue()), value['failure'])
 
 
 if __name__ == "__main__":

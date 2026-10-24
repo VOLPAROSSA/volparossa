@@ -102,13 +102,13 @@ def identity(info):
             info.st_nlink, info.st_mtime_ns, info.st_ctime_ns)
 
 
-def read_file(path, maximum, *, parent=None):
+def read_file(path, maximum, *, parent=None, allow_empty=False):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
     try:
         before = os.fstat(fd)
         require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
                 and before.st_uid in (0, os.geteuid()) and not before.st_mode & 0o7022
-                and 0 < before.st_size <= maximum)
+                and (0 <= before.st_size if allow_empty else 0 < before.st_size) and before.st_size <= maximum)
         raw = bytearray()
         while len(raw) <= maximum:
             part = os.read(fd, min(65536, maximum + 1 - len(raw)))
@@ -529,6 +529,21 @@ def inventory_apt_options(root, helper):
         "-o", "Acquire::https::Verify-Host=true"]
 
 
+def inventory_failure(error, action, phase):
+    # Only fixed phase/action labels, exception class and machine error codes
+    # leave this boundary. Never print arbitrary exception messages or URLs.
+    code = str(error)
+    value = dict(kind="weather-source-inventory-failure", admitted=False, compiled=False,
+                 action=action, phase=phase, exception=type(error).__name__,
+                 code=code if re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', code) else "SOURCE_INPUT_INVENTORY_FAILED")
+    for name, attribute in (("errno", "errno"), ("exit_status", "returncode"), ("http_status", "code")):
+        item = getattr(error, attribute, None)
+        if type(item) is int and -4096 <= item <= 4096:
+            value[name] = item
+    print(json.dumps(value, sort_keys=True), file=sys.stderr)
+    return value
+
+
 def source_inventory(commit):
     inventory_boundary(commit)
     source_files(SOURCE_GUEST)
@@ -567,14 +582,17 @@ def source_inventory(commit):
         before = command("before.tsv", ["/usr/bin/dpkg-query", "--show", "--showformat=" + helper["STATUS_FORMAT"]], 20)
         helper["inventory"](before)
         helper["capture_base"](root)
-        phase("signed-metadata")
         repositories = {}
         for name, pin in helper["REPOSITORIES"].items():
+            phase(name + "-inrelease-fetch")
             snapshot_fetch(pin["inrelease_url"], root / (name + ".InRelease"), pin["inrelease_bytes"], deadline)
+            phase(name + "-inrelease-verify")
             repositories[name] = helper["verify_release"](root / (name + ".InRelease"), name)
             index_url = pin["archive_url"] + "dists/" + pin["codename"] + "/" + helper["INDEX_PATH"]
+            phase(name + "-index-fetch")
             snapshot_fetch(index_url, root / (name + ".Packages.xz"), repositories[name]["index"]["bytes"], deadline)
             # Consume the stream now, before trusting APT or resolving packages.
+            phase(name + "-index-verify")
             for _record in helper["index_records"](root / (name + ".Packages.xz"), repositories[name]["index"]):
                 pass
         sources = ''.join("deb [arch=amd64 signed-by=" + str(helper["KEYRING"]) + "] " + pin["archive_url"] +
@@ -605,8 +623,9 @@ def source_inventory(commit):
         helper["write_candidate_file"](root / "candidate.json", helper["canonical"](value))
         report.update(success=True, candidate_sha256=digest(helper["canonical"](value)))
         phase("complete")
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, Interrupted, CleanupUnconfirmed):
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, Interrupted, CleanupUnconfirmed) as error:
         report["blocker"] = "SOURCE_INPUT_INVENTORY_FAILED"
+        report["failure"] = inventory_failure(error, "source-input-inventory", report["phase"])
         raise
     finally:
         # Keep original bounded logs even on failure; only this closed metadata
@@ -643,12 +662,18 @@ def stage_inventory_public(source, output):
     for name, maximum in INVENTORY_PUBLIC_EXPORTS.items():
         path = source / name
         if not path.exists() and not path.is_symlink(): continue
-        raw = read_file(path, maximum)
-        total += len(raw)
-        require(total <= 73 * 1024**2 and not re.search(br"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", raw),
-                "INVENTORY_PUBLIC_BOUND")
-        if name.endswith('.json'): decode(raw)
-        write_new(output / name, raw)
+        try:
+            # QEMU commonly has an empty stderr file on a quiet boot. Empty
+            # plain runner logs are evidence; JSON/status inputs stay nonempty.
+            raw = read_file(path, maximum, allow_empty=name in {"qemu.stderr", "vm-console.log"})
+            total += len(raw)
+            require(total <= 73 * 1024**2 and not re.search(br"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", raw),
+                    "INVENTORY_PUBLIC_BOUND")
+            if name.endswith('.json'): decode(raw)
+            write_new(output / name, raw)
+        except (OSError, ValueError) as error:
+            inventory_failure(error, "stage-inventory-public", name)
+            raise
         files[name] = dict(bytes=len(raw), sha256=digest(raw))
     require(files, "INVENTORY_PUBLIC_EMPTY")
     write_new(output / "inventory-public-export.json", json.dumps(dict(schema=1, admitted=False,
