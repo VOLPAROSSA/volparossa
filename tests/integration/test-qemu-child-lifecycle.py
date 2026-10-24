@@ -253,7 +253,7 @@ class ShellShutdownWiring(unittest.TestCase):
 
     def run_script(self, status, confirmed, *, normal=False, started=True):
         script = '\n'.join([
-            'set -eu', 'scenario=alpha', 'HERE=/inert', 'RUN_DIRECTORY_PARENT=$1', 'RUN_DIRECTORY_PREFIX=qemu',
+            'set -eu', 'scenario=alpha', 'decoder_mode=historical-v1', 'HERE=/inert', 'RUN_DIRECTORY_PARENT=$1', 'RUN_DIRECTORY_PREFIX=qemu',
             'RUN_DIRECTORY=$1/qemu.ABCdef', 'output_directory=$1', 'FINISHED=no',
             'WEATHER_ANDROID_OWNER_PID=', 'weather_client_version=',
             'QEMU_STARTED=' + ('yes' if started else 'no'), 'QEMU_JOINED=no',

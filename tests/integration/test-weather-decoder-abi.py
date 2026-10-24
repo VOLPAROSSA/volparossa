@@ -372,9 +372,70 @@ class SourceInventory(unittest.TestCase):
         self.assertNotIn('secret', captured.getvalue())
         self.assertNotIn('private', captured.getvalue())
 
-    def run_inventory(self, root, fail_deb=False, fail_release=False, build_mode=False):
+    def test_apt_cache_names_match_apt_epoch_underscore_and_literal_plus_spelling(self):
+        for name, version, architecture, expected in [
+            ('libfoo+bar', '2:1.0_2+deb13u1', 'amd64', 'libfoo+bar_2%3a1.0%5f2+deb13u1_amd64.deb'),
+            ('fixed-package', '1.0~rc1-2', 'all', 'fixed-package_1.0~rc1-2_all.deb')]:
+            self.assertEqual(H['apt_cache_filename'](dict(name=name, version=version, architecture=architecture)), expected)
+        for name, version, architecture in [('bad/name', '1', 'amd64'), ('bad_name', '1', 'amd64'),
+                ('valid', '1%3a2', 'amd64'), ('valid', '../1', 'amd64'), ('valid', '1', '../all')]:
+            with self.assertRaisesRegex(ValueError, 'APT_CACHE_IDENTITY'):
+                H['apt_cache_filename'](dict(name=name, version=version, architecture=architecture))
+
+    def cache_fixture(self, root):
+        (root / 'debs').mkdir(mode=0o700); (root / 'apt-cache').mkdir(mode=0o700)
+        raw = b'only preverified package data'
+        source = root / 'debs/package.deb'; source.write_bytes(raw); source.chmod(0o600)
+        package = dict(name='fixed-package', version='1:2+deb13u1', architecture='amd64',
+                       filename='pool/package.deb', bytes=len(raw), sha256=H['digest'](raw))
+        target = root / 'apt-cache' / H['apt_cache_filename'](package)
+        return raw, source, package, target
+
+    def test_apt_cache_copies_exact_separate_single_link_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            raw, source, package, target = self.cache_fixture(Path(temporary))
+            H['stage_verified_apt_cache'](Path(temporary), [package])
+            self.assertEqual(target.read_bytes(), raw)
+            self.assertEqual((source.stat().st_nlink, target.stat().st_nlink), (1, 1))
+            self.assertNotEqual(source.stat().st_ino, target.stat().st_ino)
+            self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+
+    def test_apt_cache_never_overwrites_or_follows_source_destination_or_directory_links(self):
+        for mutation in ('existing', 'destination-link', 'source-link', 'directory-link'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); raw, source, package, target = self.cache_fixture(root)
+                other = root / 'other'; other.write_bytes(raw); other.chmod(0o600)
+                if mutation == 'existing': target.write_bytes(b'preserved'); target.chmod(0o600)
+                elif mutation == 'destination-link': target.symlink_to(other)
+                elif mutation == 'source-link': source.unlink(); source.symlink_to(other)
+                else:
+                    (root / 'apt-cache').rmdir(); (root / 'apt-cache').symlink_to(root / 'debs', target_is_directory=True)
+                with self.assertRaises(OSError): H['stage_verified_apt_cache'](root, [package])
+                self.assertEqual(other.read_bytes(), raw)
+                if mutation == 'existing': self.assertEqual(target.read_bytes(), b'preserved')
+
+    def test_apt_cache_rehashes_source_and_actual_copied_bytes(self):
+        for mutation in ('source', 'copy'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); raw, source, package, target = self.cache_fixture(root)
+                if mutation == 'source':
+                    source.write_bytes(b'changed after verification')
+                    with self.assertRaisesRegex(ValueError, 'APT_CACHE_SOURCE_DIGEST'):
+                        H['stage_verified_apt_cache'](root, [package])
+                    self.assertFalse(target.exists())
+                else:
+                    original = H['read_file']
+                    def changed(path, maximum, **kwargs):
+                        actual = original(path, maximum, **kwargs)
+                        return b'corrupt copied bytes' if kwargs.get('parent') is not None else actual
+                    with patch.dict(G, read_file=changed), self.assertRaisesRegex(ValueError, 'APT_CACHE_COPY_DIGEST'):
+                        H['stage_verified_apt_cache'](root, [package])
+
+    def run_inventory(self, root, fail_deb=False, fail_release=False, build_mode=False, fail_cache=False, fail_lock=False):
         events = []
         def canonical(value): return (json.dumps(value, sort_keys=True) + '\n').encode()
+        deb = b'verified package fixture'
+        package = dict(name='fixed-package', version='1:2.0+deb13u1', architecture='amd64', repository='debian', filename='pool/main/f/fixed/package.deb', bytes=len(deb), sha256=H['digest'](deb))
         helper = dict(STATUS_FORMAT='fixed status format', SCOPE={'compiled': False}, KEYRING=Path('/fixed/image/keyring'),
             INDEX_PATH='main/binary-amd64/Packages.xz', ROOT_PACKAGES=['fixed-package'],
             APT_OPTIONS=['--no-install-recommends', '--no-remove'],
@@ -383,15 +444,17 @@ class SourceInventory(unittest.TestCase):
             inventory=lambda raw: [], capture_base=lambda directory: events.append('baseline'),
             verify_release=lambda *_args: dict(index={'bytes': 100, 'sha256': 'a' * 64}), index_records=lambda *_args: iter([{}]),
             resolver_inventory=lambda raw: [{'name': 'fixed-package'}],
-            indexed_packages=lambda *_args: [dict(repository='debian', filename='pool/main/f/fixed/package.deb', bytes=100, sha256='b' * 64)],
+            indexed_packages=lambda *_args: [package],
             candidate=lambda directory: {'admitted': False}, validate_record=lambda value, admitted: value,
             package_delta=lambda *_args: [{'name': 'fixed-package'}],
-            verify_locked_inputs=lambda *_args: {'environment_lock_sha256': '1' * 64},
+            verify_locked_inputs=lambda *_args: {'environment_lock_sha256': ('2' if fail_lock else '1') * 64},
             check_environment=lambda: {'environment_lock_sha256': '1' * 64},
             canonical=canonical, write_candidate_file=H['write_new'])
         def verified(*_args):
             events.append('verified-deb')
             if fail_deb: raise ValueError('DEB_DIGEST')
+            if fail_cache: (root / 'inventory/debs/package.deb').write_bytes(b'changed after verification')
+            return [package]
         helper['verified_packages'] = verified
         if fail_release:
             helper['verify_release'] = Mock(side_effect=ValueError('INRELEASE_SIGNATURE'))
@@ -402,17 +465,24 @@ class SourceInventory(unittest.TestCase):
                 if '--no-download' in argv:
                     self_test.assertIn('verified-deb', events)
                     self_test.assertNotIn('compile', events)
+                    self_test.assertEqual((root / 'inventory/apt-cache/fixed-package_1%3a2.0+deb13u1_amd64.deb').read_bytes(), deb)
+                    self_test.assertEqual((root / 'inventory/debs/package.deb').stat().st_nlink, 1)
                 return 0, b'inert log\n'
         self_test = self
+        def fetch(_url, path, *_args):
+            events.append('download-data')
+            path.write_bytes(deb if path.suffix == '.deb' else b'metadata')
+            path.chmod(0o600)
         state = dict(INVENTORY_ROOT=root / 'inventory', INVENTORY_PHASE=root / 'phase',
             inventory_boundary=lambda commit: None, source_files=lambda path: {},
-            snapshot_fetch=lambda *_args: events.append('download-data'), Commands=InertCommands)
+            snapshot_fetch=fetch, Commands=InertCommands)
         if build_mode:
             state['load_source_lock'] = lambda _helper: (dict(before=[], after=[],
                 repositories={'debian': dict(index={'bytes': 100, 'sha256': 'a' * 64})}), '1' * 64)
         with patch.dict(G, **state), patch.object(H['runpy'], 'run_path', return_value=helper):
-            if fail_deb or fail_release:
-                with self.assertRaisesRegex(ValueError, 'INRELEASE_SIGNATURE' if fail_release else 'DEB_DIGEST'):
+            if fail_deb or fail_release or fail_cache or fail_lock:
+                error = 'INRELEASE_SIGNATURE' if fail_release else 'DEB_DIGEST' if fail_deb else 'APT_CACHE_SOURCE_DIGEST' if fail_cache else 'ENVIRONMENT_LOCK_CHANGED'
+                with self.assertRaisesRegex(ValueError, error):
                     H['source_inventory']('a' * 40, build_mode=build_mode)
                 value = json.loads((root / 'inventory/inventory-report.json').read_bytes())
             else:
@@ -436,6 +506,13 @@ class SourceInventory(unittest.TestCase):
             self.assertFalse(value['success']); self.assertFalse(value['admitted'])
             self.assertEqual(value['phase'], 'verify-debs')
             self.assertFalse(any('--no-download' in event for event in events if isinstance(event, list)))
+
+    def test_inventory_never_installs_after_cache_rehash_or_locked_input_failure(self):
+        for options in (dict(fail_cache=True), dict(fail_lock=True, build_mode=True)):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as temporary:
+                value, events = self.run_inventory(Path(temporary), **options)
+                self.assertFalse(value['success'])
+                self.assertFalse(any('--no-download' in event for event in events if isinstance(event, list)))
 
     def test_signed_metadata_failure_preserves_exact_phase_and_error_code(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(sys, 'stderr', io.StringIO()) as diagnostic:

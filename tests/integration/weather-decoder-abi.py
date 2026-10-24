@@ -610,6 +610,44 @@ def inventory_apt_options(root, helper):
         "-o", "Acquire::https::Verify-Host=true"]
 
 
+def apt_cache_filename(package):
+    # APT3's QuoteString uses lowercase hex, and '+' remains literal. These
+    # identities have already come from the authenticated package projection.
+    name, version, architecture = (package.get(key) for key in ("name", "version", "architecture"))
+    require(type(name) is str and re.fullmatch(r"[a-z0-9][a-z0-9+.-]{0,127}", name)
+            and type(version) is str and re.fullmatch(r"[0-9][A-Za-z0-9.+:~_-]{0,255}", version)
+            and architecture in ("amd64", "all"), "APT_CACHE_IDENTITY")
+    quote = lambda value, bad: ''.join(f"%{ord(char):02x}" if char in bad else char for char in value)
+    return quote(name, "_:") + "_" + quote(version, "_:") + "_" + quote(architecture, "_:.") + ".deb"
+
+
+def stage_verified_apt_cache(root, packages):
+    cache = os.open(root / "apt-cache", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(cache)
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid()
+                and not info.st_mode & 0o022, "APT_CACHE_DIRECTORY")
+        for package in packages:
+            name = apt_cache_filename(package)
+            size, checksum = package["bytes"], package["sha256"]
+            require(type(size) is int and 0 < size <= 128 * 1024**2
+                    and hex_value(checksum, 64), "APT_CACHE_PIN")
+            raw = read_file(root / "debs" / Path(package["filename"]).name, 128 * 1024**2)
+            require(len(raw) == size and digest(raw) == checksum, "APT_CACHE_SOURCE_DIGEST")
+            # Separate bytes, never hardlinks: the original verified input must
+            # retain its single-link identity for later helper checks.
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         0o600, dir_fd=cache)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            copied = read_file(name, 128 * 1024**2, parent=cache)
+            require(len(copied) == size and digest(copied) == checksum, "APT_CACHE_COPY_DIGEST")
+    finally:
+        os.close(cache)
+
+
 def inventory_failure(error, action, phase):
     # Only fixed phase/action labels, exception class and machine error codes
     # leave this boundary. Never print arbitrary exception messages or URLs.
@@ -701,9 +739,13 @@ def source_inventory(commit, build_mode=False):
             snapshot_fetch(pin["archive_url"] + package["filename"], root / "debs" / Path(package["filename"]).name,
                            package["bytes"], deadline, package["sha256"])
         # Every archive and payload member is verified before apt can install it.
-        helper["verified_packages"](root, selected, repositories)
+        packages = helper["verified_packages"](root, selected, repositories)
         if build_mode:
             require(helper["verify_locked_inputs"](root)["environment_lock_sha256"] == lock_sha, "ENVIRONMENT_LOCK_CHANGED")
+        # --no-download requires APT's own canonical cache entries even when
+        # exact local package paths are supplied alongside the signed index.
+        phase("stage-apt-cache")
+        stage_verified_apt_cache(root, packages)
         phase("install")
         paths = [str(root / "debs" / Path(package["filename"]).name) for package in packages]
         require(paths, "INVENTORY_EMPTY_INSTALL")
