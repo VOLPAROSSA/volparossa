@@ -343,7 +343,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    use std::os::unix::fs::symlink;
 
     use serde::Deserialize;
     use tempfile::tempdir;
