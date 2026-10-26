@@ -2,13 +2,10 @@
 
 DPS is a shared VOLPAROSSA core service for local positioning, source consistency
 and eventually independent GNSS integrity assessment. It uses the existing five
-DICN infrastructure layers. The [complete goal](../development/GOAL.md) remains
-the project-wide authority. The [joined DPS requirements](../development/DPS_REQUIREMENTS.md)
-are the permanent normative DPS scope; the byte-preserved
-[DPS_GOAL_20261021 provenance archive](../development/DPS_GOAL_20261021.md) is
-retained only to document received source text and hashes. This service design
-and acceptance sequence explain implementation choices; they do not cap or
-replace either goal. The [implementation ledger](../IMPLEMENTATION_STATUS.md#decentralized-positioning-system--2026-10-21)
+DICN infrastructure layers. The [DPS section of the complete goal](../development/GOAL.md#dps)
+defines its functional requirements. This page records service design and staged
+acceptance, without capping that scope. The [source archive](../archive/requirements-20261023/README.md)
+retains the received texts and hashes. The [implementation ledger](../IMPLEMENTATION_STATUS.md#decentralized-positioning-system--2026-10-21)
 records accepted evidence. Chat attachments or transcript context are not
 requirements dependencies. This design is not a claim of working sensor fusion,
 GNSS-free navigation, anonymous ranging or comprehensive spoofing detection.
@@ -313,7 +310,7 @@ continuation. They do not displace existing critical integrations.
 | Chat / Mail | Only explicit encrypted location sharing with the selected recipient and precision/expiry. Preserve the Signal Protocol and limited retention in Chat, including future local positioning features. Receiving DPS help does not authorize sharing. |
 | Browser | Origin-scoped permission and precision controls through a future browser adapter. No background geographic fingerprint or bypass of browser geolocation consent. |
 | Cloud | Optional private storage/synchronisation of explicitly retained records; no automatic location history. |
-| Studio / hosted websites | The [permanent hosting addition](../development/STUDIO_HOSTING_REQUIREMENTS.md) permits useful optional map/location components only within explicit purpose and precision permissions. A map does not authorize publication of coordinates, movement history or private media metadata; use the existing DPS/Map and browser boundaries. |
+| Studio / hosted websites | The [permanent hosting addition](../development/GOAL.md#studio) permits useful optional map/location components only within explicit purpose and precision permissions. A map does not authorize publication of coordinates, movement history or private media metadata; use the existing DPS/Map and browser boundaries. |
 | Code | Reuse service contracts and synthetic evaluation tools; no default need for the developer's physical location. |
 | Bank / Citizen | No default positioning dependency. Location is not identity, residence, citizenship, financial authority or voting eligibility. Any concrete future use needs its own justified authorisation and threat analysis. |
 

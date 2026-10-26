@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
-"""Verify immutable requirement sources and effective scope references.
+"""Verify archived requirement sources and integrated goal sections.
 
 This is an inert repository check, not a semantic completeness or implementation
 acceptance proof. No attachments, network access, native builds or writes are
@@ -22,18 +22,16 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 MAX_DOCUMENT = 4 * 1024 * 1024
 GOAL = "docs/development/GOAL.md"
-ARCHIVE = "docs/development/DPS_GOAL_20261021.md"
-CONSOLIDATED = "docs/development/DPS_REQUIREMENTS.md"
-SOURCE_GOAL = "docs/development/GOAL_SOURCE_20261023.md"
-SOURCE_DPS = "docs/development/DPS_REQUIREMENTS_SOURCE_20261023.md"
-SOURCE_STUDIO = "docs/development/STUDIO_HOSTING_REQUIREMENTS_SOURCE_20261023.md"
+SOURCE_DIRECTORY = "docs/archive/requirements-20261023/"
+ARCHIVE = SOURCE_DIRECTORY + "DPS_GOAL_20261021.md.txt"
+SOURCE_GOAL = SOURCE_DIRECTORY + "GOAL.md.txt"
+SOURCE_DPS = SOURCE_DIRECTORY + "DPS_REQUIREMENTS.md.txt"
+SOURCE_STUDIO = SOURCE_DIRECTORY + "STUDIO_HOSTING_REQUIREMENTS.md.txt"
 SOURCE_HASHES = {
     SOURCE_GOAL: "302af13b29e0cc1ce9ac09889669ff3866a233403134aca3bf6c25f6ce091393",
     SOURCE_DPS: "abe2b6643a52ea5d579ce8cd4ab7a143fb1a43dd4504cce034a70bd454211c59",
     SOURCE_STUDIO: "4e3d92e240b32b3208829e02f46dd038bc0d15349795e0cf2c983a9f333b6d93",
 }
-PROMPT = "docs/development/PURSUING_GOAL.md"
-STUDIO = "docs/development/STUDIO_HOSTING_REQUIREMENTS.md"
 STUDIO_SHA = "a9fc3d875a48083720941aa74d1c00c506038f7550bbe983e6f0e91e2fe2dc50"
 PRE_STUDIO_SHA = "d8155106a231be9863be613e03594ca2838c8d57bbe9ddfcd00a32d27e758a40"
 ORIGINAL_SHA = "2bebaf9e27860115e64f5b93f50cc1e5bc17d34b22c45fe83106d200b86b54c7"
@@ -128,9 +126,9 @@ def references(raw, names):
 
 
 def verify(root, revision=None):
-    result = dict(version=2, source="committed-blobs" if revision else "worktree",
+    result = dict(version=3, source="committed-blobs" if revision else "worktree",
                   git_revision=revision, success=False,
-                  scope="source-byte-preservation-and-active-references-only",
+                  scope="source-byte-preservation-and-integrated-section-markers-only",
                   checks={}, payloads={}, errors=[])
 
     def check(name, operation):
@@ -154,7 +152,7 @@ def verify(root, revision=None):
             return result
 
     documents = {}
-    for path in (GOAL, CONSOLIDATED, STUDIO, PROMPT, ARCHIVE, *SOURCE_HASHES):
+    for path in (GOAL, ARCHIVE, *SOURCE_HASHES):
         value = check("read:" + path, lambda path=path: read_document(root, path, revision))
         if value is not None:
             documents[path] = value
@@ -213,32 +211,21 @@ def verify(root, revision=None):
         require(consolidated.count(MAP) == 1, "consolidated DPS must contain exactly one Map heading")
     check("exact_dps_consolidation_and_single_map", dps_equality)
 
-    def goal_reference():
-        require(GOAL in documents, "GOAL document unavailable")
-        references(documents[GOAL], ("DPS_REQUIREMENTS.md",))
-    check("goal_references_consolidated_dps", goal_reference)
-    check("goal_references_studio_hosting", lambda: references(
-        documents.get(GOAL, b""), ("STUDIO_HOSTING_REQUIREMENTS.md",)))
+    check("goal_source_reference", lambda: references(
+        documents.get(GOAL, b""), ("../archive/requirements-20261023/README.md",)))
 
-    for active, snapshot in ((GOAL, SOURCE_GOAL), (CONSOLIDATED, SOURCE_DPS),
-                             (STUDIO, SOURCE_STUDIO)):
-        check("effective_requirement_source:" + active,
-              lambda active=active, snapshot=snapshot: references(
-                  documents.get(active, b""), (Path(snapshot).name,)))
-
-    def prompt_references():
-        require(PROMPT in documents, "PURSUING_GOAL document unavailable")
-        references(documents[PROMPT], ("GOAL.md", "AGENTS.md", "IMPLEMENTATION_STATUS.md",
-                                      "CODEX_WORKFLOW.md", "DPS_REQUIREMENTS.md",
-                                      "STUDIO_HOSTING_REQUIREMENTS.md"))
-        text = documents[PROMPT].decode("utf-8")
-        phrase = r"\b(?:(?:all|every)\s+(?:(?:earlier|previous|agreed|subsequent|later)\s+)*(?:amendments?|clarifications?)|alle\s+(?:(?:eerdere|latere|afgesproken|bestaande)\s+)*(?:aanvullingen|verduidelijkingen|wijzigingen))\b"
-        require(re.search(phrase, text, re.IGNORECASE),
-                "resume prompt must explicitly retain all amendments/clarifications")
-        require(re.search(r"\bDPS\b", text), "resume prompt must explicitly name DPS")
-        require(re.search(r"\bStudio\b", text) and re.search(r"\bhosting\b", text, re.IGNORECASE),
-                "resume prompt must explicitly name Studio and hosting")
-    check("resume_prompt_explicit_scope_and_references", prompt_references)
+    def integrated_sections():
+        text = documents.get(GOAL, b"").decode("utf-8")
+        for section in ("dps", "studio"):
+            marker = f'<a id="{section}"></a>'
+            require(text.count(marker) == 1, section + ": expected one integrated section marker")
+            match = re.search(re.escape(marker) + r"\s*\n(#{1,6}) [^\n]+\n", text)
+            require(match is not None, section + ": marker must introduce a goal heading")
+            following = text[match.end():]
+            boundary = re.search(r"(?m)^#{1," + str(len(match[1])) + r"} ", following)
+            body = following[:boundary.start()] if boundary else following
+            require(bool(body.strip()), section + ": integrated requirement section is empty")
+    check("goal_integrated_sections", integrated_sections)
     result["success"] = all(result["checks"].values())
     return result
 
@@ -250,7 +237,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     revision = args.git_revision
     if revision is not None and not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
-        print(json.dumps(dict(version=2, success=False, errors=[dict(
+        print(json.dumps(dict(version=3, success=False, errors=[dict(
             check="git_revision_argument", reason="expected exactly 40 hexadecimal characters")]), sort_keys=True))
         return 2
     result = verify(ROOT, revision.lower() if revision else None)

@@ -1,8 +1,8 @@
 # VOLPAROSSA implementation status
 
 This is the current execution index for the complete [DICN goal](development/GOAL.md),
-including [DPS](development/DPS_REQUIREMENTS.md) and
-[Studio/hosting](development/STUDIO_HOSTING_REQUIREMENTS.md). Use [AGENTS.md](../AGENTS.md)
+including [DPS](development/GOAL.md#dps) and
+[Studio/hosting](development/GOAL.md#studio). Use [AGENTS.md](../AGENTS.md)
 for engineering boundaries and the [development workflow](development/CODEX_WORKFLOW.md)
 for scoped execution. A milestone does not reduce the agreed goal.
 
@@ -15,20 +15,24 @@ that it is running now. Later local baseline `6542b42f505c` changes README text 
 [Current work](#current-integration-and-active-work) ·
 [Priorities](#execution-priorities-and-next-milestones) ·
 [Retained work](#retained-branches-and-resumption-dependencies) ·
-[Historical evidence](IMPLEMENTATION_HISTORY_20261023.md) ·
+[Historical evidence](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md) ·
 [Completion](#definition-of-done)
 
-The [historical ledger](IMPLEMENTATION_HISTORY_20261023.md) preserves the previous
+The [historical ledger](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md) preserves the previous
 1,424,479 bytes unchanged, including original source revisions, run/artifact IDs,
 digests, failures and scorecard. Its dated model assignments, session status and
 procedural instructions are historical; current AGENTS/workflow supersede them.
-Read the linked evidence for the task, rather than loading the entire archive.
+The [local source archive](archive/requirements-20261023/README.md) retains the
+original bytes for offline inspection. Read only evidence relevant to the task.
 
 ## Current integration and active work
 
 ### Development workflow — 2026-10-26
 
-The revised development policy replaces fixed model/effort/role assignments with
+The complete requirements now live in one GOAL, with DPS as a shared service and
+Studio/hosting among the applications. Duplicate goal/prompt and add-on requirement
+files are removed; source records live in the archive. The revised development
+policy replaces fixed model/effort/role assignments with
 task-driven selection supported by the current client. Effective requirements and
 workflow are streamlined; original requirement snapshots and the evidence ledger
 remain byte-identical. Preservation/reference checks and independent scope review
@@ -105,7 +109,7 @@ system value; these priorities impose no fixed application/model/agent order.
   pass; ordinary Quality and actual Alpha 39871646877 are recorded pending in
   this checkpoint. Refresh them before deciding the next action.
 
-[Full Storage evidence and original failures](IMPLEMENTATION_HISTORY_20261023.md#execution-priorities-and-next-milestones)
+[Full Storage evidence and original failures](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#execution-priorities-and-next-milestones)
 retain exact pins, artifacts and receipts. Automatic upload branch PR279 still
 requires the complete consumer profile, finite authority, actual enrollment,
 repeated restore and all-copy deletion; SDK source checks do not replace it.
@@ -134,7 +138,7 @@ repeated restore and all-copy deletion; SDK source checks do not replace it.
 Keep strict raw host equality, unchanged public-job authority, bounded
 privacy-safe diagnostics and original failures. Public fixture execution is not
 confidential/private-workload acceptance. The
-[full record](IMPLEMENTATION_HISTORY_20261023.md#resumed-full-objective-and-dependency-work--2026-10-22)
+[full record](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#resumed-full-objective-and-dependency-work--2026-10-22)
 retains exact source/tree manifests and failed/successful artifacts.
 
 ### Studio and shared hosting evidence
@@ -158,7 +162,7 @@ hosting, shared AI and all fifteen Studio acceptance cases remain open.
 The pinned publication route currently builds vectors and reads Storage assets
 before calling the connector; preparation must be bounded before that seam.
 
-[Studio evidence, failed trials and source bindings](IMPLEMENTATION_HISTORY_20261023.md#studiohosting-scope-and-preserved-work--2026-10-22)
+[Studio evidence, failed trials and source bindings](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#studiohosting-scope-and-preserved-work--2026-10-22)
 remain available without becoming routine startup context.
 
 ### Decentralized positioning system — 2026-10-21
@@ -180,7 +184,7 @@ application identity/permission authority remain unproved. The fixture stack
 enters Map main as `ae7a5ccdbd14`, documentation as `8a227709e99f`.
 Preserve unpublished Map `feature/native-traffic-lifecycle` at `ca7a4e59a057`.
 
-[DPS/Map history](IMPLEMENTATION_HISTORY_20261023.md#decentralized-positioning-system--2026-10-21)
+[DPS/Map history](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#decentralized-positioning-system--2026-10-21)
 and the [service contract](services/DPS.md) retain research and acceptance detail.
 
 ### Latest completed integration evidence
@@ -204,8 +208,8 @@ and the [service contract](services/DPS.md) retain research and acceptance detai
   settlement and complete Bank functionality remain open.
 
 These results remain bound to their actual source and scenario.
-[Earlier completed integration details](IMPLEMENTATION_HISTORY_20261023.md#latest-completed-integration-evidence)
-and [Transaction evidence](IMPLEMENTATION_HISTORY_20261023.md#bank-and-transaction-layer-implementation)
+[Earlier completed integration details](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#latest-completed-integration-evidence)
+and [Transaction evidence](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#bank-and-transaction-layer-implementation)
 include independent review, resource limits, artifacts and unresolved cases.
 
 ### Retained branches and resumption dependencies
@@ -234,7 +238,7 @@ artifacts expire, record the evidence gap rather than reconstructing success.
 
 ## Network baseline and remaining proof
 
-The original [full v1 checkpoint](IMPLEMENTATION_HISTORY_20261023.md#current-live-integration-checkpoint)
+The original [full v1 checkpoint](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#current-live-integration-checkpoint)
 passes A01–A15 on `482e33d0` with complete privacy captures, real MPTCP aggregation,
 path-loss survival, 25 forced crashes/helper restart recovery and zero owned
 objects after cleanup. Run 34047766913 and Quality 34047735082 bind that source.
@@ -249,7 +253,7 @@ part of completion.
 ## Fixed alpha v1 scorecard
 
 The frozen original twenty-row, 100-point criteria and AV1/A01–A15 definitions
-remain in the [preserved scorecard](IMPLEMENTATION_HISTORY_20261023.md#fixed-alpha-v1-scorecard).
+remain in the [preserved scorecard](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#fixed-alpha-v1-scorecard).
 Its pre-vertical 11/100 value is historical, not today's score. Later accepted
 same-build v1 execution is recorded above; no new full-goal percentage is assigned
 by reorganizing documentation. Functional extensions remain required regardless
@@ -266,27 +270,27 @@ not additional startup reading or current completion assertions.
 <a id="latest-completed-integration-evidence--15-october"></a>
 <a id="latest-completed-integration-evidence--1516-october"></a>
 
-- [Original live network checkpoint](IMPLEMENTATION_HISTORY_20261023.md#current-live-integration-checkpoint)
-  and [earlier functional candidate](IMPLEMENTATION_HISTORY_20261023.md#current-candidate-functional-integration-in-progress).
-- [Earlier native/consumer milestones](IMPLEMENTATION_HISTORY_20261023.md#latest-completed-integration-evidence).
+- [Original live network checkpoint](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#current-live-integration-checkpoint)
+  and [earlier functional candidate](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#current-candidate-functional-integration-in-progress).
+- [Earlier native/consumer milestones](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#latest-completed-integration-evidence).
 
 <a id="latest-dns-integration-checkpoint"></a>
 <a id="latest-known-contact-mailbox-integration-checkpoint"></a>
 <a id="latest-content-integration-checkpoint"></a>
 <a id="earlier-milestone-evidence"></a>
 
-- [DNS](IMPLEMENTATION_HISTORY_20261023.md#latest-dns-integration-checkpoint),
-  [known-contact mailbox](IMPLEMENTATION_HISTORY_20261023.md#latest-known-contact-mailbox-integration-checkpoint),
-  [content](IMPLEMENTATION_HISTORY_20261023.md#latest-content-integration-checkpoint)
-  and [earlier milestones](IMPLEMENTATION_HISTORY_20261023.md#earlier-milestone-evidence).
+- [DNS](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#latest-dns-integration-checkpoint),
+  [known-contact mailbox](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#latest-known-contact-mailbox-integration-checkpoint),
+  [content](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#latest-content-integration-checkpoint)
+  and [earlier milestones](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#earlier-milestone-evidence).
 
 <a id="additional-application-and-autonomous-maintenance-scope"></a>
 <a id="android-to-core-integration-boundary"></a>
 <a id="warm-mpquic-growth-integration"></a>
 
-- [Application/maintenance integration](IMPLEMENTATION_HISTORY_20261023.md#additional-application-and-autonomous-maintenance-scope)
-  and [Android integration evidence](IMPLEMENTATION_HISTORY_20261023.md#installed-android-verification).
-- [Network candidate and growth evidence](IMPLEMENTATION_HISTORY_20261023.md#current-candidate-functional-integration-in-progress).
+- [Application/maintenance integration](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#additional-application-and-autonomous-maintenance-scope)
+  and [Android integration evidence](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#installed-android-verification).
+- [Network candidate and growth evidence](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#current-candidate-functional-integration-in-progress).
 
 <a id="explicit-local-policy-for-protected-compute"></a>
 <a id="guest-owned-protected-compute-session-candidate"></a>
@@ -294,11 +298,11 @@ not additional startup reading or current completion assertions.
 <a id="authorized-quote-exchange-candidate"></a>
 <a id="explicit-public-code-proposals-bounded-peer-repair-passes"></a>
 
-- [Protected local policy](IMPLEMENTATION_HISTORY_20261023.md#explicit-local-policy-for-protected-compute),
-  [guest-owned session](IMPLEMENTATION_HISTORY_20261023.md#guest-owned-protected-compute-session-candidate),
-  [verifier preparation](IMPLEMENTATION_HISTORY_20261023.md#protected-compute-verifier-preparation),
-  [authorized quote exchange](IMPLEMENTATION_HISTORY_20261023.md#authorized-quote-exchange-and-authenticated-refusal)
-  and [public peer repair](IMPLEMENTATION_HISTORY_20261023.md#explicit-public-code-proposals-bounded-peer-repair-passes).
+- [Protected local policy](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#explicit-local-policy-for-protected-compute),
+  [guest-owned session](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#guest-owned-protected-compute-session-candidate),
+  [verifier preparation](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#protected-compute-verifier-preparation),
+  [authorized quote exchange](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#authorized-quote-exchange-and-authenticated-refusal)
+  and [public peer repair](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#explicit-public-code-proposals-bounded-peer-repair-passes).
 
 ## Definition of done
 

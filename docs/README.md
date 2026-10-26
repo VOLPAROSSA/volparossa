@@ -9,8 +9,8 @@ the documentation describes both implemented milestones and intended capabilitie
 
 ## Find the right folder
 
-The top level keeps this guide, the FAQ, a compact implementation status and its
-separate historical evidence ledger.
+The top level keeps this guide, the FAQ and compact implementation status.
+Historical source records live in `archive/`.
 Technical documents are grouped by subject so the folder itself is easier to browse:
 
 | Folder | Contents |
@@ -49,8 +49,7 @@ or go directly to a topic when you already know what you need.
 2. Read the repository's [engineering instructions](../AGENTS.md) and
    [current implementation status](IMPLEMENTATION_STATUS.md). For a full project
    resumption, read the [complete agreed goal](development/GOAL.md), including
-   [DPS](development/DPS_REQUIREMENTS.md) and
-   [Studio/hosting](development/STUDIO_HOSTING_REQUIREMENTS.md). For a bounded task,
+   its DPS and Studio/hosting sections. For a bounded task,
    load the relevant requirements; the complete scope remains authoritative.
 3. Follow the status links for retained work, exact revisions, acceptance evidence
    and dependencies. Read historical records only when the task needs them.
@@ -107,17 +106,15 @@ or go directly to a topic when you already know what you need.
 ## Operations and project reference
 
 - [Agreed goal](development/GOAL.md): effective complete objective and integrated amendments.
-- [Studio/hosting requirements](development/STUDIO_HOSTING_REQUIREMENTS.md): complete permanent Silex, hosting and shared AI amendment.
-- [DPS requirements](development/DPS_REQUIREMENTS.md): complete joined and permanent normative positioning scope.
-- [DPS source archive](development/DPS_GOAL_20261021.md): byte-preserved provenance only; not the current normative requirements file.
-- [Continuation prompt](development/PURSUING_GOAL.md): optional text for resuming the complete goal in any client.
-- [Goal verification](development/GOAL_VERIFICATION.md): source preservation and inclusion checks when requirements change.
+- [DPS](development/GOAL.md#dps) and [Studio/hosting](development/GOAL.md#studio): integrated sections of the same complete goal.
+- [Source archive](archive/requirements-20261023/README.md): original requirements and historical evidence; not startup reading.
+- [Requirement preservation](development/TESTING.md#requirement-preservation): checks when requirements change.
 - [Goal preservation verifier](../scripts/verify-goal-preservation.py): standard-library-only integrity check.
 - [Shared development workflow](development/CODEX_WORKFLOW.md): task-driven execution, delegation, verification and handover for any client.
 - [Operations](development/OPERATIONS.md): configuration, commands, packaging and removal.
 - [Testing](development/TESTING.md): focused checks, disposable topologies and acceptance requirements.
 - [Implementation status](IMPLEMENTATION_STATUS.md): compact current work, evidence and dependencies.
-- [Historical evidence](IMPLEMENTATION_HISTORY_20261023.md): preserved detailed checkpoints, including failed trials; not default startup reading.
+- [Historical evidence](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md): preserved detailed checkpoints, including failed trials; not default startup reading.
 - [Public growth readiness](development/PUBLIC_GROWTH_20261020.md): organization audit, verification and sustainable outreach/funding roadmap.
 - [2026-10-20 repository maintenance](development/MAINTENANCE_20261020.md): measured cleanup outcomes and retained recovery state.
 - [Execution plan](IMPLEMENTATION_STATUS.md#execution-priorities-and-next-milestones): next milestones, shared dependencies and current blockers.

@@ -8,7 +8,7 @@ applications and new research projects to its shared capabilities. They are
 own current implementation and evidence; this page explains the scope and major boundaries.
 
 The [complete agreed goal](../development/GOAL.md) preserves the full application scope;
-the [joined DPS requirements](../development/DPS_REQUIREMENTS.md) preserve the
+its [DPS section](../development/GOAL.md#dps) preserves the
 permanent cross-application positioning scope;
 the [core implementation ledger](../IMPLEMENTATION_STATUS.md#current-integration-and-active-work)
 records shared dependencies and exact acceptance evidence. Follow each application's linked
@@ -23,13 +23,14 @@ See the [shared-service contract](../architecture/APPLICATION_LIFECYCLE.md).
 
 [volparossa-studio](https://github.com/VOLPAROSSA/volparossa-studio) is the required
 Silex-based visual website editor, portable export and shared decentralized hosting
-integration. The [complete amendment](../development/STUDIO_HOSTING_REQUIREMENTS.md)
+integration. The [Studio section of the goal](../development/GOAL.md#studio)
 requires visual/manual editing, preview, explicit publication, actual independent
 availability, updates/recovery/withdrawal and shared protected AI through Core and
 supported Silex interfaces. [The architecture and initial audit](../services/STUDIO_HOSTING.md)
 separate static publishing from progressive dynamic execution and durable state.
-The initial repository is only a README/license scaffold; no working Studio
-integration or hosted-site acceptance is claimed.
+The initial audit started from a README/license scaffold. Current bounded
+editing/export evidence is recorded in [implementation status](../IMPLEMENTATION_STATUS.md#studio-and-shared-hosting-evidence);
+complete production publication and independently available hosting remain open.
 
 Reuse Browser discovery/rendering with existing TLS/fallback/killswitch policy;
 Cloud private project storage; Code/OpenCode editing/testing/review; explicitly
@@ -117,7 +118,7 @@ Signed traffic-snapshot validation exists; live aggregation and mobile display r
 Sharing congestion should not expose individual journeys or complete location histories.
 Licenses, freshness and uncertainty remain relevant even when data comes from nearby peers.
 
-The [joined DPS requirements](../development/DPS_REQUIREMENTS.md) define the
+The [joined DPS requirements](../development/GOAL.md#dps) define the
 permanent application scope; the [DPS service design](../services/DPS.md) records
 implementation and acceptance choices. Together they cover alternative or
 complementary location sources, including weak-GNSS, tunnel/indoor and

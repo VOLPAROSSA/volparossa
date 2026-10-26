@@ -8,17 +8,17 @@ instructions rather than session transcripts or tool-specific rituals.
 
 1. Read the task, applicable AGENTS instructions and the compact
    [implementation status](../IMPLEMENTATION_STATUS.md). For a full-project resume,
-   read the complete effective [goal](GOAL.md), including its incorporated
-   [DPS](DPS_REQUIREMENTS.md) and [Studio/hosting](STUDIO_HOSTING_REQUIREMENTS.md)
-   requirements. For a bounded task, load the relevant requirements and contracts.
+   read the complete [goal](GOAL.md), including its integrated [DPS](GOAL.md#dps)
+   and [Studio/hosting](GOAL.md#studio) sections. For a bounded task, load the
+   relevant requirements and contracts.
 2. Inspect status and ownership before writing. Use `git status --short --branch`
    and, when working across checkouts, `git worktree list`. Refresh remote heads,
    relevant PRs and CI when integration decisions depend on them; old pending or
    running records are not live state. Read affected applications' own instructions.
-3. Continue useful unfinished work according to dependencies. An optional
-   [continuation prompt](PURSUING_GOAL.md) can carry the full objective between
-   clients; no special goal UI or prior attachment is required. Preserve an existing
-   unfinished goal rather than completing/recreating it to change its display text.
+3. Continue useful unfinished work according to dependencies. Reference GOAL when
+   changing clients or sessions; no parallel goal prompt, special UI or prior
+   attachment is required. Preserve an existing unfinished goal rather than
+   completing/recreating it to change its display text.
 
 Do not read provenance snapshots or the entire evidence history at startup.
 Requirements are authoritative for scope; status is evidence and priorities, not a
@@ -52,8 +52,8 @@ Choose checks for the changed behavior and actual risk. Use narrow formatter/com
 checks and targeted functional smoke during development; run broader integration and
 release checks when their scope is affected. Documentation-only work needs relevant
 link, scope and preservation checks, not runtime builds or model-routing demonstrations.
-Run [goal preservation](GOAL_VERIFICATION.md) when effective requirements, preserved
-sources or the continuation prompt change, not on every task or conversation.
+Run [requirement preservation](TESTING.md#requirement-preservation) when effective
+requirements or preserved sources change, not on every task or conversation.
 
 Reuse completed exact-source results when still applicable. Inspect an existing hosted
 run before dispatching another; preserve original failures and explicit acceptance

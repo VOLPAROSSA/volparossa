@@ -12,7 +12,7 @@ Network/content checkpoints do not establish those compute capabilities.
 
 ## Studio editing and website maintenance
 
-The [permanent Studio/hosting requirements](../development/STUDIO_HOSTING_REQUIREMENTS.md)
+The [permanent Studio/hosting requirements](../development/GOAL.md#studio)
 add bounded Silex editing and maintenance tasks to the existing shared model and
 agent infrastructure. Reuse Core scheduling/resource control and Code's OpenCode
 integration, with a scoped Silex MCP/tool adapter rather than a second AI network.

@@ -1,8 +1,7 @@
 # Studio, shared website publishing and hosting
 
-The complete [Studio/hosting requirements](../development/STUDIO_HOSTING_REQUIREMENTS.md)
-are a permanent part of [GOAL](../development/GOAL.md), alongside DPS and every
-previous amendment. This page records architecture, the initial source audit and
+The [Studio/hosting section of GOAL](../development/GOAL.md#studio)
+defines the complete functional scope. This page records architecture, the initial source audit and
 verification work. It does not replace the normative text or establish runtime acceptance.
 
 ## Audited starting point — 2026-10-22

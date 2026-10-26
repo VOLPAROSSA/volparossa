@@ -5,6 +5,32 @@ multipath. Real dataplane claims require a disposable Debian 13 network-namespac
 independent kernel/native counters, packet captures, fault injection, cleanup, and a machine-readable
 acceptance report.
 
+## Requirement preservation
+
+[GOAL.md](GOAL.md) is the complete effective specification, including DPS and
+Studio. The [source archive](../archive/requirements-20261023/README.md) preserves
+the original goal, amendments, DPS parts and Studio source bytes. Archived model
+assignments and one-time procedures are historical, not current instructions.
+
+When changing requirements or their preserved sources, run:
+
+```sh
+python3 -B scripts/verify-goal-preservation.py
+```
+
+To check immutable committed blobs, append `--git-revision FULL_COMMIT_SHA` with
+the full 40-character commit identity. When changing the verifier, also run
+`python3 -B scripts/test-goal-preservation.py`. These are bounded inert reads;
+they need no attachments, network, native builds or prior Git history.
+
+The verifier checks source hashes, original payloads and amendment prefixes, the
+exact DPS join, and explicit integrated DPS/Studio markers in GOAL. It reads no
+status ledger and requires no duplicate goal/prompt file. These checks establish
+preservation and inclusion markers, not semantic equivalence or runtime acceptance.
+Review requirement rewrites against the sources for full functional coverage,
+privacy and authority. Ordinary code tasks that leave these documents untouched
+do not require this check at startup.
+
 ## Unprivileged quality gate
 
 During functional development, run the narrowest formatter/compile check and relevant executable

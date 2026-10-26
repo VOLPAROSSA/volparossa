@@ -12,7 +12,7 @@ Continue from the scoped downlink/mixed-link passes into the application/content
 
 ## Permanent Studio and hosting extension
 
-The [complete 2026-10-22 amendment](../development/STUDIO_HOSTING_REQUIREMENTS.md)
+The [complete 2026-10-22 amendment](../development/GOAL.md#studio)
 requires this existing substrate to support Silex-based Studio and shared decentralized
 website hosting. [The hosting audit](STUDIO_HOSTING.md) maps actual site-pack,
 named-publication, protected retrieval and custody/retention capabilities to missing

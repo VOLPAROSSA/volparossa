@@ -69,7 +69,7 @@ it adds no sixth layer or location dependency to network participation. Platform
 adapters own permission-checked sensor/radio access, reference frames and lifecycle.
 Shared logic owns bounded observation assessment and subsequent positioning/fusion.
 The [complete agreed goal](../development/GOAL.md) remains authoritative for the
-full project scope; the [joined DPS requirements](../development/DPS_REQUIREMENTS.md)
+full project scope; the [joined DPS requirements](../development/GOAL.md#dps)
 are the permanent normative DPS scope. The service page records design choices
 and staged acceptance, not a ceiling on those requirements.
 Private measurements stay local by default; receiving assistance, contributing,
@@ -83,7 +83,7 @@ yet native Map integration, measured sensor fusion or proven attack detection.
 
 ## Studio and shared hosting
 
-The permanent [Studio/hosting addition](../development/STUDIO_HOSTING_REQUIREMENTS.md)
+The permanent [Studio/hosting addition](../development/GOAL.md#studio)
 uses the same five layers and existing signed content/site/name/custody interfaces.
 [Studio's design and audit](../services/STUDIO_HOSTING.md) separates editor and AI
 tool rights from publication identity, retention responsibilities and visitor access.

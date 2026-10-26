@@ -11,7 +11,7 @@ restoring a backup must leave its retained copies intact.
 
 ## Studio drafts and dynamic website state
 
-The [permanent Studio/hosting requirements](../development/STUDIO_HOSTING_REQUIREMENTS.md)
+The [permanent Studio/hosting requirements](../development/GOAL.md#studio)
 add authorized project, draft, asset, template and revision synchronization through
 this same Storage-layer. Retain user/app isolation, encryption, uniform redundancy,
 recovery and deletion accounting. A draft is not a public publication: the selected
