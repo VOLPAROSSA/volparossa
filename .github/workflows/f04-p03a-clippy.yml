@@ -1,0 +1,139 @@
+name: F04 P03a targeted Clippy evidence
+on:
+  push:
+    branches: [proof/p03a-f04-clippy-20261027]
+permissions:
+  contents: read
+concurrency:
+  group: f04-p03a-clippy-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  CANDIDATE: d2b515a93255eb4d9409d32ed9069090e25e80ec
+  BASELINE: 7cd1432b8cbd191dbeb1e50e7ed808c3a5216803
+  CARGO_TERM_COLOR: never
+  CARGO_BUILD_JOBS: '2'
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  targeted:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.CANDIDATE }}
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Bind source and minimal change scope
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
+          test "$GITHUB_REF" = refs/heads/proof/p03a-f04-clippy-20261027
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          mkdir evidence
+          git fetch --no-tags --depth=1 origin "$BASELINE"
+          python3 -B - <<'PY_BIND'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          candidate, baseline = os.environ['CANDIDATE'], os.environ['BASELINE']
+          assert git('rev-parse', 'HEAD^') == baseline
+          paths = git('diff', '--name-only', baseline, candidate).splitlines()
+          assert paths == ['crates/volparossa-linux-uapi/src/egress.rs', 'docs/IMPLEMENTATION_STATUS.md']
+          record = dict(candidate=candidate, baseline=baseline,
+              candidate_tree=git('rev-parse', 'HEAD^{tree}'),
+              proof_workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'],
+              run_id=os.environ['GITHUB_RUN_ID'], run_attempt=os.environ['GITHUB_RUN_ATTEMPT'],
+              paths={p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in paths},
+              scope='linux-uapi targeted Clippy and three in-memory parser tests only',
+              full_workspace_clippy=False, runtime_acceptance=False)
+          Path('evidence/source.json').write_text(json.dumps(record, indent=2)+'\n')
+          PY_BIND
+          git worktree add --detach "$RUNNER_TEMP/f04-clippy-before" "$BASELINE"
+      - name: Provision unchanged authenticated Rust 1.99.1 profile
+        run: python3 -B scripts/provision-rust199.py runner
+      - name: Record compiler and fetch locked inputs
+        run: |
+          set -euo pipefail
+          rustc -Vv | tee evidence/rustc.txt
+          cargo clippy -V | tee evidence/clippy.txt
+          cp "$RUNNER_TEMP/volparossa-rust-1.99.1/receipt.json" evidence/compiler-receipt.json
+          cargo fetch --locked 2>&1 | tee evidence/fetch.log
+      - name: Reproduce both original package diagnostics without changing lint levels
+        run: |
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/f04-clippy-target"
+          cd "$RUNNER_TEMP/f04-clippy-before"
+          set +e
+          cargo clippy --keep-going --locked --offline -p volparossa-linux-uapi \
+            --all-targets --all-features --message-format=json -- -D warnings \
+            > "$GITHUB_WORKSPACE/evidence/baseline.jsonl" 2> "$GITHUB_WORKSPACE/evidence/baseline-stderr.log"
+          status=$?
+          set -e
+          test "$status" = 101
+          cd "$GITHUB_WORKSPACE"
+          python3 -B - <<'PY_BEFORE'
+          import json
+          from pathlib import Path
+          errors = set()
+          for line in Path('evidence/baseline.jsonl').read_text().splitlines():
+              item = json.loads(line)
+              if item.get('reason') != 'compiler-message':
+                  continue
+              message = item['message']
+              if message['level'] != 'error':
+                  continue
+              print(message.get('rendered', message['message']))
+              code = message.get('code')
+              assert code is not None
+              for span in message['spans']:
+                  if span['is_primary']:
+                      errors.add((code['code'], span['file_name'], span['line_start']))
+          expected = {
+              ('clippy::manual_is_multiple_of', 'crates/volparossa-linux-uapi/src/egress.rs', 99),
+              ('clippy::collapsible_if', 'crates/volparossa-linux-uapi/src/egress.rs', 304),
+          }
+          assert errors == expected, errors
+          Path('evidence/baseline-errors.json').write_text(json.dumps(sorted(errors), indent=2)+'\n')
+          PY_BEFORE
+      - name: Check exact corrected package with unchanged strict lint levels
+        run: |
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/f04-clippy-target"
+          cargo fmt --check -p volparossa-linux-uapi
+          cargo clippy --keep-going --locked --offline -p volparossa-linux-uapi \
+            --all-targets --all-features -- -D warnings 2>&1 | tee evidence/candidate-clippy.log
+      - name: Run only three unchanged in-memory parser tests
+        run: |
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/f04-clippy-target"
+          for case in traffic_counters_use_64_bit_kernel_prefix_and_never_short_zero_samples \
+            egress_parser_observes_real_family_encodings_and_rejects_overlay \
+            egress_rejects_names_and_malformed_netlink_without_io; do
+            cargo test --locked --offline -p volparossa-linux-uapi --lib \
+              "egress::tests::$case" -- --exact 2>&1 | tee "evidence/$case.log"
+            python3 -B - "$case" <<'PY_TEST'
+          import re, sys
+          from pathlib import Path
+          log = Path('evidence/'+sys.argv[1]+'.log').read_text()
+          assert len(re.findall(r'^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in ', log, re.M)) == 1
+          PY_TEST
+          done
+          git diff --exit-code
+      - name: Preserve exact source and original diagnostics even on failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: f04-p03a-clippy-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 14
