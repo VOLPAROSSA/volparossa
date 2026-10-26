@@ -1,369 +1,174 @@
-<!-- Permanent normative amendment incorporated by GOAL.md. -->
-<!-- Source: user amendment received 2026-10-22. The complete payload is preserved below. -->
-<!-- BEGIN STUDIO HOSTING REQUIREMENTS -->
-# VOLPAROSSA — Permanent Pursuing Goal Amendment: Decentralized Hosting & AI-Powered Studio
-
-Extend the complete VOLPAROSSA Pursuing Goal with a fully integrated decentralized website hosting and publishing capability, using Silex as the foundation of VOLPAROSSA Studio.
-
-This is a permanent functional addition to the existing DICN development-alpha objective, not a separate project, optional experiment, or replacement for existing requirements.
-
-Preserve the entire original goal, all previous amendments including DPS, every existing architectural contract, and all active implementation work.
-
-## 1. Preserve and extend the authoritative goal
-
-First read:
-
-- `AGENTS.md`
-- `docs/development/GOAL.md`
-- `docs/development/DPS_REQUIREMENTS.md`
-- `docs/development/GOAL_VERIFICATION.md`
-- `docs/development/PURSUING_GOAL.md`
-- `docs/IMPLEMENTATION_STATUS.md`
-- `docs/services/CONTENT_NETWORK_PROPOSAL.md`
-- Relevant architecture, publishing, storage, compute and application documentation.
-
-Inspect the current `VOLPAROSSA/volparossa-studio` repository and the upstream Silex project:
-
-https://github.com/VOLPAROSSA/volparossa-studio
-
-https://github.com/silexlabs/Silex
-
-Preserve the original goal and all earlier amendments byte-for-byte where they are covered by established preservation records.
-
-Create a clearly structured, permanent normative hosting/Studio amendment and incorporate it into the authoritative goal documentation.
-
-Prefer a dedicated file such as `docs/development/STUDIO_HOSTING_REQUIREMENTS.md`, explicitly incorporated by `GOAL.md`.
-
-Update the goal-preservation verification so that the new amendment is checked without invalidating or rewriting the historical original-goal, pre-DPS and DPS baselines.
-
-Do not depend on temporary attachments or conversation history.
-
-## 2. Decentralized hosting as a shared core capability
-
-Develop a reusable decentralized website hosting and publishing capability within the existing VOLPAROSSA Core.
-
-Reuse and complete the existing content-addressed storage, signed manifests, site packaging, named publications, peer discovery, protected transport, retention and replica-management mechanisms.
-
-Do not create a competing hosting subsystem that duplicates these foundations.
-
-The target functionality must enable users to publish and maintain websites through the cooperative VOLPAROSSA network, with appropriate availability even when the original publisher's device is offline.
-
-Research and implement the required capabilities for:
-
-- Publishing static websites and associated assets.
-- Authenticated site identities and stable names.
-- Versioned website updates and atomic publication.
-- Content integrity and publisher authenticity.
-- Distributed availability through suitable independent peers.
-- Replica retention, verification, replacement and repair.
-- Safe rollback to authorized previous revisions.
-- Content expiry, withdrawal and lifecycle management.
-- Quotas, resource budgets and participant fairness.
-- Efficient caching, deduplication and content delivery.
-- Recovery after individual peers or the original publisher become unavailable.
-- Independent verification of actual website availability.
-
-Distinguish content integrity, publisher identity, domain ownership, current-version authority and availability guarantees.
-
-Do not treat successful replication or local caching as proof of general website hosting.
-
-Avoid unnecessary central infrastructure, but document unavoidable trust anchors and bootstrap dependencies.
-
-## 3. Integrate Silex as VOLPAROSSA Studio
-
-Use the existing open-source Silex website builder as the primary foundation for VOLPAROSSA Studio.
-
-Inspect its current architecture, supported versions, plugin system, publishing interfaces, desktop implementation, editor APIs and MCP capabilities.
-
-Select a reproducible, reviewed upstream version.
-
-Prefer maintainable adapters, plugins and upstream-compatible extensions over unnecessary invasive forks.
-
-Preserve Silex's established editing capabilities, visual design workflow, responsive design, HTML/CSS export, templates and accessibility features.
-
-Provide a user-friendly VOLPAROSSA publishing workflow:
-
-1. Create or import a website.
-2. Design and edit its pages.
-3. Preview the website locally.
-4. Validate and prepare the publication.
-5. Select the intended publication identity and hosting mode.
-6. Explicitly authorize publication.
-7. Publish through the VOLPAROSSA Core.
-8. Monitor actual availability and replica health.
-9. Update, restore or withdraw the publication.
-
-Maintain standard, portable website output and avoid proprietary content lock-in.
-
-Ensure users can export their sites and host them elsewhere.
-
-The editor must remain usable without requiring that a public website has already been deployed.
-
-## 4. Connect the shared VOLPAROSSA AI to Silex
-
-Integrate Silex with the existing decentralized VOLPAROSSA AI and agent infrastructure.
-
-Use the shared VOLPAROSSA Core model backend and agent orchestration rather than building a second independent AI network inside Studio.
-
-Investigate Silex's existing MCP server, OpenCode compatibility, plugin interfaces, and AI-ready desktop architecture.
-
-Where suitable, connect the VOLPAROSSA AI orchestration through Silex's existing MCP interfaces and supported extension mechanisms.
-
-Enable AI-assisted website creation and maintenance, including:
-
-- Generating websites and individual pages from natural-language instructions.
-- Creating and modifying layouts, components, styles, and responsive designs.
-- Editing HTML, CSS, and JavaScript through authorized Silex interfaces.
-- Generating and improving text, images, and other permitted website assets.
-- Improving accessibility, semantic structure, metadata, and search-engine discoverability.
-- Translating and localizing website content.
-- Detecting and proposing fixes for broken links, layout problems, and accessibility issues.
-- Explaining and reviewing proposed changes before publication.
-- Assisting with website updates, maintenance, and migration.
-- Coordinating suitable independent subtasks through the shared VOLPAROSSA agent network.
-
-Preserve Silex's normal visual editing capabilities without requiring AI.
-
-AI functionality must work through the established VOLPAROSSA Compute-layer, including suitable decentralized model execution, agent collaboration, resource scheduling, and protected processing.
-
-The user's own device must not become the architectural limit of available intelligence. Where permitted and technically supported, suitable tasks may use cooperating network resources.
-
-Protect private websites, unpublished drafts, credentials, customer information, source code, and sensitive content.
-
-Do not send private website content to arbitrary peers or shared training systems. Use the existing protected-computation architecture and explicit permissions.
-
-When suitable protected execution is unavailable, clearly offer waiting or an authorized local fallback rather than silently weakening privacy.
-
-Treat AI-generated website code, external templates, MCP responses, and imported assets as untrusted inputs.
-
-Require explicit authorization for consequential modifications, external publication, account operations, and deployment.
-
-AI agents must not independently acquire publication credentials, expand their permissions, or bypass review and release authorization.
-
-## 5. Support static and dynamic website hosting
-
-Begin with complete, reliable decentralized hosting of static websites generated by Silex.
-
-Research and progressively implement additional hosting capabilities where they provide genuine value.
-
-Investigate:
-
-- Static HTML, CSS, JavaScript, fonts, images, and other authorized assets.
-- Versioned publication manifests and stable website identities.
-- Custom domains and authenticated domain-to-publication binding.
-- HTTPS delivery and certificate lifecycle management.
-- Suitable decentralized naming and discovery.
-- Content delivery through existing VOLPAROSSA networking and caching.
-- Website availability when the publisher's device is offline.
-- Authorized deployment, rollback, withdrawal, and recovery.
-- Website forms, APIs, and dynamic application functionality.
-- Server-side execution, where supported by protected and authorized Compute-layer capabilities.
-- Persistent application state, databases, sessions, and authenticated users.
-- Separation between public website content and private application data.
-- Abuse prevention, resource quotas, and service availability monitoring.
-
-Do not confuse static content replication with dynamic hosting.
-
-Dynamic websites require actual execution, durable state management, authorization, and suitable availability guarantees.
-
-Evaluate whether existing open-source runtimes, databases, and protocols can provide these capabilities efficiently without duplicating the Core's responsibilities.
-
-Do not introduce a separate general-purpose hosting platform unless it provides capabilities that cannot reasonably be implemented through the established architecture.
-
-Preserve interoperability with conventional web browsers and established Internet standards.
-
-Support conventional hosting or export as an explicit alternative where decentralized hosting is unavailable or incomplete.
-
-Do not claim universal website availability, censorship resistance, guaranteed uptime, or complete independence from conventional infrastructure without appropriate evidence.
-
-## 6. Integrate hosting with other VOLPAROSSA applications
-
-Investigate useful integrations between Studio, decentralized hosting, and the existing VOLPAROSSA applications.
-
-Prioritize actual functional value rather than adding unnecessary dependencies.
-
-### Browser
-
-Enable suitable discovery and browsing of VOLPAROSSA-hosted websites through the existing Browser and Core integration.
-
-Preserve ordinary web compatibility, TLS authentication, privacy settings, and the existing browser-specific fallback and killswitch behavior.
-
-Do not silently bypass network policy or expose browsing history.
-
-### Cloud
-
-Investigate private storage and synchronization of Silex projects, drafts, assets, templates, and revision history through the existing Storage-layer.
-
-Keep unpublished website data private and separate from publicly hosted content.
-
-Reuse existing access-control, redundancy, recovery, and synchronization mechanisms.
-
-### Code
-
-Connect VOLPAROSSA Code to suitable Studio development workflows, including source editing, testing, debugging, component creation, and technical reviews.
-
-Reuse the existing OpenCode integration and shared Core agent orchestration.
-
-Avoid implementing a second independent code-assistant runtime inside Studio.
-
-### Image
-
-Enable authorized selection and use of images and other media from VOLPAROSSA Image.
-
-Preserve ownership, licenses, privacy, metadata protection, and explicit publication permissions.
-
-Private photos must never become public website assets automatically.
-
-### Mail
-
-Investigate website contact forms, notifications, and authorized mail delivery through existing VOLPAROSSA Mail capabilities.
-
-Preserve spam protection, delivery status, authentication, and the distinction between decentralized and conventional external e-mail.
-
-### DPS and Map
-
-Investigate optional location-based website functionality and map components.
-
-Use DPS only where useful and with explicit location permissions.
-
-Never expose precise locations, movement histories, or private geographic metadata merely because a website includes a map.
-
-### Other applications
-
-Evaluate whether Chat, Weather, Citizen, Bank, and future applications can provide useful, permission-controlled website components or integrations.
-
-Do not grant financial, identity, governance, or transaction authority merely through a website component or AI-generated workflow.
-
-Keep application-specific business logic within the appropriate application and shared infrastructure within the Core.
-
-## 7. Security, privacy, licensing, and trust boundaries
-
-Treat decentralized hosting as a security-sensitive shared infrastructure service.
-
-Protect against:
-
-- Unauthorized website publication or modification.
-- Publisher identity impersonation.
-- Malicious or compromised hosting peers.
-- Stale, substituted, or replayed website revisions.
-- Cross-user and cross-site data leakage.
-- Malicious HTML, JavaScript, templates, plugins, and dependencies.
-- Supply-chain attacks.
-- Abuse of dynamic execution capabilities.
-- Resource exhaustion and denial-of-service attacks.
-- Unauthorized access to private drafts and deployment credentials.
-- AI-generated insecure code and unauthorized agent actions.
-- Incorrect domain ownership or certificate validation.
-- Misleading availability or integrity claims.
-
-Separate editor permissions, AI tool permissions, publication authority, hosting responsibilities, and end-user access.
-
-Use independently verifiable publisher identities and authorized release procedures.
-
-Maintain least-privilege access and appropriate isolation between unrelated websites and users.
-
-Preserve the existing VOLPAROSSA relay/exit privacy boundaries and participant resource budgets.
-
-Investigate Silex's upstream AGPL-3.0-or-later licensing, existing dependencies, and the current VOLPAROSSA Studio repository license.
-
-Ensure that integration, modification, distribution, and network-service use comply with applicable licenses.
-
-Preserve upstream attribution and prefer maintainable upstream-compatible contributions.
-
-Do not assume the existing GPLv3 repository license automatically satisfies all obligations of an integrated AGPL-licensed Silex implementation.
-
-## 8. Functional verification and acceptance
-
-Develop the hosting and Studio integration through coherent, end-to-end functional milestones.
-
-Verify at minimum:
-
-1. Silex can create or import a representative website.
+# VOLPAROSSA Studio, decentralized hosting and shared AI
+
+This permanent functional amendment is incorporated in full by [GOAL.md](GOAL.md),
+alongside DPS and every earlier requirement. Build a fully integrated Silex-based
+Studio for visual creation, AI assistance, publication, updates and maintenance
+through the shared DICN infrastructure, preserving Silex functionality, portability,
+security and privacy. [The source snapshot](STUDIO_HOSTING_REQUIREMENTS_SOURCE_20261023.md)
+is provenance only: the user's 2026-10-26 revision replaces its fixed model and
+one-time consolidation instructions with [AGENTS.md](../../AGENTS.md) and the
+[development workflow](CODEX_WORKFLOW.md). Product model orchestration remains required.
+[The design](../services/STUDIO_HOSTING.md) describes integration contracts;
+[IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md) records evidence and priorities.
+
+## Shared Core publishing and hosting
+
+Complete and reuse Core content-addressed storage, signed manifests, site packages,
+named publications, peer discovery, protected transport, retention and replica management.
+Provide website publication and maintenance through suitable independent peers,
+including documented availability when the publisher is offline. Implement:
+
+- static websites and associated authorized assets;
+- authenticated publisher/site identities, stable names and atomic versioned updates;
+- content integrity, publisher authenticity and independent availability verification;
+- replica retention, verification, replacement, repair and recovery after peer/publisher loss;
+- authorized rollback, expiry, withdrawal and lifecycle management;
+- quotas, resource budgets, participant fairness, efficient cache/deduplication and delivery.
+
+Keep content integrity, publisher identity, domain ownership, current-version authority
+and availability guarantees distinct. Local caching or successful replication alone
+does not prove general hosting. Avoid unnecessary central infrastructure and document
+necessary trust anchors and bootstrap dependencies. Prefer completing these existing
+facilities over overlapping hosting services.
+
+## Silex editor and publication workflow
+
+Inspect the current [Studio repository](https://github.com/VOLPAROSSA/volparossa-studio)
+and [upstream Silex](https://github.com/silexlabs/Silex): architecture, versions, plugins,
+publishing interfaces, desktop implementation, editor APIs and MCP capabilities.
+Pin a reproducible, reviewed upstream version. Prefer maintainable adapters, plugins
+and upstream-compatible contributions over invasive forks.
+
+Preserve visual editing, responsive design, HTML/CSS export, templates, accessibility
+features and normal non-AI operation. Keep output standard and portable, with export
+and conventional hosting available; the editor must work before any public deployment.
+The user workflow must support creating/importing a site, editing pages, local preview,
+validation/preparation, selection of publication identity and hosting mode, explicit
+publication authorization, Core publication, actual availability/replica-health monitoring,
+and update, restore or withdrawal.
+
+## Shared AI through supported interfaces
+
+Use the established Core model backend, Compute-layer and agent orchestration for
+suitable decentralized model execution, collaboration, scheduling and protected processing.
+Investigate Silex's MCP server, OpenCode compatibility, plugin interfaces and AI-ready
+desktop architecture; connect through supported MCP/extension mechanisms where suitable.
+The user's device must not bound usable intelligence: use cooperating network resources
+where permitted and supported. Do not create another AI network or independent
+code-assistant runtime inside Studio.
+
+Enable authorized AI assistance for:
+
+- sites/pages from natural-language instructions, layouts, components, styles and responsive design;
+- HTML, CSS and JavaScript edits through authorized Silex interfaces;
+- text, images and other permitted assets;
+- accessibility, semantic structure, metadata, discoverability, translation and localization;
+- detection and correction proposals for broken links, layout and accessibility problems;
+- explanations and review of proposed changes, updates, maintenance and migration;
+- independent suitable subtasks coordinated through the shared agent network.
+
+Protect private sites, unpublished drafts, credentials, customer information, source
+code and sensitive content through existing protected computation and explicit rights.
+Do not send private content to arbitrary peers or shared training. If suitable protected
+execution is unavailable, offer waiting or authorized local fallback without weakening
+privacy. Treat model-generated code, external templates, MCP responses and imported
+assets as untrusted. Consequential modifications, external publication, account operations
+and deployment need explicit authorization; agents may not acquire publication credentials,
+enlarge permissions or bypass review/release controls on their own.
+
+## Static and progressive dynamic hosting
+
+Deliver complete, reliable static hosting first, then progressively implement useful
+dynamic functionality as security, execution and durable-state foundations permit.
+Research and implement appropriate capabilities for:
+
+- HTML, CSS, JavaScript, fonts, images and other authorized assets;
+- versioned manifests, stable identities, decentralized naming/discovery and existing Core delivery;
+- custom domains with authenticated domain-to-publication binding, HTTPS and certificate lifecycles;
+- publisher-offline availability and authorized deployment, rollback, withdrawal and recovery;
+- forms, APIs and dynamic application functionality;
+- protected, authorized server-side Compute execution;
+- persistent state, databases, sessions and authenticated users;
+- separation of public website content and private application data;
+- abuse prevention, quotas and service-availability monitoring.
+
+Dynamic hosting requires actual execution, durable state, authorization and suitable
+availability guarantees; static replication does not supply them. Evaluate existing
+open-source runtimes, databases and protocols without duplicating Core responsibilities.
+Introduce a separate general hosting platform only for capabilities that cannot reasonably
+fit the established architecture. Preserve conventional browsers and Internet standards;
+provide explicit export/conventional hosting alternatives when decentralized hosting is
+unavailable or incomplete. Claims of universal availability, censorship resistance,
+guaranteed uptime or independence from conventional infrastructure require evidence.
+
+## Application integrations
+
+Prioritize actual functional value and permission-controlled reuse over unnecessary
+dependencies. Keep application business rules in applications and shared infrastructure
+in Core.
+
+| Application | Integration and boundary |
+| --- | --- |
+| Browser | Discover/browse suitable hosted sites through existing Browser/Core integration; preserve ordinary web compatibility, TLS authentication, privacy settings and browser fallback/killswitch behavior. Do not bypass network policy or expose browsing history. |
+| Cloud | Investigate private storage/sync of projects, drafts, assets, templates and revision history using existing access control, redundancy, recovery and synchronization. Keep unpublished data separate from public content. |
+| Code | Connect source editing, testing, debugging, component creation and technical review to the existing OpenCode integration and shared Core orchestration. |
+| Image | Permit explicitly authorized media selection/publication while preserving ownership, licenses, privacy and metadata protection; private photos never become public assets automatically. |
+| Mail | Investigate contact forms, notifications and authorized delivery using existing Mail; preserve spam protection, delivery status, authentication and decentralized/external e-mail distinctions. |
+| DPS/Map | Investigate optional map/location components only where useful and explicitly authorized; maps must not expose precise locations, movement history or private geographic metadata automatically. |
+| Chat, Weather, Citizen, Bank and future apps | Evaluate useful components without granting financial, identity, governance or transaction authority through website components or AI workflows. |
+
+## Security, privacy and licensing
+
+Treat hosting as security-sensitive shared infrastructure. Protect against unauthorized
+publication/modification, publisher impersonation, malicious hosting peers, stale/substituted/
+replayed revisions, cross-user/site leakage, malicious HTML/JavaScript/templates/plugins/
+dependencies, supply-chain attacks, dynamic-execution abuse, exhaustion/denial of service,
+private-draft or credential access, insecure AI code/unauthorized agent actions, incorrect
+domain/certificate validation and misleading integrity/availability claims.
+
+Separate editor permissions, AI tools, publication authority, hosting responsibilities
+and end-user access. Use independently verifiable publisher identities and authorized
+release procedures, least privilege and isolation between unrelated users/sites.
+Preserve relay/exit privacy and participant resource budgets.
+
+Investigate Silex's upstream AGPL-3.0-or-later terms, dependencies and the Studio repository's
+current license. Comply with integration, modification, distribution and network-service
+obligations; retain attribution. Existing GPLv3 repository licensing does not automatically
+satisfy an integrated AGPL implementation's obligations.
+
+## Functional acceptance
+
+Develop coherent end-to-end milestones using representative real processes, separate
+identities, actual Core interfaces and appropriate integration tests. Verify all of:
+
+1. Silex creates or imports a representative website.
 2. The website can be edited and previewed.
-3. The user can explicitly authorize publication.
-4. The Core produces and validates the appropriate signed publication.
-5. An independent consumer can retrieve and render the complete website.
-6. The website remains available through suitable retained replicas after the original publisher goes offline, under documented conditions.
-7. Authorized website updates become visible without mixing incompatible revisions.
-8. Unauthorized modifications and stale or forged publications are rejected.
-9. A failed deployment preserves the previously authorized working version where appropriate.
+3. The user explicitly authorizes publication.
+4. Core produces and validates the signed publication.
+5. An independent consumer retrieves and renders the complete site.
+6. Suitable retained replicas serve the site after the publisher goes offline, under documented conditions.
+7. Authorized updates become visible without mixing incompatible revisions.
+8. Unauthorized changes and stale or forged publications are rejected.
+9. Failed deployment preserves the previously authorized working version where appropriate.
 10. Hosting respects participant resource limits.
-11. AI can perform an authorized, bounded Silex editing task through the shared VOLPAROSSA model and agent infrastructure.
-12. AI-generated modifications can be independently reviewed and tested before publication.
-13. Private drafts, credentials, and sensitive data remain protected.
+11. Shared VOLPAROSSA models/agents perform an authorized, bounded Silex editing task.
+12. AI changes can be independently reviewed and tested before publication.
+13. Drafts, credentials and sensitive data remain protected.
 14. Conventional website export remains functional.
-15. Supported recovery, withdrawal, and cleanup operations behave as documented.
+15. Recovery, withdrawal and cleanup behave as documented.
 
-Use representative real processes, separate identities, actual Core interfaces, and appropriate integration tests.
+Distinguish component tests, simulated peers, real distributed publication and verified
+public availability. HTML export/signed-chunk storage does not complete decentralized
+hosting, and a local MCP call alone does not prove decentralized AI integration.
 
-Distinguish local component tests, simulated peer behavior, real distributed publication, and verified public website availability.
+## Delivery priorities
 
-Do not claim completed decentralized hosting merely because Silex exports HTML or the Core stores signed chunks.
-
-Do not claim decentralized AI integration merely because a local MCP client can call Silex.
-
-## 9. Implementation strategy and prioritization
-
-Begin by auditing the existing hosting and publishing implementation in VOLPAROSSA Core.
-
-Identify which capabilities are already verified, partially implemented, missing, or blocked.
-
-Inspect the current upstream Silex architecture and select the least disruptive integration approach.
-
-Prefer completing existing Core publishing and retention functionality before introducing overlapping hosting services.
-
-Develop Studio together with actual Core interfaces rather than implementing a disconnected demonstration.
-
-Prioritize:
-
-- Reusing verified Core capabilities.
-- Establishing the Silex-to-Core publishing contract.
-- Achieving a complete static-site publishing workflow.
-- Verifying independent retrieval and publisher-offline availability.
-- Integrating shared VOLPAROSSA AI through Silex's supported interfaces.
-- Adding useful application integrations.
-- Extending toward dynamic hosting when the necessary security, execution, and state-management foundations are ready.
-
-This sequence is indicative, not a mandatory fixed implementation order.
-
-Coordinate hosting work with ongoing Storage, protected Compute, DPS, networking, and application integrations.
-
-Do not interrupt higher-priority critical work without documenting the reason.
-
-Use the configured Astra Ultra principal agent, Sol High implementation and review agents, and Luna Medium supporting agents efficiently.
-
-Reuse appropriate GitHub Actions workflows and preserve established quality gates.
-
-## 10. Permanently incorporate this amendment into the Pursuing Goal
-
-Consolidate this entire Studio and hosting amendment into the authoritative VOLPAROSSA development requirements.
-
-Preserve the original goal and all earlier amendments, including DPS, without rewriting their protected source payloads.
-
-Update:
-
-- `docs/development/GOAL.md`
-- `docs/development/GOAL_VERIFICATION.md`
-- `docs/development/PURSUING_GOAL.md`
-- `docs/IMPLEMENTATION_STATUS.md`
-- Relevant architecture, publishing, Compute, Storage, and application documentation.
-- The VOLPAROSSA Studio repository's project guidance and implementation status.
-
-Create a dedicated, version-controlled normative requirements document for Studio and decentralized hosting, such as `docs/development/STUDIO_HOSTING_REQUIREMENTS.md`.
-
-Update the goal-preservation verifier to ensure the new requirements remain permanently included without changing historical SHA-256 baselines.
-
-Keep requirements, implementation evidence, and execution priorities clearly separated.
-
-Verify that a fresh Codex conversation can reconstruct the complete objective using only the version-controlled repositories.
-
-Integrate the documentation through the established reviewed GitHub workflow.
-
-Do not overwrite the active Pursuing Goal UI with a temporary attachment reference.
-
-Provide a concise, self-contained replacement Pursuing Goal text referring to the permanent repository documents.
-
-Continue the full VOLPAROSSA development objective autonomously after the amendment is safely consolidated.
-
-**The ultimate goal is a fully integrated VOLPAROSSA Studio in which users can visually create, AI-assist, publish, update, and maintain websites using the shared decentralized DICN infrastructure, without compromising portability, security, privacy, or the original functionality of Silex.**
-<!-- END STUDIO HOSTING REQUIREMENTS -->
+Build on an audit of verified, partial, missing and blocked Core hosting functionality.
+Develop Studio with actual Core contracts, not a disconnected demonstration. Prefer the
+least disruptive upstream approach. Establish the publishing contract, complete static
+publication, independent retrieval and offline retention, shared AI and useful application
+integrations; extend toward dynamic hosting as its foundations become ready. This is
+indicative sequencing, not a fixed order. Coordinate with Storage, protected Compute,
+DPS, networking and application work; record why higher-priority work is interrupted.
+Keep relevant architecture/application documentation, evidence and next steps current;
+documentation itself does not satisfy functional acceptance.

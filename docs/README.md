@@ -9,7 +9,8 @@ the documentation describes both implemented milestones and intended capabilitie
 
 ## Find the right folder
 
-The top level keeps this guide, the FAQ and the implementation-status ledger.
+The top level keeps this guide, the FAQ, a compact implementation status and its
+separate historical evidence ledger.
 Technical documents are grouped by subject so the folder itself is easier to browse:
 
 | Folder | Contents |
@@ -45,15 +46,17 @@ or go directly to a topic when you already know what you need.
    [support guide](https://github.com/VOLPAROSSA/.github/blob/main/SUPPORT.md) and
    [accessibility guide](https://github.com/VOLPAROSSA/.github/blob/main/ACCESSIBILITY.md)
    apply across repositories.
-2. Read the repository's [engineering instructions](../AGENTS.md), then the
-   [complete agreed goal](development/GOAL.md) and permanent
-   [joined DPS requirements](development/DPS_REQUIREMENTS.md) and
-   [Studio/hosting requirements](development/STUDIO_HOSTING_REQUIREMENTS.md). The current milestone is not the full scope.
-3. Read [current implementation status](IMPLEMENTATION_STATUS.md#current-integration-and-active-work)
-   for retained branches, exact revisions, acceptance evidence and unresolved dependencies.
+2. Read the repository's [engineering instructions](../AGENTS.md) and
+   [current implementation status](IMPLEMENTATION_STATUS.md). For a full project
+   resumption, read the [complete agreed goal](development/GOAL.md), including
+   [DPS](development/DPS_REQUIREMENTS.md) and
+   [Studio/hosting](development/STUDIO_HOSTING_REQUIREMENTS.md). For a bounded task,
+   load the relevant requirements; the complete scope remains authoritative.
+3. Follow the status links for retained work, exact revisions, acceptance evidence
+   and dependencies. Read historical records only when the task needs them.
 4. Follow the [architecture](architecture/ARCHITECTURE.md) and relevant topic guide below.
-   Use [Contributing](../CONTRIBUTING.md) and the [Codex handover workflow](development/CODEX_WORKFLOW.md)
-   when preparing scoped work or transferring it to another session.
+   Use [Contributing](../CONTRIBUTING.md) and the [shared development workflow](development/CODEX_WORKFLOW.md)
+   when preparing scoped work or transferring it between clients or sessions.
 5. Use the [read-only prerequisite checks](development/OPERATIONS.md#read-only-prerequisites), then
    the [build instructions](development/OPERATIONS.md#build-and-package).
 6. Choose [focused tests](development/TESTING.md#unprivileged-quality-gate) for your change. Network
@@ -103,17 +106,18 @@ or go directly to a topic when you already know what you need.
 
 ## Operations and project reference
 
-- [Agreed goal](development/GOAL.md): complete preserved objective and later clarifications.
+- [Agreed goal](development/GOAL.md): effective complete objective and integrated amendments.
 - [Studio/hosting requirements](development/STUDIO_HOSTING_REQUIREMENTS.md): complete permanent Silex, hosting and shared AI amendment.
 - [DPS requirements](development/DPS_REQUIREMENTS.md): complete joined and permanent normative positioning scope.
 - [DPS source archive](development/DPS_GOAL_20261021.md): byte-preserved provenance only; not the current normative requirements file.
-- [Fresh-session prompt](development/PURSUING_GOAL.md): exact copyable UI text for continuing the complete goal.
-- [Goal verification](development/GOAL_VERIFICATION.md): preservation hashes, traceability and inert verification method.
+- [Continuation prompt](development/PURSUING_GOAL.md): optional text for resuming the complete goal in any client.
+- [Goal verification](development/GOAL_VERIFICATION.md): source preservation and inclusion checks when requirements change.
 - [Goal preservation verifier](../scripts/verify-goal-preservation.py): standard-library-only integrity check.
-- [Codex workflow](development/CODEX_WORKFLOW.md): safe resumption, scoped delegation and handover.
+- [Shared development workflow](development/CODEX_WORKFLOW.md): task-driven execution, delegation, verification and handover for any client.
 - [Operations](development/OPERATIONS.md): configuration, commands, packaging and removal.
 - [Testing](development/TESTING.md): focused checks, disposable topologies and acceptance requirements.
-- [Implementation status](IMPLEMENTATION_STATUS.md): detailed evidence ledger, including failed trials.
+- [Implementation status](IMPLEMENTATION_STATUS.md): compact current work, evidence and dependencies.
+- [Historical evidence](IMPLEMENTATION_HISTORY_20261023.md): preserved detailed checkpoints, including failed trials; not default startup reading.
 - [Public growth readiness](development/PUBLIC_GROWTH_20261020.md): organization audit, verification and sustainable outreach/funding roadmap.
 - [2026-10-20 repository maintenance](development/MAINTENANCE_20261020.md): measured cleanup outcomes and retained recovery state.
 - [Execution plan](IMPLEMENTATION_STATUS.md#execution-priorities-and-next-milestones): next milestones, shared dependencies and current blockers.
@@ -130,10 +134,10 @@ or go directly to a topic when you already know what you need.
 every usage scenario works. **Verified** refers to a stated source revision and test scope.
 **Pending** remains unfinished, even when adjacent components pass.
 
-The detailed status file is an evidence ledger, not a quick-start guide. Its older records
-are retained so a failed experiment is not silently turned into a success. A historical
-checkpoint does not qualify a newer build; a passing small-model task does not establish
-reliable reasoning; a connector does not establish a complete application.
+The status index links to detailed evidence without repeating the full history.
+Older records retain failed experiments. A historical checkpoint does not qualify a
+newer build; a passing small-model task does not establish reliable reasoning; a
+connector does not establish a complete application.
 
 Start with the concise README, follow the topic guide when needed, and use the ledger for
 the exact claim. Feature branches may contain work not yet integrated into `main`.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
-"""Verify archived goal bytes, DPS/Studio additions and explicit resume references.
+"""Verify immutable requirement sources and effective scope references.
 
 This is an inert repository check, not a semantic completeness or implementation
 acceptance proof. No attachments, network access, native builds or writes are
@@ -24,6 +24,14 @@ MAX_DOCUMENT = 4 * 1024 * 1024
 GOAL = "docs/development/GOAL.md"
 ARCHIVE = "docs/development/DPS_GOAL_20261021.md"
 CONSOLIDATED = "docs/development/DPS_REQUIREMENTS.md"
+SOURCE_GOAL = "docs/development/GOAL_SOURCE_20261023.md"
+SOURCE_DPS = "docs/development/DPS_REQUIREMENTS_SOURCE_20261023.md"
+SOURCE_STUDIO = "docs/development/STUDIO_HOSTING_REQUIREMENTS_SOURCE_20261023.md"
+SOURCE_HASHES = {
+    SOURCE_GOAL: "302af13b29e0cc1ce9ac09889669ff3866a233403134aca3bf6c25f6ce091393",
+    SOURCE_DPS: "abe2b6643a52ea5d579ce8cd4ab7a143fb1a43dd4504cce034a70bd454211c59",
+    SOURCE_STUDIO: "4e3d92e240b32b3208829e02f46dd038bc0d15349795e0cf2c983a9f333b6d93",
+}
 PROMPT = "docs/development/PURSUING_GOAL.md"
 STUDIO = "docs/development/STUDIO_HOSTING_REQUIREMENTS.md"
 STUDIO_SHA = "a9fc3d875a48083720941aa74d1c00c506038f7550bbe983e6f0e91e2fe2dc50"
@@ -120,9 +128,9 @@ def references(raw, names):
 
 
 def verify(root, revision=None):
-    result = dict(version=1, source="committed-blobs" if revision else "worktree",
+    result = dict(version=2, source="committed-blobs" if revision else "worktree",
                   git_revision=revision, success=False,
-                  scope="byte-preservation-and-explicit-references-only",
+                  scope="source-byte-preservation-and-active-references-only",
                   checks={}, payloads={}, errors=[])
 
     def check(name, operation):
@@ -146,11 +154,15 @@ def verify(root, revision=None):
             return result
 
     documents = {}
-    for path in (GOAL, ARCHIVE, CONSOLIDATED, STUDIO, PROMPT, "docs/development/GOAL_VERIFICATION.md", "AGENTS.md",
-                 "docs/IMPLEMENTATION_STATUS.md", "docs/development/CODEX_WORKFLOW.md"):
+    for path in (GOAL, CONSOLIDATED, STUDIO, PROMPT, ARCHIVE, *SOURCE_HASHES):
         value = check("read:" + path, lambda path=path: read_document(root, path, revision))
         if value is not None:
             documents[path] = value
+
+    for path, expected in SOURCE_HASHES.items():
+        check("source_snapshot:" + path, lambda path=path, expected=expected: require(
+            path in documents and hashlib.sha256(documents[path]).hexdigest() == expected,
+            path + ": complete source snapshot differs from preserved bytes"))
 
     def payload(name, path, label, size=None, sha=None):
         require(path in documents, path + ": document unavailable")
@@ -163,28 +175,28 @@ def verify(root, revision=None):
                 name + ": payload SHA-256 differs from preserved value")
         return raw
 
-    check("original_goal_payload", lambda: payload("original_goal", GOAL, "ORIGINAL GOAL", 26125, ORIGINAL_SHA))
+    check("original_goal_payload", lambda: payload("original_goal", SOURCE_GOAL, "ORIGINAL GOAL", 26125, ORIGINAL_SHA))
     first = check("received_dps_payload", lambda: payload("received_dps", ARCHIVE, "RECEIVED DPS GOAL", 10495, ARCHIVE_SHA))
     continuation = check("dps_continuation_payload", lambda: payload("dps_continuation", ARCHIVE, "DPS CONTINUATION", 4375, CONTINUATION_SHA))
-    consolidated = check("consolidated_dps_markers", lambda: payload("consolidated_dps", CONSOLIDATED, "CONSOLIDATED DPS REQUIREMENTS"))
+    consolidated = check("consolidated_dps_markers", lambda: payload("consolidated_dps", SOURCE_DPS, "CONSOLIDATED DPS REQUIREMENTS"))
     check("studio_hosting_payload", lambda: payload(
-        "studio_hosting", STUDIO, "STUDIO HOSTING REQUIREMENTS", 18793, STUDIO_SHA))
+        "studio_hosting", SOURCE_STUDIO, "STUDIO HOSTING REQUIREMENTS", 18793, STUDIO_SHA))
 
     def pre_studio_prefix():
-        require(GOAL in documents, "GOAL document unavailable")
-        raw = documents[GOAL][:33913]
+        require(SOURCE_GOAL in documents, "goal source unavailable")
+        raw = documents[SOURCE_GOAL][:33913]
         result["payloads"]["complete_pre_studio_goal"] = digest(raw)
         require(len(raw) == 33913 and hashlib.sha256(raw).hexdigest() == PRE_STUDIO_SHA,
                 "first 33913 GOAL bytes differ from the complete pre-Studio goal")
     check("complete_pre_studio_goal_preserved", pre_studio_prefix)
 
     def original_prefix():
-        require(GOAL in documents, "GOAL document unavailable")
-        raw = documents[GOAL][:30249]
+        require(SOURCE_GOAL in documents, "goal source unavailable")
+        raw = documents[SOURCE_GOAL][:30249]
         result["payloads"]["original_goal_with_amendments_prefix"] = digest(raw)
         require(len(raw) == 30249 and hashlib.sha256(raw).hexdigest() == PREFIX_SHA,
                 "first 30249 GOAL bytes differ from the preserved amended goal")
-        metadata = documents[GOAL].split(b"<!-- BEGIN ORIGINAL GOAL -->", 1)[0]
+        metadata = documents[SOURCE_GOAL].split(b"<!-- BEGIN ORIGINAL GOAL -->", 1)[0]
         require(ORIGINAL_SHA.encode("ascii") in metadata,
                 "original goal SHA-256 missing from provenance metadata")
     check("goal_prefix_and_original_hash_metadata", original_prefix)
@@ -207,6 +219,12 @@ def verify(root, revision=None):
     check("goal_references_consolidated_dps", goal_reference)
     check("goal_references_studio_hosting", lambda: references(
         documents.get(GOAL, b""), ("STUDIO_HOSTING_REQUIREMENTS.md",)))
+
+    for active, snapshot in ((GOAL, SOURCE_GOAL), (CONSOLIDATED, SOURCE_DPS),
+                             (STUDIO, SOURCE_STUDIO)):
+        check("effective_requirement_source:" + active,
+              lambda active=active, snapshot=snapshot: references(
+                  documents.get(active, b""), (Path(snapshot).name,)))
 
     def prompt_references():
         require(PROMPT in documents, "PURSUING_GOAL document unavailable")
@@ -232,7 +250,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     revision = args.git_revision
     if revision is not None and not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
-        print(json.dumps(dict(version=1, success=False, errors=[dict(
+        print(json.dumps(dict(version=2, success=False, errors=[dict(
             check="git_revision_argument", reason="expected exactly 40 hexadecimal characters")]), sort_keys=True))
         return 2
     result = verify(ROOT, revision.lower() if revision else None)

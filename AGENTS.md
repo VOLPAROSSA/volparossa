@@ -1,102 +1,161 @@
 # VOLPAROSSA repository instructions
 
-These instructions apply to the entire repository and must remain in force in future sessions.
+These instructions apply to this repository with Codex, OpenCode and other coding
+agents. The user's latest scoped instructions take precedence over older records.
 
-## Start and resume
+## Scope and reading
 
-- Read `docs/development/GOAL.md` for the complete agreed goal and subsequent clarifications. Do not replace that scope with the next milestone or an older v1 specification.
-- Use `docs/IMPLEMENTATION_STATUS.md` for the current execution plan, retained branches, dependencies and evidence. Then read only the relevant topic documents and the affected application's own instructions/status. `docs/README.md` is the index.
-- Follow `docs/development/CODEX_WORKFLOW.md` for conversation handover, delegation and checkout recovery. Recheck live branch/run state; a prior conversation or an old “running” entry is not current evidence.
+- Build the complete DICN development alpha in `docs/development/GOAL.md`, including
+  its DPS and Studio/hosting additions. A milestone never reduces agreed scope.
+- Start with the task and `docs/IMPLEMENTATION_STATUS.md`. For a full project
+  resumption, read GOAL; for bounded work, read the affected requirements and topic
+  sections. Use `docs/README.md` as the index and the application's own guidance.
+  Do not load historical ledgers, source snapshots or unrelated specifications by default.
+- `docs/development/CODEX_WORKFLOW.md` defines the shared development workflow;
+  despite its filename it is client-independent. `PURSUING_GOAL.md` is an optional
+  continuation prompt; `GOAL_VERIFICATION.md` documents preservation checks when
+  requirements or their source records change. None needs ritual rereading per task.
 
-- The permanent DPS addition is `docs/development/DPS_REQUIREMENTS.md`, incorporated by `GOAL.md`. Use `docs/development/PURSUING_GOAL.md` for durable UI text and `docs/development/GOAL_VERIFICATION.md` for preservation checks. Archived attachment references are provenance, not dependencies. Requirements, engineering rules and current implementation evidence have distinct roles; a milestone does not reduce agreed scope.
+## Autonomous execution and coordination
 
-## Task-aware multi-agent development
+- Choose models, reasoning effort, agents/subagents, skills, tools, context and
+  parallelism dynamically for the task's complexity, uncertainty, risk and cost,
+  using capabilities actually available in the current client. Reassess as needed.
+  There are no required model names, vendors, fixed role assignments or project
+  concurrency quotas. This replaces all earlier development model-routing rules.
+- Delegate independent bounded work when it helps. Give each assignment the goal,
+  source revision, owned paths/worktree, relevant contracts and expected evidence.
+  Avoid duplicate exploration and concurrent writers to the same files. The
+  coordinating agent integrates results; use independent review where correctness,
+  privacy or consequential integration warrants it. Agents may not approve their
+  own work or gain publication/release authority through delegation.
+- Choose implementation details, priorities, checks and scoped commit/push timing
+  autonomously. Preserve unrelated changes, unfinished work and branch protections.
+  Ask only for consequential authority outside the agreed scope: private disclosure,
+  real funds, host changes, permission expansion or bypassing release controls.
+- Keep project requirements, implementation evidence and development-tool choices
+  distinct. Client settings may constrain model switching; report actual limitations
+  rather than claiming a prompt changed configuration or enabled automatic routing.
 
-- User revision 2026-10-22: keep the manually selected Astra Ultra principal responsible for architecture, consequential decisions, coordination and critical integration. Autonomously delegate suitable bounded work; do not routinely consume principal context on implementation or support work Sol or Luna can reliably complete.
-- Prefer the configured `volparossa_implementer_medium` (`gpt-6.1-sol`, Medium) for bounded implementation within established architectural contracts, subject to appropriate verification and independent Sol High review. Use the existing Sol High implementer for complex debugging, ambiguous or security-sensitive implementation; independent technical review remains Sol High. Use Luna Medium for bounded exploration, documentation and supporting tasks. Escalate consequential architectural or trust-boundary changes to Astra Ultra. Start with at most **two concurrent subagents**, excluding the principal; delegate only when beneficial.
-- Delegate only when useful. Specify the source revision, objective, owned paths/worktree, invariants, permitted checks and expected result. Give minimal sufficient context. Avoid duplicate exploration and conflicting edits; one agent owns a file or interface change at a time.
-- The principal integrates and verifies results. Subagents return changed paths, exact evidence and unresolved risks; they do not spawn further agents or publish/dispatch work unless explicitly assigned. Model choice does not confer permissions or evidence of correctness.
-- Prefer the specialized roles when the installed client exposes them. Otherwise select the explicit model/effort with the same bounded role instructions; do not claim custom-role discovery worked when only model overrides were tested.
+## Network and privacy invariants
 
-## Autonomous project execution
+- Target Debian 13 amd64 with systemd, nftables, netlink/iproute2, kernel WireGuard
+  and kernel MPTCP; additional platforms remain in scope where feasible.
+- Normal Internet traffic is `client -> exactly one relay -> exit -> destination`.
+  Parallel paths use different relays between the same client and exit. Direct
+  client-to-exit dataplanes are forbidden except a conspicuous development-only
+  debug option, default false, excluded from normal tests and production config.
+- Relays know client and exit, never the Internet destination; exits know destination
+  and relay, never the client's public address; destinations see the exit address.
+  Client-to-exit payloads remain end-to-end encrypted across the two WireGuard links.
+- Relays forward only authorized short-lived route IDs between the relevant
+  WireGuard interfaces: no relay-host access or Internet NAT/egress for sessions.
+- Participation is reciprocal and capability-based. Production consumers contribute
+  nonzero relay capacity and, with independent Internet access, exit service.
+  Local-only nodes contribute local links/relay service and never enable exit,
+  invent an ASN/public origin prefix or derive Internet egress from the overlay.
+  Service-only participation is allowed; client-only consumption is rejected.
+- `network.uplink` is an operator declaration (`independent_internet` by default,
+  or `local_only`), not reachability/outage proof. Configuration alone cannot prove
+  offline/private-endpoint routing. All nodes use the same software; no privileged
+  central server class.
+- Installation activates no roles. Client, relay and exit default off; participation
+  requires explicit acceptance of available-capability responsibilities. Only an
+  enabled authorized exit with independent Internet provides egress. Role-isolated
+  disposable fixtures are tests, not production participation modes.
+- Core kill switch and policy fail-closed default on. The Browser's separately
+  scoped kill switch defaults off as specified in GOAL; it cannot weaken other apps.
+- Exits fail closed against the same threshold-signed whitelist: no open proxy,
+  implicit raw-IP egress, arbitrary DNS, destination mutation or unsafe port fallback.
+  Product configuration rejects development policy keys.
+- No production private keys/accounts, telemetry, analytics or hidden update channels.
+  Required automatic client updates accept only independently authorized releases
+  authenticated against pre-established trust; peers/model output are not execution
+  authority and installation cannot expand permissions or alter the development host.
+- Do not persist URLs, DNS/browsing/destination-IP history, payloads, private keys or
+  durable node-to-browsing associations by default. Treat peers, DHT data, parsers,
+  advertisements and the unprivileged agent as untrusted; fail closed on ambiguity.
 
-- User revision 2026-10-11, applicable across all VOLPAROSSA repositories: use independent engineering judgment to make the project work well. Choose implementation details, architecture within the agreed requirements, priorities, parallel work, checks, and commit/push timing without requesting approval for ordinary development steps.
-- Continue useful work and resolve obsolete workflow restrictions against the user's latest explicit requirements. Distinguish a current implementation limit or an earlier milestone from a permanent prohibition. Explain material tradeoffs and preserve existing work; do not silently drop agreed functionality.
-- Autonomy does not authorize disclosing private data, using real funds, changing the development host's active configuration, bypassing access or release controls, or lowering agreed privacy. Ask a focused question only when a consequential choice falls outside the established scope or authority; do not repeatedly request authority already granted.
+## Required datapaths and architecture
 
-## Mission and truthfulness
+- TCP: transparent proxy framing over TLS 1.3 over Linux `IPPROTO_MPTCP`, with
+  subflows bound to selected WireGuard relay paths; no ordinary-TCP fallback.
+- General UDP: protected single-path QUIC MASQUE CONNECT-IP/CONNECT-UDP through
+  exactly one relay, with a pinned destination tuple.
+- Browser QUIC/HTTP3: original QUIC datagrams inside MASQUE CONNECT-IP over genuine
+  Multipath QUIC with at least two active WireGuard relay paths; fail closed when
+  required multipath is unavailable. Prove data on the required paths.
+- No cover traffic, cells, artificial delay, batching, duplication, FEC/erasure coding
+  or adaptive path equalisation in v1 network datapaths. Scheduler interfaces stay
+  extensible. Storage may separately evaluate erasure coding with uniform redundancy,
+  compatibility and recoverability preserved.
+- New control/configuration/policy/orchestration/service code uses stable Rust,
+  Tokio, tracing, serde, SQLite and canonical wire encoding (prefer prost protobuf).
+  Use rust-libp2p QUIC, Identify, Ping, VOLPAROSSA Kademlia, mDNS, AutoNAT, DCUtR,
+  Circuit Relay v2 and request-response. Bootstrap contacts are replaceable, not
+  authorities. DHT provider records index capabilities; fetch signed short-lived
+  advertisements directly, without a central all-node catalogue.
+- Before using mqvpn/xquic, inspect current upstream source, license, draft and tests;
+  pin the commit, record origin/notices/patches and build from source. Prefer a
+  versioned process boundary for native MPQUIC. Original code is GPL-3.0-only;
+  retain third-party licenses/notices unchanged in `THIRD_PARTY_LICENSES.md`.
+- Use a permanent Ed25519 identity and derived libp2p Peer ID, encrypted local keys
+  at mode 0600, ephemeral session identities and per-route/path WireGuard keys.
+  Never invent cryptography. Signed control messages include version, sender,
+  timestamp, expiry, nonce, type, payload hash and signature; reject bad signatures,
+  versions, expiry, replay, lengths and excessive resource use.
+- Select exit before relays and score complete paths; enforce operator, IPv4 /24,
+  IPv6 /48, ASN and network-origin diversity with exploration. The reusable
+  `MptcpPathManagerBackend` needs a kernel backend; mptcpd requires a reproducible
+  Debian 13 limitation. Kernel MPTCP owns scheduling/congestion/retransmission/reassembly.
+  MPQUIC uses estimated delivery time from RTT, queue, rate, congestion and loss,
+  respecting congestion without duplication/FEC.
+- Defaults: four active paths, minimum two, maximum eight, two warm backups,
+  maximum 20 ms RTT spread. New active paths add roughly 10% unique throughput
+  or meaningful failover value. Scope route contexts by profile, registrable
+  domain/origin, transport and policy version; never move established flows to a
+  new exit. Expiry affects new flows; LRU cleanup removes all associated resources.
+- Keep reusable Cache, Storage, Compute and Transaction layers alongside applications.
+  No payments/tokens/blockchain as overlay participation conditions, automatic exit
+  activation or core-daemon GUI. Implement the reusable Bank Transaction-layer;
+  isolated fictitious-asset tests are authorized. Distinguish ownership, payment
+  authority, accounting and settlement; simulations prove neither real-money
+  settlement/legal ownership nor guaranteed recovery of externally transferred funds.
 
-- Build VOLPAROSSA v1 as an open-source, decentralised VPN overlay for Debian 13 amd64.
-- This is the required network baseline, not a limit on the agreed DICN services or application integrations. Develop the shared cache, storage, compute and transaction layers alongside their applications; support additional platforms where feasible without treating an untested port as complete.
-- The normal data path is always `client -> exactly one relay -> exit -> destination`; every parallel path uses a different relay between the same client and exit.
-- Never describe ordinary TCP or single-path QUIC as MPTCP or Multipath QUIC. A feature is complete only when tests prove that its real datapath and required number of paths carry data.
-- Keep `docs/IMPLEMENTATION_STATUS.md` current. Checked items must be supported by passing tests or explicit evidence; incomplete work stays unchecked.
-- Do not leave essential mocks, stubs, `TODO`s, or `unimplemented!()` calls in production datapaths.
+## Host safety and verification
 
-## Non-negotiable privacy and policy invariants
-
-- Normal clients must never connect directly to an exit dataplane. A conspicuous development-only direct-exit debug option may exist, must default to false, and must not be used by normal tests or production configuration.
-- Relays learn the client address and selected exit, but not the Internet destination. Exits learn destinations and incoming relays, but not the client's public address. Destinations see only the exit address.
-- Client-to-exit payloads remain end-to-end encrypted even though a relay terminates two distinct WireGuard links.
-- Relays may forward only explicitly authorised, short-lived route IDs between the two relevant WireGuard interfaces. They must never provide Internet NAT/egress for relayed sessions or access to the relay host.
-- Participation is capability-based and reciprocal (user requirement revised 2026-09-05): every production consumer must contribute relay service with nonzero capacity. A node with usable independent Internet access must also contribute exit service; a node with only local links contributes those links/relay capability without inventing an exit. All nodes run the same software; there is no privileged central server class. Service-only contribution may exist, but client-only consumption is rejected.
-- `network.uplink` declares operator-known capability: `independent_internet` (the backward-compatible default) or `local_only`. It is not runtime reachability proof, automatic outage detection, or an uptime claim. Local-only nodes must keep exit off in every mode to prevent overlay-derived egress loops, and must not invent an ASN or public origin prefix. Configuration support alone does not prove offline/private-endpoint routing; keep that datapath incomplete until implemented and tested.
-- Installing the package does not activate network participation or Internet egress. All roles default off; explicitly enabling participation requires accepting the contribution responsibilities of the node's available capabilities. Only an enabled, policy-authorized exit with independent Internet access may provide egress. Disposable development fixtures may isolate roles to test individual boundaries; that is not a production participation mode.
-- All exits fail closed against the same threshold-signed whitelist manifest. No open proxy, implicit raw-IP egress, arbitrary DNS, destination changes, or unsafe port fallback is allowed.
-- Product configuration rejects development policy keys. Never add production private keys, accounts, analytics, telemetry or hidden update channels. User revision 2026-10-01 permits an explicit automatic update facility for VOLPAROSSA clients: only independently authorized releases, authenticated against pre-established update trust, may be downloaded and installed. Peer objects/model output are not executable update authority; installation may not enlarge its own permissions. This is required functionality, not a presently implemented channel, and does not authorize modifying the development host.
-- Do not persist URLs, DNS history, payloads, full browsing hostnames, destination IP history, private keys, or a durable node-to-browsing association by default.
-
-## Required v1 datapaths
-
-- TCP: transparent proxy framing over TLS 1.3 over a Linux `IPPROTO_MPTCP` connection whose subflows are bound to selected WireGuard relay paths; no silent ordinary-TCP fallback.
-- General UDP: datagrams over a protected single-path QUIC MASQUE CONNECT-IP/CONNECT-UDP association through exactly one relay; destination tuple is pinned.
-- Browser QUIC/HTTP/3: original QUIC datagrams inside MASQUE CONNECT-IP over genuine Multipath QUIC with at least two active WireGuard relay paths. Default is fail closed when multipath is required and unavailable.
-- Do not add cover traffic, cells, artificial delay, batching, packet duplication, FEC, erasure coding or adaptive path equalisation to the v1 network datapaths. Keep scheduler interfaces extensible for later policies. This transport restriction does not prohibit investigation and evidence-backed adoption of erasure coding under the separate Storage-layer's uniform redundancy policy, with compatibility and recoverability preserved.
-- Do not add payments, tokens or blockchain as conditions of overlay participation, automatically enable exit service, or add a GUI to the core daemon. These boundaries do not prohibit the agreed Transaction-layer or application user interfaces.
-- User extension 2026-10-04 and subsequent clarification: research and implement a separate reusable Transaction-layer connected to VOLPAROSSA Bank; research alone is not the endpoint. Isolated single-node and multi-node integration tests with fictitious assets/test units are authorized. They do not enable real-money services, introduce fees/tokens into overlay participation, or grant model workers financial authority. Keep securities ownership, payment authorization, internal accounting and external settlement distinct. Do not represent reversible simulations as distributed settlement, legal ownership or guaranteed recovery of externally transferred funds.
-
-## Architecture and implementation choices
-
-- Target Debian 13 Trixie amd64, systemd, nftables, iproute2/netlink, kernel WireGuard, and kernel MPTCP.
-- Write new control-plane, configuration, policy, selection, orchestration, and service code in stable Rust using Tokio, `tracing`, `serde`, SQLite, and a canonical wire encoding (prefer Protocol Buffers with `prost` unless documented otherwise).
-- Use rust-libp2p QUIC plus Identify, Ping, Kademlia with a VOLPAROSSA-specific protocol, mDNS, AutoNAT, DCUtR, Circuit Relay v2 for control-plane connectivity, and request-response protocols. Bootstrap peers are replaceable contacts, never authorities.
-- Use Kademlia provider records as capability indexes; fetch signed, short-lived advertisements directly from provider peers. Never publish a central all-node catalogue.
-- Use `mp0rta/mqvpn`/xquic only after checking current upstream code, license, draft compatibility, and tests. Pin an exact commit, record provenance/license/patches, and do not use unchecked prebuilt binaries. Isolate native MPQUIC behind a versioned process API where practical.
-- Use GPL-3.0-only for original code and preserve every third-party license and notice unchanged.
-- Use one permanent Ed25519 identity, libp2p Peer ID derived from it, encrypted local key storage at mode `0600`, ephemeral session identities, and ephemeral WireGuard keys per route context/path. Do not invent cryptographic primitives.
-- Every signed control message includes version, sender, timestamp, expiry, nonce, type, payload hash, and signature. Reject invalid versions, signatures, expiry, replay, lengths, and resource use.
-- Select exit first, then relays; score full `client -> relay -> exit` paths. Enforce operator, IPv4 /24, IPv6 /48, ASN, and network-origin diversity plus an exploration pool.
-- The reusable `MptcpPathManagerBackend` must have a kernel backend; add an mptcpd backend only if a reproducible Debian 13 limitation requires it. Kernel MPTCP retains scheduling, congestion control, retransmission, and reassembly.
-- The MPQUIC scheduler uses estimated delivery time based on RTT, queue, delivery rate, congestion, and loss; it respects congestion state and performs no duplication/FEC.
-
-## Privilege and host-safety boundaries
-
-- Keep `volparossa-agent` unprivileged. `volparossa-helper` is the smallest possible privileged service and accepts only a strict, typed allowlist of network operations over a protected root-owned Unix socket. It must never accept commands, arbitrary paths, or free-form privileged input.
-- Apply restrictive systemd sandboxing and the minimum capabilities/address families/syscalls needed by each executable.
-- Product networking uses netlink/UAPI, not parsed `wg`, `ip`, or `nft` CLI output. Diagnostic and test scripts may use those tools.
-- Never alter the development host's active DNS, routes, firewall, VPN, sysctls, or network configuration. Network tests run only in disposable Linux network namespaces using veth devices and temporary nftables rules.
-- Any script requiring root must print its exact intended changes, request confirmation where appropriate, trap interruption, and implement idempotent full cleanup. Verify original host routes, DNS, and firewall remain unchanged.
-- Do not install or permanently modify anything outside this workspace without explicit user approval. Never use `curl | sh`, untagged containers, unpinned Git dependencies, or silently downloaded binaries.
-- User revision 2026-10-11, applicable across all VOLPAROSSA repositories: independently decide when scoped, verified changes are ready to commit and push; no separate user approval is required. Keep unrelated or unfinished work separate, preserve unpublished changes, and respect branch protections and required checks. This replaces the earlier per-operation commit/push approval requirement; it does not expand host, release-signing, or installation permissions.
-
-## Quality workflow
-
-- Functional-development priority (user revised 2026-09-05): integrate complete executable slices and agreed ideas rapidly. Use the narrowest relevant formatter/compile check and targeted functional smoke during development. Defer repeated exhaustive regression runs, extra hardening, optimization and polish until the desired functionality is integrated. Never defer the evidence needed to distinguish real datapaths from substitutes, or disposable-network cleanup.
-- The broad verification suite remains available for integration/release preparation; do not rerun it for every small change:
-  - `cargo fmt --check`
-  - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-  - `cargo test --workspace --all-features`
-  - `cargo deny check`
-- Provide unit/property tests for canonical encoding, signatures/replay/TTL, advertisements, policy, routing contexts, scoring/diversity/capacity, reservations, framing, versions, cleanup, and configuration.
-- Fuzz all externally controlled parsers named in the master specification. Bound message sizes, allocations, peers, sessions, buffers, and time. Use secure randomness and constant-time secret comparisons.
-- The privileged integration topology must be disposable and must test real libp2p discovery, reservations, WireGuard links, MPTCP subflows, MPQUIC paths, TCP/UDP/HTTP3, policy denials, failover, privacy packet captures, crash cleanup, and no host damage. Emit a machine-readable acceptance report.
-- Native code must be covered by upstream tests plus sanitizers and Valgrind or AddressSanitizer.
-- Prefer official specifications and primary upstream documentation. Record external source commit, origin, license, and local patches in `THIRD_PARTY_LICENSES.md`.
-
-## Safe operating defaults
-
-- Default roles: client off, relay off, exit off until explicit participation configuration. Production client mode requires relay mode, plus exit mode when an independent Internet uplink is declared; local-only exit mode is forbidden. Default kill switch and policy fail-closed are on.
-- Default multipath settings: four active, at least two, at most eight, two warm backups, 20 ms maximum RTT spread; a new active path should add roughly 10% unique throughput or meaningful failover value.
-- Route contexts are scoped by local profile, registrable domain/origin, transport, and policy version; never move an established flow to a new exit. Expiry affects new flows, and LRU cleanup removes all associated interfaces, routes, MPTCP/MPQUIC paths, and firewall state.
-- Treat DHT records, advertisements, peers, parsers, and the unprivileged agent as untrusted. Fail closed on ambiguity.
-- Be candid in documentation: this low-latency design cannot guarantee protection from a global observer correlating both ends, and local anti-Sybil measures mitigate rather than eliminate Sybil attacks.
+- `volparossa-agent` stays unprivileged; the minimal privileged helper accepts only
+  typed allowlisted network operations over a protected root-owned Unix socket,
+  never commands, arbitrary paths or free-form privileged input. Apply restrictive
+  systemd sandboxing and minimum capabilities, address families and syscalls.
+  Product networking uses netlink/UAPI; diagnostic/test scripts may use CLI tools.
+- Never change development-host DNS, routes, firewall, VPN, sysctls or active network
+  configuration. Network trials use disposable namespaces/veth/nftables with full
+  cleanup. Root scripts state exact changes, confirm where appropriate, trap
+  interruption and clean up idempotently; verify host routes/DNS/firewall unchanged.
+  Use approved disposable hosted runners for builds, native/model/VM/SDK/Gradle and
+  installation trials; local inspection and inert documentation checks are allowed.
+- Do not install or permanently modify anything outside the workspace without
+  approval. No curl-pipe-shell, untagged containers, unpinned Git dependencies or
+  silently downloaded binaries. Preserve dirty worktrees and unique evidence;
+  recover or retire checkouts through the shared workflow.
+- Integrate useful executable slices. Run the smallest relevant formatter/compile
+  check and functional smoke; broaden checks for affected boundaries and integration.
+  Reuse exact-source results; do not rerun completed trials because a conversation
+  ended. Full quality commands and acceptance requirements are in
+  `docs/development/TESTING.md`, not mandatory steps for every small edit.
+- Test canonical encoding, signatures/replay/TTL, advertisements, policy, scoring,
+  diversity/capacity, reservations, framing, versions, cleanup and configuration.
+  Bound external input/resources; fuzz the specified parsers; use secure randomness
+  and constant-time secret comparisons. Native code needs upstream tests and
+  sanitizers plus Valgrind or AddressSanitizer as appropriate.
+- Disposable network acceptance must prove real discovery, reservations, WireGuard,
+  MPTCP/MPQUIC paths, TCP/UDP/HTTP3, denials, failover, privacy captures, crash cleanup
+  and no host damage, with a machine-readable report. Mocks, interfaces, simulations,
+  disabled tests and single-path substitutes do not prove required runtime behavior.
+  No essential stubs, TODOs or unimplemented production datapaths.
+- Keep current status concise: changed source, result, evidence link and remaining
+  dependency. Preserve original failed reports separately. Claims require evidence;
+  checks do not imply product completion. Local anti-Sybil measures mitigate rather
+  than eliminate attacks; this design cannot guarantee protection from a global
+  observer correlating both ends.
