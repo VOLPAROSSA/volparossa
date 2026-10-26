@@ -211,3 +211,82 @@ For `libp2p-yamux`, that means a published single-backend release compatible
 with the project toolchain and with the preserved read-after-close policy.
 Never carry these patches into a newer package without re-auditing whether the
 upstream code already contains the fix.
+
+## ctutils 0.4.4: fixed upstream source adapted for Rust 1.85
+
+The root and fuzz graphs use exactly one local `ctutils 0.4.4`. Its original
+crates.io archive SHA-256 is
+`12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865`,
+with embedded RustCrypto/utils commit
+`a993c0ba50db6510d8db15a6219572de65115438` (release PR1569).
+The fixed upstream baseline includes the mask optimization barrier from PR1567
+`a43d7f37a93b2db3b1bebccc6f5fa8ea6ef76910` and 32-bit u128 comparison fix
+from PR1568 `d21441f19e4654e006be73d9234dd05d2a49c706`, addressing
+[RUSTSEC-2026-0385](https://rustsec.org/advisories/RUSTSEC-2026-0385.html).
+This is VOLPAROSSA's modified 0.4.4 source, with no advisory exemption.
+
+| Reviewed input | SHA-256 |
+|---|---|
+| `patches/ctutils-0.4.4-rust1.85.patch` | `1e6bf3aac8e37c897e88a59fe5f60aaa6c3d7090f6c2a2d629015a20d5967ac6` |
+| Complete `vendor/ctutils-0.4.4` tree, using the algorithm above | `4c18cd159e5013b4ed127137ca157dc8fb6fd2f3239ab9b90602765d41273635` |
+| Adapted normalized manifest | `147a8c6bd85279767624f7b484677d700f52c99ef9a2581efeca2ffe24d81f4b` |
+
+The original Apache-2.0 and MIT license files, upstream runtime algorithms,
+feature definitions, data layout, `black_box(self.0)`, mask calls to `to_u8()`,
+three barriers in the u128-halves algorithm, and CtLt/CtGt routing remain exact.
+Only the manifest MSRV, bit-preserving same-width casts, and necessary const
+qualifications/test bindings change. `scripts/check-ctutils-scope.py` derives
+this closed permitted surface directly from the original archive; its mutation
+tests reject changes to the barriers, masks, routing, assertions and licenses.
+The general dependency verifier also reconstructs and hashes the entire tree,
+and checks exact root/fuzz path-package identity before scanning.
+
+There is an explicit compile-time API limitation: these **20 public methods are
+ordinary functions in this variant**, retaining their runtime signatures:
+
+- `Choice`: `to_bool`, `to_u8`, `to_bool_vartime`, `to_u8_vartime`;
+  `to_u8_mask`, `to_u16_mask`, `to_u32_mask`, `to_u64_mask`, `to_u128_mask`;
+  `select_i64`, `select_u8`, `select_u16`, `select_u32`, `select_u64`, `select_u128`;
+  `from_u128_lt`, `from_u128_le`.
+- `CtOption`: `expect_ref`, `expect_copied`, `into_option_copied`.
+
+The private halves helper and corresponding upstream test bindings also become
+runtime functions/bindings. All other const qualifications remain unchanged.
+Original upstream rustdoc descriptions are preserved; their const claims for
+these methods do not apply to this local variant. Rust's `black_box` is available
+at runtime in 1.85, but its const support requires 1.86. Replacing the newer
+same-width cast methods and reducing constness preserves that runtime barrier;
+merely lowering upstream's manifest MSRV would not suffice. This is not a claim
+of full compile-time API compatibility or of universal constant-time execution.
+
+### Bounded hosted verification and remaining acceptance
+
+The existing Quality workflow has an explicit `ctutils_compatibility=true`
+manual mode, bound to `core_revision` equal to the workflow's exact source SHA.
+Normal PRs retain the ordinary Quality gate. The opt-in uses
+`scripts/run-ctutils-hosted.py`, which refuses development-host/self-hosted
+execution before installation or compilation. It performs:
+
+- Original upstream unit/property tests (1024 property cases), with no features,
+  alloc, subtle, and alloc+subtle, for adapted Rust **1.85.0** and unmodified
+  original Rust **1.87.0**, on amd64 and actual `i686-unknown-linux-musl`.
+  The bundled pinned `rust-lld` supplies 32-bit linking without a host multilib
+  installation. Unsupported 32-bit execution is a failure, not a skipped pass.
+- `ctutils-regressions` value tests and actual digest/HMAC-output and
+  Poly1305/universal-hash verification, plus real Core route-credential and
+  private-message HPKE tests on 1.85/amd64. These tests exercise real consumers;
+  the codegen wrapper is not a substitute for Core's HPKE tests.
+- Linked release codegen and LLVM capture, named secret-input entrypoints,
+  disassembly and artifact hashes for both compilers/targets. The profile matches
+  Core's opt-level 3, one codegen unit, thin LTO, panic abort and debuginfo stripping.
+
+The receipt keeps functional execution separate from **required independent
+codegen/dataflow review**. Compare the masks, selects, u128 lt/le and trait
+routing, and linked digest/universal-hash consumer paths on the actual 1.85
+compiler; branch counts or value tests alone do not prove constant-time behavior.
+The original 1.87 reference is comparative evidence, not proof transferred to
+1.85. No BINSEC execution or formal cryptographic proof is claimed by this recipe.
+Hosted execution and codegen review remain pending when this source is introduced.
+Full ordinary Quality/offline audits are a separate required check; the newly
+reported unmaintained zvariant-family advisories are open findings, with no new
+ignore, MSRV-major port or scope reduction in this change.

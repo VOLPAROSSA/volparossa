@@ -931,12 +931,37 @@ Runtime transitive system dependencies are libc6, libevent and OpenSSL;
 `dns-root-data` supplies read-only root hints/anchors and retains its own notices.
 The package does not depend on or start the standalone Unbound daemon.
 
+### Maintained YAML configuration packages
+
+The workspace dependency named `serde_yaml` is a Cargo alias for exact registry
+[`yaml_serde` 0.10.7](https://crates.io/crates/yaml_serde/0.10.7), maintained by
+the YAML Organization at upstream commit
+[`22a7009e918620b523ea06e54ca75275eabe8027`](https://github.com/yaml/yaml-serde/tree/22a7009e918620b523ea06e54ca75275eabe8027).
+Its exact crates.io archive SHA-256 is
+`33b729a08a9a6be689bbad3e2bf8015926db54b6622cc89c3a5f7dc174b9e918`.
+The unchanged upstream [MIT](third_party/rust/licenses/yaml_serde-0.10.7/LICENSE-MIT)
+and [Apache-2.0](third_party/rust/licenses/yaml_serde-0.10.7/LICENSE-APACHE)
+texts are retained. Its declared minimum Rust version is 1.82.
+
+The root lockfile selects exact registry
+[`libyaml-rs` 0.3.0](https://crates.io/crates/libyaml-rs/0.3.0), upstream commit
+[`66d8ae3d348b328ef2159e3dc0bc53f1deb4c3a2`](https://github.com/yaml/libyaml-rs/tree/66d8ae3d348b328ef2159e3dc0bc53f1deb4c3a2),
+archive SHA-256
+`2e126dda6f34391ab7b444f9922055facc83c07a910da3eb16f1e4d9c45dc777`.
+The unchanged [MIT text](third_party/rust/licenses/libyaml-rs-0.3.0/LICENSE-MIT)
+is retained. Its declared minimum Rust version is 1.60. Both packages use
+unmodified published source; there are no local patches. The dependency checker
+guards these exact package versions. The maintained libyaml fork remains an
+unsafe C2Rust translation; this migration does not claim a safe-Rust parser.
+The existing package license collector copies the resolved crates' original
+notices; the retained copies here additionally preserve their reviewed provenance.
+
 ### Rust dependency families
 
 | Component family | Purpose | Upstream license expression to verify in release audit |
 |---|---|---|
 | Tokio, tracing, futures | async runtime and structured diagnostics | MIT |
-| serde, serde_json, serde_yaml, prost | configuration and wire encoding | MIT or Apache-2.0/MIT |
+| serde, serde_json, yaml_serde (aliased as serde_yaml), prost | configuration and wire encoding | MIT or Apache-2.0/MIT |
 | rust-libp2p and Quinn | decentralised control plane and QUIC | MIT |
 | rustls, ring, ed25519-dalek, x25519-dalek, Argon2 | transport, identity, and key protection | mixed permissive licenses; inspect every resolved crate |
 | `hpke` 0.14.1 (`rust-hpke`) | RFC 9180 route-credential sealing, exact crates.io pin in `Cargo.lock` | MIT/Apache-2.0; upstream `https://github.com/rozbb/rust-hpke` |
@@ -975,3 +1000,20 @@ versions, locked upstream dependencies and audit/license obligations are retaine
   distribution/network-source obligations and asset licenses before activation.
 - Primary files and adapter/telemetry/update boundaries are linked in
   [Studio hosting](docs/services/STUDIO_HOSTING.md#silex-source-selection-and-interfaces).
+
+## ctutils 0.4.4 Rust 1.85 compatibility adaptation
+
+Origin: [RustCrypto/utils](https://github.com/RustCrypto/utils), exact release
+commit `a993c0ba50db6510d8db15a6219572de65115438`;
+crates.io source archive SHA-256
+`12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865`.
+The complete source is retained under `third_party/rust/vendor/ctutils-0.4.4`
+with its original **Apache-2.0 OR MIT** notices unchanged. The package notice
+collector includes those exact files and labels the source as locally adapted.
+
+Local patch `third_party/rust/patches/ctutils-0.4.4-rust1.85.patch` adapts the
+manifest MSRV, same-width casts and twenty public const qualifications for
+Rust 1.85; it preserves upstream's runtime security fixes and algorithms.
+Exact hashes, compile-time API limitations, reconstruction/scope guards and
+pending hosted/codegen acceptance are documented in `third_party/rust/README.md`.
+This is modified upstream source, not an unchanged official 0.4.4 release.
