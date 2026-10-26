@@ -18,6 +18,47 @@ Last updated: 2026-10-27
 
 ## Current integration and active work
 
+### F04 P03a — begrensde Strict Clippy-correctie — 2026-10-27
+
+P02 is hosted bevestigd op PR349-bron
+`7cd1432b8cbd191dbeb1e50e7ed808c3a5216803`: ordinary Quality
+[40419353923](https://github.com/VOLPAROSSA/volparossa/actions/runs/40419353923)
+passeert formatting/ShellCheck en de vier root/fuzz deny/audit-scans met de
+bestaande RustSec-pin. De run stopt daarna bij Strict Clippy; workspace-tests
+en latere acceptatiestappen zijn overgeslagen.
+
+De 49 afzonderlijke diagnoses betreffen 33 bestanden: 17 `collapsible_if`,
+13 `assert_is_empty`, 5 `chunks_exact_to_as_chunks`, 4 `manual_is_multiple_of`,
+4 `duration_suboptimal_units`, 3 `struct_field_names` en telkens 1
+`doc_markdown`, `needless_continue` en `large_enum_variant`. Alle gemelde
+broncontexten zijn identiek aan pre-F04 main `89d3aea5`; alle 33 bestanden
+zijn bytegelijk aan PR347-bron `18d2c49b`. Dit zijn dus geen nieuw ingevoerde
+bronconstructies uit de zbus-migratie. Rust 1.99.1/MSRV 1.99 maakt ook nieuwe
+en uitgebreidere lintcontroles zichtbaar: vier linttypen met samen 26 diagnoses
+zijn toegevoegd na 1.85. De 17 let-chainadviezen betreffen een bestaande lint
+met nieuwe syntax/MSRV-ondersteuning, niet 17 nieuwe linttypen.
+
+Deze tranche corrigeert alleen de eerste twee meldingen in
+`volparossa-linux-uapi/src/egress.rs`: constante deelbaarheid door acht via
+`is_multiple_of` en dezelfde geordende `decode_link`/`replace`-voorwaarden in
+een let-chain. Grenzen, fouten, publieke API, FFI en bestaande tests blijven
+behouden. Geen suppressions, dependencywijzigingen of Quality-gatewijzigingen.
+Gerichte hosted Clippy vóór/na en drie bestaande parserunits worden afzonderlijk
+op de exacte bron gebonden; definitieve uitkomsten en onafhankelijke review
+staan onder `.volparossa-dev/p03a-f04-20261027/`.
+
+Strict Clippy voor de volledige workspace is hiermee nog niet groen: 47
+historisch gemelde diagnoses in 32 andere bestanden blijven open; checks kunnen
+na reparatie aanvullende fouten tonen. Vooral het voorgestelde boxen van
+`DiscoveryEvent::Other` verandert de publieke variantpayload en valt buiten
+een semantisch equivalente lintcorrectie. Geen brede automatische fix en geen
+gewone Quality-herhaling zolang deze bekende blokkades blijven bestaan.
+Kleine volgende tranche: alleen de drie `collapsible_if`-meldingen in Config,
+met eigen diffreview en gerichte hosted controle. De discovery-API/layoutvraag
+vereist afzonderlijke analyse. De oude F04-werkboom, JNI/DPS-commits en zeven
+werkbestanden blijven behouden. F04 blijft onvoltooid; overige F04-evidencegates
+uit P02 blijven open. F09 en F02 vallen buiten deze tranche.
+
 ### F04 P02 — eerste ordinary-Quality-blokkade — 2026-10-27
 
 PR349 stond bij hervatting nog op `88502d986c759cfd17549b09b708ae5351881ab8`.

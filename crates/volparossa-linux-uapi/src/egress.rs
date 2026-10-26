@@ -96,7 +96,7 @@ pub fn observe_interface_traffic(interface: &str) -> io::Result<Option<Interface
 fn decode_traffic(ifindex: u32, bytes: &[u8]) -> io::Result<InterfaceTraffic> {
     // Stable prefix of Linux <linux/if_link.h> struct rtnl_link_stats64. Later counters
     // may extend it; a short or unaligned prefix must never become zero activity.
-    if bytes.len() < 64 || bytes.len() > 512 || bytes.len() % 8 != 0 {
+    if bytes.len() < 64 || bytes.len() > 512 || !bytes.len().is_multiple_of(8) {
         return Err(invalid("invalid 64-bit interface counters"));
     }
     let counter = |at: usize| -> io::Result<u64> {
@@ -301,10 +301,10 @@ impl Reader {
     fn snapshot(&mut self, interface: &str) -> io::Result<Snapshot> {
         let mut snapshot = Snapshot::default();
         self.dump(18, 16, 16, |payload| {
-            if let Some(link) = decode_link(payload, interface)? {
-                if snapshot.link.replace(link).is_some() {
-                    return Err(invalid("duplicate configured interface"));
-                }
+            if let Some(link) = decode_link(payload, interface)?
+                && snapshot.link.replace(link).is_some()
+            {
+                return Err(invalid("duplicate configured interface"));
             }
             Ok(())
         })?;
