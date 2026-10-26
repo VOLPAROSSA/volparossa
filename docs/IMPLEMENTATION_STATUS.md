@@ -14,9 +14,41 @@ detailed evidence ledger, including historical failures—not an installation gu
 [Original v1 scorecard](#fixed-alpha-v1-scorecard) ·
 [Completion requirements](#definition-of-done)
 
-Last updated: 2026-10-24
+Last updated: 2026-10-27
 
 ## Current integration and active work
+
+### F04 P02 — eerste ordinary-Quality-blokkade — 2026-10-27
+
+PR349 stond bij hervatting nog op `88502d986c759cfd17549b09b708ae5351881ab8`.
+Quality [40063416048](https://github.com/VOLPAROSSA/volparossa/actions/runs/40063416048)
+faalde vóór de securityscans in `tests/helper/test-live-worker-identity-contract.sh`:
+SC2030 op regel2244, SC2031 op regel8665 en SC2317 in de indirect aangeroepen
+retirement-fixturefuncties op regels8647–8662. Dit is een blokkade van de inerte
+fixture; geen bewijs van een defect of geslaagde werking in het echte datapad.
+
+P02 is geïsoleerd vanaf die gepubliceerde head. Alleen de noodzakelijke
+ShellCheck-correctie wordt uit het lokale vervolgwerk hergebruikt; de bestaande
+JNI-noticescommit `22c51181`, DPS-commit `8b759903`, oorspronkelijke fixturecommit
+`f9524b5e` en zeven gewijzigde/nieuwe werkbestanden in `f04-maintained-zbus`
+blijven behouden. Er worden geen native-, VM- of SDK-acceptatietests gestart.
+Het gerichte P02-verslag en de brongebonden lokale/hosted resultaten worden
+bewaard onder `.volparossa-dev/p02-f04-20261027/`; de oorspronkelijke mislukte
+run blijft afzonderlijk bewijs. Shellsyntax, strikte ShellCheck met de bronbibliotheek,
+de ongewijzigde `scripts/check-shell.sh` en de bestaande inerte workercontracttest
+slagen. Onafhankelijke review vindt geen blokkade; productie-gatescript en bestaande
+suppressions zijn bytegelijk. Eén gewone hosted Quality-run moet de reparatie nog
+op de gepubliceerde bron bevestigen. P02 is beperkt tot de eerste CI-blokkade.
+
+F04 blijft onvoltooid. P03 moet de RustSec-pinactualiteit, vier echte
+dependencysecuritychecks, volledige noticeclosure, ctutils/32-bit-musl,
+oorspronkelijke zbus-tests, DPS met de huidige compiler en helper/native-integratie
+afronden en onafhankelijk laten beoordelen. De eerdere gerichte native slice
+[40057590797](https://github.com/VOLPAROSSA/volparossa/actions/runs/40057590797)
+slaagde voor zijn eigen bron en scope; helper-VM-run
+[40063417260](https://github.com/VOLPAROSSA/volparossa/actions/runs/40063417260)
+faalde eerst bij `production-launch-status` / `preflight-runtime`. Geen van deze
+historische resultaten bewijst acceptatie van de P02-bron of de volledige migratie.
 
 ### F04 maintained zbus / Rust1.99.1 source candidate — 2026-10-24
 

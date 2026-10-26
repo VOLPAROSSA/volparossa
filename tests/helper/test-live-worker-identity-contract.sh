@@ -8629,6 +8629,22 @@ proof_failure_reason=
 production_retirement_block=$temporary_directory/production-retirement-block.sh
 sed -n '/^    production_retirement_confirmed=no$/,/^    production_retirement_confirmed=yes$/p' \
     "$gate" >"$production_retirement_block"
+forget_unit_ownership() {
+    unit_name='' unit_owned=no unit_may_own=no unit_invocation_id='' unit_ownership_marker=''
+}
+retire_unit() {
+    retire_failure_stage=stop-wait
+    [ "$production_fixture" != retire-failed ] || return 1
+    [ "$production_fixture" = affine-retained ] || forget_unit_ownership
+}
+unit_load_state() {
+    if [ "$production_fixture" = not-collected ]; then printf '%s\n' loaded
+    else printf '%s\n' not-found; fi
+}
+retired_runtime_is_absent() {
+    [ "$1:$2:$3:$4" = "private-fixture:$production_control_group:$production_main_pid:$identity_starttime_value" ] \
+        && [ "$production_fixture" != runtime-present ]
+}
 exercise_production_retirement_diagnostic() (
     production_fixture=$1
     proof_failure_reason=${2:-}
@@ -8643,23 +8659,7 @@ exercise_production_retirement_diagnostic() (
     unit_name=private-fixture
     unit_owned=yes unit_may_own=no unit_invocation_id=private unit_ownership_marker=private
     production_control_group=private production_main_pid=1 identity_starttime_value=1
-    forget_unit_ownership() {
-        unit_name='' unit_owned=no unit_may_own=no unit_invocation_id='' unit_ownership_marker=''
-    }
-    retire_unit() {
-        retire_failure_stage=stop-wait
-        [ "$production_fixture" != retire-failed ] || return 1
-        [ "$production_fixture" = affine-retained ] || forget_unit_ownership
-    }
-    unit_load_state() {
-        if [ "$production_fixture" = not-collected ]; then printf '%s\n' loaded
-        else printf '%s\n' not-found; fi
-    }
-    retired_runtime_is_absent() {
-        [ "$1:$2:$3:$4" = "private-fixture:$production_control_group:$production_main_pid:$identity_starttime_value" ] \
-            && [ "$production_fixture" != runtime-present ]
-    }
-    failed() { printf '%s\n' fixture-failed >&2; exit 1; }
+    production_retirement_confirmed=no
     # shellcheck source=/dev/null
     . "$production_retirement_block"
     test "$production_retirement_confirmed" = yes
@@ -8672,7 +8672,12 @@ for production_pair in retire-failed:stop-wait affine-retained:affine-state \
         "VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_DIAGNOSTIC_V1=${production_pair#*:}"
     test "$(sed -n '2p' "$last_stderr")" = \
         'VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1=production-retirement'
-    test "$(sed -n '3p' "$last_stderr")" = fixture-failed
+    case ${production_pair%%:*} in
+        retire-failed) production_expected_fatal='production unit retirement did not settle' ;;
+        affine-retained) production_expected_fatal='production unit retirement retained affine ownership state' ;;
+        *) production_expected_fatal='production unit retirement fence did not settle' ;;
+    esac
+    test "$(sed -n '3p' "$last_stderr")" = "diagnostic failure: $production_expected_fatal"
 done
 expect_status 0 exercise_production_retirement_diagnostic success
 test ! -s "$last_stdout" && test ! -s "$last_stderr"
@@ -8685,7 +8690,7 @@ for earlier_reason in production-launch-status production-process-identity; do
     test "$(cat "$last_stderr")" = \
         "VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_DIAGNOSTIC_V1=runtime-fence
 VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1=$earlier_reason
-fixture-failed"
+diagnostic failure: production unit retirement fence did not settle"
 done
 for earlier_stage in identity-process unknown-stage; do
     expect_status 1 exercise_production_retirement_diagnostic runtime-present \
@@ -8696,9 +8701,9 @@ for earlier_stage in identity-process unknown-stage; do
     if [ "$earlier_stage" = identity-process ]; then
         test "$(sed -n '3p' "$last_stderr")" = \
             'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=identity-process'
-        test "$(sed -n '4p' "$last_stderr")" = fixture-failed
+        test "$(sed -n '4p' "$last_stderr")" = 'diagnostic failure: production unit retirement fence did not settle'
     else
-        test "$(sed -n '3p' "$last_stderr")" = fixture-failed
+        test "$(sed -n '3p' "$last_stderr")" = 'diagnostic failure: production unit retirement fence did not settle'
         test "$(wc -l <"$last_stderr")" -eq 3
     fi
 done
