@@ -1,5 +1,10 @@
 # Distributed content, publishing and offline delivery
 
+Use [implementation status](../IMPLEMENTATION_STATUS.md) for current priorities and
+source-bound acceptance. Detailed superseded trial sequences remain in the
+[service evidence archive](../archive/service-notes-20261026.txt), separate from
+this content contract.
+
 Status: user idea received 2026-09-07; architecture proposal with working persistent native
 storage, protected-route public/encrypted transfer and cooperative-origin/representation-digest
 HTTPS consumers.
@@ -84,8 +89,9 @@ envelope after a completed named download. An existing owned cache can then reop
 publication/site without route setup or peer discovery, while retaining its original expiry
 and durable revision/conflict floor. Missing newer content cannot silently revive an older
 version. This is local availability, separate from external replica retention or global
-latest-version claims. Its [no-route integrated proof on `4e6cc308`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34214732165)
-passes with identical cached bytes, no peer/origin delivery and full cleanup.
+latest-version claims.
+This is local availability, not independent retention or a global latest-version
+claim. The recorded cache-only HTTP proof is in the service evidence archive.
 
 Best-effort cache eviction alone cannot provide durable publishing. Retention commitments,
 replica receipts, repair and an honest availability status are needed. No permanent-availability
@@ -103,14 +109,11 @@ and places missing public copies without hand-picking provider keys. Its owner e
 fixes the original object, desired copy count, lifetime and cumulative upload budget. It can
 replace an unavailable holder while that owner runs; restart preserves the budget/deadline
 and rechecks availability rather than counting old receipts. Transfers yield to foreground
-work through configured quiet admission and per-chunk budgets. The
-[original `2a431c1` loss/replacement trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35916493141)
-passes with a fresh named download after the publisher's owner process and source are removed.
-The [source-exact `ca7` integration proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/35921884371)
-also passes and is integrated by PR #160. Original expiry, signed observations, upload budget,
-privacy captures and cleanup are verified; the Client node remains online. This is not
-globally fair placement, maintenance after the owner controller stops or guaranteed uptime. See the
-[development commands](../development/OPERATIONS.md#depositing-a-public-copy-with-other-participants).
+work through configured quiet admission and per-chunk budgets.
+[Retention integration run 35921884371](https://github.com/VOLPAROSSA/volparossa/actions/runs/35921884371)
+passes its bounded replacement and publisher-source-offline scope. The Client remains
+online; maintenance after the owner controller stops, global fairness and uptime
+remain unproved. Use the [operational commands](../development/OPERATIONS.md#depositing-a-public-copy-with-other-participants).
 
 ### Private messages and optional mail interoperability
 
@@ -152,16 +155,11 @@ bounded by received TTLs, signature expiry and local monotone first-seen deadlin
 cannot extend the local expiry. DNSSEC cannot prove when an unknown peer first received a
 record, so this is not an absolute network-wide TTL-replay guarantee.
 
-The combined runtime compiles and the focused core verifies a real cryptographic test chain
-and TCP collector in a disposable namespace. That test's private anchor exists only under
-`cfg(test)`; it does not prove the current public chain or network-wide C05. A separate fixture
-probe now passes genuine public A and AAAA validation against the unchanged built-in production
-anchors, followed by local cache reuse, in the
-[exact `0fa80d65` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34182008684).
-The subsequent [two-Exit peer-hit/fallback checkpoint on `b172d11f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34192821990)
-passes real positive A/AAAA sharing, local reuse after peer shutdown and miss/fallback. This
-does not add CNAME or negative-answer sharing; see the current
-[DNS implementation evidence](../IMPLEMENTATION_STATUS.md#latest-dns-integration-checkpoint).
+Recorded DNS trials cover cryptographic test-chain validation, production-anchor
+positive A/AAAA validation and a two-Exit peer-hit/reuse/miss-fallback scenario.
+Their exact sources and limits remain in the [DNS evidence](../IMPLEMENTATION_STATUS.md#latest-dns-integration-checkpoint)
+and service archive. This positive-only slice does not add CNAME/negative sharing
+or full network-wide C05 acceptance.
 
 ## First delivered foundation (2026-09-07)
 
@@ -185,48 +183,25 @@ Explicit `content publish --contribute` now adds complete publication through an
 configured contribution service: the authorized local stream carries bytes from the user's
 private cache, and success requires the original full object in the actual configured cache,
 durable ownership and live registration. No hand-written `serve` step or filesystem ownership
-change is needed; `site pack` bundles use the same command. The
-[publish/restart/independent-consumer proof on `ac782769`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34221501655)
-passes with all 2,097,628 site bytes and the original manifest/expiry. This is one complete
-local copy, not the outstanding external retention, replica repair or global availability promise.
+change is needed; `site pack` bundles use the same command.
+The source-bound publication/restart trial establishes one complete local copy,
+not external retention, replica repair or general availability.
 
 The integrated runtime provides explicit `content serve` / `content fetch` / `content stop`.
 A provider signs only a short-lived generic service location. A consumer asks its current
 authenticated control Relay to find services, verifies their node-key signatures, then fetches
 the exact independently trusted manifest over existing policy-authorized MPTCP/TLS routes.
 The DHT and control lookup carry no object IDs, URLs or publication-key catalogue. At most
-16 offers and 64 explicitly registered publications are supported. Compilation and focused
-provider/discovery/control/CLI tests pass. The first independent-provider KVM attempt on
-`aa634ce1` failed before retrieval. The later `fdcb64d3` run now completes live discovery with
-two verified offers. With application TLS, `a20efb71` then reconstructs the complete object
-through native and HTTPS commands, including partial origin ranges. Its final evidence gate
-uses the wrong fixture Exit interface address; corrected raw-record validation passes, but the
-original scenario still failed before its final explicit service-stop steps. Cleanup completed
-with unchanged host state. The `472b6e7a` rerun again completes both two-provider downloads,
-but a subsequent lookup yields no usable peer offer and HTTPS falls back to the complete origin
-body. The same repeated-lookup defect blocks the new C03 sequence after its first real download.
-The subsequent native-role/content-offer ownership and unchanged-policy refresh fixes preserve
-valid provider offers without renewing their deadlines. The fresh `e592b610` provider scenario
-now passes native and both HTTPS cases, including exact partial ranges, physical captures and
-cleanup. That scoped explicit-object proof does not establish general NAT reachability or a
-complete C02 claim. Automatic placement, retention and name lookup are not supplied by it,
-and C06 remains open. The newer
-[normal-user run on `10f63244`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178615941)
-also passes publication/import, service serving, independent protected retrieval and user
-export/assembly of the exact signed object across separate accounts. This does not supply
-stable-name discovery, retention repair or general website hosting. The new explicit
-`fetch-name` slice adds publisher-local name retrieval over those same protected provider
-streams: original signed envelopes, highest observed revision, durable cache-bound conflict/
-rollback floors, and caller-owned output without a prior manifest file. Public serving must
-opt in; names stay out of DHT records and private-message metadata stays excluded. The
-[separate live name phase on `d2f886c8`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34186359414)
-passes retrieval of nine chunks / 2,097,275 bytes from two providers without the Client's
-manifest copy, into a separate user's private file. Both actual relay paths, account isolation
-and cleanup pass. Source-specific evidence is recorded in
-[implementation status](../IMPLEMENTATION_STATUS.md); no globally newest-version, retention or
-general website-hosting claim is implied.
-The newer normal HTTPS command is described below; [implementation status](../IMPLEMENTATION_STATUS.md)
-retains the source-specific network and Quality results.
+16 offers and 64 explicitly registered publications are supported.
+Provider offers retain their original deadlines across role/unchanged-policy
+refresh. Explicit `fetch-name` retrieves original publisher-signed envelopes over
+those protected streams, using the highest observed revision, durable cache-bound
+conflict/rollback floors and caller-owned output without a prior manifest. Public
+name serving is opt-in; names stay outside DHT records and private metadata is
+excluded. Recorded explicit-object and named-retrieval trials pass their source
+scope; their failed predecessors remain failed. Neither path implies globally
+freshest revisions, automatic placement, retention repair, general NAT reachability
+or complete website hosting. See [source-bound status](../IMPLEMENTATION_STATUS.md).
 
 The runtime uses a real provider application-TLS layer inside the protected path. The
 existing libp2p TLS identity proof pins the endpoint to its verified signed offer; exact SNI and
@@ -242,14 +217,13 @@ directory/key are removed: the first replica supplies five chunks / 1,048,699 by
 restarts and the second supplies only the remaining four / 1,048,576 bytes. The reconstructed
 SHA-256 is `add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767`.
 
-The dedicated [`content` KVM scenario on `f0a906ca`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34146922945)
-passes through the existing real MPTCP/TLS ingress, two WireGuard legs and exact policy-authorized
-destination. Both providers observe the Exit address; ten complete, zero-drop boundary privacy
-captures and cleanup with unchanged guest state pass. This completes C01. Two replica processes
-on the same destination do not establish
-distributed provider discovery, independent provider nodes, durable offline availability,
-HTTPS authenticity or speed gain. No browsing capture is enabled. [Testing instructions](../development/TESTING.md#native-content-storage-foundation)
-and crate documentation record these limits. Only existing workspace dependencies are reused.
+[Content run 34146922945](https://github.com/VOLPAROSSA/volparossa/actions/runs/34146922945)
+completes C01 through real MPTCP/TLS, two WireGuard legs, policy pinning, boundary
+captures and unchanged-guest cleanup. Same-destination replica processes do not
+prove independent provider nodes, distributed discovery, durable offline
+availability, HTTPS authenticity or speed gain. No browsing capture is enabled;
+[focused tests](../development/TESTING.md#native-content-storage-foundation) and
+crate documentation retain those boundaries.
 
 ### Recipient-encrypted native messages
 
@@ -270,34 +244,19 @@ identity is stored; no additional plaintext private-key file is provisioned. Pas
 preserve the recipient key, identity rotation replaces it, and compromise of the identity also
 compromises messages addressed to that key. One node identity means one recipient key across
 local profiles, not profile isolation. Public keys still need independent authentication.
-The local CLI smoke reconstructs from two partial ciphertext stores across identity reloads,
-rejects a wrong recipient/sender and overwrites, and preserves a 0600 plaintext output. This
-does not upgrade the older test-only-key network evidence into a normal-CLI network proof.
-The network harness now provisions its disposable encrypted identities through normal `init`,
-exports only `recipient-key`, and uses `open-message` on the retrieved cache. Its six local
-checker/cleanup/process tests pass, including real CLI compatibility with the existing fixture
-publisher. The [fresh network run on `4c4c8954`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34170523962)
-now passes with normal recipient CLI decryption of the retrieved ciphertext, exact bytes,
-wrong-recipient/no-clobber checks, ten complete zero-drop captures and unchanged-host cleanup.
-In that `4c4c8954` run the sender remains a fixture; neither automatic key discovery nor a
-mailbox is introduced. The additive `f0936007` harness now composes normal private
-publish/import/serve/fetch/export/open, with the new sender's key and input removed before
-remote retrieval. Its local checks pass; its
-[exact VM run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34182554210) reaches successful
-transfer and recipient opening but fails the final privacy check: an empty DNS-cache provider
-advertisement causes three outgoing Exit-to-Client discovery attempts. The availability correction
-passes targeted checks but needs a fresh network run; the original run stays failed, not a
-completed normal-sender or full C07 network claim.
+Normal-recipient protected-network decryption passes its recorded scope, with
+a fixture sender. The later normal-sender composition transfers/opens successfully
+but fails its final privacy gate after empty DNS-cache advertisements trigger
+Exit-to-Client discovery attempts. Its targeted correction is not a retroactive
+network pass; normal-sender/full C07 acceptance needs its own proof. Automatic
+key discovery and a mailbox are not supplied by these primitives.
 
-Five focused tests, strict crate Clippy and an isolated separate-process transfer/decryption
-proof pass. The [`content-message` protected-route KVM scenario](https://github.com/VOLPAROSSA/volparossa/actions/runs/34149009080)
-also passes on `b1082645`, including actual recipient decryption, ten complete zero-drop boundary
-captures and unchanged guest state. Its disposable
-test-only recipient key and cleartext output have explicit ownership checks and cleanup; they
-are not an example of production private-key persistence. Public sender identity, length and
-lifetime remain visible. Key discovery, a mailbox, anti-spam/acknowledgements, retention, forward
-secrecy after key compromise and email interoperability are not supplied by this slice. C07
-therefore stays open rather than counting the configured fixture as a complete messaging service.
+The earlier test-key `content-message` protected-route trial passes recipient
+decryption, privacy captures and cleanup under explicit disposable ownership.
+It is not production private-key persistence or a normal-sender acceptance result.
+Public sender identity, length and lifetime remain visible. Key discovery, mailbox,
+anti-spam/ACKs, retention, forward secrecy after compromise and ordinary email
+interoperability remain separate required work; C07 stays open.
 
 The next executable slice adds known-contact mailboxes rather than requiring a manifest to be
 handed to the recipient for every message. Normal `content mailbox invite/enroll/send/receive/serve`
@@ -322,26 +281,19 @@ Date and no cookies, credentials, variants, redirects or nonzero Age. Unsupporte
 are rejected by this adapter, not silently declared shareable; a general application fallback
 for unsupported sites still needs integration.
 
-Seven real-TLS tests and a disposable separate-process demonstration pass. A 777-byte origin
-descriptor authorizes 2,097,275 payload bytes reconstructed from two partial caches, with no
-origin body transfer. Missing chunks invoke one full origin download checked against the same
-manifest; changed bytes, wrong CA/name, stale metadata and partial publication are rejected.
-No new authority is imported from peers or persisted by the consumer. The
-[`content-https` KVM scenario on `2de8209f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34150683819)
-passes the same full-body-fallback sequence over protected routes, with ten complete zero-drop
-boundary captures and unchanged guest state.
+The full-body-fallback implementation reconstructs peer bytes under the origin's
+original descriptor and verifies any missing full origin body against the same
+manifest. Wrong CA/name, stale/changed bytes and partial publication fail closed;
+peers import no new authority and the consumer persists none. Recorded real-TLS
+and protected-route trials establish this explicit cooperative-origin scope.
 
-The next implemented version adds exact missing-chunk Range fallback. Eleven real-TLS tests
-and a separate-process disposable-loopback proof pass: five cached chunks supply 1,048,699 bytes,
-then four 206 responses supply only the missing 1,048,576 bytes. Each range binds the original
-offset, length, total and authenticated chunk hash; wrong/stale/changed responses are rejected.
-An origin that ignores Range can still supply a fully verified 200 response, with its full cost
-reported. Original authorization never renews. The
-[Range protected-route proof on `6cf2394b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34151753705)
-passes with the exact four missing ranges, nine protected flows, ten complete zero-drop boundary
-captures, zero remaining owned objects and unchanged guest state; exact-source Quality also passes.
-This requires publisher support and proves neither faster total retrieval nor
-browser/generic-web/TLSNotary integration.
+Exact missing-chunk Range fallback binds each response to original offset,
+length, total and authenticated chunk hash. Wrong/stale/changed responses are
+rejected. If an origin ignores Range, a fully verified 200 response may supply the
+object with its full cost reported; original authorization never renews.
+[Run 34151753705](https://github.com/VOLPAROSSA/volparossa/actions/runs/34151753705)
+passes the bounded protected-route scenario, not faster total retrieval or generic
+browser/existing-web/TLSNotary integration. Publisher support remains required.
 
 The normal `volparossa content fetch-https` command now composes these operations in the agent:
 `--url` supplies the exact canonical HTTPS resource, `--metadata-path` its canonical same-origin
@@ -434,14 +386,10 @@ first mode therefore does not combine partial origin ranges. An absent/unsupport
 currently returns unavailable, not arbitrary peer trust. Unsupported-site/witness integration
 remains separate work, with any extra trust requiring the user's explicit choice.
 
-Real local origin-TLS and provider-stream tests, CLI-process checks, strict scoped Clippy and
-the additive harness checks pass. The
-[protected-network run on `f3abee8e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34212634858)
-now verifies cold HEAD+origin GET, then cold HEAD+two-provider delivery with zero origin body,
-the exact original transport index, same output hash, physical captures and cleanup. The
-peer-assisted operation takes 9.230 seconds versus 2.577 seconds for origin-only: all 2,097,275
-origin payload bytes are avoided on the peer hit, but there is no latency benefit. C08 remains
-open; explicit peers-first is not evidence of successful measured automatic peer selection.
+The recorded cold-origin/cold-peer representation-digest trial avoids all origin
+body bytes on a peer hit, but takes longer than origin-only retrieval. Its exact
+measurements and source remain in the archive. C08 stays open: explicit peers-first
+is not measured successful automatic selection.
 
 The next implementation removes two concrete limitations without changing the provider wire:
 known peers are refreshed before waiting for a new full DHT round, and independently signed
@@ -449,12 +397,10 @@ compatible transport indexes stay paired with their actual providers. Their comp
 chunk lists, whole digest, length and public type must agree; the final own-origin hash check
 still authorizes output. One writer distributes missing chunks across at most two workers at
 a time, each selecting its provider's original index. Native/named exact-index behavior and
-private-content exclusion remain unchanged. Real local complementary-provider tests and
-targeted agent checks pass. The [new network proof on `3357169e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34218261300)
-also passes with both independent indexes, complete reconstruction and zero origin body.
-Recent lookup replies arrive in 42/64 ms; the entire peers-first operation takes 4.915 seconds
-versus 2.544 seconds origin-only. Eliminating the earlier DHT wait does not yet make this
-fixture faster than its origin or complete C08.
+private-content exclusion remain unchanged.
+A recorded complementary-provider network proof reconstructs the same authorized
+object without origin body transfer, but remains slower than that fixture's origin.
+Removing a DHT wait does not by itself establish latency benefit or complete C08.
 
 The next automatic-selection implementation also accounts for the separately measured digest
 index flows. Two lookups overlap under the original deadline; successful complete delivery may
@@ -542,20 +488,12 @@ not wall-clock or VM time. Quota still pauses uptake when no eligible capacity c
 No boot service, retention repair or storage-peer publisher authority is introduced; full C04
 and an expiry-maintenance network sequence remain unproved.
 
-Five focused duplex tests pass, including actual uptake followed by re-serving, quota without
-eviction, exclusions/duplicates, original expiry/hops, malformed data and a hard deadline.
-Existing v1 provider tests still pass. Three new persistence probes cover actual credit-uptake,
-merge, original expiry and re-serving after publisher removal and store reopen; two agent
-tests cover explicit restoration, missing journals and full/duplicate registration handling.
-Strict content/agent/CLI/local-control Clippy passes. The `e592b610` network run completes v3 Q
-uptake and an independent Client's Q retrieval after the original provider stops, but its final
-capture gate remains failed because remote route owners survive the replicator's disconnect.
-The next fixture also stops and explicitly reopens the replica service from its journal before
-that final retrieval. Its [live run on `603cec9d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178099281)
-passes uptake, provider removal, journal reopen and independent Q retrieval with complete
-physical captures and unchanged-host cleanup. Retention repair and global contribution/fairness
-remain absent; that older run covers C03's bounded-diversity criterion. The newer owner-contention
-run below covers C04's local bounded-contribution criterion, not those wider missing functions.
+Recorded extra-chunk trials exercise uptake/re-serving, quota without eviction,
+exclusions, original expiry/hops, persistence, publisher removal and journal reopen.
+The earlier surviving-route-owner capture failure remains failed; the corrected
+source-bound reopen/retrieval proof passes captures and cleanup. This covers C03's
+bounded diversity, not global fairness or retention repair; owner-contention C04
+has its own proof below.
 
 ### Automatic contribution from actual downloads
 
@@ -566,11 +504,10 @@ native/named and freshly origin-authorized cooperative/digest HTTPS objects, and
 without live-content eviction. The existing extra-chunk exchange and local copy share a single
 background owner. Name lookup retains the original independently trusted publisher authority;
 no URL, private-message payload or reusable HTTPS authority enters this automatic public queue.
-The [source-offline/agent-restart/independent-retrieval run on `f76ac97a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34211580709)
-passes: an empty automatic service admits a completed normal P download, retains its original
-journal across a real agent PID change after source shutdown, then serves all 524,609 bytes to
-an independent Client. Twenty complete zero-drop captures and unchanged-state cleanup pass.
-This does not introduce global placement fairness, retention repair or generic HTTPS capture.
+The source-bound agent-restart/independent-retrieval trial passes automatic uptake,
+original-journal reuse after source loss and unchanged-host cleanup. This remains
+bounded contribution, not global placement fairness, retention repair or generic
+HTTPS capture.
 
 The preceding measured-source selection now has a
 [passing exact-source run on `8830a57a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34205965849):
@@ -729,16 +666,11 @@ The new output directory contains `filters.txt`, `manifest.pb`,
 floors; cached bytes do not extend the publisher's expiry. The delivery receipt
 describes the fetch but is not a portable signed transport attestation.
 
-The `content-provider` fixture now exercises an independently selected two-rule
-snapshot before and after its existing route disconnect. Its acceptance checks
-require exact exported bytes, original manifest and expiry, real cold peer traffic,
-isolated caches and zero peer/discovery work on warm reuse. Existing static-site
-and bulk multipath evidence remains mandatory. The actual disposable
-[trial 37648508917](https://github.com/VOLPAROSSA/volparossa/actions/runs/37648508917)
-passes on exact source `d95e10cb`: 63 cold peer bytes from one provider, then zero
-peer/discovery work after disconnect, with unchanged manifest and expiry.
-Original receipts and captures reconstruct the complete successful report;
-owned cleanup and enumerated guest-root network state checks also pass.
+The `content-provider` fixture requires exact snapshot bytes/manifest/expiry,
+real cold protected peer traffic, isolated caches and zero peer/discovery work on
+warm disconnected reuse. [Run 37648508917](https://github.com/VOLPAROSSA/volparossa/actions/runs/37648508917)
+passes that bounded filter-snapshot profile with cleanup and enumerated guest-host
+checks. Existing static-site and bulk-multipath evidence remains separate.
 
 The command does not register a browser subscription or make uBO recheck expiry.
 Protected peer delivery and actual browser consumption still need a combined

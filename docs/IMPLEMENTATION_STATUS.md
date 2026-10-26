@@ -29,6 +29,13 @@ original bytes for offline inspection. Read only evidence relevant to the task.
 
 ### Development workflow — 2026-10-26
 
+The remaining authored documentation has been reviewed across architecture,
+network, services, development, privacy, applications and component references.
+Repeated checklists and superseded trial narratives are consolidated; current
+wire versions and runtime/installed-package claims are corrected against source
+and existing evidence. Detailed records remain in the [documentation archive](archive/README.md).
+This documentation work changes no product behavior or runtime acceptance.
+
 The complete requirements now live in one GOAL, with DPS as a shared service and
 Studio/hosting among the applications. Duplicate goal/prompt and add-on requirement
 files are removed; source records live in the archive. The revised development

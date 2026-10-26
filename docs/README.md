@@ -5,7 +5,7 @@ VOLPAROSSA is a developing **Decentralized Intelligent Cooperative Network**;
 the documentation describes both implemented milestones and intended capabilities.
 
 [Project introduction](../README.md) · [Applications](applications/APPLICATIONS.md) ·
-[Common questions](FAQ.md) · [Detailed implementation status](IMPLEMENTATION_STATUS.md)
+[Common questions](FAQ.md) · [Current implementation status](IMPLEMENTATION_STATUS.md)
 
 ## Find the right folder
 
@@ -23,6 +23,7 @@ Technical documents are grouped by subject so the folder itself is easier to bro
 | [privacy/](privacy/) | Privacy boundaries, threat model and destination policy. |
 | [development/](development/) | Building, operating and testing the project. |
 | [assets/](assets/) | Images used by the documentation. |
+| [archive/](archive/README.md) | Original sources and dated evidence, outside the normal reading path. |
 
 The folders organize the documentation; they do not represent separate daemons or
 different completion levels. Follow the reading paths below for an introduction,
@@ -107,7 +108,7 @@ or go directly to a topic when you already know what you need.
 
 - [Agreed goal](development/GOAL.md): effective complete objective and integrated amendments.
 - [DPS](development/GOAL.md#dps) and [Studio/hosting](development/GOAL.md#studio): integrated sections of the same complete goal.
-- [Source archive](archive/requirements-20261023/README.md): original requirements and historical evidence; not startup reading.
+- [Documentation archive](archive/README.md): original requirements, dated audits and detailed historical evidence; not startup reading.
 - [Requirement preservation](development/TESTING.md#requirement-preservation): checks when requirements change.
 - [Goal preservation verifier](../scripts/verify-goal-preservation.py): standard-library-only integrity check.
 - [Shared development workflow](development/CODEX_WORKFLOW.md): task-driven execution, delegation, verification and handover for any client.
@@ -115,8 +116,6 @@ or go directly to a topic when you already know what you need.
 - [Testing](development/TESTING.md): focused checks, disposable topologies and acceptance requirements.
 - [Implementation status](IMPLEMENTATION_STATUS.md): compact current work, evidence and dependencies.
 - [Historical evidence](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md): preserved detailed checkpoints, including failed trials; not default startup reading.
-- [Public growth readiness](development/PUBLIC_GROWTH_20261020.md): organization audit, verification and sustainable outreach/funding roadmap.
-- [2026-10-20 repository maintenance](development/MAINTENANCE_20261020.md): measured cleanup outcomes and retained recovery state.
 - [Execution plan](IMPLEMENTATION_STATUS.md#execution-priorities-and-next-milestones): next milestones, shared dependencies and current blockers.
 - [Applications](applications/APPLICATIONS.md): boundaries and links for the application repositories.
 - [Community overview](community/OVERVIEW.md): project entry point and contributor routes.

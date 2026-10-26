@@ -118,13 +118,13 @@ Signed traffic-snapshot validation exists; live aggregation and mobile display r
 Sharing congestion should not expose individual journeys or complete location histories.
 Licenses, freshness and uncertainty remain relevant even when data comes from nearby peers.
 
-The [joined DPS requirements](../development/GOAL.md#dps) define the
+The [DPS goal section](../development/GOAL.md#dps) define the
 permanent application scope; the [DPS service design](../services/DPS.md) records
 implementation and acceptance choices. Together they cover alternative or
 complementary location sources, including weak-GNSS, tunnel/indoor and
 manipulated-GNSS scenarios. Keep offline navigation, visible uncertainty and
-application permission boundaries. Native integration and actual positioning
-improvement remain unverified; journeys and movement histories are not shared
+application permission boundaries. The recorded debug JNI quality slice is separate from native navigation and
+actual positioning improvement; journeys and movement histories are not shared
 automatically. No application depends on a chat attachment or conversation history
 for these requirements.
 
@@ -188,27 +188,16 @@ neither a public-election security proof nor recognized legal authority.
 
 ## Shared positioning integration
 
-The [shared DPS service](../services/DPS.md#application-integration-priorities)
-supplies one versioned core interface with separate platform sensor adapters.
-Applications must not duplicate its positioning engine or enable collection just
-because the node participates in VOLPAROSSA.
+Use the [DPS goal section](../development/GOAL.md#dps) for complete functional
+and per-application requirements, and the [shared DPS service](../services/DPS.md#application-integration-priorities)
+for versioned adapters and acceptance. Applications share that service rather
+than duplicate positioning engines. Participation grants no sensor, contribution,
+retention or training permission; each needs its own appropriate authorization.
 
-- Weather may use permitted position estimates and geographically associated
-  observations while protecting locations and accounting for correlated sources.
-- Image may optionally retain photo/video locations only within existing user
-  rights and private storage, without automatic publication.
-- Chat may provide explicitly authorized encrypted location exchange/local
-  positioning with bounded retention and the existing Signal Protocol.
-- Browser must preserve platform and origin permissions and never give websites
-  or extensions finer location than the user allowed.
-- Cloud may store/synchronize only explicitly authorized private positioning
-  data through the existing Storage layer.
-- Other applications adopt DPS only for a concrete benefit. Unproven location
-  claims cannot alone authorize transactions, identities, voting rights or access.
-
-Hardware, permission revocation, privacy and native application behavior require
-their own tests. Synthetic service tests do not prove functioning location sensors,
-geographic truth or improved navigation. See the [DPS acceptance sequence](../services/DPS.md#acceptance-sequence).
+Preserve offline behavior, uncertainty, platform/origin precision limits and private
+location/media history. Unproved position claims cannot grant financial, identity,
+voting or access authority. Synthetic assessments and debug JNI quality displays do
+not prove sensor acquisition, geographic truth, navigation or measured improvement.
 
 ## Shared boundaries
 

@@ -31,9 +31,9 @@ only after checking the prerequisites of the relevant task.
 - Before removing or recovering a node, read [crash and cleanup](#crash-and-cleanup)
   and [uninstall and data removal](#uninstall-and-data-removal).
 
-Each command group states what it changes and what its evidence does **not** prove.  
-Source-bound runs remain attached to the behavior they exercised; they are not  
-blanket approval to enable every feature on a real host.
+Each command group states its effects and authority limits. Source-bound results
+remain in [implementation status](../IMPLEMENTATION_STATUS.md); no checkpoint
+authorizes arbitrary host activation.
 
 ## Read-only prerequisites
 
@@ -82,15 +82,13 @@ The script does not run `apt update` or install optional mptcpd by default. It u
 
 ### Build and verify a candidate
 
-The following block combines a build, verification gates and an explicit package build. These write build outputs; they do not install or enable the services.
+Build and package only in the approved disposable environment. Apply the
+[quality gates](TESTING.md#unprivileged-quality-gate) appropriate to that candidate
+before packaging; their canonical commands are maintained there. These commands
+write build outputs without installing or enabling services.
 
 ```sh
 cargo build --locked --workspace --all-features
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
-./scripts/check-rust-dependencies.sh
-./packaging/test-collect-cargo-licenses.sh
 ./packaging/build-deb.sh --build
 ```
 
@@ -247,7 +245,7 @@ credential.
 
 `volparossa-mpquic.service`: unprivileged Client and Exit role workers, not a release-security claim.
 
-API v6 preflights one client or exit role/process lifetime, targets that instance thereafter, and
+API v7 preflights one client or exit role/process lifetime, targets that instance thereafter, and
 correlates every response to the exact canonical request. It accepts exact 43-character
 base64url client auth and TLS names only in bounded, signed-scope route-session messages; the
 native commitment check proves bearer equality, not generator entropy or binary attestation.
@@ -557,8 +555,9 @@ ratchet, forward secrecy, delivery acknowledgement, guaranteed retention or emai
 ## Known-contact mailboxes
 
 `content mailbox` adds a private inbox to the existing protected content service. It is an
-explicit development feature: use disposable test nodes until its normal-network scenario has
-passed. There is no automatic contact lookup, SMTP delivery, background boot activation or
+explicit development feature: use approved disposable test nodes and consult the source-bound
+scenario verdict in [implementation status](../IMPLEMENTATION_STATUS.md). There is no automatic
+contact lookup, SMTP delivery, background boot activation or
 promise of permanent availability. Existing encrypted identities remain in the calling user's
 account; providers and the agent receive neither passphrases nor recipient decryption keys.
 
@@ -933,11 +932,10 @@ peer index is found, but an offline origin still cannot authorize a new download
 Local/browser JSON reports `authentication_scope: "origin-repr-digest"` and the original
 `transport_manifest_id`; descriptor mode reports `cooperative-origin`. These labels distinguish
 authorization from transport signatures. The original HTTP expiry is never renewed by caching.
-Targeted local origin-TLS, provider, CLI and harness checks pass. The
-[integrated run on `f3abee8e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34212634858)
-also passes: fresh HEAD and two providers supply 2,097,275 bytes with zero origin body.
-It takes 9.23 seconds versus 2.58 seconds origin-only in this fixture; no general website support
-or speed gain is claimed. This does not verify the later cache-only native-site extension.
+The
+[source-bound evidence](../IMPLEMENTATION_STATUS.md) distinguishes the original
+digest trial, subsequent index batching and later cache-only site support; none
+establishes generic website support or a general speed improvement.
 
 #### Independent provider indexes and bounded admission
 
@@ -946,11 +944,9 @@ whole hash, length, public media type and complete ordered chunk layout agree. I
 re-sign either index or change the final origin-authority check. Explicit `peers-first` refreshes
 recent route/policy-bound offers first, then falls back to bounded discovery if needed; workers
 grow adaptively within resource limits and the original thirty-second peer budget. Already verified
-progress is retained across attempts. The
-[independent-index run on `3357169e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34218261300)
-passes with both providers and zero origin body; recent lookup replies take 42/64 ms.
-The complete operation still takes 4.91 seconds versus 2.54 seconds origin-only, not a speed
-win. Automatic mode keeps its measured budget and does not gain unbounded discovery fallback.
+progress is retained across attempts. The source-bound independent-index
+trial is recorded with the other [content evidence](../IMPLEMENTATION_STATUS.md);
+its fixture timings are not an operator speed promise.
 Digest index requests now overlap in resource-sized batches. For automatic mode, recent payload
 measurements must also have a fresh successful digest-index measurement; missing measurements
 prefer the origin. Admission includes that fixed setup cost and is checked again after the
@@ -967,14 +963,10 @@ current worker credits. The earliest original offer/measurement expiry still app
 is counted once before fresh indexes, then only actual spent time plus remaining payload cost
 after them. The original twenty-percent admission margin is unchanged. Otherwise automatic mode
 uses the existing conservative estimate or the origin; no speed improvement is presumed.
-The fixed 4-Mbps-origin comparison on `2769761c` completed a genuine automatic hit with two
-providers and zero origin body: 4.092074725 seconds for the full command versus 6.307903196
-seconds origin-only. That workflow failed in the checker; retained HTTPS raw evidence passes
-with the subsequent qdisc-array and silent-unselected-relay corrections. The
-[complete corrected workflow on `6d3f44d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34227589468)
-passes with all later publication/name/site/cache-only phases. Its full automatic command takes
-4.319381088 seconds versus 6.392691790 seconds origin-only, with both peers and zero origin body.
-These are bounded comparisons, not a general speed guarantee or three-provider network proof.
+The bounded automatic-hit comparisons and original checker failures are retained
+in the [development archive](../archive/development-notes-20261026.txt) and linked
+content evidence. They do not establish a general speed guarantee or three-provider
+network proof.
 
 ### Choose between peer and origin retrieval
 
@@ -1308,7 +1300,8 @@ capability. The worker can establish the normal protected route and discover gen
 without waiting for a foreground download. Missing object/chunk identities travel only inside
 the protected content stream. New foreground work, Stop, expiry or unavailable accounting ends
 or defers the attempt. It neither creates arbitrary new holder assignments nor promises a
-global copy count. Local runtime/stream tests pass; the dedicated repair VM is still pending.
+global copy count. Local runtime/stream tests are supporting evidence; the dedicated repair
+VM acceptance remains a separate source-bound result in [implementation status](../IMPLEMENTATION_STATUS.md).
 Missing or corrupt bytes in an already complete journal are not silently reinterpreted as a
 healthy partial record. Do not delete journaled files to trigger repair.
 
@@ -1403,21 +1396,14 @@ Control and mesh admission are described below; native transport ceilings remain
 
 #### Read the three-provider evidence
 
-The [exact `d0251a27` provider VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34232194290)
-passes the three-provider extension: disjoint R3/R4/R5 caches each supply five unique chunks,
-reconstructing all 3,932,160 bytes after the original publisher exits. Actual kernel-observed
-bulk windows overlap across all three providers; both selected WireGuard relay paths carry
-traffic. Complete captures and cleanup preserve the guest's original network state. This is
-useful missing-content growth, not a threefold speedup or arbitrary-provider-count guarantee.
-
-The [complete `1aab4caf` provider run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34841784259)
-also passes the origin-digest HTTPS variant: three providers deliver all fifteen chunks /
-3,932,160 bytes after a fresh origin-authenticated HEAD, with zero origin body and actual
-three-way bulk overlap. Native retrieval passes the same three-provider gate. An admitted
-exploratory provider gets unresolved, previously missed chunks before established providers
-refill; a manifest alone never implies that its provider stores every chunk. Independent raw
-reconstruction verifies the complete scenario and unchanged guest state. This is concurrent
-delivery, not a general speedup or support for HTTPS origins without usable digest authority.
+The native and origin-digest fixtures use three disjoint caches supplying all
+fifteen chunks after publisher shutdown. Useful missing-content growth requires
+actual overlapping bulk windows, new verified bytes from each provider, active
+WireGuard paths, exact reconstruction and cleanup; a manifest alone does not
+prove chunk availability. The retained source-bound results are linked from
+[implementation status](../IMPLEMENTATION_STATUS.md), with exact earlier runs in
+the [development archive](../archive/development-notes-20261026.txt). Concurrent
+delivery is not a threefold speedup or arbitrary-provider-count guarantee.
 
 ### Adaptive control connections
 
@@ -1468,11 +1454,10 @@ the helper checks the exact owned runtime/interface/wiphy/network namespace, cha
 
 The helper's bounded station dump currently supports 512 observations and limits effective
 admission accordingly; it is a defensive representation boundary, not proven hardware capacity.
-Physical-radio and large-mesh performance remain untested. The
-[simulated-radio run on `e146b560`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34238191689)
-passes established-peer retention while admission changes from zero to two, then transfers
-131,072 bytes each way with matching hashes and normal/socket-loss cleanup. This exercises the
-real Linux kernel backend on simulated radios, not the full adaptive agent or physical capacity.
+Physical-radio and large-mesh performance remain untested. The retained simulated-radio proof is
+linked from [local-link documentation](../network/LOCAL_LINK_NETWORK.md); it
+exercises the real kernel backend, not full adaptive-agent or physical-radio
+capacity.
 
 ### Warm MPTCP path growth
 
@@ -1491,15 +1476,12 @@ TLS truncation remains an error, not an authenticated end of content.
 
 `mptcp-growth` is a separate disposable topology scenario, not the full alpha or a speed benchmark.
 It requires the same live download before/after expansion, actual kernel subflow ACK and receive
-deltas, data on all six WireGuard legs, the full application hash and complete cleanup. Its
-first network run ended before three-subflow growth was observed. The
-[corrected `1aab4caf` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34841782480)
-now passes: the same original Client/Exit metasockets retain their initial subflows and grow
-to three simultaneously data-carrying subflows. Actual loss, new ACK/receive bytes on all three,
-all six WireGuard legs and the complete 32-MiB response hash are independently verified from
-the retained raw evidence. Disconnect removes the route and injected loss with unchanged guest
-state. The ordinary MPTCP CLI selection rows are reachability metadata, not these live
-per-socket byte counters. No general throughput gain or removal of backend path limits is claimed.
+deltas, data on all six WireGuard legs, the full application hash and complete cleanup. The
+[source-bound result](../IMPLEMENTATION_STATUS.md) proves same-socket growth to
+three data-carrying subflows in that fixture; original failures and raw evidence
+remain in the [development archive](../archive/development-notes-20261026.txt).
+CLI selection rows are reachability metadata, not per-socket byte counters.
+No general throughput gain or removal of backend limits is claimed.
 
 ### Warm MPQUIC path growth
 
@@ -1519,16 +1501,12 @@ separately from the CLI's unchanged `bytes` user counter; transport ACKs are not
 The separate `mpquic-growth` VM scenario starts with two active paths and one reserved backup,
 uses a real 32-MiB HTTP/3 upload and download, and applies fixed 15% loss only to one owned
 Relay veth. It requires two-to-three native payload deltas, all six WireGuard legs, exact hashes,
-route retirement and unchanged guest state. The first two runs found fixture selection and
-native-counter integration faults; both are corrected. The API7 rerun proves initial ACK progress
-but still fails to activate the third path under loss. Its diagnostic follow-up identifies an
-incorrect retransmission-based loss counter for unreliable datagrams. The corrected native
-mapping reports actual detected losses without changing the growth conditions. The
-[exact `5b1ba7af` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34838838851) now passes:
-all three paths make fresh transport progress in the same live route, both complete application
-hashes match, and the owned loss rule and route are removed with unchanged guest state. Its
-report was independently rebuilt from the retained raw evidence. This is not a throughput-gain
-claim; the existing eight-path backend ceiling and other transport limits remain.
+route retirement and unchanged guest state. The
+[source-bound result](../IMPLEMENTATION_STATUS.md) and its original fixture/counter
+failures remain recorded separately. A pass requires new transport progress on
+all three paths, exact application hashes, owned loss/route retirement and
+unchanged guest state. It is not a throughput-gain claim; the eight-path backend
+ceiling and other transport limits remain.
 
 ## Crash and cleanup
 
@@ -1636,4 +1614,5 @@ created in that mode.
 
 Never publish an identity file, passphrase, WireGuard key, full hostname, destination IP, DNS history,
 payload, or unredacted packet capture. The system checker emits no secrets. There is no external
-telemetry or update channel.
+telemetry or hidden update channel. Independently authorized automatic updates
+remain required by [GOAL](GOAL.md); this guide does not activate or implement them.

@@ -6,7 +6,7 @@ executable and links the pinned libraries from source. Native API version 7
 provides bounded request-driven bidirectional datagrams, per-route
 credentials and TLS server names, an independent local association identifier,
 explicit multipath and single-path modes, descriptor-only path adoption, and a
-fail-closed descriptor-bound single-path exit-listener contract. It retains the v6 binding of
+fail-closed descriptor-bound exit-listener contract. It retains the v6 binding of
 every operational request to a native-generated process incarnation,
 correlates responses to the exact canonical request digest, carries the
 fields derived from the exit-signed route scope without verifying that
@@ -112,18 +112,14 @@ delivery is not inferred from acknowledged transport counters.
   and is assembled safely; missing, extra, incomplete, truncated, late,
   cross-domain, or wrongly bound descriptors are rejected and closed on every
   path.
-- `StartExitSession` is restricted to one `SinglePathGeneralUdp` route and
-  carries its nonzero SPKI pin, DNS TLS name, exact exit-listener/expected-client
-  overlay tuples, reservation hash, and bounded unparsed in-memory certificate/private-
-  key candidate PEM (64 KiB/16 KiB). Rust requires the transferred descriptor to be a
-  pre-bound, unconnected, nonblocking, close-on-exec, IPv6-only UDP socket
-  without address/port reuse, and the dormant C runtime repeats those current
-  socket and tuple checks. Neither proves helper origin, assigned-address state,
-  or network namespace. The dormant native runtime closes it on every
-  path and returns `exit_listener_orchestration_unavailable`; no host bind,
-  pathname secret, or fallback exists. A structurally valid request with a
-  matching bearer commitment consumes its reservation/finalize pair before
-  that failure, so a same-process retry of the pair is rejected.
+- `StartExitSession` supports both explicit transport modes and carries its
+  nonzero SPKI pin, DNS TLS name, exact exit-listener/expected-client overlay tuples,
+  reservation hash and bounded in-memory certificate/private-key PEM (64 KiB/16 KiB).
+  Rust and C validate a pre-bound, unconnected, nonblocking, close-on-exec, IPv6-only
+  UDP descriptor without address/port reuse. The real exit backend adopts the exact
+  listener; failures close owned descriptors without host binding or secret-path
+  fallback. Repeated listeners must match the live session's immutable parameters;
+  collisions, stale/replayed authority and path-capacity overflow fail closed.
 - Focused upstream patches enforce the caller-supplied leaf-SPKI SHA-256 pin
   on every handshake, pass explicit local/remote tuples to xquic, expose real
   RTT, congestion-window, bytes-in-flight, loss, rate, and ACKed-transport
@@ -149,6 +145,17 @@ and warm-path probes use its fresh deltas, rejecting regressions for an unchange
 payload delivery. The ACK counter includes QUIC framing and possible retransmissions;
 complete application hashes and independent path captures remain separate acceptance gates.
 
+## Tunnel assignment
+
+Rust and C accept only server IPv4 `10.76.0.1/32` and client IPv4
+`10.76.0.2` through `10.76.0.254`, each with prefix `/32`. MTU is 1280–1420.
+Optional client IPv6 is `fd76:6f6c:7062::2` through `fd76:6f6c:7062::fe`,
+with prefix `/112`; absent IPv6 requires prefix zero (and zero address storage
+in the C representation). The adapter exposes the assignment only after
+`ESTABLISHED`, rejects mutation for the session, and binds outbound inner source
+and reverse inner destination to the assigned address. Assignment shape is not
+independent route/helper authority.
+
 ## Executable contract
 
 The daemon has an explicit role and a narrow argument surface:
@@ -163,18 +170,15 @@ volparossa-mpquic --mode exit --socket ABSOLUTE_PATH
 and opens no socket or runtime. The control socket path must satisfy the
 ownership and mode checks above. Authentication and the TLS server name arrive
 only in bounded API-v7 route-session messages. Client and exit roles are
-separate process modes; a node enabling both eventually needs two separately
+separate process modes; a node enabling both needs two separately
 orchestrated instances and control sockets.
 
-Exit mode accepts only its role-specific `StartExitSession` shape, validates
-its credential syntax, bounded identity metadata, exact overlay route and short authorization window,
-and consumes exactly one inherited listener descriptor, but still returns
-`exit_listener_orchestration_unavailable`. The native boundary has no reviewed
-exit backend factory. It closes the supplied listener and never substitutes a
-host-local listener, secret pathname, or fallback.
-The dormant boundary does not yet parse the certificate, prove that its key
-matches, or bind the leaf certificate to the supplied DNS name and SPKI pin;
-those checks are mandatory before the future backend may report success.
+Exit mode accepts role-specific `StartExitSession` requests and descriptor-bound
+listeners through the real mqvpn server backend. Request admission, process-local
+replay, session matching, listener adoption and cleanup are in
+[`runtime.c`](src/runtime.c); server configuration, namespace-cookie checks and
+packet callbacks are in [`mqvpn_backend.c`](src/mqvpn_backend.c). The
+[authority boundary](#authority-and-acceptance) remains separate from those checks.
 
 ## Locked upstream source
 
@@ -250,6 +254,9 @@ datapath.
 
 ## Local boundary build
 
+Run build and sanitizer commands only in the approved disposable build environment;
+they are not permission to install tooling or change the development host.
+
 ~~~sh
 cmake -S native/volparossa-mpquic -B /tmp/volparossa-mpquic-build \
   -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
@@ -290,7 +297,9 @@ does not constitute namespace dataplane acceptance.
 The libFuzzer target additionally requires Clang and
 `-DVMP_BUILD_FUZZER=ON`.
 
-## Resolved seams and mandatory WRITE-STOP gates
+<a id="resolved-seams-and-mandatory-write-stop-gates"></a>
+
+## Upstream integration contracts
 
 The locked mqvpn/xquic revisions genuinely implement RFC 9484 CONNECT-IP,
 QUIC DATAGRAM, and draft-ietf-quic-multipath-21 path creation. The local
@@ -333,116 +342,40 @@ patches close ten concrete integration seams:
     Request close, H3 close, refusal, and defensive destroy share idempotent
     session-table, address, callback, and admission cleanup.
 
-The following historical API-v6 foundation notes are not current completion claims;
-the repository implementation status records later integrated datapath evidence. API
-version 7 additionally exposes the transport counter described above.
+## Authority and acceptance
 
-API version 6 retained the bounded reverse/session contracts and strict
-single-path exit-listener handoff while adding process-incarnation targeting,
-exact request-digest correlation, signed route-scope fields, and a canonical
-tunnel-assignment response plus client retention policy. It preserves the
-earlier seven process-boundary seams:
+The current runtime has client and exit backends. `dispatch_start_exit` validates
+role, descriptor, route shape, credential commitment, admission time and process-local
+pair replay before creating the real transport and adopting its listener. The mqvpn
+exit backend configures the fixed IPv4/IPv6 pools, one client, route identity/auth,
+explicit transport mode and scheduler. It checks listener tuples and nonzero consistent
+`SO_NETNS_COOKIE`; it opens no replacement host listener.
 
-1. Reverse datagrams use bounded, request-driven polling with deterministic
-   overflow and explicit memory wiping; the native process never pushes an
-   unsolicited frame.
-2. A nonzero local association identifier is carried and validated through
-   the mqvpn adapter boundary independently of route ID and request nonce.
-   This identifier does not alter the RFC 9484 zero wire Context ID for IP
-   Datagrams.
-3. Multipath QUIC requires at least two paths while general UDP single-path
-   requires exactly one; either mismatch fails without fallback.
-4. Exact-length base64url client auth, TLS server name, and an
-   at-most-fifteen-minute expiry are bound to one `StartSession`; no
-   process-global product credential remains.
-5. Versions 1 through 5, unknown versions, non-minimal varints, reordered fields,
-   duplicate fields, and unknown fields fail closed.
-6. `AddPath` consumes exactly one correlated UDP descriptor and native never
-   opens or binds its own path socket. The descriptor and metadata are checked
-   independently by Rust and C.
-7. `StartExitSession` consumes exactly one separately domain-bound, listener-shaped
-   descriptor, carries its exact overlay peer metadata and bounded unparsed TLS
-   candidate material, and closes the descriptor before the intentionally dormant backend returns
-   unavailable. Every remaining operation carries no descriptor.
+These implementation boundaries do not collapse the following distinct claims:
 
-Two additional native tests cover a bounded, externally serialized exit-session
-state machine and bounded-chain leaf identity consistency, canonical DER and pin
-verification. These are still isolated foundations: the runtime does not start
-mqvpn's exit server, and they prove neither helper descriptor provenance nor a
-client-to-relay-to-exit datapath.
+- A same-UID socket, request digest and process incarnation correlate a contact;
+  they are not binary attestation or independent proof of helper-origin authority.
+  Socket shape and namespace consistency alone do not prove the helper created it.
+- Native's bounded, process-local pair ledger is not independent signature verification
+  of the complete reservation bundle and does not survive process restart. Production
+  admission belongs to the signed route/helper orchestration contract in
+  [the helper specification](../../docs/architecture/HELPER_V3.md).
+- `acked_transport_bytes` and `data_carrying` describe transport activity, not unique
+  inner payload. Inner hashes, independent path counters and privacy/cleanup captures
+  remain necessary for the requested source and mode.
+- The original unchanged `482e33d0` topology passes A01–A15, as recorded in
+  [implementation status](../../docs/IMPLEMENTATION_STATUS.md#network-baseline-and-remaining-proof).
+  That result does not qualify an arbitrary newer build, arbitrary NAT/radio topology
+  or later adaptive-growth feature. Review the exact source and acceptance scenario.
 
-The following gates remain hard blockers:
-
-1. **No separate role service identity or trusted helper-origin proof.** The
-   current single same-UID socket correlates a process but cannot authenticate
-   native against an untrusted agent, and an agent can still create a conforming
-   descriptor. Packaging needs distinct client/exit service identities and
-   role sockets. Only client `AddPath` checks a same-session namespace cookie;
-   StartExit lacks exact namespace and assigned-address proof. Production
-   adoption remains blocked until an affine helper-to-native capability binds
-   each descriptor to the attested helper acquisition.
-2. **No unique payload-delivery metric.** xquic's counter includes QUIC
-   transport overhead and retransmission. `GetStatus` uses it only to prove
-   per-path transport activity and leaves `NativePathStatus.delivered_bytes`
-   zero; it never relabels those bytes as unique delivered payload.
-3. **No operational exit lifecycle.** The patched mqvpn server can report a
-   session-correlated inbound packet and can initialize xquic from bounded
-   in-memory TLS candidate material without a caller-supplied secret pathname.
-   The native backend remains client-only, and the helper/agent does not yet provide the
-   end-to-end listener provenance/handoff to a reviewed exit factory. API v6
-   accepts and closes the descriptor and carries the TLS material in memory,
-   while a separate callerless foundation verifies bounded-chain leaf/key,
-   a non-wildcard DNS hostname under case-insensitive X.509 DNS semantics,
-   trusted interval, canonical complete-leaf DER and DER-SPKI consistency.
-   Runtime wiring remains blocked on affine helper provenance, exact signed
-   millisecond conversion, a fixed independent Rust/C digest vector, parser
-   fuzzing and trust/usage enforcement; native also does not independently
-   verify the signed reservation scope. Valid
-   `StartExitSession` requests still return
-   `exit_listener_orchestration_unavailable`; no launcher is shipped.
-4. **Process-local replay and BOOTTIME admission are not a production
-   authority.** Native request nonces correlate one response but have no
-   general replay tombstone. The bounded pair ledger and converted BOOTTIME
-   deadline prevent same-process pair reuse and wall-clock lifetime extension,
-   but native does not verify the signed bundle, both changed IDs look like a
-   new scope, tombstones expire, and process restart clears the table.
-   Production still needs cryptographic verification and a preverified affine
-   handoff bound to both process instances.
-5. **Client assignment still lacks production provenance.** The mqvpn adapter
-   now deep-copies exactly one callback assignment, independently enforces the
-   fixed VOLPAROSSA IPv4/optional-IPv6 pools and MTU, rejects changes, publishes
-   only after `ESTABLISHED`, and checks inner source and reverse-destination
-   ownership. Focused C tests prove the pure state and packet policy. There is
-   still no production exit configuring that pool, helper proof that the address
-   belongs to the exact namespace, production caller, or disposable-topology
-   packet evidence, so this client-side state must not be reported as an
-   operational tunnel.
-6. **EDT lacks live-topology acceptance.** Production multipath client and
-   exit sessions use the dedicated VOLPAROSSA xquic callback, which chooses
-   exactly one writable path from live RTT, bytes in flight, bandwidth, cwnd,
-   and recent loss. A deterministic native contract test covers both healthy
-   choices and a congested/lossy loser. No disposable topology has yet proved
-   the expected distribution or failover with real relay paths.
-7. **No real reverse-dataplane acceptance.** Unit tests prove queue/poll
-   framing, correlation, overflow, and wiping, but no disposable topology has
-   yet proved an exit-originated inner datagram reaches the Rust client.
-8. **No end-to-end dynamic path removal or failover evidence.** The pinned
-   upstream exposes these operations, but the VOLPAROSSA lifecycle has not
-   exercised them across real relay paths.
-9. **No full acceptance evidence.** No disposable namespace test yet proves
-   at least two data-carrying paths via distinct relays, bidirectional
-   CONNECT-IP, loss-aware scheduling, failover, disabled duplication/FEC,
-   privacy packet captures, and unchanged host routes, firewall, and DNS.
-
-The implementation-status dataplane items remain unchecked until these gates
-and the real namespace acceptance suite are complete. Focused API-v6 boundary
-tests and the full API-v6 sanitizer run alone must not be reported as A06/A07
-or full dataplane acceptance.
+The superseded API-v6 foundation and blocker narrative is retained in the
+[historical excerpt](../../docs/archive/implementation-notes-20261026.txt).
+It must not be read as a claim that the current exit backend is dormant.
 
 ## Policy boundary
 
-The native process may eventually accept only an already-authorised complete
-inner IP datagram. It is not the whitelist authority and must not infer
+The native process accepts complete inner IP datagrams only within an admitted
+route session. It is not the whitelist authority and must not infer
 authorization from packet shape. The Rust policy/traffic layer must validate
 the flow, including QUIC Initial/TLS ClientHello SNI and ECH rules where
 required, before forwarding; the exit must independently enforce the same

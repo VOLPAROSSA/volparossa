@@ -1,5 +1,9 @@
 # Private cooperative storage
 
+[Service status](../IMPLEMENTATION_STATUS.md) records current cross-service priorities.
+Detailed superseded trial narratives are retained in the
+[service evidence archive](../archive/service-notes-20261026.txt); they are not startup instructions.
+
 The storage layer keeps **encrypted private data on other participants' devices**.
 The owner retains the recovery keys and reconstruction metadata. Providers hold encrypted
 fragments; they do not need a readable copy of the owner's files.
@@ -1017,119 +1021,28 @@ reimplementing custody or acquiring Signal's private recovery keys.
 
 ## Recorded application recovery trials
 
-These records describe the pinned revisions and test conditions, not a guarantee about
-newer builds. Earlier failures remain part of the record. For the concepts and commands,
-use the sections above; for exact historical evidence, follow the individual runs below.
+These are historical source-bound slices, not acceptance of newer builds or full
+application services. Exact receipts, failed predecessors, hashes and test setup
+remain in the [service evidence archive](../archive/service-notes-20261026.txt).
+The current [consumer boundary](../IMPLEMENTATION_STATUS.md#storage-consumer-and-provider-evidence)
+remains open after catalog/maintenance failures; older successful slices do not
+replace that newer acceptance gate.
 
-### Image: encrypted snapshot recovery
+<a id="image-encrypted-snapshot-recovery"></a>
+<a id="cloud-one-file-recovery"></a>
+<a id="cloud-catalog-and-sdk-reads"></a>
+<a id="cloud-original-files-ui-downloads"></a>
+<a id="cloud-original-uploads-and-restarted-recovery"></a>
 
-The `image-snapshot` scenario is a verified cross-repository slice: it uses pinned
-VOLPAROSSA Image code to encrypt a synthetic quiesced database/assets snapshot with GPG,
-passes only that ciphertext through the actual Image Node storage CLI, and requires two
-independently hash-verified plaintext restorations after provider A stops. The owner keeps
-the recovery key private. In [trial 36901573120](https://github.com/VOLPAROSSA/volparossa/actions/runs/36901573120),
-the actual guest report confirms those operations and complete cleanup, but the overall
-workflow fails its runner-side report check because runtime-generated synthetic gzip
-headers differ between Python versions. Fixed synthetic bytes preserve the exact guest
-identity and remove that cross-version dependency. The subsequent complete
-[run 36905847039](https://github.com/VOLPAROSSA/volparossa/actions/runs/36905847039)
-passes on core `cf4de524ce885af95d0f75fcb53d80254486c27f`: real GPG, actual Node/core
-fragment storage, A offline, two B/C decryptions, all-copy deletion, zero owned
-objects and unchanged host state. Its original report passes exact-revision replay.
-This trial uses pinned Image `e177afeb`, not a newer adapter, and does not establish a
-running Immich database, mobile synchronization or general serverless Immich availability.
+| Recorded slice | Evidence and remaining boundary |
+| --- | --- |
+| Image encrypted snapshot | [36905847039](https://github.com/VOLPAROSSA/volparossa/actions/runs/36905847039), Core `cf4de524` / Image `e177afeb`: actual GPG/Node/Core fragment transfer, source/A offline, two B/C decryptions and all-copy deletion. Not a running Immich database, mobile synchronization or serverless availability. |
+| Cloud one-file recovery | [36909989038](https://github.com/VOLPAROSSA/volparossa/actions/runs/36909989038), Core `41e404a4` / Cloud `541cc826`: authenticated synthetic DAV import, source/credentials/local ciphertext removed, two protected restores and zero retained leases. Not a newer read service or actual OpenCloud server/UI. |
+| Cloud catalog/SDK reads | [36916040042](https://github.com/VOLPAROSSA/volparossa/actions/runs/36916040042), Core `5d9d347f` / Cloud `a67b91fb`: encrypted owner selection, actual SDK full/range reads from B/C, original source/local ciphertext/A unavailable, authenticated denial and deletion. Range reads verify the complete encrypted file first. Not account/permission recovery, writes, distributed catalogs or second-device recovery. |
+| Original Files UI download | [36940326270](https://github.com/VOLPAROSSA/volparossa/actions/runs/36940326270), Core `d7403106` / Cloud `63bba5d1`: actual owner-local service and two original Files Downloads after source/A loss, six protected reconstructions and confirmed zero leases. Earlier socket-limit/UI-unlock failure remains failed. Not general writable sync, sharing or complete server independence. |
+| Original upload and restart | [37218270756](https://github.com/VOLPAROSSA/volparossa/actions/runs/37218270756), Core `929c2ff9` / Cloud `ffdcfaa1`: original Files/Uppy encryption/deposit, restart, source/A loss, two baseline restores and two UI downloads, nonconsuming charges and all-copy deletion. This remains an explicitly owner-private upload space. |
 
-### Cloud: one-file recovery
-
-The `cloud-private-file` scenario has **passed its one-file protected-peer trial**.
-It reuses the
-same protected topology with Cloud `541cc826fe14ce69cf89a82ecb600ad14dd534c6`:
-an actual authenticated synthetic DAV endpoint feeds the pinned Cloud importer,
-which encrypts the file and source metadata locally. The endpoint is stopped and
-joined before create/deposit, its credentials are removed, and the local encrypted
-file is removed before two provider-loss restores. The actual Cloud CLI must fetch
-through core fragment storage and complete authenticated GPG/manifest verification
-before new plaintext directories appear. Owner keys never go to peers or exported
-reports. Retained physical charges, explicit lease deletion, private cleanup and
-unchanged host state passed in [run36909989038](https://github.com/VOLPAROSSA/volparossa/actions/runs/36909989038)
-on core `41e404a40312f039827f761dea7b90be48d0c21f`; the original exact-source
-report also passed replay. This source-bound result does not establish a newer
-Cloud read service or an actual OpenCloud server/web UI.
-
-### Cloud: catalog and SDK reads
-
-The subsequent catalog/SDK integration uses Cloud
-`a67b91fbed42ecd23ba215eb21ef54397fc9f06a`: an encrypted immutable owner selection,
-private restoration through the core and authenticated loopback DAV listing and
-reads. Its real GPG/OpenCloud SDK local integration test passes with an explicitly
-injected storage adapter. The new protected-peer client proof now independently
-passes in [run36916040042](https://github.com/VOLPAROSSA/volparossa/actions/runs/36916040042)
-on core `5d9d347fc52e4cc13498ed3b6790d1f00de370c3`. The original source and local
-ciphertext are absent and provider A is offline before direct recovery, catalog
-creation and actual SDK full/range reads reconstruct from B/C. All 32 required
-MPTCP/TLS exchanges complete; authentication/ETag denial, private cleanup, retained
-physical charges and final zero leases pass. Exact-source replay of the 44
-original artifacts reproduces the aggregate; ZIP SHA-256
-`f59a2c2baf693b5087c0827c0971589da23bf15610f96c885db6f2bbe0abdaef`.
-Range requests still reconstruct and verify the complete encrypted file before
-selecting plaintext bytes. This is not the full web UI. Accounts, shared permissions,
-writes, peer-distributed catalogs and second-device recovery are not completed.
-### Cloud: original Files UI downloads
-
-The joined original-UI scenario pins Cloud `63bba5d1163a69e1ee6b4218c9e7462d941f22f7` and builds
-the original OpenCloud Web8 Files UI from its exact source in the disposable guest.
-It connects a fresh isolated Firefox profile to the same owner-private read service
-and requires two actual Download actions, in addition to the four preceding SDK/
-catalog/direct reconstructions. The source, local ciphertext and provider A remain
-unavailable. At least 48 completed protected exchanges and the corresponding B/C
-payloads are required; browser profiles, temporary plaintext and all leases must
-be cleaned up. The earlier Cloud-local UI test uses a synthetic backend and is
-not peer-storage evidence.
-The original joined run `36935715873` using Cloud `c81980dd` failed during UI
-unlock, after the preceding recovery/catalog/SDK operations; private cleanup and
-unchanged host state passed. A local original-Web8 synthetic diagnostic reproduced
-the same failure when six idle browser connections exhausted the service's socket
-limit. The new Cloud pin keeps at least eight transport slots only for web mode,
-while private request/restoration concurrency, authentication and all joined-proof
-gates stay unchanged. Focused HTTP and synthetic UI checks pass; a fresh joined
-original-UI/peer-storage result was still required at that stage.
-
-That combined result now **passes** in
-[run36940326270](https://github.com/VOLPAROSSA/volparossa/actions/runs/36940326270)
-on exact core `d7403106837962c66cd0af0e049236785d8053cb`. The original Files UI,
-using the real owner-local service rather than a synthetic backend, completes two
-786,433-byte Downloads with independently checked hash
-`5cb6c6ae54a29c1769e7189e1e6d4457e65afdbf78c48c89beb5780f86593f5c`.
-All six protected B/C reconstructions and actual GPG decryptions succeed with the
-source off, local ciphertext absent and A offline. All 48 restore exchanges finish;
-A contributes zero restore payload. Authentication/ETag checks, listing, logout,
-private browser/service cleanup and unchanged host state pass. Eight retained
-fragment copies keep their 1,598,292-byte charge through nonconsuming reads, then
-all three reopened provider stores reach zero reservations, committed bytes and
-leases after idempotent deletion. The 18 privacy captures have zero drops and no
-direct client/exit traffic. Exact-source replay reconstructs both aggregates from
-44 original files; ZIP SHA-256
-`9815e1ee6435f39a03c9b566008068e471aa4ac2ad405006df530044b65ffbab`.
-This is selected owner-local read-only recovery in the original Files application,
-not general account/permission recovery, writable synchronization, sharing or
-complete server-independent OpenCloud. Earlier failures remain failures.
-Preview with
-`sh tests/integration/run-alpha-topology-vm.sh --preview --scenario cloud-private-file`;
-execution belongs only in the explicitly approved disposable KVM workflow.
-
-### Cloud: original uploads and restarted recovery
-
-The separate owner-private new-file scenario now **passes** in
-[run37218270756](https://github.com/VOLPAROSSA/volparossa/actions/runs/37218270756),
-core `929c2ff909f4e9704046459e0434006397dc9110` / Cloud
-`ffdcfaa15cdd2a029dae545904b0a58603da4e17`. The original Files/Uppy upload is
-encrypted and deposited through the real core. After source/local-ciphertext
-removal, service/browser restart and provider A withdrawal, two baseline restores
-and two original UI downloads succeed from B/C with exact hashes. All sixteen
-baseline/upload copies keep their actual charges through nonconsuming reads,
-then all three stores reach zero bytes/leases after deletion. Continuous bounded
-log observations, privacy captures, private cleanup and unchanged guest-root
-network state pass. See the [source-bound evidence and historical failures](../IMPLEMENTATION_STATUS.md#additional-application-and-autonomous-maintenance-scope).
-This is an explicit owner-private upload space, not recovery of ordinary
-OpenCloud accounts, permissions, sharing, writable synchronization or complete
-server-independent service. The preceding read-only trial remains unchanged.
+Each trial retains its own protected-path, private-cleanup and host-observation
+scope. They do not establish independent physical failure domains, automatic
+account/contribution recovery or general application availability. Execution uses
+the approved disposable workflow; a scenario preview is not runtime proof.

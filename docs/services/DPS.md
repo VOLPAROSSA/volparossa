@@ -1,5 +1,9 @@
 # Decentralized Positioning System
 
+[Service status](../IMPLEMENTATION_STATUS.md) records current cross-service priorities.
+Detailed superseded trial narratives are retained in the
+[service evidence archive](../archive/service-notes-20261026.txt); they are not startup instructions.
+
 DPS is a shared VOLPAROSSA core service for local positioning, source consistency
 and eventually independent GNSS integrity assessment. It uses the existing five
 DICN infrastructure layers. The [DPS section of the complete goal](../development/GOAL.md#dps)
@@ -27,16 +31,10 @@ Unix socket authorizes local administrative callers; it is not yet a per-app
 least-authority location broker. Untrusted mobile apps must not receive that
 administrative socket as a shortcut to location access.
 
-A bounded hosted runtime proof now exercises one normal launch of the dormant
-daemon, framed status and a synthetic DPS request, joined shutdown, and removal
-of its owned socket and fixture. Quality `39630688730` and CodeQL `39630681739`
-pass on PR305 source `350a013de73334b2deb18843057cb964101989d7`; the temporary PR test
-merge against main has an identical tree to that source. The closed receipt reports only synthetic
-DPS activity and unchanged bounded host observations. This does not grant apps
-location access or establish app-owned permissions, active-participation
-behavior, restart/crash recovery, complete namespace cleanup, sensor acquisition,
-fusion or physical accuracy. The administrative socket remains unsuitable for
-untrusted apps.
+The bounded normal-daemon proof covers a dormant launch, synthetic framed request,
+joined shutdown and owned socket/fixture removal. It establishes neither app-facing
+location authority, full crash/restart cleanup nor sensor/fusion accuracy; source-bound
+results are in [implementation status](../IMPLEMENTATION_STATUS.md#decentralized-positioning-system--2026-10-21).
 
 The local-control envelope remains version 2; DPS schema version 1 uses request
 field 64 and response field 64. Allocation was checked against main and all 23
@@ -105,146 +103,45 @@ identifies the actual Organic Maps SDK/JNI/CMake seams. Its existing location
 listener can immediately replay a saved real fix, and starting its location
 helper can start sensors. A synthetic-only native quality fixture must therefore
 use a separate coordinator and stay outside both that helper and the GPS/track
-forwarding path. No Rust linkage or DPS coordinator exists in the pinned native
-app yet; the Python component is not an Android bridge.
+forwarding path. At that plan snapshot, native Rust linkage/coordinator work was still absent;
+its Python component was not an Android bridge. Later bounded JNI evidence is
+separate from genuine sensor/navigation integration.
 
 ### Quality-only native ABI
 
-#### Historical Map checkpoint
+The shared Rust assessor exposes a 36-byte response containing exactly nine `u32`
+quality/limitation fields. Canonical bare-protobuf requests are bounded to 16 KiB.
+No coordinates or fix are returned; the library acquires no sensors, keeps no
+history and accesses no administrative socket. Keep Rust assessment as the single
+algorithm: the Map adapter cannot turn relative/unavailable quality into a GPS fix.
+C/C++ caller, sanitizer and Valgrind trials cover their recorded source and scope;
+the Rust library itself was not sanitizer-instrumented.
 
-This is the dated checkpoint recorded when PR10 was at source
-[`3abb91fa`](https://github.com/VOLPAROSSA/volparossa-map/tree/3abb91fa56a5bdf1b27337c689a409986caed793).
-It passed source gate `39664119379` with 13 inert tests. Actual hosted trial
-`39664284521` failed its pre-existing KVM-access requirement before acquisition or
-native execution. This historical result is superseded as the current source
-checkpoint below; the failure remains part of the evidence record.
+The bounded Map debug path uses an app-owned coordinator and C/JNI bridge without
+loading the Organic Maps framework or requesting location. Link its standalone
+native target to the Rust static library and required Android system libraries,
+not the existing Organic Maps JNI helper or `JNI_OnLoad`. Keep work outside the
+real location helper, GPS listeners and track route; a JNI lifecycle is not proof
+of OS app identity or location authorization.
 
-#### Current Map checkpoint — 2026-10-22
-
-The current actual PR10 trial uses source
-[`f3296c21`](https://github.com/VOLPAROSSA/volparossa-map/commit/f3296c21f9787cb760e561954652158c7b21601d),
-tree `0002fa35860355a41541aa4563870909b03e7a5e`. Source gate `39694301016`
-passes 93 inert checks and Components `39694300657` passes 31. Actual run
-`39694570310` passes all eight Android/JNI instrumentation cases, including the
-real Rust/JNI golden and permission-boundary test; private process-group and
-cleanup controls also pass. The full fixture fails `KVM_DEVICE_CHANGED`, with
-only `ctime_ns` and `mtime_ns` changed. This does not identify whether udev,
-another process or the trial caused the metadata change. No normalization or
-waiver of this baseline failure is accepted.
-
-The preserved artifact `12390187577` is 97,745 bytes with SHA-256
-`e8a5320620919713895a5435e12826254719cb099cbe664fbb017459e1d0ac0e`.
-The instrumentation receipt is 5,558 bytes, SHA-256
-`f577b7780b302c55f93888d2ec617ea749f39b8a5e18e3108fca24a0d095e2e3`.
-The trial has no sensor exercise, physical accuracy, confidential execution or
-main Map navigation. Earlier actual trial `39690910102` on source
-`b64fba86d56ef1ac9e8d1afe89274c009bb7fffe` remains failed at its eighth test
-after seven passes; its KVM timestamp difference also left the host baseline
-unconfirmed. That earlier failure does not explain the current trial.
-
-A separate four-path KVM diagnostic candidate contains one query-only negative
-control followed by one empty-VM control. Its 112 total inert checks include 19
-new checks; independent Sol review passes all 20 focused checks. It is published
-as Map PR11, head
-[`f23d8a8b`](https://github.com/VOLPAROSSA/volparossa-map/commit/f23d8a8b31633bb62bc3f0581b6332d5273ff880),
-tree `a941a3c057caee886ca3bd6599fc24f803162b6e`, directly based on PR10
-source `f3296c21`. Source run `39696441858` passes 112 inert checks and Components
-`39696441713` passes 31. Actual control `39696546767` completes the bounded
-experiment: the original API12 query/close preserves all metadata after 250ms;
-one empty type-0 VM create/close then changes only ctime/mtime. VM/system
-descriptors close, the namespace group drains within its unchanged 10-second
-budget, and outer groups/state clean up. No SDK acquisition or Android execution
-occurs. The strict phase and overall host-baseline checks still fail. Artifact
-`12391605549` is 5,724 bytes, API/ZIP SHA-256
-`d7c6dee986c0673f8531bd353d33e08a4437913356c9211c12ccb8f8a331581a`;
-its committed source/pins and run/attempt match. This reproduction does not
-identify the timestamp actor, exclude delayed/transient changes, explain past
-runs or authorize normalization. Keep this diagnostic separate; do not merge it
-into PR10 or main as the app fixture. See the
-[implementation ledger](../IMPLEMENTATION_STATUS.md#current-integration-and-active-work)
-for shared-core and current trial status.
-
-#### Earlier Map checkpoint — 2026-10-21
-
-At that snapshot PR10's published source was
-[`02cf65b9`](https://github.com/VOLPAROSSA/volparossa-map/commit/02cf65b9cea0fd9a09e51f434d8b55deccb40fb7),
-tree `5d5bbafa9a659ff81a046870b4f46af9cee3d7bd`. The independently reviewed
-change enables loopback in the verified private offline-build phase and adds inert checks;
-source gate `39678152908` passes 56 tests and Components `39678152985` passes 31.
-Actual run `39679300414` is in progress on this exact source. Previous actual
-trial `39676098216` completed public acquisition and build, then failed the
-isolated offline stage at `LOCAL_ADDRESS_SELECTION`. KVM probe API 12 and the
-public native build are separately evidenced; Android JNI/runtime execution is
-unproved. Its process groups drained and state was removed, but the IPv6 raw
-state hash differed, so the host baseline is unconfirmed. This correction does
-not normalize IPv6 or establish the cause of that IPv6 discrepancy. The earlier
-`3abb91fa` KVM-access failure, `4e165e6e` offline-build failure, `33c80178`
-firewall raw-hash failure, `c479fbd2` unexplained baseline and earlier KVM
-probe remain historical and are not generalized to the new source. No native
-Android execution, sensor access, positioning or accuracy is established.
-See the [implementation ledger's current snapshot](../IMPLEMENTATION_STATUS.md#current-integration-and-active-work)
-for shared-core and current trial status.
-
-The shared Rust assessor has a separately testable C ABI. PR314 source
-`4d4612200e0a4a46546e0c827a3f3e7f0b73c669` has accepted tree
-`bac45917af63e152ddb232a885446cb7221c84bb`; that source is integrated on main
-`0f15a349d3fe34131a806241c3efcb7c8a1cdb8d`, whose tree is
-`985b9d834381701f19d05ae4c0a2a4e6353fe782`. Its
-36-byte response is exactly nine `u32` quality/limitation fields; the canonical
-bare-protobuf request is bounded to 16 KiB. The response contains no coordinates
-or fix; the library acquires no sensors, keeps no history and accesses no
-administrative socket. Keep the Rust assessment as the
-single algorithm implementation; the Map adapter must not introduce a second
-estimator or turn a relative/unavailable assessment into a GPS fix. This narrow
-ABI is privacy/quality plumbing only and proves neither app identity nor location
-authority, Android integration, positioning accuracy or native navigation.
-
-Hosted run `39659133028` passed on ABI source
-`aae217d3341d50ea3f925ac58059a705ba215f75`, with 12 Rust tests, 18 C11 and 18
-C++17 synthetic caller cases under ASan/UBSan, and 36 separate full-library
-Valgrind cases. The Rust library was not itself sanitizer-instrumented. Artifact
-`12373670287` has verified API/ZIP SHA-256
-`f246d0481ee3f83950134ce4da76bdb0be698529a87886873d02024f5076b0a4`.
-Corrected main composition `4d4612200e0a4a46546e0c827a3f3e7f0b73c669` has
-passed independent exact-scope review and the same dedicated native checks in
-`39661011331`. Combined Quality `39661019902` and CodeQL `39661012097` pass;
-the former records 4,244 passed workspace executions, zero failures and 12 ignores.
-Current artifact
-bindings and historical failures are in the implementation ledger. The
-earlier combined run `39656846006` failed cargo-deny on a wildcard dependency;
-the corrected exact dependency version is now in the candidate.
-
-The separate Map candidate lives in
-`.volparossa-dev/worktrees/map-native-dps-jni-20261021`, based on pinned Map
-source `e8fdcca87575e238894d579797379de9c3516384`. It is a standalone,
-debug/test path designed to require no permissions, with an app-owned coordinator
-and C/JNI boundary;
-it does not load the Organic Maps framework or request location. Link the
-standalone native target to the new Rust static library and required Android
-system libraries; do not route it
-through Organic Maps' existing JNI helper or `JNI_OnLoad`. At the initial source
-checkpoint, thirteen inert tests passed and Android had not run; subsequent
-partial native evidence is recorded above. Initial independent review found a SIGTERM
-cleanup bypass, background lifecycle tests that revoke/expire before entering
-background, and missing deterministic coverage of expiry between posting and
-display. The revised
-candidate adds controls for these cases and passes independent rereview; the
-implementation ledger records exact source and test boundaries. Preserve
-generation-based revocation, monotonic expiry and joined cancellation; keep all
-work outside the real location helper, GPS listeners and track route. The
-existing JNI lifecycle does not establish OS app identity. No native Map runtime,
-sensor, positioning or accuracy claim follows from source or hosted ABI checks.
-
-Before work and again before publication, check the app-owned consent generation,
+Before work and again before publication, check app-owned consent generation,
 monotonic expiry and active lifecycle. Revocation, disable or backgrounding clears
-selected DPS state and invalidates pending results; an obsolete completion must
-not republish them. The initial Android fixture uses synthetic Cartesian data
-while location permission is denied, and must prove displayed quality, expiry,
-revocation during work, background/resume, late-result rejection, unavailable
-offline input, no sensor/network activity and joined owned work. This establishes
-only the native adapter boundary when actually exercised. Real sensor acquisition,
-frame conversion, location precision authorization, independent GNSS integrity and
-navigation remain required subsequent work.
+selected DPS state and invalidates pending results; late completions cannot
+republish it. Cancel and join owned work. Synthetic denied-location fixtures must
+exercise displayed quality, expiry, revocation during work, background/resume,
+late-result rejection, unavailable offline input and absence of sensor/network activity.
+
+<a id="historical-map-checkpoint"></a>
+<a id="current-map-checkpoint--2026-10-22"></a>
+<a id="earlier-map-checkpoint--2026-10-21"></a>
+
+The [current recorded Map checkpoint](../IMPLEMENTATION_STATUS.md#decentralized-positioning-system--2026-10-21)
+accepts a bounded completed-emulator debug/JNI slice while retaining its raw host
+comparison failure. Earlier KVM, instrumentation and cleanup failures remain in the
+[dated evidence archive](../archive/service-notes-20261026.txt); no timestamp
+normalization or retrospective pass follows. Real sensor acquisition, frame
+conversion, precision authorization, independent GNSS integrity and native
+navigation remain subsequent work.
 
 ## Research and implementation choices
 

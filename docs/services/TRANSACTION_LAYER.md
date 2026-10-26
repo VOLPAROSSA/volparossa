@@ -1,5 +1,9 @@
 # Transaction layer: implementation and research
 
+[Service status](../IMPLEMENTATION_STATUS.md) records current cross-service priorities.
+Detailed superseded trial narratives are retained in the
+[service evidence archive](../archive/service-notes-20261026.txt); they are not startup instructions.
+
 [Documentation](../README.md) · [Bank application](https://github.com/VOLPAROSSA/volparossa-bank)
 
 Requested on 2026-10-04. The Transaction-layer is required reusable functionality
@@ -252,20 +256,10 @@ routes, DNS or firewall. Acceptance requires live packet-drop observations,
 rejoined state, original receipts, byte-identical retries in newly committed
 blocks and complete owned-resource cleanup. Only bounded receipts are exported.
 
-The first actual four-validator run reached startup, conflicting signed TEST
-reserves and a conserved transfer, then failed at the first partition command.
-Its processes/namespaces/keys were cleaned up, but the separate guest-parent
-unchanged-state check also failed. It is not distributed acceptance or recovery
-proof. The source correction fixes a missing nft chain separator and adds closed
-diagnostics without relaxing the original state-comparison or runtime gates.
-The later exact-source `66cf3670` trial passed all inner functional checkpoints:
-competing signed reserves, conserved transfer, observed 3–1 majority progress and
-2–2 halt, healing, and a post-commit restart followed by both original commands
-executing again in a new block without changing historical receipts or balances.
-It still **failed overall**: address and IPv6-route lifetime fields changed in
-the separate parent-state comparison. All processes/namespaces/keys were cleaned
-up. That old receipt lacks the actual deltas and read timing needed to establish
-natural countdown; it remains failed and is not complete acceptance.
+Earlier four-validator trials reached different functional boundaries but failed
+partition or parent-state gates. Their original failed verdicts and diagnostic
+sequence remain in the [service evidence archive](../archive/service-notes-20261026.txt).
+A corrected observer does not retroactively upgrade them.
 
 The follow-up observer keeps raw equality separate from bounded expiry semantics.
 Each address/IPv6-route read has its own monotonic start/end window, at most 20s;
@@ -287,25 +281,14 @@ new successful trial below support this observer; the old failed runs are not
 retrospectively upgraded.
 
 The exact-source `2ea504e399eb08b7d67d64e5087f6dad596db65a`
-[trial 37669796654, attempt 1](https://github.com/VOLPAROSSA/volparossa/actions/runs/37669796654/job/112958337820)
-passed on 2026-10-07: all nine setup/startup, signed-conflict, commit, partition,
-rejoin and crash/replay checkpoints, plus the outer acceptance and cleanup gates.
-One conflicting reserve was rejected; 70 TEST units moved while total supply
-remained 100. A 3–1 split permitted majority progress and a 2–2 split halted all
-four live validators. Both healed. After the post-commit restart, both original
-signed commands executed again in block 21 without changing balances or original
-receipts; all stores converged at height 22. Driver and guest exits were 0.
-
-All eight processes were reaped and owned namespaces/private keys removed.
-Raw parent address/IPv6-route hashes still differed: the separate observer
-accepted six finite lifetime countdowns over approximately 43.06s, preserving six
-forever values, structure and all other raw hashes. This scoped guest-parent
-result is not raw equality or a whole-runner audit. The original ZIP/log and
-independently repeated offline gate are recorded in the implementation status.
-
-See the [original trials and remaining evidence](../IMPLEMENTATION_STATUS.md).
-Post-commit restart is not a pre-commit crash or actively equivocating validator;
-those cases and independent client finality verification remain separate work.
+[trial 37669796654](https://github.com/VOLPAROSSA/volparossa/actions/runs/37669796654)
+passes its bounded signed-conflict, conservation, 3–1 progress/2–2 halt, healing,
+post-commit restart/replay and cleanup gates. Raw parent address/IPv6-route hashes
+differed; only the separate bounded lifetime observer accepted those changes,
+not raw equality, causation or a whole-runner audit. Detailed receipts remain in
+the archive and [implementation status](../IMPLEMENTATION_STATUS.md).
+Pre-commit crashes, active equivocation and independently verified client finality
+remain separate required evidence.
 
 ### Bank integration and remaining financial functions
 

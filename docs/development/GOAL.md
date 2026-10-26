@@ -424,4 +424,4 @@ controles, toegestane integratie en verificatie van gepubliceerde inhoud. Vertaa
 architectuur naar bruikbare voordelen met behoud van identiteit, attributie, volledige
 scope en bewijsgrenzen. Dit vervangt de vroegere publicatiestop voor deze afgebakende
 wijzigingen; overige benadering, financiering en accountwijzigingen blijven apart
-bevoegd. [PUBLIC_GROWTH_20261020.md](PUBLIC_GROWTH_20261020.md) bewaart de onderbouwing.
+bevoegd. [PUBLIC_GROWTH_20261020.md](../archive/PUBLIC_GROWTH_20261020.md.txt) bewaart de onderbouwing.
