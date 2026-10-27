@@ -165,7 +165,7 @@ impl OriginClient {
             || limits.handshake_timeout.is_zero()
             || limits.handshake_timeout > Duration::from_secs(60)
             || limits.session_timeout.is_zero()
-            || limits.session_timeout > Duration::from_secs(900)
+            || limits.session_timeout > Duration::from_mins(15)
             || limits.max_object_bytes == 0
             || limits.max_object_bytes > MAX_OBJECT_BYTES
         {

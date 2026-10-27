@@ -18,6 +18,31 @@ Last updated: 2026-10-27
 
 ## Current integration and active work
 
+### F04 P03d — vier equivalente Duration-bovengrenzen — 2026-10-27
+
+Hervat vanaf live PR349-head `2b8b179c625e774a5a5ef765018704915c093e1c`.
+De bestaande log meldt vier `duration_suboptimal_units` in Content:
+`origin_https.rs`, `provider/custody/session.rs`, `provider.rs` en `transfer.rs`.
+Alleen `Duration::from_secs(900)` wordt `Duration::from_mins(15)` in dezelfde
+vergelijkingen. Vijftien maal zestig is exact 900 gehele seconden, zonder
+subseconden, overloop of precisieverlies. Defaults, deadlineberekeningen,
+retries, cancellation, foutpaden, API/ABI en serialisatie blijven bytegelijk
+buiten deze vier uitdrukkingen. Geen bestaande test gewijzigd.
+
+Gerichte hosted verificatie bewaart strikte Content-Clippy zonder suppressions:
+14 bekende diagnoses op de baseline en dezelfde 10 overige diagnoses na deze
+vier correcties. Content en de workspace worden daarmee niet Clippy-groen
+verklaard. Package-formatting, een numerieke waarneming met de gepinde compiler
+en vier bestaande relevante deadline-/quotumtests worden afzonderlijk gebonden
+aan baseline/kandidaat met gescheiden builds. Bestaande tests bestrijken geen
+letterlijke 900-secondengrens; de exacte constante en grensvergelijkingen krijgen
+afzonderlijk waarde-/bronbewijs, geen vijftien minuten durende runtimeclaim.
+Onafhankelijke review en definitieve resultaten staan onder
+`.volparossa-dev/p03d-f04-20261027/`; de bewijsworkflow komt niet in PR349.
+Na deze tranche blijven 31 eerder bekende diagnoses open. Geen gewone Quality-,
+VM-/native-acceptatieproef of vervolgtranche; bestaand F04-werk blijft behouden.
+F04 blijft onvoltooid en de overige security-/dependency-/native-gates blijven open.
+
 ### F04 P03c — negen eenvoudige Clippy-meldingen — 2026-10-27
 
 Hervat vanaf live PR349-head `19721396d7a9914e07df02a851f26753d4feb215`,
