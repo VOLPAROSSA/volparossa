@@ -1,0 +1,200 @@
+name: F04 P03f guards targeted Clippy evidence
+on:
+  push:
+    branches: [proof/p03f-f04-collapse-corrected-20261027]
+permissions:
+  contents: read
+concurrency:
+  group: f04-p03f-collapse-corrected-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  CANDIDATE: c11d97f4265834218500ba7ec7e2aff1e66c55db
+  BASELINE: 339409e885412f47f1f02fef1002984be109c4e1
+  CARGO_TERM_COLOR: never
+  CARGO_BUILD_JOBS: '2'
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  targeted:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.CANDIDATE }}
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Bind source and minimal change scope
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
+          test "$GITHUB_REF" = refs/heads/proof/p03f-f04-collapse-corrected-20261027
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          mkdir evidence
+          test ! -e "$RUNNER_TEMP/f04-p03f-baseline-target"
+          test ! -e "$RUNNER_TEMP/f04-p03f-candidate-target"
+          git fetch --no-tags --depth=1 origin "$BASELINE"
+          python3 -B - <<'PY_BIND'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          candidate, baseline = os.environ['CANDIDATE'], os.environ['BASELINE']
+          assert git('rev-parse', 'HEAD^') == baseline
+          paths = git('diff', '--name-only', baseline, candidate).splitlines()
+          assert paths == ['crates/volparossa-content/src/provider/digest.rs', 'crates/volparossa-content/src/transfer/parallel.rs', 'crates/volparossa-content/src/transfer/parallel/adaptive.rs', 'crates/volparossa-discovery/src/content_provider.rs', 'crates/volparossa-discovery/src/lib.rs', 'crates/volparossa-discovery/src/preselection_responder.rs', 'crates/volparossa-local-control/src/private_storage_outcome.rs', 'crates/volparossa-selection/src/path.rs', 'crates/volparossa-selection/src/route_context.rs', 'crates/volparossa-transaction/src/ordered.rs', 'docs/IMPLEMENTATION_STATUS.md']
+          unchanged_extra_paths = ['crates/volparossa-content/src/private_message/confirmation.rs', 'crates/volparossa-content/src/private_storage/wire/tests/begin_observation.rs', 'crates/volparossa-content/src/private_storage/wire/tests/bridge_observation.rs', 'crates/volparossa-content/src/provider/compute/attestation/tests.rs', 'crates/volparossa-content/src/provider/compute/quote/confirmation/tests.rs', 'crates/volparossa-content/src/provider/compute/quote/outcome_tests.rs', 'crates/volparossa-content/src/provider/compute/transcript/tests.rs', 'crates/volparossa-content/src/provider/digest/tests.rs', 'crates/volparossa-content/src/provider/replication/credit_tests.rs', 'crates/volparossa-mptcp/src/lib.rs', 'crates/volparossa-mptcp/src/netlink.rs', 'crates/volparossa-mptcp/src/netlink/userspace.rs', 'crates/volparossa-mptcp/src/socket.rs', 'crates/volparossa-selection/tests/selection.rs', 'crates/volparossa-test-support/src/acceptance.rs', 'crates/volparossa-udp/src/bridge.rs', 'crates/volparossa-udp/src/dns/resolver.rs', 'crates/volparossa-udp/src/dns/resolver/private_unbound.rs', 'crates/volparossa-udp/src/dns/resolver/source_choice.rs']
+          for p in unchanged_extra_paths:
+              assert Path(p).read_bytes() == subprocess.check_output(['git', 'show', baseline+':'+p])
+          record = dict(candidate=candidate, baseline=baseline,
+              unchanged_extra_source={p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in unchanged_extra_paths},
+              candidate_tree=git('rev-parse', 'HEAD^{tree}'),
+              proof_workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'],
+              run_id=os.environ['GITHUB_RUN_ID'], run_attempt=os.environ['GITHUB_RUN_ATTEMPT'],
+              paths={p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in paths},
+              scope='Thirteen selected guard collapses; strict five-package diagnostics and source-bound existing exact tests',
+              full_workspace_clippy=False, runtime_acceptance=False)
+          Path('evidence/source.json').write_text(json.dumps(record, indent=2)+'\n')
+          PY_BIND
+          git worktree add --detach "$RUNNER_TEMP/f04-clippy-before" "$BASELINE"
+      - name: Provision unchanged authenticated Rust 1.99.1 profile
+        run: python3 -B scripts/provision-rust199.py runner
+      - name: Record compiler and fetch locked inputs
+        run: |
+          set -euo pipefail
+          rustc -Vv | tee evidence/rustc.txt
+          cargo clippy -V | tee evidence/clippy.txt
+          cp "$RUNNER_TEMP/volparossa-rust-1.99.1/receipt.json" evidence/compiler-receipt.json
+          cargo fetch --locked 2>&1 | tee evidence/fetch.log
+      - name: Check formatting of only the five affected packages
+        run: cargo fmt --check -p volparossa-content -p volparossa-local-control -p volparossa-transaction -p volparossa-selection -p volparossa-discovery
+      - name: Preserve strict diagnostics and require exactly the selected thirteen to disappear
+        run: |
+          set -euo pipefail
+          output="$GITHUB_WORKSPACE/evidence"
+          for variant in baseline candidate; do
+            export CARGO_TARGET_DIR="$RUNNER_TEMP/f04-p03f-$variant-target"
+            if test "$variant" = baseline; then
+              cd "$RUNNER_TEMP/f04-clippy-before"
+            else
+              cd "$GITHUB_WORKSPACE"
+            fi
+            set +e
+            cargo clippy --keep-going --locked --offline -p volparossa-content -p volparossa-local-control -p volparossa-transaction -p volparossa-selection -p volparossa-discovery --all-targets --all-features --message-format=json -- -D warnings > "$output/$variant-clippy.jsonl" 2> "$output/$variant-clippy-stderr.log"
+            status=$?
+            set -e
+            test "$status" = 101
+            echo "$status" > "$output/$variant-clippy-exit.txt"
+          done
+          cd "$GITHUB_WORKSPACE"
+          python3 -B - <<'PY_CLIPPY'
+          import json
+          from pathlib import Path
+          expected_baseline = {('clippy::collapsible_if', 'crates/volparossa-udp/src/dns/resolver.rs', 238), ('clippy::collapsible_if', 'crates/volparossa-mptcp/src/lib.rs', 511), ('clippy::collapsible_if', 'crates/volparossa-udp/src/dns/resolver.rs', 244), ('clippy::collapsible_if', 'crates/volparossa-content/src/provider/digest.rs', 193), ('clippy::collapsible_if', 'crates/volparossa-udp/src/dns/resolver.rs', 259), ('clippy::collapsible_if', 'crates/volparossa-udp/src/dns/resolver.rs', 326), ('clippy::collapsible_if', 'crates/volparossa-udp/src/dns/resolver/source_choice.rs', 109), ('clippy::struct_field_names', 'crates/volparossa-discovery/src/mpquic_session.rs', 20), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/origin_https/digest.rs', 378), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/store.rs', 531), ('clippy::collapsible_if', 'crates/volparossa-discovery/src/lib.rs', 1244), ('clippy::large_enum_variant', 'crates/volparossa-discovery/src/lib.rs', 633), ('clippy::collapsible_if', 'crates/volparossa-udp/src/dns/resolver.rs', 237), ('clippy::collapsible_if', 'crates/volparossa-discovery/src/content_provider.rs', 121), ('clippy::struct_field_names', 'crates/volparossa-udp/src/bridge.rs', 12), ('clippy::collapsible_if', 'crates/volparossa-content/src/transfer/parallel/adaptive.rs', 171), ('clippy::manual_is_multiple_of', 'crates/volparossa-test-support/src/acceptance.rs', 1389), ('clippy::collapsible_if', 'crates/volparossa-udp/src/dns/resolver.rs', 258), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/provider/compute/attestation/policy.rs', 132), ('clippy::mut_mut', 'crates/volparossa-mptcp/src/netlink/userspace.rs', 239), ('clippy::collapsible_if', 'crates/volparossa-mptcp/src/lib.rs', 897), ('clippy::collapsible_if', 'crates/volparossa-discovery/src/preselection_responder.rs', 944), ('clippy::collapsible_if', 'crates/volparossa-transaction/src/ordered.rs', 365), ('clippy::collapsible_if', 'crates/volparossa-mptcp/src/lib.rs', 912), ('clippy::collapsible_if', 'crates/volparossa-mptcp/src/socket.rs', 268), ('clippy::mut_mut', 'crates/volparossa-mptcp/src/netlink.rs', 196), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/provider/replication/persistence.rs', 202), ('clippy::collapsible_if', 'crates/volparossa-selection/src/path.rs', 293), ('clippy::collapsible_if', 'crates/volparossa-mptcp/src/lib.rs', 500), ('clippy::collapsible_if', 'crates/volparossa-selection/src/route_context.rs', 378), ('clippy::struct_field_names', 'crates/volparossa-discovery/src/mptcp_session.rs', 19), ('clippy::collapsible_if', 'crates/volparossa-udp/src/dns/resolver.rs', 236), ('clippy::double_must_use', 'crates/volparossa-mptcp/src/lib.rs', 195), ('clippy::struct_field_names', 'crates/volparossa-discovery/src/udp_session.rs', 18), ('clippy::collapsible_if', 'crates/volparossa-local-control/src/private_storage_outcome.rs', 267), ('clippy::collapsible_if', 'crates/volparossa-udp/src/dns/resolver.rs', 245), ('clippy::collapsible_if', 'crates/volparossa-udp/src/dns/resolver/private_unbound.rs', 216), ('clippy::collapsible_if', 'crates/volparossa-content/src/transfer/parallel.rs', 386), ('clippy::collapsible_if', 'crates/volparossa-selection/src/path.rs', 283), ('clippy::collapsible_if', 'crates/volparossa-discovery/src/lib.rs', 1953), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/provider/compute/attestation/policy.rs', 149), ('clippy::collapsible_if', 'crates/volparossa-discovery/src/lib.rs', 1959)}
+          selected = {('clippy::collapsible_if', 'crates/volparossa-transaction/src/ordered.rs', 365), ('clippy::collapsible_if', 'crates/volparossa-discovery/src/preselection_responder.rs', 944), ('clippy::collapsible_if', 'crates/volparossa-discovery/src/lib.rs', 1244), ('clippy::collapsible_if', 'crates/volparossa-content/src/transfer/parallel.rs', 386), ('clippy::collapsible_if', 'crates/volparossa-content/src/provider/digest.rs', 193), ('clippy::collapsible_if', 'crates/volparossa-selection/src/path.rs', 293), ('clippy::collapsible_if', 'crates/volparossa-selection/src/route_context.rs', 378), ('clippy::collapsible_if', 'crates/volparossa-selection/src/path.rs', 283), ('clippy::collapsible_if', 'crates/volparossa-discovery/src/content_provider.rs', 121), ('clippy::collapsible_if', 'crates/volparossa-discovery/src/lib.rs', 1953), ('clippy::collapsible_if', 'crates/volparossa-local-control/src/private_storage_outcome.rs', 267), ('clippy::collapsible_if', 'crates/volparossa-content/src/transfer/parallel/adaptive.rs', 171), ('clippy::collapsible_if', 'crates/volparossa-discovery/src/lib.rs', 1959)}
+          expected_candidate = {('clippy::collapsible_if', 'crates/volparossa-udp/src/dns/resolver.rs', 238), ('clippy::assert_is_empty', 'crates/volparossa-content/src/provider/digest/tests.rs', 158), ('unused_imports', 'crates/volparossa-content/src/provider/compute/transcript/tests.rs', 6), ('clippy::collapsible_if', 'crates/volparossa-mptcp/src/lib.rs', 511), ('clippy::collapsible_if', 'crates/volparossa-udp/src/dns/resolver.rs', 244), ('clippy::collapsible_if', 'crates/volparossa-udp/src/dns/resolver.rs', 259), ('clippy::collapsible_if', 'crates/volparossa-udp/src/dns/resolver.rs', 326), ('clippy::collapsible_if', 'crates/volparossa-udp/src/dns/resolver/source_choice.rs', 109), ('clippy::assert_is_empty', 'crates/volparossa-selection/tests/selection.rs', 2433), ('clippy::manual_assert_eq', 'crates/volparossa-content/src/private_message/confirmation.rs', 98), ('clippy::struct_field_names', 'crates/volparossa-discovery/src/mpquic_session.rs', 20), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/origin_https/digest.rs', 378), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/store.rs', 531), ('clippy::assert_is_empty', 'crates/volparossa-content/src/private_storage/wire/tests/begin_observation.rs', 155), ('clippy::large_enum_variant', 'crates/volparossa-discovery/src/lib.rs', 633), ('clippy::collapsible_if', 'crates/volparossa-udp/src/dns/resolver.rs', 237), ('clippy::struct_field_names', 'crates/volparossa-udp/src/bridge.rs', 12), ('clippy::collapsible_if', 'crates/volparossa-content/src/provider/compute/quote/outcome_tests.rs', 647), ('clippy::manual_is_multiple_of', 'crates/volparossa-test-support/src/acceptance.rs', 1389), ('clippy::collapsible_if', 'crates/volparossa-udp/src/dns/resolver.rs', 258), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/provider/compute/attestation/policy.rs', 132), ('clippy::mut_mut', 'crates/volparossa-mptcp/src/netlink/userspace.rs', 239), ('clippy::collapsible_if', 'crates/volparossa-mptcp/src/lib.rs', 897), ('clippy::manual_assert_eq', 'crates/volparossa-content/src/private_message/confirmation.rs', 94), ('clippy::collapsible_if', 'crates/volparossa-mptcp/src/lib.rs', 912), ('clippy::collapsible_if', 'crates/volparossa-mptcp/src/socket.rs', 268), ('clippy::mut_mut', 'crates/volparossa-mptcp/src/netlink.rs', 196), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/provider/replication/persistence.rs', 202), ('clippy::manual_assert_eq', 'crates/volparossa-content/src/provider/compute/attestation/tests.rs', 219), ('clippy::collapsible_if', 'crates/volparossa-mptcp/src/lib.rs', 500), ('clippy::struct_field_names', 'crates/volparossa-discovery/src/mptcp_session.rs', 19), ('clippy::collapsible_if', 'crates/volparossa-udp/src/dns/resolver.rs', 236), ('clippy::double_must_use', 'crates/volparossa-mptcp/src/lib.rs', 195), ('clippy::struct_field_names', 'crates/volparossa-discovery/src/udp_session.rs', 18), ('clippy::collapsible_if', 'crates/volparossa-udp/src/dns/resolver.rs', 245), ('clippy::collapsible_if', 'crates/volparossa-udp/src/dns/resolver/private_unbound.rs', 216), ('clippy::manual_assert_eq', 'crates/volparossa-content/src/provider/compute/quote/confirmation/tests.rs', 553), ('clippy::assert_is_empty', 'crates/volparossa-content/src/private_storage/wire/tests/bridge_observation.rs', 48), ('clippy::manual_assert_eq', 'crates/volparossa-content/src/private_message/confirmation.rs', 93), ('clippy::manual_assert_eq', 'crates/volparossa-content/src/provider/replication/credit_tests.rs', 317), ('clippy::manual_assert_eq', 'crates/volparossa-content/src/provider/compute/attestation/tests.rs', 215), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/provider/compute/attestation/policy.rs', 149), ('clippy::assert_is_empty', 'crates/volparossa-content/src/provider/compute/transcript/tests.rs', 287), ('clippy::assert_is_empty', 'crates/volparossa-content/src/private_storage/wire/tests/begin_observation.rs', 150)}
+          observed = {}
+          for variant, expected in [('baseline', expected_baseline), ('candidate', expected_candidate)]:
+              errors = set()
+              finished = []
+              for line in Path('evidence/'+variant+'-clippy.jsonl').read_text().splitlines():
+                  item = json.loads(line)
+                  if item.get('reason') == 'build-finished':
+                      finished.append(item['success'])
+                  if item.get('reason') != 'compiler-message' or item['message']['level'] != 'error':
+                      continue
+                  message = item['message']
+                  print(variant, message.get('rendered', message['message']))
+                  assert message.get('code') is not None
+                  for span in message['spans']:
+                      if span['is_primary']:
+                          errors.add((message['code']['code'], span['file_name'], span['line_start']))
+              assert errors == expected, (variant, errors - expected, expected - errors)
+              assert finished == [False]
+              assert Path('evidence/'+variant+'-clippy-exit.txt').read_text().strip() == '101'
+              observed[variant] = sorted(errors)
+          assert len(observed['baseline']) == 42 and len(observed['candidate']) == 44
+          Path('evidence/clippy-summary.json').write_text(json.dumps(dict(diagnostics=observed, removed=sorted(selected), selected_removed=13, newly_visible=sorted(expected_candidate - expected_baseline), unchanged_extra_diagnostics=20, strict_packages_green=False), indent=2))
+          PY_CLIPPY
+      - name: Run only selected existing regressions on separate sources
+        run: |
+          set -euo pipefail
+          output="$GITHUB_WORKSPACE/evidence"
+          selections=(
+            'lc_states|local-control|--lib|private_storage_outcome::tests::tls_close_v9_wire_accepts_only_four_exact_outer_failure_states'
+            'lc_overlap|local-control|--lib|private_storage_outcome::tests::tls_close_v9_wire_rejects_unknown_values_and_append_timing_overlap'
+            'content_digest|content|--lib|provider::digest::tests::digest_lookup_preserves_original_index_and_existing_chunk_transfer'
+            'content_adaptive|content|--lib|transfer::parallel::tests::adaptive::adaptive_original_indexes_use_three_providers_and_preserve_progress_under_resource_limits'
+            'content_probe|content|--lib|transfer::parallel::tests::adaptive::unsuccessful_probe_gets_no_speculative_credits_when_other_peers_cover_the_object'
+            'transaction_replay|transaction|--lib|ordered::tests::stage_is_memory_only_and_commit_reopen_replay_are_exact'
+            'transaction_conflict|transaction|--lib|ordered::tests::conflicting_concurrent_commits_and_out_of_order_inputs_do_not_overwrite'
+            'selection_errors|selection|--test=selection|path_observation_errors_do_not_partially_replace_metrics'
+            'selection_ttl|selection|--test=selection|route_ttl_affects_new_flows_but_never_moves_existing_flow'
+            'selection_lru|selection|--test=selection|route_context_capacity_retires_the_least_recently_used_unpinned_generation'
+            'discovery_addresses|discovery|--lib|content_provider::tests::content_address_diagnostics_preserve_hint_validation_and_deduplication'
+            'discovery_actor|discovery|--lib|preselection_responder::tests::exact_previously_served_relay_actor_survives_bounded_advertisement_refresh'
+            'discovery_identify|discovery|--lib|tests::relayed_identify_cannot_import_direct_listeners'
+            'discovery_budget|discovery|--lib|advertisement_budget::tests::inbound_budget_is_per_peer_rate_limited_and_globally_bounded'
+            'discovery_roles|discovery|--lib|tests::advertisement_protocol_matrix_never_serves_an_exit_only_node_directly'
+          )
+          for variant in baseline candidate; do
+            export CARGO_TARGET_DIR="$RUNNER_TEMP/f04-p03f-$variant-target"
+            if test "$variant" = baseline; then
+              cd "$RUNNER_TEMP/f04-clippy-before"
+            else
+              cd "$GITHUB_WORKSPACE"
+            fi
+            for selection in "${selections[@]}"; do
+              IFS='|' read -r key component target test_name <<< "$selection"
+              cargo test --locked --offline -p "volparossa-$component" "$target" --all-features "$test_name" -- --exact --list 2>&1 | tee "$output/$variant-$key-inventory.log"
+              cargo test --locked --offline -p "volparossa-$component" "$target" --all-features "$test_name" -- --exact 2>&1 | tee "$output/$variant-$key-tests.log"
+            done
+          done
+          cd "$GITHUB_WORKSPACE"
+          python3 -B - <<'PY_TEST'
+          import hashlib, json, os, re
+          from pathlib import Path
+          selections = {'lc_states': {'component': 'local-control', 'target': '--lib', 'name': 'private_storage_outcome::tests::tls_close_v9_wire_accepts_only_four_exact_outer_failure_states'}, 'lc_overlap': {'component': 'local-control', 'target': '--lib', 'name': 'private_storage_outcome::tests::tls_close_v9_wire_rejects_unknown_values_and_append_timing_overlap'}, 'content_digest': {'component': 'content', 'target': '--lib', 'name': 'provider::digest::tests::digest_lookup_preserves_original_index_and_existing_chunk_transfer'}, 'content_adaptive': {'component': 'content', 'target': '--lib', 'name': 'transfer::parallel::tests::adaptive::adaptive_original_indexes_use_three_providers_and_preserve_progress_under_resource_limits'}, 'content_probe': {'component': 'content', 'target': '--lib', 'name': 'transfer::parallel::tests::adaptive::unsuccessful_probe_gets_no_speculative_credits_when_other_peers_cover_the_object'}, 'transaction_replay': {'component': 'transaction', 'target': '--lib', 'name': 'ordered::tests::stage_is_memory_only_and_commit_reopen_replay_are_exact'}, 'transaction_conflict': {'component': 'transaction', 'target': '--lib', 'name': 'ordered::tests::conflicting_concurrent_commits_and_out_of_order_inputs_do_not_overwrite'}, 'selection_errors': {'component': 'selection', 'target': '--test=selection', 'name': 'path_observation_errors_do_not_partially_replace_metrics'}, 'selection_ttl': {'component': 'selection', 'target': '--test=selection', 'name': 'route_ttl_affects_new_flows_but_never_moves_existing_flow'}, 'selection_lru': {'component': 'selection', 'target': '--test=selection', 'name': 'route_context_capacity_retires_the_least_recently_used_unpinned_generation'}, 'discovery_addresses': {'component': 'discovery', 'target': '--lib', 'name': 'content_provider::tests::content_address_diagnostics_preserve_hint_validation_and_deduplication'}, 'discovery_actor': {'component': 'discovery', 'target': '--lib', 'name': 'preselection_responder::tests::exact_previously_served_relay_actor_survives_bounded_advertisement_refresh'}, 'discovery_identify': {'component': 'discovery', 'target': '--lib', 'name': 'tests::relayed_identify_cannot_import_direct_listeners'}, 'discovery_budget': {'component': 'discovery', 'target': '--lib', 'name': 'advertisement_budget::tests::inbound_budget_is_per_peer_rate_limited_and_globally_bounded'}, 'discovery_roles': {'component': 'discovery', 'target': '--lib', 'name': 'tests::advertisement_protocol_matrix_never_serves_an_exit_only_node_directly'}}
+          results = {}
+          for variant in ('baseline', 'candidate'):
+              source_root = (Path(os.environ['RUNNER_TEMP']) / 'f04-clippy-before' if variant == 'baseline' else Path(os.environ['GITHUB_WORKSPACE']))
+              target_root = Path(os.environ['RUNNER_TEMP']) / ('f04-p03f-'+variant+'-target')
+              inventories = {}
+              results[variant] = {}
+              for key, selection in selections.items():
+                  component, name = selection['component'], selection['name']
+                  inventory = Path('evidence/'+variant+'-'+key+'-inventory.log').read_text()
+                  inventories[component] = inventories.get(component, '') + inventory
+                  assert re.findall('^([a-zA-Z0-9_:]+): test$', inventory, re.M) == [name]
+                  paths = re.findall('Running (?:unittests src/lib[.]rs|tests/[^ ]+[.]rs) [(]([^)]+)[)]', inventory)
+                  assert len(paths) == 1, (variant, key, paths)
+                  executable = Path(paths[0]).resolve()
+                  assert executable.is_file() and executable.is_relative_to(target_root.resolve())
+                  log = Path('evidence/'+variant+'-'+key+'-tests.log').read_text()
+                  summaries = re.findall('^test result: ok[.] 1 passed; 0 failed; 0 ignored; 0 measured; ([0-9]+) filtered out;', log, re.M)
+                  assert len(summaries) == 1 and 'test '+name+' ... ok' in log and str(executable) in log
+                  results[variant][key] = dict(component=component, source_root=str(source_root), target_root=str(target_root), executable=str(executable), executable_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(), test_name=name, passed=1, failed=0, ignored=0, filtered=int(summaries[0]))
+              for component, inventory in inventories.items():
+                  compile_line = 'Compiling volparossa-'+component+' v0.1.0 ('+str(source_root / ('crates/volparossa-'+component))+')'
+                  assert compile_line in inventory, (variant, component, compile_line)
+          for key in selections:
+              assert results['baseline'][key]['executable'] != results['candidate'][key]['executable']
+          Path('evidence/regression-summary.json').write_text(json.dumps(results, indent=2))
+          PY_TEST
+          git diff --exit-code
+      - name: Preserve scoped evidence including known remaining failures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: f04-p03f-guards-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 14
