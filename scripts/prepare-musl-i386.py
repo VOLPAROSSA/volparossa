@@ -8,6 +8,7 @@ import lzma
 import os
 from pathlib import Path, PurePosixPath
 import re
+import stat
 import struct
 import tarfile
 import urllib.parse
@@ -17,6 +18,8 @@ PINS = Path(__file__).with_name('musl-i386-input.json')
 PINS_SHA256 = '9e8e31d579c4a41242cf5d436351a5340ac8f05533359920f8a52d6b9003a739'
 ARCHIVE_SHA256 = '7c6500215eeb2d7479f238969b8e38daafc23d5c746044764a47c80bfe24415f'
 SPEC_SHA256 = '33bdd08bcecd6366f2ed9e141b42a48be0332dbdcc70ca6aac45e26f35bb997f'
+GCC_MULTILIB = Path('/usr/lib/gcc/x86_64-linux-gnu/13/32')
+GCC_INPUTS = ('crtbeginS.o', 'crtendS.o', 'libgcc.a', 'libgcc_eh.a')
 PROBE = b'''#include <stdint.h>
 #include <stdio.h>
 int main(void) {
@@ -110,16 +113,18 @@ def stage(raw, prefix):
     with wrapper.open('x') as stream:
         # The authenticated musl *link spec replaces GCC's native link spec,
         # including its usual -m32 -> elf_i386 mapping. Select both compiler
-        # ABI and GNU ld emulation explicitly; never fall back to host libc.
+        # ABI and GNU ld emulation explicitly. Its startup/libgcc %s searches
+        # also need the validated GCC13 multilib directory as a closed -B prefix.
+        # The caller validates all four files before staging; no host libc fallback.
         stream.write('#!/bin/sh\n'
             'for argument do\n'
             '    case "$argument" in\n'
-            '        -m64|-mx32|-Wl,-m,elf_x86_64|-Wl,-m,elf32_x86_64)\n'
+            '        -m64|-mx32|-Wl,-m,elf_x86_64|-Wl,-m,elf32_x86_64|-B*)\n'
             '            printf \'%s\\n\' \'musl wrapper requires i386 compilation and linking\' >&2\n'
             '            exit 2 ;;\n'
             '    esac\n'
             'done\n'
-            'exec /usr/bin/gcc "$@" -m32 -Wl,-m,elf_i386 -static -specs="' + str(specs) + '"\n')
+            'exec /usr/bin/gcc "$@" -m32 -Wl,-m,elf_i386 -static -B' + str(GCC_MULTILIB) + '/ -specs="' + str(specs) + '"\n')
     wrapper.chmod(0o700)
     return dict(package=expected['package'], version=expected['version'], architecture='i386',
         archive=expected['archive'], inrelease_sha256=expected['inrelease_sha256'],
@@ -127,7 +132,99 @@ def stage(raw, prefix):
         original_specs_sha256=SPEC_SHA256, adapted_specs_sha256=hashlib.sha256(adapted.encode()).hexdigest(),
         wrapper_sha256=hashlib.sha256(wrapper.read_bytes()).hexdigest(),
         probe_source_sha256=hashlib.sha256(PROBE).hexdigest(), package_installed=False,
-        compiler_architecture_option='-m32', linker_emulation_option='-Wl,-m,elf_i386')
+        compiler_architecture_option='-m32', linker_emulation_option='-Wl,-m,elf_i386',
+        gcc_multilib_prefix=str(GCC_MULTILIB) + '/')
+
+
+def root_owned_bytes(path):
+    """Read only canonical, root-owned immutable-to-runner compiler inputs."""
+    if not path.is_absolute() or path.resolve(strict=True) != path:
+        raise ValueError('GCC input must be canonical')
+    before = path.lstat()
+    for current in (path, *path.parents):
+        metadata = current.lstat()
+        correct_kind = stat.S_ISREG(metadata.st_mode) if current == path else stat.S_ISDIR(metadata.st_mode)
+        if not correct_kind or metadata.st_uid != 0 or metadata.st_mode & 0o022:
+            raise ValueError('GCC input ownership/type/mode')
+    if not 0 < before.st_size <= 16 * 1024**2:
+        raise ValueError('GCC input bound')
+    with path.open('rb') as stream:
+        raw = stream.read(16 * 1024**2 + 1)
+    after = path.lstat()
+    stable = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+    if len(raw) != before.st_size or any(getattr(before, key) != getattr(after, key) for key in stable):
+        raise ValueError('GCC input changed')
+    return raw
+
+
+def gcc_identity():
+    command = Path('/usr/bin/gcc')
+    if command.lstat().st_uid != 0:
+        raise ValueError('GCC driver ownership')
+    resolved = command.resolve(strict=True)
+    if str(resolved) not in ('/usr/bin/gcc-13', '/usr/bin/x86_64-linux-gnu-gcc-13'):
+        raise ValueError('GCC driver must be the existing GCC13')
+    raw = root_owned_bytes(resolved)
+    return dict(command=str(command), resolved=str(resolved), bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+
+
+def i386_relocatable(raw):
+    if (len(raw) < 52 or raw[:7] != b'\x7fELF\x01\x01\x01'
+            or struct.unpack_from('<HHI', raw, 16) != (1, 3, 1)):
+        raise ValueError('GCC support object must be ELF32/i386/ET_REL')
+
+
+def i386_archive(raw):
+    """Bounded ordinary GNU ar inventory; every non-index member is target code."""
+    if not raw.startswith(b'!<arch>\n') or len(raw) > 16 * 1024**2:
+        raise ValueError('GCC support archive header/bound')
+    offset, members, code_members, indexes = 8, 0, 0, set()
+    while offset < len(raw):
+        header = raw[offset:offset + 60]
+        if len(header) != 60 or header[58:] != b'`\n' or members >= 4096:
+            raise ValueError('GCC support archive member')
+        name = header[:16].decode('ascii').strip()
+        length = header[48:58].decode('ascii').strip()
+        if not name or not re.fullmatch('[0-9]+', length):
+            raise ValueError('GCC support archive name/size')
+        size = int(length)
+        end = offset + 60 + size
+        if end + size % 2 > len(raw):
+            raise ValueError('GCC support archive truncation')
+        if name in ('/', '//'):
+            if name in indexes:
+                raise ValueError('GCC support archive duplicate index')
+            indexes.add(name)
+        else:
+            i386_relocatable(raw[offset + 60:end])
+            code_members += 1
+        members += 1
+        offset = end + size % 2
+    if offset != len(raw) or not code_members:
+        raise ValueError('GCC support archive has no target code')
+    return code_members
+
+
+def multilib_inputs(output, run):
+    records = {}
+    for name in GCC_INPUTS:
+        label = 'musl-gcc-query-' + name
+        run(['/usr/bin/gcc', '-m32', '-print-file-name=' + name], label)
+        log = output / (label + '.log')
+        if log.is_symlink() or not 0 < log.stat().st_size <= 512:
+            raise ValueError('GCC multilib query bound')
+        expected = GCC_MULTILIB / name
+        if log.read_bytes() != (str(expected) + '\n').encode():
+            raise ValueError('GCC multilib query must select exact GCC13 i386 input')
+        raw = root_owned_bytes(expected)
+        if name.endswith('.a'):
+            code_members = i386_archive(raw)
+        else:
+            i386_relocatable(raw)
+            code_members = 1
+        records[name] = dict(path=str(expected), bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest(),
+                             elf32_i386_relocatable_members=code_members)
+    return records
 
 
 class SnapshotRedirect(urllib.request.HTTPRedirectHandler):
@@ -161,13 +258,19 @@ def prepare(prefix, output, run):
     fixed = Path(os.environ['RUNNER_TEMP']) / 'ctutils-musl-i386'
     if prefix != fixed or not re.fullmatch(r'/[A-Za-z0-9_./-]+', str(prefix)):
         raise ValueError('musl fixed prefix')
+    driver = gcc_identity()
+    run(['/usr/bin/gcc', '--version'], 'musl-gcc-version')
+    multilib = multilib_inputs(output, run)
+    # Retain validated local input observations even if the subsequent real C
+    # probe fails. This receipt never asserts compilation or native execution.
+    (output / 'musl-gcc-inputs.log').write_text(json.dumps(dict(gcc_driver=driver,
+        gcc_multilib_inputs=multilib, static_i386_probe_passed=False), sort_keys=True) + '\n')
     opener = urllib.request.build_opener(SnapshotRedirect())
     with opener.open(pins()['archive']['url'], timeout=60) as response:
         raw = response.read(1024**2 + 1)
     receipt = stage(raw, prefix)
     source = prefix / 'probe.c'; source.write_bytes(PROBE); source.chmod(0o600)
     binary = prefix / 'probe'
-    run(['/usr/bin/gcc', '--version'], 'musl-gcc-version')
     run([str(prefix / 'musl-gcc'), str(source), '-o', str(binary)], 'musl-probe-compile')
     if binary.is_symlink() or not 0 < binary.stat().st_size <= 1024**2:
         raise ValueError('musl probe binary bound')
@@ -175,6 +278,10 @@ def prepare(prefix, output, run):
     run([str(binary)], 'musl-probe-execute')
     if (output / 'musl-probe-execute.log').read_bytes() != b'musl-i386-static\n':
         raise ValueError('musl actual C probe result')
-    receipt.update(static_i386_probe_passed=True, probe_binary_sha256=hashlib.sha256(data).hexdigest())
+    if gcc_identity() != driver or any(hashlib.sha256(root_owned_bytes(GCC_MULTILIB / name)).hexdigest()
+            != multilib[name]['sha256'] for name in GCC_INPUTS):
+        raise ValueError('GCC multilib inputs changed during probe')
+    receipt.update(static_i386_probe_passed=True, probe_binary_sha256=hashlib.sha256(data).hexdigest(),
+                   gcc_driver=driver, gcc_multilib_inputs=multilib)
     (output / 'musl-input.log').write_text(json.dumps(receipt, sort_keys=True) + '\n')
     return receipt

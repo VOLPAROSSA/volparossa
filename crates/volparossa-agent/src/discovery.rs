@@ -25208,7 +25208,7 @@ mod tests {
         let owner = braced_item(product, "enum ClientPreselectionOwner {");
         for state in [
             "Available(PreselectionAttemptGate),",
-            "Active(ActiveClientPreselection),",
+            "Active(Box<ActiveClientPreselection>),",
             "Cooling(CoolingPreselectionAttemptGate),",
             "Closed,",
             "Lost,",

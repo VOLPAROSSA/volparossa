@@ -140,12 +140,43 @@ maskercontroles en de ingestelde privileges blijven behouden. Dit bewijst geen
 specifieke eerst gefaalde VM-subcontrole. Beide noodzakelijke harnesscorrecties
 krijgen onafhankelijke review vóór een nieuwe gerichte proef.
 
-**F04 blijft open.** Strict root-Clippy, alle vier fatale RustSec-/licentiechecks,
-volledige licentiecollectie en gewone Quality moeten op de integratiekandidaat
-slagen. Nieuwe32-bit-crypto/codegen en de noodzakelijke Debian13/systemd-proef
-blijven vereist; het geslaagde zbus-/DPS-bewijs blijft behouden bij gelijke
-betrokken broninputs. Oude failures blijven zichtbaar. Geen automatische merge
-en geen volledige netwerk-/DICN-acceptatieclaim.
+Op de identieke Rust-bron/locks van `107e0c5c` zijn inmiddels de vier fatale
+root/fuzz dependency-/advisoryscans, de gerichte collectorregressie en strict
+root-Clippy werkelijk geslaagd. Dat is geen claim dat de gefilterde collector-
+regressie alle resolved notices verzamelt. De volledige run40456324327 blijft FAILED op de latere workspace-tests:
+876 agenttests slagen, één broncontracttest verwacht nog de oude onboxed
+private variant. Alleen dat exacte testliteral wordt gecorrigeerd; productie-
+bytes blijven gelijk. Het complete contract met37 assertions/54 uitgewerkte
+voorwaarden is inert gecontroleerd, maar vereist nog echte hosted Rust-
+uitvoering. De gewone Quality-workflow krijgt
+daarom een afzonderlijke fatale full-inventorystap over ongewijzigde locked,
+offline, all-features metadata en bewaart metadata/log/inventaris/hashbewijzen,
+ook bij failure. Alle bestaande gates en opt-injobs blijven behouden.
+De nieuwe multilibcorrectie selecteert uitsluitend de geverifieerde GCC13/32-
+startupobjecten en supportarchives, controleert ieder codemember op ELF32/i386
+en behoudt de echte C-compile/ELF/runverplichting. Dit zijn gereviewde bronclaims;
+werkelijke uitvoering blijft het criterium.
+
+De vervolghelperproef op `af386a35`,
+[40457844101](https://github.com/VOLPAROSSA/volparossa/actions/runs/40457844101),
+blijft **FAILED** op `functional-worker-observation`. De bronvolgorde bewijst
+voortgang door identiteit/protocol, eerste Client Prepare/Activate en echte
+PID1 `NFileDescriptorStore==2`. Exacte worker-custody, commit/destroy/retry,
+retirement en cleanup zijn daarmee niet bewezen. Onafhankelijke begrensde
+triage vindt geen concrete inconsistentie in het oude observatieblok/directe
+contract; gelijke oude bron bewijst geen oude runtimefailure of afwezigheid van
+regressie. Geen verdere blinde VM-proefreeks: deze nativebeperking blijft open.
+
+**F04 blijft open.** De beveiligingskandidaat en verplichte review-/mergeprocedure
+lopen via [PR349](https://github.com/VOLPAROSSA/volparossa/pull/349);
+[de actuele PR-controles](https://github.com/VOLPAROSSA/volparossa/pull/349/checks)
+zijn leidend voor latere jobuitkomsten. Bovenstaande resultaten blijven exact
+brongebonden momentopnamen. Acceptatie vereist alle vier fatale scans, volledige
+noticecollectie, strict root/fuzz-Clippy, gewone Quality en de noodzakelijke
+nieuwe crypto/codegenbeoordeling. Geslaagd zbus-/DPS-bewijs blijft behouden bij
+gecontroleerd gelijke betrokken inputs. Volledige helper/nativeacceptatie blijft
+begrensd door de beschreven failure. Geen automatische merge en geen volledige
+netwerk-/DICN-acceptatieclaim.
 
 ### F04 P03f — dertien geordende guards — 2026-10-27
 

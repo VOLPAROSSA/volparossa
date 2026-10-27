@@ -537,6 +537,35 @@ jobs:
           ./scripts/check-rust-dependencies.sh
           ./packaging/test-collect-cargo-licenses.sh
 
+      # The focused collector regression above does not exercise every resolved crate.
+      - name: Collect the full locked dependency notice inventory
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/core-license-metadata.json"
+          notices="$RUNNER_TEMP/core-license-notices"
+          test ! -e "$metadata" && test ! -L "$metadata"
+          test ! -e "$notices" && test ! -L "$notices"
+          cargo metadata --locked --offline --all-features --format-version 1 >"$metadata"
+          ./packaging/collect-cargo-licenses.sh "$metadata" "$notices" \
+            2>&1 | tee "$RUNNER_TEMP/core-license-collector.log"
+          (
+            cd "$notices"
+            find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+          ) >"$RUNNER_TEMP/core-license-SHA256SUMS"
+
+      - name: Preserve full notice inventory evidence including failures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: locked-license-inventory-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/core-license-metadata.json
+            ${{ runner.temp }}/core-license-collector.log
+            ${{ runner.temp }}/core-license-SHA256SUMS
+            ${{ runner.temp }}/core-license-notices/DEPENDENCIES.tsv
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Run strict Clippy
         run: >-
           cargo clippy --keep-going --locked --offline --workspace --all-targets
