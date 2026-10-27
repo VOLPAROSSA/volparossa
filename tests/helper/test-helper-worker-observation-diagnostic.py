@@ -86,6 +86,10 @@ if worker_observation_failure "$2"; then exit 3; fi
         # Frozen hashes are the complete functions at source57b121a0.
         for name, expected in BASELINE.items():
             text = function(HOOK, name)
+            # Only this reviewed observer correction changes successful code:
+            # bind each existing call to its explicit Client/Exit role.
+            text = text.replace('worker_wireguard_interface 7 client', 'worker_wireguard_interface 7')
+            text = text.replace('worker_wireguard_interface 7 exit', 'worker_wireguard_interface 7')
             def restore_group(match):
                 predicate = '\n'.join(line[4:] for line in match[1].splitlines())
                 if match[2] == 'functional-worker-custody-missing-pins':

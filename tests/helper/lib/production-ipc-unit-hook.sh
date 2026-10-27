@@ -1990,9 +1990,20 @@ EOF
     fi
 }
 
+worker_wireguard_mark_is_exact() {
+    [ "$#" -eq 2 ] || return 1
+    # Match the production activator/prober's exact role-specific underlay mark.
+    case $1:$2 in
+        client:0x56501001|exit:0x56503001|relay:0x56503001) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 worker_wireguard_interface() {
-    [ "$#" -eq 1 ] || return 1
+    [ "$#" -eq 2 ] || return 1
     hook_namespace_fd=$1
+    hook_wireguard_role=$2
+    case $hook_wireguard_role in client|exit) ;; *) return 1 ;; esac
     fd_number_is_safe "$hook_namespace_fd" || return 1
     hook_interfaces=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
         /usr/bin/wg show interfaces 2>/dev/null) || return 1
@@ -2027,7 +2038,7 @@ worker_wireguard_interface() {
     [ "$hook_listen_port" -le 65535 ] || return 1
     hook_firewall_mark=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
         /usr/bin/wg show "$hook_interfaces" fwmark 2>/dev/null) || return 1
-    [ "$hook_firewall_mark" = off ] || return 1
+    worker_wireguard_mark_is_exact "$hook_wireguard_role" "$hook_firewall_mark" || return 1
     /usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
         /usr/sbin/ip -6 -json address show dev "$hook_interfaces" 2>/dev/null \
         | /usr/bin/jq -e '
@@ -2162,7 +2173,7 @@ worker_relay_pair_interfaces() {
             --net="/proc/self/fd/$hook_namespace_fd" -- \
             /usr/bin/wg show "$hook_pair_interface" fwmark 2>/dev/null) \
             || return 1
-        [ "$hook_pair_firewall_mark" = off ] || return 1
+        worker_wireguard_mark_is_exact relay "$hook_pair_firewall_mark" || return 1
         if [ "$hook_pair_interface" = "$hook_relay_client_interface" ]; then
             hook_relay_client_public_key=$hook_pair_public_key
             hook_relay_client_listen_port=$hook_pair_listen_port
@@ -4972,7 +4983,7 @@ run_functional_client_lease_probe() {
         "$hook_functional_unit" \
         "$proof_directory/unit.identity" \
         "$hook_functional_agent_gid" || { worker_observation_failure functional-worker-helper-stability; return 1; }
-    hook_functional_wireguard=$(worker_wireguard_interface 7) || { worker_observation_failure functional-worker-wireguard-interface; return 1; }
+    hook_functional_wireguard=$(worker_wireguard_interface 7 client) || { worker_observation_failure functional-worker-wireguard-interface; return 1; }
     case $hook_functional_wireguard in
         ''|*[!A-Za-z0-9_.-]*) worker_observation_failure functional-worker-wireguard-name; return 1 ;;
     esac
@@ -5345,7 +5356,7 @@ run_functional_client_lease_probe() {
         8 "$hook_functional_exit_worker_pid" "$hook_functional_main_pid" \
         "$hook_functional_worker_uid" "$hook_functional_worker_gid" \
         "$hook_functional_parent_filters") || return 1
-    hook_functional_exit_wireguard=$(worker_wireguard_interface 7) || return 1
+    hook_functional_exit_wireguard=$(worker_wireguard_interface 7 exit) || return 1
     case $hook_functional_exit_wireguard in
         ''|*[!A-Za-z0-9_.-]*) return 1 ;;
     esac

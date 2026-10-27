@@ -16,6 +16,7 @@ ipc_hook=$repository_directory/tests/helper/lib/production-ipc-unit-hook.sh
 python3 -B "$script_directory/test-helper-preflight-diagnostic.py"
 python3 -B "$script_directory/test-helper-worker-observation-diagnostic.py"
 python3 -B "$script_directory/test-helper-guest-source-environment.py"
+python3 -B "$script_directory/test-helper-wireguard-role-mark.py"
 evidence_validator=$repository_directory/tests/helper/validate-helper-boundary-evidence-v1.sh
 evidence_schema=$repository_directory/tests/helper/helper-boundary-evidence-v1.schema.json
 worker_source=$repository_directory/crates/volparossa-helper/src/worker_v3.rs
@@ -7559,7 +7560,9 @@ for required_hook_contract in \
     '/usr/bin/wg show "$hook_interface" allowed-ips' \
     '/usr/bin/wg show "$hook_interface" latest-handshakes' \
     '/usr/bin/wg show "$hook_interface" transfer' \
-    'worker_wireguard_interface 7' \
+    'worker_wireguard_interface 7 client' \
+    'worker_wireguard_interface 7 exit' \
+    'worker_wireguard_mark_is_exact relay' \
     'worker_client_peer_address' \
     'worker_client_local_address' \
     'worker_activated_wireguard_is_exact' \
