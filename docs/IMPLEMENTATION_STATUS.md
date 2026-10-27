@@ -18,6 +18,37 @@ Last updated: 2026-10-27
 
 ## Current integration and active work
 
+### F04 P03f — dertien geordende guards — 2026-10-27
+
+Hervat vanaf live PR349-head `339409e885412f47f1f02fef1002984be109c4e1`.
+De bestaande inventaris van 23 diagnoses wordt hergebruikt; uitsluitend de
+dertien `collapsible_if`-locaties in tien bestanden veranderen: Local-Control
+(1), Content (3), Transaction (1), Selection (3) en Discovery (5). Geordende
+let-chains behouden short circuit, gegroepeerde OR-fouten, borrows, mutaties,
+cleanup, deadlines en early returns. Met name ratebudget, requestvalidatie,
+advertisementclone en responseconstructie blijven in dezelfde volgorde staan.
+Geen publieke API/ABI/FFI-, serialisatie- of configuratiewijziging, testedit,
+dependencywijziging of lintuitzondering. Overig F04-werk blijft gescheiden.
+
+Gerichte hosted verificatie betreft formatting, ongewijzigd strikte Clippy
+voor de vijf gewijzigde packages en bestaande brongebonden regressietests op
+baseline/kandidaat met gescheiden targets en executablebinding. De verwachte
+bekende diagnoses zijn 22 naar 9 binnen die packages; de tiende resterende
+workspace-diagnose betreft de ongewijzigde Quic-continue buiten deze controle.
+Dit is geen groene package-/workspace-Clippygate. Discoverycomponenttests
+kunnen transport/mDNS-constructors gebruiken op de disposable runner; zij zijn
+geen native- of netwerkdatapadacceptatie. De advertisement-requesteventtak heeft
+geen directe gesloten unittest; protocol- en budgettests zijn ondersteunend
+bewijs, aangevuld met onafhankelijke controle van evaluatie en dropsemantiek.
+Definitieve resultaten en onafhankelijke bron-/hosted-bewijsreview staan onder
+`.volparossa-dev/p03f-f04-20261027/`; de bewijsworkflow blijft buiten PR349.
+Na deze dertien correcties blijven tien eerder bekende diagnoses open: vijf
+chunk-iteratorregels, drie signed-veldnamen, één publieke enum en één native
+continue. Compatibiliteit, parserrestbytes en descriptorlifecycle vereisen hun
+eigen beoordeling. Geen volledige Quality-, native-, VM- of SDK-acceptatierun.
+RustSec-pinactualiteit, vier dependencysecuritychecks, notices en de overige
+compiler-/helper-/native-/integratiegates blijven open; F04 is niet afgerond.
+
 ### F04 P03e — zes testasserties en twee vaste delers — 2026-10-27
 
 Hervat vanaf live PR349-head `93a0a486cf0a40dd19f970e2f590721aaa87d10d`.

@@ -1243,10 +1243,10 @@ impl DiscoveryService {
             }
             if let Ok(canonical) =
                 prepare_discovery_address(self.swarm.local_peer_id(), peer_id, address)
+                && private_address_is_local(&canonical)
+                && !retained.contains(&canonical)
             {
-                if private_address_is_local(&canonical) && !retained.contains(&canonical) {
-                    retained.push(canonical);
-                }
+                retained.push(canonical);
             }
         }
         let removed =
@@ -1955,16 +1955,14 @@ impl DiscoveryService {
                             .advertisement_budgets
                             .allow_inbound_request(peer, Instant::now())
                         && request.validate().is_ok()
+                        && let Some(envelope) = self.local_advertisement.clone()
+                        && let Ok(response) = AdvertisementResponse::new(envelope)
                     {
-                        if let Some(envelope) = self.local_advertisement.clone() {
-                            if let Ok(response) = AdvertisementResponse::new(envelope) {
-                                let _ = self
-                                    .swarm
-                                    .behaviour_mut()
-                                    .advertisements
-                                    .send_response(channel, response);
-                            }
-                        }
+                        let _ = self
+                            .swarm
+                            .behaviour_mut()
+                            .advertisements
+                            .send_response(channel, response);
                     }
                 }
                 libp2p::swarm::SwarmEvent::Behaviour(BehaviourEvent::DatapathRelay(

@@ -942,10 +942,9 @@ impl DiscoveryService {
         now_ms: u64,
     ) -> Result<LocalPreselectionAuthority, DirectPreselectionResponderError> {
         if let Ok(authority) = self.local_relay_authority(policy, signer_public_key, scope, now_ms)
+            && &authority.actor == expected
         {
-            if &authority.actor == expected {
-                return Ok(authority);
-            }
+            return Ok(authority);
         }
         self.preselection_responder
             .local_advertisement_lineage()
