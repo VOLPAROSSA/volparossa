@@ -273,6 +273,57 @@ start_failure_stage_is_safe() {
         functional-probe-socket|\
         functional-probe-fdstore|\
         functional-worker-observation|\
+        functional-worker-child|\
+        functional-worker-custody|\
+        functional-worker-pidfd-identity|\
+        functional-worker-namespace-identity|\
+        functional-worker-fdstore|\
+        functional-worker-namespace-distinct|\
+        functional-worker-process-revalidate|\
+        functional-worker-namespace-revalidate|\
+        functional-worker-namespace-open|\
+        functional-worker-process-open|\
+        functional-worker-namespace-stat|\
+        functional-worker-namespace-pin|\
+        functional-worker-process-stat|\
+        functional-worker-process-pin|\
+        functional-worker-custody-repeat|\
+        functional-worker-custody-stability|\
+        functional-worker-process-status|\
+        functional-worker-helper-stability|\
+        functional-worker-wireguard-interface|\
+        functional-worker-wireguard-name|\
+        functional-worker-peer-address|\
+        functional-worker-local-address|\
+        functional-worker-wireguard-state|\
+        functional-worker-public-key-read|\
+        functional-worker-public-key-shape|\
+        functional-worker-public-key-unique|\
+        functional-worker-port-read|\
+        functional-worker-port-shape|\
+        functional-worker-port-distinct|\
+        functional-worker-counters|\
+        functional-worker-custody-parent-netns|\
+        functional-worker-custody-parent-netns-shape|\
+        functional-worker-custody-empty|\
+        functional-worker-custody-readlink|\
+        functional-worker-custody-pidfd|\
+        functional-worker-custody-pidfd-conflict|\
+        functional-worker-custody-process-target|\
+        functional-worker-custody-process|\
+        functional-worker-custody-process-conflict|\
+        functional-worker-custody-netns|\
+        functional-worker-custody-netns-conflict|\
+        functional-worker-custody-missing-pins|\
+        functional-worker-fdstore-count-before-read|\
+        functional-worker-fdstore-count-before|\
+        functional-worker-fdstore-object|\
+        functional-worker-fdstore-dump-read|\
+        functional-worker-fdstore-dump-size|\
+        functional-worker-fdstore-dump-exact|\
+        functional-worker-fdstore-name|\
+        functional-worker-fdstore-count-after-read|\
+        functional-worker-fdstore-count-after|\
         functional-relay-fixture|\
         functional-relay-traffic|\
         functional-relay-cleanup|\
@@ -297,6 +348,22 @@ start_failure_stage_is_safe() {
             ;;
         *) return 1 ;;
     esac
+}
+
+worker_observation_failure() {
+    # Substitutions run in subshells: persist the first fixed label before its
+    # caller unwinds. The original private-file guards reject replacement.
+    # This annotates failure only; it never advances a successful transition.
+    [ "$#" -eq 1 ] || return 1
+    [ "$start_failure_stage" = functional-worker-observation ] || return 1
+    case $1 in
+        functional-worker-observation) return 1 ;;
+        functional-worker-*) start_failure_stage_is_safe "$1" || return 1 ;;
+        *) return 1 ;;
+    esac
+    start_failure_stage=$1
+    publish_start_failure || :
+    return 1
 }
 
 restart_start_failure_stage_is_safe() {
@@ -1834,8 +1901,8 @@ capture_parent_worker_custody() {
     number_is_safe "$hook_custody_parent_pid" || return 1
     number_is_safe "$hook_custody_worker_pid" || return 1
     hook_custody_parent_namespace=$(stat -Lc '%d:%i' \
-        /proc/self/ns/net 2>/dev/null) || return 1
-    kernel_object_identity_is_safe "$hook_custody_parent_namespace" || return 1
+        /proc/self/ns/net 2>/dev/null) || { worker_observation_failure functional-worker-custody-parent-netns; return 1; }
+    kernel_object_identity_is_safe "$hook_custody_parent_namespace" || { worker_observation_failure functional-worker-custody-parent-netns-shape; return 1; }
     hook_custody_fd_unsorted=$(
         hook_custody_count=0
         for hook_custody_path in /proc/"$hook_custody_parent_pid"/fd/*; do
@@ -1851,7 +1918,7 @@ capture_parent_worker_custody() {
 $hook_custody_fd_unsorted
 EOF
     ) || return 1
-    [ -n "$hook_custody_fd_numbers" ] || return 1
+    [ -n "$hook_custody_fd_numbers" ] || { worker_observation_failure functional-worker-custody-empty; return 1; }
     hook_custody_pidfd_count=0
     hook_custody_process_count=0
     hook_custody_namespace_count=0
@@ -1864,39 +1931,39 @@ EOF
     while IFS= read -r hook_custody_fd; do
         hook_custody_fd_path=/proc/$hook_custody_parent_pid/fd/$hook_custody_fd
         hook_custody_target=$(readlink "$hook_custody_fd_path" 2>/dev/null) \
-            || return 1
+            || { worker_observation_failure functional-worker-custody-readlink; return 1; }
         case $hook_custody_target in
             'anon_inode:[pidfd]')
                 hook_custody_observed_identity=$(capture_parent_pidfd_record \
                     "$hook_custody_parent_pid" "$hook_custody_fd" \
-                    "$hook_custody_worker_pid") || return 1
+                    "$hook_custody_worker_pid") || { worker_observation_failure functional-worker-custody-pidfd; return 1; }
                 if [ -z "$hook_custody_pidfd_identity" ]; then
                     hook_custody_pidfd_fd=$hook_custody_fd
                     hook_custody_pidfd_identity=$hook_custody_observed_identity
                 else
                     [ "$hook_custody_observed_identity" = \
-                        "$hook_custody_pidfd_identity" ] || return 1
+                        "$hook_custody_pidfd_identity" ] || { worker_observation_failure functional-worker-custody-pidfd-conflict; return 1; }
                 fi
                 hook_custody_pidfd_count=$((hook_custody_pidfd_count + 1))
                 ;;
             /proc/[1-9][0-9]*)
                 [ "$hook_custody_target" = "/proc/$hook_custody_worker_pid" ] \
-                    || return 1
+                    || { worker_observation_failure functional-worker-custody-process-target; return 1; }
                 hook_custody_observed_identity=$(capture_parent_process_fd_identity \
                     "$hook_custody_parent_pid" "$hook_custody_fd" \
-                    "$hook_custody_worker_pid") || return 1
+                    "$hook_custody_worker_pid") || { worker_observation_failure functional-worker-custody-process; return 1; }
                 if [ -z "$hook_custody_process_identity" ]; then
                     hook_custody_process_fd=$hook_custody_fd
                     hook_custody_process_identity=$hook_custody_observed_identity
                 else
                     [ "$hook_custody_observed_identity" = \
-                        "$hook_custody_process_identity" ] || return 1
+                        "$hook_custody_process_identity" ] || { worker_observation_failure functional-worker-custody-process-conflict; return 1; }
                 fi
                 hook_custody_process_count=$((hook_custody_process_count + 1))
                 ;;
             net:\[[1-9][0-9]*\])
                 hook_custody_observed_identity=$(capture_parent_namespace_fd_identity \
-                    "$hook_custody_parent_pid" "$hook_custody_fd") || return 1
+                    "$hook_custody_parent_pid" "$hook_custody_fd") || { worker_observation_failure functional-worker-custody-netns; return 1; }
                 if [ "$hook_custody_observed_identity" != \
                     "$hook_custody_parent_namespace" ]; then
                     if [ -z "$hook_custody_namespace_identity" ]; then
@@ -1904,7 +1971,7 @@ EOF
                         hook_custody_namespace_identity=$hook_custody_observed_identity
                     else
                         [ "$hook_custody_observed_identity" = \
-                            "$hook_custody_namespace_identity" ] || return 1
+                            "$hook_custody_namespace_identity" ] || { worker_observation_failure functional-worker-custody-netns-conflict; return 1; }
                     fi
                     hook_custody_namespace_count=$((hook_custody_namespace_count + 1))
                 fi
@@ -1913,9 +1980,14 @@ EOF
     done <<EOF
 $hook_custody_fd_numbers
 EOF
-    [ "$hook_custody_pidfd_count" -ge 1 ] \
-        && [ "$hook_custody_process_count" -ge 1 ] \
-        && [ "$hook_custody_namespace_count" -ge 1 ]
+    if ! {
+        [ "$hook_custody_pidfd_count" -ge 1 ] \
+            && [ "$hook_custody_process_count" -ge 1 ] \
+            && [ "$hook_custody_namespace_count" -ge 1 ]
+    }; then
+        worker_observation_failure functional-worker-custody-missing-pins
+        return 1
+    fi
 }
 
 worker_wireguard_interface() {
@@ -4492,9 +4564,9 @@ unit_fdstore_exact_active_custody() {
     hook_fdstore_count_before=$(unit_u32_property \
         "$hook_fdstore_unit" \
         org.freedesktop.systemd1.Service \
-        NFileDescriptorStore) || return 1
-    [ "$hook_fdstore_count_before" = 2 ] || return 1
-    hook_fdstore_object=$(unit_object_path "$hook_fdstore_unit") || return 1
+        NFileDescriptorStore) || { worker_observation_failure functional-worker-fdstore-count-before-read; return 1; }
+    [ "$hook_fdstore_count_before" = 2 ] || { worker_observation_failure functional-worker-fdstore-count-before; return 1; }
+    hook_fdstore_object=$(unit_object_path "$hook_fdstore_unit") || { worker_observation_failure functional-worker-fdstore-object; return 1; }
     hook_fdstore_dump=$(/usr/bin/busctl \
         --address="$system_bus_address" \
         --json=short \
@@ -4502,18 +4574,18 @@ unit_fdstore_exact_active_custody() {
         org.freedesktop.systemd1 \
         "$hook_fdstore_object" \
         org.freedesktop.systemd1.Service \
-        DumpFileDescriptorStore 2>/dev/null) || return 1
-    [ "${#hook_fdstore_dump}" -le 8192 ] || return 1
+        DumpFileDescriptorStore 2>/dev/null) || { worker_observation_failure functional-worker-fdstore-dump-read; return 1; }
+    [ "${#hook_fdstore_dump}" -le 8192 ] || { worker_observation_failure functional-worker-fdstore-dump-size; return 1; }
     hook_fdstore_custody_name=$(fdstore_dump_exact_custody_name \
         "$hook_fdstore_dump" \
         "$hook_expected_pidfd_identity" \
-        "$hook_expected_namespace_identity") || return 1
-    custody_fd_name_is_safe "$hook_fdstore_custody_name" || return 1
+        "$hook_expected_namespace_identity") || { worker_observation_failure functional-worker-fdstore-dump-exact; return 1; }
+    custody_fd_name_is_safe "$hook_fdstore_custody_name" || { worker_observation_failure functional-worker-fdstore-name; return 1; }
     hook_fdstore_count_after=$(unit_u32_property \
         "$hook_fdstore_unit" \
         org.freedesktop.systemd1.Service \
-        NFileDescriptorStore) || return 1
-    [ "$hook_fdstore_count_after" = 2 ] || return 1
+        NFileDescriptorStore) || { worker_observation_failure functional-worker-fdstore-count-after-read; return 1; }
+    [ "$hook_fdstore_count_after" = 2 ] || { worker_observation_failure functional-worker-fdstore-count-after; return 1; }
     printf '%s\n' "$hook_fdstore_custody_name"
 }
 
@@ -4834,9 +4906,9 @@ run_functional_client_lease_probe() {
     advance_start_failure_stage functional-worker-observation || return 1
 
     hook_functional_worker_pid=$(direct_helper_child "$hook_functional_main_pid") \
-        || return 1
+        || { worker_observation_failure functional-worker-child; return 1; }
     capture_parent_worker_custody \
-        "$hook_functional_main_pid" "$hook_functional_worker_pid" || return 1
+        "$hook_functional_main_pid" "$hook_functional_worker_pid" || { worker_observation_failure functional-worker-custody; return 1; }
     hook_functional_pidfd_count=$hook_custody_pidfd_count
     hook_functional_pidfd_identity=$hook_custody_pidfd_identity
     hook_functional_process_count=$hook_custody_process_count
@@ -4847,86 +4919,101 @@ run_functional_client_lease_probe() {
     hook_functional_namespace_parent_fd=$hook_custody_namespace_fd
     hook_functional_worker_namespace=$hook_custody_namespace_identity
     hook_functional_pidfd_fdstore_identity=$(capture_fdstore_descriptor_identity \
-        "/proc/$hook_functional_main_pid/fd/$hook_custody_pidfd_fd") || return 1
+        "/proc/$hook_functional_main_pid/fd/$hook_custody_pidfd_fd") || { worker_observation_failure functional-worker-pidfd-identity; return 1; }
     hook_functional_namespace_fdstore_identity=$(capture_fdstore_descriptor_identity \
-        "/proc/$hook_functional_main_pid/fd/$hook_custody_namespace_fd") || return 1
+        "/proc/$hook_functional_main_pid/fd/$hook_custody_namespace_fd") || { worker_observation_failure functional-worker-namespace-identity; return 1; }
     hook_functional_custody_name=$(unit_fdstore_exact_active_custody \
         "$hook_functional_unit" \
         "$hook_functional_pidfd_fdstore_identity" \
-        "$hook_functional_namespace_fdstore_identity") || return 1
+        "$hook_functional_namespace_fdstore_identity") || { worker_observation_failure functional-worker-fdstore; return 1; }
     [ "$hook_functional_parent_namespace" != "$hook_functional_worker_namespace" ] \
-        || return 1
+        || { worker_observation_failure functional-worker-namespace-distinct; return 1; }
     hook_functional_parent_process_path=/proc/$hook_functional_main_pid/fd/$hook_functional_process_parent_fd
     hook_functional_parent_namespace_path=/proc/$hook_functional_main_pid/fd/$hook_functional_namespace_parent_fd
     [ "$(capture_parent_process_fd_identity \
         "$hook_functional_main_pid" "$hook_functional_process_parent_fd" \
         "$hook_functional_worker_pid")" = "$hook_functional_process_identity" ] \
-        || return 1
+        || { worker_observation_failure functional-worker-process-revalidate; return 1; }
     [ "$(capture_parent_namespace_fd_identity \
         "$hook_functional_main_pid" "$hook_functional_namespace_parent_fd")" = \
-        "$hook_functional_worker_namespace" ] || return 1
-    command exec 7<"$hook_functional_parent_namespace_path" || return 1
-    command exec 8<"$hook_functional_parent_process_path" || return 1
+        "$hook_functional_worker_namespace" ] || { worker_observation_failure functional-worker-namespace-revalidate; return 1; }
+    command exec 7<"$hook_functional_parent_namespace_path" || { worker_observation_failure functional-worker-namespace-open; return 1; }
+    command exec 8<"$hook_functional_parent_process_path" || { worker_observation_failure functional-worker-process-open; return 1; }
     hook_functional_pinned_namespace=$(stat -Lc '%d:%i' \
-        /proc/self/fd/7 2>/dev/null) || return 1
+        /proc/self/fd/7 2>/dev/null) || { worker_observation_failure functional-worker-namespace-stat; return 1; }
     [ "$hook_functional_pinned_namespace" = "$hook_functional_worker_namespace" ] \
-        || return 1
+        || { worker_observation_failure functional-worker-namespace-pin; return 1; }
     hook_functional_pinned_process=$(stat -Lc '%d:%i' \
-        /proc/self/fd/8 2>/dev/null) || return 1
+        /proc/self/fd/8 2>/dev/null) || { worker_observation_failure functional-worker-process-stat; return 1; }
     [ "$hook_functional_pinned_process" = "$hook_functional_process_identity" ] \
-        || return 1
+        || { worker_observation_failure functional-worker-process-pin; return 1; }
     capture_parent_worker_custody \
-        "$hook_functional_main_pid" "$hook_functional_worker_pid" || return 1
-    [ "$hook_custody_pidfd_count" = "$hook_functional_pidfd_count" ] \
-        && [ "$hook_custody_pidfd_identity" = \
-            "$hook_functional_pidfd_identity" ] \
-        && [ "$hook_custody_process_count" = "$hook_functional_process_count" ] \
-        && [ "$hook_custody_namespace_count" = "$hook_functional_namespace_count" ] \
-        && [ "$hook_custody_process_fd" = "$hook_functional_process_parent_fd" ] \
-        && [ "$hook_custody_process_identity" = "$hook_functional_process_identity" ] \
-        && [ "$hook_custody_namespace_fd" = "$hook_functional_namespace_parent_fd" ] \
-        && [ "$hook_custody_namespace_identity" = \
-            "$hook_functional_worker_namespace" ] || return 1
+        "$hook_functional_main_pid" "$hook_functional_worker_pid" || { worker_observation_failure functional-worker-custody-repeat; return 1; }
+    if ! {
+        [ "$hook_custody_pidfd_count" = "$hook_functional_pidfd_count" ] \
+            && [ "$hook_custody_pidfd_identity" = \
+                "$hook_functional_pidfd_identity" ] \
+            && [ "$hook_custody_process_count" = "$hook_functional_process_count" ] \
+            && [ "$hook_custody_namespace_count" = "$hook_functional_namespace_count" ] \
+            && [ "$hook_custody_process_fd" = "$hook_functional_process_parent_fd" ] \
+            && [ "$hook_custody_process_identity" = "$hook_functional_process_identity" ] \
+            && [ "$hook_custody_namespace_fd" = "$hook_functional_namespace_parent_fd" ] \
+            && [ "$hook_custody_namespace_identity" = \
+                "$hook_functional_worker_namespace" ]
+    }; then
+        worker_observation_failure functional-worker-custody-stability
+        return 1
+    fi
     hook_functional_worker_starttime=$(worker_identity_from_process_fd \
         8 "$hook_functional_worker_pid" "$hook_functional_main_pid" \
         "$hook_functional_worker_uid" "$hook_functional_worker_gid" \
-        "$hook_functional_parent_filters") || return 1
+        "$hook_functional_parent_filters") || { worker_observation_failure functional-worker-process-status; return 1; }
     running_identity_is_unchanged \
         "$hook_functional_unit" \
         "$proof_directory/unit.identity" \
-        "$hook_functional_agent_gid" || return 1
-    hook_functional_wireguard=$(worker_wireguard_interface 7) || return 1
+        "$hook_functional_agent_gid" || { worker_observation_failure functional-worker-helper-stability; return 1; }
+    hook_functional_wireguard=$(worker_wireguard_interface 7) || { worker_observation_failure functional-worker-wireguard-interface; return 1; }
     case $hook_functional_wireguard in
-        ''|*[!A-Za-z0-9_.-]*) return 1 ;;
+        ''|*[!A-Za-z0-9_.-]*) worker_observation_failure functional-worker-wireguard-name; return 1 ;;
     esac
     hook_functional_peer_address=$(worker_client_peer_address \
-        7 "$hook_functional_wireguard") || return 1
+        7 "$hook_functional_wireguard") || { worker_observation_failure functional-worker-peer-address; return 1; }
     hook_functional_client_address=$(worker_client_local_address \
-        7 "$hook_functional_wireguard") || return 1
+        7 "$hook_functional_wireguard") || { worker_observation_failure functional-worker-local-address; return 1; }
     worker_activated_wireguard_is_exact \
         7 "$hook_functional_wireguard" "$hook_functional_peer_address" \
-        "$functional_peer_public_key" "$functional_peer_endpoint" || return 1
+        "$functional_peer_public_key" "$functional_peer_endpoint" || { worker_observation_failure functional-worker-wireguard-state; return 1; }
     hook_functional_client_public_key=$(/usr/bin/nsenter \
         --net=/proc/self/fd/7 -- \
         /usr/bin/wg show "$hook_functional_wireguard" public-key 2>/dev/null) \
-        || return 1
+        || { worker_observation_failure functional-worker-public-key-read; return 1; }
     case $hook_functional_client_public_key in
-        ''|'(none)'|*[!A-Za-z0-9+/=]*) return 1 ;;
+        ''|'(none)'|*[!A-Za-z0-9+/=]*) worker_observation_failure functional-worker-public-key-shape; return 1 ;;
     esac
-    [ "${#hook_functional_client_public_key}" -eq 44 ] \
-        && [ "$hook_functional_client_public_key" != \
-            "$functional_relay_public_key" ] || return 1
+    if ! {
+        [ "${#hook_functional_client_public_key}" -eq 44 ] \
+            && [ "$hook_functional_client_public_key" != \
+                "$functional_relay_public_key" ]
+    }; then
+        worker_observation_failure functional-worker-public-key-unique
+        return 1
+    fi
     hook_functional_client_listen_port=$(/usr/bin/nsenter \
         --net=/proc/self/fd/7 -- \
         /usr/bin/wg show "$hook_functional_wireguard" listen-port 2>/dev/null) \
-        || return 1
-    number_is_safe "$hook_functional_client_listen_port" \
-        && [ "$hook_functional_client_listen_port" -le 65535 ] || return 1
+        || { worker_observation_failure functional-worker-port-read; return 1; }
+    if ! {
+        number_is_safe "$hook_functional_client_listen_port" \
+            && [ "$hook_functional_client_listen_port" -le 65535 ]
+    }; then
+        worker_observation_failure functional-worker-port-shape
+        return 1
+    fi
     [ "$hook_functional_client_listen_port" -ne \
-        "$functional_relay_listen_port" ] || return 1
+        "$functional_relay_listen_port" ] || { worker_observation_failure functional-worker-port-distinct; return 1; }
     hook_functional_baseline=$(worker_wireguard_snapshot \
         7 "$hook_functional_wireguard" "$functional_relay_public_key") \
-        || return 1
+        || { worker_observation_failure functional-worker-counters; return 1; }
 
     advance_start_failure_stage functional-relay-fixture || return 1
     create_functional_relay_fixture \

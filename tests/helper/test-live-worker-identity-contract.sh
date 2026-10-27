@@ -577,6 +577,57 @@ printf '%s\n' \
     functional-probe-socket \
     functional-probe-fdstore \
     functional-worker-observation \
+    functional-worker-child \
+    functional-worker-custody \
+    functional-worker-pidfd-identity \
+    functional-worker-namespace-identity \
+    functional-worker-fdstore \
+    functional-worker-namespace-distinct \
+    functional-worker-process-revalidate \
+    functional-worker-namespace-revalidate \
+    functional-worker-namespace-open \
+    functional-worker-process-open \
+    functional-worker-namespace-stat \
+    functional-worker-namespace-pin \
+    functional-worker-process-stat \
+    functional-worker-process-pin \
+    functional-worker-custody-repeat \
+    functional-worker-custody-stability \
+    functional-worker-process-status \
+    functional-worker-helper-stability \
+    functional-worker-wireguard-interface \
+    functional-worker-wireguard-name \
+    functional-worker-peer-address \
+    functional-worker-local-address \
+    functional-worker-wireguard-state \
+    functional-worker-public-key-read \
+    functional-worker-public-key-shape \
+    functional-worker-public-key-unique \
+    functional-worker-port-read \
+    functional-worker-port-shape \
+    functional-worker-port-distinct \
+    functional-worker-counters \
+    functional-worker-custody-parent-netns \
+    functional-worker-custody-parent-netns-shape \
+    functional-worker-custody-empty \
+    functional-worker-custody-readlink \
+    functional-worker-custody-pidfd \
+    functional-worker-custody-pidfd-conflict \
+    functional-worker-custody-process-target \
+    functional-worker-custody-process \
+    functional-worker-custody-process-conflict \
+    functional-worker-custody-netns \
+    functional-worker-custody-netns-conflict \
+    functional-worker-custody-missing-pins \
+    functional-worker-fdstore-count-before-read \
+    functional-worker-fdstore-count-before \
+    functional-worker-fdstore-object \
+    functional-worker-fdstore-dump-read \
+    functional-worker-fdstore-dump-size \
+    functional-worker-fdstore-dump-exact \
+    functional-worker-fdstore-name \
+    functional-worker-fdstore-count-after-read \
+    functional-worker-fdstore-count-after \
     functional-relay-fixture \
     functional-relay-traffic \
     functional-relay-cleanup \
@@ -6189,12 +6240,63 @@ cmp -s "$expected_production_start_stages" "$observed_hook_start_stages" || {
 start_failure_stage=
 hook_stage_index=0
 while IFS= read -r hook_start_stage; do
-    # New preflight detail values are terminal failure-only labels, not
+    # Preflight and worker details are terminal failure-only labels, not
     # successful transitions. The exact fixed enum is checked above.
     case $hook_start_stage in
         preflight-contracts|preflight-socket-wait|preflight-directory-metadata|\
         preflight-socket-metadata|preflight-token-metadata|preflight-journal-metadata|\
-        preflight-journal-lock-metadata|preflight-journal-next-present) continue ;;
+        preflight-journal-lock-metadata|preflight-journal-next-present|\
+        functional-worker-child|\
+        functional-worker-custody|\
+        functional-worker-pidfd-identity|\
+        functional-worker-namespace-identity|\
+        functional-worker-fdstore|\
+        functional-worker-namespace-distinct|\
+        functional-worker-process-revalidate|\
+        functional-worker-namespace-revalidate|\
+        functional-worker-namespace-open|\
+        functional-worker-process-open|\
+        functional-worker-namespace-stat|\
+        functional-worker-namespace-pin|\
+        functional-worker-process-stat|\
+        functional-worker-process-pin|\
+        functional-worker-custody-repeat|\
+        functional-worker-custody-stability|\
+        functional-worker-process-status|\
+        functional-worker-helper-stability|\
+        functional-worker-wireguard-interface|\
+        functional-worker-wireguard-name|\
+        functional-worker-peer-address|\
+        functional-worker-local-address|\
+        functional-worker-wireguard-state|\
+        functional-worker-public-key-read|\
+        functional-worker-public-key-shape|\
+        functional-worker-public-key-unique|\
+        functional-worker-port-read|\
+        functional-worker-port-shape|\
+        functional-worker-port-distinct|\
+        functional-worker-counters|\
+        functional-worker-custody-parent-netns|\
+        functional-worker-custody-parent-netns-shape|\
+        functional-worker-custody-empty|\
+        functional-worker-custody-readlink|\
+        functional-worker-custody-pidfd|\
+        functional-worker-custody-pidfd-conflict|\
+        functional-worker-custody-process-target|\
+        functional-worker-custody-process|\
+        functional-worker-custody-process-conflict|\
+        functional-worker-custody-netns|\
+        functional-worker-custody-netns-conflict|\
+        functional-worker-custody-missing-pins|\
+        functional-worker-fdstore-count-before-read|\
+        functional-worker-fdstore-count-before|\
+        functional-worker-fdstore-object|\
+        functional-worker-fdstore-dump-read|\
+        functional-worker-fdstore-dump-size|\
+        functional-worker-fdstore-dump-exact|\
+        functional-worker-fdstore-name|\
+        functional-worker-fdstore-count-after-read|\
+        functional-worker-fdstore-count-after) continue ;;
     esac
     hook_stage_index=$((hook_stage_index + 1))
     if [ "$hook_stage_index" -eq 1 ]; then
