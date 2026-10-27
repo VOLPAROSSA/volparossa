@@ -14,6 +14,10 @@ as current navigation. Source revisions/digests identify the preserved material.
 - [Implementation ledger at 2026-10-23](IMPLEMENTATION_STATUS_20261023.md.txt):
   complete original source/run/artifact records. Current status links exact
   claims to the original immutable rendered revision.
+- [Later integration evidence from PR343](integration-evidence-pr343-20261023.patch.txt):
+  exact original diff at `a52ab4e7`, retaining later Studio, resident-model and
+  Storage source/run/artifact bindings and the Silex metadata correction. Old
+  pending entries are historical; the compact status records bounded updates.
 - [Storage branch history](STORAGE_BRANCH_HISTORY_20261018.md.txt): dated retained
   candidates and failures; not a current branch/CI inventory.
 - [Maintenance audit](MAINTENANCE_20261020.md.txt) and

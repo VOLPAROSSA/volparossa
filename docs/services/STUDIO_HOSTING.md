@@ -15,6 +15,14 @@ and Core packing pass their bounded paired trial; [implementation status](../IMP
 retains its exact sources and limitations. Production publication, trusted native
 review/signing, independent hosting and shared AI remain open.
 
+The separate recorded local-viewer trial `39875855784` failed at
+`viewer-runtime/exit_nonzero` after the Silex edit/preview/export steps. Scoped
+fixture cleanup was confirmed; neither a successful viewer/browser result nor
+the particular failing Core/browser substage follows. The
+[current evidence index](../IMPLEMENTATION_STATUS.md#studio-and-shared-hosting-evidence)
+and [preserved PR343 diff](../archive/integration-evidence-pr343-20261023.patch.txt)
+retain source bindings, diagnostics and remaining gates.
+
 | Existing Core facility | Reuse and evidence boundary |
 | --- | --- |
 | Signed chunks/manifests, explicit `content publish`, contribution handoff | Existing identity, original expiry, bounded object/cache and explicit public-content authority. A local signed object is not a published website. |
@@ -49,9 +57,10 @@ Select released **Silex v3.9.0**, exact commit
 as the reproducible initial adapter baseline. The release API reports publication
 on 2026-07-26. At that audit, upstream main was separately inspected at
 `1fe592fbf7d06ec242c97be53e32cfb30884704d`; do not float to it or an unpinned package.
-This selection follows source/interface/license inspection, not a successful build,
-full dependency audit or security approval. No upstream executable was installed.
-Studio's `upstream.lock.json` records this selection and inspected blob identities.
+The initial selection followed source/interface/license inspection. The later
+bounded hosted fixture built and ran this pinned Silex source; it is not a full
+dependency audit or security approval. No upstream executable was installed on the
+development host. Studio's `upstream.lock.json` records inspected blob identities.
 
 Primary source references at that revision:
 
@@ -136,8 +145,13 @@ hosting platform or competing storage/compute scheduler is selected here.
 
 The inspected editor/server source notices say **AGPL-3.0-or-later**, and the Rust
 server manifest uses that SPDX identifier; the root package's shorthand is
-`AGPL-3.0`. The desktop manifest/source notices are **GPL-3.0-or-later**, with its
-own GPL license file. Studio's pre-existing root GPLv3 text remains unchanged.
+`AGPL-3.0`. At the same pinned revision, the desktop
+[Cargo manifest](https://github.com/silexlabs/Silex/blob/672efed69dda04c0a1e968859239e042f00d9538/desktop/src-tauri/Cargo.toml)
+declares **AGPL-3.0-or-later**, while the
+[main.rs header](https://github.com/silexlabs/Silex/blob/672efed69dda04c0a1e968859239e042f00d9538/desktop/src-tauri/src/main.rs)
+states **GNU GPL version 3-or-later**; a separate GPL file is present. These are
+distinct source observations, not one uniform manifest/header label. Studio's
+pre-existing root GPLv3 text and all upstream notices remain unchanged.
 Do not overwrite upstream notices or describe the combined implementation as
 uniformly covered by the initial repository license. Record modified components,
 corresponding-source and network-service obligations, dependencies and attribution

@@ -966,12 +966,20 @@ versions, locked upstream dependencies and audit/license obligations are retaine
 - Selected release: v3.9.0; exact commit `672efed69dda04c0a1e968859239e042f00d9538`.
 - Inspected editor/Node server and Rust `silex-server` source notices:
   AGPL-3.0-or-later; root package uses the shorthand AGPL-3.0.
-- Desktop Tauri wrapper: GPL-3.0-or-later in its package/source notices, separate GPL file.
+- Desktop Tauri metadata differs by source at that pin: the
+  [Cargo manifest](https://github.com/silexlabs/Silex/blob/672efed69dda04c0a1e968859239e042f00d9538/desktop/src-tauri/Cargo.toml)
+  declares AGPL-3.0-or-later; the
+  [main.rs header](https://github.com/silexlabs/Silex/blob/672efed69dda04c0a1e968859239e042f00d9538/desktop/src-tauri/src/main.rs)
+  states GNU GPL version 3-or-later. A separate GPL file is present. Preserve both
+  observations rather than assigning one label to the manifest and source header.
 - The pre-existing Studio GPLv3 license file is preserved. Do not use it to
   relabel upstream AGPL components or infer fulfilled network-service/source obligations.
-- No downloaded executable, vendored source, local patch or build in this slice.
-  Studio's `upstream.lock.json` binds reviewed file blobs; dependency/build/runtime
-  acceptance remains outstanding. Preserve notices and record any future patches,
-  distribution/network-source obligations and asset licenses before activation.
+- No downloaded executable, vendored source, local patch or build was part of this
+  initial research record. Studio's `upstream.lock.json` binds reviewed file blobs;
+  the later bounded hosted edit/export/Core-pack fixture built and ran the pinned
+  source, as recorded in [Studio hosting](docs/services/STUDIO_HOSTING.md#audited-starting-point--2026-10-22).
+  Full dependency audit and complete Studio acceptance remain open. Preserve
+  notices and record future patches, distribution/network-source obligations and
+  asset licenses before activation.
 - Primary files and adapter/telemetry/update boundaries are linked in
   [Studio hosting](docs/services/STUDIO_HOSTING.md#silex-source-selection-and-interfaces).
