@@ -124,7 +124,7 @@ jobs:
           python3 -B - <<'PY_CLIPPY'
           import json
           from pathlib import Path
-          expected_baseline = {('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/provider/replication/persistence.rs', 202), ('clippy::duration_suboptimal_units', 'crates/volparossa-content/src/transfer.rs', 57), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/provider/compute/attestation/policy.rs', 132), ('clippy::duration_suboptimal_units', 'crates/volparossa-content/src/origin_https.rs', 168), ('clippy::manual_is_multiple_of', 'crates/volparossa-content/src/provider/compute/dataset/document.rs', 132), ('clippy::collapsible_if', 'crates/volparossa-content/src/transfer/parallel/adaptive.rs', 171), ('clippy::manual_is_multiple_of', 'crates/volparossa-content/src/private_storage/protocol/receipt.rs', 201), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/store.rs', 531), ('clippy::collapsible_if', 'crates/volparossa-content/src/transfer/parallel.rs', 386), ('clippy::duration_suboptimal_units', 'crates/volparossa-content/src/provider/custody/session.rs', 249), ('clippy::collapsible_if', 'crates/volparossa-content/src/provider/digest.rs', 193), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/provider/compute/attestation/policy.rs', 149), ('clippy::duration_suboptimal_units', 'crates/volparossa-content/src/provider.rs', 833), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/origin_https/digest.rs', 378)}
+          expected_baseline = {('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/provider/compute/attestation/policy.rs', 149), ('clippy::duration_suboptimal_units', 'crates/volparossa-content/src/provider.rs', 833), ('clippy::duration_suboptimal_units', 'crates/volparossa-content/src/provider/custody/session.rs', 249), ('clippy::collapsible_if', 'crates/volparossa-local-control/src/private_storage_outcome.rs', 267), ('clippy::duration_suboptimal_units', 'crates/volparossa-content/src/origin_https.rs', 168), ('clippy::manual_is_multiple_of', 'crates/volparossa-content/src/private_storage/protocol/receipt.rs', 201), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/provider/replication/persistence.rs', 202), ('clippy::manual_is_multiple_of', 'crates/volparossa-content/src/provider/compute/dataset/document.rs', 132), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/provider/compute/attestation/policy.rs', 132), ('clippy::collapsible_if', 'crates/volparossa-content/src/transfer/parallel/adaptive.rs', 171), ('clippy::collapsible_if', 'crates/volparossa-content/src/transfer/parallel.rs', 386), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/origin_https/digest.rs', 378), ('clippy::duration_suboptimal_units', 'crates/volparossa-content/src/transfer.rs', 57), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/store.rs', 531), ('clippy::collapsible_if', 'crates/volparossa-content/src/provider/digest.rs', 193)}
           expected_candidate = {entry for entry in expected_baseline if entry[0] != 'clippy::duration_suboptimal_units'}
           observed = {}
           for variant, expected in [('baseline', expected_baseline), ('candidate', expected_candidate)]:
@@ -146,8 +146,12 @@ jobs:
               assert finished == [False], finished
               assert Path('evidence/'+variant+'-clippy-exit.txt').read_text().strip() == '101'
               observed[variant] = sorted(errors)
-          assert len(observed['baseline']) == 14 and len(observed['candidate']) == 10
-          Path('evidence/clippy-summary.json').write_text(json.dumps(dict(diagnostics=observed, removed_duration_diagnostics=4, strict_content_clippy_green=False), indent=2))
+          assert len(observed['baseline']) == 15 and len(observed['candidate']) == 11
+          assert sum(v[1].startswith('crates/volparossa-content/') for v in observed['baseline']) == 14
+          assert sum(v[1].startswith('crates/volparossa-content/') for v in observed['candidate']) == 10
+          dependency = ('clippy::collapsible_if', 'crates/volparossa-local-control/src/private_storage_outcome.rs', 267)
+          assert dependency in map(tuple, observed['baseline']) and dependency in map(tuple, observed['candidate'])
+          Path('evidence/clippy-summary.json').write_text(json.dumps(dict(diagnostics=observed, removed_duration_diagnostics=4, content_counts=dict(baseline=14, candidate=10), unchanged_known_dependency_diagnostics=1, strict_content_clippy_green=False), indent=2))
           PY_CLIPPY
       - name: Run only four existing deadline and quota tests on separate sources
         run: |
