@@ -1849,12 +1849,11 @@ impl DiscoveryRuntime {
     ) -> Result<(), DiscoveryRuntimeError> {
         connection_budget::refresh(&mut self.service);
         configure_network(&mut self.service, &self.config)?;
-        if mesh_installed
-            && let Some(address) = mesh_listener_address(&self.config)? {
-                self.service
-                    .listen_on(address)
-                    .map_err(|_| DiscoveryRuntimeError::Build)?;
-            }
+        if mesh_installed && let Some(address) = mesh_listener_address(&self.config)? {
+            self.service
+                .listen_on(address)
+                .map_err(|_| DiscoveryRuntimeError::Build)?;
+        }
         Ok(())
     }
 
@@ -2743,7 +2742,8 @@ impl DiscoveryRuntime {
                             };
                             self.cancel_active_client_preselection(active, error);
                         } else {
-                            self.client_preselection = ClientPreselectionOwner::Active(Box::new(active));
+                            self.client_preselection =
+                                ClientPreselectionOwner::Active(Box::new(active));
                         }
                         None
                     }
@@ -4214,11 +4214,10 @@ impl DiscoveryRuntime {
                     capability.policy_expires_at_ms,
                 )
             });
-        if local_stale
-            && let Some(capability) = self.local_relay_snapshot.take() {
-                let accepted = accepted_from_direct_capability(&capability);
-                self.revoke_for_direct_advertisement(capability.peer_id, &accepted, false, true);
-            }
+        if local_stale && let Some(capability) = self.local_relay_snapshot.take() {
+            let accepted = accepted_from_direct_capability(&capability);
+            self.revoke_for_direct_advertisement(capability.peer_id, &accepted, false, true);
+        }
 
         let stale_forwarded = self
             .forwarded_exits
@@ -6552,34 +6551,35 @@ impl DiscoveryRuntime {
         if let Some(outbound_id) = self.relay_forward_index.get(&key).copied() {
             if let Some(pending) = self.pending_relay_forwards.get_mut(&outbound_id)
                 && let Some(udp) = pending.udp_session.as_mut()
-                    && pending.operation == ExitForwardOperation::UdpSessionStart
-                        && udp.canonical_start == request.client_signed_request()
-                        && udp.channels.len() < MAX_COALESCED_WAITERS
-                    {
-                        udp.channels.push(channel);
-                        return;
-                    }
+                && pending.operation == ExitForwardOperation::UdpSessionStart
+                && udp.canonical_start == request.client_signed_request()
+                && udp.channels.len() < MAX_COALESCED_WAITERS
+            {
+                udp.channels.push(channel);
+                return;
+            }
             reject!("UDP_SESSION_RELAY_RETRY_CONFLICT");
         }
         if let Some(existing) = self.prepared_production_relay_routes.get(&route_context_id)
             && existing.usable
-                && existing.authenticated_client_peer == authenticated_client_peer
-                && existing.accepted.encoded() == start.signed_relay_reservation()
-                && existing.accepted.path_id() == scope.relay.path_id
-                && existing.expires_at_ms > now_ms
-                && existing.committed_start.as_deref() == Some(request.client_signed_request())
-                && let Some(signal) = existing.committed_signal.clone() {
-                    if let Ok(response) = DatapathRelayResponse::granted(
-                        datapath_request_id.to_vec(),
-                        DatapathRelayOperation::UdpSessionStart,
-                        self.local_node_id.to_vec(),
-                        local_peer.to_bytes(),
-                        signal,
-                    ) {
-                        let _ = self.service.send_datapath_relay_response(channel, response);
-                    }
-                    return;
-                }
+            && existing.authenticated_client_peer == authenticated_client_peer
+            && existing.accepted.encoded() == start.signed_relay_reservation()
+            && existing.accepted.path_id() == scope.relay.path_id
+            && existing.expires_at_ms > now_ms
+            && existing.committed_start.as_deref() == Some(request.client_signed_request())
+            && let Some(signal) = existing.committed_signal.clone()
+        {
+            if let Ok(response) = DatapathRelayResponse::granted(
+                datapath_request_id.to_vec(),
+                DatapathRelayOperation::UdpSessionStart,
+                self.local_node_id.to_vec(),
+                local_peer.to_bytes(),
+                signal,
+            ) {
+                let _ = self.service.send_datapath_relay_response(channel, response);
+            }
+            return;
+        }
         let Some(route) = self
             .prepared_production_relay_routes
             .remove(&route_context_id)
@@ -6804,34 +6804,35 @@ impl DiscoveryRuntime {
         if let Some(outbound_id) = self.relay_forward_index.get(&key).copied() {
             if let Some(pending) = self.pending_relay_forwards.get_mut(&outbound_id)
                 && let Some(mptcp) = pending.mptcp_session.as_mut()
-                    && pending.operation == ExitForwardOperation::MptcpSessionStart
-                        && mptcp.canonical_start == request.client_signed_request()
-                        && mptcp.channels.len() < MAX_COALESCED_WAITERS
-                    {
-                        mptcp.channels.push(channel);
-                        return;
-                    }
+                && pending.operation == ExitForwardOperation::MptcpSessionStart
+                && mptcp.canonical_start == request.client_signed_request()
+                && mptcp.channels.len() < MAX_COALESCED_WAITERS
+            {
+                mptcp.channels.push(channel);
+                return;
+            }
             reject!("MPTCP_SESSION_RELAY_RETRY_CONFLICT");
         }
         if let Some(existing) = self.prepared_production_relay_routes.get(&route_context_id)
             && existing.usable
-                && existing.authenticated_client_peer == authenticated_client_peer
-                && existing.accepted.encoded() == local_proof.signed_relay_reservation()
-                && existing.accepted.path_id() == local_path.relay.path_id
-                && existing.expires_at_ms > now_ms
-                && existing.committed_start.as_deref() == Some(request.client_signed_request())
-                && let Some(signal) = existing.committed_signal.clone() {
-                    if let Ok(response) = DatapathRelayResponse::granted(
-                        datapath_request_id.to_vec(),
-                        DatapathRelayOperation::MptcpSessionStart,
-                        self.local_node_id.to_vec(),
-                        local_peer.to_bytes(),
-                        signal,
-                    ) {
-                        let _ = self.service.send_datapath_relay_response(channel, response);
-                    }
-                    return;
-                }
+            && existing.authenticated_client_peer == authenticated_client_peer
+            && existing.accepted.encoded() == local_proof.signed_relay_reservation()
+            && existing.accepted.path_id() == local_path.relay.path_id
+            && existing.expires_at_ms > now_ms
+            && existing.committed_start.as_deref() == Some(request.client_signed_request())
+            && let Some(signal) = existing.committed_signal.clone()
+        {
+            if let Ok(response) = DatapathRelayResponse::granted(
+                datapath_request_id.to_vec(),
+                DatapathRelayOperation::MptcpSessionStart,
+                self.local_node_id.to_vec(),
+                local_peer.to_bytes(),
+                signal,
+            ) {
+                let _ = self.service.send_datapath_relay_response(channel, response);
+            }
+            return;
+        }
         let Some(route) = self
             .prepared_production_relay_routes
             .remove(&route_context_id)
@@ -7044,34 +7045,35 @@ impl DiscoveryRuntime {
         if let Some(outbound_id) = self.relay_forward_index.get(&key).copied() {
             if let Some(pending) = self.pending_relay_forwards.get_mut(&outbound_id)
                 && let Some(mpquic) = pending.mpquic_session.as_mut()
-                    && pending.operation == ExitForwardOperation::MpquicSessionStart
-                        && mpquic.canonical_start == request.client_signed_request()
-                        && mpquic.channels.len() < MAX_COALESCED_WAITERS
-                    {
-                        mpquic.channels.push(channel);
-                        return;
-                    }
+                && pending.operation == ExitForwardOperation::MpquicSessionStart
+                && mpquic.canonical_start == request.client_signed_request()
+                && mpquic.channels.len() < MAX_COALESCED_WAITERS
+            {
+                mpquic.channels.push(channel);
+                return;
+            }
             reject!("MPQUIC_SESSION_RELAY_RETRY_CONFLICT");
         }
         if let Some(existing) = self.prepared_production_relay_routes.get(&route_context_id)
             && existing.usable
-                && existing.authenticated_client_peer == authenticated_client_peer
-                && existing.accepted.encoded() == dispatch.signed_relay_reservation
-                && existing.accepted.path_id() == dispatch.relay.path_id
-                && existing.expires_at_ms > now_ms
-                && existing.committed_start.as_deref() == Some(request.client_signed_request())
-                && let Some(signal) = existing.committed_signal.clone() {
-                    if let Ok(response) = DatapathRelayResponse::granted(
-                        datapath_request_id.to_vec(),
-                        DatapathRelayOperation::MpquicSessionStart,
-                        self.local_node_id.to_vec(),
-                        local_peer.to_bytes(),
-                        signal,
-                    ) {
-                        let _ = self.service.send_datapath_relay_response(channel, response);
-                    }
-                    return;
-                }
+            && existing.authenticated_client_peer == authenticated_client_peer
+            && existing.accepted.encoded() == dispatch.signed_relay_reservation
+            && existing.accepted.path_id() == dispatch.relay.path_id
+            && existing.expires_at_ms > now_ms
+            && existing.committed_start.as_deref() == Some(request.client_signed_request())
+            && let Some(signal) = existing.committed_signal.clone()
+        {
+            if let Ok(response) = DatapathRelayResponse::granted(
+                datapath_request_id.to_vec(),
+                DatapathRelayOperation::MpquicSessionStart,
+                self.local_node_id.to_vec(),
+                local_peer.to_bytes(),
+                signal,
+            ) {
+                let _ = self.service.send_datapath_relay_response(channel, response);
+            }
+            return;
+        }
         let Some(route) = self
             .prepared_production_relay_routes
             .remove(&route_context_id)
@@ -8087,19 +8089,21 @@ impl DiscoveryRuntime {
             forward_id,
         };
         if let Some(completed) = self.completed_relay_forwards.get(&key) {
-            if completed.canonical_request == canonical_request && completed.operation == operation
-                && let Some(response) = completed.response.clone() {
-                    let _ = self.service.send_exit_forward_response(channel, response);
-                }
+            if completed.canonical_request == canonical_request
+                && completed.operation == operation
+                && let Some(response) = completed.response.clone()
+            {
+                let _ = self.service.send_exit_forward_response(channel, response);
+            }
             return;
         }
         if let Some(outbound_id) = self.relay_forward_index.get(&key).copied() {
             if let Some(pending) = self.pending_relay_forwards.get_mut(&outbound_id)
                 && pending.canonical_request == canonical_request
-                    && pending.client_channels.len() < MAX_COALESCED_WAITERS
-                {
-                    pending.client_channels.push(channel);
-                }
+                && pending.client_channels.len() < MAX_COALESCED_WAITERS
+            {
+                pending.client_channels.push(channel);
+            }
             return;
         }
         let retry = self.retry_relay_forwards.get(&key);
@@ -8609,41 +8613,38 @@ impl DiscoveryRuntime {
                     .activate_lease_batch(&mut native.helper_owner, activation)
                     .await
                     .is_ok()
+            {
+                let response = DatapathRelayResponse::granted(
+                    native.datapath_request_id.to_vec(),
+                    DatapathRelayOperation::NativeProbeAuthorize,
+                    self.local_node_id.to_vec(),
+                    self.service.local_peer_id().to_bytes(),
+                    signed,
+                );
+                if let Ok(response) = response
+                    && let std::collections::hash_map::Entry::Vacant(entry) =
+                        self.active_native_relay_helpers.entry(route_id)
                 {
-                    let response = DatapathRelayResponse::granted(
-                        native.datapath_request_id.to_vec(),
-                        DatapathRelayOperation::NativeProbeAuthorize,
-                        self.local_node_id.to_vec(),
-                        self.service.local_peer_id().to_bytes(),
-                        signed,
-                    );
-                    if let Ok(response) = response
-                        && let std::collections::hash_map::Entry::Vacant(entry) =
-                            self.active_native_relay_helpers.entry(route_id)
-                        {
-                            entry.insert(ActiveNativeRelayProbe {
-                                authenticated_client_peer: pending.key.authenticated_client_peer,
-                                authorized_relay: pending.authorized_control.clone(),
-                                endpoint,
-                                helper_owner: native.helper_owner,
-                            });
-                            if self
-                                .service
-                                .send_datapath_relay_response(native.channel, response)
-                                .is_err()
-                            {
-                                if let Some(owner) =
-                                    self.active_native_relay_helpers.remove(&route_id)
-                                {
-                                    self.destroy_helper_owner(owner.helper_owner);
-                                }
-                                return OutboundEventOutcome::Failed;
-                            }
-                            log_reservation_event(state, "NATIVE_PROBE_AUTHORIZATION_COMPLETED")
-                                .await;
-                            return OutboundEventOutcome::Completed;
+                    entry.insert(ActiveNativeRelayProbe {
+                        authenticated_client_peer: pending.key.authenticated_client_peer,
+                        authorized_relay: pending.authorized_control.clone(),
+                        endpoint,
+                        helper_owner: native.helper_owner,
+                    });
+                    if self
+                        .service
+                        .send_datapath_relay_response(native.channel, response)
+                        .is_err()
+                    {
+                        if let Some(owner) = self.active_native_relay_helpers.remove(&route_id) {
+                            self.destroy_helper_owner(owner.helper_owner);
                         }
+                        return OutboundEventOutcome::Failed;
+                    }
+                    log_reservation_event(state, "NATIVE_PROBE_AUTHORIZATION_COMPLETED").await;
+                    return OutboundEventOutcome::Completed;
                 }
+            }
             self.destroy_helper_owner(native.helper_owner);
             if let Ok(response) = DatapathRelayResponse::unavailable(
                 native.datapath_request_id.to_vec(),
@@ -10297,15 +10298,15 @@ impl DiscoveryRuntime {
         if let Some(existing) = self.pending_mpquic_exit_sessions.get(&route_context_id)
             && (existing.canonical_start != request.canonical_request()
                 || existing.selected_path_ids != selected_path_ids)
-            {
-                let pending = self
-                    .pending_mpquic_exit_sessions
-                    .remove(&route_context_id)
-                    .expect("observed MPQUIC Exit session");
-                self.finish_mpquic_exit_session_unavailable(route_context_id, pending)
-                    .await;
-                reject!("MPQUIC_SESSION_EXIT_SET_CONFLICT", channel);
-            }
+        {
+            let pending = self
+                .pending_mpquic_exit_sessions
+                .remove(&route_context_id)
+                .expect("observed MPQUIC Exit session");
+            self.finish_mpquic_exit_session_unavailable(route_context_id, pending)
+                .await;
+            reject!("MPQUIC_SESSION_EXIT_SET_CONFLICT", channel);
+        }
 
         if let Some(pending) = self.pending_mpquic_exit_sessions.get_mut(&route_context_id) {
             pending.expires_at_ms = pending.expires_at_ms.min(pending_expiry);
@@ -10626,15 +10627,15 @@ impl DiscoveryRuntime {
         if let Some(existing) = self.pending_mptcp_exit_sessions.get(&route_context_id)
             && (existing.canonical_start != request.canonical_request()
                 || existing.selected_path_ids != selected_path_ids)
-            {
-                let pending = self
-                    .pending_mptcp_exit_sessions
-                    .remove(&route_context_id)
-                    .expect("observed MPTCP Exit session");
-                self.finish_mptcp_exit_session_unavailable(route_context_id, pending)
-                    .await;
-                reject!("MPTCP_SESSION_EXIT_SET_CONFLICT", channel);
-            }
+        {
+            let pending = self
+                .pending_mptcp_exit_sessions
+                .remove(&route_context_id)
+                .expect("observed MPTCP Exit session");
+            self.finish_mptcp_exit_session_unavailable(route_context_id, pending)
+                .await;
+            reject!("MPTCP_SESSION_EXIT_SET_CONFLICT", channel);
+        }
 
         if let Some(pending) = self.pending_mptcp_exit_sessions.get_mut(&route_context_id) {
             pending.expires_at_ms = pending.expires_at_ms.min(pending_expiry);
@@ -11084,10 +11085,12 @@ impl DiscoveryRuntime {
                     }
                 })
                 .await;
-            let event = MptcpExitRuntimeEvent::RuntimeCompleted(Box::new(MptcpExitRuntimeCompletionEvent {
-                route_context_id,
-                completion,
-            }));
+            let event = MptcpExitRuntimeEvent::RuntimeCompleted(Box::new(
+                MptcpExitRuntimeCompletionEvent {
+                    route_context_id,
+                    completion,
+                },
+            ));
             if let Err(error) = events.send(event).await {
                 let MptcpExitRuntimeEvent::RuntimeCompleted(completion) = error.0 else {
                     return;
@@ -11272,9 +11275,10 @@ impl DiscoveryRuntime {
     ) -> bool {
         route.expires_at_ms = 0;
         if let Some(runtime) = route.runtime.take()
-            && let Err(cleanup) = runtime.shutdown().await {
-                route.cleanup = Some(cleanup);
-            }
+            && let Err(cleanup) = runtime.shutdown().await
+        {
+            route.cleanup = Some(cleanup);
+        }
         let cleanup_complete = match route.cleanup.take() {
             Some(cleanup) => match cleanup.destroy().await {
                 Ok(()) => true,
@@ -12624,16 +12628,16 @@ impl DiscoveryRuntime {
         };
         if let Some(record) = self.accepted_advertisements.get(&accepted.node_id)
             && record.expires_at_ms > clock.unix_ms
-                && (accepted.sequence_number < record.sequence_number
-                    || (accepted.sequence_number == record.sequence_number
-                        && fingerprint != record.fingerprint))
-            {
-                return AdvertisementCommitOutcome::rejected(Some((
-                    LogLevel::Debug,
-                    "ADVERTISEMENT_STORE_REJECTED",
-                    clock.unix_ms,
-                )));
-            }
+            && (accepted.sequence_number < record.sequence_number
+                || (accepted.sequence_number == record.sequence_number
+                    && fingerprint != record.fingerprint))
+        {
+            return AdvertisementCommitOutcome::rejected(Some((
+                LogLevel::Debug,
+                "ADVERTISEMENT_STORE_REJECTED",
+                clock.unix_ms,
+            )));
+        }
 
         if !self.forwarded_ingest_authority_is_current(&provenance, clock) {
             return AdvertisementCommitOutcome::rejected(None);
@@ -12926,9 +12930,9 @@ impl DiscoveryRuntime {
                         .store
                         .record_endpoint(&advertisement.node_id, endpoint, *observed_ip, true, now)
                         .is_err()
-                    {
-                        diagnostic = Some((LogLevel::Warn, "PEER_ENDPOINT_STORE_FAILED", now_ms));
-                    }
+                {
+                    diagnostic = Some((LogLevel::Warn, "PEER_ENDPOINT_STORE_FAILED", now_ms));
+                }
             }
             AdvertisementProvenance::ForwardedExit {
                 control_relay_node_id,
@@ -13947,9 +13951,10 @@ async fn log_reservation_event(state: &Arc<RwLock<AgentState>>, event_code: &'st
 
 fn log_relay_forward_admission(state: Option<&Arc<RwLock<AgentState>>>, event_code: &'static str) {
     if let Some(state) = state
-        && let Ok(mut guard) = state.try_write() {
-            guard.log(LogLevel::Debug, event_code, unix_millis());
-        }
+        && let Ok(mut guard) = state.try_write()
+    {
+        guard.log(LogLevel::Debug, event_code, unix_millis());
+    }
 }
 
 async fn log_outbound_event(state: &Arc<RwLock<AgentState>>, outcome: OutboundEventOutcome) {
@@ -25288,7 +25293,9 @@ mod tests {
             "fn install_client_preselection_transition_failure(",
         );
         assert!(retained.contains("PreselectionOwnerTransitionFailure::Retained(dispatch)"));
-        assert!(retained.contains("ClientPreselectionOwner::Active(Box::new(ActiveClientPreselection"));
+        assert!(
+            retained.contains("ClientPreselectionOwner::Active(Box::new(ActiveClientPreselection")
+        );
         assert!(retained.contains("terminal_error: retained_terminal_error,"));
         assert!(!retained.contains("PreselectionOwnerTransitionFailure::Retained(_)"));
         let cancel = braced_item(product, "fn cancel_active_client_preselection(");

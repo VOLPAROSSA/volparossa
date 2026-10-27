@@ -564,7 +564,7 @@ fn send_credential_message_with_deadline<S: AsFd>(
                 validate_complete_send(written, expected_bytes)?;
                 return deadline.complete(());
             }
-            Err(nix::errno::Errno::EINTR | nix::errno::Errno::EAGAIN) => {},
+            Err(nix::errno::Errno::EINTR | nix::errno::Errno::EAGAIN) => {}
             Err(error) => return Err(errno_io(error)),
         }
     }

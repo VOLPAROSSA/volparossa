@@ -383,18 +383,19 @@ impl DiscoveryRuntime {
                     key,
                     providers,
                 })) = result
-                    && key == kad::RecordKey::new(&capability::DNSSEC_CACHE) {
-                        self.dns_cache.stage("DNS_CACHE_PROVIDERS_FOUND");
-                        for peer in providers {
-                            if self.dns_cache.candidates.len() >= MAX_CANDIDATES {
-                                break;
-                            }
-                            if !self.dns_cache.candidates.contains(&peer) {
-                                self.dns_cache.candidates.push(peer);
-                            }
+                    && key == kad::RecordKey::new(&capability::DNSSEC_CACHE)
+                {
+                    self.dns_cache.stage("DNS_CACHE_PROVIDERS_FOUND");
+                    for peer in providers {
+                        if self.dns_cache.candidates.len() >= MAX_CANDIDATES {
+                            break;
                         }
-                        self.choose_dns_peers();
+                        if !self.dns_cache.candidates.contains(&peer) {
+                            self.dns_cache.candidates.push(peer);
+                        }
                     }
+                    self.choose_dns_peers();
+                }
                 if step.last {
                     self.dns_cache.stage("DNS_CACHE_QUERY_COMPLETED");
                     self.finish_dns_query();
@@ -486,10 +487,10 @@ impl DiscoveryRuntime {
                             .service
                             .respond_dns_cache(peer, connection_id, channel, response)
                             .is_ok()
-                            && cache_miss
-                        {
-                            self.metrics.record_dns_cache_miss_reply();
-                        }
+                        && cache_miss
+                    {
+                        self.metrics.record_dns_cache_miss_reply();
+                    }
                 }
                 request_response::Message::Response {
                     request_id,

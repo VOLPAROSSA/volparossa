@@ -233,35 +233,35 @@ impl ExitResolver {
             .await
             .map(|answer| self.record(answer));
         }
-        if self.cache_enabled && scope.permits_peers()
+        if self.cache_enabled
+            && scope.permits_peers()
             && let Some(peers) = &self.peers
-                && let Ok(Ok(Some(bundle))) = timeout_at(
-                    deadline.min(Instant::now() + PEER_TIMEOUT),
-                    peers.fetch(question, scope),
-                )
-                .await
-                    && bundle.question() == question
-                        && let Ok(Ok(proof)) = timeout_at(deadline, proof::validate(bundle)).await
-                            && let Some(answer) = self.retain(
-                                proof,
-                                scope.policy_hash(),
-                                DnsAnswerSource::PeerValidated,
-                            ) {
-                                return Ok(self.record(answer));
-                            }
+            && let Ok(Ok(Some(bundle))) = timeout_at(
+                deadline.min(Instant::now() + PEER_TIMEOUT),
+                peers.fetch(question, scope),
+            )
+            .await
+            && bundle.question() == question
+            && let Ok(Ok(proof)) = timeout_at(deadline, proof::validate(bundle)).await
+            && let Some(answer) =
+                self.retain(proof, scope.policy_hash(), DnsAnswerSource::PeerValidated)
+        {
+            return Ok(self.record(answer));
+        }
         if let Some(recursive) = self.recursive.filter(|_| self.cache_enabled)
             && let Ok(Ok(proof)) = timeout_at(
                 deadline.min(Instant::now() + COLLECT_TIMEOUT),
                 proof::collect(question, recursive),
             )
             .await
-                && let Some(answer) = self.retain(
-                    proof,
-                    scope.policy_hash(),
-                    DnsAnswerSource::UpstreamValidated,
-                ) {
-                    return Ok(self.record(answer));
-                }
+            && let Some(answer) = self.retain(
+                proof,
+                scope.policy_hash(),
+                DnsAnswerSource::UpstreamValidated,
+            )
+        {
+            return Ok(self.record(answer));
+        }
         if let Some(endpoint) = self.unbound_fallback {
             return timeout_at(deadline, unbound::resolve(question, endpoint))
                 .await
@@ -319,9 +319,10 @@ impl ExitResolver {
                 proof,
                 scope.policy_hash(),
                 DnsAnswerSource::UpstreamValidated,
-            ) {
-                return Ok(answer);
-            }
+            )
+        {
+            return Ok(answer);
+        }
         Ok(private.fallback)
     }
 

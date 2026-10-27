@@ -1263,6 +1263,14 @@ non_retained_production_launch_stage_is_safe() {
     [ "$#" -eq 1 ] || return 1
     case $1 in
         preflight-runtime|\
+        preflight-contracts|\
+        preflight-socket-wait|\
+        preflight-directory-metadata|\
+        preflight-socket-metadata|\
+        preflight-token-metadata|\
+        preflight-journal-metadata|\
+        preflight-journal-lock-metadata|\
+        preflight-journal-next-present|\
         identity-socket|\
         identity-lock|\
         identity-manager|\
@@ -1379,7 +1387,7 @@ report_non_retained_production_launch_diagnostic() {
     non_retained_production_diagnostic_prefix=VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=
     [ "$(grep -Ec "^$non_retained_production_diagnostic_prefix" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
-    non_retained_production_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=(preflight-runtime|identity-socket|identity-lock|identity-manager|identity-launch|identity-birth|identity-process|identity-stability|identity-publication|active-lock|protocol-bind-before|protocol-frame-bounds|protocol-wire-shapes|protocol-wrong-uid|protocol-wrong-gid|protocol-root-peer|protocol-bind-after|functional-underlay|functional-underlay-parent-contract|functional-underlay-pristine-namespace|functional-underlay-pristine-link|functional-underlay-pristine-ipv-four|functional-underlay-pristine-ipv-six|functional-underlay-absent|functional-underlay-link|functional-underlay-address|functional-underlay-route|functional-underlay-ifindex|functional-underlay-readback-link|functional-underlay-readback-address|functional-underlay-readback-route|functional-probe-ready|functional-probe-fixture|functional-probe-launch|functional-probe-wait|functional-probe-identity|functional-probe-socket|functional-probe-fdstore|functional-worker-observation|functional-relay-fixture|functional-relay-traffic|functional-relay-cleanup|functional-client-release|functional-client-cleanup|functional-exit-ready|functional-exit-worker-observation|functional-exit-relay-fixture|functional-exit-relay-traffic|functional-exit-relay-cleanup|functional-exit-release|functional-exit-cleanup|functional-relay-pair-ready|functional-relay-pair-worker-observation|functional-relay-pair-fixtures|functional-relay-pair-traffic|functional-relay-pair-cleanup|functional-probe-finish|functional-cleanup|publication)$'
+    non_retained_production_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=(preflight-runtime|preflight-contracts|preflight-socket-wait|preflight-directory-metadata|preflight-socket-metadata|preflight-token-metadata|preflight-journal-metadata|preflight-journal-lock-metadata|preflight-journal-next-present|identity-socket|identity-lock|identity-manager|identity-launch|identity-birth|identity-process|identity-stability|identity-publication|active-lock|protocol-bind-before|protocol-frame-bounds|protocol-wire-shapes|protocol-wrong-uid|protocol-wrong-gid|protocol-root-peer|protocol-bind-after|functional-underlay|functional-underlay-parent-contract|functional-underlay-pristine-namespace|functional-underlay-pristine-link|functional-underlay-pristine-ipv-four|functional-underlay-pristine-ipv-six|functional-underlay-absent|functional-underlay-link|functional-underlay-address|functional-underlay-route|functional-underlay-ifindex|functional-underlay-readback-link|functional-underlay-readback-address|functional-underlay-readback-route|functional-probe-ready|functional-probe-fixture|functional-probe-launch|functional-probe-wait|functional-probe-identity|functional-probe-socket|functional-probe-fdstore|functional-worker-observation|functional-relay-fixture|functional-relay-traffic|functional-relay-cleanup|functional-client-release|functional-client-cleanup|functional-exit-ready|functional-exit-worker-observation|functional-exit-relay-fixture|functional-exit-relay-traffic|functional-exit-relay-cleanup|functional-exit-release|functional-exit-cleanup|functional-relay-pair-ready|functional-relay-pair-worker-observation|functional-relay-pair-fixtures|functional-relay-pair-traffic|functional-relay-pair-cleanup|functional-probe-finish|functional-cleanup|publication)$'
     [ "$(grep -Ec "$non_retained_production_diagnostic_pattern" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
     non_retained_functional_diagnostic_prefix=VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=

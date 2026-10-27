@@ -430,9 +430,10 @@ impl DiscoveryRuntime {
             return None;
         }
         if let Some(route) = self.prepared_production_relay_routes.remove(&context)
-            && !self.retire_production_relay_route(context, route).await {
-                return None;
-            }
+            && !self.retire_production_relay_route(context, route).await
+        {
+            return None;
+        }
         let receipt = RetirementReceipt {
             route_context_id: authority.parent.route_context_id,
             reservation_id: authority.parent.reservation_id,

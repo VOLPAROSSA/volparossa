@@ -321,7 +321,7 @@ fn create_staging_directory(parent: &Path) -> Result<(PathBuf, String)> {
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
                 return Ok((path, leaf));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {},
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error).context("cannot create policy staging directory"),
         }
     }

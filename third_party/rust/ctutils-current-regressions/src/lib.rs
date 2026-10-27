@@ -216,8 +216,15 @@ mod primitive_tests {
     fn wide_carry_matches_integer_arithmetic() {
         macro_rules! check {
             ($ty:ty, $add:ident) => {
-                let values: &[$ty] = &[0, 1, 2, <$ty>::MAX / 2, (<$ty>::MAX / 2) + 1,
-                    <$ty>::MAX - 1, <$ty>::MAX];
+                let values: &[$ty] = &[
+                    0,
+                    1,
+                    2,
+                    <$ty>::MAX / 2,
+                    (<$ty>::MAX / 2) + 1,
+                    <$ty>::MAX - 1,
+                    <$ty>::MAX,
+                ];
                 for &a in values {
                     for &b in values {
                         let (sum, carry) = a.overflowing_add(b);
@@ -234,8 +241,19 @@ mod primitive_tests {
     fn borrow_masked_addback_and_zero_counts_match_integer_arithmetic() {
         macro_rules! check {
             ($ty:ty, $borrow:ident, $addback:ident, $leading:ident, $trailing:ident) => {
-                let values: &[$ty] = &[0, 1, 2, 3, 7, 0xff, 0xffff, <$ty>::MAX / 2,
-                    (<$ty>::MAX / 2) + 1, <$ty>::MAX - 1, <$ty>::MAX];
+                let values: &[$ty] = &[
+                    0,
+                    1,
+                    2,
+                    3,
+                    7,
+                    0xff,
+                    0xffff,
+                    <$ty>::MAX / 2,
+                    (<$ty>::MAX / 2) + 1,
+                    <$ty>::MAX - 1,
+                    <$ty>::MAX,
+                ];
                 for &a in values {
                     assert_eq!($leading(a), a.leading_zeros());
                     assert_eq!($trailing(a), a.trailing_zeros());
@@ -250,15 +268,29 @@ mod primitive_tests {
                             let borrow = borrow1 || borrow2;
                             assert_eq!($borrow(a, b, incoming), (expected, u8::from(borrow)));
                             for &modulus in values {
-                                assert_eq!($addback(a, b, incoming, modulus),
-                                    expected.wrapping_add(if borrow { modulus } else { 0 }));
+                                assert_eq!(
+                                    $addback(a, b, incoming, modulus),
+                                    expected.wrapping_add(if borrow { modulus } else { 0 })
+                                );
                             }
                         }
                     }
                 }
             };
         }
-        check!(u32, ct_borrow_u32, ct_addback_u32, ct_leading_zeros_u32, ct_trailing_zeros_u32);
-        check!(u64, ct_borrow_u64, ct_addback_u64, ct_leading_zeros_u64, ct_trailing_zeros_u64);
+        check!(
+            u32,
+            ct_borrow_u32,
+            ct_addback_u32,
+            ct_leading_zeros_u32,
+            ct_trailing_zeros_u32
+        );
+        check!(
+            u64,
+            ct_borrow_u64,
+            ct_addback_u64,
+            ct_leading_zeros_u64,
+            ct_trailing_zeros_u64
+        );
     }
 }

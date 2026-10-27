@@ -775,10 +775,11 @@ async fn ready_round(
     // retargeting any old handle; those handles are still observed under their original lease.
     if later_attempt
         && let Some(authorization) = authorization
-            && let Ok(selected) = executors::discover(authorization, socket, cancelled).await {
-                options.providers.clone_from(&selected.providers);
-                options.executor_admission = Some((authorization.clone(), selected));
-            }
+        && let Ok(selected) = executors::discover(authorization, socket, cancelled).await
+    {
+        options.providers.clone_from(&selected.providers);
+        options.executor_admission = Some((authorization.clone(), selected));
+    }
     let first = batch::report_ready_with_activity(&options, socket, cancelled).await;
     let Some(authorization) = authorization else {
         return first;

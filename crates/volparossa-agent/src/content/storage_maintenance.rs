@@ -60,9 +60,9 @@ impl Drop for TurnGuard {
             && active
                 .as_ref()
                 .is_some_and(|turn| Arc::ptr_eq(turn, &self.turn))
-            {
-                active.take();
-            }
+        {
+            active.take();
+        }
     }
 }
 
@@ -204,7 +204,7 @@ impl ContentRuntime {
                     .map_err(|_| ContentError::Unavailable)?;
                 super::custody::checked_policy(context, None).await?;
                 match self.try_maintenance_turn(request, uid, &context.config) {
-                    Err(ContentError::Busy) => {},
+                    Err(ContentError::Busy) => {}
                     result => return result,
                 }
             }

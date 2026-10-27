@@ -499,18 +499,18 @@ impl SynchronousKernelMptcpPathManager {
                 let mut contexts = self.backend.contexts.blocking_lock();
                 if let Some(ManagedContext::Active(endpoints)) = contexts.get_mut(route_context_id)
                     && matches!(endpoints.get(&endpoint.id), Some(ManagedEndpoint::Adding(current)) if current == &endpoint)
-                    {
-                        endpoints.remove(&endpoint.id);
-                    }
+                {
+                    endpoints.remove(&endpoint.id);
+                }
                 return Err(error);
             }
             if self.backend.kernel.delete_endpoint(&endpoint).is_ok() {
                 let mut contexts = self.backend.contexts.blocking_lock();
                 if let Some(ManagedContext::Active(endpoints)) = contexts.get_mut(route_context_id)
                     && matches!(endpoints.get(&endpoint.id), Some(ManagedEndpoint::Adding(current)) if current == &endpoint)
-                    {
-                        endpoints.remove(&endpoint.id);
-                    }
+                {
+                    endpoints.remove(&endpoint.id);
+                }
                 return Err(error);
             }
             let _cleanup_state = self.mark_add_cleanup_required(route_context_id, endpoint);
@@ -892,9 +892,9 @@ impl MptcpPathManagerBackend for KernelMptcpPathManager {
                 let mut contexts = self.contexts.lock().await;
                 if let Some(ManagedContext::Active(endpoints)) = contexts.get_mut(route_context_id)
                     && matches!(endpoints.get(&endpoint.id), Some(ManagedEndpoint::Adding(current)) if current == &endpoint)
-                    {
-                        endpoints.remove(&endpoint.id);
-                    }
+                {
+                    endpoints.remove(&endpoint.id);
+                }
                 return Err(error);
             }
             let rollback_endpoint = endpoint.clone();
@@ -905,9 +905,9 @@ impl MptcpPathManagerBackend for KernelMptcpPathManager {
                 let mut contexts = self.contexts.lock().await;
                 if let Some(ManagedContext::Active(endpoints)) = contexts.get_mut(route_context_id)
                     && matches!(endpoints.get(&endpoint.id), Some(ManagedEndpoint::Adding(current)) if current == &endpoint)
-                    {
-                        endpoints.remove(&endpoint.id);
-                    }
+                {
+                    endpoints.remove(&endpoint.id);
+                }
                 return Err(error);
             }
             let _cleanup_state = self

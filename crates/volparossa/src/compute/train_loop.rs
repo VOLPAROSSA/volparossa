@@ -509,24 +509,25 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             .await?;
             reconcile_selected_adapter(args, &store, &mut state, &mut serving)?;
             if let Some(source) = state.select(&pool, args.repeat_sources, now()?)
-                && make_room(&store, &mut state)? {
-                    reconcile_selected_adapter(args, &store, &mut state, &mut serving)?;
-                    attempt(
-                        args,
-                        socket,
-                        &pool,
-                        &store,
-                        &mut state,
-                        source,
-                        &activity.receiver,
-                    )
-                    .await?;
-                    reconcile_selected_adapter(args, &store, &mut state, &mut serving)?;
-                    attempts = attempts
-                        .checked_add(1)
-                        .context("train_loop_attempt_counter")?;
-                    continue;
-                }
+                && make_room(&store, &mut state)?
+            {
+                reconcile_selected_adapter(args, &store, &mut state, &mut serving)?;
+                attempt(
+                    args,
+                    socket,
+                    &pool,
+                    &store,
+                    &mut state,
+                    source,
+                    &activity.receiver,
+                )
+                .await?;
+                reconcile_selected_adapter(args, &store, &mut state, &mut serving)?;
+                attempts = attempts
+                    .checked_add(1)
+                    .context("train_loop_attempt_counter")?;
+                continue;
+            }
         }
         let mut receiver = activity.receiver.clone();
         tokio::select! { _=receiver.changed()=>{}, ()=tokio::time::sleep(Duration::from_millis(250))=>{} }
@@ -920,17 +921,19 @@ struct CurrentAdapter {
 
 fn current_adapter(args: &Options, store: &Store, state: &State) -> Result<CurrentAdapter> {
     if let Some(registry) = &state.aggregate_updates
-        && let Some(aggregate) = aggregate_updates::active(args, registry, state.latest)? {
-            return Ok(aggregate);
-        }
+        && let Some(aggregate) = aggregate_updates::active(args, registry, state.latest)?
+    {
+        return Ok(aggregate);
+    }
     if let Some(registry) = &state.peer_updates
-        && let Some(peer) = peer_updates::active(args, registry, state.latest)? {
-            return Ok(CurrentAdapter {
-                adapter_root: Some(peer.adapter_root),
-                origin: peer.origin,
-                authority_expires: None,
-            });
-        }
+        && let Some(peer) = peer_updates::active(args, registry, state.latest)?
+    {
+        return Ok(CurrentAdapter {
+            adapter_root: Some(peer.adapter_root),
+            origin: peer.origin,
+            authority_expires: None,
+        });
+    }
     if let Some(previous) = state.latest {
         let cycle = state
             .cycles

@@ -56,9 +56,10 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Observed<'_, S> {
     ) -> Poll<io::Result<usize>> {
         let result = Pin::new(&mut self.inner).poll_write(cx, bytes);
         if let Poll::Ready(Ok(count)) = &result
-            && self.client {
-                self.guard.bytes(&bytes[..*count]);
-            }
+            && self.client
+        {
+            self.guard.bytes(&bytes[..*count]);
+        }
         result
     }
 
@@ -69,17 +70,18 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Observed<'_, S> {
     ) -> Poll<io::Result<usize>> {
         let result = Pin::new(&mut self.inner).poll_write_vectored(cx, bufs);
         if let Poll::Ready(Ok(count)) = &result
-            && self.client {
-                let mut remaining = *count;
-                for bytes in bufs {
-                    let used = remaining.min(bytes.len());
-                    self.guard.bytes(&bytes[..used]);
-                    remaining -= used;
-                    if remaining == 0 {
-                        break;
-                    }
+            && self.client
+        {
+            let mut remaining = *count;
+            for bytes in bufs {
+                let used = remaining.min(bytes.len());
+                self.guard.bytes(&bytes[..used]);
+                remaining -= used;
+                if remaining == 0 {
+                    break;
                 }
             }
+        }
         result
     }
 

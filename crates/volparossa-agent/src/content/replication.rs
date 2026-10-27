@@ -198,10 +198,10 @@ impl ReplicationRuntime {
             && tokio::time::timeout(Duration::from_secs(2), &mut task)
                 .await
                 .is_err()
-            {
-                task.abort();
-                let _ = task.await;
-            }
+        {
+            task.abort();
+            let _ = task.await;
+        }
     }
 
     pub(super) async fn reclaim(

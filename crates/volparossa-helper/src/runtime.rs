@@ -939,12 +939,12 @@ fn write_token(path: &Path, token: &[u8; 32], owner: Uid, group: Gid) -> Result<
             || metadata.uid() != owner.as_raw()
             || metadata.gid() != group.as_raw()
             || metadata.mode() & 0o777 != 0o640)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "unsafe cleanup token file",
-            ));
-        }
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "unsafe cleanup token file",
+        ));
+    }
     let mut options = OpenOptions::new();
     options
         .write(true)

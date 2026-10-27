@@ -198,15 +198,15 @@ impl DiscoveryRuntime {
                 .active_production_mptcp_exit_routes
                 .get_mut(&context)
                 .and_then(|route| route.extensions.get_mut(&id))
-            {
-                extension.pending = Some(DeferredExitCommit {
-                    request,
-                    control_peer: peer,
-                    replies,
-                    deadline,
-                });
-                return;
-            }
+        {
+            extension.pending = Some(DeferredExitCommit {
+                request,
+                control_peer: peer,
+                replies,
+                deadline,
+            });
+            return;
+        }
         self.finish_extension_forward(peer, &request, replies, result.and_then(ready_response));
     }
 
@@ -280,10 +280,10 @@ impl DiscoveryRuntime {
                     .active_production_mptcp_exit_routes
                     .get_mut(&context)
                     .and_then(|route| route.extensions.get_mut(&id))
-                {
-                    extension.pending = Some(pending);
-                    continue;
-                }
+            {
+                extension.pending = Some(pending);
+                continue;
+            }
             self.finish_extension_forward(
                 pending.control_peer,
                 &pending.request,

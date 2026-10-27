@@ -276,10 +276,11 @@ fn replication_config(
 impl ContributionRuntime {
     pub(super) async fn stop(&self) {
         if let Some(mut worker) = self.worker.lock().await.take()
-            && timeout(Duration::from_secs(2), &mut worker).await.is_err() {
-                worker.abort();
-                let _ = worker.await;
-            }
+            && timeout(Duration::from_secs(2), &mut worker).await.is_err()
+        {
+            worker.abort();
+            let _ = worker.await;
+        }
         self.queue.lock().await.clear();
     }
 
@@ -380,14 +381,14 @@ impl ContributionRuntime {
                 && registry.lock().await.has_live_publications(now());
             if usable
                 && let Ok(offer) = super::make_offer(&context.content.signer, endpoint.clone())
-                    && context
-                        .discovery
-                        .register_content_offer(offer)
-                        .await
-                        .is_ok()
-                    {
-                        content_event(&context, "CONTENT_CONTRIBUTION_CHUNKS_AVAILABLE").await;
-                    }
+                && context
+                    .discovery
+                    .register_content_offer(offer)
+                    .await
+                    .is_ok()
+            {
+                content_event(&context, "CONTENT_CONTRIBUTION_CHUNKS_AVAILABLE").await;
+            }
             drop(slot);
             if *stop.borrow() {
                 break;

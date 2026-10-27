@@ -13,6 +13,7 @@ repository_directory=$(CDPATH='' cd -- "$script_directory/../.." && pwd)
 gate=$repository_directory/tests/helper/require-live-worker-identity-proof.sh
 capture_library=$repository_directory/tests/helper/lib/live-worker-proof-capture.sh
 ipc_hook=$repository_directory/tests/helper/lib/production-ipc-unit-hook.sh
+python3 -B "$script_directory/test-helper-preflight-diagnostic.py"
 evidence_validator=$repository_directory/tests/helper/validate-helper-boundary-evidence-v1.sh
 evidence_schema=$repository_directory/tests/helper/helper-boundary-evidence-v1.schema.json
 worker_source=$repository_directory/crates/volparossa-helper/src/worker_v3.rs
@@ -530,6 +531,14 @@ done
 expected_production_start_stages=$temporary_directory/expected-production-start-stages
 printf '%s\n' \
     preflight-runtime \
+    preflight-contracts \
+    preflight-socket-wait \
+    preflight-directory-metadata \
+    preflight-socket-metadata \
+    preflight-token-metadata \
+    preflight-journal-metadata \
+    preflight-journal-lock-metadata \
+    preflight-journal-next-present \
     identity-socket \
     identity-lock \
     identity-manager \
@@ -6180,6 +6189,13 @@ cmp -s "$expected_production_start_stages" "$observed_hook_start_stages" || {
 start_failure_stage=
 hook_stage_index=0
 while IFS= read -r hook_start_stage; do
+    # New preflight detail values are terminal failure-only labels, not
+    # successful transitions. The exact fixed enum is checked above.
+    case $hook_start_stage in
+        preflight-contracts|preflight-socket-wait|preflight-directory-metadata|\
+        preflight-socket-metadata|preflight-token-metadata|preflight-journal-metadata|\
+        preflight-journal-lock-metadata|preflight-journal-next-present) continue ;;
+    esac
     hook_stage_index=$((hook_stage_index + 1))
     if [ "$hook_stage_index" -eq 1 ]; then
         [ "$hook_start_stage" = preflight-runtime ] || exit 1

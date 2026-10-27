@@ -279,9 +279,10 @@ impl ReadyCohort {
                     &mut self.cursor,
                     &self.socket,
                     &mut self.tasks,
-                ) {
-                    self.fail(error);
-                }
+                )
+            {
+                self.fail(error);
+            }
             let unlock = self.leases.next_expiry(|provider| {
                 self.packages
                     .iter()

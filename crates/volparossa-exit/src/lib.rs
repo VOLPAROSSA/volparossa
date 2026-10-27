@@ -1854,9 +1854,10 @@ impl ActiveTcpEgressRoute {
         )
         .await;
         if matches!(&result, Err(TcpProxyError::Policy(_)))
-            && let Some(metrics) = &self.metrics {
-                metrics.record_policy_denial();
-            }
+            && let Some(metrics) = &self.metrics
+        {
+            metrics.record_policy_denial();
+        }
         result.map_err(ExitError::from)
     }
 

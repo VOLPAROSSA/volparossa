@@ -1710,14 +1710,8 @@ impl HelperEngine {
                             None,
                         ))
                     } else {
-                        self.cleanup_async(
-                            request,
-                            request_id,
-                            digest,
-                            scope,
-                            sender,
-                        )
-                        .await
+                        self.cleanup_async(request, request_id, digest, scope, sender)
+                            .await
                     }
                 } else {
                     Some(execution(
@@ -2067,15 +2061,18 @@ impl HelperEngine {
                     .cleanup_pending
                     .remove(&(token.context_id, token.generation));
                 if let Some(record) = state.prepare_reconciliations.get_mut(&token.context_id)
-                    && record.backend_generation == token.generation {
-                        record.phase = PrepareReconciliationPhase::Absent;
-                    }
-            }
-        } else if exact_operation && exact_generation
-            && let Some(context) = state.contexts.get_mut(&token.context_id)
-                && context.generation == token.generation {
-                    context.phase = ContextPhase::Quarantined;
+                    && record.backend_generation == token.generation
+                {
+                    record.phase = PrepareReconciliationPhase::Absent;
                 }
+            }
+        } else if exact_operation
+            && exact_generation
+            && let Some(context) = state.contexts.get_mut(&token.context_id)
+            && context.generation == token.generation
+        {
+            context.phase = ContextPhase::Quarantined;
+        }
         if exact_operation {
             state.in_flight = None;
         }
@@ -9781,8 +9778,9 @@ mod tests {
         let valid = [lease(1, 1, 51_821), lease(2, 2, 51_822)];
         assert!(prepared_matches(&request, &valid));
         let mut punched = valid.clone();
-        for lease in punched
-            .iter_mut() { lease.evidence = UnderlayEvidence::ObservedUdpPunch; }
+        for lease in &mut punched {
+            lease.evidence = UnderlayEvidence::ObservedUdpPunch;
+        }
         assert!(prepared_matches(&request, &punched));
 
         let reordered = [valid[1].clone(), valid[0].clone()];

@@ -412,10 +412,10 @@ mod tests {
             reservation_id: vec![1; ID_BYTES],
             route_context_id: vec![2; ID_BYTES],
             path_id: 2,
-            relay_reservation: start.signed_relay_reservation.clone(),
+            relay_reservation: start.relay_reservation.clone(),
             ..ExitReservationConfirmation::default()
         };
-        start.signed_confirmation = signed(
+        start.confirmation = signed(
             ControlMessageType::ExitReservationConfirmation,
             &confirmation,
         );

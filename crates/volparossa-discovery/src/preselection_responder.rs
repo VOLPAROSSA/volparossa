@@ -2436,9 +2436,10 @@ mod tests {
                 if let SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservation(
                     request_response::Event::OutboundFailure { request_id, .. },
                 )) = client.next_internal_event().await
-                    && request_id == transplanted_outbound {
-                        break;
-                    }
+                    && request_id == transplanted_outbound
+                {
+                    break;
+                }
             }
         })
         .await

@@ -42,7 +42,10 @@ fn main() {
     opaque(ct_trailing_zeros_u64(opaque(1)));
     assert_eq!(ct_overflowing_add_u64(opaque(u64::MAX), opaque(1)), (0, 1));
     assert_eq!(ct_overflowing_add_u64(opaque(17), opaque(25)), (42, 0));
-    assert_eq!(ct_overflowing_add_u128(opaque(u128::MAX), opaque(1)), (0, 1));
+    assert_eq!(
+        ct_overflowing_add_u128(opaque(u128::MAX), opaque(1)),
+        (0, 1)
+    );
     assert_eq!(ct_overflowing_add_u128(opaque(17), opaque(25)), (42, 0));
     assert!(ct_p384_verify(
         opaque(&public_vector::PUBLIC_KEY),

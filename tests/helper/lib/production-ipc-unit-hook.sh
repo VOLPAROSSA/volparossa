@@ -227,6 +227,14 @@ start_failure_stage_is_safe() {
     [ "$#" -eq 1 ] || return 1
     case $1 in
         preflight-runtime|\
+        preflight-contracts|\
+        preflight-socket-wait|\
+        preflight-directory-metadata|\
+        preflight-socket-metadata|\
+        preflight-token-metadata|\
+        preflight-journal-metadata|\
+        preflight-journal-lock-metadata|\
+        preflight-journal-next-present|\
         identity-socket|\
         identity-lock|\
         identity-manager|\
@@ -6208,22 +6216,67 @@ restart_start_hook() {
         || fail 'restart resumed record could not be published'
 }
 
+# Failure-only detail on the existing private stage record. Successful startup
+# still follows the original transition graph; a selected failure cannot move on.
+set_preflight_failure_stage() {
+    [ "$#" -eq 1 ] || return 1
+    [ "$start_failure_stage" = preflight-runtime ] || return 1
+    case $1 in
+        preflight-contracts|\
+        preflight-socket-wait|\
+        preflight-directory-metadata|\
+        preflight-socket-metadata|\
+        preflight-token-metadata|\
+        preflight-journal-metadata|\
+        preflight-journal-lock-metadata|\
+        preflight-journal-next-present)
+            start_failure_stage=$1
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+fail_preflight() {
+    [ "$#" -eq 2 ] || fail 'preflight diagnostic argument count is invalid'
+    set_preflight_failure_stage "$1" || fail 'preflight diagnostic stage is invalid'
+    fail "$2"
+}
+
 validate_runtime_metadata() {
     [ "$#" -eq 1 ] || return 1
     hook_agent_gid=$1
     [ "$(stat -c '%F:%u:%g:%a' "$runtime_directory" 2>/dev/null || true)" = \
-        "directory:0:$hook_agent_gid:750" ] || return 1
+        "directory:0:$hook_agent_gid:750" ] || {
+        set_preflight_failure_stage preflight-directory-metadata || return 1
+        return 1
+    }
     [ "$(stat -c '%F:%u:%g:%a:%h' "$helper_socket" 2>/dev/null || true)" = \
-        "socket:0:$hook_agent_gid:660:1" ] || return 1
+        "socket:0:$hook_agent_gid:660:1" ] || {
+        set_preflight_failure_stage preflight-socket-metadata || return 1
+        return 1
+    }
     [ "$(stat -c '%F:%u:%g:%a:%h:%s' "$cleanup_token" 2>/dev/null || true)" = \
-        "regular file:0:$hook_agent_gid:640:1:32" ] || return 1
+        "regular file:0:$hook_agent_gid:640:1:32" ] || {
+        set_preflight_failure_stage preflight-token-metadata || return 1
+        return 1
+    }
     if [ -e "$journal" ] || [ -L "$journal" ]; then
         [ "$(stat -c '%f:%u:%g:%a:%h' "$journal" 2>/dev/null || true)" = \
-            "8180:0:$hook_agent_gid:600:1" ] || return 1
+            "8180:0:$hook_agent_gid:600:1" ] || {
+            set_preflight_failure_stage preflight-journal-metadata || return 1
+            return 1
+        }
     fi
     [ "$(stat -c '%f:%u:%g:%a:%h' "$journal_lock" 2>/dev/null || true)" = \
-        "8180:0:$hook_agent_gid:600:1" ] || return 1
-    [ ! -e "$journal_next" ] && [ ! -L "$journal_next" ]
+        "8180:0:$hook_agent_gid:600:1" ] || {
+        set_preflight_failure_stage preflight-journal-lock-metadata || return 1
+        return 1
+    }
+    if [ ! -e "$journal_next" ] && [ ! -L "$journal_next" ]; then
+        return 0
+    fi
+    set_preflight_failure_stage preflight-journal-next-present || return 1
+    return 1
 }
 
 capture_journal_state() {
@@ -6247,58 +6300,58 @@ capture_journal_state() {
 }
 
 start_hook() {
-    [ "$#" -eq 6 ] || fail 'start hook argument count is invalid'
+    [ "$#" -eq 6 ] || fail_preflight preflight-contracts 'start hook argument count is invalid'
     hook_unit=$1
     agent_uid=$2
     agent_gid=$3
     operator_gid=$4
     worker_uid=$5
     worker_gid=$6
-    unit_name_is_safe "$hook_unit" || fail 'unit name is unsafe'
+    unit_name_is_safe "$hook_unit" || fail_preflight preflight-contracts 'unit name is unsafe'
     for hook_id in "$agent_uid" "$agent_gid" "$operator_gid" "$worker_uid" "$worker_gid"; do
-        number_is_safe "$hook_id" || fail 'staged identity is invalid'
+        number_is_safe "$hook_id" || fail_preflight preflight-contracts 'staged identity is invalid'
     done
-    [ "$agent_uid" -eq "$agent_gid" ] || fail 'agent UID/GID are not paired'
-    [ "$worker_uid" -eq "$worker_gid" ] || fail 'worker UID/GID are not paired'
+    [ "$agent_uid" -eq "$agent_gid" ] || fail_preflight preflight-contracts 'agent UID/GID are not paired'
+    [ "$worker_uid" -eq "$worker_gid" ] || fail_preflight preflight-contracts 'worker UID/GID are not paired'
     if [ "$agent_uid" -eq "$operator_gid" ] \
         || [ "$agent_uid" -eq "$worker_uid" ] \
         || [ "$operator_gid" -eq "$worker_gid" ]; then
-        fail 'staged identities overlap'
+        fail_preflight preflight-contracts 'staged identities overlap'
     fi
     hook_entry_contract_is_exact "$agent_gid" \
-        || fail 'start hook process contract is invalid'
+        || fail_preflight preflight-contracts 'start hook process contract is invalid'
     [ "$(stat -c '%F:%u:%g:%a' "$proof_directory" 2>/dev/null || true)" = \
-        'directory:0:0:2700' ] || fail 'proof directory is unsafe'
+        'directory:0:0:2700' ] || fail_preflight preflight-contracts 'proof directory is unsafe'
     [ "$(stat -c '%F:%u:%g:%a:%h' "$probe" 2>/dev/null || true)" = \
-        "regular file:0:$agent_gid:550:1" ] || fail 'probe executable is unsafe'
+        "regular file:0:$agent_gid:550:1" ] || fail_preflight preflight-contracts 'probe executable is unsafe'
     if [ -e "$start_failure_record" ] || [ -L "$start_failure_record" ] \
         || [ -e "$start_failure_record.next" ] \
         || [ -L "$start_failure_record.next" ]; then
-        fail 'start failure record path is unsafe'
+        fail_preflight preflight-contracts 'start failure record path is unsafe'
     fi
     if [ -e "$restart_initial_handshake_failure_record" ] \
         || [ -L "$restart_initial_handshake_failure_record" ] \
         || [ -e "$restart_initial_handshake_failure_record.next" ] \
         || [ -L "$restart_initial_handshake_failure_record.next" ]; then
-        fail 'restart initial handshake failure record path is unsafe'
+        fail_preflight preflight-contracts 'restart initial handshake failure record path is unsafe'
     fi
     if [ -e "$restart_initial_handshake_terminal_record" ] \
         || [ -L "$restart_initial_handshake_terminal_record" ] \
         || [ -e "$restart_initial_handshake_terminal_record.next" ] \
         || [ -L "$restart_initial_handshake_terminal_record.next" ]; then
-        fail 'restart initial handshake terminal record path is unsafe'
+        fail_preflight preflight-contracts 'restart initial handshake terminal record path is unsafe'
     fi
     if [ -e "$restart_initial_release_authorized_record" ] \
         || [ -L "$restart_initial_release_authorized_record" ] \
         || [ -e "$restart_initial_release_authorized_record.next" ] \
         || [ -L "$restart_initial_release_authorized_record.next" ]; then
-        fail 'restart initial release authorization path is unsafe'
+        fail_preflight preflight-contracts 'restart initial release authorization path is unsafe'
     fi
 
     hook_wait_attempt=0
     while [ ! -S "$helper_socket" ]; do
         hook_wait_attempt=$((hook_wait_attempt + 1))
-        [ "$hook_wait_attempt" -lt 600 ] || fail 'production helper socket did not appear'
+        [ "$hook_wait_attempt" -lt 600 ] || fail_preflight preflight-socket-wait 'production helper socket did not appear'
         sleep 0.05
     done
     validate_runtime_metadata "$agent_gid" || fail 'production runtime metadata is invalid'

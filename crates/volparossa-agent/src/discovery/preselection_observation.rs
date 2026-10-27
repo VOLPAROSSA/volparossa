@@ -1202,8 +1202,7 @@ impl PreselectionAttemptGate {
         };
         if entropy.batch_id == [0; BATCH_ID_LENGTH]
             || entropy.challenges.len() != request_count
-            || entropy
-                .challenges.contains(&[0; CHALLENGE_LENGTH])
+            || entropy.challenges.contains(&[0; CHALLENGE_LENGTH])
             || !all_challenges_unique(&entropy.challenges)
             || entropy.challenges.iter().any(|challenge| {
                 self.tombstones
@@ -2998,7 +2997,10 @@ mod tests {
                     calls.set(calls.get() + 1);
                     Ok(minted_entropy(request_count, 141))
                 },
-            ) else { panic!("signed advertisements do not support {transport:?}/{family:?}") };
+            )
+        else {
+            panic!("signed advertisements do not support {transport:?}/{family:?}")
+        };
         assert_eq!(calls.get(), 0);
         assert_eq!(failure.error, PreselectionAttemptError::InvalidSnapshot);
         assert!(failure.gate.is_some());
@@ -3258,7 +3260,9 @@ mod tests {
                     Ok(minted_entropy(request_count, 41))
                 },
             );
-        let Err(invalid_failure) = invalid_result else { panic!("below-minimum ceiling must fail") };
+        let Err(invalid_failure) = invalid_result else {
+            panic!("below-minimum ceiling must fail")
+        };
         assert_eq!(invalid_calls.get(), 0);
         assert_eq!(
             invalid_failure.error,
@@ -3288,7 +3292,9 @@ mod tests {
                     Ok(minted_entropy(request_count, 51))
                 },
             );
-        let Err(unavailable_failure) = unavailable_result else { panic!("unavailable subject binding must fail") };
+        let Err(unavailable_failure) = unavailable_result else {
+            panic!("unavailable subject binding must fail")
+        };
         assert_eq!(unavailable_calls.get(), 0);
         assert_eq!(
             unavailable_failure.error,
@@ -3437,7 +3443,9 @@ mod tests {
                         Ok(minted_entropy(request_count, 62 + mutation))
                     },
                 );
-            let Err(failure) = result else { panic!("payload-hash splice {mutation} must fail") };
+            let Err(failure) = result else {
+                panic!("payload-hash splice {mutation} must fail")
+            };
             assert_eq!(calls.get(), 0, "mutation {mutation}");
             assert_eq!(failure.error, PreselectionAttemptError::InvalidSnapshot);
             assert!(failure.gate.is_some());
@@ -3909,11 +3917,11 @@ mod tests {
                     trusted_now_mono = started_at_mono + Duration::from_millis(ATTEMPT_LIFETIME_MS);
                 }
             }
-            let Err(failure) = completed.join_transport_facts_for_test(
-                facts,
-                trusted_now_ms,
-                trusted_now_mono,
-            ) else { panic!("proof substitution case {case} joined") };
+            let Err(failure) =
+                completed.join_transport_facts_for_test(facts, trusted_now_ms, trusted_now_mono)
+            else {
+                panic!("proof substitution case {case} joined")
+            };
             let error = failure.error();
             assert!(matches!(
                 error,
@@ -3957,7 +3965,9 @@ mod tests {
                         Ok(entropy)
                     },
                 );
-            let Err(failure) = result else { panic!("invalid entropy must fail") };
+            let Err(failure) = result else {
+                panic!("invalid entropy must fail")
+            };
             assert_eq!(calls.get(), 1);
             assert_eq!(failure.error, PreselectionAttemptError::Entropy);
             assert!(failure.gate.is_none());
@@ -4000,7 +4010,9 @@ mod tests {
                     Ok(entropy)
                 },
             );
-            let Err(failure) = result else { panic!("recent entropy must not be reused") };
+            let Err(failure) = result else {
+                panic!("recent entropy must not be reused")
+            };
             assert_eq!(failure.error, PreselectionAttemptError::Entropy);
             assert!(failure.gate.is_none());
             assert!(failure.cooling_gate.is_some());
@@ -4033,7 +4045,9 @@ mod tests {
                 challenge_calls.set(challenge_calls.get() + 1);
                 Ok(minted_entropy(request_count, 141))
             },
-        ) else { panic!("live challenge tombstones must not be evicted") };
+        ) else {
+            panic!("live challenge tombstones must not be evicted")
+        };
         assert_eq!(challenge_calls.get(), 0);
         assert_eq!(
             challenge_failure.error,
@@ -4078,7 +4092,9 @@ mod tests {
                 batch_calls.set(batch_calls.get() + 1);
                 Ok(minted_entropy(request_count, 151))
             },
-        ) else { panic!("live batch tombstones must not be evicted") };
+        ) else {
+            panic!("live batch tombstones must not be evicted")
+        };
         assert_eq!(batch_calls.get(), 0);
         assert_eq!(
             batch_failure.error,
@@ -4177,7 +4193,9 @@ mod tests {
             &response,
             started_at_ms + 100,
             started_at_mono + Duration::from_millis(100),
-        ) else { panic!("unknown dispatch must fail before crypto") };
+        ) else {
+            panic!("unknown dispatch must fail before crypto")
+        };
         assert_eq!(unknown.error, PreselectionAttemptError::UnknownDispatch);
         let mut cooling = unknown.gate.expect("valid terminal time returns cooldown");
         assert!(cooling.gate.replay.is_empty());
@@ -4223,7 +4241,9 @@ mod tests {
             &[],
             late_fixture.now_ms + REQUEST_LIFETIME_MS,
             expires_at_mono,
-        ) else { panic!("exact request deadline must fail before decode") };
+        ) else {
+            panic!("exact request deadline must fail before decode")
+        };
         assert_eq!(late_failure.error, PreselectionAttemptError::InvalidTime);
         assert!(
             late_failure
@@ -4283,7 +4303,9 @@ mod tests {
             replay_fixture.now_ms + 200,
             TimePolicy::default(),
             &mut next.gate.replay,
-        ) else { panic!("committed outer/inner transcript must not replay") };
+        ) else {
+            panic!("committed outer/inner transcript must not replay")
+        };
         assert!(matches!(replay_error, ProtocolError::Replay));
         assert_eq!(next.gate.replay.len(), 2);
     }
@@ -4307,7 +4329,11 @@ mod tests {
                 |request_count| Ok(minted_entropy(request_count, 221)),
             )
             .unwrap_or_else(|_| panic!("valid attempt"));
-        let Err(backward_failure) = backward.cancel_at(backward_fixture.now_ms - 1, backward_started_at_mono) else { panic!("backward wall time loses gate fail closed") };
+        let Err(backward_failure) =
+            backward.cancel_at(backward_fixture.now_ms - 1, backward_started_at_mono)
+        else {
+            panic!("backward wall time loses gate fail closed")
+        };
         assert_eq!(
             backward_failure.error,
             PreselectionAttemptError::InvalidTime
@@ -4540,7 +4566,9 @@ mod tests {
                     Ok(minted_entropy(request_count, 41))
                 },
             );
-        let Err(wall_failure) = wall_result else { panic!("deadline plus tombstone horizon must not overflow") };
+        let Err(wall_failure) = wall_result else {
+            panic!("deadline plus tombstone horizon must not overflow")
+        };
         assert_eq!(wall_calls.get(), 0);
         assert_eq!(wall_failure.error, PreselectionAttemptError::InvalidTime);
         assert!(wall_failure.gate.is_some());
@@ -4581,7 +4609,9 @@ mod tests {
                     Ok(minted_entropy(request_count, 51))
                 },
             );
-        let Err(mono_failure) = mono_result else { panic!("monotonic attempt deadline must not overflow") };
+        let Err(mono_failure) = mono_result else {
+            panic!("monotonic attempt deadline must not overflow")
+        };
         assert_eq!(mono_calls.get(), 0);
         assert_eq!(mono_failure.error, PreselectionAttemptError::InvalidTime);
         assert!(mono_failure.gate.is_some());
@@ -4611,7 +4641,9 @@ mod tests {
                     Ok(minted_entropy(request_count, 61))
                 },
             );
-        let Err(local_failure) = local_result else { panic!("local discovery authority equality is stale") };
+        let Err(local_failure) = local_result else {
+            panic!("local discovery authority equality is stale")
+        };
         assert_eq!(local_calls.get(), 0);
         assert_eq!(
             local_failure.error,
@@ -4640,7 +4672,9 @@ mod tests {
         let Err(backward_failure) = pending.cancel_at(
             backward.now_ms,
             backward_started_at_mono - Duration::from_nanos(1),
-        ) else { panic!("backward monotonic terminal loses gate") };
+        ) else {
+            panic!("backward monotonic terminal loses gate")
+        };
         assert_eq!(
             backward_failure.error,
             PreselectionAttemptError::InvalidTime
@@ -4762,7 +4796,9 @@ mod tests {
             &response,
             fixture.now_ms + 100,
             started_at_mono + Duration::from_millis(100),
-        ) else { panic!("corrupt next plan must fail after the composite commit") };
+        ) else {
+            panic!("corrupt next plan must fail after the composite commit")
+        };
         assert_eq!(failure.error, PreselectionAttemptError::InvalidSnapshot);
         let cooling = failure.gate.expect("valid terminal time retains cooldown");
         assert_eq!(cooling.gate.replay.len(), 2);

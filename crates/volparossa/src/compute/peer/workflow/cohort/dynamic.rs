@@ -156,11 +156,11 @@ impl ReadyWork {
         reconcile(&mut self.state, &self.enrollment, &result)?;
         if let Err(error) = result
             && !follow::transient_preflight(&error)
-                && !cancelled
-                && self.state.verified.expires() > now()?
-            {
-                return Err(error);
-            }
+            && !cancelled
+            && self.state.verified.expires() > now()?
+        {
+            return Err(error);
+        }
         Ok(())
     }
 

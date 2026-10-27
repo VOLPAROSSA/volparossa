@@ -293,13 +293,14 @@ impl HelperEngine {
             Err(result) => return response(request, result, "MESH_OWNER_MISMATCH", None),
         };
         if let Some(binding) = binding
-            && !self.destroy_mesh_binding(binding).await {
-                return backend_response(
-                    request,
-                    BackendError::CleanupIncomplete,
-                    "WIFI_MESH_CLEANUP_INCOMPLETE",
-                );
-            }
+            && !self.destroy_mesh_binding(binding).await
+        {
+            return backend_response(
+                request,
+                BackendError::CleanupIncomplete,
+                "WIFI_MESH_CLEANUP_INCOMPLETE",
+            );
+        }
         response(
             request,
             HelperResult::Ok,

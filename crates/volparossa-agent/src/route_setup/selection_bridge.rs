@@ -5234,7 +5234,9 @@ mod tests {
                 .expect("same observed source and signed local Relay endpoint"),
             vec![hint.clone()]
         );
-        assert!(bind_native_client_traversal_hints(std::slice::from_ref(&path), Vec::new()).is_err());
+        assert!(
+            bind_native_client_traversal_hints(std::slice::from_ref(&path), Vec::new()).is_err()
+        );
         for field in 0..6 {
             let mut changed = hint.clone();
             match field {
@@ -5245,7 +5247,10 @@ mod tests {
                 4 => changed.on_link.as_mut().expect("local").peer_address[3] ^= 1,
                 _ => changed.on_link = None,
             }
-            assert!(bind_native_client_traversal_hints(std::slice::from_ref(&path), vec![changed]).is_err());
+            assert!(
+                bind_native_client_traversal_hints(std::slice::from_ref(&path), vec![changed])
+                    .is_err()
+            );
         }
         assert!(bind_native_client_traversal_hints(&[path], vec![hint.clone(), hint]).is_err());
     }
@@ -7098,7 +7103,10 @@ mod tests {
             let completed = preselection_freshness_attempt(
                 snapshot, records, transport, family, batch_id, ceiling,
             );
-            let Err(failure) = join_preselection_fresh_evidence_at(completed, trusted_now_ms) else { panic!("substitution case {case} minted fresh evidence") };
+            let Err(failure) = join_preselection_fresh_evidence_at(completed, trusted_now_ms)
+            else {
+                panic!("substitution case {case} minted fresh evidence")
+            };
             assert_ne!(size_of_val(&failure.gate), 0);
             assert!(matches!(
                 failure.error,
@@ -7466,9 +7474,9 @@ mod tests {
                     .lock()
                     .expect("handoff cancellation")
                     .as_ref()
-                {
-                    let _ = cancellation.send(true);
-                }
+            {
+                let _ = cancellation.send(true);
+            }
             self.now_ms.load(Ordering::SeqCst)
         }
     }

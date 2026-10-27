@@ -144,9 +144,9 @@ impl ContentRuntime {
                     .try_lock()
                     .map_err(|_| ContentError::Busy)?
                     .has_private_storage())
-            {
-                return Err(ContentError::Busy);
-            }
+        {
+            return Err(ContentError::Busy);
+        }
         let provider_key = self.signer.verifying_key();
         // The blocking opener owns admission even if this caller is cancelled. It cannot
         // create an unbounded queue of stores or outlive a released service-setup lock.

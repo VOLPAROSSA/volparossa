@@ -3058,20 +3058,14 @@ impl PrivateMounts<AuthorizedPermanentNeighbours> {
     fn remove_permanent_neighbours_after_icmp_echo_without_policy(
         self,
         proof: ExactIpv4IcmpEchoPermanentNeighbourNetworkProof,
-    ) -> Result<
-        (
-            PrivateMounts<AuthorizedEndpointRoutes>,
-            ExactIpv4IcmpEchoEndpointRouteNetworkProof,
-        ),
-        (
-            PrivateMountLinkActivationError,
-            Box<PrivateMounts<AuthorizedDeletedTopology>>,
-        ),
-    > {
+    ) -> Result<FixedIcmpRemovedNeighbourSuccess, FixedIcmpRemovedNeighbourFailure> {
         if let Err(source) = self.verify_exact_ipv4_icmp_echo_permanent_neighbour_state(&proof) {
             let (backing, neighbours) = self.into_backing_and_run_state();
             let deleted = backing.with_run_state(neighbours.begin_fixed_icmp_cleanup_retirement());
-            return Err((PrivateMountLinkActivationError::Proof(source), Box::new(deleted)));
+            return Err((
+                PrivateMountLinkActivationError::Proof(source),
+                Box::new(deleted),
+            ));
         }
         let ExactIpv4IcmpEchoPermanentNeighbourNetworkProof {
             parent,
@@ -3310,6 +3304,15 @@ impl PolicyBoundPrivateMounts<AuthorizedPermanentNeighbours, PolicyEnabledNetwor
         )
     }
 }
+
+type FixedIcmpRemovedNeighbourSuccess = (
+    PrivateMounts<AuthorizedEndpointRoutes>,
+    ExactIpv4IcmpEchoEndpointRouteNetworkProof,
+);
+type FixedIcmpRemovedNeighbourFailure = (
+    PrivateMountLinkActivationError,
+    Box<PrivateMounts<AuthorizedDeletedTopology>>,
+);
 
 type FixedIcmpActiveMounts = PolicyBoundPrivateMounts<
     AuthorizedPermanentNeighbours,

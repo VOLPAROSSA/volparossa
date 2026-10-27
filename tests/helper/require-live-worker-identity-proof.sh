@@ -937,6 +937,14 @@ production_start_failure_stage_is_safe() {
     [ "$#" -eq 1 ] || return 1
     case $1 in
         preflight-runtime|\
+        preflight-contracts|\
+        preflight-socket-wait|\
+        preflight-directory-metadata|\
+        preflight-socket-metadata|\
+        preflight-token-metadata|\
+        preflight-journal-metadata|\
+        preflight-journal-lock-metadata|\
+        preflight-journal-next-present|\
         identity-socket|\
         identity-lock|\
         identity-manager|\

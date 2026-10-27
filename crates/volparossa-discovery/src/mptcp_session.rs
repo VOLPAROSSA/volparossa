@@ -640,7 +640,7 @@ mod tests {
             exit_node_id: vec![3; NODE_ID_BYTES],
             ..ExitConfirmationReceipt::default()
         };
-        start.paths[1].signed_confirmation_receipt =
+        start.paths[1].confirmation_receipt =
             signed(ControlMessageType::ExitConfirmationReceipt, &receipt);
         assert_eq!(start.validate(), Err(MptcpSessionFrameError::Invalid));
     }

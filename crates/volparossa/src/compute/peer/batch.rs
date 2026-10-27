@@ -415,9 +415,10 @@ async fn follow_status(
 ) -> Result<rpc::JobStatus> {
     loop {
         if let Some(current) = &status
-            && current.state != rpc::JobState::Running {
-                return Ok(current.clone());
-            }
+            && current.state != rpc::JobState::Running
+        {
+            return Ok(current.clone());
+        }
         let cancel = *cancelled.borrow() || now()? >= handle.binding.expires_unix_seconds;
         if cancel {
             let outcome = exchange(

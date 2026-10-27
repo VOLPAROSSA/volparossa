@@ -267,14 +267,15 @@ impl Agent {
             }
         };
         if self.config.wifi_mesh.enabled
-            && let Err(error) = self.discovery.configure_mesh_network(mesh.is_some()) {
-                tracing::error!(error = ?error, "direct Wi-Fi discovery startup failed");
-                self.helper
-                    .cleanup_owned()
-                    .await
-                    .map_err(|_| AgentError::ShutdownCleanup)?;
-                return Err(AgentError::WifiMesh);
-            }
+            && let Err(error) = self.discovery.configure_mesh_network(mesh.is_some())
+        {
+            tracing::error!(error = ?error, "direct Wi-Fi discovery startup failed");
+            self.helper
+                .cleanup_owned()
+                .await
+                .map_err(|_| AgentError::ShutdownCleanup)?;
+            return Err(AgentError::WifiMesh);
+        }
         let client_ingress = if roles.client {
             let ingress = match ClientIngressRuntime::start(self.helper.clone()).await {
                 Ok(ingress) => ingress,
@@ -470,21 +471,23 @@ impl Agent {
         }
 
         if let Some(mesh) = mesh
-            && mesh.shutdown().await.is_err() {
-                self.helper
-                    .cleanup_owned()
-                    .await
-                    .map_err(|_| AgentError::ShutdownCleanup)?;
-                return Err(AgentError::ShutdownCleanup);
-            }
+            && mesh.shutdown().await.is_err()
+        {
+            self.helper
+                .cleanup_owned()
+                .await
+                .map_err(|_| AgentError::ShutdownCleanup)?;
+            return Err(AgentError::ShutdownCleanup);
+        }
         if let Some(sharing) = sharing
-            && sharing.shutdown().await.is_err() {
-                self.helper
-                    .cleanup_owned()
-                    .await
-                    .map_err(|_| AgentError::ShutdownCleanup)?;
-                return Err(AgentError::ShutdownCleanup);
-            }
+            && sharing.shutdown().await.is_err()
+        {
+            self.helper
+                .cleanup_owned()
+                .await
+                .map_err(|_| AgentError::ShutdownCleanup)?;
+            return Err(AgentError::ShutdownCleanup);
+        }
         if self.state.read().await.has_network_state() {
             self.helper
                 .cleanup_owned()
@@ -1625,14 +1628,15 @@ async fn run_maintenance(
                     let state = state.read().await;
                     (state.policy_snapshot(now_ms), state.roles().client)
                 };
-                if client_policy_revoked(&previous_policy, &current_policy, client_enabled) {
-                    if control::disconnect_client_routes(&routes, &dns_routes).await.is_err() {
-                        state.write().await.log(
-                            LogLevel::Warn,
-                            "CLIENT_CLEANUP_PENDING",
-                            now_ms,
-                        );
-                    }
+                if client_policy_revoked(&previous_policy, &current_policy, client_enabled)
+                    && control::disconnect_client_routes(&routes, &dns_routes)
+                        .await
+                        .is_err()
+                {
+                    state
+                        .write()
+                        .await
+                        .log(LogLevel::Warn, "CLIENT_CLEANUP_PENDING", now_ms);
                 }
             }
         }

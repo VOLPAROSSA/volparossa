@@ -128,9 +128,9 @@ impl DeviceBudget {
             && now
                 .checked_duration_since(at)
                 .is_some_and(|age| age < CACHE_LIFETIME)
-            {
-                return observation;
-            }
+        {
+            return observation;
+        }
         let started = Instant::now();
         let mut observation = DeviceObservation {
             battery: batteries(&root.join("power_supply")),

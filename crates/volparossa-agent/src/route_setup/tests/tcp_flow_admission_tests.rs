@@ -175,9 +175,9 @@ async fn tcp_flow_admission_retry_expiry_keeps_history_without_second_acquire() 
         )
         .await;
     let Err(failure) = result else {
-            acquires.fetch_add(1, Ordering::Relaxed);
-            panic!("expired retry must not reach acquire");
-        };
+        acquires.fetch_add(1, Ordering::Relaxed);
+        panic!("expired retry must not reach acquire");
+    };
     assert_eq!(failure, original);
     assert_eq!(failure.flow_acquire(), history.summary());
     assert_eq!(acquires.load(Ordering::Relaxed), 1);

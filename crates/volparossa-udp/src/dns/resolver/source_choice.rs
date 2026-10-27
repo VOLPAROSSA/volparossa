@@ -111,9 +111,10 @@ where
             answer,
             Err(DnsResolverError::NameNotFound | DnsResolverError::NoData)
         ))
-        && let Ok(mut cache) = cache.lock() {
-            SourceChoice::sample(&mut cache.source_choice.unbound_cost, started.elapsed());
-        }
+        && let Ok(mut cache) = cache.lock()
+    {
+        SourceChoice::sample(&mut cache.source_choice.unbound_cost, started.elapsed());
+    }
     answer
 }
 

@@ -959,13 +959,15 @@ impl DiscoveryRuntime {
             return false;
         }
         if let Some(route) = self.prepared_production_exit_routes.remove(&context)
-            && !self.retire_production_exit_route(context, route).await {
-                return false;
-            }
+            && !self.retire_production_exit_route(context, route).await
+        {
+            return false;
+        }
         if let Some(route) = self.active_production_mptcp_exit_routes.remove(&context)
-            && !self.retire_active_mptcp_exit_route(context, route).await {
-                return false;
-            }
+            && !self.retire_active_mptcp_exit_route(context, route).await
+        {
+            return false;
+        }
         true
     }
 

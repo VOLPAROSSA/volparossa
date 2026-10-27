@@ -2537,7 +2537,9 @@ mod tests {
             AttemptContext {
                 candidate_snapshot_marker: vec![9, 8, 7].into_boxed_slice(),
             },
-        ) else { panic!("disabled client role dispatched") };
+        ) else {
+            panic!("disabled client role dispatched")
+        };
         assert_eq!(failure.error(), PreselectionDispatchError::Role);
         assert_eq!(
             &*failure.into_context().candidate_snapshot_marker,
@@ -2676,7 +2678,9 @@ mod tests {
         let (mut origin, _, relay, _, _) = direct_context();
         let transaction = dispatch_direct_with_context(&mut origin, relay, 77);
         let mut sibling = client_service(identity::Keypair::generate_ed25519());
-        let Err(failure) = sibling.cancel_preselection_observation_transaction(transaction) else { panic!("foreign service cancelled transaction") };
+        let Err(failure) = sibling.cancel_preselection_observation_transaction(transaction) else {
+            panic!("foreign service cancelled transaction")
+        };
         assert_eq!(failure.error(), PreselectionDispatchError::Correlation);
         let Ok(context) =
             origin.cancel_preselection_observation_transaction(failure.into_transaction())

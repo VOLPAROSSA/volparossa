@@ -21,7 +21,7 @@ Last updated: 2026-10-27
 ### F04 — één minimale beveiligingskandidaat, Rust1.89 — 2026-10-27
 
 De afzonderlijke P03-reparatietranches zijn gestopt. De bestaande PR347
-(`18d2c49b`) en PR349 (gepubliceerde tussenbron `96a0584a`) en alle eerdere
+(`18d2c49b`) en PR349 (gevalideerde bronbinding `787115a7`) en alle eerdere
 bewijzen/failures blijven behouden. De huidige samenhangende kandidaat gebruikt
 exact Rust1.89.0; de oorspronkelijke1.99.1-profielen en historische V1/V2-
 records blijven bytegelijk beschikbaar. Dit is een bewust minimaal buildprofiel,
@@ -42,7 +42,12 @@ vier equivalente15min→900s-constructors en drie compilerdeclaraties verschille
 van C11; P03-semantiek blijft behouden. Beide volledige cap-inventarissen
 compileren met exit0, maar strict blijft101:1.89 heeft43 eerst zichtbare strikte
 meldingen en228 volledig geïnventariseerde diagnoses,1.99 respectievelijk70 en519.
-De acht1.99-deprecaties van de compatibiliteitsaliassen blijven zichtbaar.
+Alle228 diagnose-identiteiten (pad/regel/lintcode) onder1.89 staan ook onder
+1.99;1.99 heeft exact291 extra. Daaronder blijven de acht opzettelijke
+deprecaties van de compatibiliteitsaliassen zichtbaar. Deze gecontroleerde
+vergelijking is compilerattributie bij dezelfde oude dependencygraph, geen
+bewijs dat iedere waarschuwing op bestaande bronregels onafhankelijk is van
+een eerdere dependencywijziging.
 ZIP `24a255ffd844f09f30139df8ac52a3b870c9a3bbe4930c5bad8ff625c7526b38`
 en alle39 memberhashes zijn geverifieerd. Geen van deze runs is een Qualitypass.
 Het externe dependencyminimum is1.89;1.99.1 is dus technisch niet noodzakelijk.
@@ -65,11 +70,15 @@ Hij blijft **FAILED** wegens vooraf onbekende scope: verplichte wnaf en tien
 bijkomende bindingswijzigingen. Onafhankelijke review bevestigt die feiten.
 De minimale rootkandidaat behoudt daarom exact negen oude packageblokken buiten
 de crypto-update. Hash `dc36ac2cb87ce457083126f3b5d48ad2df5e65a8bccc1191c758e54bda193860`
-is expliciete lockretentie, geen geclaimde Cargo-uitkomst; echte volgende
-`--locked`-acceptatie blijft verplicht. Fuzz is exact de nieuwe Cargo-uitkomst
+is expliciete lockretentie, geen geclaimde Cargo-resolveruitkomst. De echte
+[hosted controle40454047110](https://github.com/VOLPAROSSA/volparossa/actions/runs/40454047110)
+accepteert root en fuzz met `--locked` fetch/metadata en behoudt beide hashes
+tijdens compilatie. Fuzz is exact de nieuwe Cargo-uitkomst
 `782afbad801efd26c7045a6c0aab175eaa8888b42718c9e2baa6d836cfc37663`.
-Zes gerichte fixture-updates moeten gedeelde codegen-inputversies op Root aansluiten;
-resterende featureverschillen beperken de claim tot het gemeten fixtureprofiel.
+Dezelfde run voert uitsluitend de zes gerichte fixture-updates uit. Het echte
+Cargo-resultaat `ed4d04230aa4c3c6b23de323f51a198ceaac5c9fb48440da20d4281d220004c0`
+sluit de gedeelde codegen-inputversies op root aan; resterende featureverschillen
+beperken de claim tot het gemeten fixtureprofiel.
 
 Eén broncohort behandelt de218 workspace-diagnoseadressen onder1.89 in96
 Rustbestanden; de tien externe waarschuwingen worden niet blind weggewerkt.
@@ -87,13 +96,33 @@ Dit zijn bronclaims; nieuwe D-Bus-source/Display- en ownership-/cancel-/retrytes
 moeten werkelijk draaien. De strikte V3-helperomgeving accepteert uitsluitend
 het vaste1.89-profiel; oorspronkelijke V1/V2-records zijn onveranderd.
 
-**F04 blijft open.** Eerst dezelfde kandidaat op hosted1.89: root/fuzz locked-
-acceptatie, gerichte fixturelocks, formatterbewijs en werkelijk strikte root/fuzz-
-Clippy. Daarna alle vier fatale RustSec-/licentiechecks, relevante zbus-/SEV-/
-32-bit-crypto-/codegen- en C/C++-DPS-ABI-proeven en gewone Quality op exact de
-uiteindelijke integratiekandidaat. Historische mislukte helper-/i686-uitkomsten
-blijven zichtbaar; oude0.4.4-codegen bewijst geen nieuwe0.4.5/1.89-codegen.
-Geen automatische merge en geen volledige netwerk-/DICN-acceptatieclaim.
+De gerichte broncontrole40454047110 blijft **FAILED**: op exact `787115a7`
+heeft root-Clippy elf foutregels op acht unieke locaties (drie E0615-testfouten
+na private veldhernoeming, vijf unieke Clippy-bevindingen met drie dubbele
+targetemissies). Fuzz-Clippy is werkelijk strict geslaagd: exit0,
+`build-finished=true`, nul fouten. De tien bestaande vendor/time-waarschuwingen
+blijven zichtbaar. Root- en fuzz-opdrachten behouden alle bestaande targets,
+features en `-D warnings`; er is geen cap-lint in deze acceptatiepoging.
+De formatter leverde een patch voor79 firstpartybestanden en geen vendor- of
+onverwachte patch. Alle tijdelijke formatterwijzigingen zijn teruggedraaid vóór
+de compile op de oorspronkelijke committed bron. De originele artifact-ZIP
+matcht API-SHA256 `2f2a6660cc3e275ab9bba4c4eebfc2d0507747105283064d77d45cf344e60857`;
+alle81 memberhashes, compilerobservaties voor/na en cleanup zijn geverifieerd.
+De eerdere run40453975004 faalde vóór checkout/provision door de nog niet
+vervangen bronplaceholder; hij blijft afzonderlijk bewaard.
+
+**F04 blijft open.** Alleen de concrete resterende fouten, de ontvangen
+firstpartyformatterpatch en de echte fixturelock worden in dezelfde kandidaat
+geïntegreerd en onafhankelijk gereviewd. Daarna zijn strict root-Clippy, alle
+vier fatale RustSec-/licentiechecks, relevante zbus-/SEV-/32-bit-crypto-/codegen-
+en C/C++-DPS-ABI-proeven en gewone Quality op de uiteindelijke kandidaat nodig.
+Eén begrensde Debian13/systemd-helperproef moet gewijzigde189/V3- en ownership-
+interfaces controleren. Eerst krijgt de bestaande veilige diagnostiek gesloten
+preflight-categorieën: de oude oorzaak van40063417260 is onbekend en de eerdere
+coarse melding bewijst geen specifieke metadatafout. Geen guardversoepeling.
+Historische mislukte helper-/i686-uitkomsten blijven zichtbaar; oude0.4.4-codegen
+bewijst geen nieuwe0.4.5/1.89-codegen. Geen automatische merge en geen volledige
+netwerk-/DICN-acceptatieclaim.
 
 ### F04 P03f — dertien geordende guards — 2026-10-27
 

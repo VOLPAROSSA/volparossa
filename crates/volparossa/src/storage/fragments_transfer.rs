@@ -134,9 +134,10 @@ pub(super) async fn refresh_fragment(
     let mut copies = set.fragment(index)?;
     let mut retiring = super::placement::retired(set, index);
     if let Some(intent) = &copies.data.handoff
-        && intent.phase == super::super::retained::HandoffPhase::Copying {
-            retiring.remove(&intent.from);
-        }
+        && intent.phase == super::super::retained::HandoffPhase::Copying
+    {
+        retiring.remove(&intent.from);
+    }
     if maintenance {
         replicas::refresh_maintenance(&mut copies, socket, signer, renewal, &retiring).await
     } else {

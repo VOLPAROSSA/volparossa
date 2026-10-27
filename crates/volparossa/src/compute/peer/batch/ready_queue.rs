@@ -576,9 +576,9 @@ pub(super) async fn report(
                 .provider_keys
                 .iter()
                 .position(|key| *key == handle.provider_key)
-            {
-                queue.slots[index] = Slot::Active(handle.binding.job_id.clone());
-            }
+        {
+            queue.slots[index] = Slot::Active(handle.binding.job_id.clone());
+        }
         let socket = socket.to_owned();
         let cancellation = cancellation.clone();
         tasks.spawn(async move {

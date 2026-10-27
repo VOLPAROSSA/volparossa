@@ -809,7 +809,13 @@ mod tests {
         let routes = [route(7, UnderlayFamily::Ipv4)];
         let first = hint(1, WireguardRole::RelayClient, [8, 8, 8, 8]);
         assert_eq!(
-            select_observed_punch_underlay(&[link(7)], &local, &routes, &leases, std::slice::from_ref(&first)),
+            select_observed_punch_underlay(
+                &[link(7)],
+                &local,
+                &routes,
+                &leases,
+                std::slice::from_ref(&first)
+            ),
             Err(UnderlaySelectionError::NoCandidate)
         );
         assert_eq!(

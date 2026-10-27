@@ -210,11 +210,11 @@ async fn advance_reserved(
             reconcile(state, owners[state.owner].1, &result)?;
             if let Err(error) = result
                 && !follow::transient_preflight(&error)
-                    && !*cancelled.borrow()
-                    && state.verified.expires() > now()?
-                {
-                    failure.get_or_insert(error);
-                }
+                && !*cancelled.borrow()
+                && state.verified.expires() > now()?
+            {
+                failure.get_or_insert(error);
+            }
         }
     }
     // Existing retry admission already proves stopped/expired authority. Run it only
@@ -263,11 +263,11 @@ async fn advance_reserved(
         reconcile(state, enrollment, &result)?;
         if let Err(error) = result
             && !follow::transient_preflight(&error)
-                && !*cancelled.borrow()
-                && state.verified.expires() > now()?
-            {
-                failure.get_or_insert(error);
-            }
+            && !*cancelled.borrow()
+            && state.verified.expires() > now()?
+        {
+            failure.get_or_insert(error);
+        }
     }
     if let Some(error) = failure {
         return Err(error);

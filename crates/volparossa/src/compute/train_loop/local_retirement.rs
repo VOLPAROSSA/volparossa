@@ -424,9 +424,9 @@ pub(super) fn protected_sequences(store: &Store, state: &State) -> Result<BTreeS
             .iter()
             .filter(|cycle| cycle.retirement.is_some())
             .max_by_key(|cycle| cycle.sequence)
-        {
-            protected.insert(cycle.sequence);
-        }
+    {
+        protected.insert(cycle.sequence);
+    }
     Ok(protected)
 }
 

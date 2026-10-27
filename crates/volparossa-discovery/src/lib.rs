@@ -630,7 +630,10 @@ impl PreselectionResponderReject {
 /// public event pump. All unrelated swarm events, including typed outbound failures, remain
 /// available unchanged through [`Self::Other`].
 #[non_exhaustive]
-#[expect(clippy::large_enum_variant, reason = "preserve existing public event payload compatibility")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "preserve existing public event payload compatibility"
+)]
 pub enum DiscoveryEvent {
     /// Service-sealed response to an outbound client-to-relay observation request.
     ClientPreselectionResponse(ClientPreselectionResponseArrival),

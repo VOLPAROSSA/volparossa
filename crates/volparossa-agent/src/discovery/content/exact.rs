@@ -202,9 +202,10 @@ impl DiscoveryRuntime {
             return;
         }
         if job.deadline > Instant::now()
-            && let Some(offer) = offer {
-                job.offers.insert(peer, offer);
-            }
+            && let Some(offer) = offer
+        {
+            job.offers.insert(peer, offer);
+        }
         if job.remaining.is_empty() {
             self.finish_exact_content_lookup(key, true);
         }

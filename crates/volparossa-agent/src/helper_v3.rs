@@ -3588,7 +3588,9 @@ mod tests {
         );
         let mut prepared = prepared_ingress_capability();
         let (sockets, mut peers) = acquired_ingress_set(&mut prepared);
-        let Err(failure) = client.activate_client_ingress(prepared, sockets).await else { panic!("missing helper must not activate") };
+        let Err(failure) = client.activate_client_ingress(prepared, sockets).await else {
+            panic!("missing helper must not activate")
+        };
         let (error, prepared, sockets) = failure.into_parts();
         assert!(matches!(error, HelperClientError::Io(_)));
         assert_eq!(prepared.socket_identities().len(), REQUIRED_INGRESS_SOCKETS);
@@ -3761,7 +3763,9 @@ mod tests {
                     TransportSocketKind::QuicUdpUnconnected,
                 ))
                 .await;
-        let Err(error) = result else { panic!("descriptor handoff must fail") };
+        let Err(error) = result else {
+            panic!("descriptor handoff must fail")
+        };
         server.await.expect("server");
         peer.set_read_timeout(Some(Duration::from_secs(1)))
             .expect("read timeout");

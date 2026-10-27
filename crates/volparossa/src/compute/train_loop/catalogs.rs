@@ -37,7 +37,9 @@ struct RegistryWire {
 }
 
 impl<'de> Deserialize<'de> for Registry {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         let wire = RegistryWire::deserialize(deserializer)?;
         Ok(Self {
             version: wire.version,

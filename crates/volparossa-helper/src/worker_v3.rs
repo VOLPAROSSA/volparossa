@@ -3095,9 +3095,9 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                     .iter()
                     .zip(cleanup)
                     .any(|(ownership, cleanup)| ownership.resource != *cleanup))
-            {
-                return WorkerDestroyOutcome::Invalid;
-            }
+        {
+            return WorkerDestroyOutcome::Invalid;
+        }
         let Some(lifecycle) = self.lease.take() else {
             std::process::abort();
         };
@@ -6037,7 +6037,7 @@ struct StoredDurableWorkerPrepareTerminal {
 }
 
 struct DurableFunctionalPrepareFailure {
-    error: WorkerV3Error,
+    error: Box<WorkerV3Error>,
     selector: DurablePrepareTerminalSelector,
 }
 
@@ -7730,9 +7730,10 @@ impl WorkerRegistry {
         let mut detached = Vec::with_capacity(expired.len());
         for (context_id, generation) in expired {
             if self.quarantine(context_id, generation).is_ok()
-                && let Ok(Some(worker)) = self.detach_quarantined(context_id, generation) {
-                    detached.push(worker);
-                }
+                && let Ok(Some(worker)) = self.detach_quarantined(context_id, generation)
+            {
+                detached.push(worker);
+            }
         }
         detached
     }
@@ -7847,9 +7848,10 @@ impl WorkerRegistry {
         let mut detached = Vec::with_capacity(identities.len());
         for (context_id, generation) in identities {
             if self.quarantine(context_id, generation).is_ok()
-                && let Ok(Some(worker)) = self.detach_quarantined(context_id, generation) {
-                    detached.push(worker);
-                }
+                && let Ok(Some(worker)) = self.detach_quarantined(context_id, generation)
+            {
+                detached.push(worker);
+            }
         }
         detached
     }
@@ -9000,9 +9002,10 @@ impl WorkerSupervisor {
             .ok()
             .flatten();
         if let Some(worker) = detached
-            && !self.retire(worker).await {
-                return Err(WorkerV3Error::Ambiguous);
-            }
+            && !self.retire(worker).await
+        {
+            return Err(WorkerV3Error::Ambiguous);
+        }
         Err(if deadline_elapsed {
             WorkerV3Error::Deadline
         } else {
@@ -9028,9 +9031,10 @@ impl WorkerSupervisor {
             FinishOutcome::Rejected { error, detached } => {
                 drop(execution);
                 if let Some(worker) = detached
-                    && !self.retire(worker).await {
-                        return Err(WorkerV3Error::Ambiguous);
-                    }
+                    && !self.retire(worker).await
+                {
+                    return Err(WorkerV3Error::Ambiguous);
+                }
                 Err(error)
             }
         }
@@ -9155,9 +9159,10 @@ impl WorkerSupervisor {
             .ok()
             .flatten();
         if let Some(worker) = detached
-            && !self.retire(worker).await {
-                return Err(WorkerV3Error::Ambiguous);
-            }
+            && !self.retire(worker).await
+        {
+            return Err(WorkerV3Error::Ambiguous);
+        }
         Err(error)
     }
 }
@@ -10115,7 +10120,11 @@ impl WorkerCoordinator {
                 if matches!(error, WorkerV3Error::Ambiguous) {
                     return Err((
                         WorkerV3Error::Ambiguous,
-                        Box::new(DurableWorkerPrepareOutcome::WorkerAdmissionRetained { error, key, worker }),
+                        Box::new(DurableWorkerPrepareOutcome::WorkerAdmissionRetained {
+                            error,
+                            key,
+                            worker,
+                        }),
                     ));
                 }
                 match self.settle_never_dispatched_worker_until(key, worker, None, deadline) {
@@ -10126,7 +10135,11 @@ impl WorkerCoordinator {
                         error, key, worker, ..
                     } => Err((
                         worker_error_class(&error),
-                        Box::new(DurableWorkerPrepareOutcome::WorkerAdmissionRetained { error, key, worker }),
+                        Box::new(DurableWorkerPrepareOutcome::WorkerAdmissionRetained {
+                            error,
+                            key,
+                            worker,
+                        }),
                     )),
                 }
             }
@@ -10162,7 +10175,10 @@ impl WorkerCoordinator {
                 if error == DurableOwnershipError::Ambiguous {
                     return Err((
                         WorkerV3Error::Ambiguous,
-                        Box::new(DurableWorkerPrepareOutcome::CustodyFenceRetained { error, handoff }),
+                        Box::new(DurableWorkerPrepareOutcome::CustodyFenceRetained {
+                            error,
+                            handoff,
+                        }),
                     ));
                 }
                 self.settle_retained_handoff_worker_until(handle, handoff, Some(error), deadline)
@@ -10595,10 +10611,7 @@ impl WorkerCoordinator {
             DurableWorkerPrepareTerminal::Handoff(outcome) => self
                 .settle_durable_handoff_outcome_until(handle, *outcome, deadline)
                 .map_err(|(error, outcome)| {
-                    (
-                        error,
-                        DurableWorkerPrepareTerminal::Handoff(outcome),
-                    )
+                    (error, DurableWorkerPrepareTerminal::Handoff(outcome))
                 }),
             terminal => {
                 let Some(expected_ownership) = selector.identity.ownership else {
@@ -10719,7 +10732,7 @@ impl WorkerCoordinator {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .restore_exact_durable_prepare_terminal(&selector, terminal);
                 return Err(DurableFunctionalPrepareFailure {
-                    error: WorkerV3Error::Conflict,
+                    error: Box::new(WorkerV3Error::Conflict),
                     selector,
                 });
             }
@@ -10735,7 +10748,10 @@ impl WorkerCoordinator {
                         &selector,
                         DurableWorkerPrepareTerminal::CustodyPublication(Box::new(retained)),
                     );
-                return Err(DurableFunctionalPrepareFailure { error, selector });
+                return Err(DurableFunctionalPrepareFailure {
+                    error: Box::new(error),
+                    selector,
+                });
             }
         };
         match self.open_durable_functional_worker_until(may_own, deadline) {
@@ -10753,13 +10769,10 @@ impl WorkerCoordinator {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .restore_exact_durable_prepare_terminal(
                         &selector,
-                        DurableWorkerPrepareTerminal::DispatchOpen {
-                            error,
-                            may_own,
-                        },
+                        DurableWorkerPrepareTerminal::DispatchOpen { error, may_own },
                     );
                 Err(DurableFunctionalPrepareFailure {
-                    error: returned_error,
+                    error: Box::new(returned_error),
                     selector,
                 })
             }
@@ -10814,7 +10827,10 @@ impl WorkerCoordinator {
                         Box::new(retained),
                     ));
                 selector_ready(selector);
-                return Err(DurableFunctionalPrepareFailure { error, selector });
+                return Err(DurableFunctionalPrepareFailure {
+                    error: Box::new(error),
+                    selector,
+                });
             }
         };
 
@@ -10844,7 +10860,7 @@ impl WorkerCoordinator {
                         },
                     );
                 return Err(DurableFunctionalPrepareFailure {
-                    error: returned_error,
+                    error: Box::new(returned_error),
                     selector,
                 });
             }
@@ -10858,7 +10874,8 @@ impl WorkerCoordinator {
         &self,
         mut may_own: DurableWorkerMayOwnPrepare,
         deadline: HardDeadline,
-    ) -> Result<DurableFunctionalWorkerOwnership, (WorkerV3Error, Box<DurableWorkerMayOwnPrepare>)> {
+    ) -> Result<DurableFunctionalWorkerOwnership, (WorkerV3Error, Box<DurableWorkerMayOwnPrepare>)>
+    {
         let Ok(prepare) = may_own.durable.prepare_leases_v3() else {
             return Err((WorkerV3Error::Conflict, Box::new(may_own)));
         };
@@ -11647,11 +11664,11 @@ impl WorkerCoordinator {
         }
         if let Some(reservation) = detached.reservation.as_ref()
             && registry.exact_lifecycle_reservation_present(reservation)
-                && registry.abandon_generation_ref(reservation).is_err()
-            {
-                ownership.placement = Some(WorkerGenerationPlacement::ReapedPendingPurge(detached));
-                return retained_worker_generation(WorkerV3Error::Ambiguous, ownership);
-            }
+            && registry.abandon_generation_ref(reservation).is_err()
+        {
+            ownership.placement = Some(WorkerGenerationPlacement::ReapedPendingPurge(detached));
+            return retained_worker_generation(WorkerV3Error::Ambiguous, ownership);
+        }
         if let Err(error) = registry.purge_or_confirm_generation_absent(ownership.coordinates) {
             ownership.placement = Some(WorkerGenerationPlacement::ReapedPendingPurge(detached));
             return retained_worker_generation(error, ownership);

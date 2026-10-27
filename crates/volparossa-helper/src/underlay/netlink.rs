@@ -2163,9 +2163,21 @@ mod tests {
             UnderlayEvidence::DirectAssigned
         );
         snapshot.routes.clear();
-        assert!(select_bindings(&snapshot, &[lan_lease.clone()], std::slice::from_ref(&hint)).is_ok());
         assert!(
-            select_bindings(&snapshot, &[lan_lease.clone(), wan_lease], std::slice::from_ref(&hint)).is_err()
+            select_bindings(
+                &snapshot,
+                std::slice::from_ref(&lan_lease),
+                std::slice::from_ref(&hint)
+            )
+            .is_ok()
+        );
+        assert!(
+            select_bindings(
+                &snapshot,
+                &[lan_lease.clone(), wan_lease],
+                std::slice::from_ref(&hint)
+            )
+            .is_err()
         );
         let mut bad_hint = hint.clone();
         bad_hint.observer_id.fill(0);
