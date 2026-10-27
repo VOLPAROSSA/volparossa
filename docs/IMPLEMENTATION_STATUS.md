@@ -18,6 +18,32 @@ Last updated: 2026-10-27
 
 ## Current integration and active work
 
+### F04 — gericht slotbesluit: niet mergen — 2026-10-27
+
+[PR349](https://github.com/VOLPAROSSA/volparossa/pull/349) blijft draft op
+`57b121a0`; F04 kan niet veilig worden afgesloten. Bestaande Quality-, CodeQL-,
+dependency-, zbus-, crypto- en DPS-ABI-resultaten worden binnen hun oorspronkelijke
+bronbinding hergebruikt. Productiecode, locks en compiler-/native-inputs blijven
+ongewijzigd in de behouden helpercorrectiebron `747cee11`.
+
+De gerichte diagnose corrigeert uitsluitend proefcode: vaste eerste-foutlabels,
+verwijdering van twee SSH-transportmetadata-variabelen vóór de strikte Cargo-policy,
+exacte rolmarks en Client/Exit-terminalpeers. De oude `off`-mark en aangrenzende
+peeradressen zijn aantoonbare pre-F04-observercontradicties met bestaande main;
+dat verklaart niet automatisch iedere verdere runtimefailure. Gerichte inerte
+regressies, de volledige betrokken livecontracttest en onafhankelijke bronreviews
+slagen; alle custody-/commit/destroy/retry-/cleanup-/retirementcontroles blijven.
+
+De laatste [Debian13-proef40525447139](https://github.com/VOLPAROSSA/volparossa/actions/runs/40525447139)
+op `747cee116b6b6621d06c350499bf22027e6da05e` blijft FAILED op
+`functional-worker-wireguard-state`, na exacte custody/workeridentiteit en de
+gecorrigeerde mark/interfacecontrole. De afzonderlijke resterende route-/peerpredicate
+is onbekend. Verdere commit/destroy/retry/restart en volledige cleanup/retirement
+zijn onbewezen; KVM-device/ACL-controle alleen vervangt die acceptatie niet.
+Onafhankelijke slotreview bevestigt **niet mergen, draft behouden, F04 open**.
+Oorspronkelijke failures, parallelle reviewbestanden, correctiecommits en alle
+relevante worktrees blijven behouden. Geen reset, automatische merge of vrijstelling.
+
 ### F04 — één minimale beveiligingskandidaat, Rust1.89 — 2026-10-27
 
 De afzonderlijke P03-reparatietranches zijn gestopt. De bestaande PR347
