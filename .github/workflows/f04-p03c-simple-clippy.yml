@@ -1,0 +1,202 @@
+name: F04 P03c simple targeted Clippy evidence
+on:
+  push:
+    branches: [proof/p03c-f04-simple-clippy-20261027]
+permissions:
+  contents: read
+concurrency:
+  group: f04-p03c-simple-clippy-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  CANDIDATE: 2b8b179c625e774a5a5ef765018704915c093e1c
+  BASELINE: 19721396d7a9914e07df02a851f26753d4feb215
+  CARGO_TERM_COLOR: never
+  CARGO_BUILD_JOBS: '2'
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  targeted:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.CANDIDATE }}
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Bind source and minimal change scope
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
+          test "$GITHUB_REF" = refs/heads/proof/p03c-f04-simple-clippy-20261027
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          mkdir evidence
+          test ! -e "$RUNNER_TEMP/f04-p03c-baseline-target"
+          test ! -e "$RUNNER_TEMP/f04-p03c-candidate-target"
+          git fetch --no-tags --depth=1 origin "$BASELINE"
+          python3 -B - <<'PY_BIND'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          candidate, baseline = os.environ['CANDIDATE'], os.environ['BASELINE']
+          assert git('rev-parse', 'HEAD^') == baseline
+          paths = git('diff', '--name-only', baseline, candidate).splitlines()
+          assert paths == ['crates/volparossa-peerstore/tests/peerstore.rs', 'crates/volparossa-routing/src/v3.rs', 'crates/volparossa-routing/src/wifi_mesh.rs', 'crates/volparossa-wireguard/src/lib.rs', 'docs/IMPLEMENTATION_STATUS.md']
+          record = dict(candidate=candidate, baseline=baseline,
+              candidate_tree=git('rev-parse', 'HEAD^{tree}'),
+              proof_workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'],
+              run_id=os.environ['GITHUB_RUN_ID'], run_attempt=os.environ['GITHUB_RUN_ATTEMPT'],
+              paths={p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in paths},
+              scope='WireGuard/Routing library and Peerstore integration suites; nine selected lints; separate baseline/candidate builds',
+              full_workspace_clippy=False, runtime_acceptance=False)
+          Path('evidence/source.json').write_text(json.dumps(record, indent=2)+'\n')
+          PY_BIND
+          git worktree add --detach "$RUNNER_TEMP/f04-clippy-before" "$BASELINE"
+      - name: Provision unchanged authenticated Rust 1.99.1 profile
+        run: python3 -B scripts/provision-rust199.py runner
+      - name: Record compiler and fetch locked inputs
+        run: |
+          set -euo pipefail
+          rustc -Vv | tee evidence/rustc.txt
+          cargo clippy -V | tee evidence/clippy.txt
+          cp "$RUNNER_TEMP/volparossa-rust-1.99.1/receipt.json" evidence/compiler-receipt.json
+          cargo fetch --locked 2>&1 | tee evidence/fetch.log
+      - name: Reproduce exactly nine selected diagnostics without changing lint levels
+        run: |
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/f04-p03c-baseline-target"
+          cd "$RUNNER_TEMP/f04-clippy-before"
+          set +e
+          cargo clippy --keep-going --locked --offline -p volparossa-wireguard -p volparossa-routing -p volparossa-peerstore \
+            --all-targets --all-features --message-format=json -- -D warnings \
+            > "$GITHUB_WORKSPACE/evidence/baseline.jsonl" 2> "$GITHUB_WORKSPACE/evidence/baseline-stderr.log"
+          status=$?
+          set -e
+          test "$status" = 101
+          cd "$GITHUB_WORKSPACE"
+          python3 -B - <<'PY_BEFORE'
+          import json
+          from pathlib import Path
+          errors = set()
+          for line in Path('evidence/baseline.jsonl').read_text().splitlines():
+              item = json.loads(line)
+              if item.get('reason') != 'compiler-message':
+                  continue
+              message = item['message']
+              if message['level'] != 'error':
+                  continue
+              print(message.get('rendered', message['message']))
+              code = message.get('code')
+              assert code is not None
+              for span in message['spans']:
+                  if span['is_primary']:
+                      errors.add((code['code'], span['file_name'], span['line_start']))
+          expected = {
+              ('clippy::doc_markdown', 'crates/volparossa-wireguard/src/lib.rs', 287),
+              ('clippy::manual_is_multiple_of', 'crates/volparossa-routing/src/wifi_mesh.rs', 191),
+              ('clippy::assert_is_empty', 'crates/volparossa-peerstore/tests/peerstore.rs', 198),
+              ('clippy::assert_is_empty', 'crates/volparossa-peerstore/tests/peerstore.rs', 239),
+              ('clippy::assert_is_empty', 'crates/volparossa-peerstore/tests/peerstore.rs', 346),
+              ('clippy::assert_is_empty', 'crates/volparossa-routing/src/v3.rs', 3956),
+              ('clippy::assert_is_empty', 'crates/volparossa-routing/src/v3.rs', 3957),
+              ('clippy::assert_is_empty', 'crates/volparossa-routing/src/v3.rs', 3958),
+              ('clippy::assert_is_empty', 'crates/volparossa-routing/src/v3.rs', 3963),
+          }
+          assert errors == expected, errors
+          Path('evidence/baseline-errors.json').write_text(json.dumps(sorted(errors), indent=2)+'\n')
+          PY_BEFORE
+      - name: Check exact corrected package with unchanged strict lint levels
+        run: |
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/f04-p03c-candidate-target"
+          cargo fmt --check -p volparossa-wireguard -p volparossa-routing -p volparossa-peerstore
+          cargo clippy --keep-going --locked --offline -p volparossa-wireguard -p volparossa-routing -p volparossa-peerstore \
+            --all-targets --all-features -- -D warnings 2>&1 | tee evidence/candidate-clippy.log
+      - name: Execute only the three selected component suites on both sources
+        run: |
+          set -euo pipefail
+          output="$GITHUB_WORKSPACE/evidence"
+          for variant in baseline candidate; do
+            export CARGO_TARGET_DIR="$RUNNER_TEMP/f04-p03c-$variant-target"
+            if test "$variant" = baseline; then
+              cd "$RUNNER_TEMP/f04-clippy-before"
+            else
+              cd "$GITHUB_WORKSPACE"
+            fi
+            for component in wireguard routing peerstore; do
+              suite=(--lib)
+              if test "$component" = peerstore; then
+                suite=(--test peerstore)
+              fi
+              cargo test --locked --offline -p "volparossa-$component" "${suite[@]}" --all-features -- --list \
+                2>&1 | tee "$output/$variant-$component-inventory.log"
+              cargo test --locked --offline -p "volparossa-$component" "${suite[@]}" --all-features \
+                2>&1 | tee "$output/$variant-$component-tests.log"
+            done
+          done
+          cd "$GITHUB_WORKSPACE"
+          python3 -B - <<'PY_TEST'
+          import hashlib, json, os, re
+          from pathlib import Path
+          counts = {'wireguard': 9, 'routing': 48, 'peerstore': 8}
+          required = {
+              'wireguard': set(),
+              'routing': {
+                  'tests::signed_relay_reservation_default_preserves_the_legacy_wire',
+                  'wifi_mesh::tests::wifi_mesh_wire_binds_runtime_operation_and_connected_subnet',
+              },
+              'peerstore': {
+                  'pruning_expired_advertisement_cascades_all_peer_history',
+                  'oversized_provenance_is_rejected_before_any_database_write',
+                  'version_one_rows_are_atomically_quarantined_until_real_provenance_replaces_them',
+              },
+          }
+          results = {}
+          for variant in ('baseline', 'candidate'):
+              source_root = (Path(os.environ['RUNNER_TEMP']) / 'f04-clippy-before'
+                             if variant == 'baseline' else Path(os.environ['GITHUB_WORKSPACE']))
+              target_root = Path(os.environ['RUNNER_TEMP']) / ('f04-p03c-'+variant+'-target')
+              results[variant] = {}
+              for component, expected_count in counts.items():
+                  inventory = Path('evidence/'+variant+'-'+component+'-inventory.log').read_text()
+                  compile_line = 'Compiling volparossa-'+component+' v0.1.0 ('+str(source_root / ('crates/volparossa-'+component))+')'
+                  assert compile_line in inventory, (variant, component, compile_line)
+                  names = sorted(re.findall(r'^([a-zA-Z0-9_:]+): test$', inventory, re.M))
+                  assert len(names) == expected_count and len(set(names)) == expected_count
+                  assert required[component].issubset(names)
+                  executable_matches = re.findall(r'Running (?:unittests src/(?:lib|v3)\.rs|tests/peerstore\.rs) \(([^)]+)\)', inventory)
+                  assert len(executable_matches) == 1, (variant, component, executable_matches)
+                  executable = Path(executable_matches[0]).resolve()
+                  assert executable.is_file() and executable.is_relative_to(target_root.resolve())
+                  log = Path('evidence/'+variant+'-'+component+'-tests.log').read_text()
+                  summaries = re.findall(r'^test result: ok\. ([0-9]+) passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;', log, re.M)
+                  assert summaries == [str(expected_count)], summaries
+                  assert str(executable) in log
+                  for name in names:
+                      assert 'test '+name+' ... ok' in log, name
+                  results[variant][component] = dict(source_root=str(source_root), target_root=str(target_root),
+                      executable=str(executable), executable_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
+                      passed=expected_count, failed=0, ignored=0, test_names=names)
+          for component in counts:
+              assert results['baseline'][component]['test_names'] == results['candidate'][component]['test_names']
+              assert results['baseline'][component]['executable'] != results['candidate'][component]['executable']
+          Path('evidence/regression-summary.json').write_text(json.dumps(results, indent=2))
+          PY_TEST
+          git diff --exit-code
+      - name: Preserve exact source and original diagnostics even on failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: f04-p03c-simple-clippy-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 14
