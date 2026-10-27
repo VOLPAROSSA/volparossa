@@ -2401,6 +2401,9 @@ cat >"$guest_setup" <<'GUEST_SETUP'
 set -eu
 export LC_ALL=C
 umask 077
+# Drop only metadata added by the fixed no-TTY, no-agent SSH transport.
+# Keep other SSH/Git variables for the source policy to reject.
+unset SSH_CLIENT SSH_CONNECTION
 expected_commit=$1
 archive_sha256=$2
 case $expected_commit in *[!0-9a-f]*|'') exit 64 ;; esac
@@ -2438,6 +2441,9 @@ cat >"$guest_proof" <<'GUEST_PROOF'
 set -eu
 export LC_ALL=C
 umask 077
+# Drop only metadata added by the fixed no-TTY, no-agent SSH transport.
+# Keep other SSH/Git variables for the source policy to reject.
+unset SSH_CLIENT SSH_CONNECTION
 expected_commit=$1
 case $expected_commit in *[!0-9a-f]*|'') exit 64 ;; esac
 cd /home/volparossa/source

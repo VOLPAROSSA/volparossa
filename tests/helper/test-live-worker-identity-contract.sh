@@ -14,6 +14,8 @@ gate=$repository_directory/tests/helper/require-live-worker-identity-proof.sh
 capture_library=$repository_directory/tests/helper/lib/live-worker-proof-capture.sh
 ipc_hook=$repository_directory/tests/helper/lib/production-ipc-unit-hook.sh
 python3 -B "$script_directory/test-helper-preflight-diagnostic.py"
+python3 -B "$script_directory/test-helper-worker-observation-diagnostic.py"
+python3 -B "$script_directory/test-helper-guest-source-environment.py"
 evidence_validator=$repository_directory/tests/helper/validate-helper-boundary-evidence-v1.sh
 evidence_schema=$repository_directory/tests/helper/helper-boundary-evidence-v1.schema.json
 worker_source=$repository_directory/crates/volparossa-helper/src/worker_v3.rs
