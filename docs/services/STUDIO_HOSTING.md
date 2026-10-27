@@ -1,8 +1,7 @@
 # Studio, shared website publishing and hosting
 
-The complete [Studio/hosting requirements](../development/STUDIO_HOSTING_REQUIREMENTS.md)
-are a permanent part of [GOAL](../development/GOAL.md), alongside DPS and every
-previous amendment. This page records architecture, the initial source audit and
+The [Studio/hosting section of GOAL](../development/GOAL.md#studio)
+defines the complete functional scope. This page records architecture, the initial source audit and
 verification work. It does not replace the normative text or establish runtime acceptance.
 
 ## Audited starting point — 2026-10-22
@@ -10,8 +9,11 @@ verification work. It does not replace the normative text or establish runtime a
 Core source: `96f81fdd506a72533f11a7c5b4891ac15ff62320`, tree
 `adf2400fe4832d2551d71361f284b94032becb1d`. The initial
 [Studio repository](https://github.com/VOLPAROSSA/volparossa-studio/tree/97ddafa6a317e151c1352e0ac61978ddc3bd79f0)
-contains only README and the GPLv3 license text. There is no Silex runtime,
-publishing adapter, MCP authority boundary or Studio functional evidence yet.
+contained only README and GPLv3 license text. This is the initial source audit,
+not the current integration state. Later real edit/style/preview/Silex ZIP export
+and Core packing pass their bounded paired trial; [implementation status](../IMPLEMENTATION_STATUS.md#studio-and-shared-hosting-evidence)
+retains its exact sources and limitations. Production publication, trusted native
+review/signing, independent hosting and shared AI remain open.
 
 | Existing Core facility | Reuse and evidence boundary |
 | --- | --- |
@@ -34,7 +36,7 @@ external requests, service workers and persistent origin storage. Do not weaken
 that sandbox merely to call a Silex export compatible; conventional website and
 dynamic modes need explicit, separately verified origin/execution boundaries.
 
-Missing work includes the real editor-to-Core adapter, independent browser
+Remaining production work includes the editor-to-Core publication adapter, independent browser
 rendering, identity/domain/TLS integration, authorized atomic update/rollback and
 withdrawal, continuity of retention when the publisher/controller is offline,
 measured independent replica health and repair/fairness, protected shared AI and
@@ -45,7 +47,7 @@ dynamic execution with durable private state. All remain unfinished.
 Select released **Silex v3.9.0**, exact commit
 [`672efed69dda04c0a1e968859239e042f00d9538`](https://github.com/silexlabs/Silex/tree/672efed69dda04c0a1e968859239e042f00d9538),
 as the reproducible initial adapter baseline. The release API reports publication
-on 2026-07-26. Current upstream main was separately inspected at
+on 2026-07-26. At that audit, upstream main was separately inspected at
 `1fe592fbf7d06ec242c97be53e32cfb30884704d`; do not float to it or an unpinned package.
 This selection follows source/interface/license inspection, not a successful build,
 full dependency audit or security approval. No upstream executable was installed.
@@ -145,8 +147,10 @@ need their own rights review. No Silex code is imported in this documentation sl
 
 ## Acceptance and dependency order
 
-Every item below is pending for the Studio integration. Existing narrower Core
-checks are reusable evidence only within their original source/scope.
+The table defines complete acceptance. The bounded edit/preview/export milestone
+supplies partial evidence for cases 1–2 and 14; it does not complete production
+publication or independent hosting. Reuse each result only for its recorded source
+and scenario; full coverage remains open.
 
 | Required case from amendment section 8 | Reproducible functional acceptance |
 | --- | --- |

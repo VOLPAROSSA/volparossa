@@ -186,7 +186,9 @@ pressure and owner-activity checks continue while resident, including idle time.
 Exact matching decoded tokens may be reused, with the final prompt token
 recomputed; no prompt truncation, model substitution or shared KV cache is added.
 Final cleanup is process/staging cleanup, not a claim of forensic RAM erasure.
-Real acceleration and a complete coding task still require actual-model evidence.
+Performance and complete-task claims require actual-model evidence on the pinned
+Core/application pair. The [recorded bounded native coding milestone](../../../../../docs/IMPLEMENTATION_STATUS.md#latest-completed-integration-evidence)
+does not qualify every model/profile, new composition or private peer execution.
 
 ## Explicit limits
 

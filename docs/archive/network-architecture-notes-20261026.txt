@@ -1,0 +1,1994 @@
+VOLPAROSSA network and architecture historical development notes
+Captured from source revision: 682ed8b698014304e74abfcb3e5db558ff71324d
+
+These records preserve earlier checkpoint text, not current implementation claims,
+configuration instructions or permissions. Original paths and source digests precede
+each record. Use current topic contracts and IMPLEMENTATION_STATUS for new work.
+
+
+===== docs/network/DISCOVERY.md :: Historical discovery development =====
+Source file SHA-256: 689ab812a0981c310a423338f9867f12911b4b9fed87b5e9f64baf497e339c83
+
+## Historical discovery development
+
+<details>
+<summary>Earlier control-plane, preselection and native-handoff milestones</summary>
+
+The following notes retain the original development sequence and evidence limits. A successful
+unit test at one stage was not a live datapath proof; later integration does not change what
+that earlier test or failure established.
+
+The crate contains the v4 codecs, role-aware behaviours, capability namespace, peerlink validation,
+and process-local swarm tests. One three-peer test proves an exit advertisement request cannot be
+sent directly to the exit and that the byte-identical request/response crosses exactly one control
+relay. Another proves the `ExecuteProbe` frame is valid while its production handler returns
+`Unavailable` without exposing a fake probe event. Unit tests cover canonical encoding, exact
+bounds, role direction, identity contradictions, response shapes, and refusal of advertisement
+v1/v2/v3 and retired direct-reservation v2 identifiers.
+
+The unprivileged discovery actor has a crate-private route-candidate snapshot command and also
+builds the same snapshot internally for client preselection. It captures one lower-bound timestamp,
+purges expired actor entries, copies the exact
+active policy metadata, and loads at most 200 records. Before projection it re-verifies each
+persisted canonical signed envelope in production code and joins its exact fingerprint, node and
+Peer IDs, sequence, signed millisecond timestamps, actor capability, and policy
+version/hash/expiry. Output is explicitly sorted and identity-unique. Stored-only, expired,
+conflicted, self, pending-direct, unpaired, and direct-only exit records are excluded. An exit with
+more than one otherwise valid control-relay pair is currently excluded in full: choosing one
+without a selected-control measurement primitive would hide ambiguity, so this is a deliberate
+fail-closed availability limitation.
+
+The snapshot contains no raw signed envelope, stored endpoint, stored RTT/capacity history, wire
+serialization, or RPC authority. It projects only the verified advertisement body, exact signed
+times, limited historical reputation/fault state, and actor-minted in-process capability binding.
+Each projection also retains the opaque exact `SignedEnvelope.payload_hash`; a forwarded exit
+retains distinct control-relay and exit hashes. The full fingerprint record, signature and raw
+envelope stay inside discovery. The hash is only an equality binding, not reservation, session or
+dispatch authority: route execution still has to re-resolve and exactly compare current actor
+capabilities later.
+
+The protocol crate contains the A0 preselection-observation transcript primitives. Discovery now
+has production-compiled role-gated Relay/Exit responders, an affine Relay-to-Exit forwarding
+wrapper, and a private single-owner client attempt in `DiscoveryRuntime`. A direct relay can sign
+one exact short-lived challenge response. For a forwarded exit,
+the exit signs the response and the exact prospective forwarding control named in the unsigned
+request countersigns the exact nested bytes plus a public IPv4 /24 or IPv6 /48 prefix claim. The
+control intentionally echoes the exit-subject challenge with its own signed-envelope nonce and
+time window; it is not separately challenged. The claim contains no host address, endpoint, port,
+capacity, reservation, or dispatch authority, and a control signature is not proof that a
+malicious control reported origin truthfully. The production Relay handler derives the prefix from
+the exact authenticated upstream connection before signing it. Prefix validation maps the fixed
+three- or six-byte wire
+field directly into the shared normalized prefix type and checks its public range; it never
+constructs a representative host IP. That normalized value alone proves neither provenance nor
+origin truth.
+
+A0 remains requester-anonymous, but the production discovery actor now owns the client-side
+attempt. It builds and affinely narrows its snapshot, derives each target and canonical request
+inside the private attempt, binds only the exact service-sealed response, exact-set joins one
+service-bound client transport per request, and purpose-consumes both proof kinds into the
+route-selection child's private evidence. The actor returns only an opaque
+`PreparedPreselectionEvidence` handoff and retains the cooldown owner. That conservative evidence
+deliberately has `network_address_usable = false`, so no downstream selector can admit it and no
+selectable candidate or route follows. Discovery composes
+request-response behaviours around the unchanged exact A0 bytes. Its client sending seam can
+dispatch one request, bind an opaque matching response arrival sealed and timestamped by the
+originating service's private pump to a current unique connection proof, or cancel that exact
+dispatch; the affine Relay forwarding wrapper owns upstream sending separately.
+
+Discovery now also contains a role-gated Relay/Exit response poll seam called by the agent event
+loop while an exact active policy is present. The poll owner obtains a typed inbound request
+directly from the same service's swarm;
+the raw behaviour-local request IDs, `ConnectionId` and response channel never cross its public
+caller boundary and therefore cannot be transplanted between service instances. The ordinary
+public event pump closes both client-hop and upstream inbound preselection channels without
+yielding them. It seals responses for the exact active outbound dispatch into opaque
+instance-bound arrival values before returning them and drops stale/unowned responses. The
+responder pump consumes both role-appropriate inbound hops internally and applies the same response
+sealing. No public pump yields a raw preselection request or response message. Each responder synchronously
+requires the exact event `ConnectionId` to rebind a unique current authenticated peer/family
+witness. It then cryptographically re-verifies the exact currently served local Relay or Exit
+advertisement and its Peer/node/public-key identity, requires nonzero ASN, advertised
+transport/family support and the
+exact supplied active policy version/hash/expiry, and signs an exact request-bound receipt through
+the same permanent Ed25519 key. The envelope and payload commit version, sender, timestamp, expiry,
+fresh fallible CSPRNG nonce, type, payload hash, request hash, challenge, actor and scope. A fixed
+120-second no-rollback request-hash tombstone is inserted before signing; 1024 global and 16 per
+authenticated peer are the hard bounds. Duplicate requests, exhausted bounds, stale or substituted
+authority, ambiguous lineage and signing failure return no response. The affine connection proof
+is retained until the exact response-channel handoff and exposes no getter. An upstream request
+additionally requires `forwarded_control`'s public key and Peer ID to be the exact authenticated
+Relay, while its challenged actor must be the exact local Exit.
+
+These responders record no origin claim, RTT, capacity, reachability, reservation, route or Fresh
+authority. The production discovery actor polls its private responder only while an immutable
+Relay or Exit role and an exact active threshold-verified policy snapshot are present. It
+uses the same actor-owned permanent identity, and a policy command cancels the poll before applying
+the replacement. A response still requires an exact currently served role advertisement;
+production deliberately publishes no usable Relay/Exit capability before dataplane readiness is
+proved, so no successful production response or readiness claim follows from this lifecycle
+connection yet. The control-signed prefix wrapper, actor-owned A1a attempt, exact A1a/A1c join and
+opaque prepared-evidence handoff are implemented and driven by the production discovery actor.
+The local `Connect` route gate now invokes that handoff from an explicit validated client profile.
+Its affine native-preselection child mints the first endpoint-free Permit request and sends an
+exact forwarding wrapper only to the selected control Relay through the actor-owned client RPC.
+The wrapper binds the control Relay, Exit, request-nonce-derived forwarding ID and native deadline;
+a granted response is rebound to those exact fields and cryptographically consumed. Remaining
+candidates, replay state and the verified Permit stay affine for the later stage. The private Fresh
+batch still lacks native dataplane-address usability and therefore grants no capacity or route
+authority; Relay readiness, helper preparation and native result dispatch remain absent.
+
+The agent now contains an actor-owned A1a attempt lineage. Snapshot construction privately mints
+an endpoint-free, non-derived subject set from the exact freshly revalidated stored signed
+advertisements; legacy snapshot construction remains available when that hidden binding cannot be
+minted, while A1a begin rejects the unavailable marker. The subject set retains exact node and
+Peer identities, public key, required role/control-exit shape, advertisement sequence/expiry and
+`SignedEnvelope.payload_hash`, policy version/hash/expiry, canonical actor-capability expiry, and a
+separate local discovery-authority ceiling. It contains no endpoint, origin, history, stored RTT,
+per-peer capacity, operator, or ASN projection.
+
+A separate discovery-private affine sampler now consumes that actor-built candidate snapshot and
+revalidates its exact advertisement, capability, policy, identity, role, transport, family and
+forwarded-control bindings before choosing anything. It chooses one eligible forwarded Exit and
+that Exit's exact control Relay first, then between one and eight other Relay prospects. The
+product entry point owns `OsRng`; weighted choices use bounded 70/20/10 high, diverse-middle and
+exploration bands, so multiple eligible Exits and Relays are sampled rather than silently taking
+the first canonical record. The reduced snapshot keeps the control at direct index zero, one
+forwarded Exit paired to it, and the remaining Relays in sampled order; no direct Exit candidate is
+created. Invalid shape, entropy failure, missing Exit/control, or inadequate diversity fails
+closed while returning the exact original snapshot affinely in the boxed failure.
+
+Preselection diversity is strict across the chosen control, Exit and every other Relay for signed
+operator ID, non-zero ASN and a canonical public advertised IPv4 `/24` or IPv6 `/48` hint in the
+requested family. The hints are inexpensive signed claims, not authenticated network origins;
+they provide no Fresh, route, reservation or reachability authority. The later exact-set transport
+join may mint only direct connection-derived or control-attested native prefixes into its private
+Fresh evidence. The existing FreshEvidence/selection hard filter must then re-enforce actual
+network-origin diversity before route planning. The production discovery actor invokes this
+native-dataplane-agnostic sampler before beginning the affine request lineage; the sampler itself
+chooses no endpoint and grants no dispatch or Fresh-evidence authority.
+
+Each discovery-private `pub(super)` affine `PreselectionAttemptGate` lineage admits at most one
+attempt at a time. It validates a batch-wide non-zero conservative local bandwidth ceiling and an
+exact one-forwarded plus one-to-eight-other-relay slate before internally minting a non-zero
+16-byte batch ID and two
+to nine unique non-zero 32-byte challenges with `OsRng`, one per request and challenged direct
+relay or forwarded exit; the control wrapper shares the exit challenge. A single request is
+prepared at a time; the forwarded response contributes both its exit receipt and control wrapper,
+yielding three to
+ten retained signed envelopes. The attempt/request/cooldown limits are 30/5/30 seconds. Challenge
+and batch-ID tombstones are retained for 120 seconds from each JIT preparation, with fixed 36+4
+capacities and a 40-entry owned replay cache; no redraw, retry, or live eviction is allowed.
+On pre-entropy validation or capacity rejection, `PreselectionBeginFailure` retains the original
+gate without cooldown. An admitted attempt returns a cooling gate only for a valid non-decreasing
+terminal wall/monotonic pair; invalid, backward, or
+overflowing terminal time loses it fail closed.
+
+A1a gives each raw bounded response directly to the dedicated A0 verifier, then consumes the
+verified transcript against the exact canonical request bytes. Its final
+`BoundPreselectionTranscriptBatch` is opaque, non-cloneable, endpoint-free, and retains only
+sanitized subject/request bindings, process-local dispatch ID/request hash, opaque transcript
+tokens and attempt ceilings. It deliberately records no authenticated connection, local send or
+arrival event, socket origin, RTT, reachability, usable address, or Fresh-evidence validity. The
+same production discovery owner joins it only to the exact service-bound transports and creates no
+`RouteSessionAuthority` or `ReservationSession`. The request-response responders and forwarding
+wrapper do not consume this A1a value. The completed
+affine A1a owner retains the original, non-cloned `RouteCandidateSnapshot` beside—not inside—the
+endpoint-free transcript batch. This preserves the exact candidate-union allocation for a later
+owner without exposing a getter or reconstructing candidate state. That sibling is the existing
+actor-private selection snapshot and can contain advertised control endpoints; those never enter
+the transcript batch or the opaque transport proof.
+
+The actor-owned A1c transport-provenance join exact-set joins that batch to the authenticated Peer
+ID, libp2p `ConnectionId`, local request ID and request hash, and local monotonic send/arrival events.
+For a direct relay, both RTT and the normalized public IPv4 /24 or IPv6 /48 must come from that same
+authenticated remote socket. For a forwarded exit, the control-attested upstream /24 or /48 stays
+native; it must never be widened into a fabricated full representative IP. An
+`observed_endpoints[PeerId]` mutable cache, advertised endpoint, stored Ping/history, the control's
+own origin, or a direct client-to-exit connection are forbidden substitutes. Only that join imposes
+the local-arrival freshness ceiling and aggregates it with the unchanged absolute attempt deadline,
+every applicable signed receipt/attestation window, actor advertisement/capability expiries, and
+policy expiry before minting a verified observation.
+
+The first A1c provenance component is composed as a private passive libp2p behaviour. It observes
+the authenticated `ConnectionEstablished`, `AddressChange` and `ConnectionClosed` event lineage,
+bounds the registry together with connection admission, and permanently poisons and clears it
+on inconsistent event lineage or an event exceeding every previously admitted ceiling. The
+original constructor defaults remain 384 total/256 per direction/four per peer, but the production
+actor replaces the total and directional ceilings before initial dialing and on its one-second
+tick using current RAM/descriptor/pressure headroom. Capacity reduction never revokes live
+records or queued, already-admitted events; retention keeps a numeric high-water bound without
+preallocating that many entries. Pending and per-peer guards remain separate. See
+[adaptive control admission](../development/OPERATIONS.md#adaptive-control-connections) for policy and limits.
+Every connection,
+including one whose remote address is unusable, counts toward per-peer uniqueness. A usable native
+prefix is accepted only from an exact direct public-IP TCP or QUIC-v1 remote multiaddress, with an
+optional terminal `/p2p` component matching the authenticated peer; DNS, memory, circuit-relayed,
+private/special, zero-port and extra-component addresses are rejected. Records retain only the
+Peer ID, `ConnectionId`, non-zero generation, opaque normalized /24-or-/48 token and the same native
+three or six prefix bytes, never a full IP or multiaddress. An address change increments the
+generation even inside the same prefix. The private
+affine witness can be minted only for exactly one total connection to that peer in the requested
+native family, and binding consumes it while rechecking peer, connection, generation and prefix.
+There is deliberately no generic `DiscoveryService` registry, address, prefix, witness, or bound-
+observation accessor. The only consumers are the purpose-specific client and upstream transaction
+seams plus the actor-owned exact A1a/A1c join described below. The production discovery owner
+invokes that chain, while native dataplane usability remains unproved.
+
+A second A1c wire component consists of two strictly separate libp2p request-response
+behaviours and event variants. The client-facing protocol is outbound for Client and inbound for
+Relay roles; it carries an A0-valid Relay or forwarded Exit request of at most 4096 bytes and
+returns either a Relay-role signed receipt of at most 4096 bytes or a control-signed forwarded Exit
+attestation of at most 8192 bytes. The upstream protocol is outbound for Relay and inbound for Exit
+roles; it accepts only the same canonical forwarded Exit request and returns only an Exit-role
+signed receipt, each at most 4096 bytes. Both behaviours have an exact five-second transport
+timeout, 64 concurrent streams each, no legacy protocol aliases, and no retry. A shorter unchanged
+A0/A1a absolute request expiry remains authoritative.
+
+The codecs revalidate canonical encoding, v4 and hop-specific type/role shape, payload-local
+invariants, and typed payload-to-envelope fields on both read and write. They neither verify a
+signature nor mutate replay state, sign a response, or claim origin/reachability. The two event
+variants retain separate libp2p request-ID domains and independent one-at-a-time active slots. The
+client hop derives the direct relay or forwarding control plus native family from the exact
+canonical request; the upstream hop requires the request's forwarding control to be local and
+derives only the exit plus family. Each requires one unique current direct connection, mints a
+generation-bound witness immediately before its synchronous libp2p send, binds only a typed
+same-hop response arrival minted by the same service instance, and applies the minimum of its fixed timeout, unchanged A0 expiry, and
+caller deadline. Context-bound variants retain an arbitrary non-cloned caller owner—intended for
+the original candidate-snapshot attempt on the client and the original downstream channel/request
+owner at a control relay. A client transaction presented to a foreign service is retained
+unchanged so its originating service can still bind or cancel it. Once that originating service
+recognizes its exact active client transaction, every sealed response is terminal: it releases the
+slot before checking the arrival's service instance, peer, request ID, time or connection
+provenance, and a failed bind returns the exact unchanged caller context without reusable dispatch
+authority. The upstream context is still returned only by its exact bind or cancellation. This
+prevents a later owner from accidentally pairing a sibling response and snapshot without exposing
+the context during flight.
+
+Merely dropping an active dispatch, transaction or arrival, or failing to obtain an arrival clock,
+leaves its slot occupied fail closed. On the upstream hop a foreign service, wrong peer or wrong ID
+also leaves the slot occupied; exact upstream correlation consumes it before subsequent time or
+connection-provenance checks. The private pump stamps local monotonic and wall time at observation;
+binding rechecks the exact service instance, private request ID, authenticated peer, event-local
+`ConnectionId`, deadline, uniqueness, generation and native prefix. The bound authority tokens
+themselves expose no address, peer, connection, ID/hash/time getter, equality oracle, clone or
+decomposition. Purpose-specific terminal consumers destroy those tokens and expose only the facts
+needed by the actor-owned private freshness join: the client transport yields an endpoint-free
+normalized public IPv4 `/24` or IPv6 `/48`, its sealed local wall-observation time and monotonic
+round trip; the
+upstream connection may yield only the normalized prefix for the Relay-signed wrapper; and verified
+direct or forwarded transcripts yield only their signed validity ceiling, or the earlier joint
+signed ceiling plus the control-signed normalized prefix. None exposes a request, identity,
+signature, nonce, full endpoint, connection, dispatch capability or other reusable authority. The
+production discovery actor purpose-consumes these projections through the exact-set join. Its
+private `FreshEvidenceBatch` deliberately leaves native dataplane-address usability false, so the
+existing hard filter rejects it before route planning. The swarm pump drops a
+still-current client-hop request unless it targets the local relay/control and its authenticated
+remote sender differs from both that local peer and the challenged actor. A0 deliberately contains
+no client identity, so this is not a claim that the sender is request-bound. Upstream, the pump
+instead requires `forwarded_control` to equal the authenticated relay and the actor to equal the
+local exit. Those predicates exist only inside the private raw transport pump. There is no public
+raw-event bind, preselection response-channel or response-sending API; transport-only unit proofs
+use the private raw pump, while public real-swarm proofs bind both sealed response types.
+Independent client-hop and upstream request-response behaviours intentionally collide with the
+originating behaviour-local outbound ID, yet their real responses cannot bind when sealed by
+another service. The service-owned Exit responder now consumes an admitted upstream request
+without exposing its channel.
+
+A separate production-compiled role-gated poll owns each raw inbound direct-Relay or upstream-Exit
+event and its response channel inside the originating `DiscoveryService`. It binds the authenticated peer,
+event-local `ConnectionId` and requested native family to one unique current private connection
+lineage and retains that opaque affine proof through response handoff. It re-verifies the exact
+currently served signed role advertisement and local Peer/node/key identity, requires non-zero ASN,
+advertised transport/family support and the exact active policy version/hash/expiry, and signs the
+request hash, challenge, actor, scope, local observation time and bounded validity with the same
+permanent identity. The v4 envelope also binds sender, time, expiry, a fresh fallibly generated
+CSPRNG nonce, message type, payload hash and Ed25519 signature. Exact request hashes enter a
+120-second no-rollback tombstone before signing, bounded to 1024 globally and 16 per authenticated
+peer. Replay, resource exhaustion, signer failure, stale authority and ambiguous lineage fail
+closed without a response. A real two-swarm test proves that the originating channel carries the
+exact signed receipt. Separate real transport regressions prove that the ordinary public pump never
+yields an inbound channel and a sibling service cannot answer a channel captured by the
+originating service's private test pump. A second real two-swarm proof sends an upstream request
+from an authenticated Relay and verifies the exact Exit-signed receipt on only its originating
+channel. The Exit responder itself mints no control-Relay prefix wrapper.
+
+For a forwarded Exit request, the same private production pump retains the original canonical
+request, authenticated client peer, event-local connection, inbound request ID and response channel
+as one affine owner. It first requires a read-only unique authenticated Exit-provenance preflight,
+then tentatively reserves shared replay capacity and synchronously dispatches the unchanged
+request. Every pre-send dispatch failure consumes an exact non-cloneable token to roll back only
+that newly inserted tombstone; successful send commits it. Only the
+exact upstream peer/request and still-current connection generation can return. The owner verifies
+and fixed-cache replay-admits the Exit signature and exact request binding, purpose-consumes the
+opaque upstream proof into only a public `/24` or `/48`, rechecks the current Relay
+advertisement/Identity/policy, applies every expiry ceiling, signs a fresh-nonce
+`ForwardedPreselectionAttestation`, and responds only on the retained client channel. Policy-off,
+policy/Identity drift, deadline, exact upstream/downstream failure and the generic event pump all
+cancel the owner and free its one upstream slot. Requests without unique Exit provenance fail
+before consuming a tombstone.
+
+A hermetic three-swarm MemoryTransport test verifies the nested signatures/replay and checks live
+connected-peer state includes the Relay but not the Exit. It also exercises wrong peer/request/
+connection and all lifecycle cleanup paths above. The test `/24` is derived from explicitly
+injected public endpoint lineage and is not external-network evidence. Neither receipt nor wrapper
+claims origin, RTT, capacity, Fresh evidence, reservation, route, admission, readiness, or datapath
+authority. The production agent supplies the policy and permanent signer, and its discovery actor
+now owns the client-side sampler, exact request/bind lineage, exact-set join and private
+Fresh-evidence mint. Its client-side native-preselection child still has no production dispatcher
+or route-orchestrator caller. The Exit-side actor composes one deliberately narrow production
+Permit responder: it binds the exact inbound control-Relay `ConnectionId`, current actor identities
+and policy before invoking the Exit signer, and consumes that connection token with the response
+channel without an intervening await. Relay and Exit runtimes now publish a short-lived signed
+service advertisement plus their bounded provider keys from explicit role, operator capacity,
+origin-hint and active-policy configuration. Those self-declared advertisements remain untrusted
+preselection input, not Fresh datapath evidence. The responder can therefore pass its exact local
+advertisement gate, but no production client Permit dispatcher yet drives the whole exchange. The
+separate discovery transport integration proves connection-bound handoff; no end-to-end route is
+claimed. The responder provides no Ready, Result, helper or datapath work.
+
+A separate dormant A1b selector hardening does not consume A1a transcripts. It makes the fake-only
+Fresh/plan path prefix-native while treating the normalized prefix as untrusted data rather than
+provenance: the path retains no full host IP, sets the legacy candidate-origin field to `None`, and
+uses one opaque /24 or /48 value in the shared hard-filter, exit, prospective-relay and complete-path
+kernels. Legacy full-origin selector entry points remain source-compatible boundary adapters. A1b
+does not consume the separate snapshot sampler and adds no handler, transport evidence, production
+caller or usable production candidate. The A1a/A1c bridge now consumes the exact opaque transport
+and transcript proofs, but deliberately cannot prove native dataplane usability. Its private Fresh
+batch is still subject to the existing observed-origin diversity hard filter before route planning.
+
+An actor-invoked private boundary consumes one non-cloneable `FreshEvidenceBatch` into opaque
+`PreparedPreselectionEvidence`. A separate crate-private native-preselection child now consumes
+that prepared value from the production `Connect` route gate; the older downstream phase-A planner
+remains unconnected. The
+private production mint requires the
+exact retained A1a candidate set and one purpose-consumed A1c transport plus cryptographic
+transcript for every request. It rejects count, order, request hash, actor, forwarded-control,
+transport, family, wall-window and monotonic-window substitution before minting. The batch has a non-zero opaque ID, contains exactly the 1-200
+direct-relay plus forwarded-exit identities in the actor snapshot (no missing or unrelated record),
+and binds every observation to role, node/Peer ID, capability public key, advertisement
+sequence/expiry/payload hash, transport, address family, policy version/hash/expiry, observation
+time, explicit `valid_until`, one normalized public IPv4 /24 or IPv6 /48, and a conservative
+preselection capacity ceiling. A relay observation has the Relay role and no forwarded-control
+field. An exit observation has the Exit role and carries the exact forwarded control tuple,
+including its advertisement hash plus key and advertisement/capability expiries. A direct record's
+RTT is its exact client-Relay request round trip. The forwarded record's RTT spans the complete
+client-control-Exit-control-client request round trip and is copied conservatively to its control
+and Exit evidence; it is never represented as a direct client-Exit measurement. The configured
+ceiling and endpoint-free prefixes are only local selector input: they establish no measured
+capacity, offer, hold, reservation, admission or dispatch authority. Trusted time must satisfy
+`observed_at <= now < valid_until`; the observation is at most 60 seconds old and `valid_until`
+cannot exceed freshness, policy, advertisement or capability expiry.
+
+The proof mint records one successful reachability sample, no measured p25, neutral zero proximity
+and egress-quality scores, and no native dataplane-address proof. `locally_blocked = false` means
+only that this proof input supplied no local blocklist hit; it is not affirmative policy evidence.
+Consequently the existing hard filter rejects every such batch until an actual helper-backed
+native-path sampler supplies the missing dataplane evidence. The discovery actor calls the bridge
+only through the opaque Prepared handoff; the Connect route gate consumes it only into the native
+Permit stage, which grants no reservation or route authority.
+
+The production-owned child consumes Prepared evidence while its signed five-second receipts remain live,
+then discards all control-plane reachability observations and mints an independently expiring
+native attempt of at most five minutes. It binds an endpoint-free set of two to nine candidates—the
+control Relay plus one to eight alternatives—and one affine authority per exact Relay-to-Exit path.
+This is only a client-owner, v4 wire/verifier and data-Relay affine-producer foundation. Endpoint
+visibility stays role-separated: the client sees only Relay-Client readiness, while the selected
+data Relay alone verifies the hidden Relay-Exit and Exit endpoints and all four prepared-binding
+topology before signing its result. The terminal client state relies on that exact affine signed
+chain for hidden topology and does not itself create or independently attest helper evidence.
+
+A separate module-private, non-Clone Exit wire-phase owner can retain a Permit before its response
+is handed off. A bounded no-live-eviction ledger makes an identical retry from the same
+authenticated control actor byte-identical without a second signature, while altered requests or
+actors fail closed. ExitReady and ExitResult are still produced only in tests after exact
+data-Relay checks; those later authenticated-channel values remain raw test-seam arguments. The
+readiness state consumes a typed projection from the `Copy` `ExitEndpointLease`; that projection
+proves neither helper-resource custody nor same-connection runtime provenance or cleanup authority.
+Its result consumes a private exact-runtime/context/commitment and challenge observation with no
+constructor. There is still no production local Exit-advertisement/capability producer which can
+open this responder gate, Ready/Result caller, helper
+provisioning/lifecycle/cleanup ownership, one-shot challenge delivery, live WireGuard probe,
+measured readiness/capacity, terminal helper-evidence producer, usability promotion or route
+admission. Generic wire values and the generic envelope signer are not production actor authority.
+The child therefore cannot set `network_address_usable = true`, and the reported usable production
+candidate count remains zero.
+
+Phase A still selects the exclusively forwarded exit first. It then uses only hard-filtered local
+peer evidence and the existing randomized 70/20/10 score bands to choose a seed-dependent
+prospective relay slate of at most eight in randomized sampling order. Canonical candidate ordering
+makes a fixed seed independent of snapshot input order; exploration remains possible, and no
+complete-path RTT, capacity, throughput-gain or failover value is invented. Control, exit and slate
+entries must be distinct by node ID, Peer ID, operator, ASN and one normalized public IPv4 /24 or
+IPv6 /48. These constraints permit at most one
+selected slot from any such observed cluster; they mitigate but do not eliminate Sybil attacks or
+the pre-sampling multiplicity advantage of many identities in one cluster.
+
+The private plan is neither cloneable nor serializable and has no `Debug` representation. It binds
+the batch ID, trusted selection time, exact forwarded control/exit identities, immutable route
+scope/policy, 1-8 prospective relay identities, bounded selection-only peer evidence/diversity and the
+earliest evidence expiry. Each control, exit and relay binding now retains its own explicit evidence
+validity; plan construction and consumption independently recompute the aggregate as their exact
+minimum. The retained diversity material contains operator and ASN plus only the normalized /24 or
+/48, not a full host IP, together with local capacity/quality/history needed for later hard filtering;
+it retains no full observed host IP,
+dialable multiaddress or port, signed envelope, hostname, destination, application or flow history.
+The legacy `CandidateEvidence.observed_network_origin` field is explicitly `None` on this path.
+Legacy public selector entry points remain source-compatible adapters, while legacy and new
+prefix-native entry points share the same private filter, scoring, banding, RNG and diversity
+kernels. C1 must consume the plan before its earliest expiry; future dispatch must consume the C1
+continuation and re-resolve every actor capability before any RPC.
+
+The dormant phase-C1 boundary now consumes that plan by value into one private pre-probe
+continuation. Before either mint, it checks the retained non-zero batch identity, selection time,
+policy, node-to-key binding, non-zero advertisement sequences, global node/Peer/key uniqueness,
+per-actor evidence and capability windows, capacity, reachability, exact normalized prefix and hard
+diversity invariants. It assigns stable path IDs `1..N`, validates replay/setup/hard limits and
+helper second-floor boundaries, and projects one Tokio deadline from a monotonic sample bounded by
+the remaining wall-clock setup/evidence window. Only then does it mint non-zero, distinct
+reservation/context IDs and exactly one in-memory `ReservationSession`. The continuation has no
+clone, copy, debug, serialization, getter or decomposition API. It still retains the observed
+prefix, but no observed host IP, as short-lived local diversity evidence.
+
+There is no dispatch while C1 constructs this value. Dropping it before handing it to C2c remains
+pre-dispatch cancellation by abandonment: it drops the ephemeral in-memory reservation session and
+zeroizes the separate route-authority ID arrays, but it neither proves full session-memory
+zeroization nor performs a rollback or journal mutation.
+
+A dormant, crate-private C2c handoff can now consume that continuation under one manager-owned task
+and cancellation watch. Before resolving actors it rechecks cancellation, the carried Tokio
+deadline and wall/evidence windows, recomputes the exact actor hard/evidence ceilings, and consumes
+the carried route authority plus ordered proofs into the endpoint-free `RouteSetupRequest`. One
+bounded borrowed resolve then obtains the exact current control, exit and relay capabilities from
+the same owned combined resolver/transport value; the adapter accepts no second handle between
+these phases. The resolver future owns neither the route IDs nor the
+reservation session. After resolution, C2c rejects a backwards or expired wall clock, cancellation,
+deadline expiry, stale proofs, changed actor capability—including its exact advertisement payload
+hash—or changed retained selection-time control/exit bindings. Only then does it move the original
+`ReservationSession`, stable path IDs,
+limits and unchanged absolute deadline into the existing private `UnmeasuredRouteSetup`; it neither
+remints nor renumbers them. Dropping or cancelling a pending resolver drops that future and
+requires no helper, network-state or journal cleanup because reservation dispatch has not begun.
+
+The older scalar complete-path second stage remains only as a clearly dormant test boundary; the
+new plan neither calls nor trusts it. C2c supplies the private ownership and actor-resolution link
+to the existing phase-B transaction, but production Connect currently consumes the Prepared
+handoff through the first native Permit and the exact selected data-Relay Ready RPC. It does not
+yet drive helper-backed native probing or phase-B with real providers; in particular, no production
+exchange obtains the standard signed Relay reservation required after Client endpoint preparation.
+Consequently the real
+resolver/transport path is not invoked by phase A in production. C2c adds no new wire,
+provider or helper implementation, so it causes no production network/host mutation, and the
+reported usable route-candidate count deliberately remains zero.
+
+These are wire and control-service foundations only. They do not prove the production agent route
+state machine, a real two-leg probe producer, helper-backed endpoints, client ingress, Internet
+bootstrap failover, NAT traversal, enabled relay/exit serving, or any WireGuard/MPTCP/MPQUIC
+dataplane. Those items remain governed by
+[IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md).
+
+</details>
+
+
+===== docs/network/ROUTING.md :: Earlier staged planner/helper evidence =====
+Source file SHA-256: bffe5a8fdc5025ca5dae354fa3f08924664fa45278937355780610cf1f850fed
+
+<details>
+<summary>Historical staged planner and ownership development</summary>
+
+These are earlier implementation-stage notes, not a second route-setup procedure to follow.
+The original dormant/fake-only limits are retained as the scope of those stages.
+
+The crate now has a dormant in-process boundary for the beginning of steps 1-4. A bounded command
+asks the single-owner discovery actor for an immutable candidate snapshot. The actor purges expiry,
+captures exact policy lineage, re-verifies persisted signatures/fingerprints, and joins only exact
+remote direct-relay and forwarded-exit capabilities. It returns neither serialized messages nor
+dispatch authority. Stored reachability, RTT, and advertised capacity do not become fresh route
+evidence. Each projected advertisement and direct capability retain the same opaque exact
+`SignedEnvelope.payload_hash`; a forwarded capability retains separate control-relay and exit
+hashes. Those hashes are equality bindings, not authority, and the UI-facing usable-candidate count
+stays zero.
+
+The dormant fake-only phase-A planner now consumes one non-cloneable observation batch that exactly
+matches the snapshot's direct-relay and forwarded-exit capability union. Every record is bound to a
+non-zero batch ID, role, full actor identity/key/sequence/expiry/payload hash, transport, family,
+policy lineage, observation time, explicit validity, one normalized public IPv4 /24 or IPv6 /48,
+and a conservative preselection capacity ceiling; an exit also carries the exact forwarded control
+tuple including its advertisement hash, while a relay carries none. The ceiling and prefix are
+test-only local selection inputs and convey no offer, hold, reservation, admission, provenance or
+dispatch authority. The trusted clock must remain inside every freshness and
+policy/advertisement/capability lifetime. The planner applies the complete relay policy, selects
+the forwarded exit first, then
+chooses 1-8 prospective relays using the selector's real peer-only 70/20/10 bands. It does not
+fabricate or accept complete-path scalars.
+
+Control, exit and prospective relays are hard-diverse by node, Peer ID, operator, ASN and one
+normalized public IPv4 /24 or IPv6 /48. The prefix-native plan and actor proof retain no full
+observed host IP. Legacy full-origin selector APIs normalize at their boundary and then use the
+same filter, scoring, banding, RNG and diversity kernels; no second selection algorithm exists.
+Canonical ordering makes a fixed random seed independent of input order, while different seeds may
+choose different valid slates and exploration is retained.
+Hard diversity limits any observed cluster to one slate slot but does not eliminate Sybil identity
+multiplicity before sampling. An exit with multiple otherwise valid control-relay pairs is still
+excluded entirely until an actor-owned selected-control primitive exists.
+
+The resulting private plan is non-cloneable, non-serializable and not debug-printable. It retains
+only exact actor identity and advertisement-payload-hash bindings, route scope/policy, short-lived
+peer capacity/quality/history, prefix-native operator/ASN and /24-or-/48 diversity, each actor's
+explicit evidence-validity window, and their exact minimum. It retains no full observed host IP,
+dialable endpoint/port, envelope, hostname, destination, application/flow history, route-session ID
+or dispatch authority. Its legacy `CandidateEvidence.observed_network_origin` field is `None`. C1
+consumes the plan before expiry; future dispatch must consume the C1 continuation and re-resolve
+actor capabilities before any RPC.
+
+The dormant phase-C1 consume boundary now moves this plan into one private pre-probe continuation.
+It structurally checks the retained control, exit and relay node-to-key bindings, non-zero
+advertisement sequences and payload hashes, global node/Peer/key uniqueness, actor and evidence
+expiries, capacity/reachability/prefix/diversity, route policy, replay bound, setup/hard wall windows and
+helper second-floor limits. It allocates stable prospective path IDs `1..N` and one Tokio deadline,
+projected from a monotonic sample conservatively taken before the trusted wall sample and bounded by
+the minimum of setup timeout and the remaining setup/evidence window. Only after every check and
+path allocation does it mint a non-zero distinct reservation/context pair and exactly one in-memory
+`ReservationSession`. A mint failure returns no continuation. It does not re-authenticate an
+advertisement or re-resolve actor capability.
+
+The pre-probe continuation has no clone, copy, debug, serialization, getter or decomposition API.
+Dropping it is pre-dispatch cancellation by abandonment: there is no RPC, task, helper frame,
+external state, rollback or journal write. This proves no full memory wipe for the reservation
+session; only the separate route-authority ID arrays have an explicit zeroizing drop.
+
+The previous scalar complete-path phase remains a dormant test boundary only and is not called or
+trusted by the new plan. The existing private, dormant `RouteSetupTransaction` now has an internal
+phase-B ownership split: `measure_owned` moves its exact session, hold and original verified probe
+objects into a non-cloneable measured continuation, and `finish_owned` consumes that continuation
+with the same reservation/context IDs and original absolute deadline. A measurement error returns
+the original transaction for one rollback. Cancellation or deadline expiry at the handoff is
+checked before a retirement slot or helper `Prepare`; finalization is signed once, after `Prepare`,
+and ambiguous retries reuse that exact frame.
+
+The dormant phase-B request prerequisite is flat, role-hint-free and affine. Each prospective entry
+retains its explicit path ID plus one private actor-bound proof. The legacy bridge consumes the full
+`Candidate` before request construction and the proof cross-binds the evidence batch, exact relay
+node/Peer/key/advertisement sequence, actor and policy expiries, static selection scope, exact
+advertisement payload hash, forwarded control/exit identities and only an observed `/24` or `/48`
+prefix. The request and its
+path/proof values have no `Clone`, `Debug` or serialization surface and retain no advertised control
+endpoint, raw observed-origin IP, hostname, destination or full advertisement. The constructor
+accepts only caller order `1..N`, never sorts or renumbers it, and requires 1-8 entries and at least
+the policy minimum. Probe-slate size is independent of the final policy target: a UDP policy with
+final counts `1/1/1` may probe several prospective paths and still finalize one.
+`RouteSetupRequest` carries no per-path roles; phase B assigns final roles only after verified
+probes.
+
+One private, non-derived `UnmeasuredRouteSetup` owns the assembled transaction and its absolute
+Tokio deadline. The legacy phase-B manager entry accepts only this wrapper; the separate dormant
+C2c entry accepts `PreProbeContinuation` and produces the wrapper within its single task. Measurement
+consumes the wrapper deadline without a replacement and passes the same value into
+`MeasuredRouteSetup`. The sole assembly function takes the protocol and deadline together, rejects
+a deadline beyond the setup-timeout budget, and permits an already-expired value only so the first
+live check can fail before any protocol, transport, retirement or helper event. The old
+resolving/generating transaction constructor and its product `ReservationSession` remint path are
+removed.
+
+Post-probe selection no longer treats the pre-probe active/warm labels as measurement authority.
+Immediately before scoring, every proof is revalidated at the later trusted time against its exact
+static scope, evidence batch and actor/policy windows. Complete-path measurements borrow the opaque,
+value-only projection and enter the same private canonical selector core used by the legacy API;
+there is no synthetic `Candidate`, advertisement or signature bit. Any eligible measured path may
+satisfy the minimum. Paths beyond that minimum still require the canonical unique-throughput-gain
+or meaningful-failover rule; warm backups are then taken only from the remaining bounded set.
+Unknown or duplicate probe IDs fail before capacity filtering. On successful selection the request
+proofs are consumed once and only proof-free selected relay bindings continue; a measurement error
+returns the original transaction and all proofs for one rollback. The route-level protocol no
+longer requires its probe type to implement `Clone`, and the private measured handoff has no
+`Clone`, `Debug` or serialization implementation. This is an internal ownership property, not an
+end-to-end affine claim about public reservation `Verified*` types; the public
+`VerifiedRelayProbe` remains cloneable for API compatibility.
+
+A dormant C2c adapter now consumes the C1 continuation inside one private manager task and watch.
+It first rechecks cancellation, the carried Tokio deadline and trusted wall/evidence windows, then
+recomputes the exact policy/advertisement/capability and per-actor evidence ceilings. It consumes
+the existing authority and ordered actor-bound proofs into the endpoint-free `RouteSetupRequest`
+without restoring role hints, sorting or renumbering paths. Request construction precedes one
+bounded borrowed `RouteSetupAuthorities::resolve`; the same owned combined resolver/transport value
+then moves into the later reservation phase, and the adapter accepts no second handle between
+these phases. The resolve future borrows the request and owns neither the route authority nor the
+reservation session.
+
+After resolve, C2c rejects cancellation, deadline expiry, a backwards or expired wall clock, stale
+proofs and any changed control/exit/relay capability, including its exact advertisement payload
+hash. It then moves the same `ReservationSession`,
+route/context IDs, limits, stable path IDs and absolute deadline into `UnmeasuredRouteSetup`, whose
+existing phase-B flow carries them through measurement and finish without a remint or reset. A
+pending resolve cancelled by the watch, a call timeout or dropping its handle drops the resolver
+future before reservation dispatch and needs no rollback, helper cleanup or ownership-journal
+entry. The dormant bridge now builds a `Candidate` whose legacy observed-origin field is `None` and
+pairs it with the opaque normalized prefix before consuming both into a bounded projection. No full
+host IP is reconstructed or retained; the existing local quality/history and advertised control
+endpoint remain outside the projection and request.
+
+This is still dormant infrastructure, not a production route. The private C2c entry has no
+production caller, and the fake-only phase-A evidence has no production producer. A real evidence
+producer, production probe verifier/handler and production-owned orchestration remain absent; tests
+are the only callers. C1 construction itself still performs no RPC, helper call, provider update,
+host/network mutation or ownership-journal write. C2c adds no new wire, provider or helper
+implementation and has no production caller/orchestration, so it causes no production dispatch or
+mutation. These fake-only prefix boundaries remain disconnected from A1a transport evidence.
+
+A separate dormant lifecycle prerequisite now provides one private, affine route-attempt ownership
+slot. It can retain either one already-running `RouteSetupHandle` or one `EstablishedRoute`; it
+does not start a manager, spawn a task, mint authority, admit work before spawn or prevent a second
+task from already having dispatched. An occupied slot returns the supplied second handle intact.
+Pending settlement consumes the owner and yields an established owner on success. A settled
+failure reported with cleanup `NotRequired` or `Destroyed` returns a vacant owner for explicit
+reuse, whereas `Quarantined` remains terminal and rejects another adoption.
+
+Settlement and drain both consume the owner, so cancelling either future cannot expose a reusable
+vacant value. Pending drain cancels and waits; a completion race is immediately torn down instead
+of published as established. Established drain tears down explicitly. Dropping a pending owner
+delegates cancellation to the retained handle, while dropping an established owner passively
+publishes its existing retirement ownership. The owner neither owns nor shuts down the route
+manager: a future production lifecycle must drain it before manager shutdown. Tests are the only
+callers and exercise first/last probe cancellation, late success, future drop, quarantine retry,
+destroy-before-release ordering and shutdown fencing. Production admission, lifecycle ownership
+and orchestration remain absent.
+
+</details>
+
+===== docs/network/ROUTING.md :: Earlier staged planner/helper evidence =====
+Source file SHA-256: bffe5a8fdc5025ca5dae354fa3f08924664fa45278937355780610cf1f850fed
+
+<details>
+<summary>Historical single-path helper implementation and retained trials</summary>
+
+The following record describes the early isolated helper boundary. Its unavailable
+production-route and 11% statements must not be read as the current integration state.
+
+The production functional-alpha backend now runs Prepare, Activate, Probe/Commit and Destroy
+for exactly one process-owned Client/Exit singleton or one ordered `RelayClient` + `RelayExit`
+endpoint pair. It verifies the exact nested relay/exit grant and binds it to helper-owned
+context/path/role/expiry. For Relay it additionally verifies the exact client-session-signed request,
+its embedded signed ClientSessionCapability and ExitReservation, and the relay grant's SHA-256
+commitment to those request bytes. All five signed request/capability/reservation/grant/authorization
+records form one rollback-capable replay transaction with complete capability, exit, session,
+policy, transport, rate, path and lifetime scope binding. Client binds its generated
+key and installs only the signed relay-client peer. Exit binds its complete generated
+key/public-underlay/listen-port tuple to the dual-signed exit endpoint and installs only the
+relay-signed relay-exit peer. Relay atomically binds both prepared local tuples to the relay-signed
+endpoints, installs only the client-request peer and nested exit-signed peer on their respective
+roles, and rolls back the complete pair on failure. Every lease uses only its helper-derived `/128`
+route and retains the activation counter baseline. Relay activation additionally replaces the
+policy-drop baseline with two exact ifindex- and `/128`-bound accept rules guarded by one singleton
+timeout set and realtime cutoff, followed by terminal drop. Commit re-proves the complete lease set,
+requires a handshake no older than activation plus strict RX/TX growth for every lease and, for
+Relay, growth of both forwarding counters; neither leg commits alone. Destroy restores policy-drop
+before removing the interfaces and proves the complete pair and fence absent. This remains an
+isolated helper-internal single-path seam. Each successfully committed valid request for a committed
+Client or Exit singleton can acquire one helper-internal unconnected QUIC UDP socket; MPTCP and Relay socket
+acquisition, multi-path routing, a production route-manager caller, ingress and every usable product
+datapath remain unavailable.
+
+The disposable helper-boundary gate exercises these singleton roles sequentially in private
+namespaces. The Client cycle creates a temporary relay-side peer, carries bounded ICMPv6 across the
+client-to-relay leg, proves the recent handshake and strict bidirectional growth, removes that
+fixture exactly, requires an identical cached Commit retry and destroys the context. Exact-main run
+33294974441 at `77b60aed3c39ba0c80d3e2dac2b9817fd6d7be2f` retained that scoped Client evidence. Exit
+exact-main [run 33296892632](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632) at
+`1ca51fe0d2a2be855adb182e85c229d1d12bc017` retained the fresh worker/namespace proof as artifact
+[9727739271](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632/artifacts/9727739271),
+over a distinct `vpre0` relay-to-exit leg before Exit Commit retry and Destroy. Retained exact-main
+run 33301595311 at `0095b113e450a0ab29da853fafa53b2b130f05fc` separately proves one simultaneous
+Relay endpoint pair, before forwarding was implemented. Non-retained branch smoke [run
+33306523739](https://github.com/VOLPAROSSA/volparossa/actions/runs/33306523739) at
+`8d9cc533edfc1e9add273c03a9ce3fa164c3353d` proves bounded `::1` to `::4` traffic through both live
+WireGuard legs, growth of all four peer counter views and both nftables forwarding counters, Commit
+retry, teardown and unchanged host state, but retains no artifact. Exact-main
+[run 33309109220](https://github.com/VOLPAROSSA/volparossa/actions/runs/33309109220) at
+`1f3cee798787ed4673a3ba28d88931947800ca22` reproduced that proof and retained the 39,915-byte
+[artifact 9731470248](https://github.com/VOLPAROSSA/volparossa/actions/runs/33309109220/artifacts/9731470248),
+named `helper-boundary-evidence-1f3cee798787ed4673a3ba28d88931947800ca22` and expiring
+`2026-11-28T11:30:49Z`. Its streamed report is overall `PASS` from the exact clean source SHA on
+Debian 13 amd64 (`x86_64`) with systemd 257, with all 16 checks `PASS` and identical before/after
+host-state SHA-256 `2209ca5e63388fe23b8bf54c072cd2be5aa289e7e68293841150bce93ff59698`. Its scope is explicitly
+`helper_boundary_only=true`, `datapath=false`, `restart_recovery=false`,
+`acceptance_a01_a15=false`, `cleanup_owned=false`, and `installed_package=false`. It proves no
+trusted selection/policy authority, production simultaneous route, transport descriptor, ingress,
+usable VPN/datapath or crash recovery. Its cryptographically bound request/response authority is not
+an independent discovery/connection trust anchor. Keys are never persisted and are destroyed with
+the worker context; the fixed alpha score remains **11/100 (11%)**.
+
+</details>
+
+===== docs/network/ROUTING.md :: Earlier staged planner/helper evidence =====
+Source file SHA-256: bffe5a8fdc5025ca5dae354fa3f08924664fa45278937355780610cf1f850fed
+
+<details>
+<summary>Original early evidence boundary, preserved with its limitations</summary>
+
+This was the evidence boundary of the early helper/preselection milestones. The fixed 11%
+score and missing production integration below are historical, not current status. Later
+acceptance does not turn these narrower tests into broader proof.
+
+The v4 wire types, service state machines, forwarding codecs, helper plan/call/commit supervisor, and
+authorization binding have unprivileged tests. They are not proof of a live route. The production
+two-leg probe producer does not exist. The actor-linearized candidate snapshot and staged preflight
+described above are dormant and report no production-usable candidates. The no-argument production
+helper can now execute the exact Client/Exit-singleton-or-Relay-pair
+Bind/Prepare/Activate/Probe-Commit/Destroy subset. The retained gate exercises Client and Exit
+sequentially in private namespaces and retained run 33301595311 proves the simultaneous Relay pair
+before forwarding. Non-retained run 33306523739 first proved the current exact single-path
+cross-leg fence, traffic, counter evidence, teardown and host-state boundary; retained exact-main
+run 33309109220 at `1f3cee798787ed4673a3ba28d88931947800ca22` reproduced it as artifact 9731470248.
+The current 18-check exact-head contract additionally requires active Client/Exit/Relay FD-store
+counts `[2, 2, 2]` bound to exact pidfd/network-namespace identities, settled counts `[0, 0, 0]`, and
+exactly three stable `Absent(RecoveredMayOwn)` journal tombstones for the Client, ordered Relay pair
+and Exit plans. Exact-main
+[run 33318629099](https://github.com/VOLPAROSSA/volparossa/actions/runs/33318629099) at
+`63e405119ca1266499fef145fbeff7348cef5562` proved all 18 checks on privileged Debian 13 KVM and
+retained
+[artifact 9734273695](https://github.com/VOLPAROSSA/volparossa/actions/runs/33318629099/artifacts/9734273695).
+Its scope remains helper-boundary only; A01--A15, datapath, cleanup ownership, installed-package and
+restart-recovery evidence remain explicitly false. The older 16-check artifact remains historical
+helper-boundary evidence.
+The production manager does not call that helper-backed transaction. A boot-scoped, secret-free
+canonical/CAS ownership actor starts before
+cleanup-token or socket publication and shuts down after engine cleanup. Functional Prepare now
+reconstructs and registers tag 35's exact canonical intent before worker reservation, then carries
+its affine owner through systemd custody, durable dispatch and same-runtime clean settlement. A
+restart may retire an already durable all-`CleanupConfirmed` set: exact-present pairs first chain
+canonical descriptorless baseline-minus-pair removals, then a fresh stable exact-empty manager
+observation supplies full-set actor evidence. It may also reap one exact-present, same-boot,
+same-helper-image, single-path `MayOwnCustody` or active `MayOwnPrepare` namespace. The fixed authenticated child
+accepts only role-specific baseline state and the exact restricted Relay fence; it never deletes a
+WireGuard link or changes forwarding. After exact child reap, the startup actor crosses only that
+record to `CleanupConfirmed`, then reuses the existing removal/absence chain. The general cleanup
+executor still leaves `MayOwnPrepare`, no-store, multi-target and multi-path cases byte-identical and
+blocks startup. There is no broad inherited-custody recovery backend or cross-runtime tag-28 proof.
+The parent requires waitable default `SIGCHLD`, default lifecycle-signal dispositions, and a pidfd
+for the normal transcript. A bounded reserve-FD
+retry covers descriptor exhaustion; if pinning still fails, no cleanup record is sent and only
+normal direct-child EOF/reap may return an error. A stopped or stuck unpinned child invokes fixed
+non-coredumping `exit_group(70)` under the attested exact systemd
+`simple/no/main/control-group/SIGKILL/45s/terminate` retirement contract, publishes no socket and
+authorizes no journal transition. No numeric-PID signal is used.
+Journal absence is not cleanup proof. Client ingress is also
+blocked. Consequently no production route-manager path can reach finalize or `Commit`; only the
+helper's isolated endpoint-lifecycle path reaches Probe/Commit. Route-level end-to-end configuration and
+Destroy-first cleanup, A12/A13 privacy, MPTCP, and MPQUIC remain unproved. Retained run 33294974441
+proves the Client-only client-to-relay leg. Retained run 33296892632 at
+`1ca51fe0d2a2be855adb182e85c229d1d12bc017`, artifact 9727739271, separately proves the Exit
+relay-to-exit leg; both cover
+bounded ICMPv6, recent handshake, strict RX/TX growth, cached Commit retry, normal process-owned
+Destroy and sequential capacity reuse. They have no trusted selection/policy authority, production
+simultaneous route, transport descriptor, ingress, usable VPN/datapath or crash/restart recovery. The
+forwarding proof is retained exact-main helper-boundary evidence, not acceptance evidence. None of
+these results closes an A01--A15 result or changes the **11/100 (11%)** alpha score. See
+[IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md).
+
+</details>
+
+===== docs/network/MPTCP_REFILL.md :: Earlier failed refill experiments and corrections =====
+Source file SHA-256: be2a4548c16eee2b0de59e9e86f5d122c8145d1bf0970d303de755ce2de44902
+
+## Earlier evidence and corrections
+
+[Run 36581328449 on `5e6560e2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36581328449)
+remains **failed** with `MPTCP_REFILL_WARM_NOT_RETIRED`. Its saved Exit TCP row is
+`FIN-WAIT-1` with the same warm tuple and cookie `2002` previously observed as established;
+the old parser rejected that state. The Client's warm row remained established under the
+injected loss. Exit helper/agent records show endpoint retirement, but the run did not
+retain the new independent endpoint-dump interval and did not reach R4 proof. It must not
+be retroactively promoted to a passing refill result.
+
+The final fixture report records complete disposable teardown and unchanged host state.
+That is separate from the earlier route-disconnect failure still visible in its logs.
+Twelve refill checker tests and nine historical growth checker tests pass locally after
+this observer correction; these are synthetic checker regressions, not a new live run.
+
+[Run 36586125461 on `05cda509`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36586125461)
+also remains **failed**, now at `MPTCP_REFILL_FRESH_PATH_MISSING`. Its version-3 evidence
+does establish retirement: the exact warm Exit endpoint is withdrawn, its anchored TCP
+residue is closing, and the original healthy path progresses while the old warm bytes
+remain stalled. Rechecking that interval with the unchanged retirement checker succeeds.
+R4 becomes eligible afterwards, but no new R4 helper context, subflow payload or complete
+application hash is proved. The original evidence is retained without rewriting its result.
+
+The Client reports `PRESELECTION_SAMPLE_INVALID_SNAPSHOT` on the refill retry cadence.
+The corresponding production defect is that the established-route restriction filtered
+candidate vectors **after** their affine subject bindings had been constructed. Their sizes
+and pair indices then disagreed, so the existing shape check correctly rejected the attempt.
+An earlier random control-relay choice could also discard the route's required original
+control lineage. The correction selects that exact lineage from the complete, revalidated
+and ambiguity-checked group, projects its relays, and only then constructs the affine
+bindings. Unrestricted selection and all freshness, byte/hash, privacy and cleanup gates
+are unchanged. This source correction is not yet a successful live refill proof.
+
+The run's final disposable cleanup is complete and host state unchanged. Separately, the
+agent reports `SHUTDOWN_CLEANUP_FAILED`; two relays record `ROUTE_RETIRE_OUTBOUND_DIAL_FAILED`
+during their retirement exchanges. Those diagnostics identify a failed outbound dial, not
+its underlying cause, and are not erased by the fixture's eventual teardown.
+
+[Run 36591890165 on `4107389b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36591890165)
+remains **failed**, also at `MPTCP_REFILL_FRESH_PATH_MISSING`. The corrected candidate
+projection now reaches two fresh Exit-issued native permits and real helper Prepare on
+R4 and its sampling companion, but neither completes native Ready. No R4 attachment,
+new-path payload or complete application hash is established. Final disposable cleanup
+is complete and host state unchanged; the immutable original result is not rewritten.
+
+The saved injection and owner mapping identify the companion as original path 1/R2,
+whose Exit-facing link is deliberately blackholed at 100% loss. The production caller
+selected the first still-advertised original Relay, rather than the progressing sibling
+that caused refill demand. Thus a fresh two-path measurement unnecessarily depended on
+the already impaired path. The bounded correction retains the currently progressing,
+non-lossy sibling's path ID from that same flow observation and resolves it through the
+existing verified grant and Relay authority. Fresh A1/native readiness still has to prove
+that both nominated paths work; telemetry does not replace that authority. All timing,
+loss injection, original socket identity, payload/hash and cleanup requirements remain
+unchanged. Focused synthetic nomination tests accompany this correction; a successful
+new live refill is still pending.
+
+[Run 36596674960 on `258c049e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36596674960)
+remains **failed** at `MPTCP_REFILL_FRESH_PATH_MISSING`. The real fresh two-path native
+measurement now reaches helper Commit on the Client, Exit and R4. Afterwards the original
+Client and Exit prepare additive path 4, then immediately abort it before R4's route
+reservation. The expanded R4 capture contains two WireGuard data datagrams on each leg,
+consistent with the native probe, not the required fourth-path application payload.
+
+The Exit's native-evidence verifier compared the new sample's ordinal (1 or 2) with the
+established route's new path ID (4), so this valid extension could never pass that check.
+The correction keeps initial-route ordinal equality and introduces a separate extension
+binding: exact signed parent and permit, retained path, unchanged actors/control/Exit/
+policy/transport, post-permit measurements, and both distinct members of the same completed
+native batch. It does not rewrite signed native scopes or substitute advertisements for
+measurement. Focused synthetic authority/batch regressions accompany the change; no new
+successful live refill or application hash is claimed.
+
+The final fixture reports complete teardown with zero owned leftovers and matching A15
+host-state hashes. Expanded Client, Exit and R4 captures have no direct Client-to-Exit or
+unexpected outer packets, no capture drops and no truncation. These limited observations
+do not replace the unfinished full refill acceptance. The Client still separately reports
+`SHUTDOWN_CLEANUP_FAILED`; its retained 400-row diagnostic tail does not identify that
+failure's precise cleanup phase. The immutable original ZIP SHA-256 is
+`f37ceb83b2c1f2122befeb164b80bc0d5e89909347ac50926073a909bd2cc8c3`.
+
+[Run 36604968363 on `0f58f2f2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36604968363)
+remains **failed**, at `MPTCP_REFILL_APPLICATION_ENDED`. This is not a failed or truncated
+download: the retained Client completion record contains all 268,435,456 response bytes,
+and its SHA-256 matches the deterministic fixture's expected
+`9b3d1401c16ffa448d8225f14258f08c4e0fcc49b3e2e87cdb78d1ea0114f244`.
+The response completes in 306.43 seconds while the fixture is still waiting for a fourth
+subflow. The Client process exit status and separate destination completion record were
+not retained at that early failure boundary; neither is inferred from the generic blocker.
+
+The original warm path 2 first joins and carries application bytes, then retires under
+the required injected loss. Fresh extension path 4 now reaches **Prepare, Activate and
+Commit on both the original Client and Exit**, with its new WireGuard interfaces retained
+alongside the original interfaces. The Exit adds its new MPTCP endpoint at 17:37:45 UTC,
+then removes it about eleven seconds later because no useful subflow appears. Thus the
+corrected native-evidence projection has progressed through real extension admission,
+but helper Commit still does not establish fourth-path application traffic.
+
+The new bounded diagnostics localize the failure after endpoint installation: Exit
+`AddAddrTx` increases from 2 to 3, but Client `AddAddr` and `MPJoinSynTx` remain at 2,
+as does Exit `EchoAdd`. No new JOIN attempt or JOIN error is observed. Both owned
+namespaces report a 120-second `add_addr_timeout`. The original primary path 1 remains
+100% blackholed, while healthy path 3 completes the download. R4's two physical legs
+each contain only two WireGuard data datagrams, not the required application-scale bytes.
+
+This exposes a limitation of the current kernel-managed announcement strategy. In the
+fixture's [Linux 6.12.105 path manager](https://github.com/gregkh/linux/blob/v6.12.105/net/mptcp/pm_netlink.c),
+`mptcp_pm_nl_addr_send_ack_avoid_list` chooses the first subflow that passes
+[`__mptcp_subflow_active`](https://github.com/gregkh/linux/blob/v6.12.105/net/mptcp/protocol.h):
+that check requires an established/joined TCP state, not useful progress or absence of
+loss. A blackholed primary can therefore carry the announcement even while the data
+scheduler uses a healthy sibling. The saved counters establish that the new announcement
+did not reach the Client; they are not a decrypted packet trace of its exact selected
+subflow. The native kernel retry interval also exceeds the unchanged warm-probe interval.
+The required primary-path failure, all timers and all fourth-path acceptance gates remain
+unchanged. An owner-bound Client userspace path-manager integration is under investigation;
+kernel congestion control, scheduling, retransmission and reassembly would remain in use.
+No such integration or passing fresh-refill datapath is claimed here.
+
+Disposable teardown reports zero owned leftovers and unchanged host state. Retained R4
+privacy observations contain no direct Client-to-Exit or unexpected destination outer
+traffic and no capture drops/truncation, but full refill acceptance still fails. Separately,
+the Client reports `SHUTDOWN_CLEANUP_FAILED` and retirement exchanges report outbound dial
+failures; eventual fixture cleanup does not make agent shutdown clean. The immutable
+original ZIP SHA-256 is
+`f2aa60c0077325192487d98b66892863a7922b1df60be89713e58f2e202bf0a4`.
+
+
+
+===== docs/network/MPTCP_REFILL.md :: Userspace-PM live development sequence =====
+Source file SHA-256: be2a4548c16eee2b0de59e9e86f5d122c8145d1bf0970d303de755ce2de44902
+
+### First userspace-PM live result and parser correction
+
+[Run `36614116209` on `01fcabe7`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36614116209)
+fails during the initial application, before fresh-refill proof. The first owned subflow
+update returns `MPTCP_ENDPOINT_UNAVAILABLE`; the Client then records
+`INGRESS_TCP_STREAM_FAILED` and the application receives a connection reset. The original
+116 files remain unchanged (ZIP SHA-256
+`448be2f2e846b6de073fca62d3c4059be5b65195125d685fa0dfb17053d155f1`).
+Disposable cleanup reports zero owned objects and byte-identical host state, SHA-256
+`ed70b3cc6a3c37636ecd78599e64950c520a2a24d84e8c7532aa4b3df8cee106`.
+
+Source review found a concrete incompatibility: Linux v6.12's
+[`mptcp_event_addr_announced`](https://github.com/torvalds/linux/blob/v6.12/net/mptcp/pm_netlink.c)
+emits an IPv6 `ANNOUNCED` event with TOKEN, REM_ID, DPORT and DADDR6, without FAMILY.
+Our parser wrongly rejected that form. The correction accepts missing FAMILY only for
+that remote announcement, never an established/local tuple or an explicitly contradictory
+family. Eight targeted kernel checks pass, including the exact emitted shape, malformed
+and forged variants, and the existing real two-subflow disposable-kernel test; strict
+MPTCP Clippy and formatting pass. The original artifact contains no raw event frame, so
+this source-level defect is a plausible explanation of its kernel rejection, not a captured
+event identity. A new live run is still required; failure-injection and byte gates are unchanged.
+
+### Successful initial update, then fixture socket-format rejection
+
+[Run `36616966078` on `0b2e3c59`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36616966078)
+also remains **failed**, at `mptcp-refill-application` / `MPTCP_REFILL_APPLICATION_FAILED`.
+Unlike the previous run, its first owned subflow update returns `MPTCP_ENDPOINT_UPDATED`
+at 19:17:36.502 UTC. The retained Client kernel dump contains two established TCP subflows
+under the same MPTCP token, a successful MP_JOIN and an observed ADD_ADDR. It does not
+contain the raw netlink announcement frame, so it cannot establish the exact event that
+previously failed.
+
+The baseline observer rejects the actual device-bound socket spelling
+`[fd76:6f6c:7061:6ea5:e1f7:3:3068:1]%vpc37a42c7a2:55687`: its old parser accepted the
+interface zone only inside the brackets. Consequently no baseline is accepted and the
+fixture never opens its bulk-download release gate. Roughly 62 seconds after the helper
+update the application reports an incomplete download; the retained evidence does not
+identify the precise closer or timeout. The final Exit snapshot already contains a
+closing original socket and must not be reclassified as a valid live baseline.
+
+The fixture-only correction accepts the real `ss` zone position while binding any zone
+to the exact selected local interface. Duplicate/conflicting zones, invalid or overlong
+interface names, trailing text, wrong addresses and wrong ports remain rejected. Ten
+growth and fifteen refill parser/checker tests pass, including the actual retained
+endpoint spelling. No production lifetime, loss injection, release gate or byte threshold
+changes. Re-parsing retained Client rows can recover only partial kernel observations,
+not application transfer, warm retirement or fourth-path proof.
+
+The original 118 files remain unchanged (ZIP SHA-256
+`67c4f563fc7163cce4c4888cbd395b9761d1409fde313eb1a59b44607cdf87f1`).
+Disposable cleanup reports zero remaining owned objects; before/after host-state hashes
+match at `96425b125ebfe54dd4520dd41cc437387594b268b2ead134a323b798da45ab48`.
+A fresh live run is required to establish anything beyond the corrected observer.
+
+### Fourth-path data succeeds; normal retirement still fails
+
+[Run `36620197695` on `9c1eaff1`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36620197695)
+reaches `mptcp-refill-completion`, but remains **failed** at
+`MPTCP_REFILL_DISCONNECT_FAILED` / `CLIENT_CLEANUP_PENDING`. The same application completes
+all 268,435,456 bytes with the expected hash in both Client and destination receipts.
+Read-only rechecking of the original snapshots passes initial two-path and warm three-path
+progress, exact warm retirement, all eight raw projections and unchanged meta-socket
+lifetimes. Fresh path 4 gains 124,080 Client receive bytes and 122,760 Exit acknowledged
+bytes during the same transfer, both above the unchanged 65,536-byte gate. Fourteen retained
+captures pass their drain and basic privacy-boundary checks. These are partial original
+observations, not a successful full acceptance report or a throughput-improvement claim.
+
+The Client helper confirms `CONTEXT_DESTROYED`; the Exit helper also confirms destruction
+and then exact absence. Original Relay/control retirement receipts complete, but R4's
+upstream retirement remains unconfirmed. The source-level cause is concrete: Exit retirement
+membership contains only the original Finalize relays and control relay, while extension
+installation never records the newly authorized Relay. Its later valid retirement request
+therefore fails the retained-peer check even after live Exit owners have disappeared.
+
+The correction keeps original Finalize membership unchanged and retains a separate,
+bounded set of exact accepted extension scopes before an Authorize/Commit reply can escape.
+It requires the same parent/context, session, policy, expiry and Relay identity; only the
+opaque Exit service result may reach that production registration seam. There are at most
+eight extension records, matching existing transaction limits. An aborted or ambiguously
+acknowledged extension keeps destruction-only authority for eventual parent cleanup; it
+does not gain forwarding rights. Unknown/substituted peers and new admission after
+retirement remain rejected. Registration failure returns no successful extension reply
+and preserves existing helper cleanup ownership. A targeted real two-hop actor regression
+is added; its admission setup models an already accepted extension, not native probe proof.
+The exact two-hop actor regression, agent formatting and strict all-target agent Clippy
+pass after rebuilding in a branch-specific target directory. An earlier shared-target
+attempt used stale dependency artifacts from another worktree and is not verification.
+A fresh real transfer-and-retirement run remains necessary; the original run stays failed.
+
+All 167 original files remain unchanged, ZIP SHA-256
+`6b892b35cb799354816deba49ba656271ab457a3a569084507033a7c60cd1dab`.
+Disposable teardown reports zero remaining owned objects and unchanged host SHA-256
+`440fffc060d0624a44e1e5d24072598a1c837b9f4c9e3d89dbe3f05836eb61d8`;
+the product's failed normal disconnect/shutdown is not concealed by that later cleanup.
+
+### Fresh Relay cleanup succeeds; an original warm Relay cannot reconnect
+
+[Run `36624751596` on `c47e56fd`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36624751596)
+again completes 268,435,456 bytes at both application ends, SHA-256
+`0151d9c46ca3bcef1d9b4e4f4ac3c42c32a810a8c269272564e55b25e009cc54`.
+The unchanged original snapshots pass two-path progress, warm three-path progress,
+warm retirement, all eight raw projections and unchanged socket lifetimes. Fresh path 4
+carries 166,320 received bytes at the Client and 166,320 acknowledged bytes at the Exit
+in its checked interval; the healthy original path progresses too. All fourteen captures
+pass drain and basic privacy checks. These are partial observations, not a passed report.
+
+The accepted-extension retirement fix now has live effect: R4 obtains its upstream receipt
+and logs `ROUTE_RETIRE_RELAY_COMPLETE` at 20:26:47 UTC. The remaining failure is original
+warm Relay R1, whose repeated Exit retirement attempts report
+`ROUTE_RETIRE_OUTBOUND_DIAL_FAILED`. Both injected loss qdiscs had already been removed
+before normal disconnect. Exact failed dial addresses and causes were not retained, so
+the artifact does not establish which transport/address failed. The report remains
+**failed** at `MPTCP_REFILL_DISCONNECT_FAILED`; the Client's shutdown failure remains visible.
+
+Source inspection identifies a reconnect defect in the retained-address path: pinned
+libp2p-kad removes individual addresses on transport failure, whereas our bounded admission
+registry keeps their provenance and does not reinsert duplicate admissions. Peer-ID-only
+retirement can therefore keep trying an unusable surviving address after a temporary loss.
+The candidate restores only previously `Known`, still-canonical and local-scope-eligible
+addresses for the exact Exit when sending a retirement request. It imports no new address,
+does not resurrect Identify/mDNS-only or purged client addresses, does not choose a new Exit,
+and grants no forwarding authority. A focused regression delivers a real Kademlia
+`FromSwarm::DialFailure` event and verifies known-listener recovery without reviving other
+removed addresses. It passes locally; this reproduces the source defect, not the uncaptured
+endpoint identity of the failed run. Closed-category diagnostics now retain dial causes only
+for an Exit with pending retirement, without logging address/peer/error text. A new live
+run must still establish full normal cleanup; loss, timing, payload and acceptance gates
+are unchanged.
+
+All 169 original files remain unchanged, ZIP SHA-256
+`3a05e0f5aa1aeed53b38ffdc0a8ea32384efe81bec7fefd081078b278eba81bc`.
+Final disposable cleanup reports zero owned objects and equal host-state SHA-256
+`438531a184d131f9c3811715741fc01e731948a22d1f0e0a3dbffe952de08aa8`.
+
+
+===== docs/network/MPTCP_REFILL.md :: Source-only userspace-PM checks =====
+Source file SHA-256: be2a4548c16eee2b0de59e9e86f5d122c8145d1bf0970d303de755ce2de44902
+
+Targeted local checks pass: ten subflow/descriptor checks (including the existing real
+two-subflow disposable-kernel test), the Client monotone snapshot lifecycle, kernel-event
+parser, private-namespace bootstrap predicate, two signed snapshot protocol checks and
+the schema-tag parity check. Four-crate all-target/all-feature strict Clippy, formatting
+and fourteen unchanged refill-fixture checks also pass. These do not substitute for a
+new live userspace-PM/fresh-fourth-path run.
+
+
+
+===== docs/network/UNBOUND_FALLBACK.md :: Retained DNS trials and development history =====
+Source file SHA-256: fdebd3547c98b8fc1112814920d484065867f41b10e3f969a8d817e8e99f0c1a
+
+## Retained trials and development history
+
+<details>
+<summary>Original failures, intermediate fixes and scoped proofs</summary>
+
+These records are preserved in their original development context. Words such as “now”,
+“candidate”, “default stays system” and “not yet in main” refer to that stage. A later
+passing result does not change an earlier failure, its hashes or its missing evidence.
+
+### Early package and protocol checks
+
+The new disposable package proof installs the source-built companion and stages the same
+guest development binaries through the normal Debian package layout. It checks actual
+roles-off startup, missing-worker rejection by the installed agent, and the ordinary
+install/upgrade/remove lifecycle. A separate resolver probe inherits the shipped agent
+sandbox and must perform real DNSSEC resolution; its explicit executable/one-shot fixture
+deviations do not prove a full agent DNS query or a release build. Both original package
+reports and the independent native resolver report are retained. The first package run
+passes source binding, inert startup and missing-worker rejection, but fails its sandbox
+probe before upgrade/removal proof. See the source-exact results below.
+
+Native compilation against the hash-checked Debian library passes. Nine focused
+version-2 protocol, independent-proof, source-choice and owned inert-process checks
+pass. They include seeded proof collection without a repeated address lookup, rejection
+of forged signatures despite AD, and child cleanup after cancellation/timeout. These
+local checks do not prove the new native proof-cache path in a real deployment.
+All 19 focused DNS tests, strict UDP all-target/all-feature Clippy, formatting and
+four version-2 guest-report checks also pass.
+Those earlier local checks do not by themselves prove the new packaged default.
+
+The earlier rollout prerequisite was:
+
+> The intended packaged default requires the private worker above to pass a
+> simultaneous Client+Exit datapath proof. Until then the default stays `system`.
+
+That prerequisite is historical; the source default and retained scoped results are described
+above. The following original sequence explains how those results were reached.
+
+The existing `dns-cache` KVM scenario now also invokes a separate
+`private-unbound-proof` preflight. It source-builds the real worker inside the
+disposable Debian 13 guest against the exact SHA-checked Debian packages recorded
+in `THIRD_PARTY_LICENSES.md`. A public Rust `ExitResolver` example checks actual
+native verdicts for `iana.org`, `neverssl.com` (only passes if actually unsigned)
+and the deliberately broken `dnssec-failed.org` test described by
+[ICANN](https://www.icann.org/dns-resolvers-checking-current-trust-anchors).
+No alternative trust anchor, forged secure verdict or fixed positive reply is
+used. A private guest mount namespace supplies an OS-positive `/etc/hosts`
+sentinel: private bogus/timeout must fail despite that tempting fallback.
+An observer stops only the probe's own native child via pidfd and checks exact
+PID/start disappearance while the caller remains alive, for both timeout and
+caller cancellation. The extra report retains worker/anchor digests and the
+actual package version. Dependency or public-DNS availability failure fails the
+preflight; it is not a skipped PASS.
+
+`private-unbound-proof.json` is **additional**, not a replacement for existing
+C05 protected peer/cache evidence. It explicitly sets
+`normal_client_route_proven` and `reciprocal_client_exit_proven` to false. The version-2
+candidate additionally requires a genuine native signed lookup to produce independent
+shareable proof and a subsequent local-cache answer. This is still distinct from a
+live peer receiving that proof; a passing new guest artifact is required.
+Only the disposable VM installs these dependencies or performs the live queries.
+
+The [first live run on `9aa777fd`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36594857358)
+**failed**, with all 137 original exported files retained. Its native worker actually resolves
+the signed test name with `dnssec_secure=true` (3,601 ms, TTL 3,595 s) and the unsigned test
+name with `dnssec_secure=false` (3,624 ms, TTL 56 s), despite the OS-positive sentinel.
+The bogus case produces `PROBE_BOGUS_NO_RESULT`; its typed Rust failure was not retained, so
+timeout versus another failure is not established. Native timeout/cancel cases were not reached.
+The original C05 phase separately obtains one independently validated upstream answer, then
+fails `DNS_CACHE_CAPTURE_INCOMPLETE`; this is not completed peer/local-cache evidence.
+Its packet observers failed with a `frame` keyword mismatch at the shared capture adapter;
+the candidate fixes that interface and passes five focused DNS capture/report checks.
+The original failed artifact is unchanged, and that fix alone proves no live C05 result.
+Guest hosts and final host-state bytes remain unchanged, and topology cleanup completes.
+Original ZIP SHA-256: `10e197cc29b4598a90962e92026f2fbd24c075833e2b223b1238840a282921e7`.
+These partial observations are real resolver evidence, not a passing full fallback/deployment proof.
+
+The [version-2 run on `6aaa5c95`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36598970370)
+also **fails overall**. Its separate protected DNS-cache report now passes: real A/AAAA
+upstream validation, peer retrieval, local reuse and unsigned fallback, with drained privacy
+captures, complete cleanup and unchanged guest host state. The exact-source report checker
+and a rebuild from the original raw evidence both pass. This does not prove Unbound supplied
+those shared packets: that existing C05 fixture uses its separately verified upstream.
+
+The native preflight returns an unsigned answer in 2,192 ms and proves exact native-child
+reaping on timeout (4,501 ms) and caller cancellation (1,502 ms), while the caller remains
+alive. Its signed and deliberately bogus questions instead return `Unavailable` at 4,502 ms
+and 4,501 ms. Neither a validated signed answer nor a native `Bogus` verdict was obtained;
+these deadline results are not relabelled as those missing proofs. The raw worker response
+and recursive packet progress were not retained, so the particular upstream delay is unknown.
+The original 276-file artifact remains unchanged (ZIP SHA-256
+`dac9505dd913fbeac4f30ca15a6772e4504cc94e0a24fc3068d4de16073d45b1`).
+Native proof-cache linkage and simultaneous reciprocal deployment remain incomplete;
+the default is still `system`.
+The follow-up preflight retains all five original gates. Only after a signed or bogus case
+returns `Unavailable`, it may run one separate 30-second native timing diagnostic per failed
+case. These fixed-question guest-only observations retain no raw packet or log, have their
+own bounded child cleanup, and explicitly cannot count as acceptance or extend the normal
+five-second resolution budget. Six focused report/protocol checks pass; timing results are
+recorded below.
+
+The [diagnostic run on `84be45ac`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36602822670)
+still **fails overall**, but now proves the signed private-worker-to-local-cache linkage:
+the native lookup returns in 3,297 ms, the original answer validates independently against
+the built-in roots, and policy-bound local reuse does not extend its TTL. The unsigned answer
+returns in 3,611 ms, remains unshared, and timeout/cancel reaping passes again. The deliberately
+bogus name instead returns `Unavailable` at 4,502 ms. Its separate fresh native diagnostic
+also produces no complete reply within 30,032 ms and is killed/reaped; extending the caller's
+budget is therefore not a demonstrated fix. No actual native `Bogus` verdict is claimed.
+The separate protected C05 report passes again but uses its own upstream, not these native
+answers. Guest hosts, topology cleanup and byte-identical guest-parent network snapshots pass.
+The original 298-file artifact is unchanged, ZIP SHA-256
+`b568467b21f7644a17c1f713f1782316a6ccf744ff03a77dafa82cde416031ff`.
+Native-to-peer distribution and reciprocal deployment remain unproved; `system` remains the
+default pending those integration steps.
+
+The next private-DNS VM fixture also checks the runner's IPv6 address/route information
+without sending packets. Only an explicit kernel `ENETUNREACH` for the fixed root selector
+disables IPv6 on QEMU's outer user network; unknown observations stop before VM launch.
+A present route keeps that option enabled but does not establish Internet reachability.
+The bounded, sanitized decision is retained as `qemu-outer-uplink.json`. Other scenarios,
+product IPv6, internal WireGuard paths and all acceptance gates remain unchanged. Five pure
+decision checks pass. This fixture candidate is not evidence of the original runner's
+IPv6 state or a demonstrated correction of the signed/bogus failures.
+
+The [IPv6-observed run on `4930f8e9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36605711028)
+now **passes all five native preflight cases** with the exact same native worker hash as
+`84be45ac`: signed recursion plus independent proof/local reuse in 1,436 ms, unsigned recursion
+in 440 ms, a real `Bogus` verdict in 937 ms, timeout reaping in 4,501 ms and caller-cancel
+reaping in 1,503 ms. The runner actually reports no IPv6 route to the fixed root selector,
+so only QEMU outer IPv6 is disabled; product and internal-overlay IPv6 are unchanged.
+The exact-source native report checker passes and no extended diagnostic is needed.
+This supports the outer-uplink explanation without changing validation or resolution budgets.
+
+The workflow still **fails overall**, now in the separate protected C05 phase at
+`dns-cache-warm-a-aaaa` / `DNS_CACHE_NORMAL_ROUTE_UNAVAILABLE`. That route failure is not
+relabelled as a native validation failure or a successful combined deployment. The original
+167-file artifact is retained, ZIP SHA-256
+`52cab14a548df4c1ca48405a4cbd8ba6ddf2494efbf6022fc259922f3c0d82ba`.
+Cleanup completes and guest-parent snapshots are byte-identical.
+
+The new `reciprocity-private-dns` scenario is an executable candidate, not a live PASS.
+It retains the same four all-role agents and concurrent native UDP flows from the reciprocal
+fixture, then requires an ordinary protected application lookup to use the actually selected
+Exit's private worker and a second lookup to reuse independently validated local proof.
+Four owned guest-only TAPs supply independent DNS uplinks; DROP-only containment prevents
+fixture addresses or forwarded sessions from escaping over those TAPs. It adds no product
+firewall exemption and changes neither the developer host nor the VM parent's networking.
+Separate drained packet captures, exact worker ownership, original UDP lifetimes, TAP/process
+cleanup and unchanged host state remain mandatory. Five focused inert fixture tests and the
+static wrapper contract pass; no real reciprocal private-DNS result is claimed yet.
+
+Its [first live run on `4930f8e9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36605721961)
+fails during topology setup, before any reciprocal DNS lookup: the owned slirp uplink reports
+`cannot pivot_root to /tmp` / `create_sandbox failed`. Sandbox and seccomp are not disabled
+to bypass this result. Original 16-file artifact ZIP SHA-256:
+`74796b2199c6f7cf767c8f412a61cc789cf35578444a11c2948d03e0af3c030d`.
+The uplink/topology cleanup and unchanged guest-parent state pass; the deployment gate stays open.
+
+The [mount-isolated run on `71d0567d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36609662468)
+gets all four sandboxed uplinks and concurrent native UDP contexts running, but still **fails**
+with `PRIVATE_DNS_SUBPROCESS_TIMEOUT`. The fixture's first protected-DNS connect command hits
+its 20-second subprocess limit while admission reports the preselection owner busy; the Client
+then reports `CONNECT_DNS_ROUTE_READY` just after that boundary. No application DNS question
+or private resolver child is observed in this run. This is not proof of reciprocal DNS reuse.
+The candidate gives only that ordinary connect operation its existing 75-second caller budget;
+it does not extend the product's signed flow lifetime or count an expired UDP window as passing.
+The complete 147-file original artifact is retained, ZIP SHA-256
+`c1b5f3f0a692b4ef32d4bc5dca052e60c746eecb3f2c185126197c0a63b6017c`.
+Uplink/topology cleanup passes with zero leftovers and byte-identical host snapshots.
+
+The [bounded-reuse run on `859c9e90`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36613320245)
+**passes the complete C05 workflow**, including both unchanged exact-source report checkers.
+All five native private-Unbound cases pass: independently validated signed recursion/local
+reuse (673 ms), unsigned recursion (821 ms), a real Bogus verdict (2,312 ms), timeout reaping
+(4,500 ms) and cancellation reaping (1,503 ms). The separate protected-network phases prove
+A/AAAA delivery on the same actual application socket and route, independently verified
+proof fetched by a different Exit, non-shareable unsigned fallback, and local reuse after
+the original proof-serving Exit is actually stopped. Group retirement, capture completeness,
+privacy checks, zero owned leftovers and byte-identical host state all pass. The 275-file
+original artifact is retained, ZIP SHA-256
+`389b25478906eb89a058359b01a8fe09f9637c59797bd8022c396be28d710111`.
+The C05 peer proof and live native-worker preflight are separate checks, not one claim that
+every production reciprocal deployment is now ready. That run did not switch the default;
+the current default/package candidate is described above.
+
+The [reciprocal run on the same source](https://github.com/VOLPAROSSA/volparossa/actions/runs/36613323557)
+still **fails**. Its real protected warm lookup takes 1,610 ms through the selected Exit's
+unprivileged private worker; the same socket's local-cache repeat takes 3 ms, with no new
+worker, exact upstream/local metric increments and cumulative response bytes 42 then 84.
+It subsequently times out while reading route status during idle cleanup. Additionally,
+the preserved Exit captures contain two unparsed TAP frames in the warm phase and one
+unrecognized mDNS source in the local phase. Three incoming DNS response packets, but no
+outgoing DNS requests, also cross the local-phase boundary; their individual provenance is
+not proved. These capture errors are not silently accepted as a privacy PASS. Some completed
+pre-cleanup observations were not checkpointed in the failed report and are not invented.
+All four original echo applications report success; final fixture cleanup and host-state
+comparison pass, but the complete combined gate remains open. Original 169-file artifact
+ZIP SHA-256: `a27b2a97d4b04ff501b85852069bdad26c0340c4779f7fc74efb54b2e06b734b`.
+
+The [next reciprocal run on `383b8117`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36617479438)
+also remains **failed**, now at capture validation. Its checkpoints retain an 819-ms genuine
+private-Unbound answer and a 25-ms same-socket local-cache answer, one original worker/no new
+worker, unchanged four-node agent identities and UDP contexts, and a post-DNS echo on each
+original flow. Natural retirement is observed through 404 completed status reads, no status
+timeouts and eventual absence of the owned DNS context; final phase retirement fields were
+not serialized before validation failed and are not fabricated. Seven captures have no
+malformed/forbidden packets; the warm Exit capture rejects one ARP reply from the exact
+private gateway to its TAP with `tap_arp_shape`. Its length/raw bytes were not exported, so
+the precise length/padding cause cannot be read back from that artifact. Final cleanup and
+unchanged host state pass. All 169 originals are retained (ZIP SHA-256
+`8b57f4e81b79ff6b9b2de23a3ad8c31f2d09a92f04d00d36b92477e1a741891f`).
+
+The current capture candidate admits the exact 64-byte, zero-padded gateway ARP reply
+emitted by the pinned Debian libslirp implementation, retaining the exact TAP, endpoint,
+hardware/protocol and MAC bindings. It does not relax IP/DNS capture rules. Six targeted
+capture checks and nineteen shared capture checks pass. The older frame's length was not
+retained, so identifying that historical failure as this specific padding case remains an
+inference; the later source-exact reciprocal run below passes without rewriting that result.
+
+### Reciprocal private resolution and local reuse pass
+
+[Run `36621104333` on `c2e21c6c`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36621104333)
+passes the complete scoped reciprocal DNS gate. Four unchanged Client/Relay/Exit agents
+retain their original UDP flows. An actual protected application lookup starts one
+unprivileged private Unbound child at the selected Exit and returns an independently
+validated answer in 1,053 ms. The same application socket and route return the repeated
+answer from the local proof cache in 5 ms, with no new worker or outgoing recursive query.
+The worker is observed and reaped; both answers have exact source-counter increments.
+All four original flows complete a subsequent echo. These timings describe this trial,
+not a general latency guarantee or a proof that peer caching is always fastest.
+
+Natural DNS-route retirement occurs after the concurrent echo window: the 30-second idle
+bound is observed at 31,665 ms, within unchanged signed authorization. All 408 status reads
+complete without timeout and the owned context disappears. Eight drained captures contain
+2,155 frames with no malformed/forbidden packets, drops or truncation. The local phase's
+two incoming DNS responses remain explicitly unattributed residual traffic; it initiates
+zero recursive queries. Disposable cleanup leaves zero owned objects and host-state
+SHA-256 remains `bb473ef29464a9fca6dcedb2a9187be239956aa1ac8e1ac46ed5a8a1050b7853`.
+The source-exact checker passes again against all 170 retained original files, ZIP SHA-256
+`711039e5b1ac1cf4e007c16c47d3bab9acb2f8ea316af9988419da79e8ef4fd0`.
+
+The [separate package/C05 run on the same source](https://github.com/VOLPAROSSA/volparossa/actions/runs/36621100178)
+remains **failed**. Its protected synthetic-DNSSEC upstream/peer/offline-local cache sequence
+passes, as do the five actual native-Unbound signed/unsigned/bogus/timeout/cancellation cases.
+The package's source/binary binding, inert roles-off startup with the worker hidden, and
+effective-Exit rejection with `DNS_PRIVATE_WORKER_UNAVAILABLE` also pass. Its separate
+shipped-sandbox resolver probe reports `SANDBOX_PROBE_FAILED`; the package upgrade/removal
+sequence is not proven. That fixture discarded its probe result/stderr, so the report does
+not establish the specific failure cause. All 282 original files remain failed-run evidence,
+ZIP SHA-256 `6b0207484f77e44f308141ef7d00d081b8c00850a36c21215c85b25e34aaec18`.
+Successful route/native checks are not substituted for the missing package acceptance.
+The next fixture revision retains bounded manager exit/status fields and fixed probe-result
+and stderr categories before its owned temporary files are removed; it does not relax the
+shipped sandbox or export raw output. Nine focused package-proof checks pass. The separate
+quality-gate failure was a stale static readiness-call count after adding the optional
+probe; the corrected lifecycle contract now passes without changing production behavior.
+
+The diagnostic [repeat on `d4791119`, run `36624654504`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36624654504)
+also remains **failed**. C05 and all five native cases pass again, but the sandbox fixture
+stops before executing its probe: systemd reports `ExecMainCode=1`, `ExecMainStatus=203`
+(`EXEC`), after 343 ms, with no worker observed and empty result/stderr. Installed-agent
+startup guards, source bindings and restoration pass. This identifies the executable-start
+boundary, not a libunbound runtime failure; the underlying exec errno and historical mount
+flags were not retained, so a specific permission or `noexec` cause is not asserted.
+All 270 original files are retained, ZIP SHA-256
+`bf579e6c2a4e89f45d44b64857e5445b9e42450bee1831e410257fb692276873`.
+
+The next fixture stages only its source-exact probe executable in a root-owned temporary
+`/usr/libexec` directory, alongside the packaged worker's executable location, instead of
+executing from `/run`. ACK, hosts sentinel and bounded outputs remain private runtime data.
+It retains the executable/runtime mount flags and checks the actual agent user's read/execute
+access before starting the unit, without invoking the probe outside its sandbox. Both exact
+owned temporary directories are removed after the unit stops. No shipped service, sandbox,
+production executable or resolver behavior is changed. Ten focused package-proof checks
+pass; live package acceptance remains pending.
+
+The [run on `3e5c8051`, `36713955757`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36713955757)
+now **passes the package DNS probe and all five native cases**, checked against their
+unchanged exact-source validators. The probe really executes under the inherited agent
+sandbox: 857 ms for launch/observation, 504 ms for the positive independently validated
+answer, same-agent-UID worker observation/reaping and local cache reuse. The current
+runtime mount is `noexec` and the `/usr/libexec` staging mount is executable; source hashes
+and actual agent-user read/execute access are retained. Those current mount observations
+do not invent missing historical mount evidence. Source binding, roles-off startup with
+worker hidden, effective-Exit missing-worker rejection, restored configuration and unchanged
+installed unit all pass. The native signed/unsigned/bogus/timeout/cancel cases separately
+pass; the standalone signed lookup takes 1,217 ms.
+
+The full run remains **failed** in two fixture boundaries, not relabelled as package/C05
+acceptance. The ordinary package lifecycle still expects a persistent native MPQUIC PID
+although the roles-off launcher correctly exits with success; its build log records that
+inert exit, and no complete package-lifecycle report was produced. The corrected lifecycle
+version 2 requires the helper and agent to stay active and restart on actual package upgrade,
+while the native launcher must have exited successfully with zero PID and no native sockets.
+It reports `native_mpquic_running: false` explicitly. Existing identity, removal and network
+state checks remain mandatory; no role is enabled just to satisfy a test.
+
+The separate C05 topology stops at `dns-cache-prepare` before any protected application
+query: the fixed public DoH collector reports insufficient remaining original TTL/signature
+validity for its unchanged 60-second replay margin. The artifact does not identify which
+record was shortest. The collector now allows at most three rounds/21 public-record fetches
+within 120 seconds, waiting for a short-lived original record to expire before fetching
+only the fixed questions that lack sufficient remaining validity. Existing still-fresh wire
+records retain their original receive time, TTL and signature; no expiry is extended, no new
+resolver is trusted, and cryptographic validation remains the production resolver's job.
+Seven socket-free recording tests, ten package-DNS checks, six native-proof checks and the
+nonmutating package lifecycle contract pass. These checks are not the pending live lifecycle
+and protected-query proof.
+
+All 83 original files remain unchanged, ZIP SHA-256
+`aa98c974133e21fb4a30f6036ee2452a3d864eb1d9e000d500e2161dabf23e0b`.
+Disposable topology cleanup completes with zero owned objects and equal host-state SHA-256
+`bb473ef29464a9fca6dcedb2a9187be239956aa1ac8e1ac46ed5a8a1050b7853`.
+
+The [run on `c34af147`, `36716641748`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36716641748)
+passes the refreshed protected C05 sequence, all five native cases and the installed DNS
+startup/sandbox probe under their exact-source validators. The sandbox's signed lookup
+takes 1,112 ms (1,522 ms including launch/observation); the standalone signed lookup takes
+1,241 ms. Original configuration bytes and installed agent unit are restored. These are
+scoped passes, not complete package acceptance: the lifecycle stops before upgrade/removal,
+and its log shows `volparossa-mpquic --mode exit` still active after the DNS startup fixture.
+
+The fixture's temporary effective-Exit configuration starts that native service through
+the real agent's unchanged `Wants=` dependency. Restoring configuration and restarting only
+the agent cannot retire an already-running dependency. The correction stops both fixture
+agent and native service before restoring configuration/drop-in state, then starts the
+original agent and requires successful roles-off native exit, no remaining native sockets
+and the unchanged active helper PID. The same cleanup runs when the startup proof fails.
+Twelve pure package-proof checks, including a stateful dependency/cleanup regression and
+negative restoration reports, pass; live lifecycle acceptance still requires a new run.
+Neither the shipped unit nor the two-active-services/roles-off-native lifecycle gate is weakened.
+
+All 270 original files remain retained, ZIP SHA-256
+`97c5acadc568ea94a5a5f862352e780d8f31b8a627b32d041d90b7d0c6f67113`.
+Protected topology cleanup leaves zero owned objects; its host-state hashes both remain
+`bb473ef29464a9fca6dcedb2a9187be239956aa1ac8e1ac46ed5a8a1050b7853`.
+
+### Integrated repeat after MPTCP refill
+
+[Run `36722534727`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36722534727)
+passes on `c5ac8331073aa48b1c3eb6ca6917eb6f1a7d153b`. All three exact-source checkers
+pass: protected C05 cache sequence, five native private-Unbound cases, and the installed
+resolver/startup proof with complete install/upgrade/remove lifecycle. This repeats the
+scoped DNS/package gates after integrating the MPTCP-refill changes; it is not another
+reciprocal-route test or evidence of a release build.
+
+All 285 original files are retained, ZIP SHA-256
+`2dc48f086c11c7531ea971b513c21df253cd06f1aa8a32ab808a21bc5827dfb8`.
+The guest exits successfully, cleanup leaves zero owned objects, and before/after host-state
+SHA-256 remains `bb473ef29464a9fca6dcedb2a9187be239956aa1ac8e1ac46ed5a8a1050b7853`.
+Earlier failed runs remain failed historical evidence. The separate native preflight,
+protected cache sequence and installed resolver example retain their distinct scopes.
+
+### Connection-reuse development record
+
+Three targeted Rust checks cover A/AAAA correlation, changed owners/policy and unextended
+expiry/request limits. The C05 fixture now keeps a real application socket open for each
+A/AAAA pair and observes actual cumulative bytes on that same route, with separate captures
+and source counters. Explicit retirement still separates Exit changes and the offline-cache
+phase. The source-exact C05 run at `859c9e90` above now passes this sequence; the original
+failed route-selection runs remain failed.
+
+The reciprocal fixture likewise keeps one real UDP socket for its warm A lookup and
+subsequent A cache hit. PID, socket cookie, source port, sequence and cumulative route
+bytes must agree across separate capture/metric phases. Both answers and the unchanged
+four-node agent/UDP-context snapshots must precede an actual final echo on every original
+flow. One natural 30-second DNS-association retirement is then observed outside that
+concurrent window, without extending signed authorization or disconnecting the other flow.
+
+The next reciprocal candidate moves remote/helper retirement confirmation outside the
+route-state mutex. Status remains responsive while the exact cleanup owner is retained;
+only that owner's confirmed success can publish Idle. The original cleanup deadline is
+unchanged. Fixture checkpoints now retain completed observations before a later failure,
+and a timed-out status read remains unknown rather than proving route absence. Capture
+decoding admits only canonical ARP between this fixture's exact private TAP endpoints on
+that TAP, and preserves the existing Exit mDNS aliases. Locally observed inbound recursive
+responses remain counted as unattributed residual packets: a cache-hit phase must still
+have zero outgoing recursive queries, an exact local-cache counter increment and no new
+native worker. These source fixes do not retrospectively identify the rejected packets or
+the exact retirement owner in the failed `859c9e90` run.
+
+The new responsiveness test and four existing disconnect/cancellation/quarantine checks
+pass, as do strict agent Clippy, formatting, eleven reciprocal-fixture checks (the
+separate privileged mount probe is opt-in), four exact-TAP capture checks and nineteen
+shared-capture regressions. The later `c2e21c6c` run above additionally establishes the
+scoped four-role live route; it does not establish every DNS or packaging case.
+
+Focused tests cover configuration rejection, bounded CNAME/TTL/provenance parsing, malformed and
+negative responses, rebinding rejection, and an actual framed TCP backend in a disposable test
+namespace. That backend uses controlled DNS responses, **not an executed Unbound daemon**.
+On 2026-09-29, both configuration tests and all ten focused DNS tests pass, including the
+isolated TCP exchange. Strict Clippy passes for the affected config, UDP and agent crates
+with all targets/features. Reproduce with `cargo test -p volparossa-config -p volparossa-udp
+--lib dns`; this does not install Unbound or change the host resolver.
+Those focused checks alone do not prove deployed Unbound validation, private listener
+ownership, reciprocal-role routing, fastest-source choice, or the complete fallback feature.
+
+The genuine-Unbound signed/unsigned/bogus and timeout/cancellation preflight plus protected
+C05 cache sequence and combined four-role private-Unbound route now have the scoped live
+evidence above, as does the complete development-package lifecycle. The private-worker
+default is merged into `main`. Release-build acceptance, remaining CNAME/NXDOMAIN/expiry
+cases and live fastest-source comparisons still need their relevant evidence; neither
+the package/cache passes nor the separate reciprocal proof imply full fallback or alpha
+acceptance beyond their recorded scopes.
+
+</details>
+
+
+===== docs/network/UNBOUND_FALLBACK.md :: Exact retained development-package and cache result =====
+Source file SHA-256: fdebd3547c98b8fc1112814920d484065867f41b10e3f969a8d817e8e99f0c1a
+
+<details>
+<summary>Exact retained development-package and cache result</summary>
+
+### Complete development-package and cache pass
+
+[Run `36719475479`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36719475479)
+passes on `138787d148482ece6bc1f2c1f1060b7126a34d1e` (tree
+`03ba08afa61e4987b358f49c0c5b579cbfcd550b`). Its 277 original files are retained unchanged;
+artifact ZIP SHA-256 is `c3e7180d9ccfebe08f35a35fd969e45003bdfc66f99b0184a1d4e9ede21c68c9`.
+
+The real protected A/AAAA sequence exercises independently root-validated upstream,
+peer and local answers, plus the unsigned trusted fallback. All five native Unbound
+cases pass: signed (880 ms), unsigned (474 ms), bogus rejection, timeout and cancellation.
+The latter two explicitly stop and reap the owned worker; no OS-resolver fallback is used.
+
+The installed-agent startup proof rejects missing worker assets for an effective Exit,
+allows inert roles-off startup and restores both the temporary native dependency and
+original helper lifetime. The resolver probe in the installed sandbox observes and reaps
+the same-agent-UID worker, independently verifies its answer and reuses the local cache.
+It remains an explicit resolver example, not a full installed-agent DNS request.
+
+The complete package lifecycle now passes: services are not enabled by installation;
+helper and agent start and restart on upgrade; roles-off native MPQUIC stays inert;
+uninstall stops services and removes package files while preserving identity/configuration.
+This uses source-bound development-staged binaries, not release-build evidence.
+Topology cleanup leaves zero owned objects. Before/after host-state SHA-256 is unchanged:
+`bb473ef29464a9fca6dcedb2a9187be239956aa1ac8e1ac46ed5a8a1050b7853`.
+
+</details>
+
+===== docs/network/UNBOUND_FALLBACK.md :: Merged private-default integration receipt =====
+Source file SHA-256: fdebd3547c98b8fc1112814920d484065867f41b10e3f969a8d817e8e99f0c1a
+
+<a id="private-packaged-worker-candidate"></a>
+
+The development default on `main` is now the bounded private Unbound worker. The source-exact
+protected DNS cache sequence, native fallback, installed resolver sandbox and complete
+install/upgrade/remove lifecycle pass again on `c5ac8331`, including the merged MPTCP-refill
+changes. [PR #169](https://github.com/VOLPAROSSA/volparossa/pull/169) is merged as
+`3d9b0d6fc6185c153fbf00d24e2b1ac446df7822`. The reciprocal-role route retains its
+separate earlier passing proof; this is not a release-build or full-alpha claim.
+The earlier failed runs below remain failures with their original scopes. No host DNS,
+routes, firewall, resolver service or trust anchors are changed automatically.
+
+
+
+===== docs/network/UNBOUND_FALLBACK.md :: Sequential source-choice source checks =====
+Source file SHA-256: fdebd3547c98b8fc1112814920d484065867f41b10e3f969a8d817e8e99f0c1a
+
+The focused sequential-choice test and strict UDP all-target/all-feature Clippy
+pass. The controlled test covers peer timeout/drop before fallback, bypass during
+cooldown, a later successful peer probe without a worker, and exclusion-scope
+enforcement. It is not recursive DNS or a live-network speed comparison; the
+separate guest preflight below retains its own evidence boundary.
+
+
+
+===== docs/architecture/PROTOCOL.md :: Historical API6 implementation notes =====
+Source file SHA-256: e16534614964787de15daa0245b4546737e80873e13935ad1c5a39246268fb2b
+
+### Historical API6 implementation notes
+
+The following API6 design/checkpoint notes predate the current integrated runtime. Their old
+version/domain literals and statements about dormant backends are historical, not current API7
+configuration or completion claims; current code and the integration status above take precedence.
+
+`NativeRequest` contains canonical API version 6, a nonzero 16-byte nonce, a target native-process
+instance, and one operation. Versions 1 through 5 and every future version are rejected before
+dispatch. One control-socket contact carries exactly one request, with one total deadline and a
+required client write-half close before dispatch. `Preflight` is the sole operation with an empty
+target: it names the expected client or exit role and returns the native process's fresh, nonzero
+32-byte per-start instance. Every later request targets that exact instance and fails with
+`StaleInstance` after a restart; the Rust client never hides this by automatically preflighting or
+retrying retained route authority. This is process-lifetime correlation over the current same-UID
+local channel, not binary attestation or authentication against an explicitly untrusted agent.
+Production packaging must still provide separate role sockets and service identities before this
+channel can carry trusted route authority.
+
+The route operations are:
+
+- `StartSession`: 16-byte context, 32-byte exit SPKI SHA-256 pin, minimum paths, non-zero MASQUE
+  context ID, explicit multipath/single-path mode, an exact 43-character base64url per-route
+  credential, exact TLS server name, and an expiry no more than fifteen minutes ahead. It also
+  carries the signed reservation/finalize IDs, bearer commitment, certificate digest, and exact
+  client/exit native instances. The client instance must equal the request target. The native check
+  establishes credential encoding syntax and commitment equality, not generator entropy;
+- `StartExitSession`: the exact context, 43-character base64url credential, expiry, one-path
+  `SinglePathGeneralUdp` shape, MASQUE context ID, nonzero exit-SPKI pin, TLS server name, path ID,
+  exact exit-listener and expected-client IPv6 overlay tuples, nonzero reservation hash, and
+  in-memory certificate-chain/private-key PEM bounded to 64 KiB/16 KiB. It carries the same signed
+  reservation/finalize, commitment, certificate and process-instance scope as `StartSession`; the
+  exit instance must equal the request target. No pathname is accepted;
+- `AddPath`: context/path ID, exact IPv6 local/remote overlay addresses, local/remote UDP ports, and
+  a 32-byte relay-reservation hash. The address pair must use `fd76:6f6c:7061::/48`, embed the path
+  ID in segment six, share one `/112`, and use fixed client host `1` and exit host `4`;
+- `RemovePath`, `GetStatus`, and `StopSession`: exact context and, where relevant, path;
+- `SendDatagram`: context, MASQUE context ID, and one already-authorized bounded IPv4/IPv6
+  datagram;
+- `ReceiveDatagram`: exact context and MASQUE context ID for one bounded reverse poll.
+
+The canonical API-v6 `StartExitSession` field tags are deliberately append-only relative to its
+old six-field shape:
+
+| Tag | Field |
+|---:|---|
+| 1 | `route_context_id` |
+| 2 | `auth_secret` |
+| 3 | `expires_at_ms` |
+| 4 | `minimum_paths` |
+| 5 | `masque_context_id` |
+| 6 | `transport_mode` |
+| 7 | `exit_spki_sha256` |
+| 8 | `tls_server_name` |
+| 9 | `path_id` |
+| 10 | `listener_ip` |
+| 11 | `listener_port` |
+| 12 | `expected_client_ip` |
+| 13 | `expected_client_port` |
+| 14 | `reservation_hash` |
+| 15 | `tls_certificate_pem` |
+| 16 | `tls_private_key_pem` |
+| 17 | `reservation_id` |
+| 18 | `finalize_id` |
+| 19 | `auth_commitment` |
+| 20 | `certificate_sha256` |
+| 21 | `client_native_instance_id` |
+| 22 | `exit_native_instance_id` |
+
+Before the framed protobuf, every contact sends one fixed 32-byte binding as a stream prefix.
+Because `SOCK_STREAM` may split it across reads, native assembles the complete prefix; any
+descriptor must accompany its first received byte and later ancillary data is forbidden.
+`AddPath` and `StartExitSession` each bind exactly one `SCM_RIGHTS` UDP descriptor to the
+canonical request with SHA-256 over a separate NUL-terminated API-v6 domain
+(`VOLPAROSSA-MPQUIC-ADD-PATH-FD-V6` or `VOLPAROSSA-MPQUIC-START-EXIT-FD-V6`), the four-byte
+big-endian canonical payload length, and the payload. All other operations require an all-zero
+binding and zero descriptors. Missing, extra, incomplete, late, cross-domain, wrongly bound, or
+otherwise unexpected ancillary data is rejected and every received descriptor is closed.
+
+For `AddPath`, Rust validates the socket before transfer and the active native client backend
+repeats its UDP/tuple/overlay checks before mqvpn adoption. For `StartExitSession`, Rust requires an
+unconnected nonblocking close-on-exec IPv6-only UDP socket, exact pre-bound listener tuple, and
+disabled address/port reuse; the dormant C runtime independently repeats those current socket and
+tuple checks. Neither check proves that the overlay address was assigned by the helper or that the
+socket belongs to the attested route namespace. The native runtime consumes and closes that descriptor on every path,
+then returns `exit_listener_orchestration_unavailable`; it never binds a host listener, reads a
+secret pathname, or falls back. Both descriptor hashes prove request correlation. Only the active
+`AddPath` client backend checks a same-session namespace cookie; `StartExitSession` has no namespace
+cookie or helper-origin proof.
+Production adoption remains blocked until helper provenance and the reviewed exit backend exist.
+API v6 is intentionally incompatible with v5 and has no negotiation or downgrade. A consumed
+descriptor is never reused after success, rejection, timeout, or I/O failure; any caller-level
+retry requires a newly acquired listener, a fresh control connection and nonce, and a still-valid
+authorization. A structurally valid `StartExitSession` whose bearer matches its supplied
+commitment consumes its reservation/finalize pair before returning
+`exit_listener_orchestration_unavailable`; that pair cannot be retried in the same process.
+
+The API-v6 exit boundary validates DNS syntax for the supplied TLS name, nonzero length for the
+SPKI pin, and only nonempty/NUL-free size bounds for the purported certificate/private-key PEM
+bytes. A separate, callerless native foundation strictly parses a bounded certificate chain and
+private key, treats the first certificate as the leaf, and verifies leaf-key consistency, an exact
+non-wildcard DNS hostname match under case-insensitive X.509 DNS semantics, a caller-supplied
+trusted interval, canonical complete-leaf DER SHA-256, and leaf-SPKI DER SHA-256. Additional chain
+certificates must be canonical DER and parse completely but are not trust-path validated.
+The runtime does not call this verifier. Production integration remains blocked on an affine expiry
+handoff with overflow-safe floor-now/ceil-expiry conversion from signed Unix milliseconds, an
+independent fixed Rust/C DER-SPKI vector, parser fuzzing, and TLS trust/usage enforcement. No
+current session or datapath success claim depends on this isolated identity check.
+The bearer commitment, signed IDs, certificate digest, process instances and SPKI bytes are now
+carried together, but native does not itself verify the exit's signed final reservation bundle.
+After shape and bearer-commitment validation, native uses a fixed 128-record, no-live-eviction
+process-local ledger keyed by `(reservation_id, finalize_id)`: exact reuse is a replay, reuse of
+only one ID is a scope collision, an exact live client retry is allowed only while its original
+session remains active, and stop, expiry, or a valid exit start leaves a tombstone until the
+authorization deadline. Request nonces remain response-correlation values, not a general replay
+cache. The ledger is erased by process restart and purged at the deadline, so this is not
+independent cryptographic or durable replay verification; a production caller must verify the
+signed scope, bind both native instances, and hand it off affinely.
+
+For admission, native samples `CLOCK_BOOTTIME` before `CLOCK_REALTIME`, maintains a monotone
+effective wall-clock floor, and converts the accepted remaining wall lifetime once to a
+`CLOCK_BOOTTIME` deadline. Live-session checks thereafter read only `CLOCK_BOOTTIME`; wall-clock
+rollback cannot extend or revive an authorization, while a forward jump can only shorten it.
+Clock read failure, BOOTTIME regression, and arithmetic overflow fail closed.
+
+`NativeResponse` echoes version/nonce, requires the responding role/instance, and carries SHA-256
+over `"VOLPAROSSA-MPQUIC-REQUEST-V6\0"`, the four-byte big-endian canonical payload length, and the
+exact canonical unframed request. It returns `Ok`, `Version`, `InvalidRequest`, `NotFound`,
+`Unauthorised`, `Transport`, `InsufficientPaths`, `NoDatagram`, or `QueueOverflow`, plus a bounded
+code, an optional exactly correlated reverse datagram, and no more than eight path records.
+`StaleInstance` is a separate typed result. Only a successful `StartSession` may carry a bounded
+IPv4/optional-IPv6 tunnel assignment; every other operation rejects one. The current mqvpn backend
+deep-copies exactly one assignment while `TUNNEL_READY`, accepts only a byte-identical duplicate
+after activation, and publishes it only after mqvpn synchronously reaches `ESTABLISHED`. Rust, the
+C protocol boundary, and the backend state independently require server `10.76.0.1/32`, client
+`10.76.0.2/32` through `10.76.0.254/32`, MTU 1280..1420, and either no IPv6 address or
+`fd76:6f6c:7062::2/112` through `fd76:6f6c:7062::fe/112`. The backend rejects outbound packets
+whose source is not the retained client address and reverse packets whose destination is not that
+address, and wipes retained state on fatal transport failure. This does not prove that a production
+exit allocated the address uniquely for the route lifetime, that the helper assigned it in the
+exact namespace, or that a real packet traversed it. Each path wire record reserves fields for path
+ID, smoothed RTT, loss, unique delivered payload bytes, congestion window, bytes in flight,
+delivery rate, and validation/real-carriage state. The runtime now publishes an exact current path
+set only when the pinned backend supplies every required metric and a valid normalized path state.
+It uses ACKed transport bytes only for the real-carriage boolean and keeps unique delivered payload
+bytes at zero, because transport framing and retransmissions make the former unsuitable for the
+latter. These fields are necessary to prevent a native process from falsely reporting mere path
+configuration as multipath operation.
+
+
+
+===== docs/architecture/HELPER_V3.md :: Initial helper WRITE-STOP checklist =====
+Source file SHA-256: d65b9db11e928ad0c3bd670966be14137e8be82a76f76e362de4e8e0593a5f9c
+
+## WRITE-STOP: remaining live-kernel gaps
+
+No development-host network configuration is mutated or authorized for this slice. The committed gate confines
+its fixed dummy underlay and ephemeral WireGuard leases to a transient `PrivateNetwork` and child
+network namespaces inside the disposable VM. Before `Prepare`, `Activate`, `Commit`, transport
+acquisition, client ingress, or datapath operation can be called complete, all of the following
+remain. The Client lifecycle and equal enumerated host-state fences have retained exact-main
+evidence from run 33294974441 at `77b60aed3c39ba0c80d3e2dac2b9817fd6d7be2f`; the separate Exit
+lifecycle has retained exact-main evidence from run 33296892632 at
+`1ca51fe0d2a2be855adb182e85c229d1d12bc017`; and Relay-pair run 33301595311 at
+`0095b113e450a0ab29da853fafa53b2b130f05fc` retained the simultaneous endpoint-pair proof. Those
+retained scoped results predate Relay forwarding and are not staged-package, simultaneous-route,
+restart or acceptance evidence. Non-retained branch smoke [run
+33306523739](https://github.com/VOLPAROSSA/volparossa/actions/runs/33306523739) at
+`8d9cc533edfc1e9add273c03a9ce3fa164c3353d` subsequently proved bounded `::1` to `::4` ICMPv6
+cross-leg forwarding through the exact two WireGuard interfaces, growth of all four WireGuard peer
+counter views and both nftables forwarding counters, Commit plus identical retry, complete teardown,
+and the enumerated unchanged-host-state fence. That branch smoke deliberately retained no artifact.
+Exact-main run 33309109220 at `1f3cee798787ed4673a3ba28d88931947800ca22` reproduced the scoped
+forwarding proof and retained artifact 9731470248. It does not join a production route manager,
+transport or ingress, and does not change the alpha score.
+
+- validate the shipped seven-capability helper bootstrap and locked sysusers contract from the staged
+  Debian package under the same acceptance environment, including the generated local
+  passwd/group/shadow records and canonical files/systemd NSS binding; `CAP_SYS_PTRACE` must remain
+  absent, `LimitCORE=0` must be effective, process dumpability must remain disabled after Ready, and
+  the final worker must retain only `CAP_NET_ADMIN` and `CAP_NET_BIND_SERVICE`;
+- extend the asynchronous `HelperEngine` backend beyond the current
+  Client/Exit-singleton-or-Relay-pair Prepare/Activate/Probe-Commit/Destroy path and narrow committed
+  Client/Exit unconnected-QUIC-UDP acquisition: connected/listening MPTCP for the exact Client/Exit
+  roles still needs the same plan/call/commit discipline and exact
+  context/generation/phase/handle revalidation; Relay application transport acquisition remains
+  intentionally unavailable;
+- wire the handed-off descriptor into a live production route runtime whose affine receiver closes
+  every socket on Destroy, helper loss or route rollback. Same-request retry refusal is already
+  descriptorless and same-runtime generation-bound, but `HelperClient` currently creates a fresh ID
+  for each call and no agent/runtime transport caller adopts the descriptor;
+- extend the bounded `DirectAssigned` parent snapshot from the current one direct underlay to the
+  exact multi-path evidence required by complete route setup, retaining rejection of multipath,
+  duplicate, truncated or ambiguous dumps;
+- extend the exact single-path Relay endpoint pair to every selected path while preserving complete
+  batch preflight, rollback, proof and cleanup;
+- join the scoped single-path helper-internal Relay fence with the separately retained Client and Exit
+  foundations under one production route manager, extend it to every selected path, and prove one
+  simultaneous production client-to-relay-to-exit route with correlated handshake, WireGuard,
+  forwarding-counter, transport, ingress and cleanup evidence;
+- extend the connected same-runtime durable two-step settlement with restart-stable
+  pidfd/namespace adoption, exact old-worker death, and a real inherited namespace/kernel cleanup
+  backend. Exact-name manager removal is already authority-ordered between `CleanupConfirmed` and
+  `Absent` for a correlated clean live Destroy. The pure-tested typed marker/kernel foundation rejects an old
+  same-name link carrying a non-exact marker but grants no journal-phase or cleanup authority;
+- add the cross-runtime tag-28 proof plus restart reaper; until then a runtime mismatch must
+  remain quarantined and the runtime-lifetime `Absent` ledger cannot be acknowledged or pruned;
+- exercise the wired Client/Exit QUIC UDP factory, credentialed private-channel transfer, parent
+  namespace/shape validation and outer ancillary handoff in one disposable live-WireGuard route;
+  current unit tests use synthetic committed state and do not prove a live route;
+- adopt those descriptors in the TCP/QUIC datapaths and prove the exact tuple and real transport;
+- connect the implemented pre-route client-ingress protocol to a distinct privileged
+  runtime/profile namespace transaction. It must create and revalidate all four socket kinds for
+  both families, retain exactly one socket/receipt transfer per identity, and atomically own TPROXY,
+  DNS and kill-switch nftables/routing state. Prepare, partial acquisition, activation failure,
+  destruction, expiry, client crash, helper crash and ambiguous worker IPC each require exact
+  rollback or quarantine. The unprivileged agent must never enter the namespace. The TCP/UDP
+  consumers must adopt the descriptors and preserve the implemented original-destination evidence
+  without destination substitution;
+- implement signed reservation/lease renewal before supporting configured contexts beyond the
+  current signed 15-minute grant;
+- run disposable root namespace integration tests covering success, denial, ambiguity, expiry,
+  crash cleanup, packet traversal, privacy, and proof that the development host is unchanged.
+
+Until those items pass, production route preparation and client ingress remain deliberately
+unavailable. The isolated helper-internal Relay forwarding proof does not justify a product tunnel,
+interception, reservation, transport, capacity, or datapath-active claim.
+
+
+===== docs/architecture/HELPER_V3.md :: Earlier transport subset statement =====
+Source file SHA-256: d65b9db11e928ad0c3bd670966be14137e8be82a76f76e362de4e8e0593a5f9c
+
+   separately and is not representable in protobuf. Production currently accepts only explicitly
+   unconnected QUIC UDP for an exact Client or Exit singleton; Relay and both MPTCP forms remain
+   unavailable.
+
+===== docs/architecture/HELPER_V3.md :: Earlier initial backend cardinality/restart claim =====
+Source file SHA-256: d65b9db11e928ad0c3bd670966be14137e8be82a76f76e362de4e8e0593a5f9c
+
+or authenticating a worker generation. Crash/restart rollback is still absent. The production
+server selects a crate-private functional-alpha backend for exactly one live Client/Exit
+singleton or one live Relay context with exactly the ordered matching
+`WireguardRole::RelayClient` + `WireguardRole::RelayExit` pair. It
+obtains a consistent read-only direct-underlay
+
+===== docs/architecture/HELPER_V3.md :: Earlier single-path unavailable-datapath claim =====
+Source file SHA-256: d65b9db11e928ad0c3bd670966be14137e8be82a76f76e362de4e8e0593a5f9c
+
+reap and registry purge. The backend permits no second live context. This remains a helper-internal,
+single-path seam. For a committed Client or Exit singleton, the production server can satisfy a
+valid unconnected-QUIC-UDP `AcquireTransportSocket` request and hand off exactly one descriptor for
+that request. MPTCP and Relay acquisition, multi-path routing, every production transport caller and
+every usable datapath remain `Unavailable`; shutdown succeeds only with empty backend state and
+confirmed coordinator cleanup. The periodic driver uses an owned,
+
+===== docs/architecture/HELPER_V3.md :: Earlier journal evidence limitation =====
+Source file SHA-256: d65b9db11e928ad0c3bd670966be14137e8be82a76f76e362de4e8e0593a5f9c
+
+Same-runtime durable journal/systemd custody is described below; inherited-custody adoption and
+crash/restart recovery are not claimed.
+
+===== docs/architecture/HELPER_V3.md :: Earlier UDP-only descriptor adoption subset =====
+Source file SHA-256: d65b9db11e928ad0c3bd670966be14137e8be82a76f76e362de4e8e0593a5f9c
+
+production functional backend now advertises its narrow transport capability and independently
+requires the complete committed lineage, Client/Exit singleton role/path, worker-derived overlay
+address, unconnected-UDP shape and live wall/boottime/call deadlines. Its authenticated production
+v3 child invokes only the existing unconnected-UDP factory, drops the source before the release
+record, and returns exactly one descriptor through the consuming namespace validator. MPTCP and
+Relay requests remain unavailable.
+
+===== docs/architecture/HELPER_V3.md :: Earlier transport caller limitation =====
+Source file SHA-256: d65b9db11e928ad0c3bd670966be14137e8be82a76f76e362de4e8e0593a5f9c
+
+The agent transport stacks do not yet consume this helper API, and no live WireGuard route
+or working namespace datapath is claimed.
+
+===== docs/architecture/HELPER_V3.md :: Earlier dormant ingress boundary =====
+Source file SHA-256: d65b9db11e928ad0c3bd670966be14137e8be82a76f76e362de4e8e0593a5f9c
+
+These are protocol, type, descriptor-handoff, and UAPI foundations only. The production engine
+returns `Unavailable/CLIENT_INGRESS_UNAVAILABLE` for all four operations before consulting its
+clock, cache, state, backend, or network. It creates no namespace, listener, nftables rule, route,
+mark, DNS state, receipt, or descriptor. A future privileged runtime must itself cache or refuse a
+second transfer for each runtime/identity and implement transaction-wide rollback; the agent's
+one-shot guard is defense in depth, not a substitute for that privileged invariant.
+
+===== docs/architecture/ARCHITECTURE.md :: Repeated DPS scope and assessment overview =====
+Source file SHA-256: 4388555394268f010a412505c1b69c93a715c4d278d5943a4d8e3f8858e8d705
+
+The [Decentralized Positioning System](../services/DPS.md) is a reusable core service
+over the same Network, Cache, Storage, Compute and Transaction infrastructure;
+it adds no sixth layer or location dependency to network participation. Platform
+adapters own permission-checked sensor/radio access, reference frames and lifecycle.
+Shared logic owns bounded observation assessment and subsequent positioning/fusion.
+The [complete agreed goal](../development/GOAL.md) remains authoritative for the
+full project scope; the [joined DPS requirements](../development/GOAL.md#dps)
+are the permanent normative DPS scope. The service page records design choices
+and staged acceptance, not a ceiling on those requirements.
+Private measurements stay local by default; receiving assistance, contributing,
+retaining history and training are separately authorized. A signed location claim,
+matching peer reports or authenticated GNSS navigation data does not establish
+physical truth. Relative positions need a validated geographic reference before
+they become absolute location estimates. DPS must expose uncertainty, conflicts,
+age, provenance and unavailable states and must not replace OS location services
+without separate authorization. The first stateless local-control contract is not
+yet native Map integration, measured sensor fusion or proven attack detection.
+
+
+
+===== docs/network/MULTIPATH_QUIC.md :: Earlier API6 and dormant-exit overview =====
+Source file SHA-256: facece87c7953fc75be9d784917d1b3bc0e2745cb1ebb2a17c8dea643cd15b5c
+
+The version-6, 1 MiB bounded Protocol Buffers API first preflights an exact client or exit process
+role and a fresh instance per process start. Later operations target that instance and are
+correlated by nonce plus an exact canonical-request digest. They are limited to starting/stopping a
+client or exit context, adopting one request-bound UDP descriptor for a fixed path or exit listener,
+adding/removing a fixed overlay path, sending/polling an already-authorized inner IP datagram, and
+retrieving bounded status. There is no free-form interface name, pathname, command, configuration
+text, or arbitrary destination. The current same-UID socket provides channel correlation, not
+binary attestation or authentication against a compromised agent; separate client/exit service
+identities and role sockets remain required.
+
+The exit SPKI/certificate hashes (SHA-256 over the leaf's DER `SubjectPublicKeyInfo` and complete
+leaf-certificate DER, respectively), TLS name, MASQUE context, route context, signed reservation and
+finalize IDs, bearer commitment, both native instances, path/reservation proof, destination policy,
+and minimum-path count are fixed before native activation. Rust validates response identity,
+request correlation, and the exact tunnel-assignment policy. The native client retains a valid
+assignment immutably, publishes it only after `ESTABLISHED`, and independently checks outbound
+source and reverse destination ownership. A callerless native foundation verifies bounded-chain
+leaf/key, a non-wildcard DNS hostname under case-insensitive X.509 DNS semantics, trusted interval,
+canonical complete-leaf DER and DER-SPKI consistency, but is not wired into the runtime and does
+not validate chain trust. No production caller or disposable
+datapath proof exists yet, and helper provenance, server-side pool configuration, assigned-address
+and namespace ownership, independent signed-bundle replay verification plus affine handoff,
+millisecond conversion, a fixed Rust/C digest vector, parser fuzzing, trust/usage enforcement, and
+byte-counter evidence remain fail-closed requirements. Native's process-local pair ledger and
+BOOTTIME deadline do not replace that missing production authority.
+
+
+
+===== docs/architecture/HELPER_V3.md :: Earlier singleton proof score claim =====
+Source file SHA-256: d65b9db11e928ad0c3bd670966be14137e8be82a76f76e362de4e8e0593a5f9c
+
+fence deletion with a lost child reply remains retryable only as exact-empty. Broader crash recovery
+and live forced-crash/KVM proof are still absent, so AV1-10 and the 11/100 alpha score do not change.
+
+===== docs/architecture/HELPER_V3.md :: Earlier publication supervisor completion claim =====
+Source file SHA-256: d65b9db11e928ad0c3bd670966be14137e8be82a76f76e362de4e8e0593a5f9c
+
+The supervisor and publisher remain private but are reached only through production durable
+Prepare. Same-runtime clean Destroy consumes the successful terminal and authority-orders exact
+manager removal between `CleanupConfirmed` and `Absent`. Cross-process/restart-stable
+reconciliation and adoption remain disconnected, inherited descriptors are refused, and no restart
+reaper exists. The executable live-proof path has not yet
+produced recorded evidence inside the required disposable Debian 13 transient service. This
+therefore leaves AV1-10 Open, keeps the fixed alpha score at 11/100 (11%), and closes no production,
+crash-cleanup, datapath or acceptance milestone.
+
+
+
+===== docs/architecture/HELPER_V3.md :: Earlier narrow worker composition limit =====
+Source file SHA-256: d65b9db11e928ad0c3bd670966be14137e8be82a76f76e362de4e8e0593a5f9c
+
+The production server's functional-alpha backend now calls this worker path for one Client/Exit
+singleton lease or one exact Relay endpoint pair; no production route manager calls it. The
+production engine supervises cancellation-safe
+PLAN -> CALL -> COMMIT/rollback transactions: it
+reserves and revalidates state under `EngineState`, while every backend call runs without that mutex
+held. The narrow backend implements real complete-batch Prepare, Activate, correlated Probe/Commit,
+and Destroy. It also acquires one bound unconnected QUIC UDP socket per successfully committed valid
+request for a committed Client/Exit singleton. Relay operations are fail-atomic, install the exact
+two-direction fence, and
+both lease and forwarding proofs must pass before pair Commit. MPTCP and Relay transport acquisition
+remain `Unavailable`, and the engine rejects client ingress as `Unavailable` before backend
+dispatch. This scoped helper-internal composition is not full production readiness.
+
+
+
+===== docs/architecture/HELPER_V3.md :: Earlier same-runtime no-caller conclusion =====
+Source file SHA-256: d65b9db11e928ad0c3bd670966be14137e8be82a76f76e362de4e8e0593a5f9c
+
+This same-runtime reconciliation path remains containment rather than crash recovery. The
+functional-alpha production adapter can Prepare, Activate, Probe/Commit and Destroy one Client/Exit
+singleton or one exact Relay endpoint pair. A valid Acquire request for an exact committed
+Client/Exit singleton can also hand off exactly one bound unconnected QUIC UDP descriptor. This
+at-most-once rule is scoped only to the outer request ID and digest: an exact retry returns
+descriptorless `TRANSPORT_SOCKET_ALREADY_ACQUIRED`, while a fresh request ID is not rejected as a
+per-context/path/role replay. No production route-manager or transport caller adopts the descriptor,
+and no simultaneous production Client/Relay/Exit route, ingress or usable VPN datapath exists.
+Cross-leg forwarding exists only inside the isolated single-path Relay worker.
+
+
+
+===== docs/architecture/PROTOCOL.md :: Earlier unconditional ingress unavailable claim =====
+Source file SHA-256: e16534614964787de15daa0245b4546737e80873e13935ad1c5a39246268fb2b
+
+All four client-ingress operations return `Unavailable/CLIENT_INGRESS_UNAVAILABLE` before clock,
+cache, state, backend or network access. The Linux UAPI has pure/socketpair-tested socket
+revalidation plus fail-closed TCP/UDP original-destination parsing, but no production namespace,
+listener, TPROXY/DNS/kill-switch nftables transaction, privileged per-identity transfer cache,
+rollback, or live datapath is connected.
+
+
+
+===== docs/architecture/PROTOCOL.md :: Earlier Permit-only native owner stage =====
+Source file SHA-256: e16534614964787de15daa0245b4546737e80873e13935ad1c5a39246268fb2b
+
+Only Permit has that production-composed caller, and it cannot currently issue in a normal runtime.
+The module-private, non-Clone Exit readiness/result owner
+still uses raw test-seam data-Relay identities. Its typed projection from the `Copy`
+`ExitEndpointLease` proves neither helper-resource custody nor same-connection helper-runtime
+provenance or cleanup authority, and the private helper/datapath observation has no constructor.
+There is no production Ready/Result caller, helper lifecycle/cleanup owner, challenge delivery,
+live WireGuard probe, measured readiness/capacity, terminal
+helper-evidence producer, usability promotion or route admission. Permit, ExitReady and ExitResult
+each cap their own lifetime at the lower of the parent expiry and local production time plus 30
+seconds. Private phase owners retain the process-unique Exit boot incarnation and reject
+cross-restart consumption. In particular, Permit production cannot set
+`network_address_usable = true`; the existing hard filter continues to reject its output.
+
+
+
+===== docs/architecture/PROTOCOL.md :: Earlier test-seam-only discovery handoff =====
+Source file SHA-256: e16534614964787de15daa0245b4546737e80873e13935ad1c5a39246268fb2b
+
+A production discovery owner now drives the snapshot, native-agnostic sampler, exact affine
+request/bind lineage, A1a/A1c join and opaque Prepared handoff. The private client child can consume
+that handoff only through a test seam. A separate module-private, non-Clone Exit owner can retain
+one Permit in a bounded idempotency ledger. Its sole production-composed caller binds the request
+and response channel to the exact authenticated control-Relay connection and current control/Exit
+advertisement and policy identities, but the current product has no local Exit-advertisement source
+that can satisfy the gate. ExitReady and ExitResult remain test-only; their
+data-Relay arguments still have no production connection-owned source. The typed
+`ExitEndpointLease` projection is not helper-resource custody or cleanup authority, and the result
+requires a private helper/datapath observation type with no constructor. Production client Permit
+dispatch, real same-helper custody/lifecycle and challenge providers, live dataplane evidence,
+measured readiness/capacity, usability promotion, route admission and reservation are still absent.
+The fixed alpha score remains
+**11/100 (11%)**.
+
+Tags removed during the hard migration are permanently reserved: hold-request tags 5 and 10,
+relay-request tag 2, exit-grant tag 5, relay-authorization tags 7 and 13, relay-reservation tags 7
+and 15, confirmation tag 7, finalized-path tag 5, and advertisement tag 7. The corresponding old
+names (`client_peer_id`, `relay_paths`, `overlay_prefixes`, and `wireguard`) are reserved in
+the v4 schema.
+
+
+
+===== docs/architecture/PROTOCOL.md :: Earlier endpoint retirement integration gap =====
+Source file SHA-256: e16534614964787de15daa0245b4546737e80873e13935ad1c5a39246268fb2b
+
+rolls cryptographic, replay, and reservation state back atomically. Helper-backed endpoint-lease
+retirement is not yet production-wired: provider paths remain `Unavailable` until a linearly owned
+`DestroyContext` supervisor guarantees cleanup on every failure, release, expiry, and shutdown.
+
+===== docs/architecture/PROTOCOL.md :: Earlier API6 dormant route handoff conclusion =====
+Source file SHA-256: e16534614964787de15daa0245b4546737e80873e13935ad1c5a39246268fb2b
+
+This layer validates bounds, canonical public fields, PEM framing, and
+exact ownership scope. It does **not** yet prove certificate/private-key cryptographic consistency,
+activate a listener, start an mqvpn backend, or hand the verified signed authorization affinely to
+native. The separate API-v6 runtime converts the caller-supplied wall expiry once to a
+`CLOCK_BOOTTIME` deadline, but no production caller performs that preflight or carries the
+preverified authorization affinely into the dormant route. The production identity provider and
+separate role service identities remain unavailable, so both sides still fail closed.
+
+
+===== END ARCHIVE =====
