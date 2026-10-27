@@ -1415,12 +1415,17 @@ private_storage_maintenance_finalize_report 7
             self.assertTrue(result['user_directory_removed'])
             self.assertFalse(root.exists())
 
-    def test_current_intent_check_is_wired_without_new_public_fields_or_execution(self):
+    def test_current_intent_check_is_wired_through_bounded_rotation_and_unchanged_signed_turns(self):
         source = (HERE / (SCENARIO + '-smoke.py')).read_text()
         lifecycle = source.split('\ndef lifecycle(', 1)[1].split('\ndef prepare(', 1)[0]
         self.assertIn('retained_current_during_core_loss(root, retained, keys, enrollment)', lifecycle)
         self.assertNotIn('retained_during_core_loss(retained)', lifecycle)
-        self.assertLess(lifecycle.index('retained_intent_continuity(root)'), lifecycle.index('pre_withdrawal(root'))
+        self.assertIn('_reconcile_lifecycle(root, binary, client, keys, enrollment, restarted, budget)', lifecycle)
+        reconcile = source.split('\ndef _reconcile_lifecycle(', 1)[1].split('\ndef retained_current_during_core_loss(', 1)[0]
+        self.assertLess(reconcile.index('retained_intent_continuity(root)'), reconcile.index('pre_withdrawal(root'))
+        self.assertIn('run_turn(root, binary, client, keys[1], budget=budget)', reconcile)
+        self.assertIn('require(expected < limit', reconcile)
+        self.assertIn('MAX_RECONCILIATION_TURNS = 1 + len(LENGTHS)', source)
         restore = source.split('\ndef restore(', 1)[1].split('\ndef validate_retirement_progress(', 1)[0]
         self.assertEqual(restore.count('retained_intent_continuity(root)'), 2)
         finish = source.split('\ndef finish(', 1)[1].split('\ndef cleanup(', 1)[0]
@@ -1553,6 +1558,29 @@ private_storage_maintenance_finalize_report 7
             mutate(invalid)
             with self.assertRaises(ValueError):
                 M['validate_lifecycle'](invalid)
+
+    def test_rotation_failure_v4_exports_only_closed_history_and_preserves_previous_generation(self):
+        context = FIXTURE['rotation_context']()
+        with patch.dict(M['failure_receipt'].__globals__, LIFECYCLE_DIAGNOSTIC=context, SAMPLER_DIAGNOSTIC={}):
+            value = M['failure_receipt'](ValueError('owner lifecycle deadline'))
+        self.assertEqual(value['version'], 4)
+        M['validate_lifecycle_failure'](value)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'failure.json'
+            path.write_text(json.dumps(value)); path.chmod(0o600)
+            actual = subprocess.run([sys.executable, '-I', '-B', str(HERE / 'private-storage-maintenance-smoke.py'),
+                'lifecycle-failure', str(path)], capture_output=True, check=True, timeout=5)
+            self.assertEqual(json.loads(actual.stdout), value)
+        previous = copy.deepcopy(value); previous['version'] = 3; previous.pop('reconciliation')
+        M['validate_lifecycle_failure'](previous)
+        for mutate in (lambda v: v.update(version=3), lambda v: v.pop('reconciliation'),
+                lambda v: v['reconciliation'].update(raw='PRIVATE_CANARY'),
+                lambda v: v['reconciliation'].update(complete=True),
+                lambda v: v['reconciliation'].update(turns=[{}] * 6)):
+            invalid = copy.deepcopy(value); mutate(invalid)
+            with self.assertRaises((ValueError, KeyError, TypeError)):
+                M['validate_lifecycle_failure'](invalid)
+        self.assertNotIn('PRIVATE', json.dumps(value))
 
     def test_real_owned_python_child_joins_on_sigterm_and_drains(self):
         # This executes Python only, not the core, Rust, a network or a VM.

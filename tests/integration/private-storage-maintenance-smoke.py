@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Real owner CLI/core maintenance over the existing disposable protected topology."""
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -34,6 +35,7 @@ LIFECYCLE_SECONDS = 1800
 # during coordinator preparation. Later repair/retirement adds at most 12+4.
 MAX_LIFECYCLE_CURSOR = 128
 MAX_CURSOR = MAX_LIFECYCLE_CURSOR + 12 + 4
+MAX_RECONCILIATION_TURNS = 1 + len(LENGTHS)
 EXPORT_NAMES = tuple(name for name in F['EXPORT_NAMES'] if name not in
     ('private-storage-fragments-smoke.json', 'private-storage-fragments-evidence.json')) + (
     'private-storage-maintenance-smoke.json', 'private-storage-maintenance-evidence.json',
@@ -112,6 +114,8 @@ FAILURE_CODES = {
     'enrollment changed across core restart': 'lifecycle_enrollment_changed',
     'resume cursor changed': 'lifecycle_cursor_changed',
     'restart charge reconciliation': 'lifecycle_reconciliation',
+    'invalid retention-only lifecycle state': 'lifecycle_rotation_state',
+    'lifecycle rotation exhausted': 'lifecycle_rotation_exhausted',
     'owner output not drained': 'owner_output_not_drained',
     'pre-withdrawal custody not reconciled': 'baseline_custody',
     'pre-withdrawal replacement binding': 'baseline_identity',
@@ -751,7 +755,8 @@ def retirement_turn(value, turn, *, target=None, maximum=4):
 
 def failure_receipt(error):
     if LIFECYCLE_DIAGNOSTIC is not None:
-        return dict(version=3, success=False, kind='private-storage-maintenance-lifecycle-failure',
+        return dict(version=4 if 'reconciliation' in LIFECYCLE_DIAGNOSTIC else 3,
+            success=False, kind='private-storage-maintenance-lifecycle-failure',
             code='sampler_failure' if isinstance(error, SAMPLER['SamplerFailure']) else failure_code(error),
             **LIFECYCLE_DIAGNOSTIC, sampler=SAMPLER_DIAGNOSTIC or None)
     upload = UPLOAD_DIAGNOSTIC if STAGE == 'upload' else None
@@ -820,17 +825,32 @@ def upload_invoke(operation, binary, socket, arguments, **options):
     return invoke(binary, socket, arguments, failure_observer=failed, **options)
 
 
+def _lifecycle_failure_encoding(value):
+    """Exactly the version-4 wire bytes, including the writer's final newline."""
+    return (json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode()
+
+
+def _write_failure(error):
+    value = failure_receipt(error)
+    if value['kind'] == 'private-storage-maintenance-lifecycle-failure' and value['version'] == 4:
+        sys.stdout.buffer.write(_lifecycle_failure_encoding(value))
+    else:
+        print(json.dumps(value))
+
+
 def validate_lifecycle_failure(value):
     """Reject rather than copy unknown fields from even fixture-owned output."""
     require(isinstance(value, dict) and type(value.get('version')) is int
-        and value['version'] in (1, 2, 3), 'invalid lifecycle failure')
+        and value['version'] in (1, 2, 3, 4), 'invalid lifecycle failure')
     fields = {'version', 'success', 'kind', 'code', 'stage',
         'cursor_before', 'cursor_last', 'checkpoint_stage', 'owner_exit_status', 'owner_joined',
         'cleanup_error', 'sampler'}
     if value['version'] >= 2:
         fields.add('retained_status')
-    if value['version'] == 3:
+    if value['version'] >= 3:
         fields.update(('retained_status_scope', 'reconcile_status', 'fresh_turn_detail', 'baseline_reason'))
+    if value['version'] == 4:
+        fields.add('reconciliation')
     require(set(value) == fields, 'invalid lifecycle failure')
     codes = set(FAILURE_CODES.values()) | {'cli_timeout', 'cli_process', 'local_io', 'unclassified',
         'sampler_failure', 'termination_signal'}
@@ -848,7 +868,7 @@ def validate_lifecycle_failure(value):
         or value['cleanup_error'] in codes), 'invalid lifecycle failure')
     if value['version'] >= 2 and value['retained_status'] is not None:
         validate_retained_status(value['retained_status'])
-    if value['version'] == 3:
+    if value['version'] >= 3:
         require(value['retained_status_scope'] == 'core_loss'
             and (value['baseline_reason'] is None or type(value['baseline_reason']) is str
                 and value['baseline_reason'] in BASELINE_REASONS), 'invalid lifecycle reconciliation')
@@ -856,7 +876,11 @@ def validate_lifecycle_failure(value):
             validate_reconcile_status(value['reconcile_status'])
         if value['fresh_turn_detail'] is not None:
             validate_fresh_turn_detail(value['fresh_turn_detail'])
-        require(len(json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()) <= 8192,
+        if value['version'] == 4:
+            _validate_reconciliation(value['reconciliation'])
+        encoded = (_lifecycle_failure_encoding(value) if value['version'] == 4 else
+            json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode())
+        require(len(encoded) <= 8192,
             'invalid lifecycle failure bound')
     sampler = value['sampler']
     if sampler is not None:
@@ -1246,6 +1270,133 @@ def observe_lifecycle(name, projector, *arguments):
         LIFECYCLE_DIAGNOSTIC[name] = None
 
 
+def _empty_reconciliation():
+    return dict(version=1, pending_fragment=None, rotation_cursor=None, terminal_cursor=None,
+        complete=False, turns=[])
+
+
+def _original_progress(value):
+    # Original v1 reports omit repair-only counts. Keep the exported nulls and
+    # recognize that exact eight-copy shape, never turn arbitrary missing data
+    # into a claim of completed retirement.
+    status = value['status']
+    return (value['pending_retirements'] is None and value['retained_copy_records'] is None
+        and status['placement_field_present'] is False and status['placement_authorizations'] == 0
+        and status['copy_counts'] == [2] * len(LENGTHS))
+
+
+def _reconciliation_progress(value):
+    # Keep the full latest status separately. Repeating expiry/charge histograms
+    # five times could exceed the unchanged 8KiB lifecycle export envelope.
+    if value is None:
+        return None
+    result = copy.deepcopy(value)
+    for name in ('charge_states', 'retained_expiries'):
+        del result['status'][name]
+    return result
+
+
+def _validate_reconciliation_progress(value):
+    require(type(value) is dict and set(value) == {'status', 'pending_retirements', 'retained_copy_records',
+        'fully_redundant_from_retained_receipts', 'fragments_with_confirmed_unexpired_copy'},
+        'invalid lifecycle reconciliation')
+    status = value['status']
+    require(type(status) is dict and set(status) == set(RETAINED_BYTES) | {'fragment_count', 'copy_counts',
+        'placement_field_present', 'placement_authorizations'}, 'invalid lifecycle reconciliation')
+    for key in RETAINED_BYTES:
+        require(status[key] is None or type(status[key]) is int and 0 <= status[key] < 2**64,
+            'invalid lifecycle reconciliation')
+    for key, maximum in (('fragment_count', 64), ('placement_authorizations', 4096)):
+        require(status[key] is None or type(status[key]) is int and 0 <= status[key] <= maximum,
+            'invalid lifecycle reconciliation')
+    require(status['placement_field_present'] is None or type(status['placement_field_present']) is bool,
+        'invalid lifecycle reconciliation')
+    counts = status['copy_counts']
+    require(counts is None or (type(counts) is list and len(counts) <= 64 and len(counts) == status['fragment_count']
+        and all(count is None or type(count) is int and 0 <= count <= 64 for count in counts)),
+        'invalid lifecycle reconciliation')
+    for key, maximum in (('pending_retirements', 4096), ('retained_copy_records', 4096),
+            ('fragments_with_confirmed_unexpired_copy', 64)):
+        require(value[key] is None or type(value[key]) is int and 0 <= value[key] <= maximum,
+            'invalid lifecycle reconciliation')
+    require(value['fully_redundant_from_retained_receipts'] is None
+        or type(value['fully_redundant_from_retained_receipts']) is bool, 'invalid lifecycle reconciliation')
+
+
+def _validate_reconciliation(value, *, first_cursor=None, complete=False):
+    """Closed observations of at most one ordinary fragment-refresh rotation."""
+    require(type(value) is dict and set(value) == {'version', 'pending_fragment', 'rotation_cursor',
+        'terminal_cursor', 'complete', 'turns'} and type(value['version']) is int and value['version'] == 1
+        and type(value['complete']) is bool and (not complete or value['complete']), 'invalid lifecycle reconciliation')
+    rows = value['turns']
+    require(type(rows) is list and len(rows) <= MAX_RECONCILIATION_TURNS, 'invalid lifecycle reconciliation')
+    pending, limit = value['pending_fragment'], value['rotation_cursor']
+    require((pending is None and limit is None) or (type(pending) is int and pending == 0
+        and type(limit) is int and 1 <= limit <= MAX_LIFECYCLE_CURSOR), 'invalid lifecycle reconciliation')
+    terminal = None
+    for index, row in enumerate(rows):
+        require(type(row) is dict and set(row) == {'expected_cursor', 'detail', 'progress', 'custody'}
+            and type(row['expected_cursor']) is int and 1 <= row['expected_cursor'] <= MAX_LIFECYCLE_CURSOR
+            and (not index or row['expected_cursor'] == rows[index - 1]['expected_cursor'] + 1)
+            and row['custody'] in ('unavailable', 'retention_pending', 'complete'), 'invalid lifecycle reconciliation')
+        if first_cursor is not None:
+            require(row['expected_cursor'] == first_cursor + index, 'invalid lifecycle reconciliation')
+        if row['detail'] is not None:
+            validate_fresh_turn_detail(row['detail'])
+            require(row['detail']['cursor'] == row['expected_cursor']
+                and row['detail']['checkpoint_stage'] == 'turn_completed', 'invalid lifecycle reconciliation')
+            terminal = row['expected_cursor']
+        if row['progress'] is not None:
+            _validate_reconciliation_progress(row['progress'])
+        require(row['custody'] == 'unavailable' or (row['detail'] is not None and row['progress'] is not None),
+            'invalid lifecycle reconciliation')
+        require(index == len(rows) - 1 or row['custody'] == 'retention_pending', 'invalid lifecycle reconciliation')
+        if row['custody'] == 'retention_pending':
+            require(pending == 0 and limit is not None, 'invalid lifecycle reconciliation')
+            _retention_turn(row['detail'])
+            progress = row['progress']
+            require(progress['pending_retirements'] == 1 and progress['retained_copy_records'] == 9
+                and progress['fully_redundant_from_retained_receipts'] is True
+                and progress['fragments_with_confirmed_unexpired_copy'] == 4, 'invalid lifecycle reconciliation')
+            status = progress['status']
+            require(status['copy_counts'] == [3, 2, 2, 2] and status['placement_authorizations'] == 1
+                and status['committed_payload_bytes'] == status['physical_payload_charge_upper_bound'] == 2 * BYTES + LENGTHS[0]
+                and status['reserved_payload_bytes'] == status['uncertain_payload_bytes'] == 0,
+                'invalid lifecycle reconciliation')
+        if row['custody'] == 'complete':
+            progress = row['progress']
+            require((progress['pending_retirements'] == 0 or _original_progress(progress))
+                and progress['fully_redundant_from_retained_receipts'] is True
+                and progress['fragments_with_confirmed_unexpired_copy'] == 4
+                and progress['status']['committed_payload_bytes'] == progress['status']['physical_payload_charge_upper_bound'] == 2 * BYTES
+                and progress['status']['reserved_payload_bytes'] == progress['status']['uncertain_payload_bytes'] == 0,
+                'invalid lifecycle reconciliation')
+        if limit is not None:
+            require(row['expected_cursor'] <= limit, 'invalid lifecycle reconciliation')
+    require(value['terminal_cursor'] == terminal and (terminal is None or type(value['terminal_cursor']) is int),
+        'invalid lifecycle reconciliation')
+    if pending is not None:
+        require(rows and rows[0]['custody'] == 'retention_pending' and limit == rows[0]['expected_cursor']
+            + ((pending - rows[0]['expected_cursor'] % len(LENGTHS)) % len(LENGTHS)) + 1,
+            'invalid lifecycle reconciliation')
+    else:
+        require(len(rows) <= 1, 'invalid lifecycle reconciliation')
+    require(value['complete'] == bool(rows and rows[-1]['custody'] == 'complete'), 'invalid lifecycle reconciliation')
+    require(not complete or rows, 'invalid lifecycle reconciliation')
+
+
+def _lifecycle_terminal_cursor(value):
+    """Old resume evidence keeps its meaning; new records bind a separate final cursor."""
+    if 'reconciliation' not in value and 'cursor_after_reconciliation' not in value:
+        return value['cursor_after_resume']
+    require('reconciliation' in value and 'cursor_after_reconciliation' in value, 'invalid lifecycle reconciliation')
+    _validate_reconciliation(value['reconciliation'], first_cursor=value['cursor_after_resume'], complete=True)
+    require(type(value['cursor_after_reconciliation']) is int
+        and value['cursor_after_reconciliation'] == value['reconciliation']['terminal_cursor'],
+        'invalid lifecycle reconciliation')
+    return value['cursor_after_reconciliation']
+
+
 def retained_during_core_loss(retained):
     """Historical counter-only contract; current lifecycle uses the bound check below."""
     if LIFECYCLE_DIAGNOSTIC is not None:
@@ -1291,6 +1442,144 @@ def retained_intent_continuity(root):
         'retained intent changed after core restart')
     entry = next(entry for entry in entries if entry['fragment'] == 0)
     require(retained_intent_binding(root, entry) == pending, 'retained intent changed after core restart')
+
+
+def _retention_turn(detail):
+    """Only the observed, safe retention wait can authorize another fixture turn."""
+    message = 'invalid retention-only lifecycle state'
+    require(detail['checkpoint_stage'] == 'turn_completed' and detail['maintenance_stage'] == 'maintained'
+        and detail['repair_stage'] == 'pending_handoff' and type(detail['attempted_handoffs']) is int
+        and detail['attempted_handoffs'] == 1 and type(detail['freshly_verified_replacements']) is int
+        and detail['freshly_verified_replacements'] == 0 and type(detail['pending_retirements']) is int
+        and detail['pending_retirements'] == 1
+        and detail['physical_payload_charge_upper_bound'] == 2 * BYTES + LENGTHS[0]
+        and detail['fragment_outcomes'] == [dict(index=0, handoff_stage='replacement_retention_insufficient',
+            resumed_signed_intent=True, replacement_verified_this_pass=False, operation_complete=False)], message)
+    outcome = detail['fragment_outcomes'][0]
+    require(type(outcome['index']) is int and all(type(outcome[key]) is bool for key in
+        ('resumed_signed_intent', 'replacement_verified_this_pass', 'operation_complete')), message)
+    refresh = detail['refresh']
+    index = (detail['cursor'] - 1) % len(LENGTHS)
+    require(type(refresh['fragment_index']) is int and refresh['fragment_index'] == index
+        and refresh['renewal'] is True and type(refresh['operation_complete']) is bool, message)
+    expected = 3 if index == 0 else 2
+    outcomes = refresh['copy_outcomes']
+    require(type(outcomes) is list and len(outcomes) == expected and all(item in
+        ('confirmed', 'existing_retention_sufficient') for item in outcomes[:2]), message)
+    if index == 0:
+        require(outcomes[2] in ('confirmed', 'existing_retention_sufficient', 'unknown_reservation_use_deposit_retry'), message)
+    require(refresh['operation_complete'] == ('unknown_reservation_use_deposit_retry' not in outcomes), message)
+
+
+def _retention_pending(root, value, keys, detail):
+    """Validate every original obligation plus the exact retained A-to-C extra copy.
+
+    The actual progress CLI authenticates the signed root/placement/journals first.
+    Normalizing a private COPY below reuses the unchanged full original-custody
+    predicate; it neither edits those journals nor makes pending custody complete.
+    """
+    message = 'invalid retention-only lifecycle state'
+    _retention_turn(detail)
+    require(value['operation'] == 'private_storage_fragments_progress' and value['operation_complete'] is True,
+        message)
+    for key, expected in (('report_version', 2), ('placement_authorizations', 1), ('retained_copy_records', 9),
+            ('pending_retirements', 1), ('desired_copies_per_fragment', 2)):
+        require(type(value.get(key)) is int and value[key] == expected, message)
+    require(type(value['fragments']) is list and len(value['fragments']) == len(LENGTHS), message)
+    for index, fragment in enumerate(value['fragments']):
+        require(type(fragment['index']) is int and fragment['index'] == index
+            and type(fragment['offset']) is int and type(fragment['ciphertext_bytes']) is int
+            and type(fragment['confirmed_unexpired_copies']) is int
+            and fragment['confirmed_unexpired_copies'] == (3 if index == 0 else 2)
+            and type(fragment['copies']) is list and len(fragment['copies']) == (3 if index == 0 else 2), message)
+    target = value['fragments'][0]['copies'][2]
+    now = int(time.time())
+    require(target['provider_key'] == keys[2] and target['charge'] == 'committed'
+        and target['last_confirmed_state'] == 'Committed' and target['last_confirmed_stored_bytes'] == LENGTHS[0]
+        and type(target['last_confirmed_expiry']) is int and target['last_confirmed_expiry'] > now, message)
+    retained_intent_continuity(root)
+    binding = private_json(root / RETAINED_INTENT_FILE, 2048)
+    require(type(binding['pending']) is dict, message)
+    entries = private_json(root / 'fragment-set/placement-authorizations.json', 1048576)['authority']['placements']
+    require(type(entries) is list and len(entries) == 1 and type(entries[0]['fragment']) is int
+        and entries[0]['fragment'] == 0, message)
+    intent = entries[0]['handoff']
+    child = private_json(root / 'fragment-set/fragment-0000/replicas.json')
+    require(type(intent['from']) is int and intent['from'] == 0 and type(intent['to']) is int and intent['to'] == 2
+        and intent['phase'] == 'copying' and child['handoff'] == intent, message)
+    original = private_json(root / 'fragment-set/fragment-0000/copy-0/archive.json', 16384)
+    replacement = private_json(root / 'fragment-set/fragment-0000/copy-2/archive.json', 16384)
+    source = value['fragments'][0]['copies'][0]
+    require(replacement['lease'] is not None and replacement['last_expiry'] == target['last_confirmed_expiry']
+        and original['last_expiry'] == source['last_confirmed_expiry']
+        and type(original['requested_expiry']) is int and original['requested_expiry'] > 0
+        and replacement['last_expiry'] < max(original['last_expiry'], original['requested_expiry']), message)
+    normalized = copy.deepcopy(value)
+    normalized.update(placement_authorizations=0, retained_copy_records=8, pending_retirements=0)
+    normalized['fragments'][0]['copies'].pop()
+    normalized['fragments'][0]['confirmed_unexpired_copies'] = 2
+    for name in ('committed_payload_bytes', 'physical_payload_charge_upper_bound'):
+        require(type(value[name]) is int and value[name] == 2 * BYTES + LENGTHS[0], message)
+        normalized[name] -= LENGTHS[0]
+    require(type(normalized['providers']) is list and len(normalized['providers']) == 3, message)
+    normalized['providers'][2]['physical_payload_charge_upper_bound'] -= LENGTHS[0]
+    validate_custody(normalized, keys, (), withdrawn=False)
+    return 0
+
+
+def _reconcile_lifecycle(root, binary, client, keys, enrollment, first, budget):
+    """Drive only ordinary core-issued turns, through the next required refresh."""
+    history = LIFECYCLE_DIAGNOSTIC['reconciliation']
+    expected, turn = first['turns'], first
+    limit = None
+    while True:
+        require(type(expected) is int and 1 <= expected <= MAX_LIFECYCLE_CURSOR
+            and len(history['turns']) < MAX_RECONCILIATION_TURNS, 'lifecycle rotation exhausted')
+        row = dict(expected_cursor=expected, detail=None, progress=None, custody='unavailable')
+        history['turns'].append(row)
+        budget.remaining(LIFECYCLE_SECONDS)
+        require((root / 'maintenance/enrollment.json').read_bytes() == enrollment,
+            'enrollment changed across core restart')
+        if turn is None:
+            LIFECYCLE_DIAGNOSTIC['stage'] = 'fresh_owner_turn'
+            turn = run_turn(root, binary, client, keys[1], budget=budget)
+        require(type(turn.get('turns')) is int and turn['turns'] == expected
+            and turn.get('stage') == 'turn_completed', 'resume cursor changed')
+        row['detail'] = fresh_turn_diagnostic(turn)
+        history['terminal_cursor'] = expected
+        LIFECYCLE_DIAGNOSTIC['stage'] = 'reconcile_progress'
+        current = invoke(binary, client, ['storage', 'fragments', 'progress', *existing(root)],
+            deadline=budget.remaining(180))
+        observe_lifecycle('reconcile_status', reconcile_status_diagnostic, current, int(time.time()))
+        row['progress'] = _reconciliation_progress(LIFECYCLE_DIAGNOSTIC['reconcile_status'])
+        budget.remaining(LIFECYCLE_SECONDS)
+        require((root / 'maintenance/enrollment.json').read_bytes() == enrollment,
+            'enrollment changed across core restart')
+        F['check_identity'](root)
+        retained_intent_continuity(root)
+        require(current.get('operation') == 'private_storage_fragments_progress'
+            and current.get('operation_complete') is True, 'invalid retention-only lifecycle state')
+        try:
+            baseline = pre_withdrawal(root, current, keys)
+        except (ValueError, KeyError, TypeError) as error:
+            observe_lifecycle('baseline_reason', baseline_failure_reason, error)
+            if baseline_failure_reason(error) != 'pending_handoff':
+                raise
+            fragment = _retention_pending(root, current, keys, row['detail'])
+            if limit is None:
+                limit = expected + ((fragment - expected % len(LENGTHS)) % len(LENGTHS)) + 1
+                require(limit <= MAX_LIFECYCLE_CURSOR, 'lifecycle rotation exhausted')
+                history.update(pending_fragment=fragment, rotation_cursor=limit)
+            row['custody'] = 'retention_pending'
+            require(expected < limit, 'lifecycle rotation exhausted')
+            expected += 1
+            turn = None
+        else:
+            row['custody'] = 'complete'
+            history['complete'] = True
+            LIFECYCLE_DIAGNOSTIC['baseline_reason'] = None
+            _validate_reconciliation(history, first_cursor=first['turns'], complete=True)
+            return baseline, expected
 
 
 def retained_current_during_core_loss(root, retained, keys, enrollment):
@@ -1390,7 +1679,8 @@ def lifecycle(root, binary, client, keys):
     global LIFECYCLE_DIAGNOSTIC
     LIFECYCLE_DIAGNOSTIC = dict(stage='checkpoint_before', cursor_before=None, cursor_last=None,
         checkpoint_stage=None, owner_exit_status=None, owner_joined=False, cleanup_error=None, retained_status=None,
-        retained_status_scope='core_loss', reconcile_status=None, fresh_turn_detail=None, baseline_reason=None)
+        retained_status_scope='core_loss', reconcile_status=None, fresh_turn_detail=None, baseline_reason=None,
+        reconciliation=_empty_reconciliation())
     enrollment = (root / 'maintenance/enrollment.json').read_bytes()
     budget = LifecycleBudget(json.loads(enrollment)['enrollment']['expires'])
 
@@ -1462,24 +1752,15 @@ def lifecycle(root, binary, client, keys):
             restarted = run_turn(root, binary, client, keys[1], budget=budget)
             observe_lifecycle('fresh_turn_detail', fresh_turn_diagnostic, restarted)
             require(restarted['turns'] == paused['turns'] + 1, 'resume cursor changed')
-            LIFECYCLE_DIAGNOSTIC['stage'] = 'reconcile_progress'
-            current = invoke(binary, client, ['storage', 'fragments', 'progress', *existing(root)],
-                deadline=budget.remaining(180))
-            observe_lifecycle('reconcile_status', reconcile_status_diagnostic, current, int(time.time()))
-            F['check_identity'](root)
-            retained_intent_continuity(root)
-            try:
-                baseline = pre_withdrawal(root, current, keys)
-            except (ValueError, KeyError, TypeError) as error:
-                observe_lifecycle('baseline_reason', baseline_failure_reason, error)
-                raise
+            baseline, reconciled_cursor = _reconcile_lifecycle(root, binary, client, keys, enrollment, restarted, budget)
             LIFECYCLE_DIAGNOSTIC['stage'] = 'validate_flow_coverage'
         gates = coverage.report(joined=coverage.joined)
         SAMPLER['validate_summary'](gates, control['baseline'], 1)
         create(root / 'flow-lifecycle.json', json.dumps(gates, sort_keys=True).encode())
         result = dict(cursor_before=before, cursor_at_core_loss=lost['turns'],
             cursor_after_reconnect=resumed['turns'], cursor_at_pause=paused['turns'],
-            cursor_after_resume=restarted['turns'], same_owner_survived_core_loss=True,
+            cursor_after_resume=restarted['turns'], cursor_after_reconciliation=reconciled_cursor,
+            reconciliation=LIFECYCLE_DIAGNOSTIC['reconciliation'], same_owner_survived_core_loss=True,
             charge_retained_during_core_loss=True, journal_identity_retained_during_core_loss=True,
             core_unavailable_observed=True, fresh_core_turn_completed=True,
             sigterm_exit_zero=True, paused_checkpoint_retained=True,
@@ -1782,7 +2063,7 @@ def restore(root, binary, client, keys):
     lifecycle_result = read(root / 'lifecycle-result.json')
     baseline = lifecycle_result['pre_withdrawal']
     retired = validate_baseline(baseline)
-    require(begin == lifecycle_result['cursor_after_resume'],
+    require(begin == _lifecycle_terminal_cursor(lifecycle_result),
         'cursor lost before provider withdrawal')
     fresh, turns = set(), 0
     REPAIR_DIAGNOSTIC = dict(pre_withdrawal=baseline, latest_status=None, verified_new_fragment_indexes=[])
@@ -1967,6 +2248,9 @@ def validate_lifecycle(value, *, historical=False):
         'enrollment_unchanged', 'original_identities_retained', 'uncertainty_reconciled',
         'owner_process_joined', 'guest_core_pid_changed', 'guest_core_namespace_preserved')
     fields = {*cursor_keys, *flags, 'physical_payload_charge'}
+    if 'reconciliation' in value or 'cursor_after_reconciliation' in value:
+        require(not historical, 'historical lifecycle reconciliation')
+        fields.update(('reconciliation', 'cursor_after_reconciliation'))
     if not historical:
         fields.add('pre_withdrawal')
         validate_baseline(value.get('pre_withdrawal'))
@@ -1980,6 +2264,14 @@ def validate_lifecycle(value, *, historical=False):
         and all(value[key] is True for key in flags)
         and type(value['physical_payload_charge']) is int
         and value['physical_payload_charge'] == 2 * BYTES, 'lifecycle evidence incomplete')
+    terminal = _lifecycle_terminal_cursor(value)
+    require(type(terminal) is int and value['cursor_after_resume'] <= terminal <= MAX_LIFECYCLE_CURSOR,
+        'lifecycle evidence incomplete')
+    if 'reconciliation' in value:
+        progress = value['reconciliation']['turns'][-1]['progress']
+        require(progress['retained_copy_records'] == value['pre_withdrawal']['retained_copy_records']
+            or (_original_progress(progress) and value['pre_withdrawal']['retained_copy_records'] == 8),
+            'invalid lifecycle reconciliation')
 
 
 def validate_evidence(value, *, historical=False, previous=False):
@@ -2003,7 +2295,7 @@ def validate_evidence(value, *, historical=False, previous=False):
     retired = [] if historical else validate_baseline(baseline)
     remaining = sorted(set((0, 2, 3)) - set(retired))
     uncertain = sum(LENGTHS[index] for index in remaining)
-    resume_cursor = value['lifecycle']['cursor_after_resume']
+    resume_cursor = _lifecycle_terminal_cursor(value['lifecycle'])
     restored = value['restore']
     extra = {}
     if not historical:
@@ -2251,5 +2543,5 @@ if __name__ == '__main__':
     try:
         main(sys.argv[1:])
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
-        print(json.dumps(failure_receipt(error)))
+        _write_failure(error)
         sys.exit(1)

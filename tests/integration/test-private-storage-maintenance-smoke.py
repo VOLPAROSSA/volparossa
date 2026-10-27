@@ -4,6 +4,7 @@
 from pathlib import Path
 from contextlib import contextmanager
 import copy
+import io
 import json
 import os
 import re
@@ -665,6 +666,275 @@ def fresh_turn_fixture():
             copy_outcomes=['confirmed', 'existing_retention_sufficient'])))
 
 
+def rotation_turn(cursor, *, complete=False):
+    """Inert owner-result fixture; not a daemon-issued turn or a provider receipt."""
+    value = fresh_turn_fixture()
+    value['turns'] = cursor
+    detail = value['detail']
+    index = (cursor - 1) % len(CHECK['LENGTHS'])
+    detail['physical_payload_charge_upper_bound'] = 2 * CHECK['BYTES'] + (0 if complete else CHECK['LENGTHS'][0])
+    detail['refresh'] = dict(fragment_index=index, renewal=True, operation_complete=True,
+        copy_outcomes=['confirmed'] * (3 if index == 0 else 2))
+    if complete:
+        detail.update(repair_stage='pass_limit', freshly_verified_replacements=1, pending_retirements=0)
+        detail['fragment_outcomes'][0].update(operation_complete=True, handoff_stage='complete',
+            replacement_verified_this_pass=True)
+    return value
+
+
+def rotation_private_fixture(root):
+    """Synthetic unsigned JSON only; actual CLI signature validation is not exercised."""
+    current, keys = custody_fixture()
+    current.update(operation='private_storage_fragments_progress', report_version=2,
+        desired_copies_per_fragment=2, placement_authorizations=1, retained_copy_records=9,
+        pending_retirements=1, replacement_overhead_included=True)
+    target = copy.deepcopy(current['fragments'][0]['copies'][0])
+    target.update(provider_key=keys[2], last_confirmed_expiry=4000)
+    current['fragments'][0]['copies'].append(target)
+    current['fragments'][0]['confirmed_unexpired_copies'] = 3
+    for name in ('committed_payload_bytes', 'physical_payload_charge_upper_bound'):
+        current[name] += CHECK['LENGTHS'][0]
+    current['providers'][2]['physical_payload_charge_upper_bound'] += CHECK['LENGTHS'][0]
+    directory = root / 'fragment-set/fragment-0000'
+    for name in ('copy-0', 'copy-2'):
+        (directory / name).mkdir(parents=True, mode=0o700)
+    initial = dict(version=1, provider_key=list(bytes.fromhex(keys[2])), owner_key=[4] * 32,
+        grant_hex='12', archive_id=[5] * 32, ciphertext_bytes=CHECK['LENGTHS'][0], sha256=[0] * 32,
+        requested_expiry=4000, lease=None, last_state=None, last_stored_bytes=0, last_expiry=0)
+    intent = dict(phase='copying', **{'from': 0, 'to': 2}, initial_journal=initial)
+    entry = dict(fragment=0, handoff=intent)
+    CHECK['create'](root / 'fragment-set/placement-authorizations.json', json.dumps(dict(authority=dict(placements=[entry]))).encode())
+    CHECK['create'](directory / 'replicas.json', json.dumps(dict(handoff=intent)).encode())
+    CHECK['create'](directory / 'copy-0/archive.json', json.dumps(dict(last_expiry=4600, requested_expiry=4600)).encode())
+    CHECK['create'](directory / 'copy-2/archive.json', json.dumps(dict(initial, lease=[9] * 16,
+        last_state=3, last_stored_bytes=CHECK['LENGTHS'][0], last_expiry=4000)).encode())
+    binding = dict(version=1, pending=CHECK['retained_intent_binding'](root, entry))
+    CHECK['create'](root / CHECK['RETAINED_INTENT_FILE'], json.dumps(binding).encode())
+    (root / 'maintenance').mkdir(mode=0o700)
+    enrollment = json.dumps(dict(enrollment=dict(expires=7000))).encode()
+    CHECK['create'](root / 'maintenance/enrollment.json', enrollment)
+    return current, keys, enrollment
+
+
+def finish_rotation_fixture(root):
+    current, _ = custody_fixture((0,))
+    current['operation'] = 'private_storage_fragments_progress'
+    directory = root / 'fragment-set/fragment-0000'
+    child = json.loads((directory / 'replicas.json').read_text())
+    child['handoff']['phase'] = 'complete'
+    (directory / 'replicas.json').write_text(json.dumps(child))
+    journal = json.loads((directory / 'copy-2/archive.json').read_text())
+    journal['last_expiry'] = 4600
+    (directory / 'copy-2/archive.json').write_text(json.dumps(journal))
+    return current
+
+
+def rotation_context():
+    return dict(stage='fresh_owner_turn', cursor_before=3, cursor_last=5, checkpoint_stage='paused',
+        owner_exit_status=0, owner_joined=True, cleanup_error=None, retained_status=None,
+        retained_status_scope='core_loss', reconcile_status=None,
+        fresh_turn_detail=CHECK['fresh_turn_diagnostic'](rotation_turn(6)), baseline_reason=None,
+        reconciliation=CHECK['_empty_reconciliation']())
+
+
+class LifecycleRotation(unittest.TestCase):
+    def run_rotation(self, root, current, keys, enrollment, *, finish=True, worker=None, first=6, initial=None):
+        namespace = CHECK['_reconcile_lifecycle'].__globals__
+        context = rotation_context()
+        initial = rotation_turn(first) if initial is None else initial
+        context['fresh_turn_detail'] = CHECK['fresh_turn_diagnostic'](initial)
+        context['cursor_last'] = first - 1
+        limit = first + ((-first % len(CHECK['LENGTHS'])) % len(CHECK['LENGTHS'])) + 1
+        calls = []
+        def progress(*args, **kwargs):
+            calls.append('progress')
+            if finish and len(calls) == limit - first + 1:
+                return finish_rotation_fixture(root)
+            return copy.deepcopy(current)
+        run = worker if worker is not None else Mock(side_effect=[rotation_turn(cursor, complete=finish and cursor == limit)
+            for cursor in range(first + 1, limit + 1)])
+        with patch.dict(namespace, LIFECYCLE_DIAGNOSTIC=context, SAMPLER_DIAGNOSTIC={}, invoke=progress, run_turn=run), \
+                patch.dict(CHECK['F'], check_identity=Mock()):
+            try:
+                result = CHECK['_reconcile_lifecycle'](root, '/PRIVATE/cli', '/PRIVATE/socket', keys, enrollment,
+                    initial, CHECK['LifecycleBudget'](7000))
+            except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as error:
+                result = error
+                receipt = CHECK['failure_receipt'](error)
+                CHECK['validate_lifecycle_failure'](receipt)
+                self.assertNotIn('PRIVATE', json.dumps(receipt))
+        return result, context, run, calls
+
+    def test_observed_turn6_waits_only_through_next_fragment0_rotation_and_preserves_intent(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(time, 'time', return_value=1000):
+            root = Path(temporary)
+            current, keys, enrollment = rotation_private_fixture(root)
+            authority = (root / 'fragment-set/placement-authorizations.json').read_bytes()
+            current['private_path'] = 'PRIVATE-KEY-JOURNAL-CANARY'
+            result, context, worker, calls = self.run_rotation(root, current, keys, enrollment)
+            baseline, cursor = result
+            self.assertEqual(cursor, 9); self.assertEqual(baseline['retired_original_a'], [0])
+            self.assertEqual(worker.call_count, 3); self.assertEqual(len(calls), 4)
+            history = context['reconciliation']
+            CHECK['_validate_reconciliation'](history, first_cursor=6, complete=True)
+            self.assertEqual(history['rotation_cursor'], 9)
+            self.assertEqual([row['expected_cursor'] for row in history['turns']], [6, 7, 8, 9])
+            self.assertEqual([row['detail']['refresh']['fragment_index'] for row in history['turns']], [1, 2, 3, 0])
+            self.assertEqual([row['custody'] for row in history['turns']], ['retention_pending'] * 3 + ['complete'])
+            self.assertEqual(context['fresh_turn_detail']['cursor'], 6)
+            self.assertEqual((root / 'maintenance/enrollment.json').read_bytes(), enrollment)
+            self.assertEqual((root / 'fragment-set/placement-authorizations.json').read_bytes(), authority)
+            self.assertNotIn('PRIVATE', json.dumps(history))
+
+    def test_immediate_complete_baseline_uses_no_additional_turn(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(time, 'time', return_value=1000):
+            root = Path(temporary)
+            _, keys, enrollment = rotation_private_fixture(root)
+            current = finish_rotation_fixture(root)
+            result, context, worker, calls = self.run_rotation(root, current, keys, enrollment, finish=False)
+            self.assertEqual(result[1], 6); worker.assert_not_called(); self.assertEqual(len(calls), 1)
+            history = context['reconciliation']
+            self.assertIsNone(history['pending_fragment']); self.assertIsNone(history['rotation_cursor'])
+            CHECK['_validate_reconciliation'](history, first_cursor=6, complete=True)
+
+    def test_still_pending_at_computed_rotation_fails_without_a_further_turn(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(time, 'time', return_value=1000):
+            root = Path(temporary); current, keys, enrollment = rotation_private_fixture(root)
+            error, context, worker, calls = self.run_rotation(root, current, keys, enrollment, finish=False)
+            self.assertIsInstance(error, ValueError); self.assertEqual(str(error), 'lifecycle rotation exhausted')
+            self.assertEqual(worker.call_count, 3); self.assertEqual(len(calls), 4)
+            self.assertFalse(context['reconciliation']['complete']); self.assertEqual(context['reconciliation']['terminal_cursor'], 9)
+
+    def test_malformed_pending_custody_cannot_hide_behind_earlier_placement_failure(self):
+        mutations = [lambda v: v.update(uncertain_payload_bytes=1), lambda v: v.update(pending_retirements=True),
+            lambda v: v.update(committed_payload_bytes=0), lambda v: v.update(operation_complete=False),
+            lambda v: v.update(owner_signature_verified=False), lambda v: v.update(copies_per_fragment=3),
+            lambda v: v['fragments'][1].update(index=True), lambda v: v['fragments'][0]['copies'][2].update(provider_key='PRIVATE'),
+            lambda v: v['fragments'][2]['copies'][0].update(last_confirmed_expiry=1000),
+            lambda v: v['providers'][0].update(physical_payload_charge_upper_bound=0)]
+        for mutate in mutations:
+            with self.subTest(mutation=mutations.index(mutate)), tempfile.TemporaryDirectory() as temporary, patch.object(time, 'time', return_value=1000):
+                root = Path(temporary); current, keys, enrollment = rotation_private_fixture(root)
+                mutate(current)
+                error, _, worker, calls = self.run_rotation(root, current, keys, enrollment)
+                self.assertIsInstance(error, (ValueError, KeyError, TypeError)); worker.assert_not_called()
+                self.assertEqual(len(calls), 1)
+
+    def test_changed_intent_expired_authority_worker_failure_and_other_handoff_stop_closed(self):
+        for case in ('intent', 'enrollment', 'expired', 'worker', 'handoff'):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary, patch.object(time, 'time', return_value=1000):
+                root = Path(temporary); current, keys, enrollment = rotation_private_fixture(root)
+                worker = Mock(side_effect=ValueError('owner process exit'))
+                if case == 'intent':
+                    path = root / 'fragment-set/placement-authorizations.json'
+                    value = json.loads(path.read_text()); value['authority']['placements'][0]['handoff']['to'] = 1
+                    path.write_text(json.dumps(value))
+                elif case == 'enrollment':
+                    (root / 'maintenance/enrollment.json').write_text('PRIVATE')
+                elif case == 'expired':
+                    time.time.return_value = 7001
+                if case == 'handoff':
+                    worker = Mock(return_value=rotation_turn(7))
+                    worker.return_value['detail']['fragment_outcomes'][0]['handoff_stage'] = 'replacement_upload_pending'
+                error, context, worker, calls = self.run_rotation(root, current, keys, enrollment, worker=worker)
+                self.assertIsInstance(error, (ValueError, KeyError, TypeError))
+                self.assertFalse(context['reconciliation']['complete'])
+                self.assertEqual(worker.call_count, 1 if case in ('worker', 'handoff') else 0)
+
+    def test_one_full_rotation_has_four_additional_turns_and_five_closed_rows(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(time, 'time', return_value=1000):
+            root = Path(temporary); current, keys, enrollment = rotation_private_fixture(root)
+            first = rotation_turn(5)
+            first['detail']['refresh'].update(operation_complete=False,
+                copy_outcomes=['confirmed', 'confirmed', 'unknown_reservation_use_deposit_retry'])
+            result, context, worker, calls = self.run_rotation(root, current, keys, enrollment, first=5, initial=first)
+            self.assertEqual(result[1], 9); self.assertEqual(worker.call_count, 4); self.assertEqual(len(calls), 5)
+            CHECK['_validate_reconciliation'](context['reconciliation'], first_cursor=5, complete=True)
+            context['retained_status'] = CHECK['retained_status_diagnostic'](current, 1000)
+            sampler = dict(phase='final_drain', operation='route_scope', code='invalid',
+                samples=CHECK['SAMPLER']['MAX_SAMPLES'], completed=CHECK['SAMPLER']['MAX_SAMPLES'] * CHECK['SAMPLER']['LIMIT'],
+                failed=CHECK['SAMPLER']['MAX_SAMPLES'] * CHECK['SAMPLER']['LIMIT'], route_mismatch='relays_changed',
+                paths_process=dict(exit_status=255, diagnostic='MPQUIC_PATH_STATUS_UNAVAILABLE', stderr_state='unavailable'),
+                route_comparison=dict(context_relation='unobserved', relay_set_relation='changed'))
+            # Longest allowed refresh outcomes exposed the former default-JSON
+            # writer overflow. Keep the duplicate first-turn detail consistent.
+            for row in context['reconciliation']['turns']:
+                row['detail']['refresh']['copy_outcomes'] = [
+                    'existing_retention_sufficient' if item == 'confirmed' else item
+                    for item in row['detail']['refresh']['copy_outcomes']]
+            context['fresh_turn_detail'] = copy.deepcopy(context['reconciliation']['turns'][0]['detail'])
+            sink = io.BytesIO()
+            writer = io.TextIOWrapper(sink, encoding='utf-8')
+            with patch.dict(CHECK['failure_receipt'].__globals__, LIFECYCLE_DIAGNOSTIC=context, SAMPLER_DIAGNOSTIC=sampler):
+                receipt = CHECK['failure_receipt'](ValueError('owner lifecycle deadline'))
+                with patch.object(CHECK['_write_failure'].__globals__['sys'], 'stdout', writer):
+                    CHECK['_write_failure'](ValueError('owner lifecycle deadline'))
+            actual = sink.getvalue()
+            writer.detach()
+            CHECK['validate_lifecycle_failure'](receipt)
+            self.assertEqual(receipt['version'], 4)
+            self.assertEqual(actual, CHECK['_lifecycle_failure_encoding'](receipt))
+            self.assertTrue(actual.endswith(b'\n')); self.assertEqual(actual.count(b'\n'), 1)
+            self.assertLessEqual(len(actual), 8192)
+            path = root / 'failure.json'
+            CHECK['create'](path, actual)
+            self.assertEqual(CHECK['lifecycle_failure_file'](path), receipt)
+            former = (json.dumps(receipt) + '\n').encode()
+            self.assertGreater(len(former), 8192)
+            old_path = root / 'former-failure.json'
+            CHECK['create'](old_path, former)
+            with self.assertRaises(ValueError): CHECK['lifecycle_failure_file'](old_path)
+            # The reader counts the final newline too, even with otherwise
+            # valid JSON whitespace: exactly 8192 bytes fits; 8193 does not.
+            boundary = actual[:-1] + b' ' * (8192 - len(actual)) + b'\n'
+            boundary_path = root / 'boundary-failure.json'
+            CHECK['create'](boundary_path, boundary)
+            self.assertEqual(len(boundary), 8192)
+            self.assertEqual(CHECK['lifecycle_failure_file'](boundary_path), receipt)
+            overflow_path = root / 'overflow-failure.json'
+            CHECK['create'](overflow_path, boundary + b'\n')
+            with self.assertRaises(ValueError): CHECK['lifecycle_failure_file'](overflow_path)
+
+    def test_failure_writer_preserves_previous_generation_default_encoding(self):
+        context = rotation_context(); context.pop('reconciliation')
+        output = io.StringIO()
+        with patch.dict(CHECK['failure_receipt'].__globals__, LIFECYCLE_DIAGNOSTIC=context, SAMPLER_DIAGNOSTIC={}):
+            receipt = CHECK['failure_receipt'](ValueError('owner lifecycle deadline'))
+            with patch.object(CHECK['_write_failure'].__globals__['sys'], 'stdout', output):
+                CHECK['_write_failure'](ValueError('owner lifecycle deadline'))
+        self.assertEqual(receipt['version'], 3)
+        self.assertEqual(output.getvalue(), json.dumps(receipt) + '\n')
+
+    def test_closed_history_rejects_unknown_fields_false_completion_and_changed_cursor_binding(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(time, 'time', return_value=1000):
+            root = Path(temporary); current, keys, enrollment = rotation_private_fixture(root)
+            _, context, _, _ = self.run_rotation(root, current, keys, enrollment)
+            history = context['reconciliation']
+            value = fixture(retired=(0,))
+            life = value['lifecycle']
+            life.update(cursor_after_reconciliation=9, reconciliation=history)
+            CHECK['validate_lifecycle'](life)
+            value['restore'].update(scan_cursor_before=9, scan_cursor_after=12)
+            CHECK['validate_evidence'](value)
+            for mutate in [lambda h: h.update(version=True), lambda h: h.update(private_key='PRIVATE'),
+                lambda h: h.update(rotation_cursor=10), lambda h: h.update(terminal_cursor=6),
+                lambda h: h['turns'][0]['detail'].update(raw='PRIVATE'),
+                lambda h: h['turns'][1].update(expected_cursor=9),
+                lambda h: h['turns'][0]['progress']['status'].update(raw='PRIVATE'),
+                lambda h: h['turns'][-1].update(custody='retention_pending'),
+                lambda h: h['turns'].extend([copy.deepcopy(h['turns'][-1])] * 2)]:
+                invalid = copy.deepcopy(history); mutate(invalid)
+                with self.assertRaises((ValueError, KeyError, TypeError)):
+                    CHECK['_validate_reconciliation'](invalid, first_cursor=6, complete=True)
+            for mutate in (lambda v: v.update(cursor_after_resume=9), lambda v: v.update(cursor_after_reconciliation=6),
+                    lambda v: v.pop('cursor_after_reconciliation'), lambda v: v.pop('reconciliation')):
+                invalid = copy.deepcopy(life); mutate(invalid)
+                with self.assertRaises((ValueError, KeyError, TypeError)): CHECK['validate_lifecycle'](invalid)
+            value['restore'].update(scan_cursor_before=6, scan_cursor_after=9)
+            with self.assertRaises(ValueError): CHECK['validate_evidence'](value)
+
+
+
 class LifecycleReconciliationDiagnostic(unittest.TestCase):
     def test_original_custody_guard_pass_fail_messages_and_boolean_semantics_preserved(self):
         mutations = [lambda value: None]
@@ -726,7 +996,8 @@ class LifecycleReconciliationDiagnostic(unittest.TestCase):
         namespace = CHECK['lifecycle'].__globals__
         early, keys = custody_fixture()
         current = copy.deepcopy(early)
-        current.update(placement_authorizations=1, retained_copy_records=9, pending_retirements=1)
+        current.update(operation='private_storage_fragments_progress', placement_authorizations=1,
+            retained_copy_records=9, pending_retirements=1)
         current['fragments'][0]['copies'].append(dict(provider_key=keys[2], charge='unattempted', last_confirmed_expiry=0))
         gates = fixture()['network']['lifecycle']['gates']
         with tempfile.TemporaryDirectory() as temporary:
@@ -752,11 +1023,11 @@ class LifecycleReconciliationDiagnostic(unittest.TestCase):
                     status=Mock(return_value=early), run_turn=Mock(return_value=fresh_turn_fixture()),
                     invoke=Mock(return_value=current), unlock=lambda root: [], create=Mock()), \
                     patch.dict(CHECK['F'], check_identity=Mock()), patch.dict(CHECK['SAMPLER'], capture=capture):
-                with self.assertRaisesRegex(ValueError, '^pre-withdrawal custody not reconciled$') as caught:
+                with self.assertRaisesRegex(ValueError, '^invalid retention-only lifecycle state$') as caught:
                     CHECK['lifecycle'](root, '/PRIVATE/cli', '/PRIVATE/socket', keys)
                 result = CHECK['failure_receipt'](caught.exception)
                 CHECK['validate_lifecycle_failure'](result)
-                self.assertEqual(result['version'], 3)
+                self.assertEqual(result['version'], 4)
                 self.assertEqual(result['baseline_reason'], 'pending_handoff')
                 self.assertEqual(result['retained_status_scope'], 'core_loss')
                 self.assertEqual(result['retained_status']['copy_counts'], [2, 2, 2, 2])
@@ -990,9 +1261,11 @@ class MaintenanceEvidence(unittest.TestCase):
                         retained_current_during_core_loss=Mock(return_value=dict(version=1, pending=None)),
                         retained_intent_continuity=Mock(),
                         wait_owner=lambda owner, predicate, seconds=180, **kwargs: predicate(),
-                        status=Mock(return_value=retained), run_turn=Mock(return_value=dict(turns=7)),
-                        invoke=Mock(return_value=dict(physical_payload_charge_upper_bound=2 * CHECK['BYTES'],
-                            uncertain_payload_bytes=0)), pre_withdrawal=Mock(return_value=baseline_fixture())), \
+                        status=Mock(return_value=retained), run_turn=Mock(return_value=dict(turns=7, stage='turn_completed',
+                            detail=dict(maintenance_stage='observed', refresh=dict(fragment_index=2, renewal=True,
+                                operation_complete=True, copy_outcomes=['confirmed', 'confirmed'])))),
+                        invoke=Mock(return_value=dict(custody_fixture()[0], operation='private_storage_fragments_progress')),
+                        pre_withdrawal=Mock(return_value=baseline_fixture())), \
                         patch.dict(CHECK['F'], check_identity=Mock()), \
                         patch.dict(CHECK['SAMPLER'], capture=capture):
                     if expired:
