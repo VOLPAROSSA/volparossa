@@ -1,0 +1,220 @@
+name: F04 P03e eight targeted Clippy evidence
+on:
+  push:
+    branches: [proof/p03e-f04-eight-clippy-20261027]
+permissions:
+  contents: read
+concurrency:
+  group: f04-p03e-eight-clippy-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  CANDIDATE: 339409e885412f47f1f02fef1002984be109c4e1
+  BASELINE: 93a0a486cf0a40dd19f970e2f590721aaa87d10d
+  CARGO_TERM_COLOR: never
+  CARGO_BUILD_JOBS: '2'
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  targeted:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.CANDIDATE }}
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Bind source and minimal change scope
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
+          test "$GITHUB_REF" = refs/heads/proof/p03e-f04-eight-clippy-20261027
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          mkdir evidence
+          test ! -e "$RUNNER_TEMP/f04-p03e-baseline-target"
+          test ! -e "$RUNNER_TEMP/f04-p03e-candidate-target"
+          git fetch --no-tags --depth=1 origin "$BASELINE"
+          python3 -B - <<'PY_BIND'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          candidate, baseline = os.environ['CANDIDATE'], os.environ['BASELINE']
+          assert git('rev-parse', 'HEAD^') == baseline
+          paths = git('diff', '--name-only', baseline, candidate).splitlines()
+          assert paths == ['crates/volparossa-content/src/private_storage/protocol/receipt.rs', 'crates/volparossa-content/src/provider/compute/dataset/document.rs', 'crates/volparossa-local-control/src/content.rs', 'crates/volparossa-local-control/src/dps/tests.rs', 'crates/volparossa-quic/src/client.rs', 'crates/volparossa-quic/src/control.rs', 'docs/IMPLEMENTATION_STATUS.md']
+          record = dict(candidate=candidate, baseline=baseline,
+              candidate_tree=git('rev-parse', 'HEAD^{tree}'),
+              proof_workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'],
+              run_id=os.environ['GITHUB_RUN_ID'], run_attempt=os.environ['GITHUB_RUN_ATTEMPT'],
+              paths={p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in paths},
+              scope='Eight selected assertion/divisibility fixes; strict three-package diagnostics and eight existing exact tests',
+              full_workspace_clippy=False, runtime_acceptance=False)
+          Path('evidence/source.json').write_text(json.dumps(record, indent=2)+'\n')
+          PY_BIND
+          git worktree add --detach "$RUNNER_TEMP/f04-clippy-before" "$BASELINE"
+      - name: Provision unchanged authenticated Rust 1.99.1 profile
+        run: python3 -B scripts/provision-rust199.py runner
+      - name: Record compiler and fetch locked inputs
+        run: |
+          set -euo pipefail
+          rustc -Vv | tee evidence/rustc.txt
+          cargo clippy -V | tee evidence/clippy.txt
+          cp "$RUNNER_TEMP/volparossa-rust-1.99.1/receipt.json" evidence/compiler-receipt.json
+          cargo fetch --locked 2>&1 | tee evidence/fetch.log
+      - name: Check formatting of only the three affected packages
+        run: cargo fmt --check -p volparossa-content -p volparossa-quic -p volparossa-local-control
+      - name: Observe fixed nonzero divisor equivalence and receipt boundaries
+        run: |
+          set -euo pipefail
+          cat > evidence/divisor-probe.rs <<'RS'
+          fn main() {
+              let divisor: u64 = 256 * 1024;
+              let values = [0_u64, 1, divisor - 1, divisor, divisor + 1, 2 * divisor, u64::MAX];
+              let lengths = [0_usize, 1, 2, 3, 4, usize::MAX - 1, usize::MAX];
+              let old = |stored: u64, target: u64| stored > target || (stored != target && stored % divisor != 0);
+              let new = |stored: u64, target: u64| stored > target || (stored != target && !stored.is_multiple_of(divisor));
+              println!("chunk_divisor={}", divisor);
+              println!("hex_divisor={}", 2_usize);
+              println!("usize_bits={}", usize::BITS);
+              println!("u64_values={}", values.len());
+              println!("usize_values={}", lengths.len());
+              println!("u64_equivalent={}", values.iter().all(|v| (*v % divisor != 0) == !(*v).is_multiple_of(divisor)));
+              println!("usize_equivalent={}", lengths.iter().all(|v| (*v % 2 != 0) == !(*v).is_multiple_of(2)));
+              println!("receipt_equivalent={}", values.iter().all(|v| values.iter().all(|t| old(*v, *t) == new(*v, *t))));
+              println!("full_unaligned_allowed={}", !old(divisor + 31, divisor + 31) && !new(divisor + 31, divisor + 31));
+              println!("partial_unaligned_rejected={}", old(divisor + 1, divisor * 2) && new(divisor + 1, divisor * 2));
+          }
+          RS
+          rustc --edition=2024 evidence/divisor-probe.rs -o "$RUNNER_TEMP/p03e-divisor-values" 2>&1 | tee evidence/divisor-probe-build.log
+          "$RUNNER_TEMP/p03e-divisor-values" | tee evidence/divisor-values.txt
+          python3 -B - <<'PY_VALUES'
+          import json
+          from pathlib import Path
+          observed = dict(line.split('=', 1) for line in Path('evidence/divisor-values.txt').read_text().splitlines())
+          expected = dict(chunk_divisor='262144', hex_divisor='2', usize_bits='64', u64_values='7', usize_values='7', u64_equivalent='true', usize_equivalent='true', receipt_equivalent='true', full_unaligned_allowed='true', partial_unaligned_rejected='true')
+          assert observed == expected, observed
+          Path('evidence/divisor-values.json').write_text(json.dumps(observed, indent=2))
+          PY_VALUES
+      - name: Preserve strict diagnostics and require exactly the selected eight to disappear
+        run: |
+          set -euo pipefail
+          output="$GITHUB_WORKSPACE/evidence"
+          for variant in baseline candidate; do
+            export CARGO_TARGET_DIR="$RUNNER_TEMP/f04-p03e-$variant-target"
+            if test "$variant" = baseline; then
+              cd "$RUNNER_TEMP/f04-clippy-before"
+            else
+              cd "$GITHUB_WORKSPACE"
+            fi
+            set +e
+            cargo clippy --keep-going --locked --offline -p volparossa-content -p volparossa-quic -p volparossa-local-control --all-targets --all-features --message-format=json -- -D warnings > "$output/$variant-clippy.jsonl" 2> "$output/$variant-clippy-stderr.log"
+            status=$?
+            set -e
+            test "$status" = 101
+            echo "$status" > "$output/$variant-clippy-exit.txt"
+          done
+          cd "$GITHUB_WORKSPACE"
+          python3 -B - <<'PY_CLIPPY'
+          import json
+          from pathlib import Path
+          expected_baseline = {('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/store.rs', 531), ('clippy::collapsible_if', 'crates/volparossa-content/src/provider/digest.rs', 193), ('clippy::assert_is_empty', 'crates/volparossa-local-control/src/dps/tests.rs', 473), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/origin_https/digest.rs', 378), ('clippy::assert_is_empty', 'crates/volparossa-quic/src/client.rs', 1178), ('clippy::collapsible_if', 'crates/volparossa-local-control/src/private_storage_outcome.rs', 267), ('clippy::manual_is_multiple_of', 'crates/volparossa-content/src/private_storage/protocol/receipt.rs', 201), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/provider/compute/attestation/policy.rs', 149), ('clippy::assert_is_empty', 'crates/volparossa-local-control/src/content.rs', 1348), ('clippy::assert_is_empty', 'crates/volparossa-quic/src/control.rs', 1223), ('clippy::needless_continue', 'crates/volparossa-quic/src/client.rs', 619), ('clippy::collapsible_if', 'crates/volparossa-content/src/transfer/parallel/adaptive.rs', 171), ('clippy::assert_is_empty', 'crates/volparossa-local-control/src/content.rs', 1315), ('clippy::manual_is_multiple_of', 'crates/volparossa-content/src/provider/compute/dataset/document.rs', 132), ('clippy::assert_is_empty', 'crates/volparossa-quic/src/control.rs', 1775), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/provider/compute/attestation/policy.rs', 132), ('clippy::collapsible_if', 'crates/volparossa-content/src/transfer/parallel.rs', 386), ('clippy::chunks_exact_to_as_chunks', 'crates/volparossa-content/src/provider/replication/persistence.rs', 202)}
+          selected = {('clippy::assert_is_empty', 'crates/volparossa-local-control/src/dps/tests.rs', 473), ('clippy::assert_is_empty', 'crates/volparossa-quic/src/client.rs', 1178), ('clippy::manual_is_multiple_of', 'crates/volparossa-content/src/private_storage/protocol/receipt.rs', 201), ('clippy::assert_is_empty', 'crates/volparossa-local-control/src/content.rs', 1348), ('clippy::assert_is_empty', 'crates/volparossa-quic/src/control.rs', 1223), ('clippy::assert_is_empty', 'crates/volparossa-local-control/src/content.rs', 1315), ('clippy::manual_is_multiple_of', 'crates/volparossa-content/src/provider/compute/dataset/document.rs', 132), ('clippy::assert_is_empty', 'crates/volparossa-quic/src/control.rs', 1775)}
+          expected_candidate = expected_baseline - selected
+          observed = {}
+          for variant, expected in [('baseline', expected_baseline), ('candidate', expected_candidate)]:
+              errors = set()
+              finished = []
+              for line in Path('evidence/'+variant+'-clippy.jsonl').read_text().splitlines():
+                  item = json.loads(line)
+                  if item.get('reason') == 'build-finished':
+                      finished.append(item['success'])
+                  if item.get('reason') != 'compiler-message' or item['message']['level'] != 'error':
+                      continue
+                  message = item['message']
+                  print(variant, message.get('rendered', message['message']))
+                  assert message.get('code') is not None
+                  for span in message['spans']:
+                      if span['is_primary']:
+                          errors.add((message['code']['code'], span['file_name'], span['line_start']))
+              assert errors == expected, (variant, errors - expected, expected - errors)
+              assert finished == [False]
+              assert Path('evidence/'+variant+'-clippy-exit.txt').read_text().strip() == '101'
+              observed[variant] = sorted(errors)
+          assert len(observed['baseline']) == 18 and len(observed['candidate']) == 10
+          Path('evidence/clippy-summary.json').write_text(json.dumps(dict(diagnostics=observed, removed=sorted(selected), selected_removed=8, strict_packages_green=False), indent=2))
+          PY_CLIPPY
+      - name: Run only the eight selected existing unit regressions on separate sources
+        run: |
+          set -euo pipefail
+          output="$GITHUB_WORKSPACE/evidence"
+          selections=(
+            'receipt|content|private_storage::protocol::tests::private_storage_protocol_all_operations_and_receipts_keep_exact_request_scope'
+            'document|content|provider::compute::dataset::document::tests::signed_document_derivation_preserves_source_byte_ranges_without_training_fields'
+            'schema|content|provider::compute::dataset::document::tests::strict_document_schema_rejects_private_training_unknown_and_invalid_byte_ranges'
+            'preflight|quic|client::tests::preflight_selects_one_role_and_process_lifetime'
+            'target|quic|control::tests::preflight_is_the_only_request_with_an_empty_target'
+            'wipe|quic|control::tests::reverse_response_round_trips_and_can_be_wiped'
+            'dps|local-control|dps::tests::dps_no_state_or_position_carries_between_assessments'
+            'checksum|local-control|content::tests::https_checksum_mode_is_exclusive_bounded_and_legacy_agents_fail_closed'
+          )
+          for variant in baseline candidate; do
+            export CARGO_TARGET_DIR="$RUNNER_TEMP/f04-p03e-$variant-target"
+            if test "$variant" = baseline; then
+              cd "$RUNNER_TEMP/f04-clippy-before"
+            else
+              cd "$GITHUB_WORKSPACE"
+            fi
+            for selection in "${selections[@]}"; do
+              IFS='|' read -r key component test_name <<< "$selection"
+              cargo test --locked --offline -p "volparossa-$component" --lib --all-features "$test_name" -- --exact --list 2>&1 | tee "$output/$variant-$key-inventory.log"
+              cargo test --locked --offline -p "volparossa-$component" --lib --all-features "$test_name" -- --exact 2>&1 | tee "$output/$variant-$key-tests.log"
+            done
+          done
+          cd "$GITHUB_WORKSPACE"
+          python3 -B - <<'PY_TEST'
+          import hashlib, json, os, re
+          from pathlib import Path
+          selections = {'receipt': ('content', 'private_storage::protocol::tests::private_storage_protocol_all_operations_and_receipts_keep_exact_request_scope'), 'document': ('content', 'provider::compute::dataset::document::tests::signed_document_derivation_preserves_source_byte_ranges_without_training_fields'), 'schema': ('content', 'provider::compute::dataset::document::tests::strict_document_schema_rejects_private_training_unknown_and_invalid_byte_ranges'), 'preflight': ('quic', 'client::tests::preflight_selects_one_role_and_process_lifetime'), 'target': ('quic', 'control::tests::preflight_is_the_only_request_with_an_empty_target'), 'wipe': ('quic', 'control::tests::reverse_response_round_trips_and_can_be_wiped'), 'dps': ('local-control', 'dps::tests::dps_no_state_or_position_carries_between_assessments'), 'checksum': ('local-control', 'content::tests::https_checksum_mode_is_exclusive_bounded_and_legacy_agents_fail_closed')}
+          results = {}
+          for variant in ('baseline', 'candidate'):
+              source_root = (Path(os.environ['RUNNER_TEMP']) / 'f04-clippy-before' if variant == 'baseline' else Path(os.environ['GITHUB_WORKSPACE']))
+              target_root = Path(os.environ['RUNNER_TEMP']) / ('f04-p03e-'+variant+'-target')
+              inventories = {}
+              results[variant] = {}
+              for key, (component, name) in selections.items():
+                  inventory = Path('evidence/'+variant+'-'+key+'-inventory.log').read_text()
+                  inventories[component] = inventories.get(component, '') + inventory
+                  assert re.findall('^([a-zA-Z0-9_:]+): test$', inventory, re.M) == [name]
+                  paths = re.findall('Running unittests src/lib[.]rs [(]([^)]+)[)]', inventory)
+                  assert len(paths) == 1, (variant, key, paths)
+                  executable = Path(paths[0]).resolve()
+                  assert executable.is_file() and executable.is_relative_to(target_root.resolve())
+                  log = Path('evidence/'+variant+'-'+key+'-tests.log').read_text()
+                  summaries = re.findall('^test result: ok[.] 1 passed; 0 failed; 0 ignored; 0 measured; ([0-9]+) filtered out;', log, re.M)
+                  assert len(summaries) == 1 and 'test '+name+' ... ok' in log and str(executable) in log
+                  results[variant][key] = dict(component=component, source_root=str(source_root), target_root=str(target_root), executable=str(executable), executable_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(), test_name=name, passed=1, failed=0, ignored=0, filtered=int(summaries[0]))
+              for component, inventory in inventories.items():
+                  compile_line = 'Compiling volparossa-'+component+' v0.1.0 ('+str(source_root / ('crates/volparossa-'+component))+')'
+                  assert compile_line in inventory, (variant, component, compile_line)
+          for key in selections:
+              assert results['baseline'][key]['executable'] != results['candidate'][key]['executable']
+          Path('evidence/regression-summary.json').write_text(json.dumps(results, indent=2))
+          PY_TEST
+          git diff --exit-code
+      - name: Preserve scoped evidence including known remaining failures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: f04-p03e-eight-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 14
