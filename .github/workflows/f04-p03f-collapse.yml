@@ -12,7 +12,7 @@ defaults:
     shell: bash
 env:
   # Principal replaces only after independent review. Placeholder fails closed.
-  CANDIDATE: '0000000000000000000000000000000000000000'
+  CANDIDATE: '787115a714c94ffa3f85262e276718a12c4cdbb5'
   CARGO_TERM_COLOR: never
   CARGO_BUILD_JOBS: '2'
   PYTHONDONTWRITEBYTECODE: '1'
