@@ -66,6 +66,8 @@ functional_peer_endpoint=$functional_underlay_address:$functional_relay_listen_p
 functional_exit_peer_public_key=$functional_exit_relay_public_key
 functional_exit_peer_endpoint=$functional_underlay_address:$functional_exit_relay_listen_port
 functional_peer_keepalive=25
+# Real workers use the backend's fixed keepalive; external fixtures retain 25.
+functional_worker_peer_keepalive=1
 functional_release_byte=G
 helper_bootstrap_capability_mask=00000000002015e0
 start_failure_record=$proof_directory/start.failure
@@ -2637,7 +2639,7 @@ worker_activated_wireguard_is_exact() {
         /usr/bin/wg show "$hook_interface" allowed-ips 2>/dev/null) || return 1
     [ "$hook_peer_field" = "$hook_expected_peer_field" ] || return 1
     hook_expected_peer_field=$(printf '%s\t%s' \
-        "$hook_expected_peer_public_key" "$functional_peer_keepalive") || return 1
+        "$hook_expected_peer_public_key" "$functional_worker_peer_keepalive") || return 1
     hook_peer_field=$(/usr/bin/nsenter --net="/proc/self/fd/$hook_namespace_fd" -- \
         /usr/bin/wg show "$hook_interface" persistent-keepalive 2>/dev/null) || return 1
     [ "$hook_peer_field" = "$hook_expected_peer_field" ] || return 1

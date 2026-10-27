@@ -99,6 +99,11 @@ class PeerTopology(unittest.TestCase):
             if name == 'derive_exit_peer_address':
                 source = source.replace('peer = substr($1, 1, 28) "0001"',
                                         'peer = substr($1, 1, 28) "0003"', 1)
+            if name == 'worker_activated_wireguard_is_exact':
+                # The separate state suite checks the production keepalive and
+                # freezes this complete function before that one correction.
+                source = source.replace('"$functional_worker_peer_keepalive"',
+                                        '"$functional_peer_keepalive"', 1)
             self.assertEqual(hashlib.sha256(source.encode()).hexdigest(), expected, name)
         contract = (HERE / 'test-live-worker-identity-contract.sh').read_text()
         self.assertEqual(contract.count('python3 -B "$script_directory/test-helper-peer-topology.py"'), 1)
