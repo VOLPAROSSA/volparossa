@@ -1,4 +1,4 @@
-name: F04 paired minimum-compiler census (NON-ACCEPTANCE)
+name: F04 fixed candidate locked inputs, formatter patch and strict compile proof
 on:
   push:
     branches: [proof/p03f-f04-collapse-corrected-20261027]
@@ -11,15 +11,29 @@ defaults:
   run:
     shell: bash
 env:
-  CANDIDATE: c11d97f4265834218500ba7ec7e2aff1e66c55db
+  # Principal replaces only after independent review. Placeholder fails closed.
+  CANDIDATE: '0000000000000000000000000000000000000000'
   CARGO_TERM_COLOR: never
   CARGO_BUILD_JOBS: '2'
   PYTHONDONTWRITEBYTECODE: '1'
 jobs:
-  census:
+  source-validation:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
+      - name: Admit hosted proof before checkout or provisioning
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          test "$(id -u)" != 0
+          test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
+          test "$GITHUB_REF" = refs/heads/proof/p03f-f04-collapse-corrected-20261027
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          [[ "$CANDIDATE" =~ ^[0-9a-f]{40}$ ]]
+          test "$CANDIDATE" != 0000000000000000000000000000000000000000
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -30,116 +44,36 @@ jobs:
           path: source
           persist-credentials: false
           fetch-depth: 1
-      - name: Authenticate proof source and apply exact compatibility patch to disposable source only
+      - name: Bind exact clean candidate, three initial locks and proof code
+        run: |
+          python3 -B scripts/test-f04-source-validation.py
+          python3 -B scripts/run-f04-source-validation.py prepare
+      - name: Provision candidate authenticated Rust 1.89.0 directly
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$GITHUB_WORKFLOW_SHA"
-          test -z "$(git status --porcelain --untracked-files=all -- .github scripts)"
-          python3 -B scripts/run-f04-compiler-comparison.py prepare
-          sha256sum scripts/provision-rust189.py scripts/rust189-components.json \
-            scripts/provision-rust199.py scripts/rust199-components.json \
-            scripts/run-f04-compiler-comparison.py > evidence/proof-source.sha256
-      - name: Provision both authenticated compiler profiles on disposable runner only
-        run: |
-          set -euo pipefail
-          python3 -B scripts/provision-rust189.py runner 2>&1 | tee evidence/provision-1.89.0.log
-          python3 -B scripts/provision-rust199.py runner 2>&1 | tee evidence/provision-1.99.1.log
-          echo 'PROFILES_READY=true' >> "$GITHUB_ENV"
-      - name: Prepare pinned Protobuf on disposable hosted runner only
+          python3 -B source/scripts/provision-rust189.py runner 2>&1 | tee evidence/provision.log
+          cp "$RUNNER_TEMP/volparossa-rust-1.89.0/receipt.json" evidence/compiler-receipt.json
+      - name: Prepare existing pinned Protobuf on disposable hosted runner
         run: |
           set -euo pipefail
           test "$RUNNER_ENVIRONMENT" = github-hosted
-          sudo apt-get -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update 2>&1 | tee evidence/apt-update.log
-          sudo apt-get install --yes --no-install-recommends \
+          timeout --kill-after=15s 180s sudo apt-get -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update 2>&1 | tee evidence/apt-update.log
+          timeout --kill-after=15s 180s sudo apt-get install --yes --no-install-recommends \
             protobuf-compiler=3.21.12-8.2ubuntu0.4 \
             libprotoc32t64=3.21.12-8.2ubuntu0.4 \
             libprotobuf32t64=3.21.12-8.2ubuntu0.4 2>&1 | tee evidence/apt-install.log
-          protoc --version | tee evidence/protoc.txt
+          protoc --version > evidence/protoc.txt
           dpkg-query -W protobuf-compiler libprotoc32t64 libprotobuf32t64 > evidence/protobuf-packages.txt
-      - name: Fetch same unchanged C11 root and fuzz locks with authenticated minimum Cargo
-        run: |
-          set -euo pipefail
-          cd source
-          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
-          export RUSTC="$RUNNER_TEMP/volparossa-rust-1.89.0/bin/rustc"
-          export RUSTDOC="$RUNNER_TEMP/volparossa-rust-1.89.0/bin/rustdoc"
-          "$RUNNER_TEMP/volparossa-rust-1.89.0/bin/cargo" fetch --locked 2>&1 | tee ../evidence/fetch-root.log
-          "$RUNNER_TEMP/volparossa-rust-1.89.0/bin/cargo" fetch --locked --manifest-path fuzz/Cargo.toml 2>&1 | tee ../evidence/fetch-fuzz.log
-          git diff --exit-code -- Cargo.lock fuzz/Cargo.lock
-          echo 'INPUTS_READY=true' >> "$GITHUB_ENV"
-      - name: Rust 1.89 strict and explicit NON-ACCEPTANCE capped enumeration
-        run: python3 -B scripts/run-f04-compiler-comparison.py run 1.89.0
-      - name: Rust 1.99 strict and explicit NON-ACCEPTANCE capped enumeration on same source
-        if: ${{ !cancelled() && env.PROFILES_READY == 'true' && env.INPUTS_READY == 'true' }}
-        run: python3 -B scripts/run-f04-compiler-comparison.py run 1.99.1
-      - name: Always preserve first compiler errors and validate both census results
+      - name: Resolve fixture only, capture and undo formatting, compile strict committed source
+        run: python3 -B scripts/run-f04-source-validation.py run
+      - name: Always report strict failures and original source and cleanup bindings
         if: always()
-        run: |
-          set -euo pipefail
-          set +e
-          python3 -B scripts/run-f04-compiler-comparison.py summarize
-          summary_status=$?
-          set -e
-          if test -f evidence/proof-source.sha256; then
-            sha256sum --check evidence/proof-source.sha256
-          fi
-          exit "$summary_status"
-      - name: Preserve paired compiler census including incomplete and failure evidence
+        run: python3 -B scripts/run-f04-source-validation.py summarize
+      - name: Preserve only text evidence, patches and original/resolved locks
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: f04-paired-compiler-census-NON-ACCEPTANCE-${{ github.run_id }}
+          name: f04-source-validation-COMPILE-ONLY-${{ github.run_id }}
           path: evidence/
-          if-no-files-found: error
-          retention-days: 14
-  security-resolution:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          fetch-depth: 1
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: 96a0584ad985e8c404f8dd2a232e439971ca3d8d
-          path: security-source
-          persist-credentials: false
-          fetch-depth: 1
-      - name: Admit fixed resolver and security source before provisioning
-        run: |
-          set -euo pipefail
-          python3 -B - <<'PY_ADMIT'
-          import importlib.util
-          spec = importlib.util.spec_from_file_location('resolver', 'scripts/run-f04-security-resolver.py')
-          resolver = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(resolver)
-          resolver.admit()
-          PY_ADMIT
-          mkdir security-provision-evidence
-          sha256sum scripts/run-f04-security-resolver.py scripts/provision-rust199.py \
-            scripts/rust199-components.json > security-provision-evidence/proof-source.sha256
-      - name: Provision exact authenticated Rust 1.99.1 directly on hosted runner
-        run: |
-          set -euo pipefail
-          python3 -B scripts/provision-rust199.py runner 2>&1 | tee security-provision-evidence/provision.log
-          cp "$RUNNER_TEMP/volparossa-rust-1.99.1/receipt.json" security-provision-evidence/compiler-receipt.json
-      - name: Resolve only fixed source locks and preserve complete graph evidence
-        run: python3 -B scripts/run-f04-security-resolver.py
-      - name: Verify resolver proof remained unchanged
-        if: always()
-        run: |
-          set -euo pipefail
-          if test -f security-provision-evidence/proof-source.sha256; then
-            sha256sum --check security-provision-evidence/proof-source.sha256
-          fi
-      - name: Preserve resolver evidence and original locks even on failure
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: f04-security-resolution-SOURCE-ONLY-${{ github.run_id }}
-          path: |
-            security-provision-evidence/
-            security-evidence/
           if-no-files-found: error
           retention-days: 14
