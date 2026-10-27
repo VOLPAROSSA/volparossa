@@ -6,11 +6,15 @@ including [DPS](development/GOAL.md#dps) and
 for engineering boundaries and the [development workflow](development/CODEX_WORKFLOW.md)
 for scoped execution. A milestone does not reduce the agreed goal.
 
-Reorganized: 2026-10-26. Technical evidence below is the repository's recorded
-2026-10-23 checkpoint at `89d3aea585ed`; this edit runs no new product trial and
-makes no current GitHub run/PR-state claim. Refresh the relevant branch, checks
-and ownership before resuming it. A previously recorded pending job is not proof
-that it is running now. Later local baseline `6542b42f505c` changes README text only.
+Reorganized: 2026-10-26; evidence reconciled: 2026-10-27. Technical evidence
+combines the recorded 2026-10-23 checkpoint at `89d3aea585ed` with the
+[PR343 evidence supplement](archive/integration-evidence-pr343-20261023.patch.txt)
+at `a52ab4e77184`. That supplement preserves the original source/tree bindings,
+artifact IDs, digests and failures without restoring obsolete workflow instructions.
+The four formerly pending runs identified below have refreshed GitHub run/job
+metadata as of 2026-10-27; their artifacts were not revalidated in this edit.
+No new product trial was run. Refresh relevant branch/check ownership before
+resuming; an old source result does not establish current composition acceptance.
 
 [Current work](#current-integration-and-active-work) ·
 [Priorities](#execution-priorities-and-next-milestones) ·
@@ -50,7 +54,7 @@ is removed; behavioral tests and production paths are unchanged.
 | --- | --- |
 | Network | Original v1 A01–A15 passes on `482e33d0`, run 34047766913; expanded DICN and warm/mixed-link acceptance remain separate. |
 | Storage / Image / Cloud | Components pass; full consumer restore/deletion and zero remote usage remain open after catalog/retention failures. |
-| Protected Compute | Public answers/corruption/cleanup pass in 39842391908, but aggregate host comparison fails. Later connect failure and source gates do not close runtime/private-workload acceptance. |
+| Protected Compute | Strict host gate fails in 39868428738 despite public answers/corruption/cleanup; later feature run 39876860833 has successful public-job metadata. Receipt-level host/configuration acceptance, main composition and private workloads remain separate. |
 | Studio | Real local edit/style/preview/export/Core packing passes in 39869460125; production publication, independent hosting, shared AI and dynamic execution remain open. |
 | DPS / Map | Synthetic daemon, quality C ABI and bounded debug JNI slice pass; real sensors, fusion, accuracy/integrity evaluation, navigation and location authority remain open. |
 | Cache / Weather | Actual Drizz.li/Overmorrow and installed emulator delivery/refresh/resume pass; real expiry, automatic acquisition, physical devices/iOS and full precipitation/air-quality coverage remain open. |
@@ -113,8 +117,15 @@ system value; these priorities impose no fixed application/model/agent order.
   work is not reached. Reviewed PR339 at `145c49e35ac8`, tree `a0bc4b2eec1d`,
   preserves authority/custody behavior and drives the calculated ordinary turns.
   Its 93 inert smoke/44 wiring tests and real writer-to-bounded-reader controls
-  pass; ordinary Quality and actual Alpha 39871646877 are recorded pending in
-  this checkpoint. Refresh them before deciding the next action.
+  pass. Recorded ordinary Quality 39871649767 and CodeQL 39871645927 pass;
+  Quality tests merge `d78c02be1003`, tree `b6a107651409` (main `18b96ff3` plus
+  source `145c49e3`), with 4,250 passed/0 failed/18 ignored top-level tests,
+  334 focused Storage Python cases and 66 Node tests. Actual Alpha
+  [39871646877](https://github.com/VOLPAROSSA/volparossa/actions/runs/39871646877)
+  is now verified completed/failed at that source; its failed job step is
+  `Require actual owner-private storage maintenance`. This metadata does not
+  establish the underlying failure substage, rotation convergence, catalog
+  restoration or independent remote cleanup.
 
 [Full Storage evidence and original failures](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#execution-priorities-and-next-milestones)
 retain exact pins, artifacts and receipts. Automatic upload branch PR279 still
@@ -131,20 +142,45 @@ repeated restore and all-copy deletion; SDK source checks do not replace it.
   `two_public_turns/command_failed` after the connect prefix. It proves phase
   entry only; no public answer or complete host comparison follows. Diagnostic
   source run 39866709823 passes 137 Rust/484 Python cases at `3a96ad7f110b`;
-  PR338 merges into the feature as `ce438c27df80` with the same tree. Actual
-  feature trial 39868428738 is recorded pending and must be refreshed.
-- Main-based draft PR332, branch `integration/resident-model-main-20261022`,
+  PR338 merges into the feature as `ce438c27df80` with the same tree.
+- **Strict actual failure:** feature trial 39868428738 fails the final
+  `host_network_observation_changed` gate despite both expected `READY`/`4`
+  answers, corruption rejection at `verity_read` and VM/tool/scratch cleanup.
+  Its aggregate remains `state=failed`, `model_execution=false`. The bounded
+  Linux 6.17.0-1022-azure diagnostic identifies `REFERENCE_METADATA_ONLY`:
+  renderer, IPv4 routes, DNS and all six IPv6 rows' non-reference-count bytes
+  match; reference counts/raw IPv6 fingerprint differ. This localizes this
+  run's difference, without identifying its actor or explaining earlier runs.
+- **Feature checkpoint candidate:** PR341 at `81c6b6a5522b`, tree
+  `411c728475a8`, preserves raw equality false and adds a separate versioned,
+  bounded route/DNS configuration checkpoint plus sticky cancellation and
+  post-cleanup terminal checks. Source gate 39875150717 passes 137 Rust/494
+  Python tests, formatting, compilation and Clippy; actual execution is skipped.
+  It merges into the retained feature as `2d004c2466ef`, with the tested tree.
+  Follow-up [39876860833](https://github.com/VOLPAROSSA/volparossa/actions/runs/39876860833)
+  is now verified successful at that SHA, including the `public-model` job and
+  execution step. This refresh did not inspect its final receipt fields and
+  does not reclassify the earlier strict failure. The terminal guard selects
+  success after cleanup; cancellation at later receipt-write entry is not
+  atomic with that decision and can retain an already selected pass.
+- **Main composition:** PR332, branch `integration/resident-model-main-20261022`,
   is separately reconciled at `af9ecc3ca400`, tree `eefe84a3565b`.
   Source gate 39868938187 passes 137 Rust/485 Python tests, compilation,
-  formatting and Clippy; actual-model execution is skipped. Ordinary
-  Quality/CodeQL for this newer source remain separate recorded pending gates.
-  Earlier source `84be249dd014` passes Quality 39856525861 and CodeQL
-  39856518477; alert341 is fixed in that PR instance without dismissal. Those
-  results do not transfer to an untested composition.
+  formatting and Clippy with actual-model execution skipped. Recorded Quality
+  39868882810 and CodeQL 39868876355 pass; Quality tests merge `2d11a7778786`,
+  tree `9550ea68f344` (main `a68b805a` plus `af9ecc3c`), with 4,345 top-level
+  passes/0 failures/17 ignored. Later checkpoint reconciliation `c29f67c5a884`,
+  tree `10b4bb01e73b`, has 243 inert controller/20 host tests and unchanged
+  dependency/public-job authority. Its source run
+  [39876866868](https://github.com/VOLPAROSSA/volparossa/actions/runs/39876866868)
+  is now verified successful at that SHA with `public-model` skipped. Neither
+  source run proves actual inference on main's dependency composition or any
+  subsequent reconciliation. Earlier Quality/CodeQL results likewise remain
+  bound to their tested composition.
 
-Keep strict raw host equality, unchanged public-job authority, bounded
-privacy-safe diagnostics and original failures. Public fixture execution is not
-confidential/private-workload acceptance. The
+Keep raw host equality separate from configuration-checkpoint acceptance,
+unchanged public-job authority, bounded privacy-safe diagnostics and original
+failures. Public fixture execution is not confidential/private-workload acceptance. The
 [full record](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#resumed-full-objective-and-dependency-work--2026-10-22)
 retains exact source/tree manifests and failed/successful artifacts.
 
@@ -169,8 +205,30 @@ hosting, shared AI and all fifteen Studio acceptance cases remain open.
 The pinned publication route currently builds vectors and reads Storage assets
 before calling the connector; preparation must be bounded before that seam.
 
+PR340 adds optional expected-input SHA-256 binding over a bounded owned,
+zeroizing snapshot, publishing the same captured bytes and rejecting before
+credential/cache/signing/IPC effects; omission preserves streaming behavior.
+Initial Quality 39873065947 fails Clippy on test binding names; correction
+`4c0e11a2b349`, tree `6802c497e899`, only renames that binding. This prerequisite
+does not establish native review authority or hosting.
+
+The subsequent local-viewer fixture uses Core PR342 `c815483c48e5` and Studio PR4
+`65ab59b81b3c`, with an explicitly mocked local named transfer into actual
+`content site open`; it is not independent peer hosting. Recorded actual
+39875855784 fails `viewer-runtime/exit_nonzero`: editor/export and Core viewer
+compilation pass, owned groups drain and temporary outputs are removed, but
+no successful viewer, child-control or independent-browser result follows.
+Its reviewed bounded diagnostic follow-up pairs Core `81ecc1a79561` with Studio
+`164e08dfa487`; 13 inert diagnostic tests pass. Run
+[39877380401](https://github.com/VOLPAROSSA/volparossa/actions/runs/39877380401)
+is now verified completed/failed at that Core SHA in dependency acquisition/Studio
+fixture compilation; the actual viewer/browser step is skipped. These metadata
+localize that follow-up's reached step, not the earlier viewer failure's cause.
+
 [Studio evidence, failed trials and source bindings](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#studiohosting-scope-and-preserved-work--2026-10-22)
-remain available without becoming routine startup context.
+and the [PR343 supplement](archive/integration-evidence-pr343-20261023.patch.txt)
+retain artifacts, hashes and exact source/tree bindings without becoming routine
+startup context.
 
 ### Decentralized positioning system — 2026-10-21
 
@@ -227,10 +285,10 @@ using a checkout. Never reset unpublished work or remove dirty/ambiguous trees.
 
 | Work | Retained branch / checkout | Resume boundary |
 | --- | --- | --- |
-| Resident feature | `feature/protected-resident-model`, `.git/codex-protected-resident-model`, PR276 | Keep feature/runtime evidence distinct from main-based PR332; refresh trial 39868428738. |
-| Main resident composition | `integration/resident-model-main-20261022`, PR332 | Source gate passes at af9ecc3c; runtime and newer ordinary gates require current evidence. |
+| Resident feature | `feature/protected-resident-model`, `.git/codex-protected-resident-model`, PR276 | Keep strict failure 39868428738 and later successful-job metadata 39876860833 distinct; inspect the latter receipt before host/configuration claims. |
+| Main resident composition | `integration/resident-model-main-20261022`, PR332 | Source gates pass at af9ecc3c and c29f67c5; ordinary merge results bind af9ecc3c, not later runtime compositions. |
 | Model connect diagnostic | `.volparossa-dev/worktrees/resident-connect-observation-20261023`, PR338 | Integrated into retained feature; preserve original host/connect failures. |
-| Storage rotation | `.volparossa-dev/worktrees/storage-maintenance-rotation-20261023`, PR339 | Refresh source/actual 39871646877; do not infer convergence or catalog restore. |
+| Storage rotation | `.volparossa-dev/worktrees/storage-maintenance-rotation-20261023`, PR339 | Ordinary source gates pass; actual 39871646877 fails owner-private maintenance. Inspect its report before diagnosing or claiming convergence. |
 | Catalog diagnostic | `.volparossa-dev/worktrees/storage-catalog-restore-20261023`, PR336 | Integrated source; actual 39864473079 fails before catalog work. |
 | Automatic upload | `feature/cloud-upload-tls-v9`, `.git/codex-cloud-upload-tls-v9`, PR279 at dd1fd4df | Complete shared consumer profile and remote cleanup before upload acceptance. |
 | Earlier Storage dependencies | `.git/codex-storage-route-retirement`, `.git/codex-storage-real-route-sequence`, `.git/codex-storage-natural-expiry-sequence`, `.git/codex-storage-post-acquire-clock` | Preserve PR275/285/287/288 history and later integrated corrections; old heads are not current implementation status. |
