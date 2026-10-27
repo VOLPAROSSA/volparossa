@@ -8,7 +8,7 @@ applications and new research projects to its shared capabilities. They are
 own current implementation and evidence; this page explains the scope and major boundaries.
 
 The [complete agreed goal](../development/GOAL.md) preserves the full application scope;
-the [joined DPS requirements](../development/DPS_REQUIREMENTS.md) preserve the
+its [DPS section](../development/GOAL.md#dps) preserves the
 permanent cross-application positioning scope;
 the [core implementation ledger](../IMPLEMENTATION_STATUS.md#current-integration-and-active-work)
 records shared dependencies and exact acceptance evidence. Follow each application's linked
@@ -23,13 +23,14 @@ See the [shared-service contract](../architecture/APPLICATION_LIFECYCLE.md).
 
 [volparossa-studio](https://github.com/VOLPAROSSA/volparossa-studio) is the required
 Silex-based visual website editor, portable export and shared decentralized hosting
-integration. The [complete amendment](../development/STUDIO_HOSTING_REQUIREMENTS.md)
+integration. The [Studio section of the goal](../development/GOAL.md#studio)
 requires visual/manual editing, preview, explicit publication, actual independent
 availability, updates/recovery/withdrawal and shared protected AI through Core and
 supported Silex interfaces. [The architecture and initial audit](../services/STUDIO_HOSTING.md)
 separate static publishing from progressive dynamic execution and durable state.
-The initial repository is only a README/license scaffold; no working Studio
-integration or hosted-site acceptance is claimed.
+The initial audit started from a README/license scaffold. Current bounded
+editing/export evidence is recorded in [implementation status](../IMPLEMENTATION_STATUS.md#studio-and-shared-hosting-evidence);
+complete production publication and independently available hosting remain open.
 
 Reuse Browser discovery/rendering with existing TLS/fallback/killswitch policy;
 Cloud private project storage; Code/OpenCode editing/testing/review; explicitly
@@ -117,13 +118,13 @@ Signed traffic-snapshot validation exists; live aggregation and mobile display r
 Sharing congestion should not expose individual journeys or complete location histories.
 Licenses, freshness and uncertainty remain relevant even when data comes from nearby peers.
 
-The [joined DPS requirements](../development/DPS_REQUIREMENTS.md) define the
+The [DPS goal section](../development/GOAL.md#dps) define the
 permanent application scope; the [DPS service design](../services/DPS.md) records
 implementation and acceptance choices. Together they cover alternative or
 complementary location sources, including weak-GNSS, tunnel/indoor and
 manipulated-GNSS scenarios. Keep offline navigation, visible uncertainty and
-application permission boundaries. Native integration and actual positioning
-improvement remain unverified; journeys and movement histories are not shared
+application permission boundaries. The recorded debug JNI quality slice is separate from native navigation and
+actual positioning improvement; journeys and movement histories are not shared
 automatically. No application depends on a chat attachment or conversation history
 for these requirements.
 
@@ -187,27 +188,16 @@ neither a public-election security proof nor recognized legal authority.
 
 ## Shared positioning integration
 
-The [shared DPS service](../services/DPS.md#application-integration-priorities)
-supplies one versioned core interface with separate platform sensor adapters.
-Applications must not duplicate its positioning engine or enable collection just
-because the node participates in VOLPAROSSA.
+Use the [DPS goal section](../development/GOAL.md#dps) for complete functional
+and per-application requirements, and the [shared DPS service](../services/DPS.md#application-integration-priorities)
+for versioned adapters and acceptance. Applications share that service rather
+than duplicate positioning engines. Participation grants no sensor, contribution,
+retention or training permission; each needs its own appropriate authorization.
 
-- Weather may use permitted position estimates and geographically associated
-  observations while protecting locations and accounting for correlated sources.
-- Image may optionally retain photo/video locations only within existing user
-  rights and private storage, without automatic publication.
-- Chat may provide explicitly authorized encrypted location exchange/local
-  positioning with bounded retention and the existing Signal Protocol.
-- Browser must preserve platform and origin permissions and never give websites
-  or extensions finer location than the user allowed.
-- Cloud may store/synchronize only explicitly authorized private positioning
-  data through the existing Storage layer.
-- Other applications adopt DPS only for a concrete benefit. Unproven location
-  claims cannot alone authorize transactions, identities, voting rights or access.
-
-Hardware, permission revocation, privacy and native application behavior require
-their own tests. Synthetic service tests do not prove functioning location sensors,
-geographic truth or improved navigation. See the [DPS acceptance sequence](../services/DPS.md#acceptance-sequence).
+Preserve offline behavior, uncertainty, platform/origin precision limits and private
+location/media history. Unproved position claims cannot grant financial, identity,
+voting or access authority. Synthetic assessments and debug JNI quality displays do
+not prove sensor acquisition, geographic truth, navigation or measured improvement.
 
 ## Shared boundaries
 

@@ -63,27 +63,15 @@ separately and never makes private HTTPS content public. Per-app authority and a
 resource accounting must be implemented rather than exposing the whole administrative socket
 to every frontend. Existing service files alone do not prove that integration is complete.
 
-The [Decentralized Positioning System](../services/DPS.md) is a reusable core service
-over the same Network, Cache, Storage, Compute and Transaction infrastructure;
-it adds no sixth layer or location dependency to network participation. Platform
-adapters own permission-checked sensor/radio access, reference frames and lifecycle.
-Shared logic owns bounded observation assessment and subsequent positioning/fusion.
-The [complete agreed goal](../development/GOAL.md) remains authoritative for the
-full project scope; the [joined DPS requirements](../development/DPS_REQUIREMENTS.md)
-are the permanent normative DPS scope. The service page records design choices
-and staged acceptance, not a ceiling on those requirements.
-Private measurements stay local by default; receiving assistance, contributing,
-retaining history and training are separately authorized. A signed location claim,
-matching peer reports or authenticated GNSS navigation data does not establish
-physical truth. Relative positions need a validated geographic reference before
-they become absolute location estimates. DPS must expose uncertainty, conflicts,
-age, provenance and unavailable states and must not replace OS location services
-without separate authorization. The first stateless local-control contract is not
-yet native Map integration, measured sensor fusion or proven attack detection.
+[DPS](../services/DPS.md) is a permission-scoped, versioned core service over the same
+five layers, not a sixth layer or a condition of participation. The [DPS goal section](../development/GOAL.md#dps)
+defines sensor, integrity and application requirements; the service contract specifies
+measurement provenance, uncertainty and private processing. Receiving help, contributing,
+retaining history and training remain separately authorized.
 
 ## Studio and shared hosting
 
-The permanent [Studio/hosting addition](../development/STUDIO_HOSTING_REQUIREMENTS.md)
+The integrated [Studio/hosting scope](../development/GOAL.md#studio)
 uses the same five layers and existing signed content/site/name/custody interfaces.
 [Studio's design and audit](../services/STUDIO_HOSTING.md) separates editor and AI
 tool rights from publication identity, retention responsibilities and visitor access.

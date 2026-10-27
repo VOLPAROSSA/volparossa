@@ -172,6 +172,15 @@ flowchart LR
     class E,D endpoint;
 ```
 
+The diagram starts with your node in the client role: Path 1 reaches Peer A over local
+Wi-Fi, Path 2 reaches Peer B over the existing Internet, and Path 3 reaches Peer C over
+local Ethernet. These different relays each connect over WireGuard to the same selected
+exit peer. The dotted route shows additional local or Internet paths through further
+relays and WireGuard links to that same exit, when useful and supported. The exit's
+independent uplink reaches the allowed Internet destination. Each normal path remains
+client → exactly one relay → exit → destination, with payloads encrypted from client
+to exit; local links do not permit a direct client-to-exit dataplane.
+
 The diagram shows **several parallel routes**. Within each route, one WireGuard link
 connects your node to its relay, and a second connects that relay to the selected exit.
 These two links are sometimes called the route's **two legs**; that does not limit the
@@ -351,6 +360,7 @@ and compute coordination belongs in the core.
 | [Chat](https://github.com/VOLPAROSSA/volparossa-chat) | Signal | Encrypted messages, calls and private backups. |
 | [Mail](https://github.com/VOLPAROSSA/volparossa-mail) | Thunderbird + Stalwart | Existing accounts, decentralized delivery and self-hosting. |
 | [Code](https://github.com/VOLPAROSSA/volparossa-code) | OpenCode | Coding agents using core-managed models and collaboration. |
+| [Studio](https://github.com/VOLPAROSSA/volparossa-studio) | Silex | Visual website editing, portable export, explicit publication and shared hosting/AI. |
 | [Image](https://github.com/VOLPAROSSA/volparossa-image) | Immich | Private photo/video libraries and recoverable state. |
 | [Map](https://github.com/VOLPAROSSA/volparossa-map) | Organic Maps | Offline maps, shared distribution and traffic information. |
 | [Weather](https://github.com/VOLPAROSSA/volparossa-weather) | Direct ECMWF/NOAA data; Drizz.li + Overmorrow clients | Shared forecasts, client delivery and measured forecast improvement. |

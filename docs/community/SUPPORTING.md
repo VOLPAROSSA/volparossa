@@ -5,10 +5,10 @@ useful computation cooperative infrastructure. Support can fund careful engineer
 independent verification and accessible documentation. There is no supported
 end-user release, claimed revenue or established commercial traction here.
 
-**GitHub Sponsors is pending.** The maintainer reports that the setup requirements
-are complete and GitHub Support has already been contacted. This is not a live
-sponsorship offer. No payment link is published until its destination is verified
-as usable. No funding is required to participate in development or the network.
+This page publishes no live sponsorship or payment offer. A payment link may be
+published only after its destination is verified as usable; a dated application
+or support request is not proof of current availability. No funding is required
+to participate in development or the network.
 
 You can help now through a [bounded contribution](../../CONTRIBUTING.md), an
 independent reproduction, accessibility feedback or relevant research. General
@@ -21,6 +21,11 @@ For a private research or support inquiry, the organization publishes
 These are engineering priorities, not funded promises or delivery dates. See the
 [current plan](../IMPLEMENTATION_STATUS.md#execution-priorities-and-next-milestones)
 for exact source revisions, dependencies and original failed trials.
+
+Useful first contributions include one safe reproduction or a scoped documentation
+fix. Accessibility feedback should include independent screen-reader/device checks
+where possible. Gather voluntary aggregate feedback, without adding analytics or
+collecting private usage data; choose a reporting cadence maintainers can sustain.
 
 | Priority | A meaningful outcome | Resources to establish before committing |
 | --- | --- | --- |
@@ -68,4 +73,4 @@ and funded artifact production. The present engineering workflow cannot simply b
 represented as compliant. Factual opportunity research is not application text.
 
 For evidence of present capabilities and limitations, start with the
-[technical overview](OVERVIEW.md) and the [full evidence ledger](../IMPLEMENTATION_STATUS.md).
+[technical overview](OVERVIEW.md) and the [current evidence index](../IMPLEMENTATION_STATUS.md).

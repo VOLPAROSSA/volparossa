@@ -7,9 +7,8 @@ real user traffic. No released version is currently designated as supported.
 ## Reporting a vulnerability
 
 Use [private vulnerability reporting](https://github.com/VOLPAROSSA/volparossa/security/advisories/new)
-on GitHub. It was verified enabled on 20 October 2026. On another host, use its
-private security-advisory feature when available. If the project
-is mirrored somewhere without a private channel, open a minimal issue asking a maintainer to
+on GitHub when available. On another host, use its private security-advisory
+feature. If no private channel is available, open a minimal issue asking a maintainer to
 establish private contact; do not include exploit details, identities, keys, packet captures, or
 private destinations in that issue. The project has not published a separate security email or PGP
 key, so documentation must not invent one.
