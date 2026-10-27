@@ -18,6 +18,30 @@ Last updated: 2026-10-27
 
 ## Current integration and active work
 
+### F04 P03c — negen eenvoudige Clippy-meldingen — 2026-10-27
+
+Hervat vanaf live PR349-head `19721396d7a9914e07df02a851f26753d4feb215`,
+met hergebruik van de bestaande inventaris van 44 meldingen. Deze tranche
+corrigeert één `doc_markdown` in WireGuard, drie `assert_is_empty` in Peerstore,
+vier in Routing en één `manual_is_multiple_of` in de Routing-Wi-Fi-validatie.
+Alleen doc-backticks, equivalente leegte-asserties en deelbaarheid door de
+constante positieve vijf wijzigen. Publieke types, ABI/FFI, serde, wirevelden,
+configuratiecontracten en productiefoutpaden blijven behouden. De bestaande
+Wi-Fi-codec/validatietest krijgt expliciete geldige/ongeldige 5-GHz-grensgevallen.
+
+Gerichte hosted verificatie betreft uitsluitend WireGuard-/Routing-librarytests,
+Peerstore-integratietests, package-formatting en strikte Clippy met alle targets
+/features. Baseline en kandidaat hebben afzonderlijke buildmappen en worden
+gebonden aan hun bron, compilatie en uitvoerbare testbestanden; het P03b-
+bewijsprobleem blijft behouden en wordt niet herhaald. Onafhankelijke review
+en definitieve resultaten staan onder `.volparossa-dev/p03c-f04-20261027/`.
+De afzonderlijke bewijsworkflow komt niet in PR349; geen gewone Quality-run.
+Na deze negen correcties blijven 35 eerder bekende meldingen open. API-/enum-
+layout, signed-fieldrenames, chunks/parsers en native retrygedrag blijven buiten
+scope. Voorgesteld vervolg: vier equivalente Duration-constanten als eigen
+samenhangende tranche, met gerichte Content-controle en behoud van overige fouten.
+Geen vervolg uitgevoerd; bestaand F04-werk behouden. F04 blijft onvoltooid.
+
 ### F04 P03b — drie Config-Clippy-meldingen — 2026-10-27
 
 Hervat vanaf live PR349-head `d2b515a93255eb4d9409d32ed9069090e25e80ec`.
