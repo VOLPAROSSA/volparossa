@@ -296,6 +296,9 @@ if [ "$mode" = vendor_only ]; then
     exit 0
 fi
 
+python3 -B "$repository_root/scripts/cargo-source-policy.py" check ||
+    fail 'canonical public Cargo source policy is required before Cargo regressions'
+
 CARGO_TARGET_DIR="$audit_tmp/backport-target" \
     cargo test \
         --manifest-path third_party/rust/backport-regressions/Cargo.toml \
@@ -438,15 +441,12 @@ printf 'INFO  offline RustSec database commit: %s\n' "$advisory_commit"
 # Cargo-deny derives its database path from the canonical RustSec URL and has no
 # arbitrary local database flag. Point an isolated Cargo home at the already
 # selected checkout so cargo-deny and cargo-audit scan the exact same commit.
-source_cargo_home=${CARGO_HOME:-${HOME:?HOME is required to locate Cargo data}/.cargo}
 deny_cargo_home="$audit_tmp/cargo-home"
-mkdir -p "$deny_cargo_home/advisory-dbs"
+python3 -B "$repository_root/scripts/cargo-source-policy.py" deny-home "$deny_cargo_home" ||
+    fail 'canonical public Cargo origin is required before the isolated scan home'
+mkdir "$deny_cargo_home/advisory-dbs"
 ln -s "$advisory_database" \
     "$deny_cargo_home/advisory-dbs/advisory-db-3157b0e258782691"
-for cargo_entry in registry git config config.toml; do
-    [ ! -e "$source_cargo_home/$cargo_entry" ] ||
-        ln -s "$source_cargo_home/$cargo_entry" "$deny_cargo_home/$cargo_entry"
-done
 
 CARGO_HOME="$deny_cargo_home" cargo deny --version >/dev/null 2>&1 ||
     fail 'cargo-deny >= 0.18.6 is required for CVSS 4.0-capable dependency checks'

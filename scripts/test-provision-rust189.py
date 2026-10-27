@@ -33,6 +33,19 @@ def receipt():
 
 
 class CompilerTests(unittest.TestCase):
+    def setUp(self):
+        # Payload/lifecycle fixtures remain independent of the separately tested
+        # hosted Cargo-source boundary; no test may provision or execute Rust.
+        guard = patch.dict(M.POLICY, activate=lambda *a, **k: {'CARGO_HOME': '/inert'},
+                           validate_active=lambda root, env: dict(env), write_scope=lambda *a, **k: None)
+        guard.start(); self.addCleanup(guard.stop)
+
+    def test_source_boundary_rejection_precedes_installation_and_cargo_observation(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(M, 'location', return_value=Path(directory)/'prefix'), \
+             patch.dict(M.POLICY, activate=MagicMock(side_effect=ValueError('fixed policy rejection'))), \
+             patch.object(M, 'download') as download, patch.object(M, 'observe') as observe:
+            with self.assertRaises(ValueError): M.provision('runner')
+            download.assert_not_called(); observe.assert_not_called()
     def test_six_reviewed_components_and_receipt(self):
         M.validate_receipt(receipt())
         self.assertEqual(len(M.pins()['components']), 6)
@@ -246,6 +259,10 @@ def fixture(prefix):
 
 
 class PayloadTests(unittest.TestCase):
+    def setUp(self):
+        guard = patch.dict(M.POLICY, activate=lambda *a, **k: {'CARGO_HOME': '/inert'},
+                           validate_active=lambda root, env: dict(env), write_scope=lambda *a, **k: None)
+        guard.start(); self.addCleanup(guard.stop)
     def test_authenticated_complete_inert_payload_can_be_reused(self):
         with tempfile.TemporaryDirectory() as directory:
             prefix = Path(directory) / 'prefix'; metadata, value = fixture(prefix)

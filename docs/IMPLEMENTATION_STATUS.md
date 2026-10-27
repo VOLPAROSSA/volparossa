@@ -52,6 +52,23 @@ ZIP `24a255ffd844f09f30139df8ac52a3b870c9a3bbe4930c5bad8ff625c7526b38`
 en alle39 memberhashes zijn geverifieerd. Geen van deze runs is een Qualitypass.
 Het externe dependencyminimum is1.89;1.99.1 is dus technisch niet noodzakelijk.
 
+Het minimum geldt uitsluitend binnen het afgebakende buildprofiel. Cargo1.89
+blijft ongepatcht voor CVE-2026-33056/5222/5223; alleen actuele upstreamreleases
+krijgen security-updates. Crates.io sluit de beschreven kwaadaardige inputs
+aan serverzijde uit; dat repareert de oudere Cargo-binary niet. Alleen de
+bronlabels achteraf controleren is onvoldoende.
+De nieuwe broncontrole bindt daarom vóór de eerste Cargo-operatie effectieve
+configuratie, schone private homes/cache-oorsprong en credentials af. Alleen
+canonieke publieke sparse crates.io-inputs en gecontroleerde lokale patches
+zijn toegestaan. Vaste procesconfiguratie houdt Git-netwerkfetches op HTTPS
+via de CLI, zonder overgenomen gebruikersconfiguratie, credentials of SSH. De
+policyhelper inspecteert geen operatorconfiguratie of credentialinhoud; er is
+geen algemene claim over iedere interne libgit2-metadataoperatie. Ook de
+oudere Cargo-versies voor de audittools vallen onder deze controle. Dit is een
+voorwaardelijk buildprofiel met afzonderlijke source-scopebewijzen, geen patch
+of algemene upstreamsupportclaim. Werkelijke nieuwe hosted verificatie blijft
+vereist; de eerdere succesvolle scans bewijzen deze nieuwe grens niet.
+
 RustSec is vastgepind op `3279c99911354c400e1d41e47c7d60e39258b147`
 (26oktober). Nieuw RUSTSEC-2026-0387 raakt crypto-bigint0.5.5 via SEV8/p3840.13;
 de bestaande publieke RSA-uitzondering dekt dit niet. De minimale gerepareerde
@@ -167,12 +184,35 @@ triage vindt geen concrete inconsistentie in het oude observatieblok/directe
 contract; gelijke oude bron bewijst geen oude runtimefailure of afwezigheid van
 regressie. Geen verdere blinde VM-proefreeks: deze nativebeperking blijft open.
 
+De gewone kandidaat `1111f715` blijft eveneens FAILED:
+[40460898954](https://github.com/VOLPAROSSA/volparossa/actions/runs/40460898954)
+slaagt voor alle vier scans, maar de volledige notice-inventaris stopt bij
+libp2p-gossipsub0.49.5. De daaropvolgende inerte audit van alle561 Root-packages
+en zeven extra fuzz-archives vindt24 oorspronkelijke lowercase-noticebestanden
+en zeven exacte recoveries. Originele teksten/bestanden blijven ongewijzigd;
+metadata alleen geldt niet als vervangende notice. Het oorspronkelijke
+platformbrede failure-artifact blijft bewaard. Android0.1.1 heeft geen
+verifieerbare noticebron en blijft platformbreed **Not verified**.
+
+De nieuwe aanvullende noticecontrole volgt de daadwerkelijke Debian-amd64-
+dependencygraph die Cargo met `--filter-platform x86_64-unknown-linux-gnu`
+oplevert. De `packages`-definities blijven daarbij platformbreed; de collector
+selecteert daarom de volledige bereikbare closure van alle workspace-roots op
+exacte opaque `resolve`-IDs. Onbekende/ontbrekende/duplicaat IDs en ongeldige
+edges blijven fataal. Het bestaande Debian-packagingpad gebruikt dezelfde
+complete feature-consistente graph. Er is geen pakketnaam-uitzondering of
+handmatige cfg-evaluatie; bij de ongefilterde graph blijft Android opgenomen
+en de ontbrekende notice fataal. Alle root/fuzz-advisory- en licentiebeleids-
+checks blijven platformbreed onveranderd. Werkelijke targetverificatie moet de
+nieuwe Core-inventaris nog bewijzen; dit is geen Androidrelease- of algemene
+licentiecomplianceclaim.
+
 **F04 blijft open.** De beveiligingskandidaat en verplichte review-/mergeprocedure
 lopen via [PR349](https://github.com/VOLPAROSSA/volparossa/pull/349);
 [de actuele PR-controles](https://github.com/VOLPAROSSA/volparossa/pull/349/checks)
 zijn leidend voor latere jobuitkomsten. Bovenstaande resultaten blijven exact
 brongebonden momentopnamen. Acceptatie vereist alle vier fatale scans, volledige
-noticecollectie, strict root/fuzz-Clippy, gewone Quality en de noodzakelijke
+noticecollectie voor de Core-targetgraph, strict root/fuzz-Clippy, gewone Quality en de noodzakelijke
 nieuwe crypto/codegenbeoordeling. Geslaagd zbus-/DPS-bewijs blijft behouden bij
 gecontroleerd gelijke betrokken inputs. Volledige helper/nativeacceptatie blijft
 begrensd door de beschreven failure. Geen automatische merge en geen volledige

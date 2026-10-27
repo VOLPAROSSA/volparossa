@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import runpy
 import signal
 import stat
 import shutil
@@ -24,6 +25,7 @@ PROFILE = 'rust-1.89.0-20250807'
 PREFIX_NAME = 'volparossa-rust-1.89.0'
 MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_EXTRACTED = 2 * 1024 * 1024 * 1024
+POLICY = runpy.run_path(str(Path(__file__).with_name('cargo-source-policy.py')))
 
 
 def pins():
@@ -91,14 +93,16 @@ def validate_receipt(receipt):
     validate_outputs(receipt['observed_versions'])
 
 
-def observe(prefix):
+def observe(prefix, cargo_env=None):
+    cargo_env = POLICY['validate_active'](POLICY['ROOT'], os.environ if cargo_env is None else cargo_env)
+    print('CARGO_PUBLIC_SOURCE_POLICY_V1=pass', file=sys.stderr)
     outputs = {}
     for name in ('rustc', 'cargo', 'rustfmt', 'clippy-driver'):
         executable = prefix / 'bin' / name
         if not executable.is_file():
             raise ValueError('installed compiler component is missing: ' + name)
         outputs[name] = subprocess.check_output([str(executable), '--version'] + (['--verbose'] if name in ('rustc', 'cargo') else []),
-                                                text=True, timeout=30)
+                                                text=True, timeout=30, env=cargo_env)
     validate_outputs(outputs)
     return outputs
 
@@ -351,8 +355,16 @@ def install_component(source, prefix):
         raise subprocess.CalledProcessError(result.si_status, child.args)
 
 
-def provision(mode):
+def provision(mode, cargo_env=None):
     prefix = location('guest' if mode == 'guest-check' else mode, os.environ)  # Before network, extraction or execution.
+    if cargo_env is None:
+        if mode == 'guest-check':
+            cargo_env = POLICY['validate_active'](POLICY['ROOT'], os.environ)
+        else:
+            cargo_env = POLICY['activate'](mode)
+    else:
+        cargo_env = POLICY['validate_active'](POLICY['ROOT'], cargo_env)
+    POLICY['write_scope'](cargo_env, prefix.parent/'cargo-source-policy.json')
     metadata = pins()
     if prefix.exists() or prefix.is_symlink():
         if (prefix.is_symlink() or not prefix.is_dir() or prefix.stat().st_uid != os.geteuid() or
@@ -364,7 +376,7 @@ def provision(mode):
         receipt = json.loads(marker.read_text())
         validate_receipt(receipt)
         verify_payload(prefix, metadata)
-        if observe(prefix) != receipt['observed_versions']:
+        if observe(prefix, cargo_env) != receipt['observed_versions']:
             raise ValueError('compiler observations changed')
     else:
         if mode == 'guest-check':
@@ -385,7 +397,7 @@ def provision(mode):
                 install_component(source, prefix)
             verify_payload(prefix, metadata)  # Fresh payload too, before any observation.
             receipt = dict(schema_version=1, profile=PROFILE, manifest_sha256=MANIFEST_SHA256,
-                           components=metadata['components'], observed_versions=observe(prefix))
+                           components=metadata['components'], observed_versions=observe(prefix, cargo_env))
             validate_receipt(receipt)
             (prefix / 'receipt.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
         except CleanupUnconfirmed:
@@ -406,6 +418,10 @@ def provision(mode):
         # printed fixed prefix directly; no rustup installation or moving channel.
         with open(os.environ['GITHUB_PATH'], 'a') as output:
             output.write(str(prefix / 'bin') + '\n')
+        with open(os.environ['GITHUB_ENV'], 'a') as output:
+            output.write('CARGO_HOME=' + cargo_env['CARGO_HOME'] + '\n')
+            for name, value in POLICY['GIT_ENV'].items():
+                output.write(name + '=' + value + '\n')
     print(prefix)
     return prefix
 

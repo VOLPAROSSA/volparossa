@@ -36,7 +36,7 @@ class CurrentDps(unittest.TestCase):
     def test_current_full_tree_and_new_graph_bind_fixed_native_and_shared_baselines(self):
         record = M.source_receipt(ENV, self.fake_git(changed='Cargo.lock'))
         self.assertEqual(len(M.DPS), 13); self.assertEqual(len(M.SHARED), 4)
-        self.assertEqual(len(record['source_blobs']), 23)
+        self.assertEqual(len(record['source_blobs']), 25)
         self.assertEqual(record['source_commit'], REV)
         self.assertEqual(record['source_blobs']['Cargo.lock'], 'c' * 40)
         self.assertFalse(record['actual_android_acceptance'])

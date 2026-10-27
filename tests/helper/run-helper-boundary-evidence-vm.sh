@@ -2374,6 +2374,8 @@ test "$(git rev-parse HEAD)" = "$expected_commit"
 test -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)"
 test -z "$(git remote)"
 python3 -B scripts/provision-rust189.py guest
+export CARGO_HOME=/home/volparossa/.local/volparossa-cargo-public-v1
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
 export PATH="/home/volparossa/.local/volparossa-rust-1.89.0/bin:$PATH"
 cargo fetch --locked
 test -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)"
@@ -2388,6 +2390,8 @@ umask 077
 expected_commit=$1
 case $expected_commit in *[!0-9a-f]*|'') exit 64 ;; esac
 cd /home/volparossa/source
+export CARGO_HOME=/home/volparossa/.local/volparossa-cargo-public-v1
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
 python3 -B scripts/provision-rust189.py guest-check
 export PATH="/home/volparossa/.local/volparossa-rust-1.89.0/bin:$PATH"
 # shellcheck disable=SC1091

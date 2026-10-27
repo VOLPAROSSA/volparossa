@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 COMPILERS = ("1.89.0",)
 TARGETS = ("x86_64-unknown-linux-gnu", "i686-unknown-linux-musl")
 GROUP = runpy.run_path(str(ROOT / 'scripts/provision-rust189.py'))
+POLICY = GROUP['POLICY']
 MUSL = runpy.run_path(str(ROOT / 'scripts/prepare-musl-i386.py'))
 FEATURES = ((), ("alloc",), ("subtle",), ("alloc", "subtle"))
 RELEASE = {"codegen-units": 1, "lto": "thin", "opt-level": 3, "panic": "abort", "strip": "debuginfo"}
@@ -40,7 +41,7 @@ def admission(env, revision):
 
 def artifact_files(output):
     """Only the explicit upload payload; no source trees, binaries or Cargo homes."""
-    candidates = [output / "receipt.json", output / "REVIEW_REQUIRED.md"]
+    candidates = [output / "receipt.json", output / "REVIEW_REQUIRED.md", output / 'cargo-source-policy.json']
     candidates.extend(output.glob("*.log"))
     for directory in output.glob("codegen-*"):
         if directory.is_symlink():
@@ -70,14 +71,14 @@ def fixture_lock(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def current_compiler(prefix):
+def current_compiler(prefix, cargo_env=None):
     expected = Path(os.environ['RUNNER_TEMP']) / 'volparossa-rust-1.89.0'
     if prefix != expected or prefix.is_symlink():
         raise ValueError('unexpected current compiler prefix')
     receipt = json.loads((prefix / 'receipt.json').read_text())
     GROUP['validate_receipt'](receipt)
     GROUP['verify_payload'](prefix, GROUP['pins']())
-    if GROUP['observe'](prefix) != receipt['observed_versions']:
+    if GROUP['observe'](prefix, cargo_env) != receipt['observed_versions']:
         raise ValueError('current compiler observations changed')
     return receipt
 
@@ -162,6 +163,9 @@ def execute(output):
         nonlocal group_cleanup_confirmed
         log = output / (label + ".log")
         commands.append(dict(command=list(map(str, command)), label=label))
+        if Path(command[0]).name == 'cargo':
+            POLICY['validate_active'](ROOT, custom_env or env)
+            POLICY['check_command'](command[1:], cwd=ROOT)
         with log.open("w") as stream:
             group_cleanup_confirmed = False
             try:
@@ -188,6 +192,8 @@ def execute(output):
         receipt["fixture_lock_sha256"] = fixture_lock(ROOT / "third_party/rust/ctutils-current-regressions/Cargo.lock")
         private.mkdir(mode=0o700)
         private_created = True
+        env = POLICY['activate']('runner', env=os.environ, home=private/'cargo-home')
+        env['TMPDIR'] = str(private/'tmp')
         Path(env["TMPDIR"]).mkdir(mode=0o700)
         receipt['musl_input'] = MUSL['prepare'](musl_prefix, output, run)
         run(["python3", "-B", "scripts/test-ctutils-scope.py"], "source-scope")
@@ -196,6 +202,8 @@ def execute(output):
         base = private / "upstream-ctutils-0.4.5"
         shutil.copytree(ROOT / "third_party/rust/vendor/ctutils-0.4.5", base)
         harness = ROOT / "third_party/rust/ctutils-current-regressions"
+        POLICY['write_scope'](env, output/'cargo-source-policy.json',
+                              graphs={'ctutils-upstream': base/'Cargo.toml', 'ctutils-consumers': harness/'Cargo.toml'})
         receipt["source_inputs"] = {
             str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
             for directory in (ROOT / "third_party/rust/vendor/ctutils-0.4.5", harness)
@@ -210,7 +218,7 @@ def execute(output):
                 with provision_log(stream):
                     group_cleanup_confirmed = False
                     try:
-                        rust_prefix = GROUP['provision']('runner')
+                        rust_prefix = GROUP['provision']('runner', cargo_env=env)
                     except GROUP['CleanupUnconfirmed']:
                         raise
                     except BaseException:
@@ -221,7 +229,7 @@ def execute(output):
             print("install-" + compiler + ": passed", flush=True)
             compiler_env.update(PATH=str(rust_prefix / "bin") + os.pathsep + env["PATH"],
                                 RUSTC=str(rust_prefix / "bin/rustc"), RUSTDOC=str(rust_prefix / "bin/rustdoc"))
-            receipt["current_compiler"] = current_compiler(rust_prefix)
+            receipt["current_compiler"] = current_compiler(rust_prefix, env)
             rustc = [str(rust_prefix / "bin/rustc")]
             cargo = [str(rust_prefix / "bin/cargo")]
             run(rustc + ["--version", "--verbose"], "compiler-" + compiler, custom_env=compiler_env)
@@ -288,7 +296,7 @@ def execute(output):
                 run(cargo + ["test", "--locked", "--offline", "--target", target,
                     "-p", package, test_filter], "core-hpke-" + label + "-" + target,
                     custom_env=build_env, tests=True)
-        receipt["current_compiler_after"] = current_compiler(rust_prefix)
+        receipt["current_compiler_after"] = current_compiler(rust_prefix, env)
         receipt["functional_tests_passed"] = True
     except BaseException as error:
         receipt["failure"] = dict(type=type(error).__name__, message=str(error))

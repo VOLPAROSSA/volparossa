@@ -388,3 +388,24 @@ resolver output. The current-codegen fixture's six shared version pins likewise
 require real targeted Cargo updates; fixture-only feature differences do not
 establish exact complete-Core binary equivalence. See the implementation ledger
 for the original run, hashes, remaining tests and integration status.
+
+### Exact package notice fallbacks — 2026-10-27
+
+Seven additional resolved packages recover their omitted notices: libp2p-metrics0.17.0, libp2p-upnp0.5.0,
+prometheus-client-derive-encode0.4.2, r-efi5.3.0, r-efi6.0.0 and valuable0.1.1, plus libp2p-gossipsub0.49.5.
+The first six use exact upstream commits. Gossipsub retains all27 unchanged
+published Rust files, including22 complete original MIT headers, with exact
+archive/member hashes and published VCS metadata; its Git object was unavailable.
+The r-efi `AUTHORS` files contain the original MIT permission and copyright
+notice and are preserved unchanged. The fallback table's optional sixth field
+pins the original archive SHA256; its optional seventh field pins the VCS
+package path (`.` denotes the repository root). Existing rows retain their
+previous contract. For these new rows, the collector also requires the exact
+crates.io source identity. Original notice hashes and immutable upstream URLs
+are retained alongside the fallbacks. Focused inert mutation fixtures run from
+the existing packaging validation entrypoint, without invoking Cargo.
+
+Original top-level license/notice basenames now use the same patterns with
+ASCII case-insensitive matching; filenames and bytes remain unchanged. The
+Android0.1.1 support package remains unresolved and fails closed; absence of
+notice/provenance evidence is not a license-violation finding.

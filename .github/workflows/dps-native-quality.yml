@@ -177,6 +177,9 @@ jobs:
           dpkg-query -W valgrind libc6:amd64 libc6-dbg:amd64 > dps-native-evidence/native-packages.txt
           valgrind --version >> dps-native-evidence/native-packages.txt
           python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+          install -m 0600 "$RUNNER_TEMP/cargo-source-policy.json" dps-native-evidence/cargo-source-policy.json
           export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
           rustc --version --verbose > dps-native-evidence/rust.txt
           cargo --version --verbose >> dps-native-evidence/rust.txt
@@ -317,5 +320,6 @@ jobs:
           retention-days: 14
           path: |
             dps-native-evidence/*.json
+            dps-native-evidence/cargo-source-policy.json
             dps-native-evidence/*.log
             dps-native-evidence/*.txt

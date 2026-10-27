@@ -2,8 +2,12 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Inert original upstream authority/count checks; never builds or runs D-Bus."""
 from pathlib import Path
+import json
+import os
 import runpy
+import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 H=runpy.run_path(str(Path(__file__).with_name('run-zbus-upstream.py')))
 REV='a'*40
@@ -12,6 +16,17 @@ ENV=dict(GITHUB_ACTIONS='true',RUNNER_ENVIRONMENT='github-hosted',GITHUB_REPOSIT
 
 
 class Upstream(unittest.TestCase):
+    def test_source_policy_failure_precedes_archive_or_cargo_and_cleans_private_graph(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            env=dict(ENV,RUNNER_TEMP=temporary)
+            with patch.dict(os.environ,env,clear=True), \
+                 patch.object(H['NATIVE']['subprocess'],'check_output',return_value=REV), \
+                 patch.dict(H['POLICY'],activate=Mock(side_effect=ValueError('fixed policy rejection'))), \
+                 patch.object(H['urllib'].request,'urlopen',side_effect=AssertionError('network')):
+                with self.assertRaises(ValueError):H['execute']()
+            self.assertFalse((Path(temporary)/'zbus-upstream-private').exists())
+            receipt=json.loads((Path(temporary)/'zbus-upstream-proof/zbus-upstream-source.log').read_text())
+            self.assertFalse(receipt['success'])
     def test_explicit_independent_features_and_actual_named_test_inventory(self):
         self.assertEqual(H['FEATURES'],'tokio,proxy,p2p')
         self.assertEqual(len(H['TESTS']),13)

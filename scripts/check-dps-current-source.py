@@ -19,6 +19,7 @@ DPS = tuple('crates/volparossa-dps-ffi/' + name for name in (
 SHARED = tuple('crates/volparossa-local-control/' + name for name in (
     'Cargo.toml', 'src/lib.rs', 'src/dps.rs', 'src/dps/tests.rs'))
 CURRENT = ('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'scripts/provision-rust189.py', 'scripts/rust189-components.json',
+           'scripts/cargo-source-policy.py', 'scripts/test-cargo-source-policy.py',
            '.github/workflows/dps-native-quality.yml')
 
 

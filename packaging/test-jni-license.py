@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import tempfile
 
+from notice_test_fixtures import graph_fixture
+
 ROOT = Path(__file__).resolve().parents[1]
 metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--locked', '--offline', '--format-version', '1'], cwd=ROOT))
 for name, version in (('jni', '0.22.4'), ('jni-macros', '0.22.4'), ('jni-sys-macros', '0.4.1')):
@@ -30,7 +32,7 @@ for name, version in (('jni', '0.22.4'), ('jni-macros', '0.22.4'), ('jni-sys-mac
             if mutation == 'version': selected['version'] = '0.22.5'
             if mutation == 'license': selected['license'] = 'MIT'
             input_path = base / 'metadata.json'
-            input_path.write_text(json.dumps(dict(packages=[selected], workspace_members=[])))
+            input_path.write_text(json.dumps(graph_fixture([selected])))
             result = subprocess.run([str(ROOT / 'packaging/collect-cargo-licenses.sh'), str(input_path), str(base / 'notices')],
                                     cwd=ROOT, text=True, capture_output=True, check=False)
             assert (result.returncode == 0) == (mutation == 'none'), (name, mutation, result.stderr)

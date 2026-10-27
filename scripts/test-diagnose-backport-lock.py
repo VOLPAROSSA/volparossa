@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 
 SPEC = importlib.util.spec_from_file_location("lock_diagnostic", Path(__file__).with_name("diagnose-backport-lock.py"))
@@ -29,6 +30,8 @@ def workflow_step(name):
 
 class DiagnosticTests(unittest.TestCase):
     def setUp(self):
+        policy = patch.dict(DIAG.POLICY, validate_diagnostic=lambda cwd, env: dict(env))
+        policy.start(); self.addCleanup(policy.stop)
         self.directory = tempfile.TemporaryDirectory(prefix="volparossa-lock-inert-")
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
@@ -64,6 +67,14 @@ class DiagnosticTests(unittest.TestCase):
             self.assertEqual(kwargs["env"]["CARGO_NET_OFFLINE"], "true")
             (cwd / "Cargo.lock").write_bytes(AFTER)
         return subprocess.CompletedProcess(command, 0)
+
+    def test_source_policy_rejection_precedes_offline_cargo_and_preserves_nonacceptance(self):
+        with patch.dict(DIAG.POLICY, validate_diagnostic=Mock(side_effect=ValueError('fixed policy rejection'))):
+            result = DIAG.diagnose(self.repository, self.output, 101, self.runner)
+        self.assertEqual(len(self.calls), 1)  # Source-only vendor verification, no Cargo.
+        self.assertFalse(result['acceptance_evidence'])
+        self.assertEqual(result['original_fetch_status'], 101)
+        self.assertEqual(result['normalization'], 'diagnostic_input_error')
 
     def test_isolated_four_file_export_never_accepts_original_failure(self):
         result = DIAG.diagnose(self.repository, self.output, 101, self.runner)

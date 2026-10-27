@@ -1095,3 +1095,56 @@ All six component URLs, versions and original archive checksums are fixed in
 the complete payload before execution. The previous1.99 profile and notices are
 retained. This selects a minimum stable compiler for this reviewed dependency
 combination, not a claim of current upstream compiler security support.
+
+The minimum profile is limited to the controlled Core build entrypoints. Cargo
+1.89 remains affected by the [tar extraction advisory](https://blog.rust-lang.org/2026/03/21/cve-2026-33056/),
+[registry symlink advisory](https://blog.rust-lang.org/2026/05/25/cve-2026-5223/)
+and [registry credential advisory](https://blog.rust-lang.org/2026/05/25/cve-2026-5222/).
+The Rust project supplies security updates only for its
+[current supported releases](https://rust-lang.org/security/). This profile is
+not an upstream patch or a generally supported Cargo replacement.
+
+`scripts/cargo-source-policy.py` establishes the source/configuration/authentication
+boundary before the first Cargo operation, including implicit downloads and the
+older Cargo versions used to build the pinned audit tools. The profile requires
+fresh private Cargo homes, canonical public sparse crates.io sources, authenticated
+locked inputs, no registry credentials and no inherited configuration/cache
+authority. Only its own fixed configuration and the existing exact offline
+resolver diagnostic configuration are admitted. Cargo Git metadata uses the CLI
+with fixed HTTPS-only, noninteractive process configuration and fresh repositories.
+The policy helper does not inspect operator Git configuration or credential
+contents; Cargo network Git fetches do not inherit user/system configuration.
+No global user configuration is modified. This does not claim that every
+libgit2 internal metadata operation avoids reading Git configuration. The source
+scope sidecars are distinct from the unchanged official compiler-component
+receipts. These constraints do not apply an upstream fix to the older binaries;
+actual hosted execution must establish the bounded profile's acceptance.
+
+### Exact resolved-package notice recovery — 2026-10-27
+
+The published archives for libp2p-metrics0.17.0, libp2p-upnp0.5.0,
+prometheus-client-derive-encode0.4.2 and valuable0.1.1 omit their upstream
+license files. The packaging collector retains unchanged notices fetched from
+each archive's exact `.cargo_vcs_info.json` commit. r-efi5.3.0 and6.0.0 place
+their MIT permission notice and copyright attribution in `AUTHORS`; those exact
+upstream files are retained in full. Gossipsub0.49.5 likewise omits a top-level notice, but its authenticated
+published archive contains complete MIT copyright, permission and disclaimer
+headers. All27 original Rust source files are retained unchanged, including
+all22 files with complete MIT headers and the remaining original source files;
+archive/member hashes bind these primary notice bytes. The published VCS commit
+is retained as metadata even though its upstream Git object returned404. No
+replacement license text is invented.
+
+`third_party/rust/licenses/registry-fallbacks.tsv` binds each recovery to its
+exact package/version/license, root-lock archive SHA256, VCS commit and path.
+The original notice bytes have independent `SHA256SUMS`; immutable upstream
+URLs and content hashes are recorded in
+`third_party/rust/licenses/registry-fallback/full-notice-provenance.json`.
+The collector also recognizes the existing license/notice basename patterns
+without ASCII case sensitivity, preserving original names and bytes; this
+covers the lower-case license files already supplied by24 Windows packages.
+These additions do not establish a successful full hosted notice inventory:
+rustls-platform-verifier-android0.1.1 has no published VCS receipt and its
+bounded AAR/JAR inspection found no original license/notice terms. Its
+provenance remains unresolved and the collector continues to reject it. In particular, unavailable upstream source is not license-violation
+proof and is not authorization to skip a package.

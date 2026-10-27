@@ -17,6 +17,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 NATIVE = runpy.run_path(str(ROOT / 'scripts/run-ctutils-hosted.py'))
+POLICY = NATIVE['POLICY']
 SHA = 'fcff5faa63a63d5b81051740f7382017f10b3440b3f401d97f0cf0b3b39c62d9'
 LOCK_SHA = '251467a1767ef3aeeced3a709169792c1395962148fa57254f9329803481cb9f'
 VCS = dict(git=dict(sha1='90b4de2d6fa7d7f5b0cb8dd955709d3e765fd2b2'), path_in_vcs='zbus')
@@ -79,9 +80,11 @@ def execute():
         vcs=VCS,features=FEATURES,selected_tests=TESTS,success=False,production_p2p_proven=False,
         product_features='tokio,proxy',service_enabled=False,default_rt_enabled=False)
     safe=True
-    env=dict(os.environ,CARGO_HOME=str(private/'cargo-home'),CARGO_TARGET_DIR=str(private/'target'))
+    env=dict(os.environ)
     previous={n:signal.signal(n,NATIVE['interrupted']) for n in (signal.SIGINT,signal.SIGTERM)}
     try:
+        env=POLICY['activate']('runner', home=private/'cargo-home')
+        env['CARGO_TARGET_DIR']=str(private/'target')
         with urllib.request.urlopen('https://static.crates.io/crates/zbus/zbus-6.1.0.crate',timeout=60) as response:
             raw=response.read(4*1024**2+1)
         files=original_files(raw,tomllib.loads((ROOT/'Cargo.lock').read_text()))
@@ -89,8 +92,13 @@ def execute():
             path=private/name;path.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
             with path.open('xb') as stream:stream.write(data)
         source=private/'zbus-6.1.0'
+        POLICY['check_graph'](source/'Cargo.toml')
+        POLICY['write_scope'](env, output/'cargo-source-policy.json', cwd=source,
+                              graphs={'zbus-upstream': source/'Cargo.toml'})
         def run(args,log,timeout):
             nonlocal safe
+            POLICY['validate_active'](source, env)
+            POLICY['check_command'](args[1:], cwd=source)
             with log.open('ab') as stream:
                 safe=False
                 try:

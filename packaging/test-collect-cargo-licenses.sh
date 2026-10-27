@@ -21,8 +21,10 @@ fail() {
 }
 
 metadata=$test_tmp/metadata.json
+python3 -B packaging/test-cargo-notice-closure.py
 python3 -B packaging/test-pinned-sev-license.py
 python3 -B packaging/test-jni-license.py
+python3 -B packaging/test-full-notice-fallbacks.py
 cargo metadata --locked --offline --format-version 1 >"$metadata"
 
 focused_metadata=$test_tmp/focused-metadata.json
@@ -40,6 +42,15 @@ jq '
         or (.name == "time" and .version == "0.3.41")
         or (.name == "yamux" and .version == "0.13.10")
     ))
+    # A deliberately synthetic complete graph isolates the selected notice
+    # contracts. This is not Cargo evidence about their real dependency edges.
+    | .packages as $packages
+    | .workspace_members as $roots
+    | [$packages[] | select((.id as $id | $roots | index($id)) == null) | .id] as $third_party
+    | .resolve = {root:null, nodes:[$packages[] | .id as $id |
+        (if ($roots | index($id)) != null then $third_party else [] end) as $edges |
+        {id:$id, dependencies:$edges,
+         deps:[$edges[] | {name:"synthetic-fixture",pkg:.,dep_kinds:[]}],features:[]}]}
 ' "$metadata" >"$focused_metadata"
 
 notices=$test_tmp/notices

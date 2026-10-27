@@ -11,7 +11,7 @@ import unittest
 import os
 import tomllib
 import tempfile
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 SPEC = importlib.util.spec_from_file_location("hosted", Path(__file__).with_name("run-ctutils-hosted.py"))
 M = importlib.util.module_from_spec(SPEC)
@@ -50,11 +50,11 @@ class AdmissionTests(unittest.TestCase):
     def test_payload_selection_excludes_sources_binaries_caches_and_hidden_files(self):
         with tempfile.TemporaryDirectory(prefix="ctutils-payload-") as temporary:
             root = Path(temporary)
-            allowed = {"receipt.json", "REVIEW_REQUIRED.md", "tests.log",
+            allowed = {"receipt.json", "REVIEW_REQUIRED.md", "cargo-source-policy.json", "tests.log",
                        "codegen-1.85-amd64/proof.s", "codegen-1.85-i686/proof.ll"}
             forbidden = {"reference/ctutils-0.4.4/src/lib.rs", "reference/fixture/Cargo.lock",
                          "reference/build.log", "cargo-home/credentials.toml", "target/proof",
-                         "proof.bin", "codegen-1.85-amd64/proof.o", "codegen-1.85-amd64/nested/proof.s",
+                         "proof.bin", "environment.json", "cargo-home/config.toml", "codegen-1.85-amd64/proof.o", "codegen-1.85-amd64/nested/proof.s",
                          ".hidden.log", "codegen-1.85-amd64/.hidden.ll"}
             for name in allowed | forbidden:
                 path = root / name
@@ -115,8 +115,9 @@ class AdmissionTests(unittest.TestCase):
                 prefix.mkdir()
                 (prefix / "retained").write_text("inert musl")
                 return {"inert": True}
-            def provision(mode):
+            def provision(mode, cargo_env=None):
                 self.assertEqual(mode, "runner")
+                self.assertEqual(cargo_env['CARGO_HOME'], str(output)+'-private/cargo-home')
                 compiler.mkdir()
                 staging.mkdir()
                 print("inert installer cleanup unconfirmed")
@@ -130,6 +131,8 @@ class AdmissionTests(unittest.TestCase):
                  patch.object(M, "fixture_lock", return_value="inert"), \
                  patch.object(M, "run_owned") as run, \
                  patch.object(M.shutil, "copytree"), \
+                 patch.dict(M.POLICY, activate=lambda mode, **kwargs:
+                            dict(os.environ, CARGO_HOME=str(kwargs['home'])), write_scope=lambda *a, **k: None), \
                  patch.dict(M.MUSL, prepare=prepare), \
                  patch.dict(M.GROUP, provision=provision):
                 with self.assertRaises(M.GROUP['CleanupUnconfirmed']):
@@ -152,6 +155,22 @@ class AdmissionTests(unittest.TestCase):
             self.assertIn("inert installer cleanup unconfirmed", (output / "install-1.89.0.log").read_text())
             self.assertEqual(run.call_count, 2)  # Only inert source checks, never a provision child.
             self.assertFalse(any('provision-rust189.py' in str(call.args) for call in run.call_args_list))
+
+    def test_source_policy_failure_precedes_native_provision_and_removes_owned_private_graph(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)/'proof'
+            environment = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted',
+                GITHUB_SHA='a'*40, CTUTILS_CORE_REVISION='a'*40, RUNNER_TEMP=temporary)
+            with patch.dict(os.environ, environment, clear=True), \
+                 patch.object(M.subprocess, 'check_output', return_value='a'*40), \
+                 patch.object(M, 'fixture_lock', return_value='inert'), \
+                 patch.dict(M.POLICY, activate=Mock(side_effect=ValueError('fixed policy rejection'))), \
+                 patch.dict(M.MUSL, prepare=Mock(side_effect=AssertionError('native operation'))):
+                with self.assertRaises(ValueError): M.execute(output)
+            self.assertFalse(Path(str(output)+'-private').exists())
+            receipt = json.loads((output/'receipt.json').read_text())
+            self.assertTrue(receipt['private_graph_removed'])
+            self.assertFalse(receipt['functional_tests_passed'])
 
     def test_public_release_vector_reconstructs_existing_core_fixture_bytes(self):
         fixtures = M.ROOT / "crates/volparossa-content/tests/fixtures/snp"
@@ -185,7 +204,7 @@ class AdmissionTests(unittest.TestCase):
             def verify(path, pins):
                 self.assertEqual(path, prefix)
                 order.append('payload')
-            def observe(path):
+            def observe(path, cargo_env=None):
                 self.assertEqual(order, ['payload'])
                 order.append('observe')
                 return receipt['observed_versions']
@@ -196,7 +215,7 @@ class AdmissionTests(unittest.TestCase):
                 with self.assertRaises(ValueError): M.current_compiler(prefix.parent)
             with patch.dict(os.environ, RUNNER_TEMP=directory), patch.dict(M.GROUP,
                     validate_receipt=lambda value: None, pins=lambda: 'fixed metadata',
-                    verify_payload=lambda path, pins: None, observe=lambda path: {'rustc': 'changed'}):
+                    verify_payload=lambda path, pins: None, observe=lambda path, env=None: {'rustc': 'changed'}):
                 with self.assertRaises(ValueError): M.current_compiler(prefix)
 
     def test_both_native_and_real_32bit_targets_and_secret_entrypoints_are_named(self):

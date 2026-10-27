@@ -1996,6 +1996,8 @@ cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
 prepare_current_compiler() {
     python3 -B scripts/provision-rust189.py alpha-guest
+    export CARGO_HOME=/home/vpci/.local/volparossa-cargo-public-v1
+    export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
     export PATH="/home/vpci/.local/volparossa-rust-1.89.0/bin:$PATH"
 }
 guest_phase verify-source

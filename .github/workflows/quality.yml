@@ -68,10 +68,14 @@ jobs:
         run: |
           python3 -B scripts/test-provision-rust199.py
           python3 -B scripts/test-provision-rust189.py
+          python3 -B scripts/test-cargo-source-policy.py
           python3 -B tests/helper/test-helper-vm-environment-v2.py
           python3 -B tests/helper/test-helper-vm-environment-v3.py
       - name: Provision only the exact reviewed compiler on this disposable runner
-        run: python3 -B scripts/provision-rust189.py runner
+        run: |
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
       - name: Prepare the existing Protobuf compiler and a private D-Bus daemon
         run: |
           test "$RUNNER_ENVIRONMENT" = github-hosted
@@ -126,6 +130,8 @@ jobs:
           name: maintained-zbus-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/volparossa-rust-1.89.0/receipt.json
+            ${{ runner.temp }}/cargo-source-policy.json
+            ${{ runner.temp }}/zbus-upstream-proof/cargo-source-policy.json
             ${{ runner.temp }}/*-inventory.log
             ${{ runner.temp }}/*-tests.log
             ${{ runner.temp }}/zbus-upstream-proof/*.log
@@ -164,8 +170,12 @@ jobs:
             -o Acquire::Retries=2 install --yes --no-install-recommends \
             protobuf-compiler=3.21.12-8.2ubuntu0.4 \
             libprotoc32t64=3.21.12-8.2ubuntu0.4 \
-            libprotobuf32t64=3.21.12-8.2ubuntu0.4
+            libprotobuf32t64=3.21.12-8.2ubuntu0.4 \
+            gcc-13-multilib
           test "$(protoc --version)" = 'libprotoc 3.21.12'
+          # Match the proof's closed GCC13/32 support prefix on this disposable runner.
+          dpkg-query --show --showformat='${binary:Package} ${Version}\n' \
+            gcc-13-multilib lib32gcc-13-dev
       - name: Rust 1.89.0 functional execution and codegen with 1.85/1.87 references
         env:
           CTUTILS_CORE_REVISION: ${{ inputs.core_revision }}
@@ -177,6 +187,7 @@ jobs:
           name: ctutils-compatibility-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/ctutils-proof/receipt.json
+            ${{ runner.temp }}/ctutils-proof/cargo-source-policy.json
             ${{ runner.temp }}/ctutils-proof/REVIEW_REQUIRED.md
             ${{ runner.temp }}/ctutils-proof/*.log
             ${{ runner.temp }}/ctutils-proof/codegen-*/*.s
@@ -244,6 +255,8 @@ jobs:
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$(dpkg --print-architecture)" = amd64
           python3 -B core/scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
           export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
           sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
             -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update
@@ -298,6 +311,8 @@ jobs:
       - name: Install pinned Rust toolchain
         run: |
           python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
           export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
           test "$(command -v rustc)" = "$RUNNER_TEMP/volparossa-rust-1.89.0/bin/rustc"
           rustc --version --verbose
@@ -513,6 +528,7 @@ jobs:
           python3 -B scripts/test-ctutils-hosted.py
           python3 -B scripts/test-provision-rust199.py
           python3 -B scripts/test-provision-rust189.py
+          python3 -B scripts/test-cargo-source-policy.py
           python3 -B tests/helper/test-helper-vm-environment-v2.py
           python3 -B tests/helper/test-helper-vm-environment-v3.py
           git init "$RUSTSEC_ADVISORY_DB"
@@ -538,14 +554,14 @@ jobs:
           ./packaging/test-collect-cargo-licenses.sh
 
       # The focused collector regression above does not exercise every resolved crate.
-      - name: Collect the full locked dependency notice inventory
+      - name: Collect the full locked Core Debian amd64 dependency notice inventory
         run: |
           set -euo pipefail
           metadata="$RUNNER_TEMP/core-license-metadata.json"
           notices="$RUNNER_TEMP/core-license-notices"
           test ! -e "$metadata" && test ! -L "$metadata"
           test ! -e "$notices" && test ! -L "$notices"
-          cargo metadata --locked --offline --all-features --format-version 1 >"$metadata"
+          cargo metadata --locked --offline --all-features --filter-platform x86_64-unknown-linux-gnu --format-version 1 >"$metadata"
           ./packaging/collect-cargo-licenses.sh "$metadata" "$notices" \
             2>&1 | tee "$RUNNER_TEMP/core-license-collector.log"
           (
@@ -560,6 +576,9 @@ jobs:
           name: locked-license-inventory-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/core-license-metadata.json
+            ${{ runner.temp }}/cargo-source-policy.json
+            ${{ runner.temp }}/cargo-source-policy-cargo-deny.json
+            ${{ runner.temp }}/cargo-source-policy-cargo-audit.json
             ${{ runner.temp }}/core-license-collector.log
             ${{ runner.temp }}/core-license-SHA256SUMS
             ${{ runner.temp }}/core-license-notices/DEPENDENCIES.tsv
