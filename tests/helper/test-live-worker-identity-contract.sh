@@ -6410,7 +6410,7 @@ if grep -E '^[[:space:]]*(if ![[:space:]]+)?exec[[:space:]]+[0-9]+[<>]' \
     "$ipc_hook" >/dev/null \
     || [ "$(grep -Ec '^[[:space:]]*(if ![[:space:]]+)?command exec [0-9]+[<>]' \
         "$ipc_hook")" -ne 22 ] \
-    || [ "$(grep -Fxc '        command exec 5<"/proc/$2/ns/net" || exit 1' \
+    || [ "$(grep -Fxc "        command exec 5<\"/proc/\$2/ns/net\" || exit 1" \
         "$ipc_hook")" -ne 1 ] \
     || [ "$(grep -Fc "        command exec /usr/bin/setpriv \\" \
         "$ipc_hook")" -ne 1 ]; then
