@@ -336,7 +336,7 @@ restart_release_authorized_start_guard_is_exact() {
         || return 1
     [ "$(grep -Fc '[ -L "$restart_initial_release_authorized_record.next" ]' "$1")" -eq 1 ] \
         || return 1
-    [ "$(grep -Fc "fail 'restart initial release authorization path is unsafe'" "$1")" -eq 1 ]
+    [ "$(grep -Fc "fail_preflight preflight-contracts 'restart initial release authorization path is unsafe'" "$1")" -eq 1 ]
 }
 restart_release_authorized_start_guard_is_exact \
     "$restart_release_authorized_start_guard"
@@ -345,7 +345,7 @@ for release_authorized_guard_mutation in \
     '[ -L "$restart_initial_release_authorized_record" ]' \
     '[ -e "$restart_initial_release_authorized_record.next" ]' \
     '[ -L "$restart_initial_release_authorized_record.next" ]' \
-    "fail 'restart initial release authorization path is unsafe'"
+    "fail_preflight preflight-contracts 'restart initial release authorization path is unsafe'"
 do
     awk -v dropped="$release_authorized_guard_mutation" \
         'index($0, dropped) == 0 { print }' \

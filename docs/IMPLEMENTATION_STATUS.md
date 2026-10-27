@@ -69,8 +69,13 @@ voorwaardelijk buildprofiel met afzonderlijke source-scopebewijzen, geen patch
 of algemene upstreamsupportclaim. Werkelijke nieuwe hosted verificatie blijft
 vereist; de eerdere succesvolle scans bewijzen deze nieuwe grens niet.
 
-RustSec is vastgepind op `3279c99911354c400e1d41e47c7d60e39258b147`
-(26oktober). Nieuw RUSTSEC-2026-0387 raakt crypto-bigint0.5.5 via SEV8/p3840.13;
+RustSec wordt bijgewerkt naar `99670cfc0bc574433034b75876a4b791ccaa2efb`
+(27oktober, upstreamcommit10:02:42UTC). De drie nieuwe commits sinds de
+gevalideerde3279-pin wijzen cargo-nextest RUSTSEC-2026-0412 toe en voegen
+rustls-ffi RUSTSEC-2026-0413 toe. Geen van beide packages staat in root, fuzz
+of de cryptofixture; nieuwe scans op deze pin blijven vereist. Dit verandert
+geen dependency, compiler, lintinstelling of advisory-uitzondering.
+RUSTSEC-2026-0387 raakt crypto-bigint0.5.5 via SEV8/p3840.13;
 de bestaande publieke RSA-uitzondering dekt dit niet. De minimale gerepareerde
 keten is p3840.14.0, ecdsa0.17.0, elliptic-curve0.14.3, primeorder/primefield0.14,
 wnaf0.14.1, crypto-bigint0.7.9 en ongewijzigde upstream ctutils0.4.5. De lagere
@@ -238,6 +243,26 @@ fallible RdRand worden overschreven. De vier testalerts zijn als `used in tests`
 en de vier fout-positieven als `false positive` afgehandeld met brongebonden
 motivering. Queries/scans/checks blijven actief; twaalf bestaande main-alerts
 buiten F04 blijven open. Dit is geen algemene security-all-clear.
+
+De [gewone Quality40482131390](https://github.com/VOLPAROSSA/volparossa/actions/runs/40482131390)
+op bron `d1da20e4` / PR-testmerge `f084d8f2` slaagt voor alle vier scans op de
+3279-pin, strict root/fuzz-Clippy, de volledige noticecollectie,4265 workspace-
+testpasses (nul failures,19 ignored), beide Storage-controles, dormant-agent
+DPS-IPC met ongewijzigde hostconfiguratie en namespaceproeven. De gecorrigeerde
+opaque-settlement-contracttest slaagt werkelijk. Toch blijft deze run
+**FAILED**: na een geslaagde lifecyclecontrole en vier helper-PASS-meldingen
+stopt `tests/integration/test-harness.sh` zonder verdere diagnose met exit1.
+Een inerte trace lokaliseert de eerste failure in de aangeroepen restart-
+contracttest: die verwacht de oude `fail`-expressie, terwijl de onveranderde
+producer het getypeerde `fail_preflight preflight-contracts` gebruikt. Alleen
+de twee exacte test-/mutatieverwachtingen worden gelijkgetrokken; producer en
+integratiecaller blijven behouden. De volledige hosted herhaling blijft nodig.
+De latere Git safe.directory-cleanupmelding is niet als eerste oorzaak aangemerkt.
+Alle vijf [CodeQL40482123953](https://github.com/VOLPAROSSA/volparossa/actions/runs/40482123953)-
+taaljobs en de afzonderlijke resultaatcheck122115064921 slagen op exact d1da;
+de twaalf bestaande alerts buiten F04 blijven open. De volgende kandidaat
+combineert uitsluitend de noodzakelijke harnesscorrectie met de nieuwe
+RustSec-pin. Geen nieuwe Clippytranche of verandering aan productie-/ABI-bron.
 
 **F04 blijft open.** De beveiligingskandidaat en verplichte review-/mergeprocedure
 lopen via [PR349](https://github.com/VOLPAROSSA/volparossa/pull/349);
