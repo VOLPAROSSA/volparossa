@@ -24,7 +24,7 @@ Last updated: 2026-10-27
 `57b121a0`; F04 kan niet veilig worden afgesloten. Bestaande Quality-, CodeQL-,
 dependency-, zbus-, crypto- en DPS-ABI-resultaten worden binnen hun oorspronkelijke
 bronbinding hergebruikt. Productiecode, locks en compiler-/native-inputs blijven
-ongewijzigd in de behouden helpercorrectiebron `747cee11`.
+ongewijzigd in de behouden helpercorrectiebron `9126d5ee`.
 
 De gerichte diagnose corrigeert uitsluitend proefcode: vaste eerste-foutlabels,
 verwijdering van twee SSH-transportmetadata-variabelen vóór de strikte Cargo-policy,
@@ -34,12 +34,22 @@ dat verklaart niet automatisch iedere verdere runtimefailure. Gerichte inerte
 regressies, de volledige betrokken livecontracttest en onafhankelijke bronreviews
 slagen; alle custody-/commit/destroy/retry-/cleanup-/retirementcontroles blijven.
 
-De laatste [Debian13-proef40525447139](https://github.com/VOLPAROSSA/volparossa/actions/runs/40525447139)
-op `747cee116b6b6621d06c350499bf22027e6da05e` blijft FAILED op
-`functional-worker-wireguard-state`, na exacte custody/workeridentiteit en de
-gecorrigeerde mark/interfacecontrole. De afzonderlijke resterende route-/peerpredicate
-is onbekend. Verdere commit/destroy/retry/restart en volledige cleanup/retirement
-zijn onbewezen; KVM-device/ACL-controle alleen vervangt die acceptatie niet.
+De afgebakende statecorrectie `9126d5ee` verhelpt één extra aantoonbare
+pre-F04-observerfout: productie configureert en verifieert keepalive1, terwijl de
+observer25 van de externe fixtures verwachtte. Alleen de echte workerexpectatie
+wordt1; alle acht fixturegebruiken blijven25. Drie nieuwe inerte regressies, het
+bestaande volledige livecontract en onafhankelijke read-only review slagen.
+
+De enige vervolgproef [40528873727](https://github.com/VOLPAROSSA/volparossa/actions/runs/40528873727)
+op exact `9126d5eebe17f8994c0bd329a6100feddd7cf065` passeert de interface-, peer-,
+route- en keepalivecontroles en relayfixtureaanleg; zij faalt daarna op
+`functional-relay-traffic`. Die stage onderscheidt ping, countergroei en
+fixturehercontrole niet. Exacte verkeerspredicate, pinguitkomst en handshake-/RX-/TX-
+waarnemingen ontbreken. Oorspronkelijke statefailure40525447139 blijft behouden;
+geen tweede proef of verdere verkeersdiagnose gestart. De enige actuele blokkade
+is `functional-relay-traffic`. Verdere commit/destroy/retry/restart en volledige
+cleanup/retirement zijn onbewezen; KVM-device/ACL-controle alleen vervangt die
+acceptatie niet. Geen mergeconflictbehandeling zolang helperacceptatie faalt.
 Onafhankelijke slotreview bevestigt **niet mergen, draft behouden, F04 open**.
 Oorspronkelijke failures, parallelle reviewbestanden, correctiecommits en alle
 relevante worktrees blijven behouden. Geen reset, automatische merge of vrijstelling.
