@@ -18,6 +18,46 @@ Last updated: 2026-10-27
 
 ## Current integration and active work
 
+### F04 P03f — dertien geordende guards — 2026-10-27
+
+Hervat vanaf live PR349-head `339409e885412f47f1f02fef1002984be109c4e1`.
+De bestaande inventaris van 23 diagnoses wordt hergebruikt; uitsluitend de
+dertien `collapsible_if`-locaties in tien bestanden veranderen: Local-Control
+(1), Content (3), Transaction (1), Selection (3) en Discovery (5). Geordende
+let-chains behouden short circuit, gegroepeerde OR-fouten, borrows, mutaties,
+cleanup, deadlines en early returns. Met name ratebudget, requestvalidatie,
+advertisementclone en responseconstructie blijven in dezelfde volgorde staan.
+Geen publieke API/ABI/FFI-, serialisatie- of configuratiewijziging, testedit,
+dependencywijziging of lintuitzondering. Overig F04-werk blijft gescheiden.
+
+Gerichte hosted verificatie betreft formatting, ongewijzigd strikte Clippy
+voor de vijf gewijzigde packages en bestaande brongebonden regressietests op
+baseline/kandidaat met gescheiden targets en executablebinding. Eerste run
+[40440169320](https://github.com/VOLPAROSSA/volparossa/actions/runs/40440169320)
+stopt terecht op een onvolledige bewijsverwachting: 42 diagnoses op de baseline
+en 44 op de kandidaat. Precies de dertien gekozen diagnoses verdwijnen; twintig
+extra dependencydiagnoses staan op beide bronnen en vijftien testdiagnoses
+worden pas zichtbaar nadat eerdere libraryfouten zijn verdwenen. Alle negentien
+betrokken extra bronbestanden zijn bytegelijk. Er worden geen extra fixes gedaan.
+De oorspronkelijke mislukte run en proof/sourcecommits blijven behouden;
+gecorrigeerde bewijsverwachtingen benoemen alle extra diagnoses afzonderlijk.
+Dit is geen groene package-/workspace-Clippygate. Discoverycomponenttests
+kunnen transport/mDNS-constructors gebruiken op de disposable runner; zij zijn
+geen native- of netwerkdatapadacceptatie. De advertisement-requesteventtak heeft
+geen directe gesloten unittest; protocol- en budgettests zijn ondersteunend
+bewijs, aangevuld met onafhankelijke controle van evaluatie en dropsemantiek.
+Definitieve resultaten en onafhankelijke bron-/hosted-bewijsreview staan onder
+`.volparossa-dev/p03f-f04-20261027/`; de bewijsworkflow blijft buiten PR349.
+Van de oorspronkelijke 49 diagnoses blijven er tien open: vijf chunkregels,
+drie signed-veldnamen, één publieke enum en één native continue. Daarnaast zijn
+35 extra diagnoses zichtbaar; het bekende totaal is nu 45, inclusief de Quic-
+continue buiten de vijf packages. Dit is geen volledige nieuwe workspace-scan.
+Compatibiliteit, parserrestbytes en descriptorlifecycle vereisen hun eigen
+beoordeling; de extra test-/MPTCP-/UDP-diagnoses blijven een afzonderlijke tranche.
+Geen volledige Quality-, native-, VM- of SDK-acceptatierun.
+RustSec-pinactualiteit, vier dependencysecuritychecks, notices en de overige
+compiler-/helper-/native-/integratiegates blijven open; F04 is niet afgerond.
+
 ### F04 P03e — zes testasserties en twee vaste delers — 2026-10-27
 
 Hervat vanaf live PR349-head `93a0a486cf0a40dd19f970e2f590721aaa87d10d`.
