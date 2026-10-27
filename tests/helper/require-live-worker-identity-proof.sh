@@ -4291,6 +4291,16 @@ capture_host_state() {
         printf '%s=%s\n' "$sysctl_path" "$sysctl_value" >>"$sysctls_capture" \
             || failed 'host forwarding capture could not be written'
     done
+    # Retain the previous forwarding bytes and add exact read-only ping range
+    # bytes to the same before/after sysctls digest. Never configure host state.
+    vp_capture_run "$capture_directory/ping-group-range.raw" \
+        cat /proc/sys/net/ipv4/ping_group_range || failed 'host ping range could not be read'
+    [ "$(stat -Lc '%s' "$capture_directory/ping-group-range.raw")" -le 32 ] \
+        || failed 'host ping range capture is oversized'
+    printf '%s=' /proc/sys/net/ipv4/ping_group_range >>"$sysctls_capture" \
+        || failed 'host ping range label could not be captured'
+    cat "$capture_directory/ping-group-range.raw" >>"$sysctls_capture" \
+        || failed 'host ping range bytes could not be captured'
     vp_capture_file_is_safe "$sysctls_capture" \
         || failed 'host forwarding capture is not a validated private file'
     vp_capture_publish_digest "$sysctls_capture" "$destination/sysctls" \

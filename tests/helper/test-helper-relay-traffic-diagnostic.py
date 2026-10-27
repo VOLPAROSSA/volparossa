@@ -5,11 +5,13 @@ from pathlib import Path
 import hashlib
 import os
 import re
+import runpy
 import subprocess
 import tempfile
 import unittest
 
 HERE = Path(__file__).resolve().parent
+normalize_ping_fixture_access = runpy.run_path(str(HERE / 'test-helper-private-ping-access.py'))['normalize_ping_fixture_access']
 HOOK = HERE / 'lib/production-ipc-unit-hook.sh'
 GATE = HERE / 'require-live-worker-identity-proof.sh'
 OUTER = HERE / 'run-helper-boundary-evidence-vm.sh'
@@ -41,6 +43,7 @@ def traffic_block(source):
 
 def normalize_relay_traffic_diagnostic(source):
     """Invert only this reviewed failure annotation; retain all original guards."""
+    source = normalize_ping_fixture_access(source)
     if '    advance_start_failure_stage functional-relay-traffic || return 1\n' in source:
         block = traffic_block(source)
         def restore_ping(match):

@@ -20,6 +20,7 @@ python3 -B "$script_directory/test-helper-wireguard-role-mark.py"
 python3 -B "$script_directory/test-helper-peer-topology.py"
 python3 -B "$script_directory/test-helper-wireguard-state.py"
 python3 -B "$script_directory/test-helper-relay-traffic-diagnostic.py"
+python3 -B "$script_directory/test-helper-private-ping-access.py"
 evidence_validator=$repository_directory/tests/helper/validate-helper-boundary-evidence-v1.sh
 evidence_schema=$repository_directory/tests/helper/helper-boundary-evidence-v1.schema.json
 worker_source=$repository_directory/crates/volparossa-helper/src/worker_v3.rs
@@ -6408,7 +6409,9 @@ done
 if grep -E '^[[:space:]]*(if ![[:space:]]+)?exec[[:space:]]+[0-9]+[<>]' \
     "$ipc_hook" >/dev/null \
     || [ "$(grep -Ec '^[[:space:]]*(if ![[:space:]]+)?command exec [0-9]+[<>]' \
-        "$ipc_hook")" -ne 21 ] \
+        "$ipc_hook")" -ne 22 ] \
+    || [ "$(grep -Fxc '        command exec 5<"/proc/$2/ns/net" || exit 1' \
+        "$ipc_hook")" -ne 1 ] \
     || [ "$(grep -Fc "        command exec /usr/bin/setpriv \\" \
         "$ipc_hook")" -ne 1 ]; then
     printf '%s\n' 'production hook FD redirections can retain fatal special-builtin semantics' >&2

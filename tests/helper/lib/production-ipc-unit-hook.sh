@@ -4890,6 +4890,50 @@ observe_functional_probe_failure() {
         "$hook_functional_failure_status" "$hook_functional_failure_source"
 }
 
+ping_fixture_namespace_is_exact() {
+    [ "$#" -eq 2 ] || return 1
+    number_is_safe "$1" || return 1
+    kernel_object_identity_is_safe "$2" || return 1
+    # The expected group is bound to the already verified production unit.
+    private_file_is_safe "$proof_directory/unit.identity" || return 1
+    ping_fixture_contract=$(sed -n '6p' "$proof_directory/unit.identity") || return 1
+    process_contract_filter_count "$ping_fixture_contract" "$1" >/dev/null || return 1
+    hook_entry_contract_is_exact "$1" || return 1
+    private_file_is_safe "$host_network_identity_record" || return 1
+    ping_fixture_host=$(cat "$host_network_identity_record") || return 1
+    kernel_object_identity_is_safe "$ping_fixture_host" || return 1
+    printf '%s\n' "$ping_fixture_host" | cmp -s - "$host_network_identity_record" || return 1
+    [ "$2" != "$ping_fixture_host" ] || return 1
+    [ "$(stat -Lc '%d:%i' /proc/self/ns/net 2>/dev/null)" = "$2" ] || return 1
+}
+
+configure_private_ping_group_range() {
+    [ "$#" -eq 2 ] || return 1
+    ping_fixture_namespace_is_exact "$1" "$2" || return 1
+    [ -f /proc/sys/net/ipv4/ping_group_range ] \
+        && [ ! -L /proc/sys/net/ipv4/ping_group_range ] || return 1
+    # No inherited broad range, repeated configuration, or implicit fallback.
+    printf '1\t0\n' | cmp -s - /proc/sys/net/ipv4/ping_group_range || return 1
+    ping_fixture_namespace_is_exact "$1" "$2" || return 1
+    printf '%s\t%s\n' "$1" "$1" >/proc/sys/net/ipv4/ping_group_range || return 1
+    printf '%s\t%s\n' "$1" "$1" | cmp -s - /proc/sys/net/ipv4/ping_group_range || return 1
+    ping_fixture_namespace_is_exact "$1" "$2"
+}
+
+configure_functional_peer_ping_group_range() {
+    (
+        [ "$#" -eq 4 ] || exit 1
+        number_is_safe "$1" || exit 1
+        functional_peer_keeper_is_exact "$2" "$3" "$4" || exit 1
+        # Hold the verified keeper namespace while entering the fixed setter.
+        command exec 5<"/proc/$2/ns/net" || exit 1
+        [ "$(stat -Lc '%d:%i' /proc/self/fd/5 2>/dev/null)" = "$4" ] || exit 1
+        /usr/bin/nsenter --net=/proc/self/fd/5 -- \
+            /run/volparossa-helper-production-ipc-hook fixture-ping-range "$1" "$4" || exit 1
+        functional_peer_keeper_is_exact "$2" "$3" "$4" || exit 1
+    )
+}
+
 run_functional_client_lease_probe() {
     [ "$#" -eq 7 ] || return 1
     hook_functional_unit=$1
@@ -4915,6 +4959,8 @@ run_functional_client_lease_probe() {
     hook_functional_parent_filters=$(process_contract_filter_count \
         "$hook_functional_parent_contract" "$hook_functional_agent_gid") || return 1
     private_network_is_pristine yes || return 1
+    configure_private_ping_group_range \
+        "$hook_functional_agent_gid" "$hook_private_namespace" || return 1
     advance_start_failure_stage functional-underlay-absent || return 1
     [ ! -e "/sys/class/net/$functional_underlay" ] \
         && [ ! -L "/sys/class/net/$functional_underlay" ] || return 1
@@ -5832,6 +5878,10 @@ run_functional_client_lease_probe() {
     advance_start_failure_stage functional-relay-pair-traffic || return 1
     functional_peer_keeper_is_exact \
         "$functional_pair_client_keeper_pid" \
+        "$functional_pair_client_keeper_starttime" \
+        "$functional_pair_client_namespace_identity" || return 1
+    configure_functional_peer_ping_group_range \
+        "$hook_functional_agent_gid" "$functional_pair_client_keeper_pid" \
         "$functional_pair_client_keeper_starttime" \
         "$functional_pair_client_namespace_identity" || return 1
     /usr/bin/nsenter \
@@ -6809,6 +6859,10 @@ stop_hook() {
 }
 
 case ${1:-} in
+    fixture-ping-range)
+        shift
+        configure_private_ping_group_range "$@" || fail 'private fixture ping range is invalid'
+        ;;
     start)
         shift
         start_failure_stage=preflight-runtime
