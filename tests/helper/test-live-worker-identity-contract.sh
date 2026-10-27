@@ -17,6 +17,7 @@ python3 -B "$script_directory/test-helper-preflight-diagnostic.py"
 python3 -B "$script_directory/test-helper-worker-observation-diagnostic.py"
 python3 -B "$script_directory/test-helper-guest-source-environment.py"
 python3 -B "$script_directory/test-helper-wireguard-role-mark.py"
+python3 -B "$script_directory/test-helper-peer-topology.py"
 evidence_validator=$repository_directory/tests/helper/validate-helper-boundary-evidence-v1.sh
 evidence_schema=$repository_directory/tests/helper/helper-boundary-evidence-v1.schema.json
 worker_source=$repository_directory/crates/volparossa-helper/src/worker_v3.rs
@@ -7717,7 +7718,7 @@ functional_peer_key=MdSras7slhE3kXA3k25gcW+sVzr+lNnahKgCBEjfwRI=
 functional_interface=vpc1proof
 valid_client_address='fd766f6c70611234567800019abc0001 02 80 00 80 vpc1proof'
 link_local_address='fe80000000000000123456fffe789abc 02 40 20 80 vpc1proof'
-expected_peer_address=fd76:6f6c:7061:1234:5678:0001:9abc:0002
+expected_peer_address=fd76:6f6c:7061:1234:5678:0001:9abc:0004
 observed_peer_address=$(printf '%s\n%s\n' \
     "$valid_client_address" "$link_local_address" \
     | derive_client_peer_address "$functional_interface") \
@@ -7726,7 +7727,7 @@ observed_peer_address=$(printf '%s\n%s\n' \
         exit 1
     }
 if [ "$observed_peer_address" != "$expected_peer_address" ]; then
-    printf '%s\n' 'Client peer address was not derived as exact topology host ::2' >&2
+    printf '%s\n' 'Client peer address was not derived as exact topology host ::4' >&2
     exit 1
 fi
 expected_local_address=fd76:6f6c:7061:1234:5678:0001:9abc:0001
@@ -7766,7 +7767,7 @@ if printf '%s\n%s\n' "$valid_client_address" "$valid_client_address" \
 fi
 
 valid_exit_address='fd766f6c70611234567800019abc0004 02 80 00 80 vpc1proof'
-expected_exit_peer_address=fd76:6f6c:7061:1234:5678:0001:9abc:0003
+expected_exit_peer_address=fd76:6f6c:7061:1234:5678:0001:9abc:0001
 observed_exit_peer_address=$(printf '%s\n%s\n' \
     "$valid_exit_address" "$link_local_address" \
     | derive_exit_peer_address "$functional_interface") || {
@@ -7774,7 +7775,7 @@ observed_exit_peer_address=$(printf '%s\n%s\n' \
         exit 1
     }
 [ "$observed_exit_peer_address" = "$expected_exit_peer_address" ] || {
-    printf '%s\n' 'Exit peer address was not derived as exact topology host ::3' >&2
+    printf '%s\n' 'Exit peer address was not derived as exact topology host ::1' >&2
     exit 1
 }
 expected_exit_local_address=fd76:6f6c:7061:1234:5678:0001:9abc:0004

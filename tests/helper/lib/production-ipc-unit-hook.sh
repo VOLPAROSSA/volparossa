@@ -2259,7 +2259,7 @@ derive_client_peer_address() {
             && $3 == "80" \
             && $4 == "00" {
                 candidates++
-                peer = substr($1, 1, 28) "0002"
+                peer = substr($1, 1, 28) "0004"
             }
         END {
             if (candidates != 1) exit 1
@@ -2317,7 +2317,7 @@ derive_exit_peer_address() {
             && $3 == "80" \
             && $4 == "00" {
                 candidates++
-                peer = substr($1, 1, 28) "0003"
+                peer = substr($1, 1, 28) "0001"
             }
         END {
             if (candidates != 1) exit 1
