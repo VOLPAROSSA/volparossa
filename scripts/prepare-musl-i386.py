@@ -108,14 +108,26 @@ def stage(raw, prefix):
     specs.chmod(0o600)
     wrapper = prefix / 'musl-gcc'
     with wrapper.open('x') as stream:
-        stream.write('#!/bin/sh\nexec /usr/bin/gcc "$@" -m32 -static -specs="' + str(specs) + '"\n')
+        # The authenticated musl *link spec replaces GCC's native link spec,
+        # including its usual -m32 -> elf_i386 mapping. Select both compiler
+        # ABI and GNU ld emulation explicitly; never fall back to host libc.
+        stream.write('#!/bin/sh\n'
+            'for argument do\n'
+            '    case "$argument" in\n'
+            '        -m64|-mx32|-Wl,-m,elf_x86_64|-Wl,-m,elf32_x86_64)\n'
+            '            printf \'%s\\n\' \'musl wrapper requires i386 compilation and linking\' >&2\n'
+            '            exit 2 ;;\n'
+            '    esac\n'
+            'done\n'
+            'exec /usr/bin/gcc "$@" -m32 -Wl,-m,elf_i386 -static -specs="' + str(specs) + '"\n')
     wrapper.chmod(0o700)
     return dict(package=expected['package'], version=expected['version'], architecture='i386',
         archive=expected['archive'], inrelease_sha256=expected['inrelease_sha256'],
         index_sha256=expected['index_sha256'], files=len(files),
         original_specs_sha256=SPEC_SHA256, adapted_specs_sha256=hashlib.sha256(adapted.encode()).hexdigest(),
         wrapper_sha256=hashlib.sha256(wrapper.read_bytes()).hexdigest(),
-        probe_source_sha256=hashlib.sha256(PROBE).hexdigest(), package_installed=False)
+        probe_source_sha256=hashlib.sha256(PROBE).hexdigest(), package_installed=False,
+        compiler_architecture_option='-m32', linker_emulation_option='-Wl,-m,elf_i386')
 
 
 class SnapshotRedirect(urllib.request.HTTPRedirectHandler):

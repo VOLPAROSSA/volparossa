@@ -3,9 +3,12 @@
 """Inert musl archive/path/authority/ELF checks; never executes a compiler."""
 import hashlib
 import io
+import json
+import os
 from pathlib import Path
 import runpy
 import struct
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -62,13 +65,56 @@ class MuslInput(unittest.TestCase):
             self.assertFalse(record['package_installed'])
             self.assertEqual((prefix/'usr/lib/i386-linux-musl/musl-gcc.specs').read_bytes(),original)
             wrapper=(prefix/'musl-gcc').read_text()
-            self.assertIn('exec /usr/bin/gcc "$@" -m32 -static -specs=',wrapper)
+            self.assertIn('exec /usr/bin/gcc "$@" -m32 -Wl,-m,elf_i386 -static -specs=',wrapper)
+            self.assertEqual(record['compiler_architecture_option'], '-m32')
+            self.assertEqual(record['linker_emulation_option'], '-Wl,-m,elf_i386')
             self.assertIn(str(prefix/'usr/include/i386-linux-musl'),(prefix/'musl-gcc.specs').read_text())
             self.assertEqual(prefix.stat().st_mode&0o777,0o700)
             self.assertEqual((prefix/'usr/include').stat().st_mode&0o777,0o700)
             with self.assertRaises(ValueError): H['stage'](b'inert',prefix)
             link=Path(directory)/'link';link.symlink_to(prefix)
             with self.assertRaises(ValueError): H['stage'](b'inert',link)
+
+    def wrapper_fixture(self, directory):
+        original=b'-isystem /usr/include/i386-linux-musl -L/usr/lib/i386-linux-musl\n*link:\n-nostdlib %{static:-static}\n'
+        files={'usr/lib/i386-linux-musl/musl-gcc.specs':original}
+        prefix=Path(directory)/'input'
+        with patch.dict(G,package_files=lambda *_:files,SPEC_SHA256=hashlib.sha256(original).hexdigest()):
+            H['stage'](b'inert',prefix)
+        stub=Path(directory)/'inert-gcc.py'
+        stub.write_text('#!/usr/bin/python3\nimport json,os,sys\nfrom pathlib import Path\nPath(os.environ["MUSL_INERT_ARGV_FILE"]).write_text(json.dumps(sys.argv[1:]))\n')
+        stub.chmod(0o700)
+        text=(prefix/'musl-gcc').read_text()
+        self.assertEqual(text.count('/usr/bin/gcc'),1)
+        # Only this test copy replaces the compiler with a pure argv recorder.
+        # No compiler binary is invoked and production has no compiler override.
+        wrapper=Path(directory)/'inert-wrapper'
+        wrapper.write_text(text.replace('/usr/bin/gcc',str(stub)))
+        return prefix,wrapper
+
+    def test_wrapper_selects_both_i386_compilation_and_linking_with_original_argv(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prefix,wrapper=self.wrapper_fixture(directory)
+            output=Path(directory)/'argv.json'
+            inputs=['source name.c','-o','output name','-m32','-Wl,-m,elf_i386']
+            result=subprocess.run(['sh',str(wrapper),*inputs],env=dict(os.environ,MUSL_INERT_ARGV_FILE=str(output)),capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            observed=json.loads(output.read_text())
+            self.assertEqual(observed,inputs+['-m32','-Wl,-m,elf_i386','-static','-specs='+str(prefix/'musl-gcc.specs')])
+            self.assertNotIn('-m64',observed)
+            self.assertNotIn('-Wl,-m,elf_x86_64',observed)
+
+    def test_known_contradictory_architecture_flags_stop_before_inert_driver(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _,wrapper=self.wrapper_fixture(directory)
+            output=Path(directory)/'argv.json'
+            for flag in ('-m64','-mx32','-Wl,-m,elf_x86_64','-Wl,-m,elf32_x86_64'):
+                with self.subTest(flag=flag):
+                    result=subprocess.run(['sh',str(wrapper),'probe.c',flag],env=dict(os.environ,MUSL_INERT_ARGV_FILE=str(output)),capture_output=True,text=True)
+                    self.assertEqual(result.returncode,2)
+                    self.assertEqual(result.stdout,'')
+                    self.assertEqual(result.stderr,'musl wrapper requires i386 compilation and linking\n')
+                    self.assertFalse(output.exists())
 
     def test_host_guard_precedes_download_or_compiler(self):
         run=Mock(side_effect=AssertionError('compiler'))
@@ -82,6 +128,9 @@ class MuslInput(unittest.TestCase):
         struct.pack_into('<I',raw,52,1);H['static_i386'](raw)
         for field,kind,value in ((18,'<H',62),(52,'<I',3),(28,'<I',100000),(42,'<H',0)):
             changed=bytearray(raw);struct.pack_into(kind,changed,field,value)
+            with self.assertRaises(ValueError): H['static_i386'](changed)
+        for offset,value in ((4,2),(5,2)):
+            changed=bytearray(raw);changed[offset]=value
             with self.assertRaises(ValueError): H['static_i386'](changed)
         self.assertIn(str(0x123456789*7).encode(),H['PROBE'])
 

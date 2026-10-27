@@ -33,6 +33,90 @@ def shell(script, *args, env=None):
 
 
 class PreflightDiagnostic(unittest.TestCase):
+    def test_named_bootstrap_capabilities_agree_across_all_production_layers(self):
+        # Linux UAPI capability numbers, independently evaluated rather than
+        # copying a previously recorded hexadecimal status string.
+        bits = {'CAP_KILL': 5, 'CAP_SETGID': 6, 'CAP_SETUID': 7, 'CAP_SETPCAP': 8,
+                'CAP_NET_BIND_SERVICE': 10, 'CAP_NET_ADMIN': 12, 'CAP_SYS_ADMIN': 21}
+        expected = sum(1 << bit for bit in bits.values())
+        root = HERE.parents[1]
+        packaged = (root / 'packaging/systemd/volparossa-helper.service').read_text()
+        for property_name in ('CapabilityBoundingSet', 'AmbientCapabilities'):
+            values = re.findall(r'^' + property_name + r'=(.*)$', packaged, re.M)
+            self.assertEqual(len(values), 1)
+            names = values[0].split()
+            self.assertEqual(len(names), len(bits))
+            self.assertEqual(set(names), set(bits))
+            self.assertEqual(sum(1 << bits[name] for name in names), expected)
+        gate = GATE.read_text()
+        configured = re.findall(r"^capabilities='([^']+)'$", gate, re.M)
+        self.assertEqual(len(configured), 1)
+        self.assertEqual(len(configured[0].split()), len(bits))
+        self.assertEqual(set(configured[0].split()), set(bits))
+        self.assertEqual(sum(1 << bits[name] for name in configured[0].split()), expected)
+        # Worker, production and restart transient units all use this exact set.
+        for property_name in ('CapabilityBoundingSet', 'AmbientCapabilities'):
+            self.assertEqual(gate.count('--property="' + property_name + '=$capabilities"'), 3)
+        rust = (root / 'crates/volparossa-helper/src/worker_sandbox.rs').read_text()
+        constants = dict((name, int(value)) for name, value in re.findall(
+            r'^const (CAP_[A-Z_]+): u32 = ([0-9]+);$', rust, re.M))
+        self.assertEqual({name: constants[name] for name in bits}, bits)
+        expression = re.search(r'const HELPER_BOOTSTRAP_CAPABILITY_BITS: u64 = (.*?);', rust, re.S)
+        self.assertIsNotNone(expression)
+        names = [name.removesuffix('_BIT') for name in expression[1].replace('|', ' ').split()]
+        self.assertEqual(len(names), len(bits))
+        self.assertEqual(set(names), set(bits))
+        self.assertEqual(sum(1 << constants[name] for name in names), expected)
+        for name in names:
+            self.assertIn('const ' + name + '_BIT: u64 = 1_u64 << ' + name + ';', rust)
+        rust_test = re.findall(r'assert_eq!\(HELPER_BOOTSTRAP_CAPABILITY_BITS, (0x[0-9a-f_]+)\);', rust)
+        self.assertEqual(len(rust_test), 1)
+        self.assertEqual(int(rust_test[0].replace('_', ''), 16), expected)
+        hook_masks = re.findall(r'^helper_bootstrap_capability_mask=([0-9a-f]{16})$', HOOK.read_text(), re.M)
+        self.assertEqual(len(hook_masks), 1)
+        self.assertEqual(hook_masks[0], f'{expected:016x}')
+        gate_masks = re.findall(r'expected_process_contract_prefix="[^"\n]*;caps:([0-9a-f]{16});filters:', gate)
+        self.assertEqual(len(gate_masks), 1)
+        self.assertEqual(gate_masks[0], f'{expected:016x}')
+
+    def test_actual_process_parser_requires_every_exact_capability_set(self):
+        parser = function(HOOK, 'capture_helper_process_contract')
+        # Redirect only the proc-file operand to an inert fixture. Keep the real
+        # shell guards and complete awk validator, with no process observation.
+        operand = 'hook_contract_status=/proc/$hook_contract_pid/status'
+        self.assertEqual(parser.count(operand), 1)
+        parser = parser.replace(operand, 'hook_contract_status=$fixture_status')
+        code = function(HOOK, 'number_is_safe') + parser
+        fixture = '''
+fixture_status=$1
+helper_bootstrap_capability_mask=00000000002015e0
+capture_helper_process_contract 4242 1250
+'''
+        status = ('Pid:\t4242\nUid:\t0\t0\t0\t0\nGid:\t1250\t1250\t1250\t1250\n'
+                  'Groups:\t1250\nNoNewPrivs:\t1\nSeccomp:\t2\nSeccomp_filters:\t2\n')
+        fields = ('CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb')
+        status += ''.join(name + ':\t00000000002015e0\n' for name in fields)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'status'
+            path.write_text(status)
+            result = shell(code + fixture, path)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, 'process-status-v1=uid:0:0:0:0;gid:1250:1250:1250:1250;'
+                             'groups:1250;nnp:1;seccomp:2;caps:00000000002015e0;filters:2\n')
+            for field in fields:
+                line = field + ':\t00000000002015e0\n'
+                for value in ('00000000002031e0', '00000000002011e0', '00000000002035e0'):
+                    with self.subTest(field=field, value=value):
+                        path.write_text(status.replace(line, field + ':\t' + value + '\n'))
+                        result = shell(code + fixture, path)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual(result.stdout, '')
+                for changed in (status.replace(line, ''), status + line):
+                    path.write_text(changed)
+                    result = shell(code + fixture, path)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, '')
+
     def test_terminal_only_reason_selection_and_first_reason_preservation(self):
         code = function(HOOK, 'set_preflight_failure_stage') + function(HOOK, 'advance_start_failure_stage')
         for reason in REASONS:

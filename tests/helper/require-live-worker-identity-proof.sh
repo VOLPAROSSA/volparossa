@@ -5227,7 +5227,7 @@ if [ "$proof_ok" = yes ]; then
                 fi
                 ;;
         esac
-        expected_process_contract_prefix="process-status-v1=uid:0:0:0:0;gid:$agent_gid:$agent_gid:$agent_gid:$agent_gid;groups:$agent_gid;nnp:1;seccomp:2;caps:00000000002031e0;filters:"
+        expected_process_contract_prefix="process-status-v1=uid:0:0:0:0;gid:$agent_gid:$agent_gid:$agent_gid:$agent_gid;groups:$agent_gid;nnp:1;seccomp:2;caps:00000000002015e0;filters:"
         case $identity_process_contract in
             "$expected_process_contract_prefix"*)
                 identity_seccomp_filters=${identity_process_contract#"$expected_process_contract_prefix"}

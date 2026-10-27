@@ -111,18 +111,41 @@ alle81 memberhashes, compilerobservaties voor/na en cleanup zijn geverifieerd.
 De eerdere run40453975004 faalde vóór checkout/provision door de nog niet
 vervangen bronplaceholder; hij blijft afzonderlijk bewaard.
 
-**F04 blijft open.** Alleen de concrete resterende fouten, de ontvangen
-firstpartyformatterpatch en de echte fixturelock worden in dezelfde kandidaat
-geïntegreerd en onafhankelijk gereviewd. Daarna zijn strict root-Clippy, alle
-vier fatale RustSec-/licentiechecks, relevante zbus-/SEV-/32-bit-crypto-/codegen-
-en C/C++-DPS-ABI-proeven en gewone Quality op de uiteindelijke kandidaat nodig.
-Eén begrensde Debian13/systemd-helperproef moet gewijzigde189/V3- en ownership-
-interfaces controleren. Eerst krijgt de bestaande veilige diagnostiek gesloten
-preflight-categorieën: de oude oorzaak van40063417260 is onbekend en de eerdere
-coarse melding bewijst geen specifieke metadatafout. Geen guardversoepeling.
-Historische mislukte helper-/i686-uitkomsten blijven zichtbaar; oude0.4.4-codegen
-bewijst geen nieuwe0.4.5/1.89-codegen. Geen automatische merge en geen volledige
-netwerk-/DICN-acceptatieclaim.
+De gereviewde correcties, formatterpatch en echte fixturelock zijn gepubliceerd
+als `107e0c5c`; PR349 is op main gericht en bevat ook PR347. De expliciet gestarte
+[gewone Quality40456324327](https://github.com/VOLPAROSSA/volparossa/actions/runs/40456324327)
+heeft formattering/shellcontroles doorlopen, maar is nog geen volledige pass.
+De [gerichte zbus-proef40456269560](https://github.com/VOLPAROSSA/volparossa/actions/runs/40456269560)
+slaagt:69 gewone FD-storegevallen, één afzonderlijke echte private-bustest,
+drie async-FD-tests, twee doctests,36 Configtests, vijf helper-entrytests plus
+één startup-integratie en de selectie van13 oorspronkelijke upstreamtests.
+De [DPS-ABI-proef40456272211](https://github.com/VOLPAROSSA/volparossa/actions/runs/40456272211)
+slaagt met12 Rusttests,18 C- en18 C++-gevallen en36 Valgrindgevallen zonder
+Memcheckfout. C/C++ gebruikt ASan+UBSan; Rust is niet sanitizer-geïnstrumenteerd.
+Dit blijft synthetische ABI-evidence, geen Android- of fysieke positioneringsclaim.
+
+De cryptojob in40456269560 blijft **FAILED** vóór Rusttests/codegen: de echte
+32-bit-C-preflight linkt niet met de i386-muslbibliotheek. De vastgepinde Debian-
+linkspecs vervangen GCC's standaard-emulatieselectie; de gerichte correctie voegt
+expliciet i386-linkeremulatie toe naast de bestaande32-bit/static-opties.
+Authenticatie, oorspronkelijke specs/notices, ELF-controle en echte uitvoering
+blijven vereist. Er is nog geen nieuwe assembly of cryptoacceptatie.
+De [Debian13-helperproef40456274671](https://github.com/VOLPAROSSA/volparossa/actions/runs/40456274671)
+blijft **FAILED** op `production-launch-status`/`preflight-contracts`; de latere
+runtime-fencefout is geen bewezen eerste oorzaak. Afzonderlijke statische analyse
+vindt een onvermijdelijke inconsistentie: hook/gate verwachten `2031e0`, terwijl
+productie-unit, tijdelijke unit en Rust-constante exact `2015e0` gebruiken.
+Alleen de verouderde verwachting en tests worden gelijkgetrokken; vijf exacte
+maskercontroles en de ingestelde privileges blijven behouden. Dit bewijst geen
+specifieke eerst gefaalde VM-subcontrole. Beide noodzakelijke harnesscorrecties
+krijgen onafhankelijke review vóór een nieuwe gerichte proef.
+
+**F04 blijft open.** Strict root-Clippy, alle vier fatale RustSec-/licentiechecks,
+volledige licentiecollectie en gewone Quality moeten op de integratiekandidaat
+slagen. Nieuwe32-bit-crypto/codegen en de noodzakelijke Debian13/systemd-proef
+blijven vereist; het geslaagde zbus-/DPS-bewijs blijft behouden bij gelijke
+betrokken broninputs. Oude failures blijven zichtbaar. Geen automatische merge
+en geen volledige netwerk-/DICN-acceptatieclaim.
 
 ### F04 P03f — dertien geordende guards — 2026-10-27
 

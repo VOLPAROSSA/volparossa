@@ -4958,7 +4958,7 @@ for required_contract in \
     'systemd_launch_record_is_safe "$identity_launch"' \
     'launch_image_record_is_safe' \
     'identity_starttime_prefix=process-starttime-v1=' \
-    'expected_process_contract_prefix="process-status-v1=uid:0:0:0:0;gid:$agent_gid:$agent_gid:$agent_gid:$agent_gid;groups:$agent_gid;nnp:1;seccomp:2;caps:00000000002031e0;filters:"' \
+    'expected_process_contract_prefix="process-status-v1=uid:0:0:0:0;gid:$agent_gid:$agent_gid:$agent_gid:$agent_gid;groups:$agent_gid;nnp:1;seccomp:2;caps:00000000002015e0;filters:"' \
     'identity_seccomp_filters=${identity_process_contract#"$expected_process_contract_prefix"}' \
     '[ "${#identity_seccomp_filters}" -gt 10 ]' \
     '[ "$identity_seccomp_filters" -gt 1024 ]' \
@@ -7294,7 +7294,7 @@ for required_hook_contract in \
     'probe=/run/volparossa-helper-production-ipc-probe' \
     'production_helper=/run/volparossa-helper-production' \
     'restart_launcher=/run/volparossa-helper-restart-launcher' \
-    'helper_bootstrap_capability_mask=00000000002031e0' \
+    'helper_bootstrap_capability_mask=00000000002015e0' \
     "'directory:0:0:2700'" \
     'systemd_exec_record_from_json() {' \
     "basic:'a(sasbttttuii)'|extended:'a(sasasttttuii)'" \
@@ -7914,7 +7914,7 @@ hook_process_contract_source_is_exact() {
     hook_contract_source=$1
     [ -f "$hook_contract_source" ] && [ ! -L "$hook_contract_source" ] || return 1
     awk '
-        $0 == "helper_bootstrap_capability_mask=00000000002031e0" { mask++ }
+        $0 == "helper_bootstrap_capability_mask=00000000002015e0" { mask++ }
         /^capture_helper_process_contract\(\) \{$/ { in_contract = 1; next }
         /^capture_running_identity\(\) \{$/ {
             in_contract = 0
@@ -8023,7 +8023,7 @@ do
     hook_contract_mutant=$temporary_directory/hook-$hook_contract_mutation.sh
     case $hook_contract_mutation in
         capability-mask)
-            sed '0,/00000000002031e0/s//0000000000000000/' \
+            sed '0,/00000000002015e0/s//0000000000000000/' \
                 "$ipc_hook" >"$hook_contract_mutant"
             ;;
         group-count)
