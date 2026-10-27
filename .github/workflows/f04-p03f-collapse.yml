@@ -1,4 +1,4 @@
-name: F04 fixed-source full workspace Clippy census (NON-ACCEPTANCE)
+name: F04 paired minimum-compiler census (NON-ACCEPTANCE)
 on:
   push:
     branches: [proof/p03f-f04-collapse-corrected-20261027]
@@ -18,52 +18,33 @@ env:
 jobs:
   census:
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.CANDIDATE }}
           persist-credentials: false
           fetch-depth: 1
-      - name: Bind fixed source, locks and proof revision
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.CANDIDATE }}
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Authenticate proof source and apply exact compatibility patch to disposable source only
         run: |
           set -euo pipefail
-          test "$GITHUB_ACTIONS" = true
-          test "$RUNNER_ENVIRONMENT" = github-hosted
-          test "$RUNNER_OS" = Linux
-          test "$RUNNER_ARCH" = X64
-          test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
-          test "$GITHUB_REF" = refs/heads/proof/p03f-f04-collapse-corrected-20261027
-          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
-          test "$(git rev-parse HEAD)" = "$CANDIDATE"
-          test -z "$(git status --porcelain --untracked-files=all)"
-          test ! -e .f04-census-target
-          mkdir evidence
-          python3 -B - <<'PY_BIND'
-          import hashlib, json, os, subprocess
-          from pathlib import Path
-          pins = {'Cargo.lock': '1ed913b2cc64690d0c3bbb3c484071f72cd1c202a6372f608d13c8c99bc2fb8b',
-                  'fuzz/Cargo.lock': '3b28c49468ac9096621405acdf685b7216d00b4ced8642d666a86f14b0ba4159'}
-          for path, digest in pins.items():
-              assert hashlib.sha256(Path(path).read_bytes()).hexdigest() == digest
-          record = dict(source=os.environ['CANDIDATE'],
-              source_tree=subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip(),
-              proof_workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'],
-              run_id=os.environ['GITHUB_RUN_ID'], run_attempt=os.environ['GITHUB_RUN_ATTEMPT'],
-              lock_sha256=pins, rust_profile='1.99.1', build_jobs=2,
-              full_workspace_clippy=True, rust185_comparison=False,
-              quality_acceptance=False, runtime_acceptance=False,
-              scope='Single fixed source census; strict failures retained; capped diagnostics NON-ACCEPTANCE')
-          Path('evidence/source.json').write_text(json.dumps(record, indent=2)+'\n')
-          PY_BIND
-          git ls-files -s > evidence/tracked-source-index.txt
-          cp Cargo.lock evidence/root-Cargo.lock
-          cp fuzz/Cargo.lock evidence/fuzz-Cargo.lock
-      - name: Provision unchanged authenticated Rust 1.99.1 profile
+          test "$(git rev-parse HEAD)" = "$GITHUB_WORKFLOW_SHA"
+          test -z "$(git status --porcelain --untracked-files=all -- .github scripts)"
+          python3 -B scripts/run-f04-compiler-comparison.py prepare
+          sha256sum scripts/provision-rust189.py scripts/rust189-components.json \
+            scripts/provision-rust199.py scripts/rust199-components.json \
+            scripts/run-f04-compiler-comparison.py > evidence/proof-source.sha256
+      - name: Provision both authenticated compiler profiles on disposable runner only
         run: |
           set -euo pipefail
-          python3 -B scripts/provision-rust199.py runner 2>&1 | tee evidence/provision.log
-          cp "$RUNNER_TEMP/volparossa-rust-1.99.1/receipt.json" evidence/compiler-receipt.json
+          python3 -B scripts/provision-rust189.py runner 2>&1 | tee evidence/provision-1.89.0.log
+          python3 -B scripts/provision-rust199.py runner 2>&1 | tee evidence/provision-1.99.1.log
+          echo 'PROFILES_READY=true' >> "$GITHUB_ENV"
       - name: Prepare pinned Protobuf on disposable hosted runner only
         run: |
           set -euo pipefail
@@ -75,133 +56,90 @@ jobs:
             libprotobuf32t64=3.21.12-8.2ubuntu0.4 2>&1 | tee evidence/apt-install.log
           protoc --version | tee evidence/protoc.txt
           dpkg-query -W protobuf-compiler libprotoc32t64 libprotobuf32t64 > evidence/protobuf-packages.txt
-      - name: Record compiler receipt and fetch locked root and fuzz inputs
+      - name: Fetch same unchanged C11 root and fuzz locks with authenticated minimum Cargo
         run: |
           set -euo pipefail
-          rustc -Vv | tee evidence/rustc.txt
-          cargo -Vv | tee evidence/cargo.txt
-          cargo clippy -V | tee evidence/clippy.txt
-          cp "$RUNNER_TEMP/volparossa-rust-1.99.1/receipt.json" evidence/compiler-receipt.json
-          printf '%s\n' 'cargo fetch --locked' 'cargo fetch --locked --manifest-path fuzz/Cargo.toml' > evidence/fetch-commands.txt
-          set +e
-          cargo fetch --locked 2>&1 | tee evidence/fetch-root.log
-          root_status=${PIPESTATUS[0]}
-          echo "$root_status" > evidence/fetch-root-exit.txt
-          cargo fetch --locked --manifest-path fuzz/Cargo.toml 2>&1 | tee evidence/fetch-fuzz.log
-          fuzz_status=${PIPESTATUS[0]}
-          echo "$fuzz_status" > evidence/fetch-fuzz-exit.txt
-          set -e
-          test "$root_status" = 0
-          test "$fuzz_status" = 0
+          cd source
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
+          export RUSTC="$RUNNER_TEMP/volparossa-rust-1.89.0/bin/rustc"
+          export RUSTDOC="$RUNNER_TEMP/volparossa-rust-1.89.0/bin/rustdoc"
+          "$RUNNER_TEMP/volparossa-rust-1.89.0/bin/cargo" fetch --locked 2>&1 | tee ../evidence/fetch-root.log
+          "$RUNNER_TEMP/volparossa-rust-1.89.0/bin/cargo" fetch --locked --manifest-path fuzz/Cargo.toml 2>&1 | tee ../evidence/fetch-fuzz.log
           git diff --exit-code -- Cargo.lock fuzz/Cargo.lock
-      - name: Strict root workspace census followed by diagnostic-only capped census
-        run: |
-          set -euo pipefail
-          python3 -B - <<'PY_CENSUS'
-          import datetime, hashlib, json, os, subprocess
-          from pathlib import Path
-          evidence = Path('evidence')
-          source = json.loads((evidence / 'source.json').read_text())
-          results = {}
-          assert subprocess.check_output(['rustc', '--version'], text=True).startswith('rustc 1.99.1 ')
-          base = ['cargo', 'clippy', '--keep-going', '--locked', '--offline', '--workspace',
-                  '--all-targets', '--all-features', '--message-format=json', '--', '-D', 'warnings']
-          for variant in ('strict', 'diagnostic-NON-ACCEPTANCE'):
-              command = base + (['--cap-lints=warn'] if variant != 'strict' else [])
-              # Same source only: reuse compiled inputs, never comparison/test outcomes.
-              # Changed lint flags still require Cargo to rerun affected workspace rustc invocations.
-              target = Path(os.environ['GITHUB_WORKSPACE']) / '.f04-census-target'
-              env = dict(os.environ, CARGO_TARGET_DIR=str(target))
-              command_record = dict(command=command, timeout_seconds=1080, kill_after_seconds=30,
-                  target=str(target), source=source['source'], lock_sha256=source['lock_sha256'],
-                  classification='STRICT QUALITY COMMAND' if variant == 'strict' else 'NON-ACCEPTANCE: lint cap for enumeration only',
-                  started_utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
-              (evidence / (variant+'-command.json')).write_text(json.dumps(command_record, indent=2)+'\n')
-              with (evidence / (variant+'.jsonl')).open('w') as stdout, (evidence / (variant+'-stderr.log')).open('w') as stderr:
-                  status = subprocess.run(['timeout', '--signal=TERM', '--kill-after=30s', '18m', *command],
-                                          env=env, stdout=stdout, stderr=stderr, check=False).returncode
-              (evidence / (variant+'-exit.txt')).write_text(str(status)+'\n')
-              results[variant] = dict(command_record, exit_status=status,
-                  finished_utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
-              (evidence / 'execution-status.json').write_text(json.dumps(results, indent=2)+'\n')
-          PY_CENSUS
-          git diff --exit-code > evidence/tracked-source-after.diff
-          sha256sum Cargo.lock fuzz/Cargo.lock > evidence/locks-after.sha256
-          python3 -B - <<'PY_LOCKS'
-          import hashlib, json
-          from pathlib import Path
-          source = json.loads(Path('evidence/source.json').read_text())
-          for path, digest in source['lock_sha256'].items():
-              assert hashlib.sha256(Path(path).read_bytes()).hexdigest() == digest
-          PY_LOCKS
-      - name: Always enumerate primary diagnostics and preserve failures
+          echo 'INPUTS_READY=true' >> "$GITHUB_ENV"
+      - name: Rust 1.89 strict and explicit NON-ACCEPTANCE capped enumeration
+        run: python3 -B scripts/run-f04-compiler-comparison.py run 1.89.0
+      - name: Rust 1.99 strict and explicit NON-ACCEPTANCE capped enumeration on same source
+        if: ${{ !cancelled() && env.PROFILES_READY == 'true' && env.INPUTS_READY == 'true' }}
+        run: python3 -B scripts/run-f04-compiler-comparison.py run 1.99.1
+      - name: Always preserve first compiler errors and validate both census results
         if: always()
         run: |
           set -euo pipefail
-          mkdir -p evidence
-          python3 -B - <<'PY_SUMMARY'
-          import hashlib, json, re
-          from pathlib import Path
-          evidence = Path('evidence')
-          variants = {}
-          for variant in ('strict', 'diagnostic-NON-ACCEPTANCE'):
-              log = evidence / (variant+'.jsonl')
-              if not log.exists():
-                  variants[variant] = dict(complete=False, reason='command not started')
-                  continue
-              diagnostics, errors, finished, malformed = set(), [], [], []
-              for number, line in enumerate(log.read_text().splitlines(), 1):
-                  try:
-                      item = json.loads(line)
-                  except json.JSONDecodeError:
-                      malformed.append(number)
-                      continue
-                  if item.get('reason') == 'build-finished':
-                      finished.append(item['success'])
-                  if item.get('reason') != 'compiler-message':
-                      continue
-                  message = item['message']
-                  code = (message.get('code') or {}).get('code')
-                  if message['level'] == 'error':
-                      errors.append(dict(code=code, message=message['message'], spans=message['spans']))
-                  if code and message['level'] in ('warning', 'error'):
-                      for span in message['spans']:
-                          if span['is_primary']:
-                              diagnostics.add((code, span['file_name'], span['line_start']))
-              status_file = evidence / (variant+'-exit.txt')
-              status = int(status_file.read_text()) if status_file.exists() else None
-              compiler_errors = [error for error in errors if error['code'] is None or re.fullmatch(r'E[0-9]{4}', error['code'])]
-              complete = status == 0 and finished == [True] and not malformed and not errors
-              variants[variant] = dict(exit_status=status, build_finished=finished,
-                  complete=complete, unique_primary_diagnostics=[dict(code=c, path=p, line=n) for c,p,n in sorted(diagnostics)],
-                  unique_primary_count=len(diagnostics), errors=errors, compiler_errors=compiler_errors,
-                  malformed_json_lines=malformed,
-                  classification='STRICT QUALITY COMMAND' if variant == 'strict' else 'NON-ACCEPTANCE: capped warnings cannot establish Quality success')
-          summary = dict(scope='fixed-source full root workspace all-target all-feature census',
-              rust185_comparison=False, quality_acceptance=False, runtime_acceptance=False,
-              diagnostic_census_complete=variants['diagnostic-NON-ACCEPTANCE'].get('complete', False), variants=variants)
-          (evidence / 'census-summary.json').write_text(json.dumps(summary, indent=2)+'\n')
-          hashes = {str(p.relative_to(evidence)): hashlib.sha256(p.read_bytes()).hexdigest()
-                    for p in sorted(evidence.rglob('*')) if p.is_file() and p.name != 'artifact-sha256.json'}
-          (evidence / 'artifact-sha256.json').write_text(json.dumps(hashes, indent=2)+'\n')
-          with Path(__import__('os').environ['GITHUB_STEP_SUMMARY']).open('a') as output:
-              output.write('## NON-ACCEPTANCE: fixed-source Clippy census\n\nNo Quality, Rust 1.85 comparison, or runtime acceptance claim.\n\n')
-              for variant, result in variants.items():
-                  output.write(f"- {variant}: exit {result.get('exit_status')}, unique primary diagnostics {result.get('unique_primary_count', 0)}, completed without errors {result.get('complete', False)}\n")
-          # Expected strict failure is evidence, never a passing Quality gate.
-          strict = variants['strict']
-          assert strict.get('exit_status') == 101, 'unexpected strict status; preserve logs'
-          assert strict.get('build_finished') == [False], 'strict build-finished evidence missing or ambiguous'
-          assert not strict.get('malformed_json_lines'), 'malformed strict diagnostics'
-          assert not strict.get('compiler_errors'), 'strict compiler failure is not a lint baseline'
-          assert strict.get('unique_primary_count', 0) > 0, 'strict lint inventory empty'
-          assert summary['diagnostic_census_complete'], 'diagnostic census incomplete or compiler failure; preserve logs'
-          PY_SUMMARY
-      - name: Preserve complete census evidence including failure logs
+          set +e
+          python3 -B scripts/run-f04-compiler-comparison.py summarize
+          summary_status=$?
+          set -e
+          if test -f evidence/proof-source.sha256; then
+            sha256sum --check evidence/proof-source.sha256
+          fi
+          exit "$summary_status"
+      - name: Preserve paired compiler census including incomplete and failure evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: f04-full-workspace-census-NON-ACCEPTANCE-${{ github.run_id }}
+          name: f04-paired-compiler-census-NON-ACCEPTANCE-${{ github.run_id }}
           path: evidence/
+          if-no-files-found: error
+          retention-days: 14
+  security-resolution:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 96a0584ad985e8c404f8dd2a232e439971ca3d8d
+          path: security-source
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Admit fixed resolver and security source before provisioning
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY_ADMIT'
+          import importlib.util
+          spec = importlib.util.spec_from_file_location('resolver', 'scripts/run-f04-security-resolver.py')
+          resolver = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(resolver)
+          resolver.admit()
+          PY_ADMIT
+          mkdir security-provision-evidence
+          sha256sum scripts/run-f04-security-resolver.py scripts/provision-rust199.py \
+            scripts/rust199-components.json > security-provision-evidence/proof-source.sha256
+      - name: Provision exact authenticated Rust 1.99.1 directly on hosted runner
+        run: |
+          set -euo pipefail
+          python3 -B scripts/provision-rust199.py runner 2>&1 | tee security-provision-evidence/provision.log
+          cp "$RUNNER_TEMP/volparossa-rust-1.99.1/receipt.json" security-provision-evidence/compiler-receipt.json
+      - name: Resolve only fixed source locks and preserve complete graph evidence
+        run: python3 -B scripts/run-f04-security-resolver.py
+      - name: Verify resolver proof remained unchanged
+        if: always()
+        run: |
+          set -euo pipefail
+          if test -f security-provision-evidence/proof-source.sha256; then
+            sha256sum --check security-provision-evidence/proof-source.sha256
+          fi
+      - name: Preserve resolver evidence and original locks even on failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: f04-security-resolution-SOURCE-ONLY-${{ github.run_id }}
+          path: |
+            security-provision-evidence/
+            security-evidence/
           if-no-files-found: error
           retention-days: 14
