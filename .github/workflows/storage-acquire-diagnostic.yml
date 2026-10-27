@@ -125,8 +125,8 @@ jobs:
         id: toolchain
         run: |
           set -euo pipefail
-          python3 -B scripts/provision-rust199.py runner
-          export PATH="$RUNNER_TEMP/volparossa-rust-1.99.1/bin:$PATH"
+          python3 -B scripts/provision-rust189.py runner
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
           rustc --version --verbose
           cargo --version --verbose
       - name: Install reviewed Protobuf on disposable hosted runner

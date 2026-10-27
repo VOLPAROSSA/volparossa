@@ -21,11 +21,10 @@ struct State {
 
 impl Progress {
     pub(super) fn start_operation(&self, started: Option<Instant>) {
-        if let Ok(mut state) = self.0.lock() {
-            if state.operation_started.is_none() && state.failed_at.is_none() {
+        if let Ok(mut state) = self.0.lock()
+            && state.operation_started.is_none() && state.failed_at.is_none() {
                 state.operation_started = started;
             }
-        }
     }
 
     pub(super) fn phase(&self, phase: Phase) {
@@ -49,11 +48,10 @@ impl Progress {
     }
 
     pub(super) fn fail(&self) {
-        if let Ok(mut state) = self.0.lock() {
-            if state.failed_at.is_none() {
+        if let Ok(mut state) = self.0.lock()
+            && state.failed_at.is_none() {
                 state.failed_at = Some(Instant::now());
             }
-        }
     }
 
     pub(super) fn detail(&self, phase: i32) -> Option<PrivateStorageAppendTiming> {

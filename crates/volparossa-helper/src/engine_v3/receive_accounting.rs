@@ -175,8 +175,8 @@ impl HelperEngine {
         let result = completion
             .filter(|value| value.binding == binding)
             .map_or(Err(BackendError::CleanupIncomplete), |value| value.result);
-        if let Ok(ingress_ifindex) = result {
-            if ingress_ifindex > 1 && i32::try_from(ingress_ifindex).is_ok() {
+        if let Ok(ingress_ifindex) = result
+            && ingress_ifindex > 1 && i32::try_from(ingress_ifindex).is_ok() {
                 self.inner
                     .state
                     .lock()
@@ -198,7 +198,6 @@ impl HelperEngine {
                     )),
                 );
             }
-        }
         let error = result.err().unwrap_or(BackendError::Kernel);
         let complete = self.cleanup_accounting().await;
         // Unavailable/Invalid backends promise no mutation; still require exact absence proof
@@ -284,15 +283,14 @@ impl HelperEngine {
             Ok(value) => value,
             Err(result) => return response(request, result, "ACCOUNTING_OWNER_MISMATCH", None),
         };
-        if let Some(binding) = binding {
-            if !self.destroy_accounting_binding(binding).await {
+        if let Some(binding) = binding
+            && !self.destroy_accounting_binding(binding).await {
                 return backend_response(
                     request,
                     BackendError::CleanupIncomplete,
                     "RECEIVE_ACCOUNTING_CLEANUP_INCOMPLETE",
                 );
             }
-        }
         response(
             request,
             HelperResult::Ok,

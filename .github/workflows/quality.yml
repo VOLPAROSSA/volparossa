@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       maintained_zbus:
-        description: 'Opt in to exact Rust 1.99.1 Config/helper/private-bus execution only'
+        description: 'Opt in to exact Rust 1.89.0 Config/helper/private-bus execution only'
         type: boolean
         default: false
       ctutils_compatibility:
@@ -47,10 +47,10 @@ env:
 
 jobs:
   maintained-zbus:
-    name: Exact Rust 1.99.1 maintained D-Bus functional slice
+    name: Exact Rust 1.89.0 maintained D-Bus functional slice
     if: github.event_name == 'workflow_dispatch' && inputs.maintained_zbus
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - name: Bind the reviewed source before any compiler installation
         env:
@@ -67,9 +67,11 @@ jobs:
       - name: Check compiler authority and versioned evidence without native execution
         run: |
           python3 -B scripts/test-provision-rust199.py
+          python3 -B scripts/test-provision-rust189.py
           python3 -B tests/helper/test-helper-vm-environment-v2.py
+          python3 -B tests/helper/test-helper-vm-environment-v3.py
       - name: Provision only the exact reviewed compiler on this disposable runner
-        run: python3 -B scripts/provision-rust199.py runner
+        run: python3 -B scripts/provision-rust189.py runner
       - name: Prepare the existing Protobuf compiler and a private D-Bus daemon
         run: |
           test "$RUNNER_ENVIRONMENT" = github-hosted
@@ -111,20 +113,27 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/helper-private-bus-tests.log"
           grep -F 'test result: ok. 1 passed; 0 failed' "$RUNNER_TEMP/helper-private-bus-tests.log"
           git diff --exit-code
+      - name: Check upstream zbus admission and source contracts without compiling
+        run: python3 -B scripts/test-zbus-upstream.py
+      - name: Execute exact original upstream zbus tests in an isolated graph
+        env:
+          ZBUS_CORE_REVISION: ${{ inputs.core_revision }}
+        run: python3 -B scripts/run-zbus-upstream.py
       - name: Preserve actual source, compiler observations and failed test output
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: maintained-zbus-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/volparossa-rust-1.99.1/receipt.json
+            ${{ runner.temp }}/volparossa-rust-1.89.0/receipt.json
             ${{ runner.temp }}/*-inventory.log
             ${{ runner.temp }}/*-tests.log
+            ${{ runner.temp }}/zbus-upstream-proof/*.log
           if-no-files-found: warn
           retention-days: 14
 
   ctutils-compatibility:
-    name: Opt-in ctutils Rust 1.99.1 and retained reference codegen evidence
+    name: Opt-in ctutils Rust 1.89.0 and retained reference codegen evidence
     if: github.event_name == 'workflow_dispatch' && inputs.ctutils_compatibility
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -157,7 +166,7 @@ jobs:
             libprotoc32t64=3.21.12-8.2ubuntu0.4 \
             libprotobuf32t64=3.21.12-8.2ubuntu0.4
           test "$(protoc --version)" = 'libprotoc 3.21.12'
-      - name: Rust 1.99.1 functional execution and codegen with 1.85/1.87 references
+      - name: Rust 1.89.0 functional execution and codegen with 1.85/1.87 references
         env:
           CTUTILS_CORE_REVISION: ${{ inputs.core_revision }}
         run: python3 -B scripts/run-ctutils-hosted.py "$RUNNER_TEMP/ctutils-proof"
@@ -234,8 +243,8 @@ jobs:
           set -euo pipefail
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$(dpkg --print-architecture)" = amd64
-          python3 -B core/scripts/provision-rust199.py runner
-          export PATH="$RUNNER_TEMP/volparossa-rust-1.99.1/bin:$PATH"
+          python3 -B core/scripts/provision-rust189.py runner
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
           sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
             -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update
           sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
@@ -288,9 +297,9 @@ jobs:
 
       - name: Install pinned Rust toolchain
         run: |
-          python3 -B scripts/provision-rust199.py runner
-          export PATH="$RUNNER_TEMP/volparossa-rust-1.99.1/bin:$PATH"
-          test "$(command -v rustc)" = "$RUNNER_TEMP/volparossa-rust-1.99.1/bin/rustc"
+          python3 -B scripts/provision-rust189.py runner
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
+          test "$(command -v rustc)" = "$RUNNER_TEMP/volparossa-rust-1.89.0/bin/rustc"
           rustc --version --verbose
           cargo --version --verbose
 
@@ -503,7 +512,9 @@ jobs:
           python3 -B scripts/test-ctutils-scope.py
           python3 -B scripts/test-ctutils-hosted.py
           python3 -B scripts/test-provision-rust199.py
+          python3 -B scripts/test-provision-rust189.py
           python3 -B tests/helper/test-helper-vm-environment-v2.py
+          python3 -B tests/helper/test-helper-vm-environment-v3.py
           git init "$RUSTSEC_ADVISORY_DB"
           git -C "$RUSTSEC_ADVISORY_DB" remote add origin \
             https://github.com/RustSec/advisory-db.git

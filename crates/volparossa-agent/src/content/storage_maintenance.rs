@@ -56,14 +56,13 @@ struct TurnGuard {
 impl Drop for TurnGuard {
     fn drop(&mut self) {
         self.turn.stopped.send_replace(true);
-        if let Ok(mut active) = self.coordinator.active.lock() {
-            if active
+        if let Ok(mut active) = self.coordinator.active.lock()
+            && active
                 .as_ref()
                 .is_some_and(|turn| Arc::ptr_eq(turn, &self.turn))
             {
                 active.take();
             }
-        }
     }
 }
 
@@ -94,7 +93,7 @@ impl Turn {
     pub(super) async fn admit(&self, bytes: u64) -> bool {
         if self
             .remaining
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
                 left.checked_sub(bytes)
             })
             .is_err()
@@ -205,7 +204,7 @@ impl ContentRuntime {
                     .map_err(|_| ContentError::Unavailable)?;
                 super::custody::checked_policy(context, None).await?;
                 match self.try_maintenance_turn(request, uid, &context.config) {
-                    Err(ContentError::Busy) => continue,
+                    Err(ContentError::Busy) => {},
                     result => return result,
                 }
             }

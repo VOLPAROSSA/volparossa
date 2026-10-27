@@ -263,11 +263,10 @@ impl ReplicationRuntime {
             }
             .await;
             flow.shutdown();
-            if let Ok(progress) = result {
-                if !progress.replicas.is_empty() {
+            if let Ok(progress) = result
+                && !progress.replicas.is_empty() {
                     return self.complete_repair(context, registry).await;
                 }
-            }
             if self.state.lock().await.repair_pending.is_some() {
                 // Do not redownload verified durable progress after a failed close.
                 // The next permitted idle tick independently reconciles local storage;

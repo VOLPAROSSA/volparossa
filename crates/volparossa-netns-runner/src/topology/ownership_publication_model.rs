@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::{
     collections::HashSet, fs::File, io, marker::PhantomData, mem::MaybeUninit, os::fd::AsFd, rc::Rc,
 };
@@ -208,12 +209,12 @@ impl OwnershipManifest {
     fn encode(&self) -> String {
         let mut encoded = format!("{MANIFEST_MAGIC}\nrun_id={}\n", self.run_id.as_str());
         for record in &self.records {
-            encoded.push_str(&format!(
-                "namespace\t{}\t{}:{}\n",
+            writeln!(encoded,
+                "namespace\t{}\t{}:{}",
                 record.name(),
                 record.identity().device(),
                 record.identity().inode()
-            ));
+            ).expect("writing into String cannot fail");
         }
         encoded.push_str("END\n");
         encoded

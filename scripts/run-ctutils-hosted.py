@@ -15,9 +15,9 @@ import sys
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
-COMPILERS = ("1.99.1",)
+COMPILERS = ("1.89.0",)
 TARGETS = ("x86_64-unknown-linux-gnu", "i686-unknown-linux-musl")
-GROUP = runpy.run_path(str(ROOT / 'scripts/provision-rust199.py'))
+GROUP = runpy.run_path(str(ROOT / 'scripts/provision-rust189.py'))
 MUSL = runpy.run_path(str(ROOT / 'scripts/prepare-musl-i386.py'))
 FEATURES = ((), ("alloc",), ("subtle",), ("alloc", "subtle"))
 RELEASE = {"codegen-units": 1, "lto": "thin", "opt-level": 3, "panic": "abort", "strip": "debuginfo"}
@@ -68,6 +68,18 @@ def fixture_lock(path):
         if name == "ctutils" and "source" in matches[0]:
             raise ValueError("fixture ctutils must use reviewed local source")
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def current_compiler(prefix):
+    expected = Path(os.environ['RUNNER_TEMP']) / 'volparossa-rust-1.89.0'
+    if prefix != expected or prefix.is_symlink():
+        raise ValueError('unexpected current compiler prefix')
+    receipt = json.loads((prefix / 'receipt.json').read_text())
+    GROUP['validate_receipt'](receipt)
+    GROUP['verify_payload'](prefix, GROUP['pins']())
+    if GROUP['observe'](prefix) != receipt['observed_versions']:
+        raise ValueError('current compiler observations changed')
+    return receipt
 
 
 def remove_private(path, safe):
@@ -130,7 +142,8 @@ def execute(output):
     output.mkdir(mode=0o700, exist_ok=False)
     commands = []
     receipt = dict(schema=1, revision=revision, functional_tests_passed=False,
-                   codegen_review="required", constant_time_proven=False, commands=commands)
+                   codegen_review="required", constant_time_proven=False, commands=commands,
+                   fixture_scope="Bounded consumer/codegen fixture; twelve remaining shared-package feature differences; not an exact Core binary")
     private = output.parent / (output.name + "-private")
     if private.exists() or private.is_symlink():
         raise ValueError("private proof prefix already exists")
@@ -208,7 +221,7 @@ def execute(output):
             print("install-" + compiler + ": passed", flush=True)
             compiler_env.update(PATH=str(rust_prefix / "bin") + os.pathsep + env["PATH"],
                                 RUSTC=str(rust_prefix / "bin/rustc"), RUSTDOC=str(rust_prefix / "bin/rustdoc"))
-            receipt["current_compiler"] = json.loads((rust_prefix / "receipt.json").read_text())
+            receipt["current_compiler"] = current_compiler(rust_prefix)
             rustc = [str(rust_prefix / "bin/rustc")]
             cargo = [str(rust_prefix / "bin/cargo")]
             run(rustc + ["--version", "--verbose"], "compiler-" + compiler, custom_env=compiler_env)
@@ -275,6 +288,7 @@ def execute(output):
                 run(cargo + ["test", "--locked", "--offline", "--target", target,
                     "-p", package, test_filter], "core-hpke-" + label + "-" + target,
                     custom_env=build_env, tests=True)
+        receipt["current_compiler_after"] = current_compiler(rust_prefix)
         receipt["functional_tests_passed"] = True
     except BaseException as error:
         receipt["failure"] = dict(type=type(error).__name__, message=str(error))
@@ -284,9 +298,9 @@ def execute(output):
         receipt['process_group_cleanup_confirmed'] = group_cleanup_confirmed
         if not group_cleanup_confirmed:
             receipt['retained_prefixes'] = [str(private), str(musl_prefix),
-                str(temporary / "volparossa-rust-1.99.1")]
+                str(temporary / "volparossa-rust-1.89.0")]
             receipt['retained_compiler_staging_candidates'] = [
-                str(path) for path in sorted(temporary.glob("rust199-components-*"))]
+                str(path) for path in sorted(temporary.glob("rust189-components-*"))]
         receipt['musl_input_removed'] = remove_private(musl_prefix, group_cleanup_confirmed)
         receipt['private_graph_removed'] = (not private_created or remove_private(private, group_cleanup_confirmed))
         if not receipt['musl_input_removed'] or not receipt['private_graph_removed']:
@@ -294,12 +308,14 @@ def execute(output):
         receipt["profile"] = RELEASE
         receipt["review_entrypoints"] = SYMBOLS
         (output / "REVIEW_REQUIRED.md").write_text(
-            "Functional execution is separate from constant-time acceptance. Review Rust 1.99.1 "
+            "Functional execution is separate from constant-time acceptance. Review Rust 1.89.0 "
             "ctutils 0.4.5 linked assembly/LLVM for every named secret-input entrypoint on both targets "
             "with opt-level3/thinLTO/one codegen unit, especially borrow and masked add-back, zero "
             "counts, digest and universal-hash consumers. P384 verification uses public inputs; inspect "
             "its linked crypto-bigint path separately. Check control flow and dataflow, not merely branch "
-            "counts. Historical 0.4.4 compiler results are retained and are not rerun here. This capture "
+            "counts. The fixture disables crypto-bigint/sha2 defaults, but twelve remaining shared-package "
+            "feature differences limit this evidence to fixture codegen, not an exact Core binary. "
+            "Historical 0.4.4 compiler results are retained and are not rerun here. This capture "
             "is not a formal or universal cryptographic proof. Record findings and exact artifact hashes.\n")
         receipt["artifacts"] = {str(p.relative_to(output)): hashlib.sha256(p.read_bytes()).hexdigest()
                                 for p in artifact_files(output) if p.name != "receipt.json"}

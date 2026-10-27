@@ -34,8 +34,8 @@ pub fn read_passphrase_with_prompts(
         ),
     };
 
-    if path.is_none() {
-        if let Some(confirmation_prompt) = confirmation_prompt {
+    if path.is_none()
+        && let Some(confirmation_prompt) = confirmation_prompt {
             let mut confirmation = Zeroizing::new(
                 rpassword::prompt_password(confirmation_prompt)
                     .context("could not read passphrase confirmation")?,
@@ -46,7 +46,6 @@ pub fn read_passphrase_with_prompts(
                 bail!("passphrase confirmation does not match");
             }
         }
-    }
 
     let passphrase = Passphrase::new(secret.as_bytes()).context("invalid passphrase")?;
     secret.zeroize();

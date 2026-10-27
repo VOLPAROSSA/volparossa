@@ -74,7 +74,7 @@ impl Queue {
 
 enum Event {
     Profile(usize, Result<rpc::Capabilities>),
-    Finished(JobHandle, Result<rpc::JobStatus>, bool),
+    Finished(Box<JobHandle>, Result<rpc::JobStatus>, bool),
 }
 
 fn terminal(status: &rpc::JobStatus) -> bool {
@@ -349,7 +349,7 @@ async fn finish(
             result = Ok(status);
         }
     }
-    Event::Finished(handle, result, new_submission)
+    Event::Finished(Box::new(handle), result, new_submission)
 }
 
 fn completed(
@@ -571,15 +571,14 @@ pub(super) async fn report(
         .filter(|pending| !pending.verified_status.as_ref().is_some_and(terminal))
     {
         let handle = pending.handle.clone();
-        if handle.binding.expires_unix_seconds > time {
-            if let Some(index) = plan
+        if handle.binding.expires_unix_seconds > time
+            && let Some(index) = plan
                 .provider_keys
                 .iter()
                 .position(|key| *key == handle.provider_key)
             {
                 queue.slots[index] = Slot::Active(handle.binding.job_id.clone());
             }
-        }
         let socket = socket.to_owned();
         let cancellation = cancellation.clone();
         tasks.spawn(async move {

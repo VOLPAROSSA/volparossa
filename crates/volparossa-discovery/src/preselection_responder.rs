@@ -1548,11 +1548,10 @@ mod tests {
                             connection_id,
                             endpoint,
                             ..
-                        } = event {
-                            if peer_id == client_peer {
+                        } = event
+                            && peer_id == client_peer {
                                 relay_lineage = Some((connection_id, endpoint));
                             }
-                        }
                     }
                 }
             }
@@ -1599,11 +1598,9 @@ mod tests {
                             endpoint,
                             ..
                         } = event
-                        {
-                            if peer_id == listening_peer {
+                            && peer_id == listening_peer {
                                 dialling_lineage = Some((connection_id, endpoint));
                             }
-                        }
                     }
                     event = next_other(listening) => {
                         if let SwarmEvent::ConnectionEstablished {
@@ -1612,11 +1609,9 @@ mod tests {
                             endpoint,
                             ..
                         } = event
-                        {
-                            if peer_id == dialling_peer {
+                            && peer_id == dialling_peer {
                                 listening_lineage = Some((connection_id, endpoint));
                             }
-                        }
                     }
                 }
             }
@@ -2441,11 +2436,9 @@ mod tests {
                 if let SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservation(
                     request_response::Event::OutboundFailure { request_id, .. },
                 )) = client.next_internal_event().await
-                {
-                    if request_id == transplanted_outbound {
+                    && request_id == transplanted_outbound {
                         break;
                     }
-                }
             }
         })
         .await

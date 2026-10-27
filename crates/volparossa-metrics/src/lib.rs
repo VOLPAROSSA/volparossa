@@ -410,7 +410,7 @@ fn set_bounded(
 }
 
 fn saturating_add(metric: &AtomicU64, increment: u64) {
-    let _result = metric.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+    let _result = metric.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         Some(current.saturating_add(increment))
     });
 }

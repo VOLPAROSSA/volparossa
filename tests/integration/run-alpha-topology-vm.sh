@@ -1995,8 +1995,8 @@ case $scenario in weather-decoder-abi|alpha|datapath|reciprocity|reciprocity-pri
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
 prepare_current_compiler() {
-    python3 -B scripts/provision-rust199.py alpha-guest
-    export PATH="/home/vpci/.local/volparossa-rust-1.99.1/bin:$PATH"
+    python3 -B scripts/provision-rust189.py alpha-guest
+    export PATH="/home/vpci/.local/volparossa-rust-1.89.0/bin:$PATH"
 }
 guest_phase verify-source
 printf '%s  source.tar.gz\n' "$source_sha256" | sha256sum --check --strict -

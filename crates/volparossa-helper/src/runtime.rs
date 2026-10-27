@@ -934,18 +934,17 @@ fn validate_directory(path: &Path, uid: u32, gid: u32) -> Result<(), io::Error> 
 }
 
 fn write_token(path: &Path, token: &[u8; 32], owner: Uid, group: Gid) -> Result<(), io::Error> {
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        if !metadata.file_type().is_file()
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && (!metadata.file_type().is_file()
             || metadata.uid() != owner.as_raw()
             || metadata.gid() != group.as_raw()
-            || metadata.mode() & 0o777 != 0o640
+            || metadata.mode() & 0o777 != 0o640)
         {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "unsafe cleanup token file",
             ));
         }
-    }
     let mut options = OpenOptions::new();
     options
         .write(true)

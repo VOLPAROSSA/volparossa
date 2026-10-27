@@ -405,8 +405,8 @@ jobs:
               helper-boundary-evidence-v1.json.sha256|\
               helper-restart-exact-present-evidence-v1.json|\
               helper-restart-exact-present-evidence-v1.json.sha256|\
-              helper-restart-vm-environment-v2.json|\
-              vm-environment-v2.json|\
+              helper-restart-vm-environment-v3.json|\
+              vm-environment-v3.json|\
               vm-console.log|\
               helper-boundary-proof.stderr.log)
                 return 0
@@ -476,11 +476,11 @@ jobs:
                 helper-restart-exact-present-evidence-v1.json.sha256)
                   test "$size" -eq 112
                   ;;
-                helper-restart-vm-environment-v2.json)
+                helper-restart-vm-environment-v3.json)
                   test "$size" -ge 1
                   test "$size" -le 32768
                   ;;
-                vm-environment-v2.json)
+                vm-environment-v3.json)
                   test "$size" -ge 1
                   test "$size" -le 32768
                   ;;
@@ -506,7 +506,7 @@ jobs:
             printf '%s\n' 'any=false' >>"$GITHUB_OUTPUT"
           fi
 
-          if test -f "$retained_dir/vm-environment-v2.json" \
+          if test -f "$retained_dir/vm-environment-v3.json" \
               || test -f "$retained_dir/vm-console.log" \
               || test -f "$retained_dir/helper-boundary-proof.stderr.log"; then
             printf '%s\n' 'diagnostics_any=true' >>"$GITHUB_OUTPUT"
@@ -526,8 +526,8 @@ jobs:
           report_hash="$retained_dir/helper-boundary-evidence-v1.json.sha256"
           restart_report="$retained_dir/helper-restart-exact-present-evidence-v1.json"
           restart_report_hash="$retained_dir/helper-restart-exact-present-evidence-v1.json.sha256"
-          restart_environment="$retained_dir/helper-restart-vm-environment-v2.json"
-          environment="$retained_dir/vm-environment-v2.json"
+          restart_environment="$retained_dir/helper-restart-vm-environment-v3.json"
+          environment="$retained_dir/vm-environment-v3.json"
           console="$retained_dir/vm-console.log"
           proof_stderr="$retained_dir/helper-boundary-proof.stderr.log"
           validator_stdout="$RUNNER_TEMP/helper-boundary-validator.stdout"
@@ -577,7 +577,7 @@ jobs:
           )
           environment_validator_stdout="$RUNNER_TEMP/vm-environment-validator.stdout"
           environment_validator_stderr="$RUNNER_TEMP/vm-environment-validator.stderr"
-          tests/helper/validate-helper-boundary-vm-environment-v2.sh \
+          tests/helper/validate-helper-boundary-vm-environment-v3.sh \
             "$environment" \
             "$report" \
             "$GITHUB_SHA" \
@@ -606,7 +606,7 @@ jobs:
           )
           restart_environment_validator_stdout="$RUNNER_TEMP/restart-environment-validator.stdout"
           restart_environment_validator_stderr="$RUNNER_TEMP/restart-environment-validator.stderr"
-          tests/helper/validate-helper-restart-vm-environment-v2.sh \
+          tests/helper/validate-helper-restart-vm-environment-v3.sh \
             "$restart_environment" \
             "$restart_report" \
             "$GITHUB_SHA" \
@@ -664,7 +664,7 @@ jobs:
           path: |
             ${{ runner.temp }}/helper-boundary-retained/helper-boundary-evidence-v1.json
             ${{ runner.temp }}/helper-boundary-retained/helper-boundary-evidence-v1.json.sha256
-            ${{ runner.temp }}/helper-boundary-retained/vm-environment-v2.json
+            ${{ runner.temp }}/helper-boundary-retained/vm-environment-v3.json
             ${{ runner.temp }}/helper-boundary-retained/vm-console.log
             ${{ runner.temp }}/helper-boundary-retained/helper-boundary-proof.stderr.log
           if-no-files-found: error
@@ -683,7 +683,7 @@ jobs:
         with:
           name: helper-boundary-diagnostics-${{ github.sha }}
           path: |
-            ${{ runner.temp }}/helper-boundary-retained/vm-environment-v2.json
+            ${{ runner.temp }}/helper-boundary-retained/vm-environment-v3.json
             ${{ runner.temp }}/helper-boundary-retained/vm-console.log
             ${{ runner.temp }}/helper-boundary-retained/helper-boundary-proof.stderr.log
           if-no-files-found: error
@@ -703,7 +703,7 @@ jobs:
           path: |
             ${{ runner.temp }}/helper-boundary-retained/helper-restart-exact-present-evidence-v1.json
             ${{ runner.temp }}/helper-boundary-retained/helper-restart-exact-present-evidence-v1.json.sha256
-            ${{ runner.temp }}/helper-boundary-retained/helper-restart-vm-environment-v2.json
+            ${{ runner.temp }}/helper-boundary-retained/helper-restart-vm-environment-v3.json
             ${{ runner.temp }}/helper-boundary-retained/vm-console.log
             ${{ runner.temp }}/helper-boundary-retained/helper-boundary-proof.stderr.log
           if-no-files-found: error

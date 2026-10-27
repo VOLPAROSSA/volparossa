@@ -266,8 +266,8 @@ impl Agent {
                 return Err(AgentError::WifiMesh);
             }
         };
-        if self.config.wifi_mesh.enabled {
-            if let Err(error) = self.discovery.configure_mesh_network(mesh.is_some()) {
+        if self.config.wifi_mesh.enabled
+            && let Err(error) = self.discovery.configure_mesh_network(mesh.is_some()) {
                 tracing::error!(error = ?error, "direct Wi-Fi discovery startup failed");
                 self.helper
                     .cleanup_owned()
@@ -275,7 +275,6 @@ impl Agent {
                     .map_err(|_| AgentError::ShutdownCleanup)?;
                 return Err(AgentError::WifiMesh);
             }
-        }
         let client_ingress = if roles.client {
             let ingress = match ClientIngressRuntime::start(self.helper.clone()).await {
                 Ok(ingress) => ingress,
@@ -470,24 +469,22 @@ impl Agent {
             }
         }
 
-        if let Some(mesh) = mesh {
-            if mesh.shutdown().await.is_err() {
+        if let Some(mesh) = mesh
+            && mesh.shutdown().await.is_err() {
                 self.helper
                     .cleanup_owned()
                     .await
                     .map_err(|_| AgentError::ShutdownCleanup)?;
                 return Err(AgentError::ShutdownCleanup);
             }
-        }
-        if let Some(sharing) = sharing {
-            if sharing.shutdown().await.is_err() {
+        if let Some(sharing) = sharing
+            && sharing.shutdown().await.is_err() {
                 self.helper
                     .cleanup_owned()
                     .await
                     .map_err(|_| AgentError::ShutdownCleanup)?;
                 return Err(AgentError::ShutdownCleanup);
             }
-        }
         if self.state.read().await.has_network_state() {
             self.helper
                 .cleanup_owned()
@@ -1071,7 +1068,6 @@ async fn run_client_udp_ingress(
                     "INGRESS_UDP_ROUTE_UNAVAILABLE",
                     unix_millis(),
                 );
-                continue;
             }
             // Submission is complete. The independent reverse-drain branch above owns replies;
             // the next application datagram must not wait for this destination to answer.
@@ -1637,7 +1633,6 @@ async fn run_maintenance(
                             now_ms,
                         );
                     }
-                    continue;
                 }
             }
         }

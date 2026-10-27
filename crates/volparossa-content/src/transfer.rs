@@ -54,7 +54,7 @@ impl TransferLimits {
         if self.exchange_timeout.is_zero()
             || self.exchange_timeout > Duration::from_secs(60)
             || self.session_timeout.is_zero()
-            || self.session_timeout > Duration::from_mins(15)
+            || self.session_timeout > Duration::from_secs(900)
             || self.max_requests == 0
             || self.max_requests > MAX_CHUNKS
             || self.max_bytes == 0

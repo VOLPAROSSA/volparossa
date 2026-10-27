@@ -4036,7 +4036,7 @@ jq -e '
   and (.checks | length == 20)
 ' "$fixture" >/dev/null
 grep -F 'helper-restart-exact-present-evidence-v1.json' "$workflow" >/dev/null
-grep -F 'helper-restart-vm-environment-v2.json' "$workflow" >/dev/null
+grep -F 'helper-restart-vm-environment-v3.json' "$workflow" >/dev/null
 grep -F 'retention-days: 90' "$workflow" >/dev/null
 
 printf '%s\n' \

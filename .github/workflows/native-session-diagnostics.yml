@@ -30,7 +30,7 @@ env:
   CARGO_BUILD_JOBS: '2'
   CARGO_TERM_COLOR: never
   PYTHONDONTWRITEBYTECODE: '1'
-  RUSTUP_TOOLCHAIN: 1.99.1
+  RUSTUP_TOOLCHAIN: 1.89.0
 
 jobs:
   diagnostics:
@@ -107,8 +107,8 @@ jobs:
         id: toolchain
         run: |
           set -euo pipefail
-          python3 -B scripts/provision-rust199.py runner
-          export PATH="$RUNNER_TEMP/volparossa-rust-1.99.1/bin:$PATH"
+          python3 -B scripts/provision-rust189.py runner
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
           rustc --version --verbose
           cargo --version --verbose
 

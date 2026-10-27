@@ -158,15 +158,14 @@ impl DiscoveryRuntime {
         self.downlink.outgoing.clear();
         self.downlink.targets.clear();
         self.downlink.deferred.clear();
-        if let Some(runtime) = self.downlink.runtime.take() {
-            if runtime.shutdown().await.is_err() {
+        if let Some(runtime) = self.downlink.runtime.take()
+            && runtime.shutdown().await.is_err() {
                 state.write().await.log(
                     LogLevel::Error,
                     "DOWNLINK_ACCOUNTING_CLEANUP_PENDING",
                     unix_millis(),
                 );
             }
-        }
     }
 
     /// Called only after this Relay's exact pair of helper leases has activated.

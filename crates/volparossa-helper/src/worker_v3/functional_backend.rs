@@ -2710,8 +2710,8 @@ impl FunctionalAlphaLeaseBackend {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.as_mut().and_then(|entry| entry.parent_policy.take())
         };
-        if let Some(parent_policy) = parent_policy {
-            if super::client_ingress_policy::remove_parent(&parent_policy, deadline).is_err() {
+        if let Some(parent_policy) = parent_policy
+            && super::client_ingress_policy::remove_parent(&parent_policy, deadline).is_err() {
                 let mut state = self
                     .ingress_state
                     .lock()
@@ -2722,7 +2722,6 @@ impl FunctionalAlphaLeaseBackend {
                 }
                 return false;
             }
-        }
         let parent_routing = {
             let mut state = self
                 .ingress_state
@@ -3111,14 +3110,13 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .as_ref()
                         .map(|entry| (entry.client_runtime_id, entry.backend_generation));
-                    if let Some((client_runtime_id, backend_generation)) = ingress {
-                        if !self
+                    if let Some((client_runtime_id, backend_generation)) = ingress
+                        && !self
                             .cleanup_ingress_exact(client_runtime_id, backend_generation, deadline)
                             .await
                         {
                             return request.complete(Err(BackendError::CleanupIncomplete));
                         }
-                    }
                     let keys = lock_state(&self.state).keys().copied().collect::<Vec<_>>();
                     for key in keys {
                         if !self.cleanup_exact(key, deadline, true).await {

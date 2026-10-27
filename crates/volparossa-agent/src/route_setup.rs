@@ -952,14 +952,13 @@ impl ProductionMpquicPathHealth {
             return Err(());
         }
         for status in native {
-            if let Some(previous) = self.counters.get(&status.path_id) {
-                if status.delivered_bytes < previous.delivered_bytes
+            if let Some(previous) = self.counters.get(&status.path_id)
+                && (status.delivered_bytes < previous.delivered_bytes
                     || status.acked_transport_bytes < previous.acked_transport_bytes
-                    || status.packets_lost < previous.packets_lost
+                    || status.packets_lost < previous.packets_lost)
                 {
                     return Err(());
                 }
-            }
         }
         let route_progressed = native.iter().any(|status| {
             self.counters.get(&status.path_id).is_some_and(|previous| {
@@ -2149,8 +2148,8 @@ impl ClientRouteControl {
         self.retire_expired_route(now_ms, Instant::now()).await;
         {
             let mut state = self.state.lock().await;
-            if let ClientRouteControlState::Established(established) = &mut *state {
-                if let ClientTransportState::NativeUdp(active) = &mut established.transport {
+            if let ClientRouteControlState::Established(established) = &mut *state
+                && let ClientTransportState::NativeUdp(active) = &mut established.transport {
                     if let Some(binding) = active.binding.as_ref() {
                         let lifetime = active
                             .lifetime
@@ -2247,7 +2246,6 @@ impl ClientRouteControl {
                         .await?;
                     return Ok(ClientRouteProgress::TransportActive);
                 }
-            }
         }
         let previous = {
             let mut state = self.state.lock().await;
@@ -5983,7 +5981,7 @@ struct ProductionUdpPreparationFailure {
 }
 
 struct ProductionUdpCertificateFailure {
-    prepared: PreparedProductionUdpRoute,
+    prepared: Box<PreparedProductionUdpRoute>,
     cause: ProductionUdpRouteError,
 }
 
@@ -6354,7 +6352,7 @@ impl PreparedProductionUdpRoute {
         };
         self.bind_exit_session_signal(&local_signal)
             .map_err(|failure| ProductionUdpSessionFailure {
-                prepared: failure.prepared,
+                prepared: *failure.prepared,
                 cause: failure.cause,
             })
     }
@@ -6371,7 +6369,7 @@ impl PreparedProductionUdpRoute {
         let certificate_der = signal.certificate_der().to_vec();
         let Some(authorization) = self.route.established.native_authorization.as_ref() else {
             return Err(ProductionUdpCertificateFailure {
-                prepared: self,
+                prepared: Box::new(self),
                 cause: ProductionUdpRouteError::ExitCertificate,
             });
         };
@@ -6387,7 +6385,7 @@ impl PreparedProductionUdpRoute {
                 != 1
         {
             return Err(ProductionUdpCertificateFailure {
-                prepared: self,
+                prepared: Box::new(self),
                 cause: ProductionUdpRouteError::ExitCertificate,
             });
         }
@@ -6395,19 +6393,19 @@ impl PreparedProductionUdpRoute {
         let mut roots = RootCertStore::empty();
         if roots.add(certificate).is_err() {
             return Err(ProductionUdpCertificateFailure {
-                prepared: self,
+                prepared: Box::new(self),
                 cause: ProductionUdpRouteError::ExitCertificate,
             });
         }
         let Ok(client_config) = quinn::ClientConfig::with_root_certificates(Arc::new(roots)) else {
             return Err(ProductionUdpCertificateFailure {
-                prepared: self,
+                prepared: Box::new(self),
                 cause: ProductionUdpRouteError::ExitCertificate,
             });
         };
         let Ok(target) = ProtectedExitUdpTarget::new(&self.path, SINGLE_RELAY_UDP_EXIT_PORT) else {
             return Err(ProductionUdpCertificateFailure {
-                prepared: self,
+                prepared: Box::new(self),
                 cause: ProductionUdpRouteError::ExitCertificate,
             });
         };
@@ -8242,7 +8240,7 @@ impl<P: ClientReservationProtocol> Drop for RouteSetupHandle<P> {
 enum RouteAttemptState<P: ClientReservationProtocol> {
     Vacant,
     Pending(RouteSetupHandle<P>),
-    Established(EstablishedRoute<P>),
+    Established(Box<EstablishedRoute<P>>),
     Settling,
     Quarantined,
 }
@@ -8284,11 +8282,11 @@ impl<P: ClientReservationProtocol> RouteAttemptOwner<P> {
         Ok(())
     }
 
-    fn adopt_established(&mut self, route: EstablishedRoute<P>) -> Result<(), EstablishedRoute<P>> {
+    fn adopt_established(&mut self, route: EstablishedRoute<P>) -> Result<(), Box<EstablishedRoute<P>>> {
         if !matches!(self.state, RouteAttemptState::Vacant) {
-            return Err(route);
+            return Err(Box::new(route));
         }
-        self.state = RouteAttemptState::Established(route);
+        self.state = RouteAttemptState::Established(Box::new(route));
         Ok(())
     }
 
@@ -8300,7 +8298,7 @@ impl<P: ClientReservationProtocol> RouteAttemptOwner<P> {
         };
         match handle.wait().await {
             Ok(route) => {
-                self.state = RouteAttemptState::Established(route);
+                self.state = RouteAttemptState::Established(Box::new(route));
                 RouteAttemptSettlement::Established(self)
             }
             Err(failure) => {
@@ -8329,7 +8327,7 @@ impl<P: ClientReservationProtocol> RouteAttemptOwner<P> {
                 }
             }
             RouteAttemptState::Established(route) => {
-                RouteAttemptDrain::Retired(route.teardown().await)
+                RouteAttemptDrain::Retired((*route).teardown().await)
             }
             RouteAttemptState::Settling | RouteAttemptState::Quarantined => {
                 RouteAttemptDrain::Quarantined

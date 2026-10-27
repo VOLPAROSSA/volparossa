@@ -220,13 +220,13 @@ impl SessionOwner {
     pub(super) fn begin_at(&self, now: Stamp) -> Result<PendingSession<'_>, EvidenceError> {
         self.check_time(&now)?;
         self.pending
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
                 (count < self.limits.maximum_pending).then_some(count + 1)
             })
             .map_err(|_| EvidenceError::Budget)?;
         let slot = Slot(self);
         self.remaining
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
                 count.checked_sub(1)
             })
             .map_err(|_| EvidenceError::Budget)?;

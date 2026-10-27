@@ -870,13 +870,12 @@ impl ProvisionalMountGuard {
         let visible = open_visible_namespace(parent, &self.name)?;
         let visible_mount_id = mount_id(&visible)?;
         verify_visible_binding(namespace, &visible, self.hidden_mount_id, visible_mount_id)?;
-        if let Some(expected) = self.mount_id {
-            if expected != visible_mount_id {
+        if let Some(expected) = self.mount_id
+            && expected != visible_mount_id {
                 return Err(NamespacePinError::Unsafe(
                     "provisional namespace mount identity changed",
                 ));
             }
-        }
         drop(visible);
         drop(self.mount_descriptor.take());
         unmount(cleanup_path(parent, &self.name), UnmountFlags::NOFOLLOW).map_err(|source| {
@@ -2039,11 +2038,10 @@ impl FixedIpv4AddressJournal {
         let endpoint_addresses = &mut self.endpoints;
         let visited = pairs.visit_network_namespaces_reverse(|endpoint| {
             let index = endpoint.index();
-            if let Some(address) = endpoint_addresses[index].take() {
-                if let Err(error) = address.rollback(fixed_pairs[index]) {
+            if let Some(address) = endpoint_addresses[index].take()
+                && let Err(error) = address.rollback(fixed_pairs[index]) {
                     first_error.get_or_insert(FixedIpv4AddressSetError::Rollback(error));
                 }
-            }
             Ok::<(), std::convert::Infallible>(())
         });
         if let Err(error) = visited {
@@ -2055,11 +2053,10 @@ impl FixedIpv4AddressJournal {
             };
         }
         for index in (0..ENDPOINT_COUNT).rev() {
-            if let Some(address) = self.parent[index].take() {
-                if let Err(error) = address.rollback(fixed_pairs[index]) {
+            if let Some(address) = self.parent[index].take()
+                && let Err(error) = address.rollback(fixed_pairs[index]) {
                     first_error.get_or_insert(FixedIpv4AddressSetError::Rollback(error));
                 }
-            }
         }
         if self.parent.iter().any(Option::is_some) || self.endpoints.iter().any(Option::is_some) {
             return Err(FixedIpv4AddressSetError::Unsafe(
@@ -4493,8 +4490,8 @@ mod tests {
         }
         assert!(!live.get());
         assert_eq!(current.get(), ModelNetworkNamespace::Parent);
-        let observed = events.borrow().clone();
-        observed
+
+        events.borrow().clone()
     }
 
     const fn model_namespace_for(specification: FixedIpv4Address) -> ModelNetworkNamespace {
@@ -5743,13 +5740,10 @@ mod tests {
                     model_install_endpoint_routes(activated, None).expect("model routed topology");
                 events.borrow_mut().clear();
 
-                let (observed_failure, mut deleted) = match model_install_permanent_neighbours(
+                let Err((observed_failure, mut deleted)) = model_install_permanent_neighbours(
                     routed,
                     Some((failed_specification, failure)),
-                ) {
-                    Ok(_) => panic!("model neighbour failure was accepted"),
-                    Err(failure) => failure,
-                };
+                ) else { panic!("model neighbour failure was accepted") };
                 assert_eq!(observed_failure, failure);
                 let failed_index = permanent_neighbour_index(failed_specification);
                 let mut expected_retirements = [false; PERMANENT_NEIGHBOUR_COUNT];
@@ -5815,12 +5809,8 @@ mod tests {
                 .expect("model permanent-neighbour topology");
             events.borrow_mut().clear();
 
-            let mut deleted = match neighbours
-                .remove_permanent_neighbours_with_failure(Some(failed_specification))
-            {
-                Ok(_) => panic!("ambiguous model neighbour deletion returned routed authority"),
-                Err(deleted) => deleted,
-            };
+            let Err(mut deleted) = neighbours
+                .remove_permanent_neighbours_with_failure(Some(failed_specification)) else { panic!("ambiguous model neighbour deletion returned routed authority") };
             let failed_index = permanent_neighbour_index(failed_specification);
             let mut expected_retirements = [false; PERMANENT_NEIGHBOUR_COUNT];
             expected_retirements[failed_index] = true;
@@ -5867,11 +5857,7 @@ mod tests {
                 let current = Rc::new(Cell::new(ModelNetworkNamespace::Parent));
                 let activated = model_complete_activation(&events, &current);
                 events.borrow_mut().clear();
-                let (observed, mut deleted) =
-                    match model_install_endpoint_routes(activated, Some((endpoint, failure))) {
-                        Ok(_) => panic!("model route failure was accepted"),
-                        Err(failure) => failure,
-                    };
+                let Err((observed, mut deleted)) = model_install_endpoint_routes(activated, Some((endpoint, failure))) else { panic!("model route failure was accepted") };
                 assert_eq!(observed, failure);
                 let expected = match (endpoint, failure) {
                     (NamespaceEndpoint::A, ModelRouteFailure::DeletionBound) => [true, false],

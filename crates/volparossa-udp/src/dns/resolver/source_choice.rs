@@ -106,16 +106,14 @@ where
     // No new timeout/deadline: the actual backend owns its original absolute
     // deadline, two-worker bound, cleanup reserve and quarantine semantics.
     let answer = unbound.await;
-    if answer.is_ok()
+    if (answer.is_ok()
         || matches!(
             answer,
             Err(DnsResolverError::NameNotFound | DnsResolverError::NoData)
-        )
-    {
-        if let Ok(mut cache) = cache.lock() {
+        ))
+        && let Ok(mut cache) = cache.lock() {
             SourceChoice::sample(&mut cache.source_choice.unbound_cost, started.elapsed());
         }
-    }
     answer
 }
 

@@ -213,14 +213,13 @@ async fn supervise(
     // Optional collection must not replace an already usable native answer with
     // a new timeout. Only a deadline (never malformed protocol/bogus data) can
     // recover it, and only after the exact child has been confirmed reaped.
-    if (timed_out || proof_timed_out) && session.integrity_error().is_none() && !reply.is_closed() {
-        if let Some(fallback) = fallback.filter(|answer| answer.ttl_seconds() > 0) {
+    if (timed_out || proof_timed_out) && session.integrity_error().is_none() && !reply.is_closed()
+        && let Some(fallback) = fallback.filter(|answer| answer.ttl_seconds() > 0) {
             return Ok(PrivateResolution {
                 fallback,
                 proof: None,
             });
         }
-    }
     result
 }
 

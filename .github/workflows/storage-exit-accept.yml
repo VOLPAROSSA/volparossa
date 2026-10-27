@@ -87,8 +87,8 @@ jobs:
 
       - name: Prepare pinned compiler on the disposable runner
         run: |
-          python3 -B scripts/provision-rust199.py runner
-          export PATH="$RUNNER_TEMP/volparossa-rust-1.99.1/bin:$PATH"
+          python3 -B scripts/provision-rust189.py runner
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
           sudo -n apt-get update
           sudo -n apt-get install --yes --no-install-recommends protobuf-compiler=3.21.12-8.2ubuntu0.3
           test "$(protoc --version)" = 'libprotoc 3.21.12'

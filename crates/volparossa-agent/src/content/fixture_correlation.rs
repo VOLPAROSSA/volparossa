@@ -402,12 +402,11 @@ impl Correlation {
                 if record.role != role {
                     return None;
                 }
-                if let Some(target) = selected_target {
-                    if !record.request_valid.load(Relaxed) || record.request.target != Some(target)
+                if let Some(target) = selected_target
+                    && (!record.request_valid.load(Relaxed) || record.request.target != Some(target))
                     {
                         return None;
                     }
-                }
                 let fingerprint = record
                     .prefix_valid
                     .load(Relaxed)
@@ -716,11 +715,10 @@ impl Guard {
                 }
                 _ => {}
             }
-        }) {
-            if let Some(track) = &self.0 {
+        })
+            && let Some(track) = &self.0 {
                 track.request_valid.store(false, Relaxed);
             }
-        }
     }
 
     fn request_stage(&self, stage: RequestStage) {
@@ -733,11 +731,10 @@ impl Guard {
         } as i32;
         if !self.update(|record| {
             record.request.provider_stage = stage;
-        }) {
-            if let Some(track) = &self.0 {
+        })
+            && let Some(track) = &self.0 {
                 track.request_valid.store(false, Relaxed);
             }
-        }
     }
 
     fn worker(&self) -> Option<Arc<dyn WorkerObserver>> {

@@ -24,7 +24,7 @@ sev = { path = "third_party/rust/vendor/sev-8.0.0" }
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.99.1"
+rust-version = "1.89"
 authors = ["VOLPAROSSA contributors"]
 license = "GPL-3.0-only"
 repository = "https://github.com/VOLPAROSSA/volparossa"

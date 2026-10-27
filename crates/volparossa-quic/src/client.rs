@@ -616,7 +616,7 @@ async fn send_control_binding(
                     "native descriptor binding was only partially sent",
                 )));
             }
-            Err(Errno::EAGAIN) => continue,
+            Err(Errno::EAGAIN) => {},
             Err(error) => return Err(NativeClientError::Io(error.into())),
         }
     }

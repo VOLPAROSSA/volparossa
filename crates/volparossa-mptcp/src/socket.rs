@@ -265,14 +265,13 @@ pub async fn connect(
     timeout: Duration,
 ) -> io::Result<MptcpStream> {
     let domain = domain_for(remote);
-    if let Some(local) = local {
-        if domain_for(local) != domain {
+    if let Some(local) = local
+        && domain_for(local) != domain {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "MPTCP local and remote address families differ",
             ));
         }
-    }
 
     let socket = create_socket(domain)?;
     socket.set_nonblocking(true)?;

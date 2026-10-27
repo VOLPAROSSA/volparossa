@@ -832,10 +832,7 @@ mod tests {
         inherited
             .thread_set_mask()
             .expect("set inherited test mask");
-        let error = match FixedSignalSupervisor::install_outer() {
-            Ok(_) => panic!("inherited mask must fail"),
-            Err(error) => error,
-        };
+        let Err(error) = FixedSignalSupervisor::install_outer() else { panic!("inherited mask must fail") };
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(
             SigSet::thread_get_mask().expect("unchanged inherited mask"),

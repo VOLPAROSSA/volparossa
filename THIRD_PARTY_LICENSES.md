@@ -944,7 +944,8 @@ Their original MIT notices are retained unchanged under
 source patch is applied. The zbus/macros source commit is
 [`90b4de2d6fa7d7f5b0cb8dd955709d3e765fd2b2`](https://github.com/z-galaxy/zbus/tree/90b4de2d6fa7d7f5b0cb8dd955709d3e765fd2b2).
 
-The build candidate uses exact Rust1.99.1. The reviewed official distribution
+The earlier build candidate used exact Rust1.99.1, retained as a reference profile.
+The reviewed official distribution
 manifest is `https://static.rust-lang.org/dist/channel-rust-1.99.1.toml`, SHA-256
 `fb152be80975c194aa5fc684b2aec3a6e14e2b855efe2faa4e5f8ae6e590f463`.
 [Component metadata](scripts/rust199-components.json) binds the exact dated
@@ -1084,3 +1085,13 @@ version and `MIT OR Apache-2.0` metadata. Unchanged originals come from
 and [LICENSE-APACHE](https://github.com/jni-rs/jni-sys/blob/64d77b7a5f119d7b55b4e2c169a4668067ff59e6/LICENSE-APACHE).
 Both differ from the earlier jni/jni-macros texts; their own SHA256SUMS preserve
 the exact upstream bytes. This corrects this package's omission only.
+
+
+The current minimum build profile is Rust1.89.0. Its original official
+[distribution manifest](https://static.rust-lang.org/dist/channel-rust-1.89.0.toml)
+has SHA-256 `fbd1662e100e7b305908ece23b441cb7534eadfa6336c5f173ff08d1cec174a1`.
+All six component URLs, versions and original archive checksums are fixed in
+`scripts/rust189-components.json`; the separately pinned provisioner authenticates
+the complete payload before execution. The previous1.99 profile and notices are
+retained. This selects a minimum stable compiler for this reviewed dependency
+combination, not a claim of current upstream compiler security support.

@@ -201,11 +201,10 @@ impl DiscoveryRuntime {
         if !job.remaining.remove(&peer) {
             return;
         }
-        if job.deadline > Instant::now() {
-            if let Some(offer) = offer {
+        if job.deadline > Instant::now()
+            && let Some(offer) = offer {
                 job.offers.insert(peer, offer);
             }
-        }
         if job.remaining.is_empty() {
             self.finish_exact_content_lookup(key, true);
         }

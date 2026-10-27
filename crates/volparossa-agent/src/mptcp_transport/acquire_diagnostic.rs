@@ -113,11 +113,10 @@ impl Observation {
         &mut self,
         diagnostic: Option<volparossa_local_control::StorageFixtureHelperDiagnostic>,
     ) {
-        if let Some(failure) = &mut self.0 {
-            if failure.stage == Stage::HelperAcquire {
+        if let Some(failure) = &mut self.0
+            && failure.stage == Stage::HelperAcquire {
                 failure.helper_diagnostic = diagnostic;
             }
-        }
     }
 
     pub(super) fn transport_error(

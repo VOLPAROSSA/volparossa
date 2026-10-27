@@ -31,8 +31,8 @@ impl Progress {
         if !self.1 {
             return;
         }
-        if let Ok(mut state) = self.0.lock() {
-            if state.phase == Some(Phase::ChallengeReadVerify)
+        if let Ok(mut state) = self.0.lock()
+            && state.phase == Some(Phase::ChallengeReadVerify)
                 && state.failed_at.is_none()
                 && state
                     .read
@@ -43,20 +43,17 @@ impl Progress {
                     returned_outcome: None,
                 });
             }
-        }
     }
 
     pub(super) fn read_failure(&self, outcome: Outcome) {
         if !self.1 {
             return;
         }
-        if let Ok(mut state) = self.0.lock() {
-            if state.failed_at.is_none() {
-                if let Some(read) = &mut state.read {
+        if let Ok(mut state) = self.0.lock()
+            && state.failed_at.is_none()
+                && let Some(read) = &mut state.read {
                     read.returned_outcome.get_or_insert(outcome as i32);
                 }
-            }
-        }
     }
 
     pub(super) fn operation_started(&self) -> Option<Instant> {

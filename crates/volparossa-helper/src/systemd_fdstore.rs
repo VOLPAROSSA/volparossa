@@ -290,7 +290,7 @@ pub(crate) enum FdStoreError {
     #[error("descriptor-store I/O failed")]
     Io(#[source] io::Error),
     #[error("systemd D-Bus operation failed")]
-    Dbus(#[source] zbus::Error),
+    Dbus(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("descriptor-store operation deadline elapsed")]
     Deadline,
     #[error("systemd descriptor-store inventory is invalid: {0}")]
@@ -327,7 +327,7 @@ impl From<io::Error> for FdStoreError {
 
 impl From<zbus::Error> for FdStoreError {
     fn from(error: zbus::Error) -> Self {
-        Self::Dbus(error)
+        Self::Dbus(Box::new(error))
     }
 }
 
@@ -1737,11 +1737,11 @@ impl ManagerMutationGate {
             None => return Err(FdStoreError::RemovalNotPoisoned),
         };
         if current == evidence.attempt {
-            return Ok(RemovalRetryGate::Ready(RemovalRetryAttempt {
+            return Ok(RemovalRetryGate::Ready(Box::new(RemovalRetryAttempt {
                 state,
                 authority: evidence.attempt.clone(),
                 crossed: None,
-            }));
+            })));
         }
         if current.retry_of == Some(evidence.attempt.attempt_id)
             && current.target == evidence.attempt.target
@@ -1906,7 +1906,7 @@ struct RemovalAttempt<'a> {
 }
 
 enum RemovalRetryGate<'a> {
-    Ready(RemovalRetryAttempt<'a>),
+    Ready(Box<RemovalRetryAttempt<'a>>),
     AlreadyCrossed(RemovalAttemptId),
 }
 
@@ -2852,7 +2852,7 @@ where
         .await
         .map_err(RemovalFailure::before_send)?
     {
-        RemovalRetryGate::Ready(attempt) => attempt,
+        RemovalRetryGate::Ready(attempt) => *attempt,
         RemovalRetryGate::AlreadyCrossed(attempt_id) => {
             return Err(RemovalFailure::manager_may_have_removed(
                 attempt_id,
@@ -3487,14 +3487,20 @@ mod tests {
     use super::*;
     use crate::systemd_custody::CUSTODY_FD_NAME_PREFIX;
 
+    #[test]
+    fn dbus_failure_retains_original_error_source_and_sanitized_display() {
+        let original = zbus::Error::from(io::Error::other("private error detail"));
+        let expected_source = original.to_string();
+        let wrapped = FdStoreError::from(original);
+        assert_eq!(wrapped.to_string(), "systemd D-Bus operation failed");
+        let source = std::error::Error::source(&wrapped).expect("original D-Bus error");
+        assert!(source.downcast_ref::<zbus::Error>().is_some());
+        assert_eq!(source.to_string(), expected_source);
+    }
+
     #[tokio::test]
     #[ignore = "requires explicitly assigned disposable runner and private dbus-daemon"]
     async fn private_dbus_typed_replies_and_errors_use_real_zbus() {
-        assert_eq!(env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
-        assert_eq!(
-            env::var("RUNNER_ENVIRONMENT").as_deref(),
-            Ok("github-hosted")
-        );
         struct PrivateBus(std::process::Child);
         impl Drop for PrivateBus {
             fn drop(&mut self) {
@@ -3502,6 +3508,11 @@ mod tests {
                 let _ = self.0.wait();
             }
         }
+        assert_eq!(env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
+        assert_eq!(
+            env::var("RUNNER_ENVIRONMENT").as_deref(),
+            Ok("github-hosted")
+        );
         let directory = tempdir().expect("private bus directory");
         let socket = directory.path().join("bus");
         let address = format!("unix:path={}", socket.display());

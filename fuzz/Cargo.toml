@@ -4,7 +4,7 @@ version = "0.0.0"
 publish = false
 license = "GPL-3.0-only"
 edition = "2024"
-rust-version = "1.99.1"
+rust-version = "1.89"
 
 [package.metadata]
 cargo-fuzz = true

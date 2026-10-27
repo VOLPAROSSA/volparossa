@@ -18,51 +18,82 @@ Last updated: 2026-10-27
 
 ## Current integration and active work
 
-### F04 — beveiligingsroute en volledige Clippy-baseline — 2026-10-27
+### F04 — één minimale beveiligingskandidaat, Rust1.89 — 2026-10-27
 
-De opeenvolgende P03-reparatietranches zijn gestopt. PR347 blijft op
-`18d2c49ba9081b3604b95027400f103502466617`; alle P03a–P03f-correcties van
-PR349-bron `c11d97f4265834218500ba7ec7e2aff1e66c55db` blijven behouden.
-De afzonderlijke, onafhankelijk gereviewde inventaris
-[40445396460](https://github.com/VOLPAROSSA/volparossa/actions/runs/40445396460)
-bindt die bron en beide lockfiles aan dezelfde geauthenticeerde Rust1.99.1,
-root workspace/all-targets/all-features en bestaande lintinstellingen. De echte
-strikte command eindigt101 en toont65 unieke meldingen, inclusief waarschuwingen
-uit dependencies. De aanvullende `--cap-lints=warn`-inventaris eindigt0 met517
-unieke meldingen en een volledig build-finished-record. Deze laatste stap is
-uitsluitend diagnose-evidence, geen Qualitypass of verlaging van productgates.
-ZIP-SHA256 `b007ceaf1615a97ae1b525c7c77f36bab8d76ef9f5a5d6e5f302366f5bca33a4`
-is tegen de oorspronkelijke GitHubartifactdigest gecontroleerd.
+De afzonderlijke P03-reparatietranches zijn gestopt. De bestaande PR347
+(`18d2c49b`) en PR349 (gepubliceerde tussenbron `96a0584a`) en alle eerdere
+bewijzen/failures blijven behouden. De huidige samenhangende kandidaat gebruikt
+exact Rust1.89.0; de oorspronkelijke1.99.1-profielen en historische V1/V2-
+records blijven bytegelijk beschikbaar. Dit is een bewust minimaal buildprofiel,
+niet de claim dat1.89 de actuele upstream security-supportrelease is.
 
-De nieuwe vaste RustSec-kandidaatpin is
-`3279c99911354c400e1d41e47c7d60e39258b147` (26oktober). Nieuw
-RUSTSEC-2026-0387 raakt crypto-bigint0.5.5 via SEV8/p3840.13; de bestaande
-publieke RSA-uitzondering dekt dit niet. Een lock-only-update kan de vereiste
-majorovergang niet oplossen. De beperkte bronkandidaat bewaart exact SEV-commit
-`a966d06d9bf0e68afe2733e7bfbf278fd7fd65b5` plus drie gecontroleerde P-384-API-
-adapters en ongewijzigde upstream ctutils0.4.5. Beoogd: p3840.14.0,
-ecdsa0.17.0, primeorder0.14.0, elliptic-curve0.14.3, crypto-bigint0.7.9
-(de kleinste niet-yanked gepatchte versie) en ctutils0.4.5. Geen nieuwe advisory-
-ignore, trust anchor, cryptografisch algoritme of OpenSSL-ABI. Alle historische
-backports, notices en oorspronkelijke failures blijven behouden. De bestaande
-JNI22c51181-noticecorrectie is hergebruikt. Onafhankelijke High-bronreview en
-19 inerte SEV/ctutils-mutatietests slagen; dit is geen cryptografische uitvoering.
+De [volledige1.99-inventaris40445396460](https://github.com/VOLPAROSSA/volparossa/actions/runs/40445396460)
+op exact `c11d97f4` toont strict exit101 en een aanvullende, expliciet
+NON-ACCEPTANCE cap-warn-inventaris van517 diagnoses. De oorspronkelijke ZIP
+matcht GitHubs SHA256 `b007ceaf1615a97ae1b525c7c77f36bab8d76ef9f5a5d6e5f302366f5bca33a4`.
+Daarvan staan473 in volledig ongewijzigde bestanden tegenover pre-F04-main en
+PR347,42 op gelijke bronregels en2 in de nieuwe private-D-Bus-test. Dit bewijst
+bronherkomst, niet automatisch een compiler- of dependencyoorzaak.
 
-Rust1.99.1 is niet het dependencyminimum: de zbus6-closure vraagt1.89. Zbus5
-houdt de drie uitgefaseerde crates en faalt dus het bestaande beleid. De omvang
-van de volledige census heropent de compilerkostenafweging: eerst een begrensde
-1.89/1.99-proef op dezelfde compatibele bron, zonder algemene lintreparatie,
-API-boxing of suppressions. Acht atomaire aliasnamen en vier equivalente
-Duration-constructors zijn afzonderlijk te beoordelen; P03-guardsemantiek en
-privacy blijven intact. Geen lagere compiler is hier al operationeel aanvaard.
+De [echte gepaarde proef40448304472](https://github.com/VOLPAROSSA/volparossa/actions/runs/40448304472)
+vergelijkt1.89/1.99 op dezelfde beperkte compatibiliteitsbron, dezelfde oude
+C11-locks, targets/features en lintinstellingen. Alleen acht atomaire aliasnamen,
+vier equivalente15min→900s-constructors en drie compilerdeclaraties verschillen
+van C11; P03-semantiek blijft behouden. Beide volledige cap-inventarissen
+compileren met exit0, maar strict blijft101:1.89 heeft43 eerst zichtbare strikte
+meldingen en228 volledig geïnventariseerde diagnoses,1.99 respectievelijk70 en519.
+De acht1.99-deprecaties van de compatibiliteitsaliassen blijven zichtbaar.
+ZIP `24a255ffd844f09f30139df8ac52a3b870c9a3bbe4930c5bad8ff625c7526b38`
+en alle39 memberhashes zijn geverifieerd. Geen van deze runs is een Qualitypass.
+Het externe dependencyminimum is1.89;1.99.1 is dus technisch niet noodzakelijk.
 
-**F04 blijft open.** De nieuwe closure moet nog werkelijk worden geresolveerd;
-de huidige oude locks bewijzen haar niet. Nodig blijven alle vier root/fuzz
-scans, volledige noticeclosure, actuele cryptografische/32-bit/codegenevidence,
-relevante zbus/native-ABI-controles en uiteindelijk Strict Clippy plus gewone
-Quality op exact de gekozen integratiekandidaat. De crypto-proofreview vond
-onder meer een geneste installer-processgroepgrens en een vroeg afwijzende
-P-384-smoke; deze zijn vóór uitvoering te herstellen. Geen automatische merge.
+RustSec is vastgepind op `3279c99911354c400e1d41e47c7d60e39258b147`
+(26oktober). Nieuw RUSTSEC-2026-0387 raakt crypto-bigint0.5.5 via SEV8/p3840.13;
+de bestaande publieke RSA-uitzondering dekt dit niet. De minimale gerepareerde
+keten is p3840.14.0, ecdsa0.17.0, elliptic-curve0.14.3, primeorder/primefield0.14,
+wnaf0.14.1, crypto-bigint0.7.9 en ongewijzigde upstream ctutils0.4.5. De lagere
+gepatchte crypto-bigint0.7.6–0.7.8 zijn yanked. Zbus6.1 verwijdert de drie
+uitgefaseerde standalonecrates; zbus5 houdt deze vast. Geen nieuwe advisory-
+ignore, OpenSSL-backend, trust anchor of eigen cryptografisch algoritme.
+De gecontroleerde SEV-override behoudt exact upstreamcommit
+`a966d06d9bf0e68afe2733e7bfbf278fd7fd65b5` plus drie beperkte P-384-API-adapters.
+Alle historische backports/notices en de hergebruikte JNI22c51181-correctie blijven.
+
+De resolverjob in40448304472 heeft de keten daadwerkelijk opgebouwd, locked
+metadata en bron-/RSAguards uitgevoerd en de compiler voor/na geauthenticeerd.
+Hij blijft **FAILED** wegens vooraf onbekende scope: verplichte wnaf en tien
+bijkomende bindingswijzigingen. Onafhankelijke review bevestigt die feiten.
+De minimale rootkandidaat behoudt daarom exact negen oude packageblokken buiten
+de crypto-update. Hash `dc36ac2cb87ce457083126f3b5d48ad2df5e65a8bccc1191c758e54bda193860`
+is expliciete lockretentie, geen geclaimde Cargo-uitkomst; echte volgende
+`--locked`-acceptatie blijft verplicht. Fuzz is exact de nieuwe Cargo-uitkomst
+`782afbad801efd26c7045a6c0aab175eaa8888b42718c9e2baa6d836cfc37663`.
+Zes gerichte fixture-updates moeten gedeelde codegen-inputversies op Root aansluiten;
+resterende featureverschillen beperken de claim tot het gemeten fixtureprofiel.
+
+Eén broncohort behandelt de218 workspace-diagnoseadressen onder1.89 in96
+Rustbestanden; de tien externe waarschuwingen worden niet blind weggewerkt.
+Onafhankelijke bronreview vindt geen concrete blokkade vóór hosted verificatie.
+De twaalf compatibiliteitsspellingen behouden bestaand gedrag. Acht private
+varianten/foutowners worden gealloceerd om interne grote waarden te verkleinen;
+heapallocatie en runtimeprestaties zijn daarmee gewijzigd, niet al aanvaard.
+Publieke functies, protobuf-tags/bytes, FD-wrapper en DiscoveryEvent-payload
+blijven behouden. Precies één item-lokale `expect(large_enum_variant)` op dat
+bestaande publieke event is een expliciete compatibiliteitsafweging; geen
+algemene lintverlaging. `-D warnings` en onvoldane-expectatiefouten blijven fataal.
+Private veldnamen wijzigen afgeleide Debuglabels van vier types. De private
+Registry-DTO behoudt vijf velden/deny-unknown-fields en validatie vóór gebruik.
+Dit zijn bronclaims; nieuwe D-Bus-source/Display- en ownership-/cancel-/retrytests
+moeten werkelijk draaien. De strikte V3-helperomgeving accepteert uitsluitend
+het vaste1.89-profiel; oorspronkelijke V1/V2-records zijn onveranderd.
+
+**F04 blijft open.** Eerst dezelfde kandidaat op hosted1.89: root/fuzz locked-
+acceptatie, gerichte fixturelocks, formatterbewijs en werkelijk strikte root/fuzz-
+Clippy. Daarna alle vier fatale RustSec-/licentiechecks, relevante zbus-/SEV-/
+32-bit-crypto-/codegen- en C/C++-DPS-ABI-proeven en gewone Quality op exact de
+uiteindelijke integratiekandidaat. Historische mislukte helper-/i686-uitkomsten
+blijven zichtbaar; oude0.4.4-codegen bewijst geen nieuwe0.4.5/1.89-codegen.
+Geen automatische merge en geen volledige netwerk-/DICN-acceptatieclaim.
 
 ### F04 P03f — dertien geordende guards — 2026-10-27
 

@@ -120,7 +120,8 @@ def public_trial_fixture(root, work, new, *, historical=True, endorsement=False,
     """Execute orchestration with synthetic public Cargo outputs, never Cargo."""
     def fake_run(argv, output, _deadline, *, stdout=None):
         if argv[1] == '--version':
-            P.write(output, (argv[0] + ' 1.99.1 (inert)\nrelease: 1.99.1\n').encode())
+            version = '1.99.1' if historical else '1.89.0'
+            P.write(output, (argv[0] + ' ' + version + ' (inert)\nrelease: ' + version + '\n').encode())
         elif argv[1] == 'fetch':
             assert '--locked' in argv
             P.write(output, b'Fetched synthetic committed dependencies\n')
@@ -168,13 +169,22 @@ def public_trial_fixture(root, work, new, *, historical=True, endorsement=False,
 
 def prepare_fixture(work):
     def fake_run(argv, output, _deadline):
-        P.write(output, (argv[0] + ' 1.99.1 (inert)\nrelease: 1.99.1\n').encode())
+        P.write(output, (argv[0] + ' 1.89.0 (inert)\nrelease: 1.89.0\n').encode())
         return tool_outcome()
     with patch.object(P, 'run', side_effect=fake_run):
         P.prepare(work)
 
 
 class ProbeContracts(unittest.TestCase):
+    def test_current_and_historical_compiler_profiles_are_closed(self):
+        for tool in ('rustc', 'cargo'):
+            current = (tool + ' 1.89.0 (inert)\nrelease: 1.89.0\n').encode()
+            historical = (tool + ' 1.99.1 (inert)\nrelease: 1.99.1\n').encode()
+            P.toolchain_version(current, tool)
+            P.toolchain_version(historical, tool, historical=True)
+            with self.assertRaises(ValueError): P.toolchain_version(historical, tool)
+            with self.assertRaises(ValueError): P.toolchain_version(current, tool, historical=True)
+
     def test_minimal_resolver_delta_preserves_original_packages_and_edges(self):
         old, new = fixture_packages()
         value = P.lock_delta(lock(old), lock(new))
@@ -444,7 +454,7 @@ class ProbeContracts(unittest.TestCase):
     def test_prepare_is_new_only_and_does_not_relabel_cryptographic_success(self):
         with source_fixture() as (_, work, old, _):
             def fake_run(argv, output, _deadline):
-                P.write(output, (argv[0] + ' 1.99.1 (inert)\nrelease: 1.99.1\n').encode())
+                P.write(output, (argv[0] + ' 1.89.0 (inert)\nrelease: 1.89.0\n').encode())
                 return tool_outcome()
             with patch.object(P, 'run', side_effect=fake_run): P.prepare(work)
             record = json.loads(P.read(work / 'evidence/source.json', P.MAX_LOCK))
@@ -1113,7 +1123,7 @@ class ProbeContracts(unittest.TestCase):
             P.cargo_env(Path(tmp))
             self.assertNotIn('CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS', os.environ)
             self.assertEqual(os.environ['CARGO_BUILD_JOBS'], '2')
-            self.assertEqual(os.environ['RUSTUP_TOOLCHAIN'], '1.99.1')
+            self.assertEqual(os.environ['RUSTUP_TOOLCHAIN'], '1.89.0')
 
     def test_pass_flags_cannot_override_changed_logs_source_lock_metadata_or_exit(self):
         for kind in ('log', 'source', 'lock', 'metadata', 'exit', 'tool', 'diff', 'ignored', 'scope'):
@@ -1253,7 +1263,7 @@ class ProbeContracts(unittest.TestCase):
         self.assertIn('cancel-in-progress: false', raw)
         self.assertIn('timeout-minutes: 45', raw)
         self.assertIn('persist-credentials: false', raw)
-        self.assertIn('python3 -B scripts/provision-rust199.py runner', raw)
+        self.assertIn('python3 -B scripts/provision-rust189.py runner', raw)
         observed = re.findall(r'\$\{\{ runner.temp \}\}/volparossa-protected-compute-admission/evidence/(\S+)', raw)
         self.assertEqual(tuple(observed), P.EXPORTS)
         self.assertNotIn('cargo update', raw); self.assertNotIn('generate-lockfile', raw)

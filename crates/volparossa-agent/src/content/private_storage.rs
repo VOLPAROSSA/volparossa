@@ -134,8 +134,8 @@ impl ContentRuntime {
         let current = Arc::clone(&self.service)
             .try_lock_owned()
             .map_err(|_| ContentError::Busy)?;
-        if let Some(active) = current.as_ref() {
-            if active.bind != bind
+        if let Some(active) = current.as_ref()
+            && (active.bind != bind
                 || active.endpoint != endpoint
                 || active.task.is_finished()
                 || *active.stop.borrow()
@@ -143,11 +143,10 @@ impl ContentRuntime {
                     .registry
                     .try_lock()
                     .map_err(|_| ContentError::Busy)?
-                    .has_private_storage()
+                    .has_private_storage())
             {
                 return Err(ContentError::Busy);
             }
-        }
         let provider_key = self.signer.verifying_key();
         // The blocking opener owns admission even if this caller is cancelled. It cannot
         // create an unbounded queue of stores or outlive a released service-setup lock.

@@ -904,7 +904,7 @@ impl LifecycleState {
     fn transition(&self, next: Lifecycle) {
         let _ = self
             .0
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 let current = match current {
                     1 => Lifecycle::Starting,
                     2 => Lifecycle::Running,
@@ -1185,7 +1185,7 @@ enum Operation {
 enum Command {
     Operation {
         deadline: HardDeadline,
-        operation: Operation,
+        operation: Box<Operation>,
         _permit: AdmissionPermit,
     },
     Shutdown {
@@ -1286,7 +1286,7 @@ impl ActorClient {
         ensure_deadline_before_acceptance(deadline)?;
         self.admission
             .accepted
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |accepted| {
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |accepted| {
                 (accepted < MAX_ACCEPTED_OPERATIONS).then_some(accepted + 1)
             })
             .map_err(|_| DurableOwnershipError::Capacity)?;
@@ -1294,7 +1294,7 @@ impl ActorClient {
         let (reply, pending) = reply_pair(&self.lifecycle, &self.admission, deadline);
         let command = Command::Operation {
             deadline,
-            operation: build(reply),
+            operation: Box::new(build(reply)),
             _permit: permit,
         };
         let result = match self.sender.try_send(command) {
@@ -3519,13 +3519,13 @@ fn run_actor_commands<Executor: CleanupExecutor + ManagerAbsenceExecutor>(
             } => {
                 debug_assert_eq!(deadline, operation.deadline());
                 if deadline.ensure_remaining().is_err() {
-                    operation.complete_unstarted_deadline();
+                    (*operation).complete_unstarted_deadline();
                     if lifecycle.load() != Lifecycle::Running {
                         return;
                     }
                     continue;
                 }
-                if process_operation(core, operation, lifecycle, admission) {
+                if process_operation(core, *operation, lifecycle, admission) {
                     return;
                 }
             }

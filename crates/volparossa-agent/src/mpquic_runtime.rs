@@ -377,8 +377,8 @@ impl ActiveProductionMpquicExitRoute {
                 let Some(packet) = packet else {
                     break;
                 };
-                if self.transport_mode == TransportMode::SinglePathGeneralUdp {
-                    if let Some(control) =
+                if self.transport_mode == TransportMode::SinglePathGeneralUdp
+                    && let Some(control) =
                         parse_general_udp_authorization(&packet, assigned_client_ipv4)?
                     {
                         assigned_client_ipv4 = Some(*control.key.client.ip());
@@ -425,7 +425,6 @@ impl ActiveProductionMpquicExitRoute {
                         }
                         continue;
                     }
-                }
                 let datagram = parse_exit_ipv4_udp(&packet, assigned_client_ipv4)?;
                 assigned_client_ipv4 = Some(*datagram.client.ip());
                 if self.transport_mode == TransportMode::MultipathQuic

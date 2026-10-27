@@ -19,7 +19,7 @@ live_gate=$script_directory/require-live-worker-identity-proof.sh
 manifest=$script_directory/debian13-amd64-image-v1.json
 workflow=$repository_directory/.github/workflows/helper-boundary-evidence.yml
 supervisor=$script_directory/qemu-pidfd-supervisor.py
-environment_validator=$script_directory/validate-helper-boundary-vm-environment-v2.sh
+environment_validator=$script_directory/validate-helper-boundary-vm-environment-v3.sh
 environment_test=$script_directory/test-helper-boundary-vm-environment-v1.sh
 evidence_fixture=$script_directory/fixtures/helper-boundary-evidence-v1.pass.json
 temporary_directory=$(mktemp -d /tmp/volparossa-helper-vm-contract.XXXXXX)
@@ -389,7 +389,7 @@ for exact_runner_text in \
     '--no-hardlinks --depth 1 --no-tags --single-branch --branch main' \
     '--branch "$expected_source_branch"' \
     'qemu-pidfd-supervisor.py' \
-    'validate-helper-boundary-vm-environment-v2.sh' \
+    'validate-helper-boundary-vm-environment-v3.sh' \
     'StrictHostKeyChecking=yes' \
     'GlobalKnownHostsFile=/dev/null' \
     'IdentityAgent=none' \
@@ -2292,7 +2292,7 @@ for exact_workflow_text in \
     '--expected-kvm-gid "$kvm_gid"' \
     '--expected-kvm-identity "$(cat "$acl_identity")"' \
     'tests/helper/validate-helper-boundary-evidence-v1.sh' \
-    'tests/helper/validate-helper-boundary-vm-environment-v2.sh' \
+    'tests/helper/validate-helper-boundary-vm-environment-v3.sh' \
     "grep -aEq -- '-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----'" \
     'VERIFY_KVM_STATE_OUTCOME: ${{ steps.verify_kvm_state.outcome }}' \
     "steps.source_selection.outputs.proof_mode == 'retained-main'" \

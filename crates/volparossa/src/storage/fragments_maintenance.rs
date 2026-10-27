@@ -308,11 +308,10 @@ fn renewal_due(
     {
         let copies = set.fragment(index)?;
         let mut retiring = placement::retired(set, index);
-        if let Some(intent) = &copies.data.handoff {
-            if intent.phase == HandoffPhase::Copying {
+        if let Some(intent) = &copies.data.handoff
+            && intent.phase == HandoffPhase::Copying {
                 retiring.remove(&intent.from);
             }
-        }
         for (copy_index, copy) in copies.data.copies.iter().enumerate() {
             if retiring.contains(&copy_index) || copy.charge == Charge::Deleted {
                 continue;

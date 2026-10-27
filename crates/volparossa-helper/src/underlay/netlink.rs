@@ -1658,7 +1658,7 @@ mod tests {
     #[test]
     fn done_error_alignment_and_duplicate_scalars_are_strict() {
         let data = link(7, b"eth7", None);
-        assert!(parse(DumpKind::Link, &[data.clone()]).is_err());
+        assert!(parse(DumpKind::Link, std::slice::from_ref(&data)).is_err());
         let mut double_done = done();
         double_done.extend_from_slice(&done());
         assert!(parse(DumpKind::Link, &[data.clone(), double_done]).is_err());
@@ -2147,7 +2147,7 @@ mod tests {
         let bindings = select_bindings(
             &snapshot,
             &[lan_lease.clone(), wan_lease.clone()],
-            &[hint.clone()],
+            std::slice::from_ref(&hint),
         )
         .expect("mixed leases");
         let binding = &bindings[&(lan_lease.path_id, lan_lease.role)];
@@ -2163,13 +2163,13 @@ mod tests {
             UnderlayEvidence::DirectAssigned
         );
         snapshot.routes.clear();
-        assert!(select_bindings(&snapshot, &[lan_lease.clone()], &[hint.clone()]).is_ok());
+        assert!(select_bindings(&snapshot, &[lan_lease.clone()], std::slice::from_ref(&hint)).is_ok());
         assert!(
-            select_bindings(&snapshot, &[lan_lease.clone(), wan_lease], &[hint.clone()]).is_err()
+            select_bindings(&snapshot, &[lan_lease.clone(), wan_lease], std::slice::from_ref(&hint)).is_err()
         );
         let mut bad_hint = hint.clone();
         bad_hint.observer_id.fill(0);
-        assert!(select_bindings(&snapshot, &[lan_lease.clone()], &[bad_hint]).is_err());
+        assert!(select_bindings(&snapshot, std::slice::from_ref(&lan_lease), &[bad_hint]).is_err());
         assert!(select_bindings(&snapshot, &[lan_lease], &[hint.clone(), hint]).is_err());
     }
 

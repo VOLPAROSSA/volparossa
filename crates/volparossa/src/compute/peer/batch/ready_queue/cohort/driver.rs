@@ -271,8 +271,8 @@ impl ReadyCohort {
                     package.fail(anyhow::anyhow!("compute_peer_source_expired"));
                 }
             }
-            if !self.stopped {
-                if let Err(error) = start_probes(
+            if !self.stopped
+                && let Err(error) = start_probes(
                     &mut self.packages,
                     &self.providers,
                     &mut self.leases,
@@ -282,7 +282,6 @@ impl ReadyCohort {
                 ) {
                     self.fail(error);
                 }
-            }
             let unlock = self.leases.next_expiry(|provider| {
                 self.packages
                     .iter()

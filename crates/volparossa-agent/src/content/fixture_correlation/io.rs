@@ -55,11 +55,10 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Observed<'_, S> {
         bytes: &[u8],
     ) -> Poll<io::Result<usize>> {
         let result = Pin::new(&mut self.inner).poll_write(cx, bytes);
-        if let Poll::Ready(Ok(count)) = &result {
-            if self.client {
+        if let Poll::Ready(Ok(count)) = &result
+            && self.client {
                 self.guard.bytes(&bytes[..*count]);
             }
-        }
         result
     }
 
@@ -69,8 +68,8 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Observed<'_, S> {
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         let result = Pin::new(&mut self.inner).poll_write_vectored(cx, bufs);
-        if let Poll::Ready(Ok(count)) = &result {
-            if self.client {
+        if let Poll::Ready(Ok(count)) = &result
+            && self.client {
                 let mut remaining = *count;
                 for bytes in bufs {
                     let used = remaining.min(bytes.len());
@@ -81,7 +80,6 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Observed<'_, S> {
                     }
                 }
             }
-        }
         result
     }
 

@@ -383,8 +383,7 @@ impl DiscoveryRuntime {
                     key,
                     providers,
                 })) = result
-                {
-                    if key == kad::RecordKey::new(&capability::DNSSEC_CACHE) {
+                    && key == kad::RecordKey::new(&capability::DNSSEC_CACHE) {
                         self.dns_cache.stage("DNS_CACHE_PROVIDERS_FOUND");
                         for peer in providers {
                             if self.dns_cache.candidates.len() >= MAX_CANDIDATES {
@@ -396,7 +395,6 @@ impl DiscoveryRuntime {
                         }
                         self.choose_dns_peers();
                     }
-                }
                 if step.last {
                     self.dns_cache.stage("DNS_CACHE_QUERY_COMPLETED");
                     self.finish_dns_query();
@@ -484,8 +482,7 @@ impl DiscoveryRuntime {
                     if let Some(response) = self
                         .sign_dns(&reply, verified.expires_at_ms())
                         .and_then(|bytes| DnsCacheResponse::new(bytes).ok())
-                    {
-                        if self
+                        && self
                             .service
                             .respond_dns_cache(peer, connection_id, channel, response)
                             .is_ok()
@@ -493,7 +490,6 @@ impl DiscoveryRuntime {
                         {
                             self.metrics.record_dns_cache_miss_reply();
                         }
-                    }
                 }
                 request_response::Message::Response {
                     request_id,

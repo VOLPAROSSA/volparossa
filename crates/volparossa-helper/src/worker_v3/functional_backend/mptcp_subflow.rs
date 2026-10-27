@@ -50,11 +50,10 @@ impl FunctionalAlphaLeaseBackend {
         let deadline = prepare_deadline(binding)?;
         // Releasing a capability cannot create room while another duplicate can still perform
         // application I/O. SHUT_RDWR affects the exact original socket and every duplicate.
-        if let Err(error) = SockRef::from(&request.descriptor).shutdown(Shutdown::Both) {
-            if error.kind() != ErrorKind::NotConnected {
+        if let Err(error) = SockRef::from(&request.descriptor).shutdown(Shutdown::Both)
+            && error.kind() != ErrorKind::NotConnected {
                 return Err(BackendError::CleanupIncomplete);
             }
-        }
         // Every failure after shutdown is mutating/ambiguous, so retain rollback authority.
         let command = worker_request(
             worker_attempt_request_id(key, STAGE_RETIRE_MPTCP_FLOW, binding),

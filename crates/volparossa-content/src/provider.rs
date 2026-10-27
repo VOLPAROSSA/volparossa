@@ -830,7 +830,7 @@ impl SelectorSession {
         if limits.exchange_timeout.is_zero()
             || limits.exchange_timeout > Duration::from_secs(60)
             || limits.session_timeout.is_zero()
-            || limits.session_timeout > Duration::from_mins(15)
+            || limits.session_timeout > Duration::from_secs(900)
             || limits.max_requests == 0
             || limits.max_requests > MAX_CHUNKS
             || limits.max_bytes == 0

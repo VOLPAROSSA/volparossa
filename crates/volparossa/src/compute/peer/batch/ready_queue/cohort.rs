@@ -174,7 +174,7 @@ enum GroupEvent {
     },
     Finished {
         package: usize,
-        handle: JobHandle,
+        handle: Box<JobHandle>,
         result: Result<rpc::JobStatus>,
         new_submission: bool,
     },

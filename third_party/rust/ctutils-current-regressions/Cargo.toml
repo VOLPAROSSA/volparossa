@@ -2,7 +2,7 @@
 name = "volparossa-ctutils-regressions"
 version = "0.0.0"
 edition = "2021"
-rust-version = "1.99"
+rust-version = "1.89"
 license = "GPL-3.0-only"
 publish = false
 
@@ -11,9 +11,9 @@ publish = false
 [dependencies]
 ctutils = { path = "../vendor/ctutils-0.4.5" }
 hmac = "=0.13.0"
-sha2 = "=0.11.0"
+sha2 = { version = "=0.11.0", default-features = false }
 poly1305 = "=0.9.1"
-crypto-bigint = "=0.7.9"
+crypto-bigint = { version = "=0.7.9", default-features = false }
 p384 = "=0.14.0"
 
 [patch.crates-io]

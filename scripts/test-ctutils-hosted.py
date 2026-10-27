@@ -109,8 +109,8 @@ class AdmissionTests(unittest.TestCase):
             root = Path(temporary)
             output = root / "proof"
             musl = root / "ctutils-musl-i386"
-            compiler = root / "volparossa-rust-1.99.1"
-            staging = root / "rust199-components-inert"
+            compiler = root / "volparossa-rust-1.89.0"
+            staging = root / "rust189-components-inert"
             def prepare(prefix, *_):
                 prefix.mkdir()
                 (prefix / "retained").write_text("inert musl")
@@ -134,7 +134,7 @@ class AdmissionTests(unittest.TestCase):
                  patch.dict(M.GROUP, provision=provision):
                 with self.assertRaises(M.GROUP['CleanupUnconfirmed']):
                     M.execute(output)
-            self.assertNotIn("install-1.99.1: passed", captured.getvalue())
+            self.assertNotIn("install-1.89.0: passed", captured.getvalue())
             receipt = json.loads((output / "receipt.json").read_text())
             self.assertFalse(receipt['process_group_cleanup_confirmed'])
             self.assertFalse(receipt['private_graph_removed'])
@@ -149,9 +149,9 @@ class AdmissionTests(unittest.TestCase):
             self.assertEqual(receipt['retained_compiler_staging_candidates'], [str(staging)])
             for path in (Path(str(output) + "-private"), musl, compiler, staging):
                 self.assertTrue(path.is_dir())
-            self.assertIn("inert installer cleanup unconfirmed", (output / "install-1.99.1.log").read_text())
+            self.assertIn("inert installer cleanup unconfirmed", (output / "install-1.89.0.log").read_text())
             self.assertEqual(run.call_count, 2)  # Only inert source checks, never a provision child.
-            self.assertFalse(any('provision-rust199.py' in str(call.args) for call in run.call_args_list))
+            self.assertFalse(any('provision-rust189.py' in str(call.args) for call in run.call_args_list))
 
     def test_public_release_vector_reconstructs_existing_core_fixture_bytes(self):
         fixtures = M.ROOT / "crates/volparossa-content/tests/fixtures/snp"
@@ -175,9 +175,33 @@ class AdmissionTests(unittest.TestCase):
         for name in ("vcek_milan.der", "report_milan.hex"):
             self.assertIn(hashlib.sha256((fixtures / name).read_bytes()).hexdigest(), source)
 
+    def test_current_compiler_requires_exact_prefix_payload_and_observations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = Path(directory) / 'volparossa-rust-1.89.0'
+            prefix.mkdir()
+            receipt = {'observed_versions': {'rustc': 'inert reviewed 189'}}
+            (prefix / 'receipt.json').write_text(json.dumps(receipt))
+            order = []
+            def verify(path, pins):
+                self.assertEqual(path, prefix)
+                order.append('payload')
+            def observe(path):
+                self.assertEqual(order, ['payload'])
+                order.append('observe')
+                return receipt['observed_versions']
+            with patch.dict(os.environ, RUNNER_TEMP=directory), patch.dict(M.GROUP,
+                    validate_receipt=lambda value: self.assertEqual(value, receipt),
+                    pins=lambda: 'fixed metadata', verify_payload=verify, observe=observe):
+                self.assertEqual(M.current_compiler(prefix), receipt)
+                with self.assertRaises(ValueError): M.current_compiler(prefix.parent)
+            with patch.dict(os.environ, RUNNER_TEMP=directory), patch.dict(M.GROUP,
+                    validate_receipt=lambda value: None, pins=lambda: 'fixed metadata',
+                    verify_payload=lambda path, pins: None, observe=lambda path: {'rustc': 'changed'}):
+                with self.assertRaises(ValueError): M.current_compiler(prefix)
+
     def test_both_native_and_real_32bit_targets_and_secret_entrypoints_are_named(self):
         self.assertEqual(M.TARGETS, ("x86_64-unknown-linux-gnu", "i686-unknown-linux-musl"))
-        self.assertEqual(M.COMPILERS, ("1.99.1",))
+        self.assertEqual(M.COMPILERS, ("1.89.0",))
         self.assertEqual(len(M.SYMBOLS), 28)
         self.assertIn("ct_digest_output_eq", M.SYMBOLS)
         self.assertIn("ct_poly1305_verify", M.SYMBOLS)

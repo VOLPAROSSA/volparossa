@@ -193,8 +193,8 @@ impl DiscoveryRuntime {
         let deadline =
             Instant::now() + Duration::from_millis(request.deadline_unix_ms().saturating_sub(now));
         let result = self.continue_route_extension(&request, peer, now).await;
-        if matches!(result, Some(ExtensionResult::AwaitBudget)) {
-            if let Some(extension) = self
+        if matches!(result, Some(ExtensionResult::AwaitBudget))
+            && let Some(extension) = self
                 .active_production_mptcp_exit_routes
                 .get_mut(&context)
                 .and_then(|route| route.extensions.get_mut(&id))
@@ -207,7 +207,6 @@ impl DiscoveryRuntime {
                 });
                 return;
             }
-        }
         self.finish_extension_forward(peer, &request, replies, result.and_then(ready_response));
     }
 
@@ -276,8 +275,8 @@ impl DiscoveryRuntime {
             let result = self
                 .continue_route_extension(&pending.request, pending.control_peer, now)
                 .await;
-            if matches!(result, Some(ExtensionResult::AwaitBudget)) {
-                if let Some(extension) = self
+            if matches!(result, Some(ExtensionResult::AwaitBudget))
+                && let Some(extension) = self
                     .active_production_mptcp_exit_routes
                     .get_mut(&context)
                     .and_then(|route| route.extensions.get_mut(&id))
@@ -285,7 +284,6 @@ impl DiscoveryRuntime {
                     extension.pending = Some(pending);
                     continue;
                 }
-            }
             self.finish_extension_forward(
                 pending.control_peer,
                 &pending.request,

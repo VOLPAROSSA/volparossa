@@ -571,10 +571,10 @@ def command_ok(outcome):
         and outcome['leader_joined'] is True, 'command_failed')
 
 
-def cargo_env(work):
+def cargo_env(work, *, historical=False):
     os.environ.update(CARGO_HOME=str(work / 'cargo-home'), CARGO_TARGET_DIR=str(work / 'target'),
         CARGO_BUILD_JOBS='2', CARGO_TERM_COLOR='never', CARGO_INCREMENTAL='0',
-        RUSTUP_TOOLCHAIN='1.99.1')
+        RUSTUP_TOOLCHAIN='1.99.1' if historical else '1.89.0')
     os.environ.pop('CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS', None)
 
 
@@ -622,10 +622,12 @@ def check_lock(work, *, historical=False, endorsement=False, certificate_profile
     return selected
 
 
-def toolchain_version(raw, tool):
+def toolchain_version(raw, tool, *, historical=False):
+    # Closed existing historical profile; caller cannot supply arbitrary versions.
+    version = '1.99.1' if historical else '1.89.0'
     text = raw.decode('ascii')
-    require(text.startswith(tool + ' 1.99.1 ')
-        and '\nrelease: 1.99.1\n' in '\n' + text + '\n', 'toolchain_version')
+    require(text.startswith(tool + ' ' + version + ' ')
+        and '\nrelease: ' + version + '\n' in '\n' + text + '\n', 'toolchain_version')
 
 
 def prepare(work, *, historical=False, endorsement=False, certificate_profile=False, collateral=False, local_policy=False):
@@ -639,7 +641,7 @@ def prepare(work, *, historical=False, endorsement=False, certificate_profile=Fa
     for tool in ('rustc', 'cargo'):
         outcome = run([tool, '--version', '--verbose'], evidence / (tool + '.txt'), 30)
         command_ok(outcome)
-        toolchain_version(read(evidence / (tool + '.txt'), 32768), tool)
+        toolchain_version(read(evidence / (tool + '.txt'), 32768), tool, historical=historical)
 
 
 def fetch(work, *, endorsement=False, certificate_profile=False, collateral=False, local_policy=False):
@@ -780,7 +782,7 @@ def verify_evidence(work, records, files, *, historical=False, endorsement=False
         require(value['log'] == files[log + '.log'], 'stage_log_changed')
     require(records['tests.json']['tests'] == verify_tests(read(evidence / 'tests.log', MAX_LOG), endorsement=endorsement, certificate_profile=certificate_profile, collateral=collateral, local_policy=local_policy), 'tests_receipt')
     for tool in ('rustc', 'cargo'):
-        toolchain_version(read(evidence / (tool + '.txt'), 32768), tool)
+        toolchain_version(read(evidence / (tool + '.txt'), 32768), tool, historical=historical)
 
 
 def receipt(work, *, historical=False, endorsement=False, certificate_profile=False, collateral=False, local_policy=False):

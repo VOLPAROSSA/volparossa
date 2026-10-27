@@ -3065,13 +3065,13 @@ impl PrivateMounts<AuthorizedPermanentNeighbours> {
         ),
         (
             PrivateMountLinkActivationError,
-            PrivateMounts<AuthorizedDeletedTopology>,
+            Box<PrivateMounts<AuthorizedDeletedTopology>>,
         ),
     > {
         if let Err(source) = self.verify_exact_ipv4_icmp_echo_permanent_neighbour_state(&proof) {
             let (backing, neighbours) = self.into_backing_and_run_state();
             let deleted = backing.with_run_state(neighbours.begin_fixed_icmp_cleanup_retirement());
-            return Err((PrivateMountLinkActivationError::Proof(source), deleted));
+            return Err((PrivateMountLinkActivationError::Proof(source), Box::new(deleted)));
         }
         let ExactIpv4IcmpEchoPermanentNeighbourNetworkProof {
             parent,
@@ -3086,7 +3086,7 @@ impl PrivateMounts<AuthorizedPermanentNeighbours> {
                 let (source, deleted) = failure.into_parts();
                 return Err((
                     PrivateMountLinkActivationError::Neighbour(source),
-                    backing.with_run_state(deleted),
+                    Box::new(backing.with_run_state(deleted)),
                 ));
             }
         };
@@ -3107,7 +3107,7 @@ impl PrivateMounts<AuthorizedPermanentNeighbours> {
             Err(source) => {
                 return Err((
                     PrivateMountLinkActivationError::Proof(source),
-                    mounts.begin_fixed_icmp_cleanup_retirement_without_policy(),
+                    Box::new(mounts.begin_fixed_icmp_cleanup_retirement_without_policy()),
                 ));
             }
         };
@@ -3132,7 +3132,7 @@ impl PrivateMounts<AuthorizedPermanentNeighbours> {
             );
             return Err((
                 PrivateMountLinkActivationError::Proof(source),
-                mounts.begin_fixed_icmp_cleanup_retirement_without_policy(),
+                Box::new(mounts.begin_fixed_icmp_cleanup_retirement_without_policy()),
             ));
         }
         if before_endpoints.iter().any(Option::is_some) {
@@ -3140,7 +3140,7 @@ impl PrivateMounts<AuthorizedPermanentNeighbours> {
                 PrivateMountLinkActivationError::Proof(NamespacePinsNetworkProofError::Network(
                     crate::network::NetworkError::Inconsistent,
                 )),
-                mounts.begin_fixed_icmp_cleanup_retirement_without_policy(),
+                Box::new(mounts.begin_fixed_icmp_cleanup_retirement_without_policy()),
             ));
         }
         let [Some(alpha), Some(omega)] = after_endpoints else {
@@ -3148,7 +3148,7 @@ impl PrivateMounts<AuthorizedPermanentNeighbours> {
                 PrivateMountLinkActivationError::Proof(NamespacePinsNetworkProofError::Network(
                     crate::network::NetworkError::Inconsistent,
                 )),
-                mounts.begin_fixed_icmp_cleanup_retirement_without_policy(),
+                Box::new(mounts.begin_fixed_icmp_cleanup_retirement_without_policy()),
             ));
         };
         let routed_proof = ExactIpv4IcmpEchoEndpointRouteNetworkProof {
@@ -3161,7 +3161,7 @@ impl PrivateMounts<AuthorizedPermanentNeighbours> {
         {
             return Err((
                 PrivateMountLinkActivationError::Proof(source),
-                mounts.begin_fixed_icmp_cleanup_retirement_without_policy(),
+                Box::new(mounts.begin_fixed_icmp_cleanup_retirement_without_policy()),
             ));
         }
         Ok((mounts, routed_proof))
@@ -3623,7 +3623,7 @@ impl
                 Err((source, mounts)) => {
                     return Err(fixed_icmp_deleted_failure(
                         FixedForwardPolicyError::Topology(source),
-                        mounts,
+                        *mounts,
                         policy.into_cleanup_authority(),
                         rollback,
                         binding,

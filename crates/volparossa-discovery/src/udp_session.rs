@@ -19,11 +19,11 @@ pub struct UdpSessionStartRequest {
     #[prost(bytes = "vec", tag = "1")]
     signed_exit_reservation: Vec<u8>,
     #[prost(bytes = "vec", tag = "2")]
-    signed_relay_reservation: Vec<u8>,
+    relay_reservation: Vec<u8>,
     #[prost(bytes = "vec", tag = "3")]
-    signed_confirmation: Vec<u8>,
+    confirmation: Vec<u8>,
     #[prost(bytes = "vec", tag = "4")]
-    signed_confirmation_receipt: Vec<u8>,
+    confirmation_receipt: Vec<u8>,
     #[prost(bytes = "vec", tag = "5")]
     signed_credential_delivery: Vec<u8>,
 }
@@ -43,9 +43,9 @@ impl UdpSessionStartRequest {
     ) -> Result<Self, UdpSessionFrameError> {
         let value = Self {
             signed_exit_reservation,
-            signed_relay_reservation,
-            signed_confirmation,
-            signed_confirmation_receipt,
+            relay_reservation: signed_relay_reservation,
+            confirmation: signed_confirmation,
+            confirmation_receipt: signed_confirmation_receipt,
             signed_credential_delivery,
         };
         value.validate()?;
@@ -66,15 +66,15 @@ impl UdpSessionStartRequest {
             ControlMessageType::ExitReservation,
         )?;
         let relay = signed_payload::<RelayReservation>(
-            &self.signed_relay_reservation,
+            &self.relay_reservation,
             ControlMessageType::RelayReservation,
         )?;
         let confirmation = signed_payload::<ExitReservationConfirmation>(
-            &self.signed_confirmation,
+            &self.confirmation,
             ControlMessageType::ExitReservationConfirmation,
         )?;
         let receipt = signed_payload::<ExitConfirmationReceipt>(
-            &self.signed_confirmation_receipt,
+            &self.confirmation_receipt,
             ControlMessageType::ExitConfirmationReceipt,
         )?;
         let credential_matches = if self.signed_credential_delivery.is_empty() {
@@ -93,7 +93,7 @@ impl UdpSessionStartRequest {
                 .as_ref()
                 .is_some_and(|scope| credential_matches_exit(scope, &exit, native))
         };
-        if confirmation.relay_reservation != self.signed_relay_reservation
+        if confirmation.relay_reservation != self.relay_reservation
             || exit.reservation_id != relay.reservation_id
             || exit.reservation_id != confirmation.reservation_id
             || exit.reservation_id != receipt.reservation_id
@@ -125,19 +125,19 @@ impl UdpSessionStartRequest {
     /// Data-Relay-signed exact path reservation.
     #[must_use]
     pub fn signed_relay_reservation(&self) -> &[u8] {
-        &self.signed_relay_reservation
+        &self.relay_reservation
     }
 
     /// Client-session-signed return of that Relay reservation to the Exit.
     #[must_use]
     pub fn signed_confirmation(&self) -> &[u8] {
-        &self.signed_confirmation
+        &self.confirmation
     }
 
     /// Exit-signed receipt for the exact confirmation bytes.
     #[must_use]
     pub fn signed_confirmation_receipt(&self) -> &[u8] {
-        &self.signed_confirmation_receipt
+        &self.confirmation_receipt
     }
 
     /// Client-session-signed HPKE delivery of the route-local native bearer.

@@ -1714,11 +1714,9 @@ mod tests {
                             endpoint,
                             ..
                         } = event
-                        {
-                            if peer_id == listening_peer {
+                            && peer_id == listening_peer {
                                 dialing_lineage = Some((connection_id, endpoint));
                             }
-                        }
                     }
                     event = next_other(listening) => {
                         listening_connected |= matches!(
@@ -2533,16 +2531,13 @@ mod tests {
             created_at_ms,
         );
         let mut non_client = relay_service(identity::Keypair::generate_ed25519());
-        let failure = match non_client.dispatch_preselection_observation_with_context(
+        let Err(failure) = non_client.dispatch_preselection_observation_with_context(
             fixture.request,
             Instant::now() + Duration::from_secs(30),
             AttemptContext {
                 candidate_snapshot_marker: vec![9, 8, 7].into_boxed_slice(),
             },
-        ) {
-            Ok(_) => panic!("disabled client role dispatched"),
-            Err(failure) => failure,
-        };
+        ) else { panic!("disabled client role dispatched") };
         assert_eq!(failure.error(), PreselectionDispatchError::Role);
         assert_eq!(
             &*failure.into_context().candidate_snapshot_marker,
@@ -2681,10 +2676,7 @@ mod tests {
         let (mut origin, _, relay, _, _) = direct_context();
         let transaction = dispatch_direct_with_context(&mut origin, relay, 77);
         let mut sibling = client_service(identity::Keypair::generate_ed25519());
-        let failure = match sibling.cancel_preselection_observation_transaction(transaction) {
-            Ok(_) => panic!("foreign service cancelled transaction"),
-            Err(failure) => failure,
-        };
+        let Err(failure) = sibling.cancel_preselection_observation_transaction(transaction) else { panic!("foreign service cancelled transaction") };
         assert_eq!(failure.error(), PreselectionDispatchError::Correlation);
         let Ok(context) =
             origin.cancel_preselection_observation_transaction(failure.into_transaction())

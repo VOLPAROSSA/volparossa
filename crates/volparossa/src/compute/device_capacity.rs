@@ -124,14 +124,13 @@ impl DeviceBudget {
     }
 
     fn sample_from(&mut self, root: &Path, now: Instant) -> DeviceObservation {
-        if let Some((at, observation)) = self.cached {
-            if now
+        if let Some((at, observation)) = self.cached
+            && now
                 .checked_duration_since(at)
                 .is_some_and(|age| age < CACHE_LIFETIME)
             {
                 return observation;
             }
-        }
         let started = Instant::now();
         let mut observation = DeviceObservation {
             battery: batteries(&root.join("power_supply")),

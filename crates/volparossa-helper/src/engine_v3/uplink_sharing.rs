@@ -167,8 +167,8 @@ impl HelperEngine {
         let result = completion
             .filter(|value| value.binding == binding)
             .map_or(Err(BackendError::CleanupIncomplete), |value| value.result);
-        if let Ok(egress_ifindex) = result {
-            if egress_ifindex > 1 && i32::try_from(egress_ifindex).is_ok() {
+        if let Ok(egress_ifindex) = result
+            && egress_ifindex > 1 && i32::try_from(egress_ifindex).is_ok() {
                 self.inner
                     .state
                     .lock()
@@ -190,7 +190,6 @@ impl HelperEngine {
                     )),
                 );
             }
-        }
         let error = result.err().unwrap_or(BackendError::Kernel);
         let complete = self.cleanup_sharing().await;
         // Unavailable/Invalid backends promise no mutation; still require exact absence proof
@@ -260,15 +259,14 @@ impl HelperEngine {
             Ok(value) => value,
             Err(result) => return response(request, result, "SHARING_OWNER_MISMATCH", None),
         };
-        if let Some(binding) = binding {
-            if !self.destroy_sharing_binding(binding).await {
+        if let Some(binding) = binding
+            && !self.destroy_sharing_binding(binding).await {
                 return backend_response(
                     request,
                     BackendError::CleanupIncomplete,
                     "UPLINK_SHARING_CLEANUP_INCOMPLETE",
                 );
             }
-        }
         response(
             request,
             HelperResult::Ok,

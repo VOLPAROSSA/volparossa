@@ -1057,9 +1057,7 @@ trait Clock: Send + Sync {
     fn now_unix(&self) -> u64;
 
     fn now_unix_nanos(&self) -> u64 {
-        self.now_unix()
-            .checked_mul(NANOSECONDS_PER_SECOND)
-            .unwrap_or(u64::MAX)
+        self.now_unix().saturating_mul(NANOSECONDS_PER_SECOND)
     }
 
     fn now_boottime_nanos(&self) -> u64;
@@ -1694,7 +1692,34 @@ impl HelperEngine {
             }
             Some(helper_request::Operation::CleanupOwned(value)) => {
                 let scope = CleanupScope::try_from(value.scope).ok();
-                if scope.is_none() || scope == Some(CleanupScope::Unspecified) {
+                if let Some(scope) = scope.filter(|scope| *scope != CleanupScope::Unspecified) {
+                    if value.cleanup_token.len() != self.inner.cleanup_token.len()
+                        || value
+                            .cleanup_token
+                            .ct_eq(self.inner.cleanup_token.as_slice())
+                            .unwrap_u8()
+                            != 1
+                    {
+                        Some(execution(
+                            response(
+                                request,
+                                HelperResult::UnauthorisedPeer,
+                                "CLEANUP_UNAUTHORISED",
+                                None,
+                            ),
+                            None,
+                        ))
+                    } else {
+                        self.cleanup_async(
+                            request,
+                            request_id,
+                            digest,
+                            scope,
+                            sender,
+                        )
+                        .await
+                    }
+                } else {
                     Some(execution(
                         response(
                             request,
@@ -1704,31 +1729,6 @@ impl HelperEngine {
                         ),
                         None,
                     ))
-                } else if value.cleanup_token.len() != self.inner.cleanup_token.len()
-                    || value
-                        .cleanup_token
-                        .ct_eq(self.inner.cleanup_token.as_slice())
-                        .unwrap_u8()
-                        != 1
-                {
-                    Some(execution(
-                        response(
-                            request,
-                            HelperResult::UnauthorisedPeer,
-                            "CLEANUP_UNAUTHORISED",
-                            None,
-                        ),
-                        None,
-                    ))
-                } else {
-                    self.cleanup_async(
-                        request,
-                        request_id,
-                        digest,
-                        scope.expect("validated cleanup scope"),
-                        sender,
-                    )
-                    .await
                 }
             }
             Some(helper_request::Operation::PrepareClientIngress(value)) => {
@@ -2066,19 +2066,16 @@ impl HelperEngine {
                 state
                     .cleanup_pending
                     .remove(&(token.context_id, token.generation));
-                if let Some(record) = state.prepare_reconciliations.get_mut(&token.context_id) {
-                    if record.backend_generation == token.generation {
+                if let Some(record) = state.prepare_reconciliations.get_mut(&token.context_id)
+                    && record.backend_generation == token.generation {
                         record.phase = PrepareReconciliationPhase::Absent;
                     }
-                }
             }
-        } else if exact_operation && exact_generation {
-            if let Some(context) = state.contexts.get_mut(&token.context_id) {
-                if context.generation == token.generation {
+        } else if exact_operation && exact_generation
+            && let Some(context) = state.contexts.get_mut(&token.context_id)
+                && context.generation == token.generation {
                     context.phase = ContextPhase::Quarantined;
                 }
-            }
-        }
         if exact_operation {
             state.in_flight = None;
         }
@@ -9784,9 +9781,8 @@ mod tests {
         let valid = [lease(1, 1, 51_821), lease(2, 2, 51_822)];
         assert!(prepared_matches(&request, &valid));
         let mut punched = valid.clone();
-        punched
-            .iter_mut()
-            .for_each(|lease| lease.evidence = UnderlayEvidence::ObservedUdpPunch);
+        for lease in punched
+            .iter_mut() { lease.evidence = UnderlayEvidence::ObservedUdpPunch; }
         assert!(prepared_matches(&request, &punched));
 
         let reordered = [valid[1].clone(), valid[0].clone()];

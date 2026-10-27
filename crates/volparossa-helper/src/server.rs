@@ -625,7 +625,7 @@ async fn receive_bound_request_descriptor(
         match stream.try_io(Interest::READABLE, || {
             receive_fd_with_binding(stream, binding)
         }) {
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {},
             result => return result,
         }
     }

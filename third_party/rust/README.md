@@ -2,7 +2,7 @@
 
 ## Current F04 source candidate: fixed P-384 arithmetic, 27 October 2026
 
-The source candidate retains pinned Rust 1.99.1 and zbus 6.1.0. Its new
+The source candidate selects pinned Rust 1.89.0 and retains zbus 6.1.0. Its new
 `RUSTSEC-2026-0387` remediation uses the original SEV 8.0.0 Git source with
 three bounded API adaptations, `p384 0.14.0`, and fixed `crypto-bigint 0.7.9`.
 The lockfile resolution and actual cryptographic/compiler/codegen evidence
@@ -367,3 +367,24 @@ Hosted execution and codegen review remain pending when this source is introduce
 Full ordinary Quality/offline audits are a separate required check; the newly
 reported unmaintained zvariant-family advisories are open findings, with no new
 ignore, MSRV-major port or scope reduction in this change.
+
+
+## Current minimum compiler and retained lock scope — 2026-10-27
+
+The integration candidate now selects exact Rust1.89.0, the maintained-zbus
+closure's declared minimum, following a real same-source1.89/1.99 comparison.
+Rust1.99.1 remains a preserved reference profile;1.89 is not claimed to receive
+current upstream compiler security support. New crypto/codegen evidence must
+bind1.89 and ctutils0.4.5; historical0.4.4 results remain scoped to their inputs.
+The existing runtime corrections are retained, with eight atomic alias spellings
+and four equal900-second timeout constructors restored to APIs available in1.89.
+
+The actual resolver output is retained with its failed scope-gate result. The
+minimal proposed root lock restores only nine original package blocks outside
+the crypto closure, preserving their existing Windows bindings and tempfile
+RNG dependency. Versions/checksums are unchanged. This edited lock is a candidate
+requiring actual hosted `--locked` acceptance, never a re-labelled successful
+resolver output. The current-codegen fixture's six shared version pins likewise
+require real targeted Cargo updates; fixture-only feature differences do not
+establish exact complete-Core binary equivalence. See the implementation ledger
+for the original run, hashes, remaining tests and integration status.
