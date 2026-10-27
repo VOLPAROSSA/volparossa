@@ -15,6 +15,8 @@ CHOICE_METHODS = (
     "from_u128_lt", "from_u128_le",
 )
 OPTION_METHODS = ("expect_ref", "expect_copied", "into_option_copied")
+CURRENT_VERSION = "0.4.5"
+CURRENT_ARCHIVE_SHA256 = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
 
 
 def replace_once(source, old, new):
@@ -70,11 +72,41 @@ def verify(files):
         raise ValueError("ctutils exceeds the approved Rust 1.85 compatibility scope")
 
 
+def current_expected_files():
+    """The current compiler uses unmodified fixed upstream source, including const API."""
+    prefix = f"ctutils-{CURRENT_VERSION}/"
+    archive = ROOT / f"third_party/rust/sources/ctutils-{CURRENT_VERSION}.crate"
+    if hashlib.sha256(archive.read_bytes()).hexdigest() != CURRENT_ARCHIVE_SHA256:
+        raise ValueError("current ctutils official archive identity changed")
+    with tarfile.open(archive) as source:
+        files = {}
+        for member in source.getmembers():
+            if member.isdir():
+                continue
+            name = member.name.removeprefix(prefix)
+            if (not member.isfile() or not member.name.startswith(prefix)
+                    or Path(name).is_absolute() or ".." in Path(name).parts or name in files):
+                raise ValueError("invalid current ctutils archive entry")
+            files[name] = source.extractfile(member).read()
+        return files
+
+
+def verify_current(files):
+    if files != current_expected_files():
+        raise ValueError("ctutils exceeds the approved unmodified 0.4.5 source scope")
+
+
 def main():
     vendor = ROOT / "third_party/rust/vendor/ctutils-0.4.4"
     verify({str(path.relative_to(vendor)): path.read_bytes()
             for path in vendor.rglob("*") if path.is_file()})
     print("PASS  ctutils exact fixed 0.4.4 source plus 20 documented const reductions and same-width casts")
+    vendor = ROOT / f"third_party/rust/vendor/ctutils-{CURRENT_VERSION}"
+    if any(path.is_symlink() for path in vendor.rglob("*")):
+        raise ValueError("current ctutils vendor symlink is forbidden")
+    verify_current({str(path.relative_to(vendor)): path.read_bytes()
+                    for path in vendor.rglob("*") if path.is_file()})
+    print("PASS  current ctutils is unmodified upstream 0.4.5; historical 0.4.4 compatibility source retained")
 
 
 if __name__ == "__main__":

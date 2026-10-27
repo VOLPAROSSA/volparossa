@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
-"""Exercise both exact JNI notice fallbacks with real locked source archives."""
+"""Exercise the exact JNI notice fallbacks with real locked source archives."""
 import hashlib
 import json
 import os
@@ -11,10 +11,10 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--locked', '--offline', '--format-version', '1'], cwd=ROOT))
-for name in ('jni', 'jni-macros'):
-    package = next(p for p in metadata['packages'] if p['name'] == name and p['version'] == '0.22.4')
+for name, version in (('jni', '0.22.4'), ('jni-macros', '0.22.4'), ('jni-sys-macros', '0.4.1')):
+    package = next(p for p in metadata['packages'] if p['name'] == name and p['version'] == version)
     source = Path(package['manifest_path']).parent
-    archive = source.parents[2] / 'cache' / source.parent.name / (name + '-0.22.4.crate')
+    archive = source.parents[2] / 'cache' / source.parent.name / (name + '-' + version + '.crate')
     for mutation in ('none', 'archive', 'vcs', 'version', 'license'):
         with tempfile.TemporaryDirectory(prefix='jni-license-') as temporary:
             base = Path(temporary); clone = base / 'registry/src/test-index' / source.name

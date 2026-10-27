@@ -1,5 +1,82 @@
 # Reviewed Rust dependency security changes
 
+## Current F04 source candidate: fixed P-384 arithmetic, 27 October 2026
+
+The source candidate retains pinned Rust 1.99.1 and zbus 6.1.0. Its new
+`RUSTSEC-2026-0387` remediation uses the original SEV 8.0.0 Git source with
+three bounded API adaptations, `p384 0.14.0`, and fixed `crypto-bigint 0.7.9`.
+The lockfile resolution and actual cryptographic/compiler/codegen evidence
+remain pending; source reconstruction is not security or runtime acceptance.
+No exception is added for that advisory. The older sections below retain the
+original backport provenance and historical Rust-1.85 compatibility evidence.
+
+`crypto-bigint 0.5.5` is reached only through `elliptic-curve 0.13.8` under
+SEV's P-384 dependency. That semver line cannot select the fixed 0.7 release.
+RustSec's patched minimum is 0.7.6; crates.io marks 0.7.6, 0.7.7 and 0.7.8
+yanked. The selected 0.7.9 is the smallest currently non-yanked patched release
+and requires `ctutils ^0.4.5`. The exact graph guard requires one registry
+`p384 0.14.0`, `ecdsa 0.17.0`, `elliptic-curve 0.14.3`, `primeorder 0.14.0`
+and `crypto-bigint 0.7.9`, plus one unmodified path `ctutils 0.4.5` in both
+root and fuzz. It rejects duplicate/legacy versions and expansion of SEV into
+the fuzz graph. The graph must be established by real hosted Cargo resolution.
+
+### SEV source and bounded adapter
+
+The original Git revision is `a966d06d9bf0e68afe2733e7bfbf278fd7fd65b5`, tree
+`636379a232b75ad3c0f2a079acc1788dc13a920f`. The GitHub Git-commit API and
+the retained local Git object agree on that tree. A deterministic `git archive`
+with prefix `sev-8.0.0/`, gzip timestamp zero, is retained as
+`sources/sev-8.0.0-a966d06.tar.gz`, SHA-256
+`6fa9d33543b5ea51b153d2fbe01111eba821f4dc92a7949d83056b2d947eb2b5`.
+This is a locally generated archive of the exact official Git tree, not a
+crates.io archive or a claim of upstream signature verification.
+
+`patches/sev-8.0.0-p384-0.14.patch`, SHA-256
+`2ce121d7fb50f2d31a3da3eaa4ebf260e6a588a4c2749693fd155d975a58b0cf`,
+produces vendor-tree SHA-256
+`e7304e86be5ac39fc9ac4ecafcac9e1153e9d342ed666ced89516c35e0bea22c`
+using the tree-hash algorithm below. Only three files differ:
+
+- `Cargo.toml`: replace optional P-384 0.13 with exact 0.14.0.
+- `src/certs/snp/ecdsa/mod.rs`: preserve the reversed first 48 scalar bytes
+  using fixed arrays accepted by the new API; discard the same unused padding.
+- `src/firmware/guest/types/snp.rs`: finalize the existing SHA-384 0.10 digest
+  of the same report prefix `[..0x2a0]` and pass those bytes to the new
+  `PrehashVerifier` in both existing verifier implementations. This avoids
+  crossing digest trait versions or hashing the digest a second time.
+
+No RSA certificate/CRL algorithm, trust anchor, report framing, public authority,
+device access or cryptographic arithmetic implementation is locally rewritten.
+The Apache-2.0 `LICENSE` remains unchanged, SHA-256
+`c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4`.
+`scripts/check-sev-p384-scope.py` independently reconstructs every vendor file
+and rejects any additional edit. The existing public-RSA exception remains
+restricted to its original pinned source/callers and advisory; its guard also
+authenticates this SEV reconstruction before allowing that existing exception.
+
+### ctutils 0.4.5 and proof boundary
+
+The current `ctutils 0.4.5` is unmodified upstream, including its const API.
+Archive `sources/ctutils-0.4.5.crate` has SHA-256
+`38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0`,
+VCS `88d6e90d4cfd2fc3333d00e13c99241507d2138f`. Vendor-tree SHA-256 is
+`063c02ff15389aa5695cca949ac0032382abc36fa6beb2f504fe3dd6b5571f41`.
+All mask `to_u8`/`black_box` and 32-bit u128-half barriers from 0.4.4 remain.
+The upstream 0.4.5 changes add integer primitives and Thumb-1 barriers, so the
+new linked crypto-bigint/P-384 route and subtraction/zero-count/carry primitives
+require fresh tests and codegen review on the selected compiler and targets.
+The old seventeen entrypoint results alone do not establish this new scope.
+The exact 0.4.4 source, compatibility patch, fixtures and evidence are retained;
+the current graphs must select only 0.4.5. All other validated backports remain.
+
+Primary references: [new RustSec advisory](https://rustsec.org/advisories/RUSTSEC-2026-0387.html),
+[SEV original source](https://github.com/virtee/sev/tree/a966d06d9bf0e68afe2733e7bfbf278fd7fd65b5),
+[P-384 release metadata](https://crates.io/api/v1/crates/p384/0.14.0),
+[crypto-bigint release metadata](https://crates.io/api/v1/crates/crypto-bigint/0.7.9),
+[ctutils release metadata](https://crates.io/api/v1/crates/ctutils/0.4.5).
+
+## Historical backport baseline
+
 VOLPAROSSA targets Debian 13 amd64 and its stable Rust 1.85 compiler. The
 upstream fixed releases `hickory-proto 0.26.1`, `hickory-resolver 0.26.2`
 and `time 0.3.47` all

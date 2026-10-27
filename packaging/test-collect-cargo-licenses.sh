@@ -30,7 +30,7 @@ jq '
     .workspace_members as $workspace_members
     | .packages |= map(select(
         (.id as $id | ($workspace_members | index($id)) != null)
-        or (.name == "ctutils" and .version == "0.4.4")
+        or (.name == "ctutils" and .version == "0.4.5")
         or (.name == "hickory-proto" and .version == "0.25.2")
         or (.name == "hickory-resolver" and .version == "0.25.2")
         or (.name == "base256emoji" and .version == "1.0.2")
@@ -46,8 +46,8 @@ notices=$test_tmp/notices
 ./packaging/collect-cargo-licenses.sh "$focused_metadata" "$notices" >"$test_tmp/collector.log"
 
 for license_path in \
-    "$notices/ctutils-0.4.4/LICENSE-APACHE" \
-    "$notices/ctutils-0.4.4/LICENSE-MIT" \
+    "$notices/ctutils-0.4.5/LICENSE-APACHE" \
+    "$notices/ctutils-0.4.5/LICENSE-MIT" \
     "$notices/blake3-1.8.5/LICENSE_A2" \
     "$notices/blake3-1.8.5/LICENSE_A2LLVM" \
     "$notices/blake3-1.8.5/LICENSE_CC0" \
@@ -66,15 +66,15 @@ do
 done
 
 for license in LICENSE-APACHE LICENSE-MIT; do
-    cmp "$notices/ctutils-0.4.4/$license" \
-        "third_party/rust/vendor/ctutils-0.4.4/$license" ||
+    cmp "$notices/ctutils-0.4.5/$license" \
+        "third_party/rust/vendor/ctutils-0.4.5/$license" ||
         fail 'ctutils original license bytes changed during collection'
 done
 awk -F '\t' '
-    $1 == "ctutils" && $2 == "0.4.4" &&
-    $4 == "vendored-crates.io+ctutils-0.4.4-rust1.85-compatibility" { found = 1 }
+    $1 == "ctutils" && $2 == "0.4.5" &&
+    $4 == "vendored-crates.io+ctutils-0.4.5-unmodified" { found = 1 }
     END { exit !found }
-' "$notices/DEPENDENCIES.tsv" || fail 'ctutils compatibility provenance is absent'
+' "$notices/DEPENDENCIES.tsv" || fail 'ctutils fixed upstream provenance is absent'
 
 cmp "$notices/sev-8.0.0/LICENSE" \
     third_party/licenses/virtee-sev-8.0.0-Apache-2.0.txt ||
@@ -144,6 +144,27 @@ if find "$notices" -mindepth 1 -maxdepth 1 -type d -name 'volparossa-*' -print -
 then
     fail 'a workspace member was incorrectly copied as a third-party dependency'
 fi
+
+# Exact approved paths do not authorize a different package identity or license.
+for package in sev ctutils; do
+    for field in name version license; do
+        changed_metadata=$test_tmp/$package-$field.json
+        jq --arg package "$package" --arg field "$field" '
+            (.packages[] | select(.name == $package) | .[$field]) = "unreviewed"
+        ' "$focused_metadata" >"$changed_metadata"
+        if ./packaging/collect-cargo-licenses.sh "$changed_metadata" \
+            "$test_tmp/rejected-$package-$field" >"$test_tmp/rejected-$package-$field.log" 2>&1
+        then
+            fail "approved vendor path accepted a different $package $field"
+        fi
+        case "$package" in
+            sev) expected='Vendored SEV package has unexpected license metadata or bytes.' ;;
+            ctutils) expected='Fixed ctutils package has unexpected license metadata.' ;;
+        esac
+        grep -F "$expected" "$test_tmp/rejected-$package-$field.log" >/dev/null ||
+            fail "vendor $package $field failed for an unexpected reason"
+    done
+done
 
 unreviewed_metadata=$test_tmp/unreviewed.json
 jq --arg manifest "$test_tmp/unreviewed/Cargo.toml" '

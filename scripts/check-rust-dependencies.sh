@@ -95,13 +95,13 @@ verify_vendor() {
     fi
 
     diff -qr "$extracted" "$vendor" >/dev/null ||
-        fail "$crate_directory differs from its verified crates.io archive plus reviewed patch"
+        fail "$crate_directory differs from its authenticated upstream archive plus reviewed patch"
 
     actual_tree_sha256=$(tree_sha256 "$vendor")
     [ "$actual_tree_sha256" = "$vendor_tree_sha256" ] ||
         fail "tree SHA-256 mismatch for $crate_directory"
 
-    pass "$crate_directory is exactly its reviewed crates.io reconstruction"
+    pass "$crate_directory is exactly its reviewed upstream reconstruction"
 }
 
 find_advisory_database() {
@@ -196,6 +196,15 @@ verify_vendor \
     ctutils-0.4.4 \
     4c18cd159e5013b4ed127137ca157dc8fb6fd2f3239ab9b90602765d41273635
 python3 -B scripts/check-ctutils-scope.py
+
+verify_vendor \
+    third_party/rust/sources/sev-8.0.0-a966d06.tar.gz \
+    6fa9d33543b5ea51b153d2fbe01111eba821f4dc92a7949d83056b2d947eb2b5 \
+    third_party/rust/patches/sev-8.0.0-p384-0.14.patch \
+    2ce121d7fb50f2d31a3da3eaa4ebf260e6a588a4c2749693fd155d975a58b0cf \
+    sev-8.0.0 \
+    e7304e86be5ac39fc9ac4ecafcac9e1153e9d342ed666ced89516c35e0bea22c
+python3 -B scripts/check-sev-p384-scope.py
 
 verify_vendor \
     third_party/rust/sources/hickory-proto-0.25.2.crate \
@@ -317,8 +326,8 @@ for graph in "$root_metadata" "$fuzz_metadata"; do
     check_single_path_package \
         "$graph" \
         ctutils \
-        0.4.4 \
-        "$repository_root/third_party/rust/vendor/ctutils-0.4.4/Cargo.toml"
+        0.4.5 \
+        "$repository_root/third_party/rust/vendor/ctutils-0.4.5/Cargo.toml"
     check_single_path_package \
         "$graph" \
         hickory-resolver \
@@ -332,6 +341,9 @@ for graph in "$root_metadata" "$fuzz_metadata"; do
         "$graph" >/dev/null || fail 'reviewed Hickory stub-only graph scope changed'
 done
 pass 'root and fuzz graphs use only the reviewed resolver backport and contain no Hickory recursor'
+
+# RUSTSEC-2026-0387 stays fatal. Require the fixed source graph; no exception.
+python3 -B scripts/check-sev-p384-scope.py "$root_metadata" "$fuzz_metadata"
 
 check_single_path_package \
     "$root_metadata" \

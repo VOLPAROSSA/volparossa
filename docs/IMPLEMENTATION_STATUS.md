@@ -18,6 +18,52 @@ Last updated: 2026-10-27
 
 ## Current integration and active work
 
+### F04 — beveiligingsroute en volledige Clippy-baseline — 2026-10-27
+
+De opeenvolgende P03-reparatietranches zijn gestopt. PR347 blijft op
+`18d2c49ba9081b3604b95027400f103502466617`; alle P03a–P03f-correcties van
+PR349-bron `c11d97f4265834218500ba7ec7e2aff1e66c55db` blijven behouden.
+De afzonderlijke, onafhankelijk gereviewde inventaris
+[40445396460](https://github.com/VOLPAROSSA/volparossa/actions/runs/40445396460)
+bindt die bron en beide lockfiles aan dezelfde geauthenticeerde Rust1.99.1,
+root workspace/all-targets/all-features en bestaande lintinstellingen. De echte
+strikte command eindigt101 en toont65 unieke meldingen, inclusief waarschuwingen
+uit dependencies. De aanvullende `--cap-lints=warn`-inventaris eindigt0 met517
+unieke meldingen en een volledig build-finished-record. Deze laatste stap is
+uitsluitend diagnose-evidence, geen Qualitypass of verlaging van productgates.
+ZIP-SHA256 `b007ceaf1615a97ae1b525c7c77f36bab8d76ef9f5a5d6e5f302366f5bca33a4`
+is tegen de oorspronkelijke GitHubartifactdigest gecontroleerd.
+
+De nieuwe vaste RustSec-kandidaatpin is
+`3279c99911354c400e1d41e47c7d60e39258b147` (26oktober). Nieuw
+RUSTSEC-2026-0387 raakt crypto-bigint0.5.5 via SEV8/p3840.13; de bestaande
+publieke RSA-uitzondering dekt dit niet. Een lock-only-update kan de vereiste
+majorovergang niet oplossen. De beperkte bronkandidaat bewaart exact SEV-commit
+`a966d06d9bf0e68afe2733e7bfbf278fd7fd65b5` plus drie gecontroleerde P-384-API-
+adapters en ongewijzigde upstream ctutils0.4.5. Beoogd: p3840.14.0,
+ecdsa0.17.0, primeorder0.14.0, elliptic-curve0.14.3, crypto-bigint0.7.9
+(de kleinste niet-yanked gepatchte versie) en ctutils0.4.5. Geen nieuwe advisory-
+ignore, trust anchor, cryptografisch algoritme of OpenSSL-ABI. Alle historische
+backports, notices en oorspronkelijke failures blijven behouden. De bestaande
+JNI22c51181-noticecorrectie is hergebruikt. Onafhankelijke High-bronreview en
+19 inerte SEV/ctutils-mutatietests slagen; dit is geen cryptografische uitvoering.
+
+Rust1.99.1 is niet het dependencyminimum: de zbus6-closure vraagt1.89. Zbus5
+houdt de drie uitgefaseerde crates en faalt dus het bestaande beleid. De omvang
+van de volledige census heropent de compilerkostenafweging: eerst een begrensde
+1.89/1.99-proef op dezelfde compatibele bron, zonder algemene lintreparatie,
+API-boxing of suppressions. Acht atomaire aliasnamen en vier equivalente
+Duration-constructors zijn afzonderlijk te beoordelen; P03-guardsemantiek en
+privacy blijven intact. Geen lagere compiler is hier al operationeel aanvaard.
+
+**F04 blijft open.** De nieuwe closure moet nog werkelijk worden geresolveerd;
+de huidige oude locks bewijzen haar niet. Nodig blijven alle vier root/fuzz
+scans, volledige noticeclosure, actuele cryptografische/32-bit/codegenevidence,
+relevante zbus/native-ABI-controles en uiteindelijk Strict Clippy plus gewone
+Quality op exact de gekozen integratiekandidaat. De crypto-proofreview vond
+onder meer een geneste installer-processgroepgrens en een vroeg afwijzende
+P-384-smoke; deze zijn vóór uitvoering te herstellen. Geen automatische merge.
+
 ### F04 P03f — dertien geordende guards — 2026-10-27
 
 Hervat vanaf live PR349-head `339409e885412f47f1f02fef1002984be109c4e1`.

@@ -18,9 +18,10 @@ SPEC.loader.exec_module(M)
 
 def metadata(root):
     packages = [dict(id=name, name=name, version=version, source=source)
-        for name, version, source in (("rsa", "0.9.10", M.REGISTRY), ("sev", "8.0.0", M.SOURCE),
+        for name, version, source in (("rsa", "0.9.10", M.REGISTRY), ("sev", "8.0.0", None),
             ("volparossa-content", "0.1.0", None))]
     packages[-1]["manifest_path"] = str(root / M.CONTENT)
+    packages[1]["manifest_path"] = str(root / M.SEV_SCOPE.VENDOR / "Cargo.toml")
     packages[1]["features"] = dict(snp=[], crypto_nossl=["dep:p384", "dep:rsa", "dep:sha2", "dep:x509-cert"])
     packages.extend(dict(id=name, name=name, version=version, source=M.REGISTRY)
         for name, version in M.CRYPTO.items() if name != "rsa")
@@ -52,6 +53,16 @@ class PublicRsaScope(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes((M.ROOT / relative).read_bytes())
         self.meta, self.fuzz = metadata(self.root)
+        # The same archived source and bounded adapter are authenticated by the
+        # RSA guard before it can grant the pre-existing public-only exception.
+        source = Path("third_party/rust/sources/sev-8.0.0-a966d06.tar.gz")
+        destination = self.root / source
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes((M.ROOT / source).read_bytes())
+        for name, raw in M.SEV_SCOPE.expected_files().items():
+            destination = self.root / M.SEV_SCOPE.VENDOR / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(raw)
 
     def test_current_repository_scope_without_cargo(self):
         M.verify_repository(M.ROOT)
@@ -74,7 +85,8 @@ class PublicRsaScope(unittest.TestCase):
         cases = []
         for index, field, value in ((0, "version", "0.9.9"), (0, "source", M.SOURCE),
                 (1, "source", M.SOURCE.replace(M.REVISION, "0" * 40)),
-                (1, "version", "8.0.1"), (2, "manifest_path", "/private/wrong/Cargo.toml")):
+                (1, "version", "8.0.1"), (1, "manifest_path", "/private/wrong/sev/Cargo.toml"),
+                (2, "manifest_path", "/private/wrong/Cargo.toml")):
             changed = copy.deepcopy(self.meta)
             changed["packages"][index][field] = value
             cases.append(changed)
@@ -208,7 +220,10 @@ class PublicRsaScope(unittest.TestCase):
 
     def test_lock_manifest_source_and_test_boundary_mutations(self):
         cases = [("Cargo.lock", M.RSA_CHECKSUM, "0" * 64),
-            ("Cargo.lock", M.SOURCE, M.SOURCE.replace(M.REVISION, "0" * 40)),
+            ("Cargo.lock", 'name = "sev"\nversion = "8.0.0"',
+                'name = "sev"\nversion = "8.0.0"\nsource = "' + M.SOURCE + '"'),
+            ("Cargo.toml", 'sev = { path = "third_party/rust/vendor/sev-8.0.0" }',
+                'sev = { path = "third_party/rust/vendor/unreviewed-sev" }'),
             ("Cargo.toml", 'features = ["snp", "crypto_nossl"]', 'features = ["snp", "crypto_nossl", "sev"]'),
             (str(M.CONTENT), "sev.workspace = true", 'renamed = { workspace = true, package = "sev" }'),
             (str(M.SNP), "use sev::{", "use sev::{ /* changed */"),

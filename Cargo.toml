@@ -3,6 +3,8 @@ resolver = "2"
 members = ["crates/*"]
 exclude = [
   "third_party/rust/vendor/ctutils-0.4.4",
+  "third_party/rust/vendor/ctutils-0.4.5",
+  "third_party/rust/vendor/sev-8.0.0",
   "third_party/rust/vendor/hickory-proto-0.25.2",
   "third_party/rust/vendor/hickory-resolver-0.25.2",
   "third_party/rust/vendor/libp2p-yamux-0.47.0",
@@ -10,11 +12,14 @@ exclude = [
 ]
 
 [patch.crates-io]
-ctutils = { path = "third_party/rust/vendor/ctutils-0.4.4" }
+ctutils = { path = "third_party/rust/vendor/ctutils-0.4.5" }
 hickory-proto = { path = "third_party/rust/vendor/hickory-proto-0.25.2" }
 hickory-resolver = { path = "third_party/rust/vendor/hickory-resolver-0.25.2" }
 libp2p-yamux = { path = "third_party/rust/vendor/libp2p-yamux-0.47.0" }
 time = { path = "third_party/rust/vendor/time-0.3.41" }
+
+[patch."https://github.com/virtee/sev"]
+sev = { path = "third_party/rust/vendor/sev-8.0.0" }
 
 [workspace.package]
 version = "0.1.0"

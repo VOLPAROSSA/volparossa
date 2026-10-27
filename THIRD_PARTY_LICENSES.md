@@ -1039,6 +1039,25 @@ versions, locked upstream dependencies and audit/license obligations are retaine
 - Primary files and adapter/telemetry/update boundaries are linked in
   [Studio hosting](docs/services/STUDIO_HOSTING.md#silex-source-selection-and-interfaces).
 
+## F04 fixed P-384 source candidate, 27 October 2026
+
+The current source candidate patches the original Apache-2.0 SEV 8.0.0 Git
+revision `a966d06d9bf0e68afe2733e7bfbf278fd7fd65b5` through a local vendor
+override. The unchanged original license is included in
+`third_party/rust/vendor/sev-8.0.0/LICENSE`; the existing Git revision and
+historical notice above remain provenance. The reviewed patch updates the
+P-384 dependency and adapts fixed-width signature decoding and the existing
+SHA-384 digest-to-prehash API boundary. It does not modify trust anchors,
+RSA certificate verification or cryptographic arithmetic algorithms.
+
+Fixed `crypto-bigint 0.7.9` requires `ctutils 0.4.5`, whose complete original
+Apache-2.0 and MIT source and licenses are retained without modification in
+`third_party/rust/vendor/ctutils-0.4.5`. The earlier 0.4.4 compatibility source,
+patch and evidence remain historical. Exact source/archive/patch/tree hashes
+and the pending resolver, cryptographic and codegen evidence are recorded in
+[the dependency review](third_party/rust/README.md#current-f04-source-candidate-fixed-p-384-arithmetic-27-october-2026).
+No exception is added for `RUSTSEC-2026-0387`; fixed graph guards remain fatal.
+
 ## ctutils 0.4.4 Rust 1.85 compatibility adaptation
 
 Origin: [RustCrypto/utils](https://github.com/RustCrypto/utils), exact release
@@ -1055,3 +1074,13 @@ Rust 1.85; it preserves upstream's runtime security fixes and algorithms.
 Exact hashes, compile-time API limitations, reconstruction/scope guards and
 pending hosted/codegen acceptance are documented in `third_party/rust/README.md`.
 This is modified upstream source, not an unchanged official 0.4.4 release.
+
+The separate `jni-sys-macros`0.4.1 archive (SHA-256
+`38c0b942f458fe50cdac086d2f946512305e5631e720728f2a61aabcd47a6264`)
+also omits its original notices. Its exact fallback is bound to VCS
+`64d77b7a5f119d7b55b4e2c169a4668067ff59e6`, path `jni-sys-macros`,
+version and `MIT OR Apache-2.0` metadata. Unchanged originals come from
+[jni-sys LICENSE-MIT](https://github.com/jni-rs/jni-sys/blob/64d77b7a5f119d7b55b4e2c169a4668067ff59e6/LICENSE-MIT)
+and [LICENSE-APACHE](https://github.com/jni-rs/jni-sys/blob/64d77b7a5f119d7b55b4e2c169a4668067ff59e6/LICENSE-APACHE).
+Both differ from the earlier jni/jni-macros texts; their own SHA256SUMS preserve
+the exact upstream bytes. This corrects this package's omission only.

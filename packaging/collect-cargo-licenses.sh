@@ -78,6 +78,24 @@ while IFS="	" read -r crate_name crate_version license_expression license_file m
             ;;
         path)
             case "$manifest_path" in
+                "$repository_root/third_party/rust/vendor/ctutils-0.4.5/Cargo.toml")
+                    if [ "$crate_name:$crate_version:$license_expression" != 'ctutils:0.4.5:Apache-2.0 OR MIT' ]; then
+                        printf '%s\n' 'Fixed ctutils package has unexpected license metadata.' >&2
+                        exit 1
+                    fi
+                    source_label='vendored-crates.io+ctutils-0.4.5-unmodified'
+                    ;;
+                "$repository_root/third_party/rust/vendor/sev-8.0.0/Cargo.toml")
+                    if [ "$crate_name:$crate_version:$license_expression" != 'sev:8.0.0:Apache-2.0' ] ||
+                        { [ "$license_file" != - ] && [ "$license_file" != LICENSE ]; } ||
+                        ! cmp -s "$repository_root/third_party/rust/vendor/sev-8.0.0/LICENSE" \
+                            "$repository_root/third_party/licenses/virtee-sev-8.0.0-Apache-2.0.txt"
+                    then
+                        printf '%s\n' 'Vendored SEV package has unexpected license metadata or bytes.' >&2
+                        exit 1
+                    fi
+                    source_label='vendored-git+sev-a966d06d9bf0e68afe2733e7bfbf278fd7fd65b5-p384-0.14-adapter'
+                    ;;
                 "$repository_root/third_party/rust/vendor/ctutils-0.4.4/Cargo.toml")
                     source_label='vendored-crates.io+ctutils-0.4.4-rust1.85-compatibility'
                     ;;
