@@ -34,6 +34,7 @@ pub(crate) mod policy_decision;
 pub(crate) mod policy_exchange;
 mod private_message;
 mod provider_activity;
+mod reviewed_input;
 pub(crate) use private_message::Unlock as IdentityUnlock;
 pub(crate) mod public_text;
 mod retain;
@@ -297,6 +298,9 @@ pub(crate) struct Publish {
     /// Explicit regular local file (at most 256 MiB); symlinks/devices are rejected.
     #[arg(long)]
     input: PathBuf,
+    /// Require these exact reviewed bytes; SHA-256 is a byte binding, not publication authority.
+    #[arg(long, value_parser = parse_input_sha256)]
+    expected_input_sha256: Option<[u8; 32]>,
     /// New private cache directory, unless --reuse-cache opens an existing owned cache.
     #[arg(long)]
     cache: PathBuf,
@@ -384,6 +388,7 @@ impl Publish {
     ) -> Self {
         Self {
             input: args.input,
+            expected_input_sha256: None,
             cache: args.cache,
             reuse_cache: args.reuse_cache,
             contribute: false,
@@ -406,6 +411,7 @@ impl Publish {
     pub(crate) fn adapter_bundle(args: AdapterPublication) -> Self {
         Self {
             input: args.input,
+            expected_input_sha256: None,
             cache: args.cache,
             reuse_cache: args.reuse_cache,
             contribute: false,
@@ -780,8 +786,9 @@ fn publish(args: &Publish) -> Result<Published> {
         bail!("--contribute accepts only native public content, never private messages");
     }
     ensure_new_output(&args.manifest)?;
-    let mut input = open_regular(&args.input, MAX_OBJECT_BYTES)?;
+    let input = open_regular(&args.input, MAX_OBJECT_BYTES)?;
     let length = input.metadata()?.len();
+    let mut input = reviewed_input::Input::new(input, length, args.expected_input_sha256)?;
     let now = now_seconds()?;
     let expires = args.expiry(now)?;
     let signer = unlock_signer(args.identity.as_deref(), args.passphrase_file.as_deref())?;
@@ -919,6 +926,15 @@ pub(crate) fn parse_publisher_key(value: &str) -> Result<VerifyingKey, String> {
     }
     hex::decode_to_slice(value, &mut bytes).map_err(|error| error.to_string())?;
     VerifyingKey::from_bytes(&bytes).map_err(|error| error.to_string())
+}
+
+fn parse_input_sha256(value: &str) -> Result<[u8; 32], String> {
+    let mut digest = [0; 32];
+    if value.len() != 64 {
+        return Err("input SHA-256 must be exactly 64 hexadecimal characters".into());
+    }
+    hex::decode_to_slice(value, &mut digest).map_err(|_| "invalid input SHA-256".to_owned())?;
+    Ok(digest)
 }
 
 fn now_seconds() -> Result<u64> {
@@ -1503,6 +1519,7 @@ mod tests {
         bytes.extend_from_slice(&[9; 37]);
         let mut publish_args = Publish {
             input: root.join("input.bin"),
+            expected_input_sha256: None,
             cache: root.join("publisher-cache"),
             reuse_cache: false,
             contribute: false,
