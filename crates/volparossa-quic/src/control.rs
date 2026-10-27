@@ -1220,7 +1220,7 @@ mod tests {
         let preflight = request(native_request::Operation::Preflight(Preflight {
             expected_role: NativeProcessRole::Client as i32,
         }));
-        assert!(preflight.target_native_instance_id.is_empty());
+        assert_eq!(preflight.target_native_instance_id, [] as [u8; 0]);
         assert!(encode_request(&preflight).is_ok());
 
         let mut targeted_preflight = preflight;
@@ -1772,13 +1772,13 @@ mod tests {
             .as_mut()
             .expect("datagram")
             .wipe();
-        assert!(
+        assert_eq!(
             response
                 .received_datagram
                 .as_ref()
                 .expect("datagram")
-                .inner_ip_packet
-                .is_empty()
+                .inner_ip_packet,
+            [] as [u8; 0]
         );
         let decoded = decode_response(&frame[4..]).expect("response decode");
         assert_eq!(

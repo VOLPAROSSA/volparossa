@@ -1175,7 +1175,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
             let request = read_regular_request(&mut stream).await;
-            assert!(request.target_native_instance_id.is_empty());
+            assert_eq!(request.target_native_instance_id, [] as [u8; 0]);
             assert!(matches!(
                 request.operation,
                 Some(native_request::Operation::Preflight(Preflight {

@@ -18,6 +18,31 @@ Last updated: 2026-10-27
 
 ## Current integration and active work
 
+### F04 P03e — zes testasserties en twee vaste delers — 2026-10-27
+
+Hervat vanaf live PR349-head `93a0a486cf0a40dd19f970e2f590721aaa87d10d`.
+De bestaande inventaris van 31 meldingen bevat zes `assert_is_empty` in Quic-
+en Local-Control-tests en twee `manual_is_multiple_of` in Content. Alleen die
+acht locaties veranderen: equivalente lege array-/stringvergelijkingen en
+vaste delers 2 (`usize`) en `CHUNK_BYTES as u64` (262144). Deler, negatie,
+short circuit, foutpaden en de niet-uitgelijnde volledige-receiptuitzondering
+blijven behouden. Geen API/ABI/FFI-, serde- of schemaverandering; geen nieuwe
+derives of algemene suppressions. Bestaande testfixtures, namen en custom
+foutcontext blijven behouden; uitsluitend testpanic-opmaak kan rijker worden.
+
+Gerichte hosted controle betreft formatting en ongewijzigd strikte Clippy
+voor Content, Quic en Local-Control, met expliciet behoud van alle bekende
+onopgeloste meldingen. Acht bestaande relevante regressietests worden per
+bron gebonden aan eigen targets/executables. Numeriek/divisorbewijs en exacte
+inverse bronvergelijking dekken nul/grenswaarden en de onveranderde guards;
+bestaande regressies hebben geen expliciete odd-length-hex- of misaligned-
+partial-receiptcase. Onafhankelijke review en definitieve resultaten staan
+onder `.volparossa-dev/p03e-f04-20261027/`; de bewijsworkflow komt niet in PR349.
+Na deze acht correcties blijven 23 eerder bekende diagnoses open. Geen volledige
+Quality-, native-, VM- of SDK-acceptatierun. Enumlayout, signed-fieldrenames,
+chunks/parsers en de overige guards/native loop blijven buiten deze tranche.
+Overig F04-werk en historische failures behouden; F04 blijft onvoltooid.
+
 ### F04 P03d — vier equivalente Duration-bovengrenzen — 2026-10-27
 
 Hervat vanaf live PR349-head `2b8b179c625e774a5a5ef765018704915c093e1c`.
