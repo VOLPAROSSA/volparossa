@@ -116,9 +116,11 @@ jobs:
       - name: Compare unchanged Config inventory and execute baseline and candidate regressions
         run: |
           set -euo pipefail
-          export CARGO_TARGET_DIR="$RUNNER_TEMP/f04-clippy-target"
           output="$GITHUB_WORKSPACE/evidence"
+          test ! -e "$RUNNER_TEMP/f04-config-baseline-tests-target"
+          test ! -e "$RUNNER_TEMP/f04-config-candidate-tests-target"
           for variant in baseline candidate; do
+            export CARGO_TARGET_DIR="$RUNNER_TEMP/f04-config-$variant-tests-target"
             if test "$variant" = baseline; then
               cd "$RUNNER_TEMP/f04-clippy-before"
             else
@@ -131,11 +133,23 @@ jobs:
           done
           cd "$GITHUB_WORKSPACE"
           python3 -B - <<'PY_TEST'
-          import json, re
+          import hashlib, json, os, re
           from pathlib import Path
           inventories = []
+          builds = {}
           for variant in ('baseline', 'candidate'):
               inventory = Path('evidence/'+variant+'-inventory.log').read_text()
+              source_root = (Path(os.environ['RUNNER_TEMP']) / 'f04-clippy-before'
+                             if variant == 'baseline' else Path(os.environ['GITHUB_WORKSPACE']))
+              target_root = Path(os.environ['RUNNER_TEMP']) / ('f04-config-'+variant+'-tests-target')
+              compile_line = 'Compiling volparossa-config v0.1.0 ('+str(source_root / 'crates/volparossa-config')+')'
+              assert compile_line in inventory, (variant, compile_line)
+              executables = re.findall(r'Running unittests src/lib.rs \(([^)]+)\)', inventory)
+              assert len(executables) == 1, executables
+              executable = Path(executables[0]).resolve()
+              assert executable.is_file() and executable.is_relative_to(target_root.resolve())
+              builds[variant] = dict(source_root=str(source_root), target_root=str(target_root),
+                  executable=str(executable), executable_sha256=hashlib.sha256(executable.read_bytes()).hexdigest())
               names = sorted(re.findall(r'^([a-zA-Z0-9_:]+): test$', inventory, re.M))
               assert len(names) == 36 and len(set(names)) == 36
               required = {
@@ -150,10 +164,12 @@ jobs:
               assert results == ['36'], results
               for name in names:
                   assert 'test '+name+' ... ok' in log, name
+              assert 'Running unittests src/lib.rs ('+str(executable)+')' in log
+          assert builds['baseline']['executable'] != builds['candidate']['executable']
           assert inventories[0] == inventories[1]
           Path('evidence/regression-summary.json').write_text(json.dumps(dict(
               baseline_passed=36, candidate_passed=36, failed=0, ignored=0,
-              unchanged_test_names=inventories[0]), indent=2))
+              unchanged_test_names=inventories[0], distinct_builds=builds), indent=2))
           PY_TEST
           git diff --exit-code
       - name: Preserve exact source and original diagnostics even on failure
