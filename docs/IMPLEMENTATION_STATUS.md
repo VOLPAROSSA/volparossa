@@ -207,6 +207,38 @@ checks blijven platformbreed onveranderd. Werkelijke targetverificatie moet de
 nieuwe Core-inventaris nog bewijzen; dit is geen Androidrelease- of algemene
 licentiecomplianceclaim.
 
+De volgende exact brongebonden momentopname is `22998552`.
+[Gewone Quality40476356296](https://github.com/VOLPAROSSA/volparossa/actions/runs/40476356296)
+slaagt voor formattering, de nieuwe begrensde Cargo-broncontrole, alle vier
+fatale root/fuzz RustSec-/dependency-/licentiebeleidscontroles, strict root/fuzz-
+Clippy en de volledige Core Debian-amd64-noticecollectie (486 resolved packages,
+31 workspace-roots,455 unieke thirdpartypakketten). Het noticeartifact heeft
+SHA256 `7afbbaf970da68a0ea51c225648b9ca4ddbb1011942a3dfafcf439b03ee5b9b5`;
+het bevat metadata/inventaris/hashmanifest, niet alle noticepayloads. De run
+blijft **FAILED**:868 helpertests slagen, één broncontracttest verwacht nog
+`operation.complete_unstarted_deadline();` terwijl de gereviewde boxed-variant
+`(*operation).complete_unstarted_deadline();` uitvoert; vier tests zijn ignored.
+Alleen de exacte testverwachting wordt gelijkgetrokken. De productie-expressie
+blijft ongewijzigd; de nieuwe gewone CI moet het volledige vervolg nog bewijzen.
+
+De [cryptoproef40476349872](https://github.com/VOLPAROSSA/volparossa/actions/runs/40476349872)
+op exact `22998552` slaagt met echte GCC13/32-objecten, een gecompileerde en
+uitgevoerde i386-musl-C-probe, de upstream ctutils0.4.5-featurematrix en echte
+32/64-bit-consumertests. Alle288 receipt-memberhashes zijn geverifieerd.
+Onafhankelijke machinecodereview van28 entrypoints per target vindt geen
+blokkerende geheime-afhankelijke branch of adresberekening binnen deze capture.
+Dit is geen timing-, microarchitectuur- of volledig Core-binarybewijs;
+`constant_time_proven=false` blijft gehandhaafd. De twaalf fixture-feature-
+verschillen en het ontbreken van een release-zero-runtimeproef blijven expliciet.
+Alle vijf taaljobs in [CodeQL40476353192](https://github.com/VOLPAROSSA/volparossa/actions/runs/40476353192)
+slagen. De afzonderlijke CodeQL-resultaatcheck slaagt na onafhankelijke,
+per-alert vastgelegde triage:342/355/360/361 zijn vaste testwaarden;
+356–359 zijn nul-geïnitialiseerde SEV-buffers die vóór gebruik volledig met
+fallible RdRand worden overschreven. De vier testalerts zijn als `used in tests`
+en de vier fout-positieven als `false positive` afgehandeld met brongebonden
+motivering. Queries/scans/checks blijven actief; twaalf bestaande main-alerts
+buiten F04 blijven open. Dit is geen algemene security-all-clear.
+
 **F04 blijft open.** De beveiligingskandidaat en verplichte review-/mergeprocedure
 lopen via [PR349](https://github.com/VOLPAROSSA/volparossa/pull/349);
 [de actuele PR-controles](https://github.com/VOLPAROSSA/volparossa/pull/349/checks)

@@ -8655,7 +8655,7 @@ pub(super) mod tests {
         // Any registration reply lost after a possible mutation is promoted to Ambiguous. A
         // non-Ambiguous persistence error is returned only after the complete journal boundary is
         // confirmed unchanged, so the registration can be dropped without orphaning its Intent.
-        assert!(actor.contains("operation.complete_unstarted_deadline();"));
+        assert!(actor.contains("(*operation).complete_unstarted_deadline();"));
         assert!(actor.contains("fence_terminal(&self.lifecycle, Lifecycle::Ambiguous)"));
         assert!(actor.contains("self.journal.confirm_retry_safe_after_definite_failure()"));
         assert!(journal.contains("fn confirm_retry_safe_after_definite_failure(&mut self)"));
