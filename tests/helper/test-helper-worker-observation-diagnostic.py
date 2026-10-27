@@ -5,10 +5,12 @@ from pathlib import Path
 import hashlib
 import importlib.util
 import re
+import runpy
 import tempfile
 import unittest
 
 HERE = Path(__file__).resolve().parent
+normalize_relay_traffic_diagnostic = runpy.run_path(str(HERE / 'test-helper-relay-traffic-diagnostic.py'))['normalize_relay_traffic_diagnostic']
 spec = importlib.util.spec_from_file_location('preflight', HERE / 'test-helper-preflight-diagnostic.py')
 preflight = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(preflight)
@@ -85,7 +87,7 @@ if worker_observation_failure "$2"; then exit 3; fi
         # remove its braces and the explicit final-conjunction failure annotation.
         # Frozen hashes are the complete functions at source57b121a0.
         for name, expected in BASELINE.items():
-            text = function(HOOK, name)
+            text = normalize_relay_traffic_diagnostic(function(HOOK, name))
             # Only this reviewed observer correction changes successful code:
             # bind each existing call to its explicit Client/Exit role.
             text = text.replace('worker_wireguard_interface 7 client', 'worker_wireguard_interface 7')

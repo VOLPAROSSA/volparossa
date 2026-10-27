@@ -2361,6 +2361,96 @@ derive_exit_local_address() {
     '
 }
 
+relay_traffic_diagnostic_value_is_safe() {
+    [ "$#" -eq 1 ] && [ "${#1}" -le 960 ] || return 1
+    printf '%s\n' "$1" | /usr/bin/awk -F ';' '
+        function u64(value) {
+            if (value == "0") return 1
+            if (value !~ /^[1-9][0-9]*$/ || length(value) > 20) return 0
+            return length(value) < 20 || ("x" value) <= "x18446744073709551615"
+        }
+        function tuple(field, key, values, count, position) {
+            if (index(field, key "=") != 1) return 0
+            count = split(substr(field, length(key) + 2), values, ",")
+            if (count != 3) return 0
+            if (values[1] == "unavailable" && values[2] == "unavailable" \
+                && values[3] == "unavailable") return 1
+            for (position = 1; position <= 3; position++) if (!u64(values[position])) return 0
+            return 1
+        }
+        function handshake(values) {
+            if (values[1] == "unavailable") return "unavailable"
+            return values[1] == "0" ? "zero" : "nonzero"
+        }
+        {
+            records++
+            if (NF != 9 || $1 !~ /^predicate=(ping|worker-snapshot|worker-growth|relay-snapshot|relay-growth|fixture)$/) exit 1
+            predicate = substr($1, 11)
+            expected = predicate == "ping" ? "ping-exit-zero" : \
+                (predicate ~ /snapshot$/ ? "canonical-u64-snapshot" : \
+                (predicate ~ /growth$/ ? "handshake-nonzero-rx-tx-increase" : "fixture-exact"))
+            if ($2 != "expected=" expected || $3 !~ /^ping=(0|[1-9][0-9]*)$/) exit 1
+            status = substr($3, 6)
+            if (length(status) > 3 || status + 0 > 255 \
+                || (predicate == "ping" ? status == "0" : status != "0")) exit 1
+            if (!tuple($4, "worker-baseline", before) || !tuple($5, "worker-current", worker) \
+                || $6 != "relay-reference=0,0,0" || !tuple($7, "relay-current", relay) \
+                || $8 != "worker-handshake=" handshake(worker) \
+                || $9 != "relay-handshake=" handshake(relay)) exit 1
+            valid = 1
+        }
+        END { if (records != 1 || !valid) exit 1 }
+    '
+}
+
+relay_traffic_snapshot_fields() {
+    [ "$#" -eq 1 ] && [ "${#1}" -le 62 ] || return 1
+    printf '%s\n' "$1" | /usr/bin/awk -F '\t' '
+        function u64(value) {
+            if (value == "0") return 1
+            if (value !~ /^[1-9][0-9]*$/ || length(value) > 20) return 0
+            return length(value) < 20 || ("x" value) <= "x18446744073709551615"
+        }
+        { records++; if (NF != 3 || !u64($1) || !u64($2) || !u64($3)) invalid = 1 }
+        END { if (records != 1 || invalid) exit 1; printf "%s,%s,%s", $1, $2, $3 }
+    '
+}
+
+publish_relay_traffic_failure() {
+    # Optional failure-only scalar evidence. Never change the original fatal
+    # reason/stage, perform traffic, or replace the first private record.
+    [ "$#" -eq 4 ] || return 1
+    [ "$start_failure_stage" = functional-relay-traffic ] || return 1
+    case $1 in
+        ping) rt_diag_expected=ping-exit-zero ;;
+        worker-snapshot|relay-snapshot) rt_diag_expected=canonical-u64-snapshot ;;
+        worker-growth|relay-growth) rt_diag_expected=handshake-nonzero-rx-tx-increase ;;
+        fixture) rt_diag_expected=fixture-exact ;;
+        *) return 1 ;;
+    esac
+    rt_diag_before=$(relay_traffic_snapshot_fields "${hook_functional_baseline-}") \
+        || rt_diag_before=unavailable,unavailable,unavailable
+    rt_diag_worker=$(relay_traffic_snapshot_fields "$3") \
+        || rt_diag_worker=unavailable,unavailable,unavailable
+    rt_diag_relay=$(relay_traffic_snapshot_fields "$4") \
+        || rt_diag_relay=unavailable,unavailable,unavailable
+    case ${rt_diag_worker%%,*} in
+        unavailable) rt_diag_worker_handshake=unavailable ;;
+        0) rt_diag_worker_handshake=zero ;;
+        *) rt_diag_worker_handshake=nonzero ;;
+    esac
+    case ${rt_diag_relay%%,*} in
+        unavailable) rt_diag_relay_handshake=unavailable ;;
+        0) rt_diag_relay_handshake=zero ;;
+        *) rt_diag_relay_handshake=nonzero ;;
+    esac
+    rt_diag_value="predicate=$1;expected=$rt_diag_expected;ping=$2;worker-baseline=$rt_diag_before;worker-current=$rt_diag_worker;relay-reference=0,0,0;relay-current=$rt_diag_relay;worker-handshake=$rt_diag_worker_handshake;relay-handshake=$rt_diag_relay_handshake"
+    relay_traffic_diagnostic_value_is_safe "$rt_diag_value" || return 1
+    write_private_file "$proof_directory/relay-traffic.failure" \
+        "VOLPAROSSA_HELPER_RELAY_TRAFFIC_DIAGNOSTIC_V1=$rt_diag_value" || :
+    return 1
+}
+
 wireguard_counter_line_is_exact() {
     [ "$#" -eq 3 ] || return 1
     case $3 in
@@ -5036,32 +5126,51 @@ run_functional_client_lease_probe() {
         "$hook_functional_peer_address" || return 1
 
     advance_start_failure_stage functional-relay-traffic || return 1
-    /usr/bin/ping -6 -n -I "$functional_relay" \
-        -c 1 -W 3 "$hook_functional_client_address" >/dev/null 2>&1 || return 1
+    if /usr/bin/ping -6 -n -I "$functional_relay" \
+        -c 1 -W 3 "$hook_functional_client_address" >/dev/null 2>&1; then
+        hook_traffic_ping_status=0
+    else
+        hook_traffic_ping_status=$?
+        # Only a failed ping obtains these two read-only observations. Failed
+        # producers remain unavailable; no retry, traffic or delay is added.
+        hook_traffic_worker=$(worker_wireguard_snapshot \
+            7 "$hook_functional_wireguard" "$functional_relay_public_key") \
+            || hook_traffic_worker=unavailable
+        hook_traffic_relay=$(relay_wireguard_snapshot \
+            "$functional_relay" "$hook_functional_client_public_key") \
+            || hook_traffic_relay=unavailable
+        publish_relay_traffic_failure ping "$hook_traffic_ping_status" \
+            "$hook_traffic_worker" "$hook_traffic_relay" || :
+        return 1
+    fi
     hook_functional_wait_attempt=0
     while :; do
         hook_functional_current=$(worker_wireguard_snapshot \
             7 "$hook_functional_wireguard" "$functional_relay_public_key") \
-            || return 1
+            || { publish_relay_traffic_failure worker-snapshot "$hook_traffic_ping_status" unavailable unavailable || :; return 1; }
         if wireguard_snapshot_has_growth \
             "$hook_functional_baseline" "$hook_functional_current"; then
             break
         fi
         hook_functional_wait_attempt=$((hook_functional_wait_attempt + 1))
-        [ "$hook_functional_wait_attempt" -lt 100 ] || return 1
+        [ "$hook_functional_wait_attempt" -lt 100 ] \
+            || { publish_relay_traffic_failure worker-growth "$hook_traffic_ping_status" "$hook_functional_current" unavailable || :; return 1; }
         sleep 0.05
     done
     hook_functional_relay_snapshot=$(relay_wireguard_snapshot \
-        "$functional_relay" "$hook_functional_client_public_key") || return 1
+        "$functional_relay" "$hook_functional_client_public_key") \
+        || { publish_relay_traffic_failure relay-snapshot "$hook_traffic_ping_status" "$hook_functional_current" unavailable || :; return 1; }
     hook_functional_zero_snapshot=$(printf '0\t0\t0') || return 1
     wireguard_snapshot_has_growth \
-        "$hook_functional_zero_snapshot" "$hook_functional_relay_snapshot" || return 1
+        "$hook_functional_zero_snapshot" "$hook_functional_relay_snapshot" \
+        || { publish_relay_traffic_failure relay-growth "$hook_traffic_ping_status" "$hook_functional_current" "$hook_functional_relay_snapshot" || :; return 1; }
     functional_relay_fixture_is_exact \
         "$functional_relay_ifindex" \
         "$hook_functional_client_public_key" \
         "$hook_functional_client_listen_port" \
         "$hook_functional_client_address" \
-        "$hook_functional_peer_address" || return 1
+        "$hook_functional_peer_address" \
+        || { publish_relay_traffic_failure fixture "$hook_traffic_ping_status" "$hook_functional_current" "$hook_functional_relay_snapshot" || :; return 1; }
 
     advance_start_failure_stage functional-relay-cleanup || return 1
     remove_functional_relay_fixture || return 1

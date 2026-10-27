@@ -709,6 +709,14 @@ report_non_retained_production_retirement_diagnostic() {
         printf 'non-retained helper-boundary PR smoke Client/Exit/Relay-pair lease diagnostic: %s\n' \
             "$non_retained_retirement_functional_value" >&2
     fi
+    if [ "$non_retained_production_retirement_stage" = runtime-fence ] \
+        && [ "$non_retained_retirement_first_reason" = production-launch-status ] \
+        && [ "$non_retained_retirement_launch_stage" = functional-relay-traffic ] \
+        && grep -F 'VOLPAROSSA_HELPER_RELAY_TRAFFIC_DIAGNOSTIC_V1=' \
+            "$non_retained_production_retirement_capture" >/dev/null 2>&1; then
+        report_non_retained_relay_traffic_diagnostic \
+            "$non_retained_production_retirement_capture" retirement-runtime-fence || :
+    fi
 }
 
 non_retained_restart_launch_failure_category() {
@@ -1416,6 +1424,94 @@ non_retained_functional_probe_failure_value_is_safe() {
     esac
 }
 
+relay_traffic_diagnostic_value_is_safe() {
+    [ "$#" -eq 1 ] && [ "${#1}" -le 960 ] || return 1
+    printf '%s\n' "$1" | /usr/bin/awk -F ';' '
+        function u64(value) {
+            if (value == "0") return 1
+            if (value !~ /^[1-9][0-9]*$/ || length(value) > 20) return 0
+            return length(value) < 20 || ("x" value) <= "x18446744073709551615"
+        }
+        function tuple(field, key, values, count, position) {
+            if (index(field, key "=") != 1) return 0
+            count = split(substr(field, length(key) + 2), values, ",")
+            if (count != 3) return 0
+            if (values[1] == "unavailable" && values[2] == "unavailable" \
+                && values[3] == "unavailable") return 1
+            for (position = 1; position <= 3; position++) if (!u64(values[position])) return 0
+            return 1
+        }
+        function handshake(values) {
+            if (values[1] == "unavailable") return "unavailable"
+            return values[1] == "0" ? "zero" : "nonzero"
+        }
+        {
+            records++
+            if (NF != 9 || $1 !~ /^predicate=(ping|worker-snapshot|worker-growth|relay-snapshot|relay-growth|fixture)$/) exit 1
+            predicate = substr($1, 11)
+            expected = predicate == "ping" ? "ping-exit-zero" : \
+                (predicate ~ /snapshot$/ ? "canonical-u64-snapshot" : \
+                (predicate ~ /growth$/ ? "handshake-nonzero-rx-tx-increase" : "fixture-exact"))
+            if ($2 != "expected=" expected || $3 !~ /^ping=(0|[1-9][0-9]*)$/) exit 1
+            status = substr($3, 6)
+            if (length(status) > 3 || status + 0 > 255 \
+                || (predicate == "ping" ? status == "0" : status != "0")) exit 1
+            if (!tuple($4, "worker-baseline", before) || !tuple($5, "worker-current", worker) \
+                || $6 != "relay-reference=0,0,0" || !tuple($7, "relay-current", relay) \
+                || $8 != "worker-handshake=" handshake(worker) \
+                || $9 != "relay-handshake=" handshake(relay)) exit 1
+            valid = 1
+        }
+        END { if (records != 1 || !valid) exit 1 }
+    '
+}
+
+report_non_retained_relay_traffic_diagnostic() {
+    [ "$#" -ge 1 ] && [ "$#" -le 2 ] || return 1
+    case ${2:-launch} in
+        launch|retirement-runtime-fence) rt_diag_mode=${2:-launch} ;;
+        *) return 1 ;;
+    esac
+    rt_diag_capture=$1
+    [ -f "$rt_diag_capture" ] && [ ! -L "$rt_diag_capture" ] || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$rt_diag_capture" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    [ "$(stat -Lc '%s' "$rt_diag_capture")" -le 1048576 ] || return 1
+    require_no_private_key_marker "$rt_diag_capture" >/dev/null 2>&1 || return 1
+    [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=' \
+        "$rt_diag_capture")" -eq 1 ] || return 1
+    [ "$(grep -Fxc 'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-relay-traffic' \
+        "$rt_diag_capture")" -eq 1 ] || return 1
+    case $rt_diag_mode in
+        launch)
+            [ "$(grep -Fc 'live worker-identity proof failed: predicate rejected: ' \
+                "$rt_diag_capture")" -eq 1 ] || return 1
+            rt_diag_failure='live worker-identity proof failed: predicate rejected: production-launch-status'
+            ;;
+        retirement-runtime-fence)
+            [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=' "$rt_diag_capture")" -eq 1 ] || return 1
+            grep -Fxq 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=production-retirement' "$rt_diag_capture" || return 1
+            [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_DIAGNOSTIC_V1=' "$rt_diag_capture")" -eq 1 ] || return 1
+            grep -Fxq 'VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_DIAGNOSTIC_V1=runtime-fence' "$rt_diag_capture" || return 1
+            [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1=' "$rt_diag_capture")" -eq 1 ] || return 1
+            grep -Fxq 'VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1=production-launch-status' "$rt_diag_capture" || return 1
+            rt_diag_failure='live worker-identity proof failed: production unit retirement fence did not settle'
+            ;;
+    esac
+    [ "$(grep -Fc 'live worker-identity proof failed: ' "$rt_diag_capture")" -eq 1 ] || return 1
+    [ "$(grep -Fxc "$rt_diag_failure" "$rt_diag_capture")" -eq 1 ] || return 1
+    [ "$(tail -n 1 -- "$rt_diag_capture")" = "$rt_diag_failure" ] || return 1
+    rt_diag_prefix=VOLPAROSSA_HELPER_RELAY_TRAFFIC_DIAGNOSTIC_V1=
+    [ "$(grep -Fc "$rt_diag_prefix" "$rt_diag_capture")" -eq 1 ] || return 1
+    rt_diag_record=$(grep -F "$rt_diag_prefix" "$rt_diag_capture") || return 1
+    [ "${#rt_diag_record}" -le 1023 ] || return 1
+    case $rt_diag_record in "$rt_diag_prefix"*) ;; *) return 1 ;; esac
+    rt_diag_value=${rt_diag_record#"$rt_diag_prefix"}
+    relay_traffic_diagnostic_value_is_safe "$rt_diag_value" || return 1
+    printf 'non-retained helper-boundary PR smoke relay traffic diagnostic: %s\n' \
+        "$rt_diag_value" >&2
+}
+
 report_non_retained_production_launch_diagnostic() {
     [ "$#" -eq 1 ] || return 1
     non_retained_diagnostic=$1
@@ -1488,6 +1584,10 @@ report_non_retained_production_launch_diagnostic() {
     if [ -n "$non_retained_functional_failure_value" ]; then
         printf 'non-retained helper-boundary PR smoke Client/Exit/Relay-pair lease diagnostic: %s\n' \
             "$non_retained_functional_failure_value" >&2
+    fi
+    if grep -F 'VOLPAROSSA_HELPER_RELAY_TRAFFIC_DIAGNOSTIC_V1=' \
+        "$non_retained_diagnostic" >/dev/null 2>&1; then
+        report_non_retained_relay_traffic_diagnostic "$non_retained_diagnostic" || :
     fi
 }
 

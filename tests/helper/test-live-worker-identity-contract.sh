@@ -19,6 +19,7 @@ python3 -B "$script_directory/test-helper-guest-source-environment.py"
 python3 -B "$script_directory/test-helper-wireguard-role-mark.py"
 python3 -B "$script_directory/test-helper-peer-topology.py"
 python3 -B "$script_directory/test-helper-wireguard-state.py"
+python3 -B "$script_directory/test-helper-relay-traffic-diagnostic.py"
 evidence_validator=$repository_directory/tests/helper/validate-helper-boundary-evidence-v1.sh
 evidence_schema=$repository_directory/tests/helper/helper-boundary-evidence-v1.schema.json
 worker_source=$repository_directory/crates/volparossa-helper/src/worker_v3.rs

@@ -1857,6 +1857,65 @@ production_functional_probe_failure_value_is_safe() {
     esac
 }
 
+relay_traffic_diagnostic_value_is_safe() {
+    [ "$#" -eq 1 ] && [ "${#1}" -le 960 ] || return 1
+    printf '%s\n' "$1" | /usr/bin/awk -F ';' '
+        function u64(value) {
+            if (value == "0") return 1
+            if (value !~ /^[1-9][0-9]*$/ || length(value) > 20) return 0
+            return length(value) < 20 || ("x" value) <= "x18446744073709551615"
+        }
+        function tuple(field, key, values, count, position) {
+            if (index(field, key "=") != 1) return 0
+            count = split(substr(field, length(key) + 2), values, ",")
+            if (count != 3) return 0
+            if (values[1] == "unavailable" && values[2] == "unavailable" \
+                && values[3] == "unavailable") return 1
+            for (position = 1; position <= 3; position++) if (!u64(values[position])) return 0
+            return 1
+        }
+        function handshake(values) {
+            if (values[1] == "unavailable") return "unavailable"
+            return values[1] == "0" ? "zero" : "nonzero"
+        }
+        {
+            records++
+            if (NF != 9 || $1 !~ /^predicate=(ping|worker-snapshot|worker-growth|relay-snapshot|relay-growth|fixture)$/) exit 1
+            predicate = substr($1, 11)
+            expected = predicate == "ping" ? "ping-exit-zero" : \
+                (predicate ~ /snapshot$/ ? "canonical-u64-snapshot" : \
+                (predicate ~ /growth$/ ? "handshake-nonzero-rx-tx-increase" : "fixture-exact"))
+            if ($2 != "expected=" expected || $3 !~ /^ping=(0|[1-9][0-9]*)$/) exit 1
+            status = substr($3, 6)
+            if (length(status) > 3 || status + 0 > 255 \
+                || (predicate == "ping" ? status == "0" : status != "0")) exit 1
+            if (!tuple($4, "worker-baseline", before) || !tuple($5, "worker-current", worker) \
+                || $6 != "relay-reference=0,0,0" || !tuple($7, "relay-current", relay) \
+                || $8 != "worker-handshake=" handshake(worker) \
+                || $9 != "relay-handshake=" handshake(relay)) exit 1
+            valid = 1
+        }
+        END { if (records != 1 || !valid) exit 1 }
+    '
+}
+
+report_relay_traffic_diagnostic() {
+    [ "${proof_failure_reason:-}" = production-launch-status ] || return 1
+    [ "${production_start_failure_stage:-}" = functional-relay-traffic ] || return 1
+    rt_diag_file=$temporary_stage/production-output/relay-traffic.failure
+    [ ! -e "$rt_diag_file.next" ] && [ ! -L "$rt_diag_file.next" ] || return 1
+    vp_capture_file_is_safe "$rt_diag_file" || return 1
+    rt_diag_size=$(stat -Lc '%s' "$rt_diag_file" 2>/dev/null) || return 1
+    [ "$rt_diag_size" -ge 1 ] && [ "$rt_diag_size" -le 1024 ] || return 1
+    rt_diag_record=$(cat "$rt_diag_file") || return 1
+    rt_diag_prefix=VOLPAROSSA_HELPER_RELAY_TRAFFIC_DIAGNOSTIC_V1=
+    case $rt_diag_record in "$rt_diag_prefix"*) ;; *) return 1 ;; esac
+    rt_diag_value=${rt_diag_record#"$rt_diag_prefix"}
+    relay_traffic_diagnostic_value_is_safe "$rt_diag_value" || return 1
+    printf '%s%s\n' "$rt_diag_prefix" "$rt_diag_value" | cmp -s - "$rt_diag_file" || return 1
+    printf '%s%s\n' "$rt_diag_prefix" "$rt_diag_value" >&2
+}
+
 report_production_launch_diagnostic() {
     [ "${proof_failure_reason:-}" = production-launch-status ] || return 1
     production_start_failure_file=$temporary_stage/production-output/start.failure
@@ -1918,6 +1977,11 @@ report_production_launch_diagnostic() {
     if [ -n "$production_functional_failure_value" ]; then
         printf 'VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=%s\n' \
             "$production_functional_failure_value" >&2
+    fi
+    if [ "$production_start_failure_stage" = functional-relay-traffic ] \
+        && { [ -e "$temporary_stage/production-output/relay-traffic.failure" ] \
+            || [ -L "$temporary_stage/production-output/relay-traffic.failure" ]; }; then
+        report_relay_traffic_diagnostic || :
     fi
 }
 

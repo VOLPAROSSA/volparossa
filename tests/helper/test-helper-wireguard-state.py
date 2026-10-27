@@ -6,10 +6,12 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import unittest
 
 HERE = Path(__file__).resolve().parent
+normalize_relay_traffic_diagnostic = runpy.run_path(str(HERE / 'test-helper-relay-traffic-diagnostic.py'))['normalize_relay_traffic_diagnostic']
 ROOT = HERE.parents[1]
 HOOK = HERE / 'lib/production-ipc-unit-hook.sh'
 BACKEND = ROOT / 'crates/volparossa-helper/src/worker_v3/functional_backend.rs'
@@ -106,7 +108,7 @@ worker_activated_wireguard_is_exact 7 vpc1proof "$FIX_PEER" "$FIX_KEY" "$functio
                 self.assertEqual((result.returncode, result.stdout, result.stderr), (1, '', ''))
 
     def test_worker_authority_and_all_other_hook_bytes_are_preserved(self):
-        source = HOOK.read_text()
+        source = normalize_relay_traffic_diagnostic(HOOK.read_text())
         self.assertEqual(re.findall(r'^functional_worker_peer_keepalive=([0-9]+)$', source, re.M),
                          [self.production_keepalive()])
         self.assertIn('persistent_keepalive_seconds: FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS,',
