@@ -18,6 +18,28 @@ Last updated: 2026-10-27
 
 ## Current integration and active work
 
+### F04 P03b — drie Config-Clippy-meldingen — 2026-10-27
+
+Hervat vanaf live PR349-head `d2b515a93255eb4d9409d32ed9069090e25e80ec`.
+De oorspronkelijke Quality-run `40419353923` meldt drie `collapsible_if`-fouten
+in Config op regels 677, 730 en 738: egressinterfacenaam en canonieke IPv4-/IPv6-
+originprefixen. Deze voorwaarden bestonden al vóór F04. Alleen de geneste
+guards worden samengevoegd; short circuit, OR-groepering, validatievolgorde,
+foutvelden en foutteksten blijven behouden. Geen publieke types/veldnamen,
+serde-attributen, configuratiebestanden, FFI, dependencies of tests gewijzigd.
+
+Gerichte hosted vergelijking gebruikt dezelfde gepinde Rust 1.99.1 voor de
+baseline en deze opvolger: strikte Config-Clippy met alle targets/features,
+formatting en de bestaande Config-regressies. Onafhankelijke diffreview,
+definitieve bron-/runbindingen en resultaten worden bewaard onder
+`.volparossa-dev/p03b-f04-20261027/`. De afzonderlijke bewijsworkflow komt niet
+in PR349. Geen algemene lintuitzondering of gewone Quality-herhaling.
+Na deze drie correcties blijven 44 eerder gemelde workspace-diagnoses open;
+latere compilatie kan aanvullende fouten tonen. Voorgestelde kleine volgende
+tranche: alleen de ene `doc_markdown`-melding in de WireGuard-docstring.
+Geen andere tranche uitgevoerd. Bestaande F04-werkbomen, ongepubliceerde commits
+en onafgemaakte bestanden blijven behouden. F04 blijft onvoltooid.
+
 ### F04 P03a — begrensde Strict Clippy-correctie — 2026-10-27
 
 P02 is hosted bevestigd op PR349-bron

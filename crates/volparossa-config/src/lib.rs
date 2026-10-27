@@ -674,20 +674,19 @@ fn validate_exact_version(version: u16) -> Result<(), ConfigError> {
 }
 
 fn validate_network_addresses(network: &NetworkConfig) -> Result<(), ConfigError> {
-    if let Some(interface) = &network.independent_egress_interface {
-        if network.uplink == NetworkUplink::LocalOnly
+    if let Some(interface) = &network.independent_egress_interface
+        && (network.uplink == NetworkUplink::LocalOnly
             || interface.is_empty()
             || interface.len() > 15
             || matches!(interface.as_str(), "." | ".." | "lo")
             || !interface
                 .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
-        {
-            return Err(validation(
-                "network.independent_egress_interface",
-                "requires independent_internet and one non-loopback interface name of 1..=15 ASCII letters, digits, '_', '.' or '-'",
-            ));
-        }
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-')))
+    {
+        return Err(validation(
+            "network.independent_egress_interface",
+            "requires independent_internet and one non-loopback interface name of 1..=15 ASCII letters, digits, '_', '.' or '-'",
+        ));
     }
     validate_address_list(
         "network.listen_addresses",
@@ -727,21 +726,21 @@ fn validate_advertisement_origin(
             "must contain exactly two uppercase ASCII letters",
         ));
     }
-    if let Some(prefix) = network.advertised_ipv4_prefix.as_deref() {
-        if !canonical_ipv4_prefix(prefix) {
-            return Err(validation(
-                "network.advertised_ipv4_prefix",
-                "must be a canonical IPv4 /24 network",
-            ));
-        }
+    if let Some(prefix) = network.advertised_ipv4_prefix.as_deref()
+        && !canonical_ipv4_prefix(prefix)
+    {
+        return Err(validation(
+            "network.advertised_ipv4_prefix",
+            "must be a canonical IPv4 /24 network",
+        ));
     }
-    if let Some(prefix) = network.advertised_ipv6_prefix.as_deref() {
-        if !canonical_ipv6_prefix(prefix) {
-            return Err(validation(
-                "network.advertised_ipv6_prefix",
-                "must be a canonical IPv6 /48 network",
-            ));
-        }
+    if let Some(prefix) = network.advertised_ipv6_prefix.as_deref()
+        && !canonical_ipv6_prefix(prefix)
+    {
+        return Err(validation(
+            "network.advertised_ipv6_prefix",
+            "must be a canonical IPv6 /48 network",
+        ));
     }
     if network.uplink == NetworkUplink::IndependentInternet && (roles.relay || roles.exit) {
         if network.advertised_asn == 0 {
