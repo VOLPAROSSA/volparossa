@@ -2,6 +2,9 @@
 resolver = "2"
 members = ["crates/*"]
 exclude = [
+  "third_party/rust/vendor/ctutils-0.4.4",
+  "third_party/rust/vendor/ctutils-0.4.5",
+  "third_party/rust/vendor/sev-8.0.0",
   "third_party/rust/vendor/hickory-proto-0.25.2",
   "third_party/rust/vendor/hickory-resolver-0.25.2",
   "third_party/rust/vendor/libp2p-yamux-0.47.0",
@@ -9,15 +12,19 @@ exclude = [
 ]
 
 [patch.crates-io]
+ctutils = { path = "third_party/rust/vendor/ctutils-0.4.5" }
 hickory-proto = { path = "third_party/rust/vendor/hickory-proto-0.25.2" }
 hickory-resolver = { path = "third_party/rust/vendor/hickory-resolver-0.25.2" }
 libp2p-yamux = { path = "third_party/rust/vendor/libp2p-yamux-0.47.0" }
 time = { path = "third_party/rust/vendor/time-0.3.41" }
 
+[patch."https://github.com/virtee/sev"]
+sev = { path = "third_party/rust/vendor/sev-8.0.0" }
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 authors = ["VOLPAROSSA contributors"]
 license = "GPL-3.0-only"
 repository = "https://github.com/VOLPAROSSA/volparossa"
@@ -73,7 +80,7 @@ rustls-pki-types = "1.12.0"
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
-serde_yaml = "0.9.34"
+serde_yaml = { package = "yaml_serde", version = "=0.10.7" }
 sev = { version = "=8.0.0", git = "https://github.com/virtee/sev", rev = "a966d06d9bf0e68afe2733e7bfbf278fd7fd65b5", default-features = false, features = ["snp", "crypto_nossl"] }
 sha2 = "0.10.9"
 socket2 = { version = "0.6.0", features = ["all"] }
@@ -92,7 +99,7 @@ wireguard-uapi = "3.0.1"
 x25519-dalek = { version = "2.0.1", features = ["getrandom", "reusable_secrets", "serde", "static_secrets"] }
 x509-cert = { version = "=0.2.5", default-features = false, features = ["std"] }
 zeroize = { version = "1.8.1", features = ["derive", "serde"] }
-zbus = { version = "=5.13.2", default-features = false, features = ["tokio"] }
+zbus = { version = "=6.1.0", default-features = false, features = ["tokio", "proxy"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

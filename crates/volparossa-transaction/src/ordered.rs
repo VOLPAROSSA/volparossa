@@ -362,10 +362,10 @@ impl OrderedStore {
         let (genesis, current) = load(&tx, ledger)?;
         let current_block = current.block.as_ref().ok_or(Error::Store)?;
         if current_block.height > 0 && current_block.id == block_id {
-            if let Some(pending) = &self.staged {
-                if pending.record != current {
-                    return Err(Error::Conflict);
-                }
+            if let Some(pending) = &self.staged
+                && pending.record != current
+            {
+                return Err(Error::Conflict);
             }
             let receipt = public_receipt(&current, ledger)?;
             tx.commit()?;

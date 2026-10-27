@@ -13,7 +13,7 @@ at `a52ab4e77184`. That supplement preserves the original source/tree bindings,
 artifact IDs, digests and failures without restoring obsolete workflow instructions.
 The four formerly pending runs identified below have refreshed GitHub run/job
 metadata as of 2026-10-27; their artifacts were not revalidated in this edit.
-No new product trial was run. Refresh relevant branch/check ownership before
+That documentation reconciliation ran no new product trial. Refresh relevant branch/check ownership before
 resuming; an old source result does not establish current composition acceptance.
 
 [Current work](#current-integration-and-active-work) ·
@@ -30,6 +30,41 @@ The [local source archive](archive/requirements-20261023/README.md) retains the
 original bytes for offline inspection. Read only evidence relevant to the task.
 
 ## Current integration and active work
+
+### F04 — helperacceptatie geslaagd; handmatige integratie — 2026-10-27
+
+De kandidaat voor [PR349](https://github.com/VOLPAROSSA/volparossa/pull/349) bevat de minimale
+beveiligingsroute en de gerichte helpercorrecties. De oorspronkelijke
+[F04-evidence en failures](https://github.com/VOLPAROSSA/volparossa/blob/ff2df276bc50a395dbcfa2d11b515c51fe0ee340/docs/IMPLEMENTATION_STATUS.md)
+blijven behouden; PR347 is historische basis, geen afzonderlijke integratiekandidaat.
+
+De verkeersblokkade was een fixture-omgevingsfout: een verse private
+netwerknamespace begint met ICMP-datagramgroepbereik `1 0`, terwijl de hook bewust
+geen `NET_RAW` heeft. Correctie `3a4ef6c9` staat uitsluitend de gevalideerde
+agent-GID toe in de twee tijdelijke namespaces die werkelijk ping uitvoeren.
+Root-/groep-/capability-/namespacebinding, beginwaarde en readback zijn fataal;
+productiecode en capabilities blijven gelijk. De initiële hostnamespace wordt
+alleen gelezen; haar pingbereik is aan de bestaande voor/na-vergelijking toegevoegd.
+
+De enige geautoriseerde [Debian13-KVM-proef40542366058](https://github.com/VOLPAROSSA/volparossa/actions/runs/40542366058)
+**slaagt** op exact `3a4ef6c9d3499cbe4d71db614194cba14e3a89b6`.
+De bestaande Client/Exit/Relay-ping-, handshake-, RX/TX- en relaygroeicontroles,
+exacte custody/FD-storecycli, commit/destroy/retry, één geforceerde singleton
+CleanupConfirmedExactPresent-restart, cleanup/retirement, hostvergelijking en
+VM-/image-/bronfences zijn werkelijk doorlopen. Dit is de bestaande niet-bewaarde
+branchproef; geen retained-main-mijlpaal, algemeen restartbewijs of DICN-productacceptatie.
+Numerieke bereik-/counterwaarden zijn niet als afzonderlijke artifacts bewaard;
+de positieve grens volgt uit de fatale guards en de exact gebonden PASS.
+
+Zes nieuwe private-fixtureregressies, acht diagnosetests, de volledige betrokken
+livecontracttest en gerichte syntax/ShellCheck/diffcontroles slagen. Onafhankelijke
+bron- en resultaatreview bevestigt de afbakening. Eerdere Quality40487291792,
+CodeQL40487286993, dependency/RustSec- en zbus/crypto/DPS-native-evidence blijven
+hergebruikt voor hun gecontroleerd gelijke inputs; dit is geen herhaalde audit.
+De integratiekandidaat behoudt actuele main-documentatie en doorloopt de
+[bestaande PR-controles](https://github.com/VOLPAROSSA/volparossa/pull/349/checks).
+Integratie en administratieve F04-afsluiting blijven aan handmatige maintainermerge
+gebonden. Geen automatische merge of productieactivatie.
 
 ### Development workflow — 2026-10-26
 

@@ -31,18 +31,17 @@ impl Progress {
         if !self.1 {
             return;
         }
-        if let Ok(mut state) = self.0.lock() {
-            if state.phase == Some(Phase::ChallengeReadVerify)
-                && state.failed_at.is_none()
-                && state
-                    .read
-                    .is_none_or(|read| read.returned_outcome.is_none())
-            {
-                state.read = Some(PrivateStorageChallengeReadDetail {
-                    step: step as i32,
-                    returned_outcome: None,
-                });
-            }
+        if let Ok(mut state) = self.0.lock()
+            && state.phase == Some(Phase::ChallengeReadVerify)
+            && state.failed_at.is_none()
+            && state
+                .read
+                .is_none_or(|read| read.returned_outcome.is_none())
+        {
+            state.read = Some(PrivateStorageChallengeReadDetail {
+                step: step as i32,
+                returned_outcome: None,
+            });
         }
     }
 
@@ -50,12 +49,11 @@ impl Progress {
         if !self.1 {
             return;
         }
-        if let Ok(mut state) = self.0.lock() {
-            if state.failed_at.is_none() {
-                if let Some(read) = &mut state.read {
-                    read.returned_outcome.get_or_insert(outcome as i32);
-                }
-            }
+        if let Ok(mut state) = self.0.lock()
+            && state.failed_at.is_none()
+            && let Some(read) = &mut state.read
+        {
+            read.returned_outcome.get_or_insert(outcome as i32);
         }
     }
 

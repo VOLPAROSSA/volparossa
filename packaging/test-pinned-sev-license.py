@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 import unittest
 
+from notice_test_fixtures import graph_fixture
+
 ROOT = Path(__file__).resolve().parents[1]
 REVISION = "a966d06d9bf0e68afe2733e7bfbf278fd7fd65b5"
 SOURCE = "git+https://github.com/virtee/sev?rev=" + REVISION + "#" + REVISION
@@ -28,7 +30,7 @@ class PinnedSevNotice(unittest.TestCase):
                 manifest_path=str(crate / "Cargo.toml"), source=SOURCE)
             package.update(changes or {})
             metadata = root / "metadata.json"
-            metadata.write_text(json.dumps(dict(workspace_members=[], packages=[package])))
+            metadata.write_text(json.dumps(graph_fixture([package])))
             destination = root / "notices"
             result = subprocess.run([str(ROOT / "packaging/collect-cargo-licenses.sh"),
                 str(metadata), str(destination)], env={**os.environ, "TMPDIR": tmp},

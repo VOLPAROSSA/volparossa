@@ -1,0 +1,122 @@
+{
+  "status": "PENDING hosted execution; no compile/codegen/security acceptance",
+  "execution_location": "disposable GitHub-hosted runner only",
+  "compiler_profile": "rust-1.89.0-20250807",
+  "manifest": "third_party/rust/ctutils-current-regressions/Cargo.toml",
+  "initial_lock_sha256": "62056d2a906a912e8150b584c4cbf0b255e5cd79e6bdef140bb1f8a6656c104c",
+  "manifest_sha256": "074647ffe9b7c868323e7c80a927b24bf5609728c51de2eeb9ba597b747e35a3",
+  "scope": "Fixture-only Cargo updates; retain original lock and raw command/status/cleanup logs; require final locked root/fuzz/fixture validation before accepting locks",
+  "updates": [
+    {
+      "name": "cfg-if",
+      "before": "1.0.5",
+      "after": "1.0.4",
+      "command": [
+        "cargo",
+        "update",
+        "--manifest-path",
+        "third_party/rust/ctutils-current-regressions/Cargo.toml",
+        "-p",
+        "cfg-if@1.0.5",
+        "--precise",
+        "1.0.4"
+      ]
+    },
+    {
+      "name": "cpufeatures",
+      "before": "0.3.1",
+      "after": "0.3.0",
+      "command": [
+        "cargo",
+        "update",
+        "--manifest-path",
+        "third_party/rust/ctutils-current-regressions/Cargo.toml",
+        "-p",
+        "cpufeatures@0.3.1",
+        "--precise",
+        "0.3.0"
+      ]
+    },
+    {
+      "name": "hybrid-array",
+      "before": "0.4.15",
+      "after": "0.4.14",
+      "command": [
+        "cargo",
+        "update",
+        "--manifest-path",
+        "third_party/rust/ctutils-current-regressions/Cargo.toml",
+        "-p",
+        "hybrid-array@0.4.15",
+        "--precise",
+        "0.4.14"
+      ]
+    },
+    {
+      "name": "libc",
+      "before": "0.2.191",
+      "after": "0.2.189",
+      "command": [
+        "cargo",
+        "update",
+        "--manifest-path",
+        "third_party/rust/ctutils-current-regressions/Cargo.toml",
+        "-p",
+        "libc@0.2.191",
+        "--precise",
+        "0.2.189"
+      ]
+    },
+    {
+      "name": "syn",
+      "before": "3.0.9",
+      "after": "3.0.3",
+      "command": [
+        "cargo",
+        "update",
+        "--manifest-path",
+        "third_party/rust/ctutils-current-regressions/Cargo.toml",
+        "-p",
+        "syn@3.0.9",
+        "--precise",
+        "3.0.3"
+      ]
+    },
+    {
+      "name": "unicode-ident",
+      "before": "1.0.27",
+      "after": "1.0.24",
+      "command": [
+        "cargo",
+        "update",
+        "--manifest-path",
+        "third_party/rust/ctutils-current-regressions/Cargo.toml",
+        "-p",
+        "unicode-ident@1.0.27",
+        "--precise",
+        "1.0.24"
+      ]
+    }
+  ],
+  "validation": [
+    [
+      "cargo",
+      "fetch",
+      "--locked",
+      "--manifest-path",
+      "third_party/rust/ctutils-current-regressions/Cargo.toml"
+    ],
+    [
+      "cargo",
+      "metadata",
+      "--locked",
+      "--offline",
+      "--format-version",
+      "1",
+      "--all-features",
+      "--manifest-path",
+      "third_party/rust/ctutils-current-regressions/Cargo.toml"
+    ]
+  ],
+  "limits": "Bounded fixture consumer/codegen capture only; other twelve shared feature differences remain; not exact Core binary equivalence"
+}

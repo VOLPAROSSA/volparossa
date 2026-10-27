@@ -470,7 +470,7 @@ fn dps_no_state_or_position_carries_between_assessments() {
     let empty = assessed(&request(vec![]));
     let later = assessed(&request(vec![observation(2)]));
     assert!(empty.unverified_input_position.is_none());
-    assert!(empty.observations.is_empty());
+    assert_eq!(empty.observations, [] as [ObservationAssessment; 0]);
     assert_eq!(later.unverified_input_position, Some(observation(2)));
     assert_ne!(
         first.unverified_input_position,

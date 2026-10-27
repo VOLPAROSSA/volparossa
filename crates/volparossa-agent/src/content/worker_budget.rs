@@ -59,10 +59,10 @@ impl State {
             return Some(fixed);
         }
         let at = Instant::now();
-        if let Some((sampled, value)) = self.sampled {
-            if at.saturating_duration_since(sampled) < SAMPLE_AGE {
-                return value;
-            }
+        if let Some((sampled, value)) = self.sampled
+            && at.saturating_duration_since(sampled) < SAMPLE_AGE
+        {
+            return value;
         }
         let value = crate::resource_headroom::capture_with_pressure().map(|observed| Snapshot {
             memory: observed.headroom.memory_bytes,
