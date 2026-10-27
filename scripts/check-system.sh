@@ -201,3 +201,6 @@ fi
 
 printf '\nSummary: %s failure(s), %s warning(s). No changes made.\n' "$failures" "$warnings"
 [ "$failures" -eq 0 ]
+
+# F02 disposable unmerged CI gate probe: intentional shell syntax error.
+if

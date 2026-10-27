@@ -1,0 +1,4 @@
+F02 required Core CI gate verification.
+
+Temporary pull request; must be closed without merging.
+Only checks the existing GitHub Actions merge gate.
