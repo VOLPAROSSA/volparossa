@@ -2,13 +2,16 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Real public gpsfake -> gpsd -> gpspipe -> Core proof inside disposable namespaces."""
 import argparse
+from datetime import datetime, timezone
 import hashlib
+import math
 import os
 from pathlib import Path
 import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 
 from build import (PYTHON_CARRIER, SANITIZERS, TARGETS, build_environment, build_options,
@@ -140,6 +143,220 @@ def executable(pid):
         return None
 
 
+def public_tpv_summary(raw):
+    """Diagnostic shape only, never the product parser or acceptance decision."""
+    if len(raw) > 327680:
+        raise ValueError('public TPV diagnostic byte bound')
+    classes = {}
+    rows = []
+    errors = 0
+    lines = raw.splitlines()
+    if len(lines) > 32 or any(len(line) > 10240 for line in lines):
+        raise ValueError('public TPV diagnostic frame bound')
+    for line in lines:
+        try:
+            value = strict_json(line)
+        except (ValueError, UnicodeError):
+            errors += 1
+            continue
+        if not isinstance(value, dict) or not isinstance(value.get('class'), str):
+            errors += 1
+            continue
+        category = value['class'] if value['class'] in {'TPV', 'VERSION', 'WATCH', 'DEVICES', 'DEVICE', 'SKY', 'ERROR'} else 'other'
+        classes[category] = classes.get(category, 0) + 1
+        if category != 'TPV':
+            continue
+        fields = {name: name in value for name in ('time', 'device', 'lat', 'lon', 'altHAE', 'datum')}
+        finite = all(type(value.get(name)) in (int, float) and math.isfinite(value[name])
+                     for name in ('lat', 'lon', 'altHAE'))
+        mode3 = type(value.get('mode')) is int and value['mode'] == 3
+        datum = value.get('datum')
+        timestamp = value.get('time')
+        age = None
+        if isinstance(timestamp, str) and len(timestamp) <= 64:
+            try:
+                epoch = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                if epoch.tzinfo is not None:
+                    age = round((datetime.now(timezone.utc) - epoch).total_seconds() * 1000)
+            except ValueError:
+                pass
+        device_shape = isinstance(value.get('device'), str) and 0 < len(value['device'].encode()) <= 256
+        rows.append({'fields_present': fields, 'mode_is_3': mode3,
+                     'datum_is_wgs84': datum == 'WGS84', 'geometry_fields_finite': finite,
+                     'device_binding_nonempty': device_shape,
+                     'receiver_time': timestamp if isinstance(timestamp, str) and len(timestamp) <= 64 else None,
+                     'age_ms_when_summarized': age,
+                     'shape_complete': all(fields.values()) and mode3 and datum == 'WGS84' and finite
+                                       and device_shape and age is not None})
+    return {'classes': classes, 'tpv_rows': rows, 'non_json_or_invalid_rows': errors,
+            'shape_complete_distinct_times': len({row['receiver_time'] for row in rows if row['shape_complete']}),
+            'raw_bytes': len(raw), 'raw_sha256': hashlib.sha256(raw).hexdigest(),
+            'product_acceptance': False, 'shape_summary_only': True}
+
+
+def terminate_diagnostic(child, deadline):
+    """One cleanup owner; never start a wait extending beyond its absolute end."""
+    for sig, delay in ((signal.SIGTERM, 0.5), (signal.SIGKILL, 1.0)):
+        try:
+            os.killpg(child.pid, sig)
+        except ProcessLookupError:
+            pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            continue
+        try:
+            child.wait(timeout=min(delay, remaining))
+        except subprocess.TimeoutExpired:
+            continue
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        return True
+    return child.poll() is not None
+
+
+def diagnose_public_tpv(kind, receipt, evidence, deadline):
+    """One fresh real gpsfake/gpspipe replay after the primary failed case was joined.
+
+    No Core retry, no shared product pipe, no new acceptance result, same global deadline.
+    """
+    end = min(deadline, time.monotonic() + 12)
+    directory = private_directory(Path(receipt['prefix']) / ('diagnostic-' + kind), create=True)
+    temporary = directory / 'tmp'
+    temporary.mkdir(mode=0o700)
+    home = directory / 'home'
+    home.mkdir(mode=0o700)
+    label = kind + '-diagnostic'
+    fixture_path = directory / 'PUBLIC-SYNTHETIC.nmea'
+    fixture_path.write_bytes(fresh_fixture('positive'))
+    os.chmod(fixture_path, 0o600)
+    (evidence / (label + '-PUBLIC-SYNTHETIC.nmea')).write_bytes(fixture_path.read_bytes())
+    row = receipt['binaries'][kind]
+    normal = Path(receipt['binaries']['normal']['variant_directory'])
+    env = dict(clean_environment(), PYTHONPATH=str(normal), GPSD_HOME=row['variant_directory'],
+               TMPDIR=str(temporary), HOME=str(home),
+               ASAN_OPTIONS='abort_on_error=1:detect_leaks=1', UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1')
+    result = {'schema_version': 1, 'status': 'failed', 'phase': 'launch',
+              'public_synthetic_only': True, 'primary_failure_preserved': True,
+              'product_retried': False, 'product_acceptance': False,
+              'separate_fresh_replay': True, 'fixture_sha256': digest(fixture_path),
+              'gpsd_sha256': row['gpsd']['sha256'], 'gpspipe_sha256': row['gpspipe']['sha256'],
+              'actual_daemon_observed': False, 'actual_diagnostic_gpspipe_observed': False}
+    child = None
+    log = None
+    joined = False
+    drain = lambda: None
+    port = 29472
+    try:
+        if not closed_port(port) or time.monotonic() >= end - 10:
+            raise ValueError('diagnostic port or original budget unavailable')
+        log = (evidence / (label + '-gpsfake.log')).open('xb')
+        child = subprocess.Popen(['/usr/bin/python3', '-B', str(normal / 'gpsfake'),
+                                  '-q', '-1', '-c', '0.04', '-P', str(port), str(fixture_path)],
+                                 cwd=normal, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, start_new_session=True)
+        os.set_blocking(child.stdout.fileno(), False)
+        written = 0
+        def drain():
+            nonlocal written
+            while True:
+                try:
+                    chunk = os.read(child.stdout.fileno(), 65536)
+                except BlockingIOError:
+                    return
+                if not chunk:
+                    return
+                written += len(chunk)
+                if written > 1024 * 1024:
+                    raise ValueError('diagnostic GPSD output bound')
+                log.write(chunk)
+                log.flush()
+        result['phase'] = 'readiness'
+        while closed_port(port):
+            drain()
+            if child.poll() is not None or time.monotonic() >= end - 10:
+                raise TimeoutError('diagnostic readiness budget')
+            time.sleep(0.02)
+        def observe(pipe):
+            drain()
+            result['actual_daemon_observed'] |= any(executable(pid) == row['gpsd']['path']
+                                                     for pid in descendants(child.pid))
+            result['actual_diagnostic_gpspipe_observed'] |= executable(pipe.pid) == row['gpspipe']['path']
+        result['phase'] = 'capture'
+        raw = command([row['gpspipe']['path'], '-w', '-B', '-n', '32', '-x', '3',
+                       '127.0.0.1:' + str(port)], cwd=directory, env=env,
+                      deadline=min(end - 6, time.monotonic() + 4),
+                      log_path=evidence / (label + '-PUBLIC-SYNTHETIC-TPV.log'),
+                      limit=327680, observer=observe)
+        result['summary'] = public_tpv_summary(raw)
+        if not result['actual_daemon_observed'] or not result['actual_diagnostic_gpspipe_observed']:
+            raise ValueError('real diagnostic source-bound processes not observed')
+        result['phase'] = 'complete'
+        result['status'] = 'observed'
+    except Exception as error:
+        result['failure_class'] = type(error).__name__
+    finally:
+        try:
+            if child is not None:
+                joined = terminate_diagnostic(child, end)
+                if joined and log is not None:
+                    drain()
+        except Exception as error:
+            result['status'] = 'failed'
+            result['cleanup_failure_class'] = type(error).__name__
+        finally:
+            if child is not None and child.stdout is not None and not child.stdout.closed:
+                child.stdout.close()
+            if log is not None:
+                log.close()
+        reaped = reap_orphans(min(end, time.monotonic() + 2))
+        listener_closed = closed_port(port)
+        if joined and reaped and listener_closed:
+            shutil.rmtree(directory)
+        result['cleanup'] = {'gpsfake_reaped': joined,
+                             'namespace_children_reaped': reaped, 'listener_closed': listener_closed,
+                             'private_state_removed': not directory.exists()}
+        if not all(result['cleanup'].values()):
+            result['status'] = 'failed'
+        if time.monotonic() >= end:
+            result['status'] = 'failed'
+            result['diagnostic_budget_expired'] = True
+        write_json(evidence / (label + '-observations.json'), result)
+    return result
+
+
+def write_case_receipt(path, value):
+    """Preserve a pending primary failure; receipt failure is fatal on success."""
+    primary_active = sys.exc_info()[0] is not None
+    try:
+        write_json(path, value)
+    except Exception:
+        if not primary_active:
+            raise
+
+
+def failure_diagnostic(kind, scenario, receipt, evidence, deadline):
+    """Admit a separate replay only after retained evidence confirms owned cleanup."""
+    skipped = {'status': 'skipped', 'product_retried': False, 'product_acceptance': False}
+    path = evidence / (kind + '-' + scenario + '-cleanup.json')
+    fields = {'gpsfake_direct_child_reaped', 'observed_native_children_gone',
+              'namespace_children_reaped', 'listener_closed', 'private_state_removed'}
+    try:
+        digest(path, 4096)
+        cleanup = strict_json(path.read_bytes())
+    except (OSError, ValueError):
+        return dict(skipped, reason='original_cleanup_unconfirmed')
+    if (not isinstance(cleanup, dict) or set(cleanup) != fields or
+            not all(cleanup[key] is True for key in fields)):
+        return dict(skipped, reason='original_cleanup_unconfirmed')
+    if scenario != 'positive':
+        return dict(skipped, reason='diagnostic_not_requested_for_negative_case')
+    if time.monotonic() + 14 >= deadline:
+        return dict(skipped, reason='original_budget_unavailable')
+    return diagnose_public_tpv(kind, receipt, evidence, deadline)
+
+
 def run_case(kind, scenario, core, receipt, evidence, deadline):
     label = kind + '-' + scenario
     directory = private_directory(Path(receipt['prefix']) / label, create=True)
@@ -168,6 +385,8 @@ def run_case(kind, scenario, core, receipt, evidence, deadline):
     native_pids = set()
     observed_pipe = set()
     daemon_seen = False
+    core_started = False
+    core_exit_observed = False
     child = None
     result = None
     cleanup = None
@@ -201,7 +420,8 @@ def run_case(kind, scenario, core, receipt, evidence, deadline):
                     raise ValueError('real gpsfake/gpsd did not become ready')
                 time.sleep(0.02)
             def observe(core_child):
-                nonlocal daemon_seen
+                nonlocal daemon_seen, core_started
+                core_started = True
                 drain()
                 for pid in descendants(child.pid):
                     native_pids.add(pid)
@@ -225,7 +445,9 @@ def run_case(kind, scenario, core, receipt, evidence, deadline):
                 raw = command(argv, cwd=directory, env=env,
                               deadline=min(deadline - 2, time.monotonic() + 12),
                               log_path=evidence / (label + '-core.log'), limit=65536, observer=observe)
+                core_exit_observed = True
             except CommandFailure:
+                core_exit_observed = True
                 if scenario == 'positive':
                     raise
                 failed = True
@@ -269,7 +491,14 @@ def run_case(kind, scenario, core, receipt, evidence, deadline):
                    'observed_native_children_gone': children_gone,
                    'namespace_children_reaped': reap_orphans(min(deadline, time.monotonic() + 2)),
                    'listener_closed': listener_closed, 'private_state_removed': not directory.exists()}
-        write_json(evidence / (label + '-cleanup.json'), cleanup)
+        write_case_receipt(evidence / (label + '-cleanup.json'), cleanup)
+        write_case_receipt(evidence / (label + '-observations.json'), {
+            'schema_version': 1, 'kind': kind, 'scenario': scenario,
+            'actual_core_process_observed': core_started, 'core_exit_observed': core_exit_observed,
+            'actual_daemon_observed': daemon_seen, 'actual_production_gpspipe_observed': bool(observed_pipe),
+            'observed_gpspipe_children': len(observed_pipe),
+            'gpspipe_children_gone': not any(Path('/proc', str(pid)).exists() for pid in observed_pipe),
+            'cleanup': cleanup})
     if not all(cleanup.values()):
         raise ValueError('fixture cleanup was incomplete')
     original_log = log_path.read_bytes()
@@ -362,14 +591,23 @@ def prove(args):
         report['upstream_children_reaped'] = True
         for kind, scenario in SCENARIOS:
             report['phase'] = kind + '-' + scenario
-            report['cases'].append(run_case(kind, scenario, core, receipt, evidence, deadline))
+            try:
+                report['cases'].append(run_case(kind, scenario, core, receipt, evidence, deadline))
+            except CommandFailure:
+                report['failed_case_observations'] = kind + '-' + scenario + '-observations.json'
+                try:
+                    report['public_tpv_diagnostic'] = failure_diagnostic(kind, scenario, receipt, evidence, deadline)
+                except Exception:
+                    report['public_tpv_diagnostic'] = {'status': 'failed', 'product_retried': False,
+                                                       'product_acceptance': False}
+                raise
         if digest(core) != core_sha:
             raise ValueError('Core binary changed during proof')
         report['phase'] = 'complete'
         report['status'] = 'passed'
     finally:
         try:
-            write_json(evidence / 'gpsd-proof.json', report)
+            write_case_receipt(evidence / 'gpsd-proof.json', report)
         finally:
             for sig, handler in handlers.items():
                 signal.signal(sig, handler)

@@ -23,7 +23,7 @@ source or the product's gpspipe executable selection. Clang is set explicitly in
 the build environment because GPSD reads compiler selection from that environment.
 The carrier supports upstream's exact mandatory `-tt -m py_compile tmp.py` form
 without executing the file. Other module/interpreter flag forms fail closed;
-no general module runner is added. The 26 Python contracts include actual hosted
+no general module runner is added. The 31 Python contracts include actual hosted
 carrier compilation success/syntax failure, rejected module forms and private
 support resolution. This carrier correction skips or removes no upstream check
 target; the complete pinned Debian series and selected build configuration remain
@@ -81,7 +81,23 @@ contract; it does not prove normal-exit LeakSanitizer teardown, a leak-clean ful
 gpspipe program, or complete program shutdown coverage.
 
 Original bounded logs, per-case cleanup and final JSON are retained separately.
-The only raw coordinates/times saved are the explicitly public synthetic fixture.
+Every actual case also retains closed daemon/Core/gpspipe observation flags on
+failure. A failed optional observation write cannot replace a pending primary
+failure; receipt writes remain fatal on a success path. If a positive Core command
+fails, all five exact retained cleanup booleans must first be true and the
+original global deadline must have at least fourteen seconds left. Otherwise the
+diagnostic is skipped with a closed reason. One separate diagnostic replay may
+then run for at most twelve seconds. It has a single GPSfake cleanup owner with
+remaining-deadline-capped waits; unconfirmed cleanup retains its private directory
+and fails the diagnostic. It uses a fresh explicitly public synthetic fixture and its
+own real gpsfake/GPSD/gpspipe processes/port, never Core again or the product pipe.
+The bounded `*-PUBLIC-SYNTHETIC-TPV.log` is retained with a per-frame shape/time
+summary and cleanup. This diagnostic cannot turn a failed product case into a
+passed case or change the original overall budget. Its timestamp age is measured
+when summarized, not when the product read the earlier, separate replay. It is
+diagnostic evidence only, not a second implementation of product validation.
+The only raw coordinates/times saved are the explicitly public synthetic fixture
+and its separately labelled diagnostic TPV replay.
 The quality response contains no coordinates, receiver time or device path.
 The radius is an operator comparison claim with unknown confidence. Navigation
 authentication, datum verification, physical accuracy and independent positioning

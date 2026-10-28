@@ -5,9 +5,11 @@ from datetime import datetime, timezone
 import ast
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import shlex
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -19,7 +21,8 @@ from build import (PYTHON_CARRIER, SANITIZERS, TARGETS, build_argv, build_enviro
                    compile_observation, download, effective_profile, unpack)
 from common import CommandFailure, command, pins, strict_json
 from fixture import fixture, sentence
-from prove import LIMITATIONS, isolation, loopback_only, quality
+from prove import (LIMITATIONS, failure_diagnostic, isolation, loopback_only,
+                   public_tpv_summary, quality, terminate_diagnostic, write_case_receipt)
 
 
 def valid_quality():
@@ -98,6 +101,91 @@ class Contracts(unittest.TestCase):
             header.write_text(expected.replace('#define ASHTECH_ENABLE 1\n', ''))
             with self.assertRaises(ValueError):
                 effective_profile(root)
+
+    def test_public_tpv_diagnostic_never_merges_frames_or_claims_product_acceptance(self):
+        partial = [{'class': 'TPV', 'mode': 3, 'lat': 0.0, 'lon': 0.0},
+                   {'class': 'TPV', 'altHAE': 10.0, 'datum': 'WGS84'},
+                   {'class': 'TPV', 'time': '2026-10-28T12:00:00Z', 'device': '/dev/pts/PUBLIC'}]
+        raw = b'\n'.join(json.dumps(item).encode() for item in partial)
+        summary = public_tpv_summary(raw)
+        self.assertEqual(summary['shape_complete_distinct_times'], 0)
+        self.assertFalse(summary['product_acceptance'])
+        self.assertTrue(summary['shape_summary_only'])
+        complete = {'class': 'TPV', 'mode': 3, 'lat': 0.0, 'lon': 0.0, 'altHAE': 10.0,
+                    'datum': 'WGS84', 'device': '/dev/pts/PUBLIC', 'time': '2026-10-28T12:00:00Z'}
+        raw = (json.dumps(complete) + '\n' + json.dumps(complete)).encode()
+        self.assertEqual(public_tpv_summary(raw)['shape_complete_distinct_times'], 1)
+
+    def test_public_tpv_diagnostic_bounds_and_invalid_rows_remain_explicit(self):
+        for raw in [b'{}\n' * 33, b'x' * 10241, b'x' * 327681]:
+            with self.assertRaises(ValueError):
+                public_tpv_summary(raw)
+        raw = b'{"class":"TPV","class":"VERSION"}\n{"class":"TPV","lat":NaN}\n'
+        summary = public_tpv_summary(raw)
+        self.assertEqual(summary['non_json_or_invalid_rows'], 2)
+        self.assertEqual(summary['shape_complete_distinct_times'], 0)
+        self.assertFalse(summary['product_acceptance'])
+
+    def test_separate_diagnostic_requires_all_five_retained_cleanup_booleans(self):
+        cleanup = dict(gpsfake_direct_child_reaped=True, observed_native_children_gone=True,
+                       namespace_children_reaped=True, listener_closed=True, private_state_removed=True)
+        with tempfile.TemporaryDirectory() as directory, patch('prove.diagnose_public_tpv') as diagnostic:
+            evidence = Path(directory)
+            path = evidence / 'normal-positive-cleanup.json'
+            deadline = time.monotonic() + 60
+            self.assertEqual(failure_diagnostic('normal', 'positive', {}, evidence, deadline)['reason'],
+                             'original_cleanup_unconfirmed')
+            for key in cleanup:
+                for refused in (False, 1, None):
+                    with self.subTest(key=key, value=refused):
+                        path.write_text(json.dumps(dict(cleanup, **{key: refused})))
+                        self.assertEqual(failure_diagnostic('normal', 'positive', {}, evidence, deadline)['status'],
+                                         'skipped')
+            diagnostic.assert_not_called()
+            path.write_text(json.dumps(cleanup))
+            diagnostic.return_value = {'status': 'observed', 'product_acceptance': False}
+            self.assertEqual(failure_diagnostic('normal', 'positive', {}, evidence, deadline)['status'], 'observed')
+            diagnostic.assert_called_once_with('normal', {}, evidence, deadline)
+            diagnostic.reset_mock()
+            self.assertEqual(failure_diagnostic('normal', 'positive', {}, evidence, time.monotonic())['reason'],
+                             'original_budget_unavailable')
+            diagnostic.assert_not_called()
+
+    def test_case_receipt_storage_failure_preserves_primary_but_fails_on_success(self):
+        primary = CommandFailure('primary Core command failure')
+        with patch('prove.write_json', side_effect=OSError('fixture receipt storage unavailable')):
+            try:
+                try:
+                    raise primary
+                finally:
+                    write_case_receipt(Path('/unused'), {'observed': True})
+            except CommandFailure as observed:
+                self.assertIs(observed, primary)
+            else:
+                self.fail('pending primary failure was swallowed')
+            with self.assertRaises(OSError):
+                write_case_receipt(Path('/unused'), {'observed': True})
+
+    def test_diagnostic_cleanup_has_one_owner_and_never_waits_past_end(self):
+        class Child:
+            pid = 4242
+            def __init__(self):
+                self.waits = []
+            def wait(self, timeout):
+                self.waits.append(timeout)
+                raise subprocess.TimeoutExpired('synthetic-child', timeout)
+            def poll(self):
+                return None
+        with patch('prove.os.killpg') as kill, patch('prove.time.monotonic', side_effect=[9.75, 10.0]):
+            child = Child()
+            self.assertFalse(terminate_diagnostic(child, 10.0))
+            self.assertEqual(child.waits, [0.25])
+            self.assertEqual(kill.call_count, 2)
+        with patch('prove.os.killpg') as kill, patch('prove.time.monotonic', return_value=10.0):
+            child = Child()
+            self.assertFalse(terminate_diagnostic(child, 10.0))
+            self.assertEqual(child.waits, [])
+            self.assertEqual(kill.call_count, 2)
 
     def test_private_carrier_executes_exact_upstream_compile_without_executing_source(self):
         with tempfile.TemporaryDirectory() as directory:
