@@ -5,18 +5,19 @@ use rand_core::OsRng;
 use std::{
     fs,
     os::unix::fs::OpenOptionsExt as _,
-    path::Path,
+    path::{Path, PathBuf},
     process::Stdio,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncBufReadExt as _, BufReader},
     net::{TcpStream, UnixListener},
-    process::Command,
+    process::{ChildStdout, Command},
     time::timeout,
 };
 use volparossa_content::{
-    CacheLimits, ChunkStore, Metadata, Publication, Validity, publish,
+    CacheLimits, ChunkStore, Metadata, Publication, SignedManifest, Validity, VerifiedManifest,
+    publish,
     site::SITE_CONTENT_TYPE,
     transfer::{TransferLimits, serve_peer},
 };
@@ -102,9 +103,9 @@ fn browser_failure_stage(value: &serde_json::Value) -> &'static str {
         || value["schema"].as_u64() != Some(1)
         || value["status"] != "failed"
         || value["browser_closed"].as_bool().is_none()
-        || !value["rendered_http_requests"]
+        || value["rendered_http_requests"]
             .as_u64()
-            .is_some_and(|n| n <= 1024)
+            .is_none_or(|n| n > 1024)
     {
         return "invalid_receipt";
     }
@@ -144,14 +145,12 @@ impl Drop for OwnedChild {
     fn drop(&mut self) {
         if let Some(pid) = self.0.id() {
             let _ = self.0.start_kill();
-            loop {
-                match nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(pid as i32), None) {
-                    Err(nix::errno::Errno::EINTR) => continue,
-                    // Tokio may already have reaped a successfully completed child.
-                    Ok(_) | Err(nix::errno::Errno::ECHILD) => break,
-                    Err(_) => break,
-                }
-            }
+            let pid = nix::unistd::Pid::from_raw(i32::try_from(pid).unwrap());
+            // Retry only EINTR; Tokio may already have reaped a completed child.
+            while matches!(
+                nix::sys::wait::waitpid(pid, None),
+                Err(nix::errno::Errno::EINTR)
+            ) {}
         }
     }
 }
@@ -174,7 +173,7 @@ async fn verify_owned_child_cleanup() {
     fn reaped(pid: u32) {
         assert_eq!(
             nix::sys::wait::waitpid(
-                nix::unistd::Pid::from_raw(pid as i32),
+                nix::unistd::Pid::from_raw(i32::try_from(pid).unwrap()),
                 Some(nix::sys::wait::WaitPidFlag::WNOHANG)
             ),
             Err(nix::errno::Errno::ECHILD),
@@ -262,7 +261,6 @@ pub(super) fn verify(bytes: &[u8], assets: &[serde_json::Value]) -> serde_json::
 }
 
 async fn scenario(bytes: &[u8], assets: &[serde_json::Value]) -> serde_json::Value {
-    use sha2::{Digest as _, Sha256};
     diagnostic(Stage::Sign);
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -300,7 +298,62 @@ async fn scenario(bytes: &[u8], assets: &[serde_json::Value]) -> serde_json::Val
     let verified = signed.verify(&key.verifying_key(), now).unwrap();
     diagnostic(Stage::Transfer);
     let listener = UnixListener::bind(root.join("control.sock")).unwrap();
-    let mut child = OwnedChild(
+    let mut child = spawn_site_viewer(root, &key);
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    let peer = serve_control_peer(
+        &listener,
+        root,
+        &key,
+        &signed,
+        &verified,
+        &mut store,
+        bytes.len() as u64,
+    );
+    timeout(Duration::from_secs(20), async {
+        let ((), read) = tokio::join!(peer, stdout.read_line(&mut line));
+        assert!(read.unwrap() > 0 && line.len() <= 16384);
+    })
+    .await
+    .unwrap();
+    drop(listener);
+    fs::remove_file(root.join("control.sock")).unwrap();
+    diagnostic(Stage::Ready);
+    let (handoff, receipt_path, sha256, port) = prepare_browser_handoff(root, &line, bytes, assets);
+    diagnostic(Stage::BrowserObservation);
+    let mut browser = OwnedChild(
+        Command::new(std::env::var_os("STUDIO_NODE").unwrap())
+            .arg(std::env::var_os("STUDIO_VIEWER_OBSERVER").unwrap())
+            .arg(&handoff)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap(),
+    );
+    let browser_receipt = observe_browser(
+        &mut browser,
+        &receipt_path,
+        &sha256,
+        bytes.len(),
+        assets.len(),
+    )
+    .await;
+    diagnostic(Stage::Shutdown);
+    shutdown_viewer(&mut child, &mut stdout, &mut line, root, port).await;
+    let result = serde_json::json!({"schema":1,"status":"passed","bundle_sha256":sha256,
+        "bundle_bytes":bytes.len(),"asset_count":assets.len(),"ephemeral_test_publisher":true,
+        "mock_local_control_peer":true,"direct_child_adversarial_cleanup":true,"production_signed_verification":true,"actual_site_open_cli":true,
+        "browser":browser_receipt,"private_spool_removed":true,"listener_closed":true,
+        "network_published":false,"independent_peer_retrieval":false});
+    directory.close().unwrap();
+    diagnostic(Stage::Complete);
+    result
+}
+
+fn spawn_site_viewer(root: &Path, key: &SigningKey) -> OwnedChild {
+    OwnedChild(
         Command::new(env!("CARGO_BIN_EXE_volparossa"))
             .current_dir(root)
             .env("TMPDIR", root)
@@ -317,83 +370,90 @@ async fn scenario(bytes: &[u8], assets: &[serde_json::Value]) -> serde_json::Val
             .kill_on_drop(true)
             .spawn()
             .unwrap(),
-    );
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    let mut line = String::new();
-    let peer = async {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let request = read_request(&mut stream).await.unwrap();
-        let Some(Operation::ContentFetchName(parameters)) = request.operation else {
-            panic!("named transfer required")
-        };
-        assert_eq!(parameters.publisher_key, key.verifying_key().to_bytes());
-        assert_eq!(parameters.name, NAME);
-        assert_eq!(parameters.min_revision, Some(1));
-        assert!(!parameters.reuse_cache && !parameters.cache_only);
-        assert_eq!(Path::new(&parameters.cache), root.join("agent-cache"));
-        let response = |code: &str, payload| ControlResponse {
-            protocol_version: CONTROL_PROTOCOL_VERSION,
-            request_id: request.request_id.clone(),
-            result: ControlResult::Ok as i32,
-            diagnostic_code: code.into(),
-            private_storage_remote_detail: None,
-            payload: Some(payload),
-        };
-        write_response(
-            &mut stream,
-            &response(
-                "NAMED_CONTENT_TRANSFER_READY",
-                Payload::NamedContentTransferReady(NamedContentTransferReady {
-                    manifest: signed.encode(),
-                    cache_only: false,
-                }),
-            ),
-        )
-        .await
-        .unwrap();
-        let progress = serve_peer(
-            &mut stream,
-            &verified,
-            &mut store,
-            TransferLimits {
-                exchange_timeout: Duration::from_secs(5),
-                session_timeout: Duration::from_secs(15),
-                max_requests: verified.chunks().len(),
-                max_bytes: verified.length(),
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(progress.bytes, bytes.len() as u64);
-        assert_eq!(progress.missing, 0);
-        write_response(
-            &mut stream,
-            &response(
-                "CONTENT_OK",
-                Payload::Content(ContentReceipt {
-                    bytes: verified.length(),
-                    chunks: verified.chunks().len() as u32,
-                    peer_bytes: verified.length(),
-                    providers_used: 1,
-                    provider_peer_ids: vec!["12D3SyntheticLocalFixture".into()],
-                    control_relay_peer_id: "12D3SyntheticMockControl".into(),
-                    ..ContentReceipt::default()
-                }),
-            ),
-        )
-        .await
-        .unwrap();
+    )
+}
+
+async fn serve_control_peer(
+    listener: &UnixListener,
+    root: &Path,
+    key: &SigningKey,
+    signed: &SignedManifest,
+    verified: &VerifiedManifest,
+    store: &mut ChunkStore,
+    expected_bytes: u64,
+) {
+    let (mut stream, _) = listener.accept().await.unwrap();
+    let request = read_request(&mut stream).await.unwrap();
+    let Some(Operation::ContentFetchName(parameters)) = request.operation else {
+        panic!("named transfer required")
     };
-    timeout(Duration::from_secs(20), async {
-        let ((), read) = tokio::join!(peer, stdout.read_line(&mut line));
-        assert!(read.unwrap() > 0 && line.len() <= 16384);
-    })
+    assert_eq!(parameters.publisher_key, key.verifying_key().to_bytes());
+    assert_eq!(parameters.name, NAME);
+    assert_eq!(parameters.min_revision, Some(1));
+    assert!(!parameters.reuse_cache && !parameters.cache_only);
+    assert_eq!(Path::new(&parameters.cache), root.join("agent-cache"));
+    let response = |code: &str, payload| ControlResponse {
+        protocol_version: CONTROL_PROTOCOL_VERSION,
+        request_id: request.request_id.clone(),
+        result: ControlResult::Ok as i32,
+        diagnostic_code: code.into(),
+        private_storage_remote_detail: None,
+        payload: Some(payload),
+    };
+    write_response(
+        &mut stream,
+        &response(
+            "NAMED_CONTENT_TRANSFER_READY",
+            Payload::NamedContentTransferReady(NamedContentTransferReady {
+                manifest: signed.encode(),
+                cache_only: false,
+            }),
+        ),
+    )
     .await
     .unwrap();
-    drop(listener);
-    fs::remove_file(root.join("control.sock")).unwrap();
-    diagnostic(Stage::Ready);
-    let ready: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let progress = serve_peer(
+        &mut stream,
+        verified,
+        store,
+        TransferLimits {
+            exchange_timeout: Duration::from_secs(5),
+            session_timeout: Duration::from_secs(15),
+            max_requests: verified.chunks().len(),
+            max_bytes: verified.length(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(progress.bytes, expected_bytes);
+    assert_eq!(progress.missing, 0);
+    write_response(
+        &mut stream,
+        &response(
+            "CONTENT_OK",
+            Payload::Content(ContentReceipt {
+                bytes: verified.length(),
+                chunks: u32::try_from(verified.chunks().len()).unwrap(),
+                peer_bytes: verified.length(),
+                providers_used: 1,
+                provider_peer_ids: vec!["12D3SyntheticLocalFixture".into()],
+                control_relay_peer_id: "12D3SyntheticMockControl".into(),
+                ..ContentReceipt::default()
+            }),
+        ),
+    )
+    .await
+    .unwrap();
+}
+
+fn prepare_browser_handoff(
+    root: &Path,
+    line: &str,
+    bytes: &[u8],
+    assets: &[serde_json::Value],
+) -> (PathBuf, PathBuf, String, u16) {
+    use sha2::{Digest as _, Sha256};
+    let ready: serde_json::Value = serde_json::from_str(line).unwrap();
     assert_eq!(ready["operation"], "native_site_ready");
     assert_eq!(ready["native_publisher_authenticated"], true);
     assert_eq!(ready["https_origin_authenticated"], false);
@@ -425,27 +485,25 @@ async fn scenario(bytes: &[u8], assets: &[serde_json::Value]) -> serde_json::Val
         serde_json::to_writer(&mut file, &handoff_value).unwrap();
         file.flush().unwrap();
     }
-    diagnostic(Stage::BrowserObservation);
-    let mut browser = OwnedChild(
-        Command::new(std::env::var_os("STUDIO_NODE").unwrap())
-            .arg(std::env::var_os("STUDIO_VIEWER_OBSERVER").unwrap())
-            .arg(&handoff)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap(),
-    );
+    (handoff, receipt_path, sha256, port)
+}
+
+async fn observe_browser(
+    browser: &mut OwnedChild,
+    receipt_path: &Path,
+    sha256: &str,
+    expected_bytes: usize,
+    expected_assets: usize,
+) -> serde_json::Value {
     let browser_status = timeout(Duration::from_secs(35), browser.wait()).await;
     if !matches!(&browser_status, Ok(Ok(status)) if status.success()) {
         emit_diagnostic(
             Stage::BrowserObservation,
-            failed_browser_stage(&receipt_path),
+            failed_browser_stage(receipt_path),
         );
     }
     assert!(browser_status.unwrap().unwrap().success());
-    assert!(fs::metadata(&receipt_path).unwrap().len() <= 4096);
+    assert!(fs::metadata(receipt_path).unwrap().len() <= 4096);
     let browser_receipt: serde_json::Value =
         serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
     assert_eq!(browser_receipt.as_object().unwrap().len(), 12);
@@ -453,11 +511,11 @@ async fn scenario(bytes: &[u8], assets: &[serde_json::Value]) -> serde_json::Val
     assert_eq!(browser_receipt["bundle_sha256"], sha256);
     assert_eq!(
         browser_receipt["bundle_bytes"].as_u64(),
-        Some(bytes.len() as u64)
+        Some(expected_bytes as u64)
     );
     assert_eq!(
         browser_receipt["asset_count"].as_u64(),
-        Some(assets.len() as u64)
+        Some(expected_assets as u64)
     );
     for flag in [
         "visible_marker",
@@ -471,18 +529,27 @@ async fn scenario(bytes: &[u8], assets: &[serde_json::Value]) -> serde_json::Val
     }
     assert_eq!(browser_receipt["status"], "passed");
     assert!((1..=1024).contains(&browser_receipt["rendered_http_requests"].as_u64().unwrap()));
-    diagnostic(Stage::Shutdown);
+    browser_receipt
+}
+
+async fn shutdown_viewer(
+    child: &mut OwnedChild,
+    stdout: &mut BufReader<ChildStdout>,
+    line: &mut String,
+    root: &Path,
+    port: u16,
+) {
     nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(child.id().unwrap() as i32),
+        nix::unistd::Pid::from_raw(i32::try_from(child.id().unwrap()).unwrap()),
         nix::sys::signal::Signal::SIGTERM,
     )
     .unwrap();
     line.clear();
-    timeout(Duration::from_secs(5), stdout.read_line(&mut line))
+    timeout(Duration::from_secs(5), stdout.read_line(line))
         .await
         .unwrap()
         .unwrap();
-    let closed: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let closed: serde_json::Value = serde_json::from_str(line).unwrap();
     assert_eq!(closed["operation"], "native_site_closed");
     assert_eq!(closed["private_spool_removed"], true);
     assert!(
@@ -504,14 +571,6 @@ async fn scenario(bytes: &[u8], assets: &[serde_json::Value]) -> serde_json::Val
             .to_string_lossy()
             .starts_with("volparossa-site-")
     }));
-    let result = serde_json::json!({"schema":1,"status":"passed","bundle_sha256":sha256,
-        "bundle_bytes":bytes.len(),"asset_count":assets.len(),"ephemeral_test_publisher":true,
-        "mock_local_control_peer":true,"direct_child_adversarial_cleanup":true,"production_signed_verification":true,"actual_site_open_cli":true,
-        "browser":browser_receipt,"private_spool_removed":true,"listener_closed":true,
-        "network_published":false,"independent_peer_retrieval":false});
-    directory.close().unwrap();
-    diagnostic(Stage::Complete);
-    result
 }
 
 #[cfg(test)]
