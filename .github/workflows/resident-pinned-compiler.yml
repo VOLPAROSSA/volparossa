@@ -59,7 +59,7 @@ jobs:
           mkdir resident-compiler-evidence
           python3 -B - <<'PYBIND'
           import json,os,pathlib,subprocess
-          base='d89aaca694eebb7a81c5a5a0ea9caf1dfa11189c'
+          base='7fa6551f606555dc2ace06af96f5616ff7c2e937'
           allowed={
             '.github/workflows/resident-pinned-compiler.yml',
             'tests/integration/protected-resident-model-build.py',
@@ -146,6 +146,8 @@ jobs:
             libprotobuf32t64=3.21.12-8.2ubuntu0.4
           test "$(protoc --version)" = 'libprotoc 3.21.12'
           python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
       - name: Prepare only the disposable runner's user manager when absent
         run: |
           set -euo pipefail
