@@ -1,0 +1,79 @@
+name: Resident installer private file preparation
+
+on:
+  push:
+    branches: [fix/resident-installer-private-create-20261028]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: resident-installer-io-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  contracts:
+    if: >-
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.ref == 'refs/heads/fix/resident-installer-private-create-20261028'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind the installer-only correction and unchanged runtime inputs
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          umask 077
+          mkdir installer-io-evidence
+          python3 -B - <<'PY'
+          import json,os,pathlib,subprocess
+          base='0d12983afa486e7f18ebc37517dc8a65bd1b346e'
+          allowed={'.github/workflows/resident-installer-io.yml',
+            'tests/integration/protected-resident-model-install.py',
+            'tests/integration/test-protected-resident-model-install.py'}
+          def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
+          subprocess.run(['git','merge-base','--is-ancestor',base,'HEAD'],check=True)
+          assert set(git('diff','--name-only',base,'HEAD').splitlines())==allowed
+          record=dict(version=1,source_commit=os.environ['GITHUB_SHA'],source_tree=git('rev-parse','HEAD^{tree}'),
+            base_commit=base,source_blobs={n:git('rev-parse','HEAD:'+n) for n in sorted(allowed)},
+            final_file_modes_preserved=True,actual_package_installation=False,actual_model_execution=False)
+          pathlib.Path('installer-io-evidence/source.json').write_text(json.dumps(record,sort_keys=True)+'\n')
+          PY
+      - name: Exercise creation permissions flush failures and existing offline installer contracts
+        run: |
+          set -euo pipefail
+          timeout --kill-after=5s 180s python3 -B tests/integration/test-protected-resident-model-install.py -v \
+            2>&1 | tee installer-io-evidence/install.log
+          python3 -B - <<'PY'
+          import pathlib,re
+          text=pathlib.Path('installer-io-evidence/install.log').read_text()
+          assert re.findall(r'^Ran ([0-9]+) tests? in ',text,re.M)==['61']
+          assert re.findall(r'^OK(?: .*)?$',text,re.M)==['OK']
+          assert not re.search(r'\bskipped\b|^FAILED',text,re.M)
+          PY
+      - name: Preserve the exact tested source
+        if: always()
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code HEAD
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: resident-installer-io-${{ github.run_id }}
+          path: installer-io-evidence/
+          retention-days: 14
+          if-no-files-found: warn
