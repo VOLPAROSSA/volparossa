@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
 """Inert builder contracts: mocks/public bytes, no compiler, VM or download."""
+from contextlib import contextmanager, nullcontext
 import hashlib
 import importlib.util
 import json
@@ -230,6 +231,19 @@ class DeadlineAndProcessTests(unittest.TestCase):
             M.command([sys.executable, '-c', 'pass'], deadline())
         self.assertEqual(joined, [0])
 
+    def test_exact_command_environment_omits_legacy_overrides_and_rejects_ambiguous_merge(self):
+        env = {'PATH': '/usr/bin:/bin', 'PUBLIC_FIXED': 'yes'}
+        raw = M.command([sys.executable, '-c', 'import json,os;print(json.dumps(dict(os.environ)))'],
+            deadline(), exact_env=env)
+        value = json.loads(raw)
+        self.assertEqual(value['PUBLIC_FIXED'], 'yes')
+        self.assertNotIn('CARGO_PROFILE_DEV_DEBUG', value)
+        self.assertNotIn('CARGO_INCREMENTAL', value)
+        with mock.patch.object(M.subprocess, 'Popen') as process:
+            with self.assertRaisesRegex(ValueError, '^command_environment$'):
+                M.command(['/public/cargo'], deadline(), extra_env={}, exact_env={})
+            process.assert_not_called()
+
     def test_guest_guard_denies_host_or_root_before_build(self):
         args = types.SimpleNamespace(execute=True, yes=True, disposable_guest=True, deadline_monotonic_ns=deadline())
         with mock.patch.object(M.os, 'getuid', return_value=0), mock.patch.object(M, 'command') as run:
@@ -253,6 +267,189 @@ class DeadlineAndProcessTests(unittest.TestCase):
             run.return_value = b'qemu\n'
             with self.assertRaises(ValueError):
                 M.guest_guard(args)
+
+
+class CompilerDeadlineTests(unittest.TestCase):
+    def test_original_absolute_deadline_restores_alarm_handler_and_timer_on_expiry_or_cancel(self):
+        previous = lambda *_: None
+        for failure in ('expiry', 'cancel'):
+            with self.subTest(failure=failure), \
+                    mock.patch.object(M.signal, 'getsignal', return_value=previous), \
+                    mock.patch.object(M.signal, 'getitimer', return_value=(0.0, 0.0)), \
+                    mock.patch.object(M.signal, 'signal') as handler, \
+                    mock.patch.object(M.signal, 'setitimer') as timer:
+                end = deadline()
+                with self.assertRaises(InterruptedError):
+                    with M.compiler_deadline(end):
+                        if failure == 'expiry':
+                            handler.call_args_list[0].args[1](signal.SIGALRM, None)
+                        raise InterruptedError('cancelled')
+                self.assertEqual(handler.call_args_list[-1], mock.call(signal.SIGALRM, previous))
+                self.assertTrue(all(call.args[0] == signal.SIGALRM for call in handler.call_args_list))
+                self.assertGreater(timer.call_args_list[0].args[1], 0)
+                self.assertLessEqual(timer.call_args_list[0].args[1], 60)
+                self.assertEqual(timer.call_args_list[-2:], [mock.call(signal.ITIMER_REAL, 0),
+                    mock.call(signal.ITIMER_REAL, 0.0, 0.0)])
+
+    def test_active_prior_timer_is_rejected_without_stealing_or_renewing_its_budget(self):
+        for prior in ((10.0, 0.0), (0.0, 1.0)):
+            with self.subTest(prior=prior), mock.patch.object(M.signal, 'getsignal'), \
+                    mock.patch.object(M.signal, 'getitimer', return_value=prior), \
+                    mock.patch.object(M.signal, 'signal') as handler, \
+                    mock.patch.object(M.signal, 'setitimer') as timer:
+                with self.assertRaisesRegex(ValueError, '^compiler_timer_busy$'):
+                    with M.compiler_deadline(deadline()):
+                        self.fail('another timer owner was admitted')
+                handler.assert_not_called(); timer.assert_not_called()
+
+    def test_expired_parent_rejects_before_changing_any_signal(self):
+        with mock.patch.object(M.signal, 'signal') as handler, \
+                mock.patch.object(M.signal, 'setitimer') as timer:
+            with self.assertRaisesRegex(ValueError, '^build_deadline$'):
+                with M.compiler_deadline(time.monotonic_ns() - 1):
+                    self.fail('expired parent was admitted')
+            handler.assert_not_called(); timer.assert_not_called()
+
+
+class CompilerAdapterTests(unittest.TestCase):
+    def compiler(self, directory):
+        core = Path(directory) / 'core'
+        put(core / 'Cargo.lock', b'public current lock')
+        put(core / 'scripts/cargo-source-policy.py', b'public reviewed policy')
+        pin = put(core / 'scripts/rust189-components.json', b'public reviewed components')
+        prefix = Path('/home/vpci/.local/volparossa-rust-1.89.0')
+        events = []
+        class InstallerCleanupUnconfirmed(RuntimeError):
+            pass
+        def activate(_mode, *, env, cwd):
+            self.assertEqual(cwd, core)
+            events.append('activate')
+            return dict(env, CARGO_HOME='/home/vpci/.local/volparossa-cargo-public-v1',
+                GIT_CONFIG_SYSTEM='/dev/null', GIT_ALLOW_PROTOCOL='https', GIT_ASKPASS='/usr/bin/false')
+        policy = dict(activate=mock.Mock(side_effect=activate),
+            validate_active=mock.Mock(side_effect=lambda *_: events.append('policy')),
+            check_command=mock.Mock(side_effect=lambda *_, **__: events.append('command')))
+        compiler = types.SimpleNamespace(PROFILE='rust-1.89.0-20250807', PINS=pin,
+            PINS_SHA256=hashlib.sha256(pin.read_bytes()).hexdigest(), MANIFEST_SHA256='a' * 64,
+            POLICY=policy, CleanupUnconfirmed=InstallerCleanupUnconfirmed,
+            location=mock.Mock(return_value=prefix), pins=mock.Mock(return_value={'reviewed': True}),
+            provision=mock.Mock(return_value=prefix),
+            verify_payload=mock.Mock(side_effect=lambda *_: events.append('payload')),
+            validate_receipt=mock.Mock())
+        return core, prefix, compiler, events
+
+    @contextmanager
+    def admitted(self, core, prefix, compiler, *, command=None):
+        def read(path, _maximum, _deadline):
+            if path == prefix / 'receipt.json': return getattr(compiler, 'receipt_payload', b'{"public":"compiler receipt"}\n')
+            if path == prefix.parent / 'cargo-source-policy.json': return getattr(compiler, 'scope_payload', b'public source scope')
+            return path.read_bytes()
+        with mock.patch.object(M.os, 'getuid', return_value=1000), \
+                mock.patch.object(M.os, 'geteuid', return_value=1000), \
+                mock.patch.object(M.pwd, 'getpwuid', return_value=types.SimpleNamespace(pw_name='vpci', pw_dir='/home/vpci')), \
+                mock.patch.object(Path, 'home', return_value=Path('/home/vpci')), \
+                mock.patch.object(M, 'compiler_module', return_value=compiler), \
+                mock.patch.object(M, 'compiler_deadline', return_value=nullcontext()) as budget, \
+                mock.patch.object(M, 'read_file', side_effect=read), \
+                mock.patch.object(M, 'command', side_effect=command or (lambda *_a, **_k: b'')) as run:
+            yield budget, run
+
+    def test_exact_reviewed_cargo_and_policy_environment_before_and_after_build(self):
+        with tempfile.TemporaryDirectory() as directory:
+            core, prefix, compiler, events = self.compiler(directory)
+            original = dict(os.environ)
+            observed_installer = []
+            compiler.provision.side_effect = lambda *_: observed_installer.append(dict(os.environ)) or prefix
+            with self.admitted(core, prefix, compiler) as (budget, run):
+                end = deadline()
+                proof = M.build_core(core, Path(directory) / 'target', end)
+            budget.assert_called_once_with(end)
+            compiler.location.assert_called_once_with('alpha-guest', mock.ANY)
+            self.assertEqual(events, ['activate', 'payload', 'policy', 'command', 'payload', 'policy'])
+            compiler.validate_receipt.assert_called_once_with({'public': 'compiler receipt'})
+            arguments = ['build', '--locked', '-p', 'volparossa', '--bin', 'volparossa']
+            compiler.POLICY['check_command'].assert_called_once_with(arguments, cwd=core)
+            self.assertEqual(run.call_args.args, ([prefix / 'bin/cargo', *arguments], end))
+            self.assertEqual(run.call_args.kwargs['cap'], 1200)
+            self.assertEqual(run.call_args.kwargs['cwd'], core)
+            env = run.call_args.kwargs['exact_env']
+            self.assertNotIn('extra_env', run.call_args.kwargs)
+            self.assertEqual(env['HOME'], '/home/vpci')
+            self.assertEqual(env['RUSTC'], str(prefix / 'bin/rustc'))
+            self.assertEqual(env['RUSTDOC'], str(prefix / 'bin/rustdoc'))
+            self.assertEqual(env['PATH'], str(prefix / 'bin') + ':' + M.ENV['PATH'])
+            for key in ('CARGO_PROFILE_DEV_DEBUG', 'CARGO_INCREMENTAL'):
+                self.assertNotIn(key, env)
+            self.assertEqual(observed_installer, [env])
+            self.assertEqual(dict(os.environ), original)
+            self.assertTrue(proof['payload_verified_before'] and proof['payload_verified_after'])
+            self.assertEqual(proof['compiler_receipt_sha256'], hashlib.sha256(b'{"public":"compiler receipt"}\n').hexdigest())
+
+    def test_wrong_account_or_actual_home_denies_before_compiler_location_or_network(self):
+        for uid, account, home, declared in ((0, 'vpci', '/home/vpci', '/home/vpci'),
+                (1000, 'other', '/home/vpci', '/home/vpci'),
+                (1000, 'vpci', '/home/other', '/home/vpci'),
+                (1000, 'vpci', '/home/vpci', '/home/other')):
+            with self.subTest(uid=uid, account=account, home=home), \
+                    mock.patch.object(M.os, 'getuid', return_value=uid), \
+                    mock.patch.object(M.os, 'geteuid', return_value=uid), \
+                    mock.patch.object(M.pwd, 'getpwuid', return_value=types.SimpleNamespace(pw_name=account, pw_dir=declared)), \
+                    mock.patch.object(Path, 'home', return_value=Path(home)), \
+                    mock.patch.object(M, 'compiler_module') as module:
+                with self.assertRaisesRegex(ValueError, '^compiler_guest_account$'):
+                    M.build_core(Path('/public/core'), Path('/public/target'), deadline())
+                module.assert_not_called()
+
+    def test_host_and_unsafe_parent_delegate_to_unchanged_guard_before_policy_or_provision(self):
+        for reason in ('not a disposable KVM guest', 'unsafe compiler parent'):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as directory:
+                core, prefix, compiler, _events = self.compiler(directory)
+                compiler.location.side_effect = ValueError(reason)
+                with self.admitted(core, prefix, compiler) as (_budget, run):
+                    with self.assertRaises(ValueError):
+                        M.build_core(core, Path(directory) / 'target', deadline())
+                compiler.POLICY['activate'].assert_not_called()
+                compiler.provision.assert_not_called(); run.assert_not_called()
+
+    def test_policy_denial_precedes_provision_or_compilation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            core, prefix, compiler, _events = self.compiler(directory)
+            compiler.POLICY['activate'].side_effect = ValueError('closed policy denial')
+            with self.admitted(core, prefix, compiler) as (_budget, run):
+                with self.assertRaises(ValueError):
+                    M.build_core(core, Path(directory) / 'target', deadline())
+            compiler.provision.assert_not_called(); run.assert_not_called()
+
+    def test_cancelled_provision_restores_environment_and_cleanup_uncertainty_dominates(self):
+        for cleanup in (False, True):
+            with self.subTest(cleanup=cleanup), tempfile.TemporaryDirectory() as directory:
+                core, prefix, compiler, _events = self.compiler(directory)
+                original = dict(os.environ)
+                error = compiler.CleanupUnconfirmed('PRIVATE_CANARY') if cleanup else InterruptedError('cancelled')
+                compiler.provision.side_effect = error
+                with self.admitted(core, prefix, compiler) as (_budget, run):
+                    with self.assertRaises(M.CleanupUnconfirmed if cleanup else InterruptedError) as caught:
+                        M.build_core(core, Path(directory) / 'target', deadline())
+                self.assertEqual(dict(os.environ), original)
+                if cleanup: self.assertEqual(str(caught.exception), 'compiler_installer_group')
+                run.assert_not_called()
+                compiler.verify_payload.assert_not_called()
+
+    def test_postbuild_payload_or_active_policy_mutation_prevents_successful_proof(self):
+        for kind in ('payload', 'policy', 'receipt', 'scope', 'pins'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                core, prefix, compiler, _events = self.compiler(directory)
+                if kind == 'payload': compiler.verify_payload.side_effect = [None, ValueError('payload changed')]
+                if kind == 'policy': compiler.POLICY['validate_active'].side_effect = [None, ValueError('policy changed')]
+                def command(*_args, **_kwargs):
+                    if kind == 'pins': compiler.PINS.write_bytes(b'changed reviewed metadata')
+                    if kind == 'receipt': compiler.receipt_payload = b'{"public":"changed receipt"}\n'
+                    if kind == 'scope': compiler.scope_payload = b'changed source scope'
+                    return b''
+                with self.admitted(core, prefix, compiler, command=command) as (_budget, run):
+                    with self.assertRaises(ValueError):
+                        M.build_core(core, Path(directory) / 'target', deadline())
+                self.assertEqual(run.call_count, 1)
 
 
 class BuildAndExportTests(unittest.TestCase):
@@ -329,21 +526,21 @@ class BuildAndExportTests(unittest.TestCase):
             self.assertEqual(result['inventory_sha256'], hashlib.sha256((output/'inventory.json').read_bytes()).hexdigest())
 
     def test_build_exact_core_and_native_commands_without_install_or_inference(self):
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(M, 'command', return_value=b'') as run:
+        proof = {'synthetic': 'compiler proof validated separately'}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(M, 'command', return_value=b'') as run, \
+                mock.patch.object(M, 'build_core', return_value=proof) as build:
             output, core = Path(directory), Path('/public/core')
             limit = deadline()
-            binary, native = M.build_assets(core, output, limit)
+            binary, native, compiler = M.build_assets(core, output, limit)
+        build.assert_called_once_with(core, output / 'target', limit)
         calls = run.call_args_list
-        self.assertEqual(len(calls), 6)
-        self.assertEqual(calls[0].args[0], ['/usr/bin/cargo', 'build', '--locked', '-p', 'volparossa', '--bin', 'volparossa'])
-        self.assertEqual(calls[0].kwargs['cap'], 1200)
-        self.assertEqual(calls[0].kwargs['extra_env'], {'CARGO_TARGET_DIR': str(output / 'target'),
-            'CARGO_HOME': str(output / 'cargo-home'), 'HOME': str(output / 'home')})
-        self.assertIn(M.LLAMA_SOURCE, calls[3].args[0])
+        self.assertEqual(len(calls), 5)
+        self.assertIn(M.LLAMA_SOURCE, calls[2].args[0])
         self.assertEqual(calls[-1].kwargs['cap'], 1800)
         self.assertTrue(all(call.args[1] <= limit for call in calls))
         self.assertEqual(binary, output / 'target/debug/volparossa')
         self.assertEqual(native, output / 'native')
+        self.assertIs(compiler, proof)
         text = str(calls)
         for forbidden in ('apt-get', 'sudo', 'resident-guest', 'private-serve', 'torchrun'):
             self.assertNotIn(forbidden, text)
@@ -585,7 +782,8 @@ class OrchestrationTests(unittest.TestCase):
         with mock.patch.object(M, 'guest_guard'), mock.patch.object(M, 'source_binding', side_effect=source), \
                 mock.patch.object(M, 'package_lock', return_value={}), mock.patch.object(M, 'verify_packages', return_value=199), \
                 mock.patch.object(M, 'load_module', return_value=helper), \
-                mock.patch.object(M, 'build_assets', return_value=(args.output/'binary', args.output/'native')), \
+                mock.patch.object(M, 'build_assets', return_value=(args.output/'binary', args.output/'native', {})), \
+                mock.patch.object(M, 'validate_compiler_proof'), \
                 mock.patch.object(M, 'provision', return_value=({}, {})), \
                 mock.patch.object(M, 'export_assets', side_effect=export), \
                 mock.patch.object(M, 'remaining', side_effect=remaining), \
@@ -646,7 +844,8 @@ class OrchestrationTests(unittest.TestCase):
                     mock.patch.object(M, 'package_lock', return_value={}), \
                     mock.patch.object(M, 'verify_packages', side_effect=lambda *_: events.append('packages') or 199), \
                     mock.patch.object(M, 'load_module', return_value=helper), \
-                    mock.patch.object(M, 'build_assets', side_effect=lambda *_: events.append('build') or (args.output/'binary', args.output/'native')), \
+                    mock.patch.object(M, 'build_assets', side_effect=lambda *_: events.append('build') or (args.output/'binary', args.output/'native', {})), \
+                    mock.patch.object(M, 'validate_compiler_proof'), \
                     mock.patch.object(M, 'provision', side_effect=lambda *_: events.append('provision') or ({}, {})), \
                     mock.patch.object(M, 'export_assets', side_effect=lambda *_: events.append('export') or {}):
                 result = M.execute(args)

@@ -52,6 +52,18 @@ def printed(value):
     return ''.join(f'{key}: {value[key]}\n' for key in M.STAT_FIELDS)
 
 
+def compiler_proof():
+    core = HERE.parents[1]
+    compiler = M.BUILD.compiler_module(core)
+    return dict(version=1, kind='protected-resident-guest-compiler', profile=compiler.PROFILE,
+        manifest_sha256=compiler.MANIFEST_SHA256, pins_sha256=compiler.PINS_SHA256,
+        compiler_receipt_sha256='c' * 64, cargo_scope_sha256='d' * 64,
+        cargo_policy_sha256=hashlib.sha256((core / 'scripts/cargo-source-policy.py').read_bytes()).hexdigest(),
+        source_lock_sha256=hashlib.sha256((core / 'Cargo.lock').read_bytes()).hexdigest(),
+        payload_verified_before=True, payload_verified_after=True,
+        cargo_policy_verified_before=True, cargo_policy_verified_after=True)
+
+
 class Fixture:
     def __init__(self, directory):
         self.root = Path(directory)
@@ -70,7 +82,7 @@ class Fixture:
             workload_sha256=M.STAGER.workload_sha256(self.public.value), native_backend_sha256=native,
             asset_files=len(self.public.value['entries']),
             asset_bytes=sum(item.get('bytes', 0) for item in self.public.value['entries'].values()))
-        self.report = dict(version=1, kind='protected-resident-public-model-build', state='assets_built',
+        self.report = dict(version=2, compiler=compiler_proof(), kind='protected-resident-public-model-build', state='assets_built',
             phase='complete', source_commit=SOURCE, source_tree=TREE, code_helper_commit=M.BUILD.CODE_COMMIT,
             code_helper_sha256=M.BUILD.HELPER_SHA256,
             package_lock_sha256=hashlib.sha256((HERE / 'protected-resident-model-debian-lock-v1.json').read_bytes()).hexdigest(),
@@ -332,6 +344,42 @@ class ExportTests(unittest.TestCase):
             self.assertFalse(list((fixture.root / 'export').glob('*.tar')))
             self.assertEqual(sum(call[-1] == 'model_export_assets' for call in fixture.calls), 1)
             self.assertTrue(all(call[2] and call[3] == 'qcow2' for call in fixture.calls))
+
+    def test_current_export_requires_compiler_schema_two_and_explicit_legacy_is_separate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Fixture(directory)
+            self.assertEqual(M.build_result(fixture.report, SOURCE, TREE), fixture.report['export'])
+            legacy = copy.deepcopy(fixture.report)
+            legacy['version'] = 1
+            del legacy['compiler']
+            with self.assertRaisesRegex(ValueError, '^build_result_scope$'):
+                M.build_result(legacy, SOURCE, TREE)
+            self.assertEqual(M.build_result(legacy, SOURCE, TREE, legacy=True), legacy['export'])
+            with self.assertRaisesRegex(ValueError, '^build_result_scope$'):
+                M.build_result(fixture.report, SOURCE, TREE, legacy=True)
+            fixture.report = legacy
+            with self.assertRaises(ValueError):
+                fixture.export()
+            self.assertFalse(any(call[-1] == 'model_export_assets' for call in fixture.calls))
+
+    def test_compiler_proof_is_strict_and_source_bound_before_asset_export(self):
+        fields = ('profile', 'manifest_sha256', 'pins_sha256', 'cargo_policy_sha256', 'source_lock_sha256',
+            'compiler_receipt_sha256', 'cargo_scope_sha256', 'payload_verified_before', 'payload_verified_after',
+            'cargo_policy_verified_before', 'cargo_policy_verified_after', 'version', 'extra', 'missing')
+        for field in fields:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                fixture = Fixture(directory)
+                proof = fixture.report['compiler']
+                if field == 'missing': del proof['profile']
+                elif field == 'extra': proof['PRIVATE_CANARY'] = True
+                elif field == 'version': proof[field] = True
+                elif field.startswith(('payload_verified', 'cargo_policy_verified')): proof[field] = False
+                elif field in ('compiler_receipt_sha256', 'cargo_scope_sha256'): proof[field] = 'not-a-hash'
+                elif field.endswith('sha256'): proof[field] = '0' * 64
+                else: proof[field] = 'moving-stable'
+                with self.assertRaises(ValueError):
+                    fixture.export()
+                self.assertFalse(any(call[-1] == 'model_export_assets' for call in fixture.calls))
 
     def test_builder_failure_or_false_source_never_exports_assets(self):
         for key, value in (('state', 'failed'), ('phase', 'provision'), ('source_tree', '0' * 40),

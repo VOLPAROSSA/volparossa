@@ -163,15 +163,18 @@ def guest_metadata(row, kind, uid, gid, *, size=None, executable=None):
         require(row['st_nlink'] == 1, 'guest_asset_symlink_links')
 
 
-def build_result(value, source, tree):
+def build_result(value, source, tree, *, legacy=False):
     keys = {'version', 'kind', 'state', 'phase', 'source_commit', 'source_tree', 'code_helper_commit',
             'code_helper_sha256', 'package_lock_sha256', 'assets_exported', 'model_execution',
             'worker_execution', 'private_inputs', 'hardware_attestation', 'production_approval',
             'controller_cgroup_cleanup_required', 'direct_child_groups_joined', 'descendants_joined',
             'complete_guest_cleanup', 'scratch_removed', 'installed_build_packages', 'provision',
             'native_build_manifest_sha256', 'export'}
+    if not legacy:
+        keys.add('compiler')
+    require(type(legacy) is bool, 'build_result_profile')
     require(type(value) is dict and value.keys() == keys and type(value['version']) is int
-            and value['version'] == 1 and value['kind'] == 'protected-resident-public-model-build'
+            and value['version'] == (1 if legacy else 2) and value['kind'] == 'protected-resident-public-model-build'
             and value['state'] == 'assets_built' and value['phase'] == 'complete'
             and value['source_commit'] == source and value['source_tree'] == tree
             and value['code_helper_commit'] == BUILD.CODE_COMMIT
@@ -181,6 +184,8 @@ def build_result(value, source, tree):
             and all(value[key] is False for key in ('model_execution', 'worker_execution', 'private_inputs',
                     'hardware_attestation', 'production_approval', 'complete_guest_cleanup', 'scratch_removed')),
             'build_result_scope')
+    if not legacy:
+        BUILD.validate_compiler_proof(value['compiler'], HERE.parents[1])
     lock = hashlib.sha256((HERE / 'protected-resident-model-debian-lock-v1.json').read_bytes()).hexdigest()
     require(value['package_lock_sha256'] == lock and type(value['installed_build_packages']) is int
             and value['installed_build_packages'] == 199 and type(value['provision']) is dict

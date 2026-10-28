@@ -10,6 +10,7 @@ No inference, owner approval, hardware appraisal or private input is performed.
 Incomplete output is retained for controller-owned cleanup after the VM joins.
 """
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -238,15 +239,17 @@ def group_absent(pid):
         time.sleep(.02)
 
 
-def command(argv, deadline, *, cap=300, cwd=None, extra_env=None, maximum=MAX_LOG):
+def command(argv, deadline, *, cap=300, cwd=None, extra_env=None, exact_env=None, maximum=MAX_LOG):
     """Bound output; retain unreaped leader until final group signal.
 
     A separate-session compiler is ultimately owned by the controller's guest
     cgroup. This function claims only its direct leader/group, not that cgroup.
     """
+    require(exact_env is None or extra_env is None, 'command_environment')
     end = time.monotonic() + remaining(deadline, cap)
+    environment = dict(ENV, **(extra_env or {})) if exact_env is None else dict(exact_env)
     process = subprocess.Popen([str(item) for item in argv], cwd=cwd,
-        env=dict(ENV, **(extra_env or {})), stdin=subprocess.DEVNULL,
+        env=environment, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, close_fds=True)
     output, count = bytearray(), 0
     try:
@@ -358,14 +361,130 @@ def verify_packages(lock, deadline):
     return len(names)
 
 
+@contextmanager
+def compiler_deadline(deadline):
+    """Own one finite timer; leave existing cancellation handlers unchanged.
+
+    An already armed alarm is another owner's budget, so reject it untouched.
+    Cleanup remains bounded by the existing outer guest unit/cgroup contract.
+    """
+    remaining(deadline)
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    require(previous_timer == (0.0, 0.0), 'compiler_timer_busy')
+
+    def expired(_signum, _frame):
+        raise InterruptedError('compiler_deadline')
+
+    signal.signal(signal.SIGALRM, expired)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, remaining(deadline))
+        yield
+        remaining(deadline)
+    finally:
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        finally:
+            try:
+                signal.signal(signal.SIGALRM, previous_handler)
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+
+
+def compiler_module(core):
+    return load_module(core / 'scripts/provision-rust189.py', 'resident_rust189')
+
+
+def validate_compiler_proof(value, core):
+    """Closed source-bound observations; hashes never grant compiler authority."""
+    fields = {'version', 'kind', 'profile', 'manifest_sha256', 'pins_sha256',
+        'compiler_receipt_sha256', 'cargo_policy_sha256', 'cargo_scope_sha256',
+        'source_lock_sha256', 'payload_verified_before', 'payload_verified_after',
+        'cargo_policy_verified_before', 'cargo_policy_verified_after'}
+    require(type(value) is dict and value.keys() == fields
+            and type(value['version']) is int and value['version'] == 1
+            and value['kind'] == 'protected-resident-guest-compiler'
+            and all(value[key] is True for key in ('payload_verified_before', 'payload_verified_after',
+                'cargo_policy_verified_before', 'cargo_policy_verified_after')), 'compiler_proof_scope')
+    compiler = compiler_module(core)
+    require(value['profile'] == compiler.PROFILE and value['manifest_sha256'] == compiler.MANIFEST_SHA256
+            and value['pins_sha256'] == compiler.PINS_SHA256, 'compiler_proof_profile')
+    for key in ('manifest_sha256', 'pins_sha256', 'compiler_receipt_sha256', 'cargo_policy_sha256',
+                'cargo_scope_sha256', 'source_lock_sha256'):
+        require(type(value[key]) is str and SHA.fullmatch(value[key]), 'compiler_proof_digest')
+    require(hashlib.sha256(compiler.PINS.read_bytes()).hexdigest() == value['pins_sha256']
+            and hashlib.sha256((core / 'scripts/cargo-source-policy.py').read_bytes()).hexdigest()
+                == value['cargo_policy_sha256']
+            and hashlib.sha256((core / 'Cargo.lock').read_bytes()).hexdigest()
+                == value['source_lock_sha256'], 'compiler_proof_source')
+
+
+def build_core(core, target, deadline):
+    # Verify the actual process identity/home before any module can create .local.
+    require(os.getuid() == os.geteuid() > 0, 'compiler_guest_account')
+    account = pwd.getpwuid(os.getuid())
+    require(account.pw_name == 'vpci' and Path(account.pw_dir) == Path('/home/vpci')
+            and Path.home() == Path('/home/vpci'), 'compiler_guest_account')
+    with compiler_deadline(deadline):
+        compiler = compiler_module(core)
+        # The unchanged provisioner's location guard checks Debian/systemd/KVM,
+        # account ownership and symlinks before network, extraction or execution.
+        expected_prefix = Path('/home/vpci/.local/volparossa-rust-1.89.0')
+        require(compiler.location('alpha-guest', os.environ) == expected_prefix, 'compiler_prefix')
+        base_env = {name: value for name, value in ENV.items()
+                    if name not in ('CARGO_PROFILE_DEV_DEBUG', 'CARGO_INCREMENTAL')}
+        base_env.update(HOME='/home/vpci', CARGO_TARGET_DIR=str(target))
+        policy = compiler.POLICY
+        cargo_env = policy['activate']('alpha-guest', env=base_env, cwd=core)
+        cargo_env.update(PATH=str(expected_prefix / 'bin') + ':' + ENV['PATH'],
+            RUSTC=str(expected_prefix / 'bin/rustc'), RUSTDOC=str(expected_prefix / 'bin/rustdoc'))
+        # Installers inherit this same sanitized environment. Restore the builder's
+        # environment even on cancellation; admission used its real original home.
+        previous_env = dict(os.environ)
+        try:
+            os.environ.clear()
+            os.environ.update(cargo_env)
+            try:
+                prefix = compiler.provision('alpha-guest', cargo_env)
+            except compiler.CleanupUnconfirmed as error:
+                # Preserve the provisioner's prefix/staging; do not relabel its
+                # installer-group uncertainty as joined direct children.
+                raise CleanupUnconfirmed('compiler_installer_group') from error
+        finally:
+            os.environ.clear()
+            os.environ.update(previous_env)
+        require(prefix == expected_prefix, 'compiler_prefix')
+        metadata = compiler.pins()
+        compiler.verify_payload(prefix, metadata)
+        policy['validate_active'](core, cargo_env)
+        receipt_path = prefix / 'receipt.json'
+        scope_path = prefix.parent / 'cargo-source-policy.json'
+        receipt = read_file(receipt_path, 32768, deadline)
+        compiler.validate_receipt(parse(receipt))
+        scope = read_file(scope_path, 65536, deadline)
+        arguments = ['build', '--locked', '-p', 'volparossa', '--bin', 'volparossa']
+        policy['check_command'](arguments, cwd=core)
+        command([prefix / 'bin/cargo', *arguments], deadline, cap=1200, cwd=core, exact_env=cargo_env)
+        compiler.verify_payload(prefix, metadata)
+        policy['validate_active'](core, cargo_env)
+        require(read_file(receipt_path, 32768, deadline) == receipt
+                and read_file(scope_path, 65536, deadline) == scope, 'compiler_receipt_changed')
+        proof = dict(version=1, kind='protected-resident-guest-compiler', profile=compiler.PROFILE,
+            manifest_sha256=compiler.MANIFEST_SHA256, pins_sha256=compiler.PINS_SHA256,
+            compiler_receipt_sha256=hashlib.sha256(receipt).hexdigest(),
+            cargo_policy_sha256=hashlib.sha256(read_file(core / 'scripts/cargo-source-policy.py',
+                1024 ** 2, deadline)).hexdigest(), cargo_scope_sha256=hashlib.sha256(scope).hexdigest(),
+            source_lock_sha256=hashlib.sha256(read_file(core / 'Cargo.lock', 4 * 1024 ** 2, deadline)).hexdigest(),
+            payload_verified_before=True, payload_verified_after=True,
+            cargo_policy_verified_before=True, cargo_policy_verified_after=True)
+        validate_compiler_proof(proof, core)
+    return proof
+
+
 def build_assets(core, output, deadline):
     target, native = output / 'target', output / 'native'
     native.mkdir(mode=0o700)
-    for name in ('home', 'cargo-home'):
-        (output / name).mkdir(mode=0o700)
-    command(['/usr/bin/cargo', 'build', '--locked', '-p', 'volparossa', '--bin', 'volparossa'],
-            deadline, cap=1200, cwd=core, extra_env={'CARGO_TARGET_DIR': str(target),
-                'CARGO_HOME': str(output / 'cargo-home'), 'HOME': str(output / 'home')})
+    compiler = build_core(core, target, deadline)
     source = native / 'llama-source'
     source.mkdir(mode=0o700)
     git = ['/usr/bin/git', '-c', 'credential.helper=', '-c', 'protocol.file.allow=never',
@@ -378,7 +497,7 @@ def build_assets(core, output, deadline):
     command(['/usr/bin/python3.13', '-B', core / 'workers/volparossa-ml/build_llama_cpu.py',
              '--source', source, '--output', native / 'llama-build', '--execute'],
             native_deadline, cap=1800)
-    return target / 'debug/volparossa', native
+    return target / 'debug/volparossa', native, compiler
 
 
 def provision(core, native, deadline):
@@ -555,7 +674,7 @@ def execute(args):
         require(helper.SOURCE == LLAMA_SOURCE and helper.ORIGIN == LLAMA_ORIGIN and helper.MODEL == MODEL,
                 'native_helper_contract')
         report['phase'] = 'build'
-        binary, native = build_assets(core, output, deadline)
+        binary, native, compiler = build_assets(core, output, deadline)
         remaining(deadline)
         built = helper.validate_build(core, native)
         report['phase'] = 'provision'
@@ -572,7 +691,9 @@ def execute(args):
         report['export_diagnostic']['operation'] = 'final_deadline'
         remaining(deadline)
         report.pop('export_diagnostic')  # Preserve the exact successful assembly receipt schema.
-        report.update(state='assets_built', phase='complete', assets_exported=True)
+        validate_compiler_proof(compiler, core)
+        remaining(deadline)
+        report.update(version=2, compiler=compiler, state='assets_built', phase='complete', assets_exported=True)
     except CleanupUnconfirmed as error:
         report['direct_child_groups_joined'] = False
         if 'export_diagnostic' in report:

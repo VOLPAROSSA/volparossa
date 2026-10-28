@@ -1,0 +1,240 @@
+name: Pinned resident guest compiler contracts and public trial
+
+on:
+  push:
+    branches: [fix/resident-pinned-guest-compiler-20261028]
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: Source checks or the explicit public-only immutable model trial
+        type: choice
+        default: source-contracts
+        options: [source-contracts, public-model]
+        required: true
+      expected_source:
+        description: Exact reviewed commit required for an explicit public model trial
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: resident-pinned-compiler-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_BUILD_JOBS: '2'
+  CARGO_TERM_COLOR: never
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  contracts:
+    if: >-
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.ref == 'refs/heads/fix/resident-pinned-guest-compiler-20261028' &&
+      (github.event_name == 'push' || inputs.scenario == 'source-contracts' ||
+      (inputs.scenario == 'public-model' && inputs.expected_source == github.sha))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind compiler adapter to the retained current-main composition
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          umask 077
+          mkdir resident-compiler-evidence
+          python3 -B - <<'PYBIND'
+          import json,os,pathlib,subprocess
+          base='d89aaca694eebb7a81c5a5a0ea9caf1dfa11189c'
+          allowed={
+            '.github/workflows/resident-pinned-compiler.yml',
+            'tests/integration/protected-resident-model-build.py',
+            'tests/integration/test-protected-resident-model-build.py',
+            'tests/integration/protected-resident-model-assemble.py',
+            'tests/integration/test-protected-resident-model-assemble.py',
+            'tests/integration/protected-resident-model-run.py',
+            'tests/integration/test-protected-resident-model-run.py',
+          }
+          def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
+          subprocess.run(['git','merge-base','--is-ancestor',base,'HEAD'],check=True)
+          changed=set(git('diff','--name-only',base,'HEAD').splitlines())
+          assert changed==allowed
+          receipt=dict(version=1,source_commit=os.environ['GITHUB_SHA'],source_tree=git('rev-parse','HEAD^{tree}'),
+            composition_commit=base,source_blobs={n:git('rev-parse','HEAD:'+n) for n in sorted(changed)},
+            rust_dependency_and_compiler_policy_sources_unchanged=True,
+            actual_model_execution=False,private_workload_acceptance=False)
+          pathlib.Path('resident-compiler-evidence/source.json').write_text(json.dumps(receipt,sort_keys=True)+'\n')
+          PYBIND
+      - name: Check the exact unchanged compiler and source policy contracts
+        run: |
+          set -euo pipefail
+          python3 -B scripts/test-provision-rust189.py -v 2>&1 | tee resident-compiler-evidence/compiler-policy.log
+          python3 -B scripts/test-cargo-source-policy.py -v 2>&1 | tee resident-compiler-evidence/cargo-policy.log
+      - name: Verify builder receipt and controller contracts without native execution
+        run: |
+          set -euo pipefail
+          for suite in build assemble run; do
+            timeout --kill-after=5s 180s python3 -B "tests/integration/test-protected-resident-model-$suite.py" -v \
+              2>&1 | tee "resident-compiler-evidence/$suite.log"
+          done
+      - name: Preserve exact tested source
+        if: always()
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code HEAD
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: resident-compiler-contracts-${{ github.run_id }}
+          path: resident-compiler-evidence/
+          retention-days: 14
+          if-no-files-found: warn
+
+  public-model:
+    needs: contracts
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.scenario == 'public-model' &&
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.ref == 'refs/heads/fix/resident-pinned-guest-compiler-20261028' &&
+      inputs.expected_source == github.sha && needs.contracts.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      EXPECTED_SOURCE: ${{ inputs.expected_source }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind explicit hosted source
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
+          test "$GITHUB_SHA" = "$EXPECTED_SOURCE"
+          test "$GITHUB_WORKFLOW_SHA" = "$EXPECTED_SOURCE"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - name: Install official tools on the disposable hosted runner only
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(dpkg --print-architecture)" = amd64
+          sudo -n apt-get update
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+            libguestfs-tools qemu-system-x86 qemu-utils cryptsetup-bin cloud-image-utils \
+            openssh-client openssl cpio zstd initramfs-tools-core dbus-user-session \
+            protobuf-compiler=3.21.12-8.2ubuntu0.4 \
+            libprotoc32t64=3.21.12-8.2ubuntu0.4 \
+            libprotobuf32t64=3.21.12-8.2ubuntu0.4
+          test "$(protoc --version)" = 'libprotoc 3.21.12'
+          python3 -B scripts/provision-rust189.py runner
+      - name: Prepare only the disposable runner's user manager when absent
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          umask 077
+          if ! sudo -n systemctl is-active --quiet "user@$(id -u).service"; then
+            touch "$RUNNER_TEMP/vp-model-user-manager-owned-$GITHUB_RUN_ID"
+            sudo -n systemctl start "user@$(id -u).service"
+          fi
+          test -S "/run/user/$(id -u)/bus"
+      - name: Compile the same-source requester for the hosted operating system
+        timeout-minutes: 35
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          cargo build --locked --offline -p volparossa --bin volparossa
+          # Cargo may hardlink target/debug to target/debug/deps. Make an owned
+          # single-link copy; do not loosen the controller's executable guard.
+          test ! -e target/resident-public-requester
+          cp --no-clobber target/debug/volparossa target/resident-public-requester
+          chmod 0700 target/resident-public-requester
+          test "$(stat -c '%h' target/resident-public-requester)" = 1
+          cmp target/debug/volparossa target/resident-public-requester
+          python3 -B - <<'PY'
+          import os,runpy
+          # Recheck the authenticated payload and the already active source policy.
+          runpy.run_path('scripts/provision-rust189.py')['provision']('runner',dict(os.environ))
+          PY
+          git diff --exit-code HEAD
+      - name: Execute the public model trial with process-scoped KVM access
+        timeout-minutes: 245
+        run: |
+          set -euo pipefail
+          umask 077
+          launch_uid="$(id -u)"
+          launch_gid="$(stat -c '%g' /dev/kvm)"
+          [[ "$launch_uid" =~ ^[1-9][0-9]*$ && "$launch_gid" =~ ^[1-9][0-9]*$ ]]
+          kernel_release="$(uname -r)"
+          [[ "$kernel_release" =~ ^[0-9][A-Za-z0-9._+-]{0,127}$ ]]
+          kernel_copy="$RUNNER_TEMP/vp-model-kernel-$GITHUB_RUN_ID"
+          # A bounded read only; no chmod/chown of the host kernel or KVM device.
+          (set -o noclobber
+            sudo -n /usr/bin/timeout --kill-after=2s 15s /usr/bin/dd \
+              "if=/boot/vmlinuz-$kernel_release" iflag=nofollow,count_bytes \
+              count=67108865 bs=1048576 status=none >"$kernel_copy")
+          sudo -n -- /usr/bin/setpriv --reuid="$launch_uid" --regid="$launch_gid" \
+            --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- \
+            /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 \
+            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_SHA="$GITHUB_SHA" GITHUB_REF="$GITHUB_REF" \
+            GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" RUNNER_TEMP="$RUNNER_TEMP" \
+            VP_PUBLIC_BOOT_UID="$launch_uid" VP_PUBLIC_BOOT_KVM_GID="$launch_gid" \
+            python3 -B tests/integration/protected-resident-model-run.py --execute --yes \
+              --expected-source "$EXPECTED_SOURCE" --work "$RUNNER_TEMP/vp-resident-model-$GITHUB_RUN_ID" \
+              --appliance-kernel "$kernel_copy" --requester "$GITHUB_WORKSPACE/target/resident-public-requester"
+      - name: Restore only the user manager started by this job
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          if test -f "$RUNNER_TEMP/vp-model-user-manager-owned-$GITHUB_RUN_ID"; then
+            sudo -n systemctl stop "user@$(id -u).service"
+            test "$(sudo -n systemctl show "user@$(id -u).service" --property=ActiveState --value)" = inactive
+          fi
+      - name: Verify source after the trial
+        if: always()
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          git diff --exit-code HEAD
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: public-resident-model-trial-${{ github.run_id }}
+          # Closed public receipts only. Never upload SSH/TLS/signing keys,
+          # guest filesystems, raw source inputs or the model payload directory.
+          path: |
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/install-build.json
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/install-runtime.json
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/build-cleanup.json
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/model-build.json
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/workload.json
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/initrd.json
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/sealed-inputs.json
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/requester.json
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/model-boot.json
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/corrupt-boot.json
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/result.json
+          if-no-files-found: warn
+          retention-days: 14
+
