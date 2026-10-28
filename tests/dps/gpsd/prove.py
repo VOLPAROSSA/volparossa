@@ -21,11 +21,21 @@ from common import (ROOT, CommandFailure, clean_environment, command, digest, ho
 from fixture import fresh_fixture
 
 PARENT_NET = 'VOLPAROSSA_DPS_GPSD_PARENT_NETNS'
+GPSFAKE_WATCH = '?WATCH={"enable":true,"json":true,"nmea":false,"raw":0}'
 SCENARIOS = [('normal', 'positive'), ('sanitized', 'positive'),
              ('normal', 'unknown_datum'), ('normal', 'missing_height')]
 LIMITATIONS = {'CallerSuppliedEvidence', 'PhysicalIntegrityUnverified',
                'PhysicalIndependenceUnverified', 'UncertaintyConfidenceUnknown',
                'NoSensorFusion', 'NoSensorOrClockVerification', 'PairwiseConsistencyOnly'}
+
+
+def gpsfake_argv(normal, port, fixture_path):
+    if port not in (29471, 29472):
+        raise ValueError('fixed actual/diagnostic fixture port required')
+    # Official pipe mode sends its own WATCH and waits 1.4 seconds before feed.
+    # Unbuffered Python preserves that public mirror while the product has its own pipe.
+    return ['/usr/bin/python3', '-B', '-u', str(normal / 'gpsfake'), '-q', '-1', '-p',
+            '-r', GPSFAKE_WATCH, '-c', '0.04', '-P', str(port), str(fixture_path)]
 
 
 def loopback_only(devices, ipv4, ipv6):
@@ -69,24 +79,40 @@ def isolation(parent_ipc, parent_pid):
             'empty_groups': True, 'all_capabilities_zero': True, 'no_new_privileges': True}
 
 
-def descendants(pid):
+def descendants(pid, proc_root=Path('/proc')):
     pending = [pid]
     result = set()
     while pending:
         parent = pending.pop()
         try:
-            raw = Path('/proc', str(parent), 'task', str(parent), 'children').read_text()
-        except FileNotFoundError:
+            tasks = []
+            with os.scandir(proc_root / str(parent) / 'task') as entries:
+                for entry in entries:
+                    if (len(tasks) >= 64 or not entry.name.isascii() or not entry.name.isdecimal() or
+                            len(entry.name) > 10):
+                        raise ValueError('fixture task inventory exceeds its bound')
+                    tasks.append(Path(entry.path))
+        except (FileNotFoundError, ProcessLookupError):
             continue
-        if len(raw) > 256:
-            raise ValueError('fixture child inventory exceeds its bound')
-        for token in raw.split():
-            child = int(token)
-            if child not in result:
-                result.add(child)
-                pending.append(child)
-        if len(result) > 16:
-            raise ValueError('fixture descendant count exceeds its bound')
+        # Linux children is per task/TID. Tokio may spawn gpspipe on a worker,
+        # so inspecting only task/<main-pid>/children misses a genuine child.
+        for task in tasks:
+            try:
+                with (task / 'children').open('rb') as stream:
+                    raw = stream.read(257)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            if len(raw) > 256:
+                raise ValueError('fixture child inventory exceeds its bound')
+            for token in raw.split():
+                if not token.isdigit() or len(token) > 10 or int(token) == 0:
+                    raise ValueError('invalid fixture child PID')
+                child = int(token)
+                if child not in result:
+                    if len(result) >= 16:
+                        raise ValueError('fixture descendant count exceeds its bound')
+                    result.add(child)
+                    pending.append(child)
     return result
 
 
@@ -251,9 +277,8 @@ def diagnose_public_tpv(kind, receipt, evidence, deadline):
     try:
         if not closed_port(port) or time.monotonic() >= end - 10:
             raise ValueError('diagnostic port or original budget unavailable')
-        log = (evidence / (label + '-gpsfake.log')).open('xb')
-        child = subprocess.Popen(['/usr/bin/python3', '-B', str(normal / 'gpsfake'),
-                                  '-q', '-1', '-c', '0.04', '-P', str(port), str(fixture_path)],
+        log = (evidence / (label + '-PUBLIC-SYNTHETIC-gpsfake.log')).open('xb')
+        child = subprocess.Popen(gpsfake_argv(normal, port, fixture_path),
                                  cwd=normal, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, start_new_session=True)
         os.set_blocking(child.stdout.fileno(), False)
@@ -381,7 +406,7 @@ def run_case(kind, scenario, core, receipt, evidence, deadline):
     port = 29471
     if not closed_port(port):
         raise ValueError('fixture loopback port already occupied')
-    log_path = evidence / (label + '-gpsfake.log')
+    log_path = evidence / (label + '-PUBLIC-SYNTHETIC-gpsfake.log')
     native_pids = set()
     observed_pipe = set()
     daemon_seen = False
@@ -393,8 +418,7 @@ def run_case(kind, scenario, core, receipt, evidence, deadline):
     try:
         with log_path.open('xb') as log:
             os.chmod(log_path, 0o600)
-            child = subprocess.Popen(['/usr/bin/python3', '-B', str(normal / 'gpsfake'),
-                                      '-q', '-1', '-c', '0.04', '-P', str(port), str(fixture_path)],
+            child = subprocess.Popen(gpsfake_argv(normal, port, fixture_path),
                                      cwd=normal, env=env, stdin=subprocess.DEVNULL,
                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
             os.set_blocking(child.stdout.fileno(), False)
@@ -430,9 +454,12 @@ def run_case(kind, scenario, core, receipt, evidence, deadline):
                 for pid in descendants(core_child.pid):
                     if executable(pid) == row['gpspipe']['path']:
                         try:
-                            argv = Path('/proc', str(pid), 'cmdline').read_bytes()
-                        except FileNotFoundError:
+                            with Path('/proc', str(pid), 'cmdline').open('rb') as stream:
+                                argv = stream.read(1025)
+                        except (FileNotFoundError, ProcessLookupError):
                             continue
+                        if len(argv) > 1024:
+                            raise ValueError('Core child argument bytes exceed their bound')
                         expected = [b'gpspipe', b'-w', b'-B', b'-n', b'32', b'-x', b'8',
                                     ('127.0.0.1:' + str(port)).encode(), b'']
                         if argv.split(b'\0') != expected:

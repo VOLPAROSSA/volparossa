@@ -20,8 +20,10 @@ def fixture(now, scenario='positive'):
     # prime meridian, 10m above the ellipsoid. Never a developer/device fix.
     result = bytearray(b'# Date: ' + now.strftime('%Y-%m-%d').encode() + b'\n')
     for lag in (3, 2, 1):
-        epoch = (now - timedelta(seconds=lag)).replace(microsecond=0)
-        hhmmss = epoch.strftime('%H%M%S') + '.00'
+        epoch = now - timedelta(seconds=lag)
+        # Preserve the original past UTC, flooring by less than 10ms. Whole-second
+        # truncation needlessly spent up to 999ms of the product's 5s age bound.
+        hhmmss = epoch.strftime('%H%M%S') + '.%02d' % (epoch.microsecond // 10000)
         date = epoch.strftime('%d%m%y')
         result.extend(sentence('GPZDA,' + hhmmss + epoch.strftime(',%d,%m,%Y,00,00')))
         # GPSD's PASHR,POS parser consumes field9 directly as WGS84 HAE.

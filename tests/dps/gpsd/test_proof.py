@@ -21,7 +21,7 @@ from build import (PYTHON_CARRIER, SANITIZERS, TARGETS, build_argv, build_enviro
                    compile_observation, download, effective_profile, unpack)
 from common import CommandFailure, command, pins, strict_json
 from fixture import fixture, sentence
-from prove import (LIMITATIONS, failure_diagnostic, isolation, loopback_only,
+from prove import (GPSFAKE_WATCH, LIMITATIONS, descendants, failure_diagnostic, gpsfake_argv, isolation, loopback_only,
                    public_tpv_summary, quality, terminate_diagnostic, write_case_receipt)
 
 
@@ -36,6 +36,64 @@ def valid_quality():
 
 
 class Contracts(unittest.TestCase):
+    def test_actual_and_diagnostic_use_official_pipe_warmup_with_json_only_private_watch(self):
+        for port in (29471, 29472):
+            argv = gpsfake_argv(Path('/owned/normal'), port, Path('/owned/PUBLIC-SYNTHETIC.nmea'))
+            self.assertEqual(argv[:4], ['/usr/bin/python3', '-B', '-u', '/owned/normal/gpsfake'])
+            self.assertIn('-p', argv)
+            self.assertIn('-1', argv)
+            self.assertEqual(argv[argv.index('-r') + 1], GPSFAKE_WATCH)
+            self.assertEqual(json.loads(GPSFAKE_WATCH.removeprefix('?WATCH=')),
+                             {'enable': True, 'json': True, 'nmea': False, 'raw': 0})
+            self.assertEqual(argv[argv.index('-P') + 1], str(port))
+            self.assertNotIn('-n', argv)
+        with self.assertRaises(ValueError):
+            gpsfake_argv(Path('/owned'), 2947, Path('/owned/fixture'))
+
+    def test_public_fixture_preserves_past_fraction_with_less_than_ten_ms_floor(self):
+        now = datetime(2026, 10, 28, 12, 0, 4, 567890, tzinfo=timezone.utc)
+        raw = fixture(now)
+        for lag in (3, 2, 1):
+            expected = '12000%d.56' % (4 - lag)
+            self.assertIn(expected.encode(), raw)
+            observed = datetime.strptime('20261028' + expected, '%Y%m%d%H%M%S.%f').replace(tzinfo=timezone.utc)
+            age = (now - observed).total_seconds()
+            self.assertGreaterEqual(age, lag)
+            self.assertLess(age - lag, 0.010)
+        self.assertNotIn(b'120004.56', raw)
+
+    def test_child_observer_includes_worker_thread_and_nested_descendants(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            for pid, tid, children in [(10, 10, b''), (10, 11, b'20 '),
+                                        (20, 20, b'30 '), (30, 30, b'')]:
+                task = proc / str(pid) / 'task' / str(tid)
+                task.mkdir(parents=True, exist_ok=True)
+                (task / 'children').write_bytes(children)
+            self.assertEqual(descendants(10, proc), {20, 30})
+            self.assertEqual(descendants(999, proc), set())
+            (proc / '10/task/11/children').unlink()
+            self.assertEqual(descendants(10, proc), set())
+
+    def test_child_observer_rejects_thread_pid_and_input_byte_overflow(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            tasks = proc / '10/task'
+            tasks.mkdir(parents=True)
+            for tid in range(65):
+                (tasks / str(tid + 10)).mkdir()
+            with self.assertRaises(ValueError):
+                descendants(10, proc)
+            for task in tasks.iterdir():
+                task.rmdir()
+            task = tasks / '10'
+            task.mkdir()
+            for raw in [b'2' * 257, b'0 ', b'bad ', b' '.join(str(pid).encode() for pid in range(20, 37))]:
+                with self.subTest(raw=raw):
+                    (task / 'children').write_bytes(raw)
+                    with self.assertRaises(ValueError):
+                        descendants(10, proc)
+
     def test_source_and_support_closure_fixed(self):
         value = pins()
         self.assertEqual(value['version'], '3.25-5+deb13u2')

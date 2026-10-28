@@ -23,7 +23,7 @@ source or the product's gpspipe executable selection. Clang is set explicitly in
 the build environment because GPSD reads compiler selection from that environment.
 The carrier supports upstream's exact mandatory `-tt -m py_compile tmp.py` form
 without executing the file. Other module/interpreter flag forms fail closed;
-no general module runner is added. The 31 Python contracts include actual hosted
+no general module runner is added. The 35 Python contracts include actual hosted
 carrier compilation success/syntax failure, rejected module forms and private
 support resolution. This carrier correction skips or removes no upstream check
 target; the complete pinned Debian series and selected build configuration remain
@@ -60,14 +60,25 @@ Inside that boundary, the controller runs upstream `scons check` with a fatal
 exit status, then the four real gpsfake -> PTY -> GPSD -> gpspipe -> Core cases in
 `manifest.json`. The positive fixture uses PASHR,POS native ellipsoidal height,
 repeated WGS84 DTM, RMC and ZDA. It contains no GGA-derived positive. All epochs
-are real current UTC minus three, two and one seconds; no old record is stamped
-fresh. Actual GPSD report scheduling and datum propagation must pass the runtime
+are real current UTC minus three, two and one seconds, preserving centiseconds by
+flooring less than 10ms instead of discarding up to 999ms. No timestamp is rounded
+into the future or restamped after receipt. Actual GPSD report scheduling and datum propagation must pass the runtime
 trial; source inspection alone does not establish them.
 
 Normal Python gpsfake/packet helpers drive both copies; in the sanitizer case,
 GPSD_HOME selects the instrumented daemon and PATH selects instrumented gpspipe.
+Actual and diagnostic replays use upstream gpsfake pipe mode with a fixed
+JSON-only WATCH. Its unthreaded initialize sends that WATCH immediately, and the
+official CLI waits 1.4 seconds before feeding, allowing device activation/probes
+to finish. This is the same lifecycle used by upstream's passing regress-driver.
+Unbuffered Python retains the independent public mirror in the bounded
+`*-PUBLIC-SYNTHETIC-gpsfake.log`; the product still owns its separate gpspipe.
 The Core CLI has no test-only executable override. `/proc` observations bind its
-actual child executable and argv to the hashed build. Static libgps linkage avoids
+actual child executable and argv to the hashed build. The bounded child observer
+reads all task/TID children (at most 64 TIDs/process, 256 bytes/TID, 16 descendants),
+including Tokio worker-thread spawns, and tolerates processes/threads disappearing.
+A previous zero observed children count alone did not prove the wrong binary ran.
+Static libgps linkage avoids
 LD_LIBRARY_PATH authority; sanitizer flags and both symbol families are checked.
 Both C and C++ compilation receive `-fno-sanitize-recover=all`, and the proof
 requires that exact flag receipt. UBSan failures therefore terminate gpspipe even
