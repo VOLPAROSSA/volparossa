@@ -1,214 +1,83 @@
-# Codex development and conversation handover
+# Shared development workflow
 
-Resume from durable repository sources, not a previous chat transcript or
-attachment. [AGENTS.md](../../AGENTS.md) contains engineering and host-safety
-rules; the [complete goal](GOAL.md), including its amendments, defines full
-project scope; [DPS_REQUIREMENTS.md](DPS_REQUIREMENTS.md) is the permanent joined
-normative DPS scope; [STUDIO_HOSTING_REQUIREMENTS.md](STUDIO_HOSTING_REQUIREMENTS.md)
-is the complete permanent Studio/hosting/AI addition; and the [implementation ledger](../IMPLEMENTATION_STATUS.md#current-integration-and-active-work)
-defines current evidence and execution priorities. The
-[DPS_GOAL_20261021 archive](DPS_GOAL_20261021.md) preserves original received
-bytes for provenance only, while [services/DPS.md](../services/DPS.md) records
-design and acceptance choices without limiting scope. This workflow describes
-engineering coordination, not the VOLPAROSSA product's decentralized agent scheduler.
+This workflow applies to Codex, OpenCode and other coding agents. The historical
+filename is retained for existing links. Use repository state and the user's latest
+instructions rather than session transcripts or tool-specific rituals.
 
-## Start a fresh conversation
+## Start or resume
 
-1. Open the core checkout and select **GPT-6 Astra / Ultra** manually in Codex.
-   Restart or reload the extension first if it was open during a configuration change.
-   A saved default does not change the model of an existing conversation.
-2. Read [AGENTS.md](../../AGENTS.md), the complete [GOAL.md](GOAL.md),
-   [DPS_REQUIREMENTS.md](DPS_REQUIREMENTS.md),
-   [STUDIO_HOSTING_REQUIREMENTS.md](STUDIO_HOSTING_REQUIREMENTS.md), and the ledger's current-work and
-   retained-branches sections. Review [GOAL_VERIFICATION.md](GOAL_VERIFICATION.md)
-   and run the inert [goal preservation verifier](../../scripts/verify-goal-preservation.py)
-   as documented there. Follow relevant technical links; do not load the entire
-   historical ledger into every subagent.
-3. Inspect `git status --short --branch`, `git worktree list` and current remote
-   heads/checks before choosing a checkout. Read the affected application's
-   instructions and README/status next. Local branches can be older than `main`.
-4. Inspect the active Codex goal. In a new conversation with no active goal,
-   manually select or create it using the exact copyable
-   UI text in [PURSUING_GOAL.md](PURSUING_GOAL.md). Do not mark an unfinished
-   project complete, restart it, or create a replacement merely to transfer
-   conversations. Preserve active work and continue the existing execution plan;
-   do not silently shrink the goal. The 2026-10-20 follow-up explicitly
-   authorizes organization-wide efficiency and quality work alongside these
-   integrations; it supersedes the handover-only deferral of that work.
+1. Read the task, applicable AGENTS instructions and the compact
+   [implementation status](../IMPLEMENTATION_STATUS.md). For a full-project resume,
+   read the complete [goal](GOAL.md), including its integrated [DPS](GOAL.md#dps)
+   and [Studio/hosting](GOAL.md#studio) sections. For a bounded task, load the
+   relevant requirements and contracts.
+2. Inspect status and ownership before writing. Use `git status --short --branch`
+   and, when working across checkouts, `git worktree list`. Refresh remote heads,
+   relevant PRs and CI when integration decisions depend on them; old pending or
+   running records are not live state. Read affected applications' own instructions.
+3. Continue useful unfinished work according to dependencies. Reference GOAL when
+   changing clients or sessions; no parallel goal prompt, special UI or prior
+   attachment is required. Preserve an existing unfinished goal rather than
+   completing/recreating it to change its display text.
 
-Use the exact first-message text in [PURSUING_GOAL.md](PURSUING_GOAL.md); do not
-depend on a previous transcript or attachment for requirements. Preserve the
-complete repository goal, all clarifications and active branches. Recheck the
-live worktree and ongoing tasks; coordinate ownership before using an active
-checkout, and preserve useful work when recovering or isolating branches. This
-handover does not call for Codex configuration changes, software installation
-or permission expansion.
+Do not read provenance snapshots or the entire evidence history at startup.
+Requirements are authoritative for scope; status is evidence and priorities, not a
+replacement specification. The [documentation index](../README.md) locates topics.
 
-## Delegate by task and ownership
+## Plan and execute
 
-| Role | Model and initial effort | Responsibility |
-| --- | --- | --- |
-| Principal | `gpt-6-astra`, Ultra | Architecture, consequential decisions, prioritization, coordination and integration. |
-| `volparossa_implementer` | `gpt-6.1-sol`, High | Substantial implementation, integration and complex debugging. |
-| `volparossa_reviewer` | `gpt-6.1-sol`, High | Independent technical review of correctness, privacy and acceptance evidence. |
-| `volparossa_support` | `gpt-6-luna`, Medium | Bounded exploration, documentation and assigned focused checks. |
+Select models, reasoning effort, tools, skills and any agents dynamically using
+available client capabilities, task complexity, uncertainty, risk, latency and cost.
+Reassess when requirements or evidence change. There is no fixed vendor, model,
+role-to-model mapping, skill roster or repository concurrency limit. Delegate only
+when useful, with minimal sufficient context, explicit ownership, exact source and
+expected evidence. Avoid competing writers and repeated exploration. The coordinating
+agent integrates results and arranges independent review where the change warrants it.
 
-Use at most two concurrent subagents initially, excluding the principal. Parallelize
-independent work only; sequential work or no delegation is often better for a small
-edit. The principal should not routinely redo reliable implementation/support work.
-Escalate ambiguous or consequential findings rather than making Luna solve a task
-outside its assignment.
+A repository instruction cannot enable a model, switch a running session or override
+client policy. Use supported controls and report limitations accurately; do not edit
+host configuration, install tooling or run routing probes merely to satisfy a workflow.
+Both [Codex](https://learn.chatgpt.com/docs/agent-configuration/subagents) and
+[OpenCode](https://opencode.ai/docs/rules/) support project instructions, but their
+configuration and delegation capabilities differ.
 
-Each assignment gives the goal, exact source, owned files/worktree, relevant
-interfaces and invariants, allowed checks and expected evidence. One agent owns a
-write scope at a time. Share concise findings rather than entire conversations.
-Subagents do not recursively delegate or publish/dispatch work unless assigned;
-the principal coordinates integration, branch protections and final claims.
-Review by an agent is not a release signature or authority to weaken privacy.
+Implement complete usable slices within the agreed privacy and authority boundaries.
+Before shared wire/interface allocation, inspect current and retained integration
+heads; preserve field ownership and compatibility. Make ordinary scoped development,
+commit and push decisions autonomously; branch protections and release authority apply.
 
-Before allocating or changing shared wire fields, inspect both main and retained
-active integration heads. A field absent from main may already belong to an
-unfinished service. Preserve existing assignments, record the selected unused
-fields and bind them with wire compatibility tests. Do not silently reinterpret
-an older field or add aliases that collide with another service.
+## Verify and record
 
-## Local configuration and verification
+Choose checks for the changed behavior and actual risk. Use narrow formatter/compile
+checks and targeted functional smoke during development; run broader integration and
+release checks when their scope is affected. Documentation-only work needs relevant
+link, scope and preservation checks, not runtime builds or model-routing demonstrations.
+Run [requirement preservation](TESTING.md#requirement-preservation) when effective
+requirements or preserved sources change, not on every task or conversation.
 
-On 2026-10-20 the VSCodium extension `26.5908.31748` used bundled
-`codex-cli 0.163.0`. There was no standalone `codex` on PATH; use the extension's
-bundled binary for diagnostics rather than installing another CLI.
-The user authorized only the relevant `~/.codex/config.toml` changes and new
-specialist files under `~/.codex/agents/`, with a configuration backup.
+Reuse completed exact-source results when still applicable. Inspect an existing hosted
+run before dispatching another; preserve original failures and explicit acceptance
+runs. Source checks, public fixtures, protected execution and product acceptance are
+different evidence. Cache pinned build inputs, never test success, private fixtures,
+credentials or authorization. Keep untrusted PR cache reads separate from trusted writes.
 
-```toml
-model = "gpt-6-astra"
-model_reasoning_effort = "ultra"
+Update the compact implementation status with the source, bounded result, evidence
+link and remaining dependency. Put detailed dated evidence in the linked history or
+topic record, without repeating it in goal text, workflow and verification instructions.
+Archive superseded narrative; keep unique failures and exact evidence bindings.
 
-[agents]
-enabled = true
-default_subagent_model = "gpt-6.1-sol"
-default_subagent_reasoning_effort = "high"
-max_concurrent_threads_per_session = 2
-```
+<a id="worktree-and-generated-artifact-lifecycle"></a>
 
-The specialist files use `name`, `description`, `model`,
-`model_reasoning_effort` and `developer_instructions`. They do not override
-permissions, providers, billing or release authority. Other existing settings,
-including trust, memory, service tier and disabled apps, were preserved.
-The local recovery copy is `~/.codex/config.toml.before-volparossa-handover-20261020`;
-restore selectively if subsequent preferences have changed.
+## Checkouts and handover
 
-Verification distinguishes the following:
+Use `.volparossa-dev/worktrees/` for new temporary worktrees, never Git's administration
+directory. Keep active work, unpublished changes and unrelated files intact. Before
+retiring a checkout, verify integration and inspect dirty, ignored and untracked unique
+material; use `git worktree remove`. A prunable record is not permission to delete it.
+Do not copy `target/` or `.git/` into snapshots. Preserve recovery refs, evidence and
+provenance; delete only understood generated outputs with verified recovery paths.
 
-- TOML parsing and an exact old/new configuration comparison pass; only the
-  principal model/effort and `[agents]` changed.
-- The bundled model catalog lists all three requested models, including Astra
-  Ultra, Sol High and Luna Medium.
-- Strict app-server startup and `config/read` accept the requested keys.
-  A new read-only ephemeral thread reports Astra/Ultra; rendered agent
-  instructions report three total slots, meaning the principal plus two children.
-- Real Sol and Luna delegated audits completed with repository/GitHub tool use.
-  Small read-only custom-role tests returned `SUPPORT_OK` and `IMPLEMENTER_OK`.
-  The same app-server's `thread/read` metadata independently recorded
-  `volparossa_support` on `gpt-6-luna`/Medium and `volparossa_implementer` on
-  `gpt-6.1-sol`/High, with the correct parent thread and completed turns. The
-  reviewer file was syntax-checked but not given an additional inference test.
-  The two-child cap was confirmed in effective config/instructions, not by
-  deliberately exhausting it.
-
-The existing IDE conversation is not hot-reloaded or used as evidence of future
-session settings. Recheck model and effort in the new conversation. Account
-availability may change. No paid service, API billing or wider execution permission
-was enabled. Missing `rg` remains a tooling limitation; use `git grep`/`grep`.
-
-Configuration semantics and custom-agent fields are documented in the official
-[configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
-and [subagent guide](https://learn.chatgpt.com/docs/agent-configuration/subagents).
-
-## Preserve checkouts and evidence
-
-The 2026-10-20 handover inventory found clean top-level application worktrees in
-sibling `volparossa-*` directories. Browser and Mail local `main` were behind
-their remote-tracking refs. Chat's `feature/signal-core-integration` and Code's
-`feature/codex-runtime` were historical ancestors of their remote `main`, not
-unpublished successors. In particular, the Code branch name does **not** undo the
-OpenCode decision. Map and Weather had retained feature checkouts. Resolve the
-current remote state before updating any of these worktrees.
-
-For an application, use its own `AGENTS.md`, README and linked integration guides;
-the [application overview](../applications/APPLICATIONS.md) supplies repository
-links. There is no need to create competing per-application ledgers. The organization
-profile belongs to `VOLPAROSSA/.github`, not the core repository's `.github/`.
-No separate organization-profile clone was found in the inspected checkout set.
-
-Core candidate paths are discoverable with `git worktree list`: the retained
-Storage branches use `.git/codex-storage-route-retirement`,
-`.git/codex-storage-real-route-sequence`, `.git/codex-storage-natural-expiry-sequence`
-and `.git/codex-storage-post-acquire-clock`; model work uses
-`.git/codex-protected-resident-model`; dependent upload work uses
-`.git/codex-cloud-upload-tls-v9`. Revisions, PRs and acceptance belong in the ledger,
-not a second status table here.
-
-Preserve the unrelated untracked `error.log` in the core main checkout, the
-uncommitted status edit in `.git/codex-native-cpu-inference`, and untracked
-`tests/integration/__pycache__/` in `.git/codex-native-editor-core` and
-`.git/codex-relay-refill`. Do not reset, delete or publish them merely to obtain a
-clean-looking checkout. The older status edit contains Browser evidence retained
-in the Browser integration guide; its old pending-candidate wording is not current.
-Prunable worktree records are not permission to remove work.
-
-Run Rust/native/model/VM/SDK/Gradle and package-installation trials on the approved
-disposable hosted runners, not the development host. Local read-only inspection,
-documentation checks and inert validation are appropriate. A cloud environment
-named VOLPAROSSA was reported, but that is not confidential-computing hardware
-or evidence of a working private-worker environment. No suitable confidential
-server has been supplied; do not repeatedly ask for one without a new requirement.
-
-Before a hosted run, inspect any existing run for that exact candidate and record
-its original run ID. Do not rerun because a watcher or conversation ended. Failed
-reports stay immutable. Bind new evidence to exact source and scope; source tests,
-public VM execution and confidential private execution are different claims.
-Retained local evidence under `.git/ci-evidence/` supplements the linked original
-CI artifacts. If an artifact has expired, report the evidence gap rather than
-reconstructing a successful outcome.
-
-## Efficiency work authorized after the handover
-
-The 2026-10-20 follow-up authorizes cross-repository optimization, while preserving
-all agreed functionality and the retained Storage/compute/application candidates.
-Start with current evidence of repeated cost or a demonstrated correctness issue;
-compare benefit, migration cost, trust impact and reversibility before redesigning.
-Keep a short prioritized record in the existing implementation ledger. Do not
-create competing per-repository plans or move application-specific policy into
-shared core mechanisms merely to reduce code duplication.
-
-Use completed hosted results for the exact source and scope. Cache reusable build
-inputs or checked source-built tools, never successful test outcomes, private
-fixtures, credentials or authorization. Cache misses must use the ordinary pinned
-source build. Keep default-branch cache writes separate from untrusted PR reads.
-Cancel superseded automatic source checks; preserve explicit acceptance runs and
-their cleanup/evidence. Retain comprehensive integration checks, action pins and
-least-privilege permissions. Do not infer runtime speedups from CI savings.
-
-The first live follow-up session independently inspected its own recorded turn
-metadata: principal `gpt-6-astra`/Ultra, `volparossa_implementer`
-`gpt-6.1-sol`/High and `volparossa_support` `gpt-6-luna`/Medium, each child bound
-to that principal. Both custom roles performed real repository/GitHub inspections.
-This verifies this session's delegation, not future account availability.
-
-## Worktree and generated-artifact lifecycle
-
-Create temporary worktrees beneath `.volparossa-dev/worktrees/`, outside Git's
-`.git` administration directory. Do not copy a checkout's `target/` or `.git/`
-into snapshots or backups. Preserve shared pinned build caches and their
-provenance; remove only verified generated build outputs when their exact scope
-is understood.
-
-Before retiring a snapshot, verify it is clean, contains no ignored or untracked
-unique evidence, and is fully integrated. Retire it with `git worktree remove`
-so Git updates its registry; a prunable record alone does not authorize removal.
-Keep failing reports, model/evidence artifacts, and recovery refs with a manifest
-that identifies their source and purpose. Before pruning administration records,
-inspect staged or missing-index state, preserve any recovery material, and confirm
-all expected repositories remain readable. Do not automate deletion of ambiguous
-checkouts or artifacts.
+A handover needs the current branch/source, owned checkout, remaining work and exact
+relevant evidence. Do not repeat machine inventories, UI character counts or historic
+model tests. Approved hosted runners remain the place for builds and runtime trials;
+local read-only inspection and inert documentation validation preserve host safety.

@@ -630,6 +630,10 @@ impl PreselectionResponderReject {
 /// public event pump. All unrelated swarm events, including typed outbound failures, remain
 /// available unchanged through [`Self::Other`].
 #[non_exhaustive]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "preserve existing public event payload compatibility"
+)]
 pub enum DiscoveryEvent {
     /// Service-sealed response to an outbound client-to-relay observation request.
     ClientPreselectionResponse(ClientPreselectionResponseArrival),
@@ -1243,10 +1247,10 @@ impl DiscoveryService {
             }
             if let Ok(canonical) =
                 prepare_discovery_address(self.swarm.local_peer_id(), peer_id, address)
+                && private_address_is_local(&canonical)
+                && !retained.contains(&canonical)
             {
-                if private_address_is_local(&canonical) && !retained.contains(&canonical) {
-                    retained.push(canonical);
-                }
+                retained.push(canonical);
             }
         }
         let removed =
@@ -1955,16 +1959,14 @@ impl DiscoveryService {
                             .advertisement_budgets
                             .allow_inbound_request(peer, Instant::now())
                         && request.validate().is_ok()
+                        && let Some(envelope) = self.local_advertisement.clone()
+                        && let Ok(response) = AdvertisementResponse::new(envelope)
                     {
-                        if let Some(envelope) = self.local_advertisement.clone() {
-                            if let Ok(response) = AdvertisementResponse::new(envelope) {
-                                let _ = self
-                                    .swarm
-                                    .behaviour_mut()
-                                    .advertisements
-                                    .send_response(channel, response);
-                            }
-                        }
+                        let _ = self
+                            .swarm
+                            .behaviour_mut()
+                            .advertisements
+                            .send_response(channel, response);
                     }
                 }
                 libp2p::swarm::SwarmEvent::Behaviour(BehaviourEvent::DatapathRelay(
@@ -2766,11 +2768,9 @@ mod tests {
                                 ..
                             }),
                         ) = event
-                        {
-                            if peer_id == client_peer {
+                            && peer_id == client_peer {
                                 break info;
                             }
-                        }
                     }
                     _ = next_other_event(&mut client) => {}
                 }

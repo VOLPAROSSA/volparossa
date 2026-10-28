@@ -158,14 +158,14 @@ impl DiscoveryRuntime {
         self.downlink.outgoing.clear();
         self.downlink.targets.clear();
         self.downlink.deferred.clear();
-        if let Some(runtime) = self.downlink.runtime.take() {
-            if runtime.shutdown().await.is_err() {
-                state.write().await.log(
-                    LogLevel::Error,
-                    "DOWNLINK_ACCOUNTING_CLEANUP_PENDING",
-                    unix_millis(),
-                );
-            }
+        if let Some(runtime) = self.downlink.runtime.take()
+            && runtime.shutdown().await.is_err()
+        {
+            state.write().await.log(
+                LogLevel::Error,
+                "DOWNLINK_ACCOUNTING_CLEANUP_PENDING",
+                unix_millis(),
+            );
         }
     }
 

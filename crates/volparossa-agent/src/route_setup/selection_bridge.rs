@@ -5230,11 +5230,13 @@ mod tests {
     fn native_client_prepare_hints_preserve_actor_observed_source_and_signed_local_peer() {
         let (path, hint) = native_client_local_traversal_fixture();
         assert_eq!(
-            bind_native_client_traversal_hints(&[path.clone()], vec![hint.clone()])
+            bind_native_client_traversal_hints(std::slice::from_ref(&path), vec![hint.clone()])
                 .expect("same observed source and signed local Relay endpoint"),
             vec![hint.clone()]
         );
-        assert!(bind_native_client_traversal_hints(&[path.clone()], Vec::new()).is_err());
+        assert!(
+            bind_native_client_traversal_hints(std::slice::from_ref(&path), Vec::new()).is_err()
+        );
         for field in 0..6 {
             let mut changed = hint.clone();
             match field {
@@ -5245,7 +5247,10 @@ mod tests {
                 4 => changed.on_link.as_mut().expect("local").peer_address[3] ^= 1,
                 _ => changed.on_link = None,
             }
-            assert!(bind_native_client_traversal_hints(&[path.clone()], vec![changed]).is_err());
+            assert!(
+                bind_native_client_traversal_hints(std::slice::from_ref(&path), vec![changed])
+                    .is_err()
+            );
         }
         assert!(bind_native_client_traversal_hints(&[path], vec![hint.clone(), hint]).is_err());
     }
@@ -7098,9 +7103,9 @@ mod tests {
             let completed = preselection_freshness_attempt(
                 snapshot, records, transport, family, batch_id, ceiling,
             );
-            let failure = match join_preselection_fresh_evidence_at(completed, trusted_now_ms) {
-                Ok(_) => panic!("substitution case {case} minted fresh evidence"),
-                Err(failure) => failure,
+            let Err(failure) = join_preselection_fresh_evidence_at(completed, trusted_now_ms)
+            else {
+                panic!("substitution case {case} minted fresh evidence")
             };
             assert_ne!(size_of_val(&failure.gate), 0);
             assert!(matches!(
@@ -7463,15 +7468,14 @@ mod tests {
     impl RouteSetupClock for HandoffClock {
         fn unix_millis(&self) -> u64 {
             let read = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
-            if self.cancel_on_read.load(Ordering::SeqCst) == read {
-                if let Some(cancellation) = self
+            if self.cancel_on_read.load(Ordering::SeqCst) == read
+                && let Some(cancellation) = self
                     .cancellation
                     .lock()
                     .expect("handoff cancellation")
                     .as_ref()
-                {
-                    let _ = cancellation.send(true);
-                }
+            {
+                let _ = cancellation.send(true);
             }
             self.now_ms.load(Ordering::SeqCst)
         }

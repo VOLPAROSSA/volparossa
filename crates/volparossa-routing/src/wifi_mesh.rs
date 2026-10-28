@@ -188,7 +188,7 @@ pub struct DestroyedWifiMesh {
 
 fn frequency(value: u32) -> bool {
     ((2412..=2472).contains(&value) && value % 5 == 2)
-        || ((5000..=5900).contains(&value) && value % 5 == 0)
+        || ((5000..=5900).contains(&value) && value.is_multiple_of(5))
 }
 
 pub(super) fn validate_install(value: &InstallWifiMesh) -> Result<(), HelperProtocolError> {
@@ -376,6 +376,23 @@ mod tests {
             decode_request(&encode_request(&request).unwrap()[4..]).unwrap(),
             request
         );
+        for frequency_mhz in [5000, 5180, 5900, 4999, 5905, 5201] {
+            let mut candidate = request.clone();
+            let Some(helper_request::Operation::InstallWifiMesh(value)) =
+                candidate.operation.as_mut()
+            else {
+                unreachable!()
+            };
+            value.frequency_mhz = frequency_mhz;
+            if matches!(frequency_mhz, 5000 | 5180 | 5900) {
+                assert_eq!(
+                    decode_request(&encode_request(&candidate).unwrap()[4..]).unwrap(),
+                    candidate
+                );
+            } else {
+                assert!(encode_request(&candidate).is_err());
+            }
+        }
         let mut response = HelperResponse {
             protocol_version: HELPER_PROTOCOL_VERSION,
             request_id: request.request_id.clone(),

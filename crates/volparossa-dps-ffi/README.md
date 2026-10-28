@@ -27,9 +27,8 @@ The v1 maximum canonical request calculation is 32 × (127 + 2) + 2 + 22 + 4 =
 **4,156 bytes**: each observation has three 18-byte IDs, 2-byte source kind,
 22-byte local frame, four 9-byte doubles, an 11-byte timestamp and 2-byte
 authentication claim. Its body length is 127, needing one tag and one length byte.
-The request adds version, desired local frame and maximum-age fields. A test
-constructs and encodes this extremum using Prost; until that test passes hosted
-execution, this remains a source derivation and authored regression. The larger
+The request adds version, desired local frame and maximum-age fields. A regression constructs and encodes this extremum using Prost. The bound is a
+structural encoding property, not physical-positioning evidence. The larger
 decode cap remains finite even for inputs rejected after decoding.
 
 All seven limitation bits are required, exactly `0x7f`:
@@ -80,6 +79,7 @@ is retained by the normal package mechanism; the workflow forbids upgrades and
 fails if the matching pinned packages are unavailable. Package/tool versions enter
 the artifact. It does not install tools on the development host.
 
-No native result has been accepted merely by adding this source. Android
-builds/tool pins, JNI integration, consent/lifecycle display,
-real sensors, navigation, fusion and physical integrity remain separate work.
+Adding an ABI or passing its synthetic callers does not establish positioning.
+The [current DPS/Map checkpoint](../../docs/IMPLEMENTATION_STATUS.md#decentralized-positioning-system--2026-10-21)
+separates accepted quality-only ABI/debug JNI evidence from real sensors,
+permission authority, navigation, fusion and physical integrity, which remain open.

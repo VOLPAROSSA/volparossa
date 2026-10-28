@@ -937,6 +937,14 @@ production_start_failure_stage_is_safe() {
     [ "$#" -eq 1 ] || return 1
     case $1 in
         preflight-runtime|\
+        preflight-contracts|\
+        preflight-socket-wait|\
+        preflight-directory-metadata|\
+        preflight-socket-metadata|\
+        preflight-token-metadata|\
+        preflight-journal-metadata|\
+        preflight-journal-lock-metadata|\
+        preflight-journal-next-present|\
         identity-socket|\
         identity-lock|\
         identity-manager|\
@@ -975,6 +983,57 @@ production_start_failure_stage_is_safe() {
         functional-probe-socket|\
         functional-probe-fdstore|\
         functional-worker-observation|\
+        functional-worker-child|\
+        functional-worker-custody|\
+        functional-worker-pidfd-identity|\
+        functional-worker-namespace-identity|\
+        functional-worker-fdstore|\
+        functional-worker-namespace-distinct|\
+        functional-worker-process-revalidate|\
+        functional-worker-namespace-revalidate|\
+        functional-worker-namespace-open|\
+        functional-worker-process-open|\
+        functional-worker-namespace-stat|\
+        functional-worker-namespace-pin|\
+        functional-worker-process-stat|\
+        functional-worker-process-pin|\
+        functional-worker-custody-repeat|\
+        functional-worker-custody-stability|\
+        functional-worker-process-status|\
+        functional-worker-helper-stability|\
+        functional-worker-wireguard-interface|\
+        functional-worker-wireguard-name|\
+        functional-worker-peer-address|\
+        functional-worker-local-address|\
+        functional-worker-wireguard-state|\
+        functional-worker-public-key-read|\
+        functional-worker-public-key-shape|\
+        functional-worker-public-key-unique|\
+        functional-worker-port-read|\
+        functional-worker-port-shape|\
+        functional-worker-port-distinct|\
+        functional-worker-counters|\
+        functional-worker-custody-parent-netns|\
+        functional-worker-custody-parent-netns-shape|\
+        functional-worker-custody-empty|\
+        functional-worker-custody-readlink|\
+        functional-worker-custody-pidfd|\
+        functional-worker-custody-pidfd-conflict|\
+        functional-worker-custody-process-target|\
+        functional-worker-custody-process|\
+        functional-worker-custody-process-conflict|\
+        functional-worker-custody-netns|\
+        functional-worker-custody-netns-conflict|\
+        functional-worker-custody-missing-pins|\
+        functional-worker-fdstore-count-before-read|\
+        functional-worker-fdstore-count-before|\
+        functional-worker-fdstore-object|\
+        functional-worker-fdstore-dump-read|\
+        functional-worker-fdstore-dump-size|\
+        functional-worker-fdstore-dump-exact|\
+        functional-worker-fdstore-name|\
+        functional-worker-fdstore-count-after-read|\
+        functional-worker-fdstore-count-after|\
         functional-relay-fixture|\
         functional-relay-traffic|\
         functional-relay-cleanup|\
@@ -1798,6 +1857,65 @@ production_functional_probe_failure_value_is_safe() {
     esac
 }
 
+relay_traffic_diagnostic_value_is_safe() {
+    [ "$#" -eq 1 ] && [ "${#1}" -le 960 ] || return 1
+    printf '%s\n' "$1" | /usr/bin/awk -F ';' '
+        function u64(value) {
+            if (value == "0") return 1
+            if (value !~ /^[1-9][0-9]*$/ || length(value) > 20) return 0
+            return length(value) < 20 || ("x" value) <= "x18446744073709551615"
+        }
+        function tuple(field, key, values, count, position) {
+            if (index(field, key "=") != 1) return 0
+            count = split(substr(field, length(key) + 2), values, ",")
+            if (count != 3) return 0
+            if (values[1] == "unavailable" && values[2] == "unavailable" \
+                && values[3] == "unavailable") return 1
+            for (position = 1; position <= 3; position++) if (!u64(values[position])) return 0
+            return 1
+        }
+        function handshake(values) {
+            if (values[1] == "unavailable") return "unavailable"
+            return values[1] == "0" ? "zero" : "nonzero"
+        }
+        {
+            records++
+            if (NF != 9 || $1 !~ /^predicate=(ping|worker-snapshot|worker-growth|relay-snapshot|relay-growth|fixture)$/) exit 1
+            predicate = substr($1, 11)
+            expected = predicate == "ping" ? "ping-exit-zero" : \
+                (predicate ~ /snapshot$/ ? "canonical-u64-snapshot" : \
+                (predicate ~ /growth$/ ? "handshake-nonzero-rx-tx-increase" : "fixture-exact"))
+            if ($2 != "expected=" expected || $3 !~ /^ping=(0|[1-9][0-9]*)$/) exit 1
+            status = substr($3, 6)
+            if (length(status) > 3 || status + 0 > 255 \
+                || (predicate == "ping" ? status == "0" : status != "0")) exit 1
+            if (!tuple($4, "worker-baseline", before) || !tuple($5, "worker-current", worker) \
+                || $6 != "relay-reference=0,0,0" || !tuple($7, "relay-current", relay) \
+                || $8 != "worker-handshake=" handshake(worker) \
+                || $9 != "relay-handshake=" handshake(relay)) exit 1
+            valid = 1
+        }
+        END { if (records != 1 || !valid) exit 1 }
+    '
+}
+
+report_relay_traffic_diagnostic() {
+    [ "${proof_failure_reason:-}" = production-launch-status ] || return 1
+    [ "${production_start_failure_stage:-}" = functional-relay-traffic ] || return 1
+    rt_diag_file=$temporary_stage/production-output/relay-traffic.failure
+    [ ! -e "$rt_diag_file.next" ] && [ ! -L "$rt_diag_file.next" ] || return 1
+    vp_capture_file_is_safe "$rt_diag_file" || return 1
+    rt_diag_size=$(stat -Lc '%s' "$rt_diag_file" 2>/dev/null) || return 1
+    [ "$rt_diag_size" -ge 1 ] && [ "$rt_diag_size" -le 1024 ] || return 1
+    rt_diag_record=$(cat "$rt_diag_file") || return 1
+    rt_diag_prefix=VOLPAROSSA_HELPER_RELAY_TRAFFIC_DIAGNOSTIC_V1=
+    case $rt_diag_record in "$rt_diag_prefix"*) ;; *) return 1 ;; esac
+    rt_diag_value=${rt_diag_record#"$rt_diag_prefix"}
+    relay_traffic_diagnostic_value_is_safe "$rt_diag_value" || return 1
+    printf '%s%s\n' "$rt_diag_prefix" "$rt_diag_value" | cmp -s - "$rt_diag_file" || return 1
+    printf '%s%s\n' "$rt_diag_prefix" "$rt_diag_value" >&2
+}
+
 report_production_launch_diagnostic() {
     [ "${proof_failure_reason:-}" = production-launch-status ] || return 1
     production_start_failure_file=$temporary_stage/production-output/start.failure
@@ -1859,6 +1977,11 @@ report_production_launch_diagnostic() {
     if [ -n "$production_functional_failure_value" ]; then
         printf 'VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=%s\n' \
             "$production_functional_failure_value" >&2
+    fi
+    if [ "$production_start_failure_stage" = functional-relay-traffic ] \
+        && { [ -e "$temporary_stage/production-output/relay-traffic.failure" ] \
+            || [ -L "$temporary_stage/production-output/relay-traffic.failure" ]; }; then
+        report_relay_traffic_diagnostic || :
     fi
 }
 
@@ -3564,6 +3687,37 @@ retire_failure_stage_is_safe() {
     esac
 }
 
+production_retirement_diagnostic_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        affine-state|unit-not-collected|runtime-fence) return 0 ;;
+        *) retire_failure_stage_is_safe "$1" ;;
+    esac
+}
+
+report_production_retirement_diagnostic() {
+    [ "$#" -eq 1 ] || return 1
+    [ "${driver_phase:-}" = production-retirement ] || return 1
+    production_retirement_diagnostic_stage_is_safe "$1" || return 1
+    if [ -n "${proof_failure_reason:-}" ]; then
+        proof_failure_reason_is_safe "$proof_failure_reason" || return 1
+        [ "${proof_ok:-}" = no ] || return 1
+    fi
+    printf 'VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_DIAGNOSTIC_V1=%s\n' "$1" >&2
+    if [ -n "${proof_failure_reason:-}" ]; then
+        printf 'VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1=%s\n' \
+            "$proof_failure_reason" >&2
+        if [ "$proof_failure_reason" = production-launch-status ]; then
+            # Reuse only the existing validated fixed-stage reporter. Discard
+            # partial/error output when its private capture is unavailable.
+            if production_retirement_launch_detail=$(report_production_launch_diagnostic 2>&1); then
+                printf '%s\n' "$production_retirement_launch_detail" >&2
+            fi
+        fi
+    fi
+    return 0
+}
+
 retire_unit() {
     retire_failure_stage=adoption
     if [ "$unit_owned" = no ] && [ "$unit_may_own" = yes ]; then
@@ -4137,6 +4291,16 @@ capture_host_state() {
         printf '%s=%s\n' "$sysctl_path" "$sysctl_value" >>"$sysctls_capture" \
             || failed 'host forwarding capture could not be written'
     done
+    # Retain the previous forwarding bytes and add exact read-only ping range
+    # bytes to the same before/after sysctls digest. Never configure host state.
+    vp_capture_run "$capture_directory/ping-group-range.raw" \
+        cat /proc/sys/net/ipv4/ping_group_range || failed 'host ping range could not be read'
+    [ "$(stat -Lc '%s' "$capture_directory/ping-group-range.raw")" -le 32 ] \
+        || failed 'host ping range capture is oversized'
+    printf '%s=' /proc/sys/net/ipv4/ping_group_range >>"$sysctls_capture" \
+        || failed 'host ping range label could not be captured'
+    cat "$capture_directory/ping-group-range.raw" >>"$sysctls_capture" \
+        || failed 'host ping range bytes could not be captured'
     vp_capture_file_is_safe "$sysctls_capture" \
         || failed 'host forwarding capture is not a validated private file'
     vp_capture_publish_digest "$sysctls_capture" "$destination/sysctls" \
@@ -5188,7 +5352,7 @@ if [ "$proof_ok" = yes ]; then
                 fi
                 ;;
         esac
-        expected_process_contract_prefix="process-status-v1=uid:0:0:0:0;gid:$agent_gid:$agent_gid:$agent_gid:$agent_gid;groups:$agent_gid;nnp:1;seccomp:2;caps:00000000002031e0;filters:"
+        expected_process_contract_prefix="process-status-v1=uid:0:0:0:0;gid:$agent_gid:$agent_gid:$agent_gid:$agent_gid;groups:$agent_gid;nnp:1;seccomp:2;caps:00000000002015e0;filters:"
         case $identity_process_contract in
             "$expected_process_contract_prefix"*)
                 identity_seccomp_filters=${identity_process_contract#"$expected_process_contract_prefix"}
@@ -5306,12 +5470,16 @@ if [ "$proof_ok" = yes ]; then
     if ! retire_unit; then
         cleanup_error=yes
         record_proof_failure 'production-retirement'
+        report_production_retirement_diagnostic "$retire_failure_stage" \
+            || failed 'production retirement diagnostic is invalid'
         failed 'production unit retirement did not settle'
     fi
     if [ -n "$unit_name" ] || [ "$unit_owned" != no ] \
         || [ "$unit_may_own" != no ] || [ -n "$unit_invocation_id" ] \
         || [ -n "$unit_ownership_marker" ]; then
         record_proof_failure 'production-retirement'
+        report_production_retirement_diagnostic affine-state \
+            || failed 'production retirement diagnostic is invalid'
         failed 'production unit retirement retained affine ownership state'
     fi
     unit_name=$production_unit_name
@@ -5321,6 +5489,14 @@ if [ "$proof_ok" = yes ]; then
             "$production_control_group" "$production_main_pid" \
             "$identity_starttime_value"; then
         record_proof_failure 'production-retirement'
+        # Classify the already observed short-circuit failure; never resample or
+        # retry retirement to manufacture a more favorable observation.
+        production_retirement_diagnostic_stage=runtime-fence
+        if [ "$production_retired_load_state" != not-found ]; then
+            production_retirement_diagnostic_stage=unit-not-collected
+        fi
+        report_production_retirement_diagnostic "$production_retirement_diagnostic_stage" \
+            || failed 'production retirement diagnostic is invalid'
         failed 'production unit retirement fence did not settle'
     fi
     forget_unit_ownership

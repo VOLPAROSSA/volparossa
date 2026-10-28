@@ -9,6 +9,14 @@ on:
       - main
   workflow_dispatch:
     inputs:
+      maintained_zbus:
+        description: 'Opt in to exact Rust 1.89.0 Config/helper/private-bus execution only'
+        type: boolean
+        default: false
+      ctutils_compatibility:
+        description: 'Opt in to reviewed ctutils current/reference compiler and real 32-bit codegen tests'
+        type: boolean
+        default: false
       studio_export_pack:
         description: 'Opt in to reviewed, synthetic Silex editor/export and offline Core pack proof'
         type: boolean
@@ -26,8 +34,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.studio_export_pack && github.run_id || github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ !(github.event_name == 'workflow_dispatch' && inputs.studio_export_pack) }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus) && github.run_id || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus)) }}
 
 defaults:
   run:
@@ -35,9 +43,158 @@ defaults:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTSEC_ADVISORY_DB_REVISION: bf5c0d245a92671908518d7e765914d437954ed6
+  RUSTSEC_ADVISORY_DB_REVISION: 99670cfc0bc574433034b75876a4b791ccaa2efb
 
 jobs:
+  maintained-zbus:
+    name: Exact Rust 1.89.0 maintained D-Bus functional slice
+    if: github.event_name == 'workflow_dispatch' && inputs.maintained_zbus
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Bind the reviewed source before any compiler installation
+        env:
+          CORE_REVISION: ${{ inputs.core_revision }}
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          [[ "$CORE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          test "$CORE_REVISION" = "$GITHUB_SHA"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.core_revision }}
+          persist-credentials: false
+      - name: Check compiler authority and versioned evidence without native execution
+        run: |
+          python3 -B scripts/test-provision-rust199.py
+          python3 -B scripts/test-provision-rust189.py
+          python3 -B scripts/test-cargo-source-policy.py
+          python3 -B tests/helper/test-helper-vm-environment-v2.py
+          python3 -B tests/helper/test-helper-vm-environment-v3.py
+      - name: Provision only the exact reviewed compiler on this disposable runner
+        run: |
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+      - name: Prepare the existing Protobuf compiler and a private D-Bus daemon
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sudo apt-get -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update
+          sudo apt-get install --yes --no-install-recommends \
+            protobuf-compiler=3.21.12-8.2ubuntu0.4 \
+            libprotoc32t64=3.21.12-8.2ubuntu0.4 \
+            libprotobuf32t64=3.21.12-8.2ubuntu0.4 dbus-daemon
+      - name: Execute real Config, helper inventory, helper entry and private D-Bus tests
+        env:
+          VOLPAROSSA_TEST_ALLOW_SUDO_NETNS: '1'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          cargo fetch --locked
+          cargo test --locked --offline -p volparossa-linux-uapi --lib async_fd::tests:: -- --list \
+            2>&1 | tee "$RUNNER_TEMP/owned-async-fd-inventory.log"
+          cargo test --locked --offline -p volparossa-linux-uapi --lib async_fd::tests:: -- --test-threads=1 \
+            2>&1 | tee "$RUNNER_TEMP/owned-async-fd-tests.log"
+          grep -F 'test result: ok. 3 passed; 0 failed' "$RUNNER_TEMP/owned-async-fd-tests.log"
+          cargo test --locked --offline -p volparossa-linux-uapi --doc OwnedAsyncFd \
+            2>&1 | tee "$RUNNER_TEMP/owned-async-fd-doc-tests.log"
+          grep -F 'test result: ok. 2 passed; 0 failed' "$RUNNER_TEMP/owned-async-fd-doc-tests.log"
+          for package in volparossa-config volparossa-helper-entry; do
+            cargo test --locked --offline -p "$package" -- --list \
+              2>&1 | tee "$RUNNER_TEMP/$package-inventory.log"
+            cargo test --locked --offline -p "$package" \
+              2>&1 | tee "$RUNNER_TEMP/$package-tests.log"
+            grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/$package-tests.log"
+          done
+          cargo test --locked --offline -p volparossa-helper --lib systemd_fdstore::tests:: -- --list \
+            2>&1 | tee "$RUNNER_TEMP/helper-fdstore-inventory.log"
+          cargo test --locked --offline -p volparossa-helper --lib systemd_fdstore::tests:: \
+            2>&1 | tee "$RUNNER_TEMP/helper-fdstore-tests.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/helper-fdstore-tests.log"
+          cargo test --locked --offline -p volparossa-helper --lib \
+            systemd_fdstore::tests::private_dbus_typed_replies_and_errors_use_real_zbus \
+            -- --ignored --exact --nocapture --test-threads=1 \
+            2>&1 | tee "$RUNNER_TEMP/helper-private-bus-tests.log"
+          grep -F 'test result: ok. 1 passed; 0 failed' "$RUNNER_TEMP/helper-private-bus-tests.log"
+          git diff --exit-code
+      - name: Check upstream zbus admission and source contracts without compiling
+        run: python3 -B scripts/test-zbus-upstream.py
+      - name: Execute exact original upstream zbus tests in an isolated graph
+        env:
+          ZBUS_CORE_REVISION: ${{ inputs.core_revision }}
+        run: python3 -B scripts/run-zbus-upstream.py
+      - name: Preserve actual source, compiler observations and failed test output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: maintained-zbus-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/volparossa-rust-1.89.0/receipt.json
+            ${{ runner.temp }}/cargo-source-policy.json
+            ${{ runner.temp }}/zbus-upstream-proof/cargo-source-policy.json
+            ${{ runner.temp }}/*-inventory.log
+            ${{ runner.temp }}/*-tests.log
+            ${{ runner.temp }}/zbus-upstream-proof/*.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  ctutils-compatibility:
+    name: Opt-in ctutils Rust 1.89.0 and retained reference codegen evidence
+    if: github.event_name == 'workflow_dispatch' && inputs.ctutils_compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Bind exact reviewed revision on disposable hosted runner
+        env:
+          CTUTILS_CORE_REVISION: ${{ inputs.core_revision }}
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          [[ "$CTUTILS_CORE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          test "$CTUTILS_CORE_REVISION" = "$GITHUB_SHA"
+      - name: Check out exact reviewed proof source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.core_revision }}
+          persist-credentials: false
+      - name: Test location guard without compiling
+        run: python3 -B scripts/test-ctutils-hosted.py
+      - name: Prepare reviewed Protobuf compiler on the disposable runner
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(dpkg --print-architecture)" = amd64
+          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+            -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update
+          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+            -o Acquire::Retries=2 install --yes --no-install-recommends \
+            protobuf-compiler=3.21.12-8.2ubuntu0.4 \
+            libprotoc32t64=3.21.12-8.2ubuntu0.4 \
+            libprotobuf32t64=3.21.12-8.2ubuntu0.4 \
+            gcc-13-multilib
+          test "$(protoc --version)" = 'libprotoc 3.21.12'
+          # Match the proof's closed GCC13/32 support prefix on this disposable runner.
+          dpkg-query --show --showformat='${binary:Package} ${Version}\n' \
+            gcc-13-multilib lib32gcc-13-dev
+      - name: Rust 1.89.0 functional execution and codegen with 1.85/1.87 references
+        env:
+          CTUTILS_CORE_REVISION: ${{ inputs.core_revision }}
+        run: python3 -B scripts/run-ctutils-hosted.py "$RUNNER_TEMP/ctutils-proof"
+      - name: Preserve exact-source results and failures for independent codegen review
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ctutils-compatibility-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/ctutils-proof/receipt.json
+            ${{ runner.temp }}/ctutils-proof/cargo-source-policy.json
+            ${{ runner.temp }}/ctutils-proof/REVIEW_REQUIRED.md
+            ${{ runner.temp }}/ctutils-proof/*.log
+            ${{ runner.temp }}/ctutils-proof/codegen-*/*.s
+            ${{ runner.temp }}/ctutils-proof/codegen-*/*.ll
+          if-no-files-found: error
+          retention-days: 14
+
   studio-export-pack:
     name: Opt-in real Studio editor export and offline Core packaging
     if: github.event_name == 'workflow_dispatch' && inputs.studio_export_pack
@@ -98,7 +255,10 @@ jobs:
           set -euo pipefail
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$(dpkg --print-architecture)" = amd64
-          rustup toolchain install 1.85.0 --profile minimal
+          python3 -B core/scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
           sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
             -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update
           sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
@@ -133,8 +293,8 @@ jobs:
           retention-days: 14
 
   quality:
-    name: Unprivileged quality gates
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.studio_export_pack) }}
+    name: ${{ github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus) && 'Quality gates skipped for opt-in proof' || 'Unprivileged quality gates' }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
@@ -151,11 +311,11 @@ jobs:
 
       - name: Install pinned Rust toolchain
         run: |
-          rustup toolchain install 1.85.0 \
-            --profile minimal \
-            --component clippy \
-            --component rustfmt
-          rustup show active-toolchain
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
+          test "$(command -v rustc)" = "$RUNNER_TEMP/volparossa-rust-1.89.0/bin/rustc"
           rustc --version --verbose
           cargo --version --verbose
 
@@ -353,7 +513,7 @@ jobs:
       - name: Lint standalone fuzz package
         run: |
           cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
-          cargo clippy \
+          cargo clippy --keep-going \
             --manifest-path fuzz/Cargo.toml \
             --locked \
             --offline \
@@ -364,6 +524,14 @@ jobs:
         env:
           RUSTSEC_ADVISORY_DB: ${{ runner.temp }}/rustsec-advisory-db
         run: |
+          python3 -B scripts/test-rustsec-pin-review.py
+          python3 -B scripts/test-ctutils-scope.py
+          python3 -B scripts/test-ctutils-hosted.py
+          python3 -B scripts/test-provision-rust199.py
+          python3 -B scripts/test-provision-rust189.py
+          python3 -B scripts/test-cargo-source-policy.py
+          python3 -B tests/helper/test-helper-vm-environment-v2.py
+          python3 -B tests/helper/test-helper-vm-environment-v3.py
           git init "$RUSTSEC_ADVISORY_DB"
           git -C "$RUSTSEC_ADVISORY_DB" remote add origin \
             https://github.com/RustSec/advisory-db.git
@@ -373,16 +541,54 @@ jobs:
           test "$(git -C "$RUSTSEC_ADVISORY_DB" rev-parse HEAD)" = \
             "$RUSTSEC_ADVISORY_DB_REVISION"
 
+      # Run the actual configuration boundary before advisory scans, so an
+      # unrelated denied dependency cannot hide the YAML migration's test result.
+      - name: Test configuration parsing and safety validation
+        run: cargo test --locked --offline -p volparossa-config
+
       - name: Check locked dependencies and licenses
         env:
           RUSTSEC_ADVISORY_DB: ${{ runner.temp }}/rustsec-advisory-db
         run: |
+          python3 -B scripts/test-dependency-scan-aggregation.py
           ./scripts/check-rust-dependencies.sh
           ./packaging/test-collect-cargo-licenses.sh
 
+      # The focused collector regression above does not exercise every resolved crate.
+      - name: Collect the full locked Core Debian amd64 dependency notice inventory
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/core-license-metadata.json"
+          notices="$RUNNER_TEMP/core-license-notices"
+          test ! -e "$metadata" && test ! -L "$metadata"
+          test ! -e "$notices" && test ! -L "$notices"
+          cargo metadata --locked --offline --all-features --filter-platform x86_64-unknown-linux-gnu --format-version 1 >"$metadata"
+          ./packaging/collect-cargo-licenses.sh "$metadata" "$notices" \
+            2>&1 | tee "$RUNNER_TEMP/core-license-collector.log"
+          (
+            cd "$notices"
+            find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+          ) >"$RUNNER_TEMP/core-license-SHA256SUMS"
+
+      - name: Preserve full notice inventory evidence including failures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: locked-license-inventory-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/core-license-metadata.json
+            ${{ runner.temp }}/cargo-source-policy.json
+            ${{ runner.temp }}/cargo-source-policy-cargo-deny.json
+            ${{ runner.temp }}/cargo-source-policy-cargo-audit.json
+            ${{ runner.temp }}/core-license-collector.log
+            ${{ runner.temp }}/core-license-SHA256SUMS
+            ${{ runner.temp }}/core-license-notices/DEPENDENCIES.tsv
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Run strict Clippy
         run: >-
-          cargo clippy --locked --offline --workspace --all-targets
+          cargo clippy --keep-going --locked --offline --workspace --all-targets
           --all-features -- -D warnings
 
       - name: Run workspace tests

@@ -931,12 +931,76 @@ Runtime transitive system dependencies are libc6, libevent and OpenSSL;
 `dns-root-data` supplies read-only root hints/anchors and retains its own notices.
 The package does not depend on or start the standalone Unbound daemon.
 
+### Maintained D-Bus client and pinned compiler candidate
+
+The workspace pins `zbus` 6.1.0 with default features disabled and only Tokio
+and client-proxy support. `zbus_names`, `zvariant` and `zvariant_derive` are
+merged into the maintained package; no compatibility fork or advisory ignore
+is added. Exact official crates.io archive SHA-256 values and upstream VCS
+metadata for zbus6.1.0, zbus_macros6.1.0, zbus_utils6.0.0, zcheapstr1.0.0 and
+zruntime0.2.0 are recorded in [the source pinset](third_party/rust/zbus6-sources.json).
+Their original MIT notices are retained unchanged under
+`third_party/rust/licenses/<package>-<version>/LICENSE`. No local upstream
+source patch is applied. The zbus/macros source commit is
+[`90b4de2d6fa7d7f5b0cb8dd955709d3e765fd2b2`](https://github.com/z-galaxy/zbus/tree/90b4de2d6fa7d7f5b0cb8dd955709d3e765fd2b2).
+
+The earlier build candidate used exact Rust1.99.1, retained as a reference profile.
+The reviewed official distribution
+manifest is `https://static.rust-lang.org/dist/channel-rust-1.99.1.toml`, SHA-256
+`fb152be80975c194aa5fc684b2aec3a6e14e2b855efe2faa4e5f8ae6e590f463`.
+[Component metadata](scripts/rust199-components.json) binds the exact dated
+compiler/Cargo/standard-library/Clippy/rustfmt archive URLs and hashes,
+including real i686-musl std. The provisioning script accepts only that fixed
+profile on disposable hosted runners or the fixed KVM guest accounts, verifies
+archive hashes before extraction/install, and installs under a local prefix.
+Original distribution notices remain in the installed components. This uses
+published compiler binaries; it does not claim a compiler reproduced from source
+or local upstream-GPG verification. Full actual version output is retained;
+Cargo's manifest package version0.100.0 is not relabelled as an executable version.
+No new compiler was downloaded, installed or executed on the development host.
+
+The concrete `jni`0.22.4 and `jni-macros`0.22.4 registry archives omit top-level
+notices. The existing fallback table now binds each exact package/version/license,
+its own VCS commit and crate archive SHA-256. The original MIT and Apache-2.0
+texts were fetched independently at
+[`5ae9458a4ec44c5318f37ddc7569c1d4ae8a69e7`](https://github.com/jni-rs/jni-rs/tree/5ae9458a4ec44c5318f37ddc7569c1d4ae8a69e7)
+and [`33045a124105c939d1e2cbdcb5a39e5d868ffa03`](https://github.com/jni-rs/jni-rs/tree/33045a124105c939d1e2cbdcb5a39e5d868ffa03)
+respectively and retained with their own SHA256SUMS. Both texts compare equal
+only after independent retrieval. The collector rejects changed archives,
+VCS metadata, versions and license expressions. This exact correction does not
+claim closure of the separate full all-platform notice inventory.
+
+### Maintained YAML configuration packages
+
+The workspace dependency named `serde_yaml` is a Cargo alias for exact registry
+[`yaml_serde` 0.10.7](https://crates.io/crates/yaml_serde/0.10.7), maintained by
+the YAML Organization at upstream commit
+[`22a7009e918620b523ea06e54ca75275eabe8027`](https://github.com/yaml/yaml-serde/tree/22a7009e918620b523ea06e54ca75275eabe8027).
+Its exact crates.io archive SHA-256 is
+`33b729a08a9a6be689bbad3e2bf8015926db54b6622cc89c3a5f7dc174b9e918`.
+The unchanged upstream [MIT](third_party/rust/licenses/yaml_serde-0.10.7/LICENSE-MIT)
+and [Apache-2.0](third_party/rust/licenses/yaml_serde-0.10.7/LICENSE-APACHE)
+texts are retained. Its declared minimum Rust version is 1.82.
+
+The root lockfile selects exact registry
+[`libyaml-rs` 0.3.0](https://crates.io/crates/libyaml-rs/0.3.0), upstream commit
+[`66d8ae3d348b328ef2159e3dc0bc53f1deb4c3a2`](https://github.com/yaml/libyaml-rs/tree/66d8ae3d348b328ef2159e3dc0bc53f1deb4c3a2),
+archive SHA-256
+`2e126dda6f34391ab7b444f9922055facc83c07a910da3eb16f1e4d9c45dc777`.
+The unchanged [MIT text](third_party/rust/licenses/libyaml-rs-0.3.0/LICENSE-MIT)
+is retained. Its declared minimum Rust version is 1.60. Both packages use
+unmodified published source; there are no local patches. The dependency checker
+guards these exact package versions. The maintained libyaml fork remains an
+unsafe C2Rust translation; this migration does not claim a safe-Rust parser.
+The existing package license collector copies the resolved crates' original
+notices; the retained copies here additionally preserve their reviewed provenance.
+
 ### Rust dependency families
 
 | Component family | Purpose | Upstream license expression to verify in release audit |
 |---|---|---|
 | Tokio, tracing, futures | async runtime and structured diagnostics | MIT |
-| serde, serde_json, serde_yaml, prost | configuration and wire encoding | MIT or Apache-2.0/MIT |
+| serde, serde_json, yaml_serde (aliased as serde_yaml), prost | configuration and wire encoding | MIT or Apache-2.0/MIT |
 | rust-libp2p and Quinn | decentralised control plane and QUIC | MIT |
 | rustls, ring, ed25519-dalek, x25519-dalek, Argon2 | transport, identity, and key protection | mixed permissive licenses; inspect every resolved crate |
 | `hpke` 0.14.1 (`rust-hpke`) | RFC 9180 route-credential sealing, exact crates.io pin in `Cargo.lock` | MIT/Apache-2.0; upstream `https://github.com/rozbb/rust-hpke` |
@@ -966,12 +1030,129 @@ versions, locked upstream dependencies and audit/license obligations are retaine
 - Selected release: v3.9.0; exact commit `672efed69dda04c0a1e968859239e042f00d9538`.
 - Inspected editor/Node server and Rust `silex-server` source notices:
   AGPL-3.0-or-later; root package uses the shorthand AGPL-3.0.
-- Desktop Tauri wrapper: GPL-3.0-or-later in its package/source notices, separate GPL file.
+- Desktop Tauri metadata differs by source at that pin: the
+  [Cargo manifest](https://github.com/silexlabs/Silex/blob/672efed69dda04c0a1e968859239e042f00d9538/desktop/src-tauri/Cargo.toml)
+  declares AGPL-3.0-or-later; the
+  [main.rs header](https://github.com/silexlabs/Silex/blob/672efed69dda04c0a1e968859239e042f00d9538/desktop/src-tauri/src/main.rs)
+  states GNU GPL version 3-or-later. A separate GPL file is present. Preserve both
+  observations rather than assigning one label to the manifest and source header.
 - The pre-existing Studio GPLv3 license file is preserved. Do not use it to
   relabel upstream AGPL components or infer fulfilled network-service/source obligations.
-- No downloaded executable, vendored source, local patch or build in this slice.
-  Studio's `upstream.lock.json` binds reviewed file blobs; dependency/build/runtime
-  acceptance remains outstanding. Preserve notices and record any future patches,
-  distribution/network-source obligations and asset licenses before activation.
+- No downloaded executable, vendored source, local patch or build was part of this
+  initial research record. Studio's `upstream.lock.json` binds reviewed file blobs;
+  the later bounded hosted edit/export/Core-pack fixture built and ran the pinned
+  source, as recorded in [Studio hosting](docs/services/STUDIO_HOSTING.md#audited-starting-point--2026-10-22).
+  Full dependency audit and complete Studio acceptance remain open. Preserve
+  notices and record future patches, distribution/network-source obligations and
+  asset licenses before activation.
 - Primary files and adapter/telemetry/update boundaries are linked in
   [Studio hosting](docs/services/STUDIO_HOSTING.md#silex-source-selection-and-interfaces).
+
+## F04 fixed P-384 source candidate, 27 October 2026
+
+The current source candidate patches the original Apache-2.0 SEV 8.0.0 Git
+revision `a966d06d9bf0e68afe2733e7bfbf278fd7fd65b5` through a local vendor
+override. The unchanged original license is included in
+`third_party/rust/vendor/sev-8.0.0/LICENSE`; the existing Git revision and
+historical notice above remain provenance. The reviewed patch updates the
+P-384 dependency and adapts fixed-width signature decoding and the existing
+SHA-384 digest-to-prehash API boundary. It does not modify trust anchors,
+RSA certificate verification or cryptographic arithmetic algorithms.
+
+Fixed `crypto-bigint 0.7.9` requires `ctutils 0.4.5`, whose complete original
+Apache-2.0 and MIT source and licenses are retained without modification in
+`third_party/rust/vendor/ctutils-0.4.5`. The earlier 0.4.4 compatibility source,
+patch and evidence remain historical. Exact source/archive/patch/tree hashes
+and the pending resolver, cryptographic and codegen evidence are recorded in
+[the dependency review](third_party/rust/README.md#current-f04-source-candidate-fixed-p-384-arithmetic-27-october-2026).
+No exception is added for `RUSTSEC-2026-0387`; fixed graph guards remain fatal.
+
+## ctutils 0.4.4 Rust 1.85 compatibility adaptation
+
+Origin: [RustCrypto/utils](https://github.com/RustCrypto/utils), exact release
+commit `a993c0ba50db6510d8db15a6219572de65115438`;
+crates.io source archive SHA-256
+`12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865`.
+The complete source is retained under `third_party/rust/vendor/ctutils-0.4.4`
+with its original **Apache-2.0 OR MIT** notices unchanged. The package notice
+collector includes those exact files and labels the source as locally adapted.
+
+Local patch `third_party/rust/patches/ctutils-0.4.4-rust1.85.patch` adapts the
+manifest MSRV, same-width casts and twenty public const qualifications for
+Rust 1.85; it preserves upstream's runtime security fixes and algorithms.
+Exact hashes, compile-time API limitations, reconstruction/scope guards and
+pending hosted/codegen acceptance are documented in `third_party/rust/README.md`.
+This is modified upstream source, not an unchanged official 0.4.4 release.
+
+The separate `jni-sys-macros`0.4.1 archive (SHA-256
+`38c0b942f458fe50cdac086d2f946512305e5631e720728f2a61aabcd47a6264`)
+also omits its original notices. Its exact fallback is bound to VCS
+`64d77b7a5f119d7b55b4e2c169a4668067ff59e6`, path `jni-sys-macros`,
+version and `MIT OR Apache-2.0` metadata. Unchanged originals come from
+[jni-sys LICENSE-MIT](https://github.com/jni-rs/jni-sys/blob/64d77b7a5f119d7b55b4e2c169a4668067ff59e6/LICENSE-MIT)
+and [LICENSE-APACHE](https://github.com/jni-rs/jni-sys/blob/64d77b7a5f119d7b55b4e2c169a4668067ff59e6/LICENSE-APACHE).
+Both differ from the earlier jni/jni-macros texts; their own SHA256SUMS preserve
+the exact upstream bytes. This corrects this package's omission only.
+
+
+The current minimum build profile is Rust1.89.0. Its original official
+[distribution manifest](https://static.rust-lang.org/dist/channel-rust-1.89.0.toml)
+has SHA-256 `fbd1662e100e7b305908ece23b441cb7534eadfa6336c5f173ff08d1cec174a1`.
+All six component URLs, versions and original archive checksums are fixed in
+`scripts/rust189-components.json`; the separately pinned provisioner authenticates
+the complete payload before execution. The previous1.99 profile and notices are
+retained. This selects a minimum stable compiler for this reviewed dependency
+combination, not a claim of current upstream compiler security support.
+
+The minimum profile is limited to the controlled Core build entrypoints. Cargo
+1.89 remains affected by the [tar extraction advisory](https://blog.rust-lang.org/2026/03/21/cve-2026-33056/),
+[registry symlink advisory](https://blog.rust-lang.org/2026/05/25/cve-2026-5223/)
+and [registry credential advisory](https://blog.rust-lang.org/2026/05/25/cve-2026-5222/).
+The Rust project supplies security updates only for its
+[current supported releases](https://rust-lang.org/security/). This profile is
+not an upstream patch or a generally supported Cargo replacement.
+
+`scripts/cargo-source-policy.py` establishes the source/configuration/authentication
+boundary before the first Cargo operation, including implicit downloads and the
+older Cargo versions used to build the pinned audit tools. The profile requires
+fresh private Cargo homes, canonical public sparse crates.io sources, authenticated
+locked inputs, no registry credentials and no inherited configuration/cache
+authority. Only its own fixed configuration and the existing exact offline
+resolver diagnostic configuration are admitted. Cargo Git metadata uses the CLI
+with fixed HTTPS-only, noninteractive process configuration and fresh repositories.
+The policy helper does not inspect operator Git configuration or credential
+contents; Cargo network Git fetches do not inherit user/system configuration.
+No global user configuration is modified. This does not claim that every
+libgit2 internal metadata operation avoids reading Git configuration. The source
+scope sidecars are distinct from the unchanged official compiler-component
+receipts. These constraints do not apply an upstream fix to the older binaries;
+actual hosted execution must establish the bounded profile's acceptance.
+
+### Exact resolved-package notice recovery — 2026-10-27
+
+The published archives for libp2p-metrics0.17.0, libp2p-upnp0.5.0,
+prometheus-client-derive-encode0.4.2 and valuable0.1.1 omit their upstream
+license files. The packaging collector retains unchanged notices fetched from
+each archive's exact `.cargo_vcs_info.json` commit. r-efi5.3.0 and6.0.0 place
+their MIT permission notice and copyright attribution in `AUTHORS`; those exact
+upstream files are retained in full. Gossipsub0.49.5 likewise omits a top-level notice, but its authenticated
+published archive contains complete MIT copyright, permission and disclaimer
+headers. All27 original Rust source files are retained unchanged, including
+all22 files with complete MIT headers and the remaining original source files;
+archive/member hashes bind these primary notice bytes. The published VCS commit
+is retained as metadata even though its upstream Git object returned404. No
+replacement license text is invented.
+
+`third_party/rust/licenses/registry-fallbacks.tsv` binds each recovery to its
+exact package/version/license, root-lock archive SHA256, VCS commit and path.
+The original notice bytes have independent `SHA256SUMS`; immutable upstream
+URLs and content hashes are recorded in
+`third_party/rust/licenses/registry-fallback/full-notice-provenance.json`.
+The collector also recognizes the existing license/notice basename patterns
+without ASCII case sensitivity, preserving original names and bytes; this
+covers the lower-case license files already supplied by24 Windows packages.
+These additions do not establish a successful full hosted notice inventory:
+rustls-platform-verifier-android0.1.1 has no published VCS receipt and its
+bounded AAR/JAR inspection found no original license/notice terms. Its
+provenance remains unresolved and the collector continues to reject it. In particular, unavailable upstream source is not license-violation
+proof and is not authorization to skip a package.

@@ -72,7 +72,7 @@ def metadata_fixture(packages):
     for i, item in enumerate(packages):
         identity = 'fixture-id-' + str(i)
         result.append(dict(id=identity, name=item['name'], version=item['version'],
-            source=item.get('source'), license='Apache-2.0 OR MIT', rust_version='1.85.0',
+            source=item.get('source'), license='Apache-2.0 OR MIT', rust_version='1.99.1',
             manifest_path='/private/not-exported/Cargo.toml',
             features={'snp': [], 'crypto_nossl': ['dep:p384', 'dep:rsa', 'dep:sha2', 'dep:x509-cert']}
                 if item['name'] == 'sev' else {}))
@@ -119,22 +119,23 @@ def source_fixture(*, committed=False, collateral=False, local_policy=False):
 def public_trial_fixture(root, work, new, *, historical=True, endorsement=False, certificate_profile=False, collateral=False, local_policy=False):
     """Execute orchestration with synthetic public Cargo outputs, never Cargo."""
     def fake_run(argv, output, _deadline, *, stdout=None):
-        if argv[2] == '--version':
-            P.write(output, (argv[0] + ' 1.85.0 (inert)\nrelease: 1.85.0\n').encode())
-        elif argv[2] == 'fetch':
+        if argv[1] == '--version':
+            version = '1.99.1' if historical else '1.89.0'
+            P.write(output, (argv[0] + ' ' + version + ' (inert)\nrelease: ' + version + '\n').encode())
+        elif argv[1] == 'fetch':
             assert '--locked' in argv
             P.write(output, b'Fetched synthetic committed dependencies\n')
-        elif argv[2] == 'metadata':
-            assert argv == ['cargo', '+1.85.0', 'metadata', '--locked', '--offline',
+        elif argv[1] == 'metadata':
+            assert argv == ['cargo', 'metadata', '--locked', '--offline',
                 '--format-version', '1', '--filter-platform', 'x86_64-unknown-linux-gnu']
             P.write(stdout, json.dumps(metadata_fixture(new)).encode())
             P.write(output, b'')
-        elif argv[2] == 'test':
-            assert argv == ['cargo', '+1.85.0', 'test', '--locked', '--offline', '-p',
+        elif argv[1] == 'test':
+            assert argv == ['cargo', 'test', '--locked', '--offline', '-p',
                 'volparossa-content', '--lib', 'provider::compute::attestation::' if collateral or local_policy else P.PREFIX,
                 '--', '--test-threads=1']
             P.write(output, test_log(endorsement=endorsement, certificate_profile=certificate_profile, collateral=collateral, local_policy=local_policy))
-        elif argv[2] == 'clippy':
+        elif argv[1] == 'clippy':
             P.write(output, b'Finished synthetic inert Clippy\n')
         else:
             raise AssertionError(argv)
@@ -168,13 +169,22 @@ def public_trial_fixture(root, work, new, *, historical=True, endorsement=False,
 
 def prepare_fixture(work):
     def fake_run(argv, output, _deadline):
-        P.write(output, (argv[0] + ' 1.85.0 (inert)\nrelease: 1.85.0\n').encode())
+        P.write(output, (argv[0] + ' 1.89.0 (inert)\nrelease: 1.89.0\n').encode())
         return tool_outcome()
     with patch.object(P, 'run', side_effect=fake_run):
         P.prepare(work)
 
 
 class ProbeContracts(unittest.TestCase):
+    def test_current_and_historical_compiler_profiles_are_closed(self):
+        for tool in ('rustc', 'cargo'):
+            current = (tool + ' 1.89.0 (inert)\nrelease: 1.89.0\n').encode()
+            historical = (tool + ' 1.99.1 (inert)\nrelease: 1.99.1\n').encode()
+            P.toolchain_version(current, tool)
+            P.toolchain_version(historical, tool, historical=True)
+            with self.assertRaises(ValueError): P.toolchain_version(historical, tool)
+            with self.assertRaises(ValueError): P.toolchain_version(current, tool, historical=True)
+
     def test_minimal_resolver_delta_preserves_original_packages_and_edges(self):
         old, new = fixture_packages()
         value = P.lock_delta(lock(old), lock(new))
@@ -406,7 +416,7 @@ class ProbeContracts(unittest.TestCase):
         with source_fixture(committed=True) as (root, work, _, new):
             prepare_fixture(work)
             def fake_run(argv, output, deadline):
-                self.assertEqual(argv, ['cargo', '+1.85.0', 'fetch', '--locked', '--manifest-path', str(root / 'Cargo.toml')])
+                self.assertEqual(argv, ['cargo', 'fetch', '--locked', '--manifest-path', str(root / 'Cargo.toml')])
                 self.assertEqual(deadline, 300)
                 P.write(output, b'public locked fetch failed\n')
                 return tool_outcome(101)
@@ -444,7 +454,7 @@ class ProbeContracts(unittest.TestCase):
     def test_prepare_is_new_only_and_does_not_relabel_cryptographic_success(self):
         with source_fixture() as (_, work, old, _):
             def fake_run(argv, output, _deadline):
-                P.write(output, (argv[0] + ' 1.85.0 (inert)\nrelease: 1.85.0\n').encode())
+                P.write(output, (argv[0] + ' 1.89.0 (inert)\nrelease: 1.89.0\n').encode())
                 return tool_outcome()
             with patch.object(P, 'run', side_effect=fake_run): P.prepare(work)
             record = json.loads(P.read(work / 'evidence/source.json', P.MAX_LOCK))
@@ -457,7 +467,7 @@ class ProbeContracts(unittest.TestCase):
             work = Path(tmp); (work / 'evidence').mkdir()
             P.record(work / 'evidence/resolved-metadata.json', {})
             def fake_run(argv, output, deadline):
-                self.assertEqual(argv[:3], ['cargo', '+1.85.0', 'test' if output.name == 'tests.log' else 'clippy'])
+                self.assertEqual(argv[:2], ['cargo', 'test' if output.name == 'tests.log' else 'clippy'])
                 self.assertIn('--locked', argv); self.assertIn('--offline', argv)
                 self.assertIn('volparossa-content', argv)
                 if output.name == 'tests.log':
@@ -1113,7 +1123,7 @@ class ProbeContracts(unittest.TestCase):
             P.cargo_env(Path(tmp))
             self.assertNotIn('CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS', os.environ)
             self.assertEqual(os.environ['CARGO_BUILD_JOBS'], '2')
-            self.assertEqual(os.environ['RUSTUP_TOOLCHAIN'], '1.85.0')
+            self.assertEqual(os.environ['RUSTUP_TOOLCHAIN'], '1.89.0')
 
     def test_pass_flags_cannot_override_changed_logs_source_lock_metadata_or_exit(self):
         for kind in ('log', 'source', 'lock', 'metadata', 'exit', 'tool', 'diff', 'ignored', 'scope'):
@@ -1146,7 +1156,7 @@ class ProbeContracts(unittest.TestCase):
             P.write(work / 'evidence/effective-Cargo.lock', lock(new))
             (root / 'Cargo.lock').write_bytes(lock(new))
             def fake_run(argv, output, deadline, *, stdout):
-                self.assertEqual(argv, ['cargo', '+1.85.0', 'metadata', '--locked', '--offline',
+                self.assertEqual(argv, ['cargo', 'metadata', '--locked', '--offline',
                     '--format-version', '1', '--filter-platform', 'x86_64-unknown-linux-gnu'])
                 self.assertEqual(deadline, 120)
                 P.write(stdout, b''); P.write(output, b'public inert metadata error\n')
@@ -1253,7 +1263,7 @@ class ProbeContracts(unittest.TestCase):
         self.assertIn('cancel-in-progress: false', raw)
         self.assertIn('timeout-minutes: 45', raw)
         self.assertIn('persist-credentials: false', raw)
-        self.assertIn('1.85.0 --profile minimal --component clippy --no-self-update', raw)
+        self.assertIn('python3 -B scripts/provision-rust189.py runner', raw)
         observed = re.findall(r'\$\{\{ runner.temp \}\}/volparossa-protected-compute-admission/evidence/(\S+)', raw)
         self.assertEqual(tuple(observed), P.EXPORTS)
         self.assertNotIn('cargo update', raw); self.assertNotIn('generate-lockfile', raw)

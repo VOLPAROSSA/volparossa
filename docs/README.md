@@ -5,11 +5,12 @@ VOLPAROSSA is a developing **Decentralized Intelligent Cooperative Network**;
 the documentation describes both implemented milestones and intended capabilities.
 
 [Project introduction](../README.md) · [Applications](applications/APPLICATIONS.md) ·
-[Common questions](FAQ.md) · [Detailed implementation status](IMPLEMENTATION_STATUS.md)
+[Common questions](FAQ.md) · [Current implementation status](IMPLEMENTATION_STATUS.md)
 
 ## Find the right folder
 
-The top level keeps this guide, the FAQ and the implementation-status ledger.
+The top level keeps this guide, the FAQ and compact implementation status.
+Historical source records live in `archive/`.
 Technical documents are grouped by subject so the folder itself is easier to browse:
 
 | Folder | Contents |
@@ -22,6 +23,7 @@ Technical documents are grouped by subject so the folder itself is easier to bro
 | [privacy/](privacy/) | Privacy boundaries, threat model and destination policy. |
 | [development/](development/) | Building, operating and testing the project. |
 | [assets/](assets/) | Images used by the documentation. |
+| [archive/](archive/README.md) | Original sources and dated evidence, outside the normal reading path. |
 
 The folders organize the documentation; they do not represent separate daemons or
 different completion levels. Follow the reading paths below for an introduction,
@@ -45,15 +47,16 @@ or go directly to a topic when you already know what you need.
    [support guide](https://github.com/VOLPAROSSA/.github/blob/main/SUPPORT.md) and
    [accessibility guide](https://github.com/VOLPAROSSA/.github/blob/main/ACCESSIBILITY.md)
    apply across repositories.
-2. Read the repository's [engineering instructions](../AGENTS.md), then the
-   [complete agreed goal](development/GOAL.md) and permanent
-   [joined DPS requirements](development/DPS_REQUIREMENTS.md) and
-   [Studio/hosting requirements](development/STUDIO_HOSTING_REQUIREMENTS.md). The current milestone is not the full scope.
-3. Read [current implementation status](IMPLEMENTATION_STATUS.md#current-integration-and-active-work)
-   for retained branches, exact revisions, acceptance evidence and unresolved dependencies.
+2. Read the repository's [engineering instructions](../AGENTS.md) and
+   [current implementation status](IMPLEMENTATION_STATUS.md). For a full project
+   resumption, read the [complete agreed goal](development/GOAL.md), including
+   its DPS and Studio/hosting sections. For a bounded task,
+   load the relevant requirements; the complete scope remains authoritative.
+3. Follow the status links for retained work, exact revisions, acceptance evidence
+   and dependencies. Read historical records only when the task needs them.
 4. Follow the [architecture](architecture/ARCHITECTURE.md) and relevant topic guide below.
-   Use [Contributing](../CONTRIBUTING.md) and the [Codex handover workflow](development/CODEX_WORKFLOW.md)
-   when preparing scoped work or transferring it to another session.
+   Use [Contributing](../CONTRIBUTING.md) and the [shared development workflow](development/CODEX_WORKFLOW.md)
+   when preparing scoped work or transferring it between clients or sessions.
 5. Use the [read-only prerequisite checks](development/OPERATIONS.md#read-only-prerequisites), then
    the [build instructions](development/OPERATIONS.md#build-and-package).
 6. Choose [focused tests](development/TESTING.md#unprivileged-quality-gate) for your change. Network
@@ -103,19 +106,16 @@ or go directly to a topic when you already know what you need.
 
 ## Operations and project reference
 
-- [Agreed goal](development/GOAL.md): complete preserved objective and later clarifications.
-- [Studio/hosting requirements](development/STUDIO_HOSTING_REQUIREMENTS.md): complete permanent Silex, hosting and shared AI amendment.
-- [DPS requirements](development/DPS_REQUIREMENTS.md): complete joined and permanent normative positioning scope.
-- [DPS source archive](development/DPS_GOAL_20261021.md): byte-preserved provenance only; not the current normative requirements file.
-- [Fresh-session prompt](development/PURSUING_GOAL.md): exact copyable UI text for continuing the complete goal.
-- [Goal verification](development/GOAL_VERIFICATION.md): preservation hashes, traceability and inert verification method.
+- [Agreed goal](development/GOAL.md): effective complete objective and integrated amendments.
+- [DPS](development/GOAL.md#dps) and [Studio/hosting](development/GOAL.md#studio): integrated sections of the same complete goal.
+- [Documentation archive](archive/README.md): original requirements, dated audits and detailed historical evidence; not startup reading.
+- [Requirement preservation](development/TESTING.md#requirement-preservation): checks when requirements change.
 - [Goal preservation verifier](../scripts/verify-goal-preservation.py): standard-library-only integrity check.
-- [Codex workflow](development/CODEX_WORKFLOW.md): safe resumption, scoped delegation and handover.
+- [Shared development workflow](development/CODEX_WORKFLOW.md): task-driven execution, delegation, verification and handover for any client.
 - [Operations](development/OPERATIONS.md): configuration, commands, packaging and removal.
 - [Testing](development/TESTING.md): focused checks, disposable topologies and acceptance requirements.
-- [Implementation status](IMPLEMENTATION_STATUS.md): detailed evidence ledger, including failed trials.
-- [Public growth readiness](development/PUBLIC_GROWTH_20261020.md): organization audit, verification and sustainable outreach/funding roadmap.
-- [2026-10-20 repository maintenance](development/MAINTENANCE_20261020.md): measured cleanup outcomes and retained recovery state.
+- [Implementation status](IMPLEMENTATION_STATUS.md): compact current work, evidence and dependencies.
+- [Historical evidence](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md): preserved detailed checkpoints, including failed trials; not default startup reading.
 - [Execution plan](IMPLEMENTATION_STATUS.md#execution-priorities-and-next-milestones): next milestones, shared dependencies and current blockers.
 - [Applications](applications/APPLICATIONS.md): boundaries and links for the application repositories.
 - [Community overview](community/OVERVIEW.md): project entry point and contributor routes.
@@ -130,10 +130,10 @@ or go directly to a topic when you already know what you need.
 every usage scenario works. **Verified** refers to a stated source revision and test scope.
 **Pending** remains unfinished, even when adjacent components pass.
 
-The detailed status file is an evidence ledger, not a quick-start guide. Its older records
-are retained so a failed experiment is not silently turned into a success. A historical
-checkpoint does not qualify a newer build; a passing small-model task does not establish
-reliable reasoning; a connector does not establish a complete application.
+The status index links to detailed evidence without repeating the full history.
+Older records retain failed experiments. A historical checkpoint does not qualify a
+newer build; a passing small-model task does not establish reliable reasoning; a
+connector does not establish a complete application.
 
 Start with the concise README, follow the topic guide when needed, and use the ledger for
 the exact claim. Feature branches may contain work not yet integrated into `main`.

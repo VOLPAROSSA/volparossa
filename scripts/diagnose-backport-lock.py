@@ -11,6 +11,7 @@ import difflib
 import hashlib
 import json
 import os
+import runpy
 from pathlib import Path
 import shutil
 import subprocess
@@ -30,6 +31,7 @@ VENDORS = (
 )
 REGISTRY_LOCKS = (Path("Cargo.lock"), Path("fuzz/Cargo.lock"), HARNESS / "Cargo.lock")
 EXPORTS = {"before.Cargo.lock", "after.Cargo.lock", "Cargo.lock.diff", "status.json"}
+POLICY = runpy.run_path(str(Path(__file__).with_name('cargo-source-policy.py')))
 
 
 def digest(data):
@@ -59,7 +61,7 @@ def copy_inputs(repository, temporary):
         source = repository / HARNESS / relative
         data = bounded_file(source)
         destination = temporary / HARNESS / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         destination.write_bytes(data)
     for name in VENDORS:
         source = repository / "third_party/rust/vendor" / name
@@ -108,6 +110,7 @@ def diagnose(repository, output, fetch_status, run=subprocess.run):
             temporary = Path(directory)
             copy_inputs(repository, temporary)
             environment = os.environ.copy()
+            environment = POLICY['validate_diagnostic'](temporary / HARNESS, environment)
             environment["CARGO_NET_OFFLINE"] = "true"
             environment["RUSTUP_AUTO_INSTALL"] = "0"
             # run requires the already installed toolchain; update performs no builds.

@@ -571,10 +571,10 @@ def command_ok(outcome):
         and outcome['leader_joined'] is True, 'command_failed')
 
 
-def cargo_env(work):
+def cargo_env(work, *, historical=False):
     os.environ.update(CARGO_HOME=str(work / 'cargo-home'), CARGO_TARGET_DIR=str(work / 'target'),
         CARGO_BUILD_JOBS='2', CARGO_TERM_COLOR='never', CARGO_INCREMENTAL='0',
-        RUSTUP_TOOLCHAIN='1.85.0')
+        RUSTUP_TOOLCHAIN='1.99.1' if historical else '1.89.0')
     os.environ.pop('CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS', None)
 
 
@@ -622,10 +622,12 @@ def check_lock(work, *, historical=False, endorsement=False, certificate_profile
     return selected
 
 
-def toolchain_version(raw, tool):
+def toolchain_version(raw, tool, *, historical=False):
+    # Closed existing historical profile; caller cannot supply arbitrary versions.
+    version = '1.99.1' if historical else '1.89.0'
     text = raw.decode('ascii')
-    require(text.startswith(tool + ' 1.85.0 ')
-        and '\nrelease: 1.85.0\n' in '\n' + text + '\n', 'toolchain_version')
+    require(text.startswith(tool + ' ' + version + ' ')
+        and '\nrelease: ' + version + '\n' in '\n' + text + '\n', 'toolchain_version')
 
 
 def prepare(work, *, historical=False, endorsement=False, certificate_profile=False, collateral=False, local_policy=False):
@@ -637,15 +639,15 @@ def prepare(work, *, historical=False, endorsement=False, certificate_profile=Fa
     write(evidence / 'original-Cargo.lock', original)
     record(evidence / 'source.json', source_receipt(selected, historical=historical, endorsement=endorsement, certificate_profile=certificate_profile, collateral=collateral, local_policy=local_policy))
     for tool in ('rustc', 'cargo'):
-        outcome = run([tool, '+1.85.0', '--version', '--verbose'], evidence / (tool + '.txt'), 30)
+        outcome = run([tool, '--version', '--verbose'], evidence / (tool + '.txt'), 30)
         command_ok(outcome)
-        toolchain_version(read(evidence / (tool + '.txt'), 32768), tool)
+        toolchain_version(read(evidence / (tool + '.txt'), 32768), tool, historical=historical)
 
 
 def fetch(work, *, endorsement=False, certificate_profile=False, collateral=False, local_policy=False):
     selected, original = check_committed(work, endorsement=endorsement, certificate_profile=certificate_profile, collateral=collateral, local_policy=local_policy)
     evidence = work / 'evidence'
-    outcome = run(['cargo', '+1.85.0', 'fetch', '--locked', '--manifest-path', str(ROOT / 'Cargo.toml')],
+    outcome = run(['cargo', 'fetch', '--locked', '--manifest-path', str(ROOT / 'Cargo.toml')],
         evidence / 'resolve.log', 300)
     effective = read(ROOT / 'Cargo.lock', MAX_LOCK)
     write(evidence / 'effective-Cargo.lock', effective)
@@ -670,7 +672,7 @@ def fetch(work, *, endorsement=False, certificate_profile=False, collateral=Fals
 def metadata(work, *, historical=False, endorsement=False, certificate_profile=False, collateral=False, local_policy=False):
     selected = check_lock(work, historical=historical, endorsement=endorsement, certificate_profile=certificate_profile, collateral=collateral, local_policy=local_policy)
     evidence = work / 'evidence'
-    outcome = run(['cargo', '+1.85.0', 'metadata', '--locked', '--offline', '--format-version', '1',
+    outcome = run(['cargo', 'metadata', '--locked', '--offline', '--format-version', '1',
         '--filter-platform', 'x86_64-unknown-linux-gnu'], evidence / 'metadata.log', 120,
         stdout=work / 'metadata.json')
     result = envelope('core-attestation-resolved-metadata', historical=historical, endorsement=endorsement, certificate_profile=certificate_profile, collateral=collateral, local_policy=local_policy, source=selected,
@@ -706,7 +708,7 @@ def check_metadata(work, *, historical=False, endorsement=False, certificate_pro
 def execute(work, phase, *, historical=False, endorsement=False, certificate_profile=False, collateral=False, local_policy=False):
     selected = check_lock(work, historical=historical, endorsement=endorsement, certificate_profile=certificate_profile, collateral=collateral, local_policy=local_policy)
     check_metadata(work, historical=historical, endorsement=endorsement, certificate_profile=certificate_profile, collateral=collateral, local_policy=local_policy)
-    argv = ['cargo', '+1.85.0']
+    argv = ['cargo']
     if phase == 'test':
         argv += ['test', '--locked', '--offline', '-p', 'volparossa-content', '--lib',
             'provider::compute::attestation::' if collateral or local_policy else PREFIX,
@@ -780,7 +782,7 @@ def verify_evidence(work, records, files, *, historical=False, endorsement=False
         require(value['log'] == files[log + '.log'], 'stage_log_changed')
     require(records['tests.json']['tests'] == verify_tests(read(evidence / 'tests.log', MAX_LOG), endorsement=endorsement, certificate_profile=certificate_profile, collateral=collateral, local_policy=local_policy), 'tests_receipt')
     for tool in ('rustc', 'cargo'):
-        toolchain_version(read(evidence / (tool + '.txt'), 32768), tool)
+        toolchain_version(read(evidence / (tool + '.txt'), 32768), tool, historical=historical)
 
 
 def receipt(work, *, historical=False, endorsement=False, certificate_profile=False, collateral=False, local_policy=False):

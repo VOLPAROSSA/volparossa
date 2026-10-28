@@ -839,17 +839,15 @@ async fn connection_with_native(
                 }
                 let response = connection_request(request, &config, &gate, &mut active,
                     &mut handshakes, &mut native, start_native);
-                if let Some(response) = response {
-                    if wire::write(&mut writer, &response).await.is_err() { break; }
-                }
+                if let Some(response) = response
+                    && wire::write(&mut writer, &response).await.is_err() { break; }
             }
             event = async {
                 events.expect("guarded native events").recv().await
             }, if events.is_some() && native_events_open => {
                 if let Some(event) = event {
-                    if let Some(response) = native.as_mut().expect("native session").event(event) {
-                        if wire::write(&mut writer, &response).await.is_err() { break; }
-                    }
+                    if let Some(response) = native.as_mut().expect("native session").event(event)
+                        && wire::write(&mut writer, &response).await.is_err() { break; }
                 } else {
                     native_events_open = false;
                 }

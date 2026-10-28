@@ -264,16 +264,15 @@ impl PrivateStorageOutcome {
         if let Some(timing) = self.append_timing {
             timing.validate(phase)?;
         }
-        if let Some(failure) = self.tls_close_failure {
-            if PrivateStorageTlsCloseFailure::try_from(failure).map_err(|_| invalid())?
+        if let Some(failure) = self.tls_close_failure
+            && (PrivateStorageTlsCloseFailure::try_from(failure).map_err(|_| invalid())?
                 == PrivateStorageTlsCloseFailure::Unspecified
                 || phase != PrivateStorageOutcomePhase::TransportTlsClose
                 || category != PrivateStorageOutcomeCategory::Unavailable
                 || deadline != PrivateStorageOutcomeDeadline::None
-                || self.append_timing.is_some()
-            {
-                return Err(invalid());
-            }
+                || self.append_timing.is_some())
+        {
+            return Err(invalid());
         }
         Ok(())
     }

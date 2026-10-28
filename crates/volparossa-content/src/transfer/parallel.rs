@@ -383,10 +383,10 @@ impl ParallelDownload {
                     for offset in 0..self.peers.len() {
                         let index = (next_result + offset) % self.peers.len();
                         let peer = &mut self.peers[index];
-                        if peer.pending.is_some() || peer.state == adaptive::PeerState::Finishing {
-                            if let Poll::Ready(response) = peer.results.poll_recv(cx) {
-                                return Poll::Ready((index, response));
-                            }
+                        if (peer.pending.is_some() || peer.state == adaptive::PeerState::Finishing)
+                            && let Poll::Ready(response) = peer.results.poll_recv(cx)
+                        {
+                            return Poll::Ready((index, response));
                         }
                     }
                     Poll::Pending

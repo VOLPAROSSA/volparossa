@@ -19,7 +19,7 @@ live_gate=$script_directory/require-live-worker-identity-proof.sh
 manifest=$script_directory/debian13-amd64-image-v1.json
 workflow=$repository_directory/.github/workflows/helper-boundary-evidence.yml
 supervisor=$script_directory/qemu-pidfd-supervisor.py
-environment_validator=$script_directory/validate-helper-boundary-vm-environment-v1.sh
+environment_validator=$script_directory/validate-helper-boundary-vm-environment-v3.sh
 environment_test=$script_directory/test-helper-boundary-vm-environment-v1.sh
 evidence_fixture=$script_directory/fixtures/helper-boundary-evidence-v1.pass.json
 temporary_directory=$(mktemp -d /tmp/volparossa-helper-vm-contract.XXXXXX)
@@ -389,7 +389,7 @@ for exact_runner_text in \
     '--no-hardlinks --depth 1 --no-tags --single-branch --branch main' \
     '--branch "$expected_source_branch"' \
     'qemu-pidfd-supervisor.py' \
-    'validate-helper-boundary-vm-environment-v1.sh' \
+    'validate-helper-boundary-vm-environment-v3.sh' \
     'StrictHostKeyChecking=yes' \
     'GlobalKnownHostsFile=/dev/null' \
     'IdentityAgent=none' \
@@ -979,6 +979,8 @@ branch_failure_functions=$temporary_directory/branch-failure-functions.sh
     sed -n '/^non_retained_restart_readiness_stage_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_restart_readiness_failure_detail_category() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_restart_retirement_failure_detail_category() {$/,/^}$/p' "$runner"
+    sed -n '/^non_retained_production_retirement_stage_is_safe() {$/,/^}$/p' "$runner"
+    sed -n '/^report_non_retained_production_retirement_diagnostic() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_restart_launch_failure_category() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_restart_initial_hook_failure_stage_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^non_retained_restart_initial_driver_failure_stage_is_safe() {$/,/^}$/p' "$runner"
@@ -994,7 +996,7 @@ branch_failure_functions=$temporary_directory/branch-failure-functions.sh
     sed -n '/^non_retained_functional_probe_failure_value_is_safe() {$/,/^}$/p' "$runner"
     sed -n '/^report_non_retained_production_launch_diagnostic() {$/,/^}$/p' "$runner"
 } >"$branch_failure_functions"
-test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 29
+test "$(grep -c '^[_a-z].*() {$' "$branch_failure_functions")" -eq 31
 sh -n "$branch_failure_functions"
 # shellcheck disable=SC1090
 . "$branch_failure_functions"
@@ -2290,7 +2292,7 @@ for exact_workflow_text in \
     '--expected-kvm-gid "$kvm_gid"' \
     '--expected-kvm-identity "$(cat "$acl_identity")"' \
     'tests/helper/validate-helper-boundary-evidence-v1.sh' \
-    'tests/helper/validate-helper-boundary-vm-environment-v1.sh' \
+    'tests/helper/validate-helper-boundary-vm-environment-v3.sh' \
     "grep -aEq -- '-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----'" \
     'VERIFY_KVM_STATE_OUTCOME: ${{ steps.verify_kvm_state.outcome }}' \
     "steps.source_selection.outputs.proof_mode == 'retained-main'" \
@@ -2504,6 +2506,133 @@ if [ "$uses_count" -ne 4 ]; then
     printf 'expected exactly four pinned action uses, got %s\n' "$uses_count" >&2
     exit 1
 fi
+
+
+# No private raw proof log is published by the production-retirement parser.
+production_marker=VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_DIAGNOSTIC_V1=
+production_phase=VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=production-retirement
+for production_stage in adoption identity initial-snapshot stop-request stop-wait \
+    reset-failed reset-wait fdstore-clean post-clean final-reset collection \
+    affine-state unit-not-collected runtime-fence; do
+    printf '%s%s\n%s\n' "$production_marker" "$production_stage" "$production_phase" \
+        >"$branch_failure_diagnostic"
+    expect_status 0 report_non_retained_production_retirement_diagnostic "$branch_failure_diagnostic"
+    test ! -s "$last_stdout"
+    test "$(cat "$last_stderr")" = \
+        "non-retained helper-boundary PR smoke failure category: production-retirement
+non-retained helper-boundary PR smoke production retirement stage: $production_stage"
+done
+for production_bad in absent-marker absent-phase duplicate-marker duplicate-phase \
+    wrong-phase prefix-junk suffix-junk private-marker oversized; do
+    case $production_bad in
+        absent-marker) printf '%s\n' "$production_phase" ;;
+        absent-phase) printf '%sidentity\n' "$production_marker" ;;
+        duplicate-marker) printf '%sidentity\n%sidentity\n%s\n' \
+            "$production_marker" "$production_marker" "$production_phase" ;;
+        duplicate-phase) printf '%sidentity\n%s\n%s\n' \
+            "$production_marker" "$production_phase" "$production_phase" ;;
+        wrong-phase) printf '%sidentity\n%s\n' "$production_marker" \
+            'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=restart-retirement' ;;
+        prefix-junk) printf 'private%sidentity\n%s\n' "$production_marker" "$production_phase" ;;
+        suffix-junk) printf '%sidentity/private/session\n%s\n' "$production_marker" "$production_phase" ;;
+        private-marker) printf '%sidentity\n%s\n%s\n' "$production_marker" "$production_phase" \
+            '-----BEGIN PRIVATE KEY-----' ;;
+        oversized) head -c 1048577 /dev/zero ;;
+    esac >"$branch_failure_diagnostic"
+    expect_status 1 report_non_retained_production_retirement_diagnostic "$branch_failure_diagnostic"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
+printf '%sidentity\n%s\n' "$production_marker" "$production_phase" >"$branch_failure_diagnostic"
+chmod 0660 "$branch_failure_diagnostic"
+expect_status 1 report_non_retained_production_retirement_diagnostic "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+chmod 0600 "$branch_failure_diagnostic"
+production_capture_alias=$temporary_directory/production-capture-alias
+ln "$branch_failure_diagnostic" "$production_capture_alias"
+expect_status 1 report_non_retained_production_retirement_diagnostic "$branch_failure_diagnostic"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+rm "$production_capture_alias"
+ln -s "$branch_failure_diagnostic" "$production_capture_alias"
+expect_status 1 report_non_retained_production_retirement_diagnostic "$production_capture_alias"
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+expect_status 1 report_non_retained_production_retirement_diagnostic
+expect_status 1 report_non_retained_production_retirement_diagnostic "$branch_failure_diagnostic" extra
+
+production_first_marker=VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1=
+production_launch_marker=VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=
+production_functional_marker=VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=
+for production_first in production-launch-status production-process-identity production-retirement; do
+    printf '%sruntime-fence\n%s\n%s%s\n' "$production_marker" "$production_phase" \
+        "$production_first_marker" "$production_first" >"$branch_failure_diagnostic"
+    expect_status 0 report_non_retained_production_retirement_diagnostic "$branch_failure_diagnostic"
+    test ! -s "$last_stdout"
+    test "$(sed -n '3p' "$last_stderr")" = \
+        "non-retained helper-boundary PR smoke first proof failure: $production_first"
+    if [ "$production_first" = production-launch-status ]; then
+        test "$(sed -n '4p' "$last_stderr")" = \
+            'non-retained helper-boundary PR smoke production launch diagnostic: unavailable'
+    else
+        test "$(wc -l <"$last_stderr")" -eq 3
+    fi
+done
+for production_launch in identity-process functional-probe-wait; do
+    printf '%sruntime-fence\n%s\n%sproduction-launch-status\n%s%s\n' \
+        "$production_marker" "$production_phase" "$production_first_marker" \
+        "$production_launch_marker" "$production_launch" >"$branch_failure_diagnostic"
+    if [ "$production_launch" = functional-probe-wait ]; then
+        printf '%sprepare,io\n' "$production_functional_marker" >>"$branch_failure_diagnostic"
+    fi
+    expect_status 0 report_non_retained_production_retirement_diagnostic "$branch_failure_diagnostic"
+    test ! -s "$last_stdout"
+    test "$(sed -n '4p' "$last_stderr")" = \
+        "non-retained helper-boundary PR smoke production launch diagnostic: $production_launch"
+    if [ "$production_launch" = functional-probe-wait ]; then
+        test "$(sed -n '5p' "$last_stderr")" = \
+            'non-retained helper-boundary PR smoke Client/Exit/Relay-pair lease diagnostic: prepare,io'
+    else
+        test "$(wc -l <"$last_stderr")" -eq 4
+    fi
+done
+for production_bad in unknown-first duplicate-first prefixed-first suffixed-first \
+    unknown-launch duplicate-launch prefixed-launch suffixed-launch contradictory-launch \
+    absent-first functional-without-launch functional-contradiction functional-unknown \
+    duplicate-functional prefixed-functional; do
+    printf '%sruntime-fence\n%s\n' "$production_marker" "$production_phase" >"$branch_failure_diagnostic"
+    case $production_bad in
+        unknown-first) printf '%sunknown\n' "$production_first_marker" ;;
+        duplicate-first) printf '%sproduction-launch-status\n%sproduction-process-identity\n' \
+            "$production_first_marker" "$production_first_marker" ;;
+        prefixed-first) printf 'private%sproduction-launch-status\n' "$production_first_marker" ;;
+        suffixed-first) printf '%sproduction-launch-status/private/session\n' "$production_first_marker" ;;
+        contradictory-launch) printf '%sproduction-process-identity\n%sidentity-process\n' \
+            "$production_first_marker" "$production_launch_marker" ;;
+        absent-first) printf '%sidentity-process\n' "$production_launch_marker" ;;
+        *)
+            printf '%sproduction-launch-status\n' "$production_first_marker"
+            case $production_bad in
+                unknown-launch) printf '%sunknown\n' "$production_launch_marker" ;;
+                duplicate-launch) printf '%sidentity-process\n%sidentity-socket\n' \
+                    "$production_launch_marker" "$production_launch_marker" ;;
+                prefixed-launch) printf 'private%sidentity-process\n' "$production_launch_marker" ;;
+                suffixed-launch) printf '%sidentity-process/private/session\n' "$production_launch_marker" ;;
+                functional-without-launch) printf '%sprepare,io\n' "$production_functional_marker" ;;
+                functional-contradiction) printf '%sidentity-process\n%sprepare,io\n' \
+                    "$production_launch_marker" "$production_functional_marker" ;;
+                *)
+                    printf '%sfunctional-probe-wait\n' "$production_launch_marker"
+                    case $production_bad in
+                        functional-unknown) printf '%sprepare,unknown\n' "$production_functional_marker" ;;
+                        duplicate-functional) printf '%sprepare,io\n%sprepare,timeout\n' \
+                            "$production_functional_marker" "$production_functional_marker" ;;
+                        prefixed-functional) printf 'private%sprepare,io\n' "$production_functional_marker" ;;
+                    esac
+                    ;;
+            esac
+            ;;
+    esac >>"$branch_failure_diagnostic"
+    expect_status 1 report_non_retained_production_retirement_diagnostic "$branch_failure_diagnostic"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
 
 printf '%s\n' \
     'PASS: helper-boundary VM preview, retained-main, non-retained branch smoke, and KVM contracts are exact.'

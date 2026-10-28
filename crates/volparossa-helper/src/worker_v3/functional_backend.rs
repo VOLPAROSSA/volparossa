@@ -2710,18 +2710,18 @@ impl FunctionalAlphaLeaseBackend {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.as_mut().and_then(|entry| entry.parent_policy.take())
         };
-        if let Some(parent_policy) = parent_policy {
-            if super::client_ingress_policy::remove_parent(&parent_policy, deadline).is_err() {
-                let mut state = self
-                    .ingress_state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(entry) = state.as_mut() {
-                    entry.parent_policy = Some(parent_policy);
-                    entry.phase = OpenIngressPhase::Quarantined;
-                }
-                return false;
+        if let Some(parent_policy) = parent_policy
+            && super::client_ingress_policy::remove_parent(&parent_policy, deadline).is_err()
+        {
+            let mut state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(entry) = state.as_mut() {
+                entry.parent_policy = Some(parent_policy);
+                entry.phase = OpenIngressPhase::Quarantined;
             }
+            return false;
         }
         let parent_routing = {
             let mut state = self
@@ -3111,13 +3111,12 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .as_ref()
                         .map(|entry| (entry.client_runtime_id, entry.backend_generation));
-                    if let Some((client_runtime_id, backend_generation)) = ingress {
-                        if !self
+                    if let Some((client_runtime_id, backend_generation)) = ingress
+                        && !self
                             .cleanup_ingress_exact(client_runtime_id, backend_generation, deadline)
                             .await
-                        {
-                            return request.complete(Err(BackendError::CleanupIncomplete));
-                        }
+                    {
+                        return request.complete(Err(BackendError::CleanupIncomplete));
                     }
                     let keys = lock_state(&self.state).keys().copied().collect::<Vec<_>>();
                     for key in keys {
@@ -8656,7 +8655,7 @@ pub(super) mod tests {
         // Any registration reply lost after a possible mutation is promoted to Ambiguous. A
         // non-Ambiguous persistence error is returned only after the complete journal boundary is
         // confirmed unchanged, so the registration can be dropped without orphaning its Intent.
-        assert!(actor.contains("operation.complete_unstarted_deadline();"));
+        assert!(actor.contains("(*operation).complete_unstarted_deadline();"));
         assert!(actor.contains("fence_terminal(&self.lifecycle, Lifecycle::Ambiguous)"));
         assert!(actor.contains("self.journal.confirm_retry_safe_after_definite_failure()"));
         assert!(journal.contains("fn confirm_retry_safe_after_definite_failure(&mut self)"));

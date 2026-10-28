@@ -30,7 +30,7 @@ env:
   CARGO_BUILD_JOBS: '2'
   CARGO_TERM_COLOR: never
   PYTHONDONTWRITEBYTECODE: '1'
-  RUSTUP_TOOLCHAIN: 1.85.0
+  RUSTUP_TOOLCHAIN: 1.89.0
 
 jobs:
   diagnostics:
@@ -107,10 +107,12 @@ jobs:
         id: toolchain
         run: |
           set -euo pipefail
-          rustup toolchain install 1.85.0 --profile minimal --no-self-update \
-            --component clippy --component rustfmt
-          rustc +1.85.0 --version --verbose
-          cargo +1.85.0 --version --verbose
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
+          rustc --version --verbose
+          cargo --version --verbose
 
       - name: Install the reviewed Protobuf compiler on this disposable runner
         run: |
@@ -150,7 +152,7 @@ jobs:
         id: fetch
         run: |
           set -euo pipefail
-          timeout --kill-after=10s 300s cargo +1.85.0 fetch --locked
+          timeout --kill-after=10s 300s cargo fetch --locked
           git diff --exit-code
 
       - name: Inventory and execute only the three native diagnostic test groups
@@ -164,7 +166,7 @@ jobs:
               private_serve) filter=compute::private_serve::tests::native_session:: ;;
             esac
             set +e
-            timeout --kill-after=10s 900s cargo +1.85.0 test --locked --offline \
+            timeout --kill-after=10s 900s cargo test --locked --offline \
               -p volparossa --bin volparossa "$filter" -- --list --format terse \
               2>&1 | tee "$DIAGNOSTIC_OUTPUT/$group.inventory.log"
             statuses=("${PIPESTATUS[@]}")
@@ -173,7 +175,7 @@ jobs:
             test "${statuses[1]}" -eq 0
             test "${statuses[0]}" -eq 0
             set +e
-            timeout --kill-after=10s 180s cargo +1.85.0 test --locked --offline \
+            timeout --kill-after=10s 180s cargo test --locked --offline \
               -p volparossa --bin volparossa "$filter" -- --color never \
               2>&1 | tee "$DIAGNOSTIC_OUTPUT/$group.tests.log"
             statuses=("${PIPESTATUS[@]}")
@@ -216,7 +218,7 @@ jobs:
         run: |
           set -euo pipefail
           set +e
-          timeout --kill-after=10s 600s cargo +1.85.0 clippy --locked --offline \
+          timeout --kill-after=10s 600s cargo clippy --locked --offline \
             -p volparossa --bin volparossa --tests -- -D warnings \
             2>&1 | tee "$DIAGNOSTIC_OUTPUT/clippy.log"
           statuses=("${PIPESTATUS[@]}")
@@ -231,7 +233,7 @@ jobs:
         run: |
           set -euo pipefail
           set +e
-          timeout --kill-after=5s 90s cargo +1.85.0 fmt --all -- --check \
+          timeout --kill-after=5s 90s cargo fmt --all -- --check \
             2>&1 | tee "$DIAGNOSTIC_OUTPUT/format.log"
           statuses=("${PIPESTATUS[@]}")
           set -e

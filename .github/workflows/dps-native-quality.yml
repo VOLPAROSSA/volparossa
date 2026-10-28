@@ -4,6 +4,17 @@ on:
   push:
     branches: [feature/dps-native-quality-20261021]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Historical source proof or exact current-compiler reuse
+        required: true
+        type: choice
+        default: historical
+        options: [historical, current-compiler]
+      core_revision:
+        description: Exact reviewed 40-hex Core commit for current-compiler only
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -20,13 +31,16 @@ env:
   SOURCE_BASE: 797f24fdf53ffcc39156bbf59507ef6be40792a4
   CARGO_BUILD_JOBS: '2'
   CARGO_TERM_COLOR: never
+  DPS_MODE: ${{ inputs.mode || 'historical' }}
+  CORE_REVISION: ${{ inputs.core_revision }}
 
 jobs:
   native-contracts:
     if: >-
       github.repository == 'VOLPAROSSA/volparossa' &&
-      github.ref == 'refs/heads/feature/dps-native-quality-20261021' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      ((github.ref == 'refs/heads/feature/dps-native-quality-20261021' &&
+        (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'historical'))) ||
+       (github.event_name == 'workflow_dispatch' && inputs.mode == 'current-compiler'))
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -46,14 +60,29 @@ jobs:
           test "$RUNNER_ARCH" = X64
           test "$(id -u)" != 0
           test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
-          test "$GITHUB_REF" = refs/heads/feature/dps-native-quality-20261021
-          case "$GITHUB_EVENT_NAME" in push|workflow_dispatch) ;; *) exit 1 ;; esac
+          case "$DPS_MODE" in
+            historical)
+              test "$GITHUB_REF" = refs/heads/feature/dps-native-quality-20261021
+              case "$GITHUB_EVENT_NAME" in push|workflow_dispatch) ;; *) exit 1 ;; esac ;;
+            current-compiler)
+              test "$GITHUB_EVENT_NAME" = workflow_dispatch
+              [[ "$CORE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+              test "$CORE_REVISION" = "$GITHUB_SHA" ;;
+            *) exit 1 ;;
+          esac
           test "$GITHUB_SHA" = "$GITHUB_WORKFLOW_SHA"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --porcelain --untracked-files=all)"
           git merge-base --is-ancestor "$SOURCE_BASE" HEAD
+          if [ "$DPS_MODE" = current-compiler ]; then
+            python3 -B scripts/check-dps-current-source.py --check
+          fi
           umask 077
           mkdir dps-native-evidence
+          if [ "$DPS_MODE" = current-compiler ]; then
+            python3 -B scripts/test-dps-current-source.py
+            python3 -B scripts/check-dps-current-source.py
+          else
           python3 -B - <<'PY'
           import hashlib
           import json
@@ -122,6 +151,7 @@ jobs:
               physical_positioning_acceptance=False)
           pathlib.Path('dps-native-evidence/source.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
           PY
+          fi
 
       - name: Check existing hosted native tools and install the pinned Rust toolchain
         run: |
@@ -146,7 +176,11 @@ jobs:
           test "$(valgrind --version)" = valgrind-3.22.0
           dpkg-query -W valgrind libc6:amd64 libc6-dbg:amd64 > dps-native-evidence/native-packages.txt
           valgrind --version >> dps-native-evidence/native-packages.txt
-          rustup toolchain install 1.85.0 --profile minimal --no-self-update --component clippy --component rustfmt
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+          install -m 0600 "$RUNNER_TEMP/cargo-source-policy.json" dps-native-evidence/cargo-source-policy.json
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
           rustc --version --verbose > dps-native-evidence/rust.txt
           cargo --version --verbose >> dps-native-evidence/rust.txt
           cargo fetch --locked
@@ -262,7 +296,7 @@ jobs:
           assert source['source_commit'] == os.environ['GITHUB_SHA'] == git('rev-parse', 'HEAD')
           assert source['workflow_commit'] == os.environ['GITHUB_WORKFLOW_SHA']
           assert source['source_tree'] == git('rev-parse', 'HEAD^{tree}')
-          assert len(source['source_blobs']) == 15
+          assert len(source['source_blobs']) == (23 if os.environ['DPS_MODE'] == 'current-compiler' else 15)
           for name, blob in {**source['source_blobs'], **source['shared_blobs']}.items():
               assert git('rev-parse', 'HEAD:' + name) == blob
           assert all(name.startswith('dps-native-evidence/') for name in git('ls-files', '--others', '--exclude-standard').splitlines())
@@ -286,5 +320,6 @@ jobs:
           retention-days: 14
           path: |
             dps-native-evidence/*.json
+            dps-native-evidence/cargo-source-policy.json
             dps-native-evidence/*.log
             dps-native-evidence/*.txt

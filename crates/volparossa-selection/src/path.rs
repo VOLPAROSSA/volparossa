@@ -280,21 +280,21 @@ impl PathStatus {
         } else {
             None
         };
-        if let Some(next_state) = next {
-            if !self.state.can_transition_to(next_state) {
-                return Err(PathTransitionError::InvalidTransition {
-                    from: self.state,
-                    to: next_state,
-                });
-            }
+        if let Some(next_state) = next
+            && !self.state.can_transition_to(next_state)
+        {
+            return Err(PathTransitionError::InvalidTransition {
+                from: self.state,
+                to: next_state,
+            });
         }
 
         self.metrics = metrics;
-        if let Some(next_state) = next {
-            if next_state != self.state {
-                self.state = next_state;
-                self.state_changed_at = now;
-            }
+        if let Some(next_state) = next
+            && next_state != self.state
+        {
+            self.state = next_state;
+            self.state_changed_at = now;
         }
         Ok(())
     }

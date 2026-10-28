@@ -141,9 +141,8 @@ async fn content_provider_memory_lookup_distinguishes_network_and_unadmitted_cac
                     event = provider.select_next_some() => {
                         if let SwarmEvent::Behaviour(ProbeEvent::Kad(kad::Event::OutboundQueryProgressed {
                             id, result: kad::QueryResult::StartProviding(result), ..
-                        })) = &event {
-                            if *id == publication { result.as_ref().unwrap(); announced = true; }
-                        }
+                        })) = &event
+                            && *id == publication { result.as_ref().unwrap(); announced = true; }
                         respond(&mut provider, event);
                     },
                     event = contact.select_next_some() => respond(&mut contact, event),
