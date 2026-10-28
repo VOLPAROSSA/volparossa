@@ -39,7 +39,7 @@ class HostedGnuBinaryPackageTests(unittest.TestCase):
             assembly = root / 'public.s'
             assembly.write_text('.text\n.global _start\n_start:\n'
                 'mov $60, %rax\nxor %rdi, %rdi\nsyscall\n'
-                '.section .debug_str,"MS",@progbits,1\n'
+                '.section .debug_str,"",@progbits\n'
                 '.ascii "PUBLIC_RESIDENT_DEBUG_MARKER"\n'
                 '.zero 67108864\n.section .note.GNU-stack,"",@progbits\n')
             limit = time.monotonic_ns() + 120 * 1_000_000_000
