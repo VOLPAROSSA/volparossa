@@ -91,6 +91,10 @@ fn failed_browser_stage(path: &Path) -> &'static str {
     let Some(value) = read() else {
         return "invalid_receipt";
     };
+    browser_failure_stage(&value)
+}
+
+fn browser_failure_stage(value: &serde_json::Value) -> &'static str {
     let Some(object) = value.as_object() else {
         return "invalid_receipt";
     };
@@ -109,6 +113,11 @@ fn failed_browser_stage(path: &Path) -> &'static str {
         Some("http") => "http",
         Some("securityheaders") => "securityheaders",
         Some("marker") => "marker",
+        // These are consistent observations AFTER the original check failed,
+        // never proof of the DOM state or cause at that earlier instant.
+        Some("marker_absent") => "marker_absent",
+        Some("marker_hidden") => "marker_hidden",
+        Some("marker_ambiguous") => "marker_ambiguous",
         Some("style") => "style",
         Some("assets") => "assets",
         Some("close") => "close",
@@ -503,4 +512,98 @@ async fn scenario(bytes: &[u8], assets: &[serde_json::Value]) -> serde_json::Val
     directory.close().unwrap();
     diagnostic(Stage::Complete);
     result
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::{browser_failure_stage, failed_browser_stage};
+    use serde_json::{Value, json};
+    use std::fs;
+
+    fn failure(stage: &str) -> Value {
+        json!({"schema": 1, "status": "failed", "stage": stage,
+            "browser_closed": true, "rendered_http_requests": 2})
+    }
+
+    #[test]
+    fn closed_marker_observations_preserve_failed_schema_without_acceptance() {
+        for stage in [
+            "launch",
+            "http",
+            "securityheaders",
+            "marker",
+            "marker_absent",
+            "marker_hidden",
+            "marker_ambiguous",
+            "style",
+            "assets",
+            "close",
+        ] {
+            assert_eq!(browser_failure_stage(&failure(stage)), stage);
+            let mut passed = failure(stage);
+            passed["status"] = json!("passed");
+            assert_eq!(browser_failure_stage(&passed), "invalid_receipt");
+        }
+    }
+
+    #[test]
+    fn malformed_private_or_wrong_type_receipts_do_not_escape_as_stages() {
+        for value in [json!(null), json!([]), json!("PRIVATE_SENTINEL")] {
+            assert_eq!(browser_failure_stage(&value), "invalid_receipt");
+        }
+        for (field, wrong_values) in [
+            (
+                "schema",
+                vec![json!(true), json!("1"), json!(1.0), json!(2)],
+            ),
+            ("status", vec![json!(true), json!("passed"), json!(null)]),
+            (
+                "stage",
+                vec![
+                    json!(null),
+                    json!(1),
+                    json!("PRIVATE_SENTINEL"),
+                    json!("marker_unavailable"),
+                ],
+            ),
+            ("browser_closed", vec![json!(null), json!(1), json!("true")]),
+            (
+                "rendered_http_requests",
+                vec![json!(true), json!(-1), json!(1.0), json!(1025)],
+            ),
+        ] {
+            for wrong in wrong_values {
+                let mut receipt = failure("marker_hidden");
+                receipt[field] = wrong;
+                assert_eq!(browser_failure_stage(&receipt), "invalid_receipt");
+            }
+        }
+        let mut extra = failure("marker_absent");
+        extra["raw_dom"] = json!("PRIVATE_SENTINEL");
+        assert_eq!(browser_failure_stage(&extra), "invalid_receipt");
+        let mut missing = failure("marker_ambiguous");
+        missing.as_object_mut().unwrap().remove("browser_closed");
+        assert_eq!(browser_failure_stage(&missing), "invalid_receipt");
+    }
+
+    #[test]
+    fn exact_bounded_regular_failure_receipt_reader_retains_only_closed_category() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("browser.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&failure("marker_hidden")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(failed_browser_stage(&path), "marker_hidden");
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert_eq!(failed_browser_stage(&link), "invalid_receipt");
+        fs::write(&path, vec![b' '; 4097]).unwrap();
+        assert_eq!(failed_browser_stage(&path), "invalid_receipt");
+        fs::write(&path, b"PRIVATE_SENTINEL").unwrap();
+        assert_eq!(failed_browser_stage(&path), "invalid_receipt");
+        fs::remove_file(&path).unwrap();
+        assert_eq!(failed_browser_stage(&path), "invalid_receipt");
+    }
 }
