@@ -98,9 +98,13 @@ def read_file(path, maximum, deadline):
 
 
 def write_new(path, raw, mode=0o600):
-    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_WRONLY, mode)
+    # Keep incomplete contents private; publish only the requested final mode
+    # after the complete buffered write has reached the file descriptor.
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_WRONLY, 0o600)
     with os.fdopen(fd, 'wb') as target:
-        target.write(raw)
+        if target.write(raw) != len(raw):
+            raise OSError('incomplete_write')
+        target.flush()
         os.fchmod(target.fileno(), mode)
 
 

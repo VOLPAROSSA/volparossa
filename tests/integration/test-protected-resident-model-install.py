@@ -84,6 +84,89 @@ class FakeRunner:
         return b''
 
 
+class PrivateCreationTests(unittest.TestCase):
+    def test_create_private_and_flush_complete_bytes_before_setting_final_mode(self):
+        original_open, original_chmod = M.os.open, M.os.fchmod
+        raw = b'fixed public installer policy\n'
+        for mask in (0o022, 0o077):
+            for mode in (0o755, 0o750, 0o400, 0o600):
+                with self.subTest(mask=mask, mode=mode), tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / 'new-file'
+                    observed = []
+                    def chmod(fd, final_mode):
+                        # These bytes are read through a different file description;
+                        # a still-buffered write would leave this observation empty.
+                        self.assertEqual(path.read_bytes(), raw)
+                        self.assertEqual(stat.S_IMODE(os.fstat(fd).st_mode), 0o600)
+                        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                        self.assertEqual(final_mode, mode)
+                        observed.append(final_mode)
+                        original_chmod(fd, final_mode)
+                    previous = os.umask(mask)
+                    try:
+                        with mock.patch.object(M.os, 'open', wraps=original_open) as opened, \
+                                mock.patch.object(M.os, 'fchmod', side_effect=chmod):
+                            M.write_new(path, raw, mode)
+                    finally:
+                        os.umask(previous)
+                    opened.assert_called_once_with(path,
+                        os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_WRONLY, 0o600)
+                    self.assertEqual(observed, [mode])
+                    self.assertEqual(path.read_bytes(), raw)
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), mode)
+
+    def test_existing_file_and_symlink_are_never_overwritten_or_widened(self):
+        for kind in ('existing', 'symlink'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                original = put(root / 'original', b'original public bytes', 0o600)
+                path = original if kind == 'existing' else root / 'new-file'
+                if kind == 'symlink': path.symlink_to(original)
+                before = M.identity(original.stat())
+                with mock.patch.object(M.os, 'fchmod') as chmod:
+                    with self.assertRaises(OSError):
+                        M.write_new(path, b'replacement', 0o755)
+                    chmod.assert_not_called()
+                self.assertEqual(original.read_bytes(), b'original public bytes')
+                self.assertEqual(M.identity(original.stat()), before)
+                if kind == 'symlink': self.assertTrue(path.is_symlink())
+
+    def test_write_or_flush_failure_never_sets_final_permissions(self):
+        original_fdopen = M.os.fdopen
+        raw = b'public complete contents before publication'
+        for failure in ('write', 'short_write', 'flush'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'incomplete'
+                events = []
+                class FailedOutput:
+                    def __init__(self, fd, mode):
+                        self.output = original_fdopen(fd, mode)
+                    def __enter__(self): return self
+                    def __exit__(self, *_):
+                        # Real close may flush the already-buffered prefix; the
+                        # inode must remain private even when cleanup does so.
+                        self.output.close()
+                    def fileno(self): return self.output.fileno()
+                    def write(self, value):
+                        events.append('write')
+                        if failure in ('write', 'short_write'):
+                            self.output.write(value[:4])
+                            if failure == 'write': raise OSError('injected write failure')
+                            return 4
+                        return self.output.write(value)
+                    def flush(self):
+                        events.append('flush')
+                        raise OSError('injected flush failure')
+                with mock.patch.object(M.os, 'fdopen', side_effect=FailedOutput), \
+                        mock.patch.object(M.os, 'fchmod') as chmod:
+                    with self.assertRaises(OSError):
+                        M.write_new(path, raw, 0o755)
+                    chmod.assert_not_called()
+                self.assertEqual(events, ['write', 'flush'] if failure == 'flush' else ['write'])
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                self.assertEqual(path.read_bytes(), raw if failure == 'flush' else raw[:4])
+
+
 class GuardTests(unittest.TestCase):
     def test_original_deadline_not_restarted_and_early_uptime(self):
         with mock.patch.object(M.time, 'monotonic_ns', return_value=35 * 10 ** 9):
