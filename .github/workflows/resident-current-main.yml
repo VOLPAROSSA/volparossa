@@ -60,21 +60,26 @@ jobs:
           def blob(revision,name): return subprocess.check_output(['git','show',revision+':'+name])
           subprocess.run(['git','merge-base','--is-ancestor',base,'HEAD'],check=True)
           reconciled={
-            'Cargo.lock':'8033825da23f8a610a9309a642e5ee56c600bb82dc5d1bd5410eb371952c25c2',
+            'Cargo.lock':'e728a8b1fb4734e1a3a9333eabe846e4776ae51f1bdff21ca42b5854e5ff8c9f',
             'THIRD_PARTY_LICENSES.md':'6822c081d55ad7aa835a47687c1bf539c0c218989c2ae2b84ac45ee6769339ea',
-            'crates/volparossa/Cargo.toml':'ecade3e66f373177dc7f744f5e4213cc76316b6022920641c7039c19505c259f',
+            'crates/volparossa/Cargo.toml':'914fed2e32b10f7fa7f4fe07c8c83688e0b0ffe5c5dff774c1dd377eb825bdd9',
+            'crates/volparossa/src/compute/resident_guest/port.rs':'e13dc3cae930135d2423d876b13caeec43af2c038baac2f2dafa5d397afa2648',
             'crates/volparossa/src/compute/resident_guest/session.rs':'9c134ad0932b507d6af2225dd1aecf939d1b0c4a8d34b9864abe9eb7b1a0bfaf',
             'crates/volparossa/src/compute/supervise.rs':'83b966be6e16154052a3d015c464c6c28638fe374b2f99b2e9579b9cf720abd1',
             'tests/integration/protected-resident-model-run.py':'522c0830e5205032b636a10fb320f3214077671874df351d9b3310d969fceef6',
             'tests/integration/test-protected-resident-model-run.py':'2cd9ef7607cae6e474453dc871d58967a116f722fc9693bd2c022117e9872205',
           }
+          support={'crates/volparossa-linux-uapi/src/async_fd.rs':
+            '5730070172362cc451ca97b6371f0ce774c5e53c83f7d65d4b2e78abdd4b261d'}
           retained=set(git('diff','--name-only',old,feature).splitlines())
           changed=set(git('diff','--name-only',base,'HEAD').splitlines())
           assert len(retained)==52 and set(reconciled)<=retained
-          assert changed==retained|{'.github/workflows/resident-current-main.yml'}
+          assert changed==retained|set(support)|{'.github/workflows/resident-current-main.yml'}
           for name in retained-set(reconciled):
             assert pathlib.Path(name).read_bytes()==blob(feature,name),name
           for name,digest in reconciled.items():
+            assert hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()==digest,name
+          for name,digest in support.items():
             assert hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()==digest,name
           before=tomllib.loads(blob(base,'Cargo.lock').decode())
           after=tomllib.loads(pathlib.Path('Cargo.lock').read_text())
@@ -83,7 +88,7 @@ jobs:
           a=[p for p in before['package'] if p['name']=='volparossa']
           b=[p for p in after['package'] if p['name']=='volparossa']
           assert len(a)==len(b)==1
-          extra={'prost','rcgen','rustls','tokio-rustls','x509-cert'}
+          extra={'prost','rcgen','rustls','tokio-rustls','x509-cert','volparossa-linux-uapi'}
           assert {k:v for k,v in a[0].items() if k!='dependencies'}=={k:v for k,v in b[0].items() if k!='dependencies'}
           assert set(b[0]['dependencies'])==set(a[0]['dependencies'])|extra
           preserved=('Cargo.toml','fuzz/Cargo.toml','fuzz/Cargo.lock','rust-toolchain.toml',
@@ -91,7 +96,7 @@ jobs:
           for name in preserved: assert pathlib.Path(name).read_bytes()==blob(base,name),name
           receipt=dict(version=1,source_commit=os.environ['GITHUB_SHA'],source_tree=git('rev-parse','HEAD^{tree}'),
             base_commit=base,retained_feature_commit=feature,
-            retained_exact_files=len(retained-set(reconciled)),reconciled_files=reconciled,
+            retained_exact_files=len(retained-set(reconciled)),reconciled_files=reconciled,support_files=support,
             source_blobs={n:git('rev-parse','HEAD:'+n) for n in sorted(changed)},
             preserved_main_blobs={n:git('rev-parse','HEAD:'+n) for n in preserved},
             non_cli_dependency_records_unchanged=True,cli_dependency_membership_additions=sorted(extra),
@@ -134,17 +139,21 @@ jobs:
           group resident volparossa compute::supervise::native_session::
           group local volparossa compute::private_serve::tests::
           group startup volparossa compute::supervise::tests::public_bubblewrap_stage
+          group descriptor volparossa-linux-uapi async_fd::tests::
+          cargo test --locked --offline -p volparossa-linux-uapi --doc OwnedAsyncFd \
+            2>&1 | tee resident-current-evidence/descriptor-doctest.log
           python3 -B - <<'PY'
           import json,pathlib,re
           root=pathlib.Path('resident-current-evidence'); counts={}; names=[]
-          for label,expected in dict(grant=22,guest=42,resident=41,local=30,startup=2).items():
+          for label,expected in dict(grant=22,guest=45,resident=41,local=30,startup=2,descriptor=3).items():
             inventory=re.findall(r'^(.+): test$',(root/(label+'-inventory.log')).read_text(),re.M)
             output=(root/(label+'-test.log')).read_text()
             assert len(inventory)==expected and len(set(inventory))==expected
             assert f'{expected} passed; 0 failed; 0 ignored;' in output
             for name in inventory: assert len(re.findall(r'^test '+re.escape(name)+r' \.\.\. ok$',output,re.M))==1
             counts[label]=expected; names.extend(inventory)
-          assert len(names)==len(set(names))==137
+          assert len(names)==len(set(names))==143
+          assert '2 passed; 0 failed; 0 ignored;' in (root/'descriptor-doctest.log').read_text()
           (root/'rust-tests.json').write_text(json.dumps(dict(version=1,counts=counts,test_names=sorted(names),model_execution=False),sort_keys=True)+'\n')
           PY
 
@@ -162,7 +171,7 @@ jobs:
       - name: Lint the affected packages
         run: |
           set -euo pipefail
-          cargo clippy --locked --offline -p volparossa-content -p volparossa --all-targets -- -D warnings \
+          cargo clippy --locked --offline -p volparossa-content -p volparossa -p volparossa-linux-uapi --all-targets -- -D warnings \
             2>&1 | tee resident-current-evidence/clippy.log
 
       - name: Preserve exact tested source

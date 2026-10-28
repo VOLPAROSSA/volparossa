@@ -4921,6 +4921,7 @@ dependencies = [
  "volparossa-config",
  "volparossa-content",
  "volparossa-identity",
+ "volparossa-linux-uapi",
  "volparossa-local-control",
  "volparossa-mptcp",
  "volparossa-policy",
