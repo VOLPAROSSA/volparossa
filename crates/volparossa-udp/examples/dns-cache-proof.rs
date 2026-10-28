@@ -159,14 +159,55 @@ fn snapshot(
     })
 }
 
-fn counts_json(counts: DnsResolutionCounts) -> String {
-    format!(
-        "{{\"local_validated\":{},\"peer_validated\":{},\"upstream_validated\":{},\"trusted_fallback\":{}}}",
-        counts.local_validated,
-        counts.peer_validated,
-        counts.upstream_validated,
-        counts.trusted_fallback
-    )
+#[derive(Clone, Copy)]
+enum AccountingPhase {
+    Warm,
+    ColdOutage,
+    Recovered,
+}
+
+impl AccountingPhase {
+    // The measured vector must match its phase before any accounting is emitted.
+    // Only these three static encodings can leave the fixture; counters themselves
+    // are never formatted or treated as public diagnostic text.
+    fn counts_json(self, measured: DnsResolutionCounts) -> Result<&'static str, &'static str> {
+        match (self, measured) {
+            (
+                Self::Warm,
+                DnsResolutionCounts {
+                    local_validated: 2,
+                    peer_validated: 0,
+                    upstream_validated: 2,
+                    trusted_fallback: 0,
+                },
+            ) => Ok(
+                "{\"local_validated\":2,\"peer_validated\":0,\"upstream_validated\":2,\"trusted_fallback\":0}",
+            ),
+            (
+                Self::ColdOutage,
+                DnsResolutionCounts {
+                    local_validated: 0,
+                    peer_validated: 0,
+                    upstream_validated: 0,
+                    trusted_fallback: 0,
+                },
+            ) => Ok(
+                "{\"local_validated\":0,\"peer_validated\":0,\"upstream_validated\":0,\"trusted_fallback\":0}",
+            ),
+            (
+                Self::Recovered,
+                DnsResolutionCounts {
+                    local_validated: 0,
+                    peer_validated: 0,
+                    upstream_validated: 2,
+                    trusted_fallback: 0,
+                },
+            ) => Ok(
+                "{\"local_validated\":0,\"peer_validated\":0,\"upstream_validated\":2,\"trusted_fallback\":0}",
+            ),
+            _ => Err("recovery accounting profile differs"),
+        }
+    }
 }
 
 async fn recovery_control(args: &[String]) -> Result<(UnixStream, SocketAddr), Box<dyn Error>> {
@@ -317,6 +358,9 @@ fn report_recovery(
     cold_outage_counts: DnsResolutionCounts,
     recovered_counts: DnsResolutionCounts,
 ) -> Result<(), Box<dyn Error>> {
+    let warm_counts = AccountingPhase::Warm.counts_json(warm_counts)?;
+    let cold_outage_counts = AccountingPhase::ColdOutage.counts_json(cold_outage_counts)?;
+    let recovered_counts = AccountingPhase::Recovered.counts_json(recovered_counts)?;
     for (index, family) in ["A", "AAAA"].iter().enumerate() {
         println!(
             "{{\"schema\":2,\"family\":\"{family}\",\"builtin_anchors\":true,\"cold_outage_error\":true,\"warm\":{},\"outage\":{},\"recovered\":{}}}",
@@ -326,11 +370,83 @@ fn report_recovery(
         );
     }
     println!(
-        "{{\"schema\":2,\"accounting\":{{\"warm_counts\":{},\"cold_outage_counts\":{},\"recovered_counts\":{}}}}}",
-        counts_json(warm_counts),
-        counts_json(cold_outage_counts),
-        counts_json(recovered_counts)
+        "{{\"schema\":2,\"accounting\":{{\"warm_counts\":{warm_counts},\"cold_outage_counts\":{cold_outage_counts},\"recovered_counts\":{recovered_counts}}}}}"
     );
     std::io::stdout().flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AccountingPhase, DnsResolutionCounts};
+
+    fn profiles() -> [(AccountingPhase, DnsResolutionCounts, &'static str); 3] {
+        [
+            (
+                AccountingPhase::Warm,
+                DnsResolutionCounts {
+                    local_validated: 2,
+                    upstream_validated: 2,
+                    ..DnsResolutionCounts::default()
+                },
+                "{\"local_validated\":2,\"peer_validated\":0,\"upstream_validated\":2,\"trusted_fallback\":0}",
+            ),
+            (
+                AccountingPhase::ColdOutage,
+                DnsResolutionCounts::default(),
+                "{\"local_validated\":0,\"peer_validated\":0,\"upstream_validated\":0,\"trusted_fallback\":0}",
+            ),
+            (
+                AccountingPhase::Recovered,
+                DnsResolutionCounts {
+                    upstream_validated: 2,
+                    ..DnsResolutionCounts::default()
+                },
+                "{\"local_validated\":0,\"peer_validated\":0,\"upstream_validated\":2,\"trusted_fallback\":0}",
+            ),
+        ]
+    }
+
+    #[test]
+    fn canonical_accounting_preserves_each_valid_phase_encoding() {
+        for (phase, measured, expected) in profiles() {
+            let actual: &'static str = phase.counts_json(measured).unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn canonical_accounting_rejects_valid_counts_bound_to_the_wrong_phase() {
+        for (phase_index, (phase, _, _)) in profiles().iter().enumerate() {
+            for (counts_index, (_, measured, _)) in profiles().iter().enumerate() {
+                if phase_index != counts_index {
+                    assert_eq!(
+                        phase.counts_json(*measured),
+                        Err("recovery accounting profile differs")
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_accounting_rejects_changed_or_unbounded_measured_counters() {
+        for (phase, measured, _) in profiles() {
+            for field in 0..4 {
+                for value in [1, u64::MAX] {
+                    let mut changed = measured;
+                    match field {
+                        0 => changed.local_validated = value,
+                        1 => changed.peer_validated = value,
+                        2 => changed.upstream_validated = value,
+                        _ => changed.trusted_fallback = value,
+                    }
+                    assert_eq!(
+                        phase.counts_json(changed),
+                        Err("recovery accounting profile differs")
+                    );
+                }
+            }
+        }
+    }
 }

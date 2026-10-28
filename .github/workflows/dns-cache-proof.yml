@@ -107,6 +107,7 @@ jobs:
           set -euo pipefail
           cargo fetch --locked
           cargo build --locked --offline -p volparossa-udp --example dns-cache-proof
+          cargo test --locked --offline -p volparossa-udp --example dns-cache-proof
           cargo clippy --locked --offline -p volparossa-udp --example dns-cache-proof -- -D warnings
           git diff --exit-code
           sha256sum target/debug/examples/dns-cache-proof \
