@@ -70,7 +70,9 @@ jobs:
             'tests/integration/test-protected-resident-model-run.py':'2cd9ef7607cae6e474453dc871d58967a116f722fc9693bd2c022117e9872205',
           }
           support={'crates/volparossa-linux-uapi/src/async_fd.rs':
-            '5730070172362cc451ca97b6371f0ce774c5e53c83f7d65d4b2e78abdd4b261d'}
+            '5730070172362cc451ca97b6371f0ce774c5e53c83f7d65d4b2e78abdd4b261d',
+            'scripts/test-cargo-source-policy.py':
+            '38c455d579944cb541852a7399dd94c6f680c95a94540c5dc4abf67c9e9f501f'}
           retained=set(git('diff','--name-only',old,feature).splitlines())
           changed=set(git('diff','--name-only',base,'HEAD').splitlines())
           assert len(retained)==52 and set(reconciled)<=retained
@@ -105,7 +107,11 @@ jobs:
           PY
 
       - name: Authenticate the existing exact compiler and public Cargo source policy
-        run: python3 -B scripts/provision-rust189.py runner
+        run: |
+          python3 -B scripts/test-cargo-source-policy.py -v
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
 
       - name: Install the existing reviewed Protobuf on this disposable runner
         run: |
