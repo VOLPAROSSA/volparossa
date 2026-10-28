@@ -20,6 +20,8 @@ import signal
 import socket
 import stat
 import struct
+import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -396,6 +398,290 @@ def validate_core(root, output):
               "core": answers, "replay": replay})
 
 
+# Recovery is a separate, explicitly selected fixture protocol. No production
+# endpoint/command is accepted over this private channel, and no query is sent on it.
+RECOVERY_FRAMES = (b"DNS_CACHE_RECOVERY_V1 WARM_READY\n",
+                   b"DNS_CACHE_RECOVERY_V1 OUTAGE_CHECKED\n",
+                   b"DNS_CACHE_RECOVERY_V1 PROBE_COMPLETE\n")
+RECOVERY_ACKS = (b"DNS_CACHE_RECOVERY_V1 UPSTREAM_DOWN\n",
+                 b"DNS_CACHE_RECOVERY_V1 UPSTREAM_RESTORED\n")
+COUNT_KEYS = {"local_validated", "peer_validated", "upstream_validated", "trusted_fallback"}
+RECOVERY_COUNTS = {
+    "warm_counts": dict(local_validated=2, peer_validated=0, upstream_validated=2, trusted_fallback=0),
+    "cold_outage_counts": dict.fromkeys(COUNT_KEYS, 0),
+    "recovered_counts": dict(local_validated=0, peer_validated=0, upstream_validated=2, trusted_fallback=0),
+}
+
+
+def remaining(deadline):
+    seconds = deadline - time.monotonic()
+    require(seconds > 0, "recovery total deadline")
+    return seconds
+
+
+def receive_phase(connection, expected, deadline):
+    """Exactly one finite frame; timeout/EOF/order are fatal, never inferred success."""
+    frame = bytearray()
+    for _ in range(128):
+        connection.settimeout(remaining(deadline))
+        byte = connection.recv(1)
+        require(byte, "recovery phase EOF")
+        frame.extend(byte)
+        if byte == b"\n":
+            require(bytes(frame) == expected, "recovery phase mismatch")
+            return
+    raise FixtureError("recovery phase frame bound")
+
+
+def send_phase(connection, frame, deadline):
+    require(frame in RECOVERY_ACKS, "recovery acknowledgement outside protocol")
+    connection.settimeout(remaining(deadline))
+    connection.sendall(frame)
+
+
+def join_child(child, deadline, *, stop=False):
+    """Only owned Popen handles; signal before reap, never reuse a numeric PID."""
+    if stop and child.poll() is None:
+        child.terminate()
+    try:
+        return child.wait(timeout=min(0.5, remaining(deadline)))
+    except (subprocess.TimeoutExpired, FixtureError):
+        if child.poll() is None:
+            child.kill()
+        return child.wait(timeout=max(0, deadline - time.monotonic()))
+
+
+def wait_ready(path, child, deadline):
+    while not path.exists():
+        require(child.poll() is None, "recovery replay exited before ready")
+        time.sleep(min(0.02, remaining(deadline)))
+    ready = read_json(path)
+    require(ready == {"ready": True, "listen": {"ip": "127.0.0.1", "port": 1053}, "pid": child.pid}
+            and child.poll() is None, "recovery replay readiness binding")
+
+
+def accept_probe(listener, probe, deadline):
+    while True:
+        require(probe.poll() is None, "recovery probe exited before handshake")
+        listener.settimeout(min(0.05, remaining(deadline)))
+        try:
+            return listener.accept()[0]
+        except socket.timeout:
+            continue
+
+
+def validate_replay(report):
+    replay = read_json(report)
+    require(set(replay) == {"schema_version", "listener_closed", "cryptographically_verified",
+                           "connections", "responses", "rejected", "bounded_stop"}
+            and type(replay["schema_version"]) is int and replay["schema_version"] == 1
+            and replay["listener_closed"] is True and replay["bounded_stop"] is True
+            and replay["cryptographically_verified"] is False
+            and type(replay["rejected"]) is int and replay["rejected"] == 0
+            and type(replay["connections"]) is int and 2 <= replay["connections"] <= 128,
+            "recovery replay completion")
+    counts = replay["responses"]
+    require(isinstance(counts, dict)
+            and set(counts) == {name + ":" + TYPE_NAMES[kind] for name, kind in QUESTIONS}
+            and all(type(value) is int and 0 < value <= 128 for value in counts.values())
+            and sum(counts.values()) == replay["connections"]
+            and counts[CANDIDATE + ":A"] == 1 and counts[CANDIDATE + ":AAAA"] == 1,
+            "recovery replay question accounting")
+    return replay
+
+
+def validate_recovery(root, output, children, recording_hash):
+    """Called only after successful phase transitions and all three child joins.
+
+    This gate binds actual Rust source/TTL/proof/address observations to the same
+    original public recording. It does not turn shape checks into crypto proof.
+    """
+    require(isinstance(children, dict)
+            and set(children) == {"probe_joined", "first_replay_joined", "second_replay_joined", "listeners_closed"}
+            and all(value is True for value in children.values()), "recovery child cleanup")
+    records = load_recording(root, int(time.time() * 1000))
+    require(hashlib.sha256(read_bounded(root / "recording.json")).hexdigest() == recording_hash,
+            "recovery recording changed")
+    rows = [json.loads(line) for line in read_bounded(output / "core.jsonl").splitlines()]
+    require(len(rows) == 3, "recovery core row count")
+    answers, accounting = rows[:2], rows[2]
+    require(all(isinstance(answer, dict) for answer in answers)
+            and {answer.get("family") for answer in answers} == {"A", "AAAA"}, "recovery family coverage")
+    for answer in answers:
+        require(set(answer) == {"schema", "family", "builtin_anchors", "cold_outage_error", "warm", "outage", "recovered"}
+                and type(answer["schema"]) is int and answer["schema"] == 2
+                and answer["builtin_anchors"] is True and answer["cold_outage_error"] is True,
+                "recovery core validation absent")
+        _, received, expected = records[(CANDIDATE, 1 if answer["family"] == "A" else 28)]
+        # Bind every retained proof to its six original signed RRsets, not just
+        # the positive address TTL. The other address family is not in this proof.
+        kind = 1 if answer["family"] == "A" else 28
+        expiry = min(min(stamp + inspected["minimum_ttl_seconds"] * 1000,
+                         inspected["signature_expiry_unix_ms"])
+                     for (_, rrtype), (_, stamp, inspected) in records.items()
+                     if rrtype not in (1, 28) or rrtype == kind)
+        for phase, source in (("warm", "UpstreamValidated"), ("outage", "LocalValidated"),
+                              ("recovered", "UpstreamValidated")):
+            observed = answer[phase]
+            require(isinstance(observed, dict) and set(observed) == {
+                "source", "ttl_seconds", "expires_at_ms", "proof_sha256", "addresses"}, "recovery observation shape")
+            require(observed["source"] == source and type(observed["ttl_seconds"]) is int
+                    and 0 < observed["ttl_seconds"] <= expected["minimum_ttl_seconds"]
+                    and type(observed["expires_at_ms"]) is int
+                    and int(time.time() * 1000) < observed["expires_at_ms"] <= expiry
+                    and isinstance(observed["proof_sha256"], str)
+                    and re.fullmatch(r"[0-9a-f]{64}", observed["proof_sha256"]) is not None
+                    and isinstance(observed["addresses"], list)
+                    and all(isinstance(address, str) for address in observed["addresses"])
+                    and sorted(observed["addresses"]) == expected["addresses"], "recovery observation binding")
+        require(answer["outage"]["ttl_seconds"] <= answer["warm"]["ttl_seconds"]
+                and answer["recovered"]["ttl_seconds"] <= answer["warm"]["ttl_seconds"], "recovery TTL renewed")
+    require(isinstance(accounting, dict) and set(accounting) == {"schema", "accounting"}
+            and type(accounting["schema"]) is int and accounting["schema"] == 2
+            and isinstance(accounting["accounting"], dict)
+            and set(accounting["accounting"]) == set(RECOVERY_COUNTS), "recovery accounting shape")
+    for phase, expected in RECOVERY_COUNTS.items():
+        counts = accounting["accounting"][phase]
+        require(isinstance(counts, dict) and set(counts) == COUNT_KEYS
+                and all(type(value) is int for value in counts.values()) and counts == expected,
+                "recovery source accounting")
+    replays = {phase: validate_replay(output / (phase + "-replay.json")) for phase in ("first", "second")}
+    write_new(output / "proof.json", {
+        "schema_version": 2, "success": True,
+        "scope": "builtin-anchor-collector-and-local-cache-only",
+        "peer_cache_proven": False, "normal_client_route_proven": False, "natural_expiry_proven": False,
+        "candidate_name": CANDIDATE, "source_url": SOURCE_URL, "recording_sha256": recording_hash,
+        "core": answers, "replay": replays,
+        "recovery": dict(warm_upstream_validated=True, upstream_stopped_before_outage=True,
+                         outage_local_validated=True, cold_outage_failed_closed=True,
+                         same_cold_resolver_recovered=True, same_recording_replayed=True,
+                         **accounting["accounting"], children=children, phase_count=3)})
+
+
+def exercise_recovery(root, binary, output):
+    """Own all test children; one original budget, no renewed TTL or fixture fetch.
+
+    SIGINT/TERM and every failure enter the same bounded join path. The namespace
+    timeout remains the outer containment backstop, not a cleanup-success claim.
+    """
+    require_isolated()
+    started = time.monotonic()
+    deadline, cleanup_deadline = started + 35, started + 39
+    require(root.is_absolute() and binary.is_absolute() and output.is_absolute(), "absolute recovery paths required")
+    metadata = output.lstat()
+    require(stat.S_ISDIR(metadata.st_mode) and stat.S_IMODE(metadata.st_mode) == 0o700
+            and metadata.st_uid == os.getuid(), "private recovery output required")
+    for entry in output.iterdir():
+        info = entry.lstat()
+        require(entry.name in {"namespace.stdout", "namespace.stderr"} and stat.S_ISREG(info.st_mode)
+                and stat.S_IMODE(info.st_mode) == 0o600 and info.st_uid == os.getuid()
+                and info.st_nlink == 1, "fresh recovery output required")
+    metadata = binary.lstat()
+    require(stat.S_ISREG(metadata.st_mode) and os.access(binary, os.X_OK), "recovery probe executable required")
+    load_recording(root, int(time.time() * 1000))
+    recording_hash = hashlib.sha256(read_bounded(root / "recording.json")).hexdigest()
+    socket_path = output / "phase.sock"
+    require(len(os.fsencode(socket_path)) < 104 and not socket_path.exists(), "recovery socket path bound")
+    children, handles, joined = [], [], set()
+    previous = {kind: signal.getsignal(kind) for kind in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    def cancel(*_):
+        raise FixtureError("recovery interrupted")
+    for kind in previous:
+        signal.signal(kind, cancel)
+    listener, connection = None, None
+    try:
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(socket_path))
+        os.chmod(socket_path, 0o600)
+        listener.listen(1)
+        def spawn(argv, label):
+            stdout = open(output / (label + ".stdout"), "xb")
+            handles.append(stdout)
+            stderr = open(output / (label + ".stderr"), "xb")
+            handles.append(stderr)
+            child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, close_fds=True)
+            children.append(child)
+            return child
+        def replay(phase):
+            require(hashlib.sha256(read_bounded(root / "recording.json")).hexdigest() == recording_hash,
+                    "recovery recording changed")
+            child = spawn([sys.executable, "-B", str(Path(__file__).resolve()), "serve", str(root),
+                           "127.0.0.1:1053", str(output / (phase + "-replay.json")),
+                           str(output / (phase + "-ready.json")), "--max-seconds", "30"], phase)
+            wait_ready(output / (phase + "-ready.json"), child, deadline)
+            return child
+        first = replay("first")
+        # Probe stdout is exactly three finite typed rows, never private query data.
+        core = open(output / "core.jsonl", "xb")
+        handles.append(core)
+        error = open(output / "core.stderr", "xb")
+        handles.append(error)
+        probe = subprocess.Popen([str(binary), "--cache-recovery", "127.0.0.1:1053", CANDIDATE,
+                                  str(socket_path), str(os.getpid())], stdin=subprocess.DEVNULL,
+                                 stdout=core, stderr=error, close_fds=True)
+        children.append(probe)
+        connection = accept_probe(listener, probe, deadline)
+        pid, uid, _ = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        require(pid == probe.pid and uid == os.getuid(), "recovery probe identity")
+        for index, frame in enumerate(RECOVERY_FRAMES):
+            receive_phase(connection, frame, deadline)
+            if index == 0:
+                require(join_child(first, deadline, stop=True) == 0, "first replay did not stop cleanly")
+                joined.add(first)
+                validate_replay(output / "first-replay.json")
+                send_phase(connection, RECOVERY_ACKS[0], deadline)
+            elif index == 1:
+                second = replay("second")
+                send_phase(connection, RECOVERY_ACKS[1], deadline)
+        connection.settimeout(remaining(deadline))
+        require(connection.recv(1) == b"", "recovery phase trailing bytes")
+        require(probe.wait(timeout=remaining(deadline)) == 0, "recovery probe failed")
+        joined.add(probe)
+        require(join_child(second, deadline, stop=True) == 0, "second replay did not stop cleanly")
+        joined.add(second)
+        validate_replay(output / "second-replay.json")
+        connection.close()
+        connection = None
+        listener.close()
+        listener = None
+        socket_path.unlink()
+        for handle in handles:
+            handle.close()
+        remaining(deadline)
+    finally:
+        primary = sys.exc_info()[0] is not None
+        # Repeated cancellation cannot interrupt the mandatory bounded reap attempt.
+        for kind in previous:
+            signal.signal(kind, signal.SIG_IGN)
+        cleanup_ok = True
+        for child in children:
+            if child in joined:
+                continue
+            try:
+                join_child(child, cleanup_deadline, stop=True)
+                joined.add(child)
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                cleanup_ok = False
+        for resource in (connection, listener, *handles):
+            if resource is not None:
+                try:
+                    resource.close()
+                except OSError:
+                    cleanup_ok = False
+        if len(joined) == len(children):
+            try:
+                socket_path.unlink(missing_ok=True)
+            except OSError:
+                cleanup_ok = False
+        for kind, handler in previous.items():
+            signal.signal(kind, handler)
+        if not primary:
+            require(cleanup_ok, "recovery cleanup unconfirmed")
+    remaining(deadline)
+    validate_recovery(root, output, dict(probe_joined=True, first_replay_joined=True,
+                                        second_replay_joined=True, listeners_closed=True), recording_hash)
+
+
 def failure_summary(error):
     summary = "DNS fixture failed: " + type(error).__name__
     if isinstance(error, FixtureError):
@@ -419,17 +705,23 @@ def main():
     validate_parser = sub.add_parser("validate-core")
     validate_parser.add_argument("root", type=Path)
     validate_parser.add_argument("output", type=Path)
+    recovery_parser = sub.add_parser("exercise-recovery")
+    recovery_parser.add_argument("root", type=Path)
+    recovery_parser.add_argument("binary", type=Path)
+    recovery_parser.add_argument("output", type=Path)
     args = parser.parse_args()
     if args.mode == "collect":
         collect(args.root)
     elif args.mode == "serve":
         serve(args.root, args.listen, args.report, args.ready, args.max_seconds)
-    else:
+    elif args.mode == "validate-core":
         validate_core(args.root, args.output)
+    else:
+        exercise_recovery(args.root, args.binary, args.output)
 
 
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, KeyError, TypeError, struct.error, urllib.error.URLError) as error:
+    except (OSError, ValueError, KeyError, TypeError, struct.error, urllib.error.URLError, subprocess.SubprocessError) as error:
         raise SystemExit(failure_summary(error)) from None

@@ -2,17 +2,42 @@
 //! Fixture-only real DNSSEC collector probe. No alternative trust anchors or AD-bit shortcut.
 //! Run against an explicit loopback recursive replay server in a disposable network namespace.
 
-use std::{env, error::Error, fs, net::SocketAddr};
+use std::{
+    env,
+    error::Error,
+    fs,
+    io::Write,
+    net::SocketAddr,
+    os::unix::fs::{FileTypeExt, MetadataExt},
+    path::Path,
+    time::Duration,
+};
 
 use sha2::{Digest, Sha256};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::UnixStream,
+    time::timeout,
+};
 use volparossa_udp::{
     DnsAnswerSource, DnsQueryType, DnsQuestion, DnsResolutionCounts, DnsResolutionScope,
-    ExitResolver,
+    ExitResolver, ValidatedDnsAnswer,
 };
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = env::args().skip(1).collect::<Vec<_>>();
+    if args.first().is_some_and(|arg| arg == "--cache-recovery") {
+        if args.len() != 5 {
+            return Err(
+                "recovery requires endpoint, public name, private socket and coordinator PID"
+                    .into(),
+            );
+        }
+        return timeout(Duration::from_secs(35), recovery(&args[1..]))
+            .await
+            .map_err(|_| "cache recovery total deadline")?;
+    }
     if args.len() != 2 {
         return Err("usage: dns-cache-proof <loopback-ip:port> <public-dns-name>".into());
     }
@@ -69,4 +94,359 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Err("actual resolution source accounting differs".into());
     }
     Ok(())
+}
+
+// These fixture-only frames contain no commands, names, addresses or remote text.
+const WARM_READY: &[u8] = b"DNS_CACHE_RECOVERY_V1 WARM_READY\n";
+const UPSTREAM_DOWN: &[u8] = b"DNS_CACHE_RECOVERY_V1 UPSTREAM_DOWN\n";
+const OUTAGE_CHECKED: &[u8] = b"DNS_CACHE_RECOVERY_V1 OUTAGE_CHECKED\n";
+const UPSTREAM_RESTORED: &[u8] = b"DNS_CACHE_RECOVERY_V1 UPSTREAM_RESTORED\n";
+const PROBE_COMPLETE: &[u8] = b"DNS_CACHE_RECOVERY_V1 PROBE_COMPLETE\n";
+
+async fn expect_frame(stream: &mut UnixStream, expected: &[u8]) -> Result<(), Box<dyn Error>> {
+    let mut frame = Vec::with_capacity(128);
+    for _ in 0..128 {
+        let byte = stream.read_u8().await?;
+        frame.push(byte);
+        if byte == b'\n' {
+            return if frame == expected {
+                Ok(())
+            } else {
+                Err("recovery phase mismatch".into())
+            };
+        }
+    }
+    Err("recovery phase frame bound".into())
+}
+
+struct Snapshot {
+    json: String,
+    ttl: u32,
+}
+
+fn snapshot(
+    resolver: &ExitResolver,
+    question: &DnsQuestion,
+    scope: &DnsResolutionScope,
+    answer: &ValidatedDnsAnswer,
+    expected: DnsAnswerSource,
+) -> Result<Snapshot, Box<dyn Error>> {
+    let ttl = answer.ttl_seconds();
+    if answer.source() != expected || answer.addresses().is_empty() || ttl == 0 {
+        return Err("recovery validated source absent".into());
+    }
+    let bundle = resolver
+        .cached_bundle(question, scope.policy_hash())
+        .ok_or("recovery retained proof absent")?;
+    let digest = Sha256::digest(bundle.encode());
+    let addresses = answer
+        .addresses()
+        .iter()
+        .map(|ip| format!("\"{ip}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    let source = match expected {
+        DnsAnswerSource::UpstreamValidated => "UpstreamValidated",
+        DnsAnswerSource::LocalValidated => "LocalValidated",
+        _ => return Err("unexpected recovery source".into()),
+    };
+    Ok(Snapshot {
+        ttl,
+        json: format!(
+            "{{\"source\":\"{source}\",\"ttl_seconds\":{ttl},\"expires_at_ms\":{},\"proof_sha256\":\"{digest:x}\",\"addresses\":[{addresses}]}}",
+            bundle.expires_at_unix_ms()
+        ),
+    })
+}
+
+#[derive(Clone, Copy)]
+enum AccountingPhase {
+    Warm,
+    ColdOutage,
+    Recovered,
+}
+
+impl AccountingPhase {
+    // The measured vector must match its phase before any accounting is emitted.
+    // Only these three static encodings can leave the fixture; counters themselves
+    // are never formatted or treated as public diagnostic text.
+    fn counts_json(self, measured: DnsResolutionCounts) -> Result<&'static str, &'static str> {
+        match (self, measured) {
+            (
+                Self::Warm,
+                DnsResolutionCounts {
+                    local_validated: 2,
+                    peer_validated: 0,
+                    upstream_validated: 2,
+                    trusted_fallback: 0,
+                },
+            ) => Ok(
+                "{\"local_validated\":2,\"peer_validated\":0,\"upstream_validated\":2,\"trusted_fallback\":0}",
+            ),
+            (
+                Self::ColdOutage,
+                DnsResolutionCounts {
+                    local_validated: 0,
+                    peer_validated: 0,
+                    upstream_validated: 0,
+                    trusted_fallback: 0,
+                },
+            ) => Ok(
+                "{\"local_validated\":0,\"peer_validated\":0,\"upstream_validated\":0,\"trusted_fallback\":0}",
+            ),
+            (
+                Self::Recovered,
+                DnsResolutionCounts {
+                    local_validated: 0,
+                    peer_validated: 0,
+                    upstream_validated: 2,
+                    trusted_fallback: 0,
+                },
+            ) => Ok(
+                "{\"local_validated\":0,\"peer_validated\":0,\"upstream_validated\":2,\"trusted_fallback\":0}",
+            ),
+            _ => Err("recovery accounting profile differs"),
+        }
+    }
+}
+
+async fn recovery_control(args: &[String]) -> Result<(UnixStream, SocketAddr), Box<dyn Error>> {
+    let parent = env::var_os("VOLPAROSSA_DNS_FIXTURE_PARENT_NETNS")
+        .ok_or("explicit disposable namespace marker required")?;
+    if fs::read_link("/proc/self/ns/net")?.as_os_str() == parent {
+        return Err("fixture must not resolve on the parent network".into());
+    }
+    let endpoint: SocketAddr = args[0].parse()?;
+    let coordinator: i32 = args[3].parse()?;
+    if !endpoint.ip().is_loopback()
+        || endpoint.port() <= 1024
+        || coordinator <= 0
+        || args[1] != "iana.org"
+    {
+        return Err("recovery requires fixed public fixture and loopback endpoint".into());
+    }
+    let path = Path::new(&args[2]);
+    let metadata = fs::symlink_metadata(path)?;
+    let directory = fs::symlink_metadata(path.parent().ok_or("recovery socket parent absent")?)?;
+    if !path.is_absolute()
+        || !metadata.file_type().is_socket()
+        || metadata.mode() & 0o777 != 0o600
+        || !directory.is_dir()
+        || directory.mode() & 0o777 != 0o700
+        || metadata.uid() != directory.uid()
+    {
+        return Err("recovery socket boundary".into());
+    }
+    let control = UnixStream::connect(path).await?;
+    let credential = control.peer_cred()?;
+    if credential.pid() != Some(coordinator)
+        || credential.uid() != metadata.uid()
+        || credential.uid() != fs::metadata("/proc/self")?.uid()
+    {
+        return Err("recovery coordinator identity".into());
+    }
+    Ok((control, endpoint))
+}
+
+async fn recovery(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let (mut control, endpoint) = recovery_control(args).await?;
+    // This explicit mode may retry the SAME endpoint, but can never fall through to OS DNS.
+    let warm = ExitResolver::new(None, None).with_unbound_fallback(endpoint)?;
+    let scope = DnsResolutionScope::without_peers([0; 32]);
+    let questions = [
+        DnsQuestion::new(&args[1], DnsQueryType::A)?,
+        DnsQuestion::new(&args[1], DnsQueryType::Aaaa)?,
+    ];
+    let mut warm_answers = Vec::new();
+    let mut warm_snapshots = Vec::new();
+    for question in &questions {
+        let answer = warm.resolve(question, &scope).await?;
+        warm_snapshots.push(snapshot(
+            &warm,
+            question,
+            &scope,
+            &answer,
+            DnsAnswerSource::UpstreamValidated,
+        )?);
+        warm_answers.push(answer);
+    }
+    control.write_all(WARM_READY).await?;
+    expect_frame(&mut control, UPSTREAM_DOWN).await?;
+    let mut outage_snapshots = Vec::new();
+    for (index, question) in questions.iter().enumerate() {
+        let answer = warm.resolve(question, &scope).await?;
+        let observed = snapshot(
+            &warm,
+            question,
+            &scope,
+            &answer,
+            DnsAnswerSource::LocalValidated,
+        )?;
+        if answer.addresses() != warm_answers[index].addresses()
+            || observed.ttl > warm_snapshots[index].ttl
+        {
+            return Err("recovery local binding or remaining TTL changed".into());
+        }
+        outage_snapshots.push(observed);
+    }
+    let warm_counts = warm.counts();
+    if warm_counts
+        != (DnsResolutionCounts {
+            local_validated: 2,
+            upstream_validated: 2,
+            ..DnsResolutionCounts::default()
+        })
+    {
+        return Err("recovery warm source accounting differs".into());
+    }
+    let cold = ExitResolver::new(None, None).with_unbound_fallback(endpoint)?;
+    for question in &questions {
+        if cold.resolve(question, &scope).await.is_ok() {
+            return Err("cold resolution succeeded during upstream outage".into());
+        }
+    }
+    let cold_outage_counts = cold.counts();
+    if cold_outage_counts != DnsResolutionCounts::default() {
+        return Err("cold outage source accounting differs".into());
+    }
+    control.write_all(OUTAGE_CHECKED).await?;
+    expect_frame(&mut control, UPSTREAM_RESTORED).await?;
+    let mut recovered_snapshots = Vec::new();
+    for (index, question) in questions.iter().enumerate() {
+        let answer = cold.resolve(question, &scope).await?;
+        let observed = snapshot(
+            &cold,
+            question,
+            &scope,
+            &answer,
+            DnsAnswerSource::UpstreamValidated,
+        )?;
+        if answer.addresses() != warm_answers[index].addresses()
+            || observed.ttl > warm_snapshots[index].ttl
+        {
+            return Err("recovery public fixture binding or remaining TTL changed".into());
+        }
+        recovered_snapshots.push(observed);
+    }
+    let recovered_counts = cold.counts();
+    if recovered_counts
+        != (DnsResolutionCounts {
+            upstream_validated: 2,
+            ..DnsResolutionCounts::default()
+        })
+    {
+        return Err("recovered source accounting differs".into());
+    }
+    report_recovery(
+        &warm_snapshots,
+        &outage_snapshots,
+        &recovered_snapshots,
+        warm_counts,
+        cold_outage_counts,
+        recovered_counts,
+    )?;
+    control.write_all(PROBE_COMPLETE).await?;
+    control.shutdown().await?;
+    Ok(())
+}
+
+fn report_recovery(
+    warm_snapshots: &[Snapshot],
+    outage_snapshots: &[Snapshot],
+    recovered_snapshots: &[Snapshot],
+    warm_counts: DnsResolutionCounts,
+    cold_outage_counts: DnsResolutionCounts,
+    recovered_counts: DnsResolutionCounts,
+) -> Result<(), Box<dyn Error>> {
+    let warm_counts = AccountingPhase::Warm.counts_json(warm_counts)?;
+    let cold_outage_counts = AccountingPhase::ColdOutage.counts_json(cold_outage_counts)?;
+    let recovered_counts = AccountingPhase::Recovered.counts_json(recovered_counts)?;
+    for (index, family) in ["A", "AAAA"].iter().enumerate() {
+        println!(
+            "{{\"schema\":2,\"family\":\"{family}\",\"builtin_anchors\":true,\"cold_outage_error\":true,\"warm\":{},\"outage\":{},\"recovered\":{}}}",
+            warm_snapshots[index].json,
+            outage_snapshots[index].json,
+            recovered_snapshots[index].json
+        );
+    }
+    println!(
+        "{{\"schema\":2,\"accounting\":{{\"warm_counts\":{warm_counts},\"cold_outage_counts\":{cold_outage_counts},\"recovered_counts\":{recovered_counts}}}}}"
+    );
+    std::io::stdout().flush()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AccountingPhase, DnsResolutionCounts};
+
+    fn profiles() -> [(AccountingPhase, DnsResolutionCounts, &'static str); 3] {
+        [
+            (
+                AccountingPhase::Warm,
+                DnsResolutionCounts {
+                    local_validated: 2,
+                    upstream_validated: 2,
+                    ..DnsResolutionCounts::default()
+                },
+                "{\"local_validated\":2,\"peer_validated\":0,\"upstream_validated\":2,\"trusted_fallback\":0}",
+            ),
+            (
+                AccountingPhase::ColdOutage,
+                DnsResolutionCounts::default(),
+                "{\"local_validated\":0,\"peer_validated\":0,\"upstream_validated\":0,\"trusted_fallback\":0}",
+            ),
+            (
+                AccountingPhase::Recovered,
+                DnsResolutionCounts {
+                    upstream_validated: 2,
+                    ..DnsResolutionCounts::default()
+                },
+                "{\"local_validated\":0,\"peer_validated\":0,\"upstream_validated\":2,\"trusted_fallback\":0}",
+            ),
+        ]
+    }
+
+    #[test]
+    fn canonical_accounting_preserves_each_valid_phase_encoding() {
+        for (phase, measured, expected) in profiles() {
+            let actual: &'static str = phase.counts_json(measured).unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn canonical_accounting_rejects_valid_counts_bound_to_the_wrong_phase() {
+        for (phase_index, (phase, _, _)) in profiles().iter().enumerate() {
+            for (counts_index, (_, measured, _)) in profiles().iter().enumerate() {
+                if phase_index != counts_index {
+                    assert_eq!(
+                        phase.counts_json(*measured),
+                        Err("recovery accounting profile differs")
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_accounting_rejects_changed_or_unbounded_measured_counters() {
+        for (phase, measured, _) in profiles() {
+            for field in 0..4 {
+                for value in [1, u64::MAX] {
+                    let mut changed = measured;
+                    match field {
+                        0 => changed.local_validated = value,
+                        1 => changed.peer_validated = value,
+                        2 => changed.upstream_validated = value,
+                        _ => changed.trusted_fallback = value,
+                    }
+                    assert_eq!(
+                        phase.counts_json(changed),
+                        Err("recovery accounting profile differs")
+                    );
+                }
+            }
+        }
+    }
 }
