@@ -589,7 +589,8 @@ def hosted(args, deadline):
     require(os.environ.get('GITHUB_REF') in ('refs/heads/feature/protected-resident-model',
             'refs/heads/integration/resident-model-main-20261022',
             'refs/heads/integration/resident-current-main-20261028',
-            'refs/heads/fix/resident-pinned-guest-compiler-20261028'), 'hosted_source_scope')
+            'refs/heads/fix/resident-pinned-guest-compiler-20261028',
+            'refs/heads/fix/resident-runtime-assembly-diagnostic-20261028'), 'hosted_source_scope')
     require(os.uname().machine == 'x86_64', 'host_architecture')
     source = source_binding(args.expected_source, deadline)
     base = module('protected-resident-image')

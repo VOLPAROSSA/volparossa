@@ -2,7 +2,7 @@ name: Pinned resident guest compiler contracts and public trial
 
 on:
   push:
-    branches: [fix/resident-pinned-guest-compiler-20261028]
+    branches: [fix/resident-runtime-assembly-diagnostic-20261028]
   workflow_dispatch:
     inputs:
       scenario:
@@ -36,7 +36,7 @@ jobs:
   contracts:
     if: >-
       github.repository == 'VOLPAROSSA/volparossa' &&
-      github.ref == 'refs/heads/fix/resident-pinned-guest-compiler-20261028' &&
+      github.ref == 'refs/heads/fix/resident-runtime-assembly-diagnostic-20261028' &&
       (github.event_name == 'push' || inputs.scenario == 'source-contracts' ||
       (inputs.scenario == 'public-model' && inputs.expected_source == github.sha))
     runs-on: ubuntu-24.04
@@ -47,7 +47,7 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Bind compiler adapter to the retained current-main composition
+      - name: Bind packaging and diagnostics to the verified compiler composition
         run: |
           set -euo pipefail
           test "$GITHUB_ACTIONS" = true
@@ -59,11 +59,12 @@ jobs:
           mkdir resident-compiler-evidence
           python3 -B - <<'PYBIND'
           import json,os,pathlib,subprocess
-          base='7fa6551f606555dc2ace06af96f5616ff7c2e937'
+          base='6c0cb480663f4fcbea270d5cc26db5598fab03ad'
           allowed={
             '.github/workflows/resident-pinned-compiler.yml',
             'tests/integration/protected-resident-model-build.py',
             'tests/integration/test-protected-resident-model-build.py',
+            'tests/integration/test-protected-resident-binary-package.py',
             'tests/integration/protected-resident-model-assemble.py',
             'tests/integration/test-protected-resident-model-assemble.py',
             'tests/integration/protected-resident-model-run.py',
@@ -91,6 +92,14 @@ jobs:
             timeout --kill-after=5s 180s python3 -B "tests/integration/test-protected-resident-model-$suite.py" -v \
               2>&1 | tee "resident-compiler-evidence/$suite.log"
           done
+      - name: Exercise the fixed GNU debug-strip path on a public minimal ELF
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(id -u)" != 0
+          timeout --kill-after=5s 180s python3 -B tests/integration/test-protected-resident-binary-package.py -v \
+            2>&1 | tee resident-compiler-evidence/binary-package.log
       - name: Preserve exact tested source
         if: always()
         run: |
@@ -109,7 +118,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' && inputs.scenario == 'public-model' &&
       github.repository == 'VOLPAROSSA/volparossa' &&
-      github.ref == 'refs/heads/fix/resident-pinned-guest-compiler-20261028' &&
+      github.ref == 'refs/heads/fix/resident-runtime-assembly-diagnostic-20261028' &&
       inputs.expected_source == github.sha && needs.contracts.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 300

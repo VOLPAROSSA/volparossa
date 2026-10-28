@@ -2510,11 +2510,12 @@ class MainHostedAdmission(Inert):
             GITHUB_REPOSITORY='VOLPAROSSA/volparossa', GITHUB_SHA='a'*40,
             GITHUB_WORKFLOW_SHA='a'*40, GITHUB_REF=branch)
 
-    def test_only_four_exact_refs_reach_source_binding_before_any_host_effect(self):
+    def test_only_five_exact_refs_reach_source_binding_before_any_host_effect(self):
         branches = ('refs/heads/feature/protected-resident-model',
             'refs/heads/integration/resident-model-main-20261022',
             'refs/heads/integration/resident-current-main-20261028',
-            'refs/heads/fix/resident-pinned-guest-compiler-20261028')
+            'refs/heads/fix/resident-pinned-guest-compiler-20261028',
+            'refs/heads/fix/resident-runtime-assembly-diagnostic-20261028')
         args = types.SimpleNamespace(execute=True, yes=True, expected_source='a'*40)
         for branch in branches:
             with mock.patch.dict(R.os.environ, self.environment(branch), clear=True), \
@@ -2535,7 +2536,8 @@ class MainHostedAdmission(Inert):
             'refs/heads/integration/resident-main-runtime-20261023', 'refs/pull/1/merge',
             branch+'-other', 'refs/heads/fix/resident-host-config-20261023',
             'refs/heads/integration/resident-current-main-20261028-other',
-            'refs/heads/fix/resident-pinned-guest-compiler-20261028-other')]
+            'refs/heads/fix/resident-pinned-guest-compiler-20261028-other',
+            'refs/heads/fix/resident-runtime-assembly-diagnostic-20261028-other')]
         cases += [(key, None) for key in self.environment(branch)]
         cases += [('execute', False), ('yes', False), ('uid', 0), ('architecture', 'aarch64')]
         for key, value in cases:
