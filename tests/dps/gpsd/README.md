@@ -23,11 +23,23 @@ source or the product's gpspipe executable selection. Clang is set explicitly in
 the build environment because GPSD reads compiler selection from that environment.
 The carrier supports upstream's exact mandatory `-tt -m py_compile tmp.py` form
 without executing the file. Other module/interpreter flag forms fail closed;
-no general module runner is added. The 23 Python contracts include actual hosted
+no general module runner is added. The 26 Python contracts include actual hosted
 carrier compilation success/syntax failure, rejected module forms and private
 support resolution. This carrier correction skips or removes no upstream check
 target; the complete pinned Debian series and selected build configuration remain
 unchanged.
+
+Upstream 3.25 checks raw argument presence for its special `minimal` and
+`timeservice` profiles: even `timeservice=no` enters the stripped-profile branch.
+Neither key is passed. Its default time-service option stays false; gpsd,
+gpsdclients, ashtech/NMEA0183 and socket export are explicitly enabled. Normal and
+sanitized builds request fixed variant gpsd/gpspipe targets in addition to their
+existing build aliases, and normal additionally requires the generated gpsfake.
+Before success, the builder and proof check generated feature macros, private
+static libgps links and actual raw compile argv. Every sanitized compilation unit
+must contain address+undefined instrumentation, nonrecovering sanitizers and frame
+pointers; symbol presence alone is insufficient. No installation or new clock
+capability is introduced.
 
 The workflow then invokes the existing wrapper's narrow interface:
 

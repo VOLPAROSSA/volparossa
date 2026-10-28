@@ -11,7 +11,8 @@ import socket
 import subprocess
 import time
 
-from build import PYTHON_CARRIER, SANITIZERS, build_environment, build_options, tree_hash
+from build import (PYTHON_CARRIER, SANITIZERS, TARGETS, build_environment, build_options,
+                   compile_observation, effective_profile, tree_hash)
 from common import (ROOT, CommandFailure, clean_environment, command, digest, hosted, pins,
                     private_directory, source_binding, strict_json, terminate, write_json)
 from fixture import fresh_fixture
@@ -290,6 +291,7 @@ def prove(args):
     if (receipt['status'] != 'compiled_only' or receipt['phase'] != 'complete' or
             receipt['source_version'] != pins()['version'] or
             receipt['sanitizer_flags'] != SANITIZERS or
+            receipt['build_targets'] != TARGETS or
             receipt['support_packages'] != pins()['support_packages']):
         raise ValueError('complete pinned native build required')
     source = source_binding(receipt['source']['commit'])
@@ -305,6 +307,17 @@ def prove(args):
     if tree_hash(prefix / 'support') != receipt['support_tree_sha256']:
         raise ValueError('private support package payload changed')
     for kind in ('normal', 'sanitized'):
+        compile_log = evidence / ('build-' + kind + '.log')
+        digest(compile_log, 32 * 1024 * 1024)
+        if compile_observation(compile_log.read_bytes(), kind) != receipt['compile_observations'][kind]:
+            raise ValueError('actual code-generation/static linkage proof differs')
+        source_directory = Path(receipt['binaries'][kind]['source_directory'])
+        expected_source = prefix / ('gpsd-3.25' if kind == 'normal' else 'sanitized')
+        if (source_directory != expected_source or
+                receipt['binaries'][kind]['variant_directory'] != str(expected_source / 'gpsd-3.25')):
+            raise ValueError('fixed native source/variant layout differs')
+        if effective_profile(source_directory) != receipt['effective_profiles'][kind]:
+            raise ValueError('effective native feature profile changed')
         for name in ('gpsd', 'gpspipe'):
             row = receipt['binaries'][kind][name]
             path = Path(row['path'])

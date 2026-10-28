@@ -15,7 +15,8 @@ import time
 import unittest
 from unittest.mock import patch
 
-from build import PYTHON_CARRIER, SANITIZERS, build_environment, download, unpack
+from build import (PYTHON_CARRIER, SANITIZERS, TARGETS, build_argv, build_environment,
+                   compile_observation, download, effective_profile, unpack)
 from common import CommandFailure, command, pins, strict_json
 from fixture import fixture, sentence
 from prove import LIMITATIONS, isolation, loopback_only, quality
@@ -53,6 +54,50 @@ class Contracts(unittest.TestCase):
         self.assertIn('-fsanitize=address,undefined', flags)
         self.assertIn('-fno-sanitize-recover=all', flags)
         self.assertFalse(any(flag.startswith('-fsanitize-recover') for flag in flags))
+
+    def test_actual_scons_argv_omits_presence_profiles_and_requires_client_nmea_targets(self):
+        for kind in ('normal', 'sanitized'):
+            argv = build_argv(Path('/private'), Path('/private/support/usr/bin/scons'), kind)
+            self.assertFalse(any(arg.split('=', 1)[0] in {'timeservice', 'minimal'} for arg in argv))
+            for option in ['gpsd=yes', 'gpsdclients=yes', 'ashtech=yes', 'socket_export=yes',
+                           'shared=no', 'magic_hat=no', 'shm_export=no']:
+                self.assertIn(option, argv)
+            self.assertIn('gpsd-3.25/gpsd/gpsd', argv)
+            self.assertIn('gpsd-3.25/clients/gpspipe', argv)
+            self.assertEqual(argv[-len(TARGETS[kind]):], TARGETS[kind])
+        self.assertIn('gpsd-3.25/gpsfake', build_argv(Path('/private'), Path('/scons'), 'normal'))
+
+    def test_compile_observation_requires_real_client_codegen_and_fatal_flags_on_every_unit(self):
+        files = ['gpsd-3.25/gpsd/gpsd.c', 'gpsd-3.25/clients/gpspipe.c',
+                 'gpsd-3.25/drivers/driver_nmea0183.c']
+        lines = ['/usr/bin/clang -o output.o -c ' + SANITIZERS + ' ' + name for name in files]
+        for output in ['gpsd-3.25/gpsd/gpsd', 'gpsd-3.25/clients/gpspipe']:
+            lines.append('/usr/bin/clang -o ' + output +
+                         ' -fsanitize=address,undefined object.o gpsd-3.25/libgps_static.a -lm')
+        raw = ('\n'.join(lines) + '\n').encode()
+        self.assertEqual(compile_observation(raw, 'sanitized')['compiled_units'], 3)
+        with self.assertRaises(ValueError):
+            compile_observation(raw.replace(b'-fno-sanitize-recover=all', b'', 1), 'sanitized')
+        with self.assertRaises(ValueError):
+            compile_observation(raw.replace(b'gpsd-3.25/clients/gpspipe.c', b'gpsd-3.25/other.c'), 'sanitized')
+        with self.assertRaises(ValueError):
+            compile_observation(raw.replace(b'libgps_static.a', b'libgps.so'), 'sanitized')
+
+    def test_effective_generated_profile_rejects_time_service_or_missing_nmea(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            header = root / 'gpsd-3.25/include/gpsd_config.h'
+            header.parent.mkdir(parents=True)
+            expected = '\n'.join('#define ' + key + '_ENABLE 1' for key in
+                                 ['GPSD', 'GPSDCLIENTS', 'ASHTECH', 'SOCKET_EXPORT']) + '\n'
+            header.write_text(expected)
+            self.assertIn('ASHTECH', effective_profile(root)['required_features_enabled'])
+            header.write_text(expected + '#define TIMESERVICE_ENABLE 1\n')
+            with self.assertRaises(ValueError):
+                effective_profile(root)
+            header.write_text(expected.replace('#define ASHTECH_ENABLE 1\n', ''))
+            with self.assertRaises(ValueError):
+                effective_profile(root)
 
     def test_private_carrier_executes_exact_upstream_compile_without_executing_source(self):
         with tempfile.TemporaryDirectory() as directory:

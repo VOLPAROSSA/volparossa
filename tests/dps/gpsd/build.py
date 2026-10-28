@@ -5,6 +5,8 @@ import argparse
 import hashlib
 import os
 from pathlib import Path
+import re
+import shlex
 import shutil
 import tarfile
 import time
@@ -13,10 +15,16 @@ import urllib.request
 from common import (clean_environment, command, digest, hosted, pins,
                     private_directory, source_binding, write_json)
 
-OPTIONS = ['-j2',
+OPTIONS = ['-j2', 'gpsd=yes', 'gpsdclients=yes', 'ashtech=yes', 'socket_export=yes',
            'xgps=no', 'qt=no', 'ncurses=no', 'libgpsmm=no', 'dbus_export=no',
            'bluez=no', 'usb=no', 'systemd=no', 'shm_export=no', 'magic_hat=no',
-           'timeservice=no', 'manbuild=no', 'shared=no', 'debug=yes', 'nostrip=yes']
+           'manbuild=no', 'shared=no', 'debug=yes', 'nostrip=yes']
+# Do not pass timeservice=no: upstream tests raw ARGUMENTS.get('timeservice'),
+# so even the string "no" selects its stripped profile. The default is False.
+TARGETS = {
+    'normal': ['build-all', 'gpsd-3.25/gpsd/gpsd', 'gpsd-3.25/clients/gpspipe', 'gpsd-3.25/gpsfake'],
+    'sanitized': ['build', 'gpsd-3.25/gpsd/gpsd', 'gpsd-3.25/clients/gpspipe'],
+}
 SANITIZERS = '-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer'
 PYTHON_CARRIER = '''#!/usr/bin/python3
 # SPDX-License-Identifier: GPL-3.0-only
@@ -58,6 +66,66 @@ else:
 
 def build_options(prefix):
     return [*OPTIONS, 'target_python=' + str(prefix / 'python')]
+
+
+def build_argv(prefix, scons, kind):
+    if kind not in TARGETS:
+        raise ValueError('unknown fixed native build')
+    return [str(prefix / 'python'), str(scons), *build_options(prefix),
+            'python=yes' if kind == 'normal' else 'python=no', *TARGETS[kind]]
+
+
+def effective_profile(directory):
+    header = directory / 'gpsd-3.25/include/gpsd_config.h'
+    digest(header, 1024 * 1024)
+    raw = header.read_bytes()
+    enabled = set(re.findall(rb'^#define ([A-Z0-9_]+)_ENABLE 1$', raw, re.M))
+    required = {b'GPSD', b'GPSDCLIENTS', b'ASHTECH', b'SOCKET_EXPORT'}
+    forbidden = {b'TIMESERVICE', b'SHM_EXPORT', b'MAGIC_HAT', b'SYSTEMD', b'DBUS_EXPORT',
+                 b'BLUEZ', b'USB', b'NCURSES', b'QT', b'LIBGPSMM', b'XGPS'}
+    if not required <= enabled or enabled & forbidden:
+        raise ValueError('effective native client/NMEA/safety feature profile differs')
+    return {'config_header_sha256': hashlib.sha256(raw).hexdigest(),
+            'required_features_enabled': sorted(item.decode() for item in required),
+            'forbidden_features_disabled': sorted(item.decode() for item in forbidden)}
+
+
+def compile_observation(raw, kind):
+    """Check actual emitted code-generation/link argv, not just metadata/symbols."""
+    if len(raw) > 32 * 1024 * 1024 or kind not in TARGETS:
+        raise ValueError('native compile observation bound')
+    sources = []
+    linked = set()
+    required_flags = {'-fsanitize=address,undefined', '-fno-sanitize-recover=all',
+                      '-fno-omit-frame-pointer'}
+    for line in raw.decode('utf-8', errors='strict').splitlines():
+        if not line.startswith(('/usr/bin/clang ', '/usr/bin/clang++ ')):
+            continue
+        argv = shlex.split(line)
+        if '-c' in argv:
+            if len(sources) >= 2048 or not argv[-1].startswith('gpsd-3.25/'):
+                raise ValueError('native code-generation source bound')
+            if kind == 'sanitized' and (not required_flags <= set(argv) or any(
+                    item.startswith(('-fsanitize-recover', '-fno-sanitize=')) for item in argv)):
+                raise ValueError('actual native code generation lacks fatal sanitizer flags')
+            sources.append(argv[-1])
+        elif '-o' in argv:
+            output = argv[argv.index('-o') + 1]
+            if output in {'gpsd-3.25/gpsd/gpsd', 'gpsd-3.25/clients/gpspipe'}:
+                if 'gpsd-3.25/libgps_static.a' not in argv:
+                    raise ValueError('native executable did not link the private static libgps')
+                if kind == 'sanitized' and '-fsanitize=address,undefined' not in argv:
+                    raise ValueError('native executable lacks sanitizer linkage')
+                linked.add(output)
+    needed_sources = {'gpsd-3.25/gpsd/gpsd.c', 'gpsd-3.25/clients/gpspipe.c',
+                      'gpsd-3.25/drivers/driver_nmea0183.c'}
+    needed_outputs = {'gpsd-3.25/gpsd/gpsd', 'gpsd-3.25/clients/gpspipe'}
+    if not needed_sources <= set(sources) or linked != needed_outputs:
+        raise ValueError('actual native build omitted required daemon/client/NMEA compilation or links')
+    return {'log_sha256': hashlib.sha256(raw).hexdigest(), 'compiled_units': len(sources),
+            'required_sources_compiled': sorted(needed_sources),
+            'required_static_executables_linked': sorted(linked),
+            'all_compilation_units_fatal_sanitizers': kind == 'sanitized'}
 
 
 def build_environment():
@@ -185,14 +253,22 @@ def build(evidence, revision):
             command(argv, cwd=prefix, env=env, deadline=deadline,
                     log_path=evidence / (label + '.log'), limit=65536)
         step = 'compile-normal'
-        command([str(carrier), str(scons), *build_options(prefix), 'python=yes', 'build-all'],
-                cwd=normal, env=env, deadline=deadline, log_path=evidence / 'build-normal.log')
+        normal_log = command(build_argv(prefix, scons, 'normal'),
+                             cwd=normal, env=env, deadline=deadline, log_path=evidence / 'build-normal.log')
         step = 'compile-address-undefined-sanitizers'
         sanitized_env = dict(env, CFLAGS=SANITIZERS, CXXFLAGS=SANITIZERS,
                              LDFLAGS='-fsanitize=address,undefined')
-        command([str(carrier), str(scons), *build_options(prefix), 'python=no', 'build'],
-                cwd=sanitized, env=sanitized_env, deadline=deadline,
-                log_path=evidence / 'build-sanitized.log')
+        sanitized_log = command(build_argv(prefix, scons, 'sanitized'),
+                                cwd=sanitized, env=sanitized_env, deadline=deadline,
+                                log_path=evidence / 'build-sanitized.log')
+        step = 'verify-actual-targets-feature-profile-and-code-generation'
+        report['build_targets'] = TARGETS
+        report['compile_observations'] = {
+            'normal': compile_observation(normal_log, 'normal'),
+            'sanitized': compile_observation(sanitized_log, 'sanitized'),
+        }
+        report['effective_profiles'] = {'normal': effective_profile(normal),
+                                        'sanitized': effective_profile(sanitized)}
         report['binaries'] = {}
         for kind, directory in [('normal', normal), ('sanitized', sanitized)]:
             variant = directory / 'gpsd-3.25'
