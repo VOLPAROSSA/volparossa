@@ -16,6 +16,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import subprocess
 import tarfile
 import time
 import types
@@ -28,6 +29,47 @@ MAX_RESULT = 1024 ** 2
 GUEST_OUTPUT = '/home/vpci/resident-output'
 SHA = re.compile(r'[0-9a-f]{64}\Z')
 SOURCE = re.compile(r'[0-9a-f]{40}\Z')
+ASSEMBLY_STEPS = frozenset(('space_reservation', 'cleanup_binding', 'build_receipt',
+    'build_identity', 'runtime_image_binding', 'output_directory', 'workload_stage',
+    'boot_overlay', 'runtime_filesystem', 'runtime_install', 'boot_metadata',
+    'boot_export', 'boot_validate', 'root_extract', 'root_validate',
+    'runtime_final_binding', 'kernel_binding', 'receipt_write'))
+# Exact source-owned guards only. This is diagnostic vocabulary, never a new
+# admission rule. Unlisted nested errors remain unknown rather than raw text.
+ASSEMBLY_PREDICATES = frozenset('''
+assemble_deadline assemble_file_bound assemble_file_changed assemble_file_metadata
+assemble_file_path assemble_output_parent build_cleanup_required build_export_bound
+build_export_digest build_export_identity build_export_shape build_guest_owner
+build_result_binding build_result_profile build_result_scope cleanup_image_binding
+cleanup_source_shape guest_asset_executable guest_asset_mode guest_asset_owner_kind
+guest_asset_size_links guest_stat_bound guest_stat_count guest_stat_field
+guest_stat_range guestfish_output_bound runtime_boot_bound runtime_boot_size
+runtime_filesystem runtime_image_binding runtime_image_size runtime_kernel_modules
+runtime_stage_stdout runtime_usr_merge separate_runtime_image staged_workload_binding
+asset_digest asset_directory_metadata asset_file_bound asset_file_metadata
+asset_inventory_exact asset_path asset_root asset_scope core_executable core_source
+duplicate_json_key elf_bound elf_identity executable_scope file_inventory fixture_tls_bound
+inventory_bound inventory_changed inventory_digest inventory_entries inventory_entry
+inventory_parent_file inventory_scope inventory_total lease_is_generated model_inventory
+model_pin native_artifact_binding native_build_binding native_build_digest
+native_dependency_binding native_inventory native_manifest_digest native_session_required
+native_wrapper_binding nonfinite_json output_path public_policy_binding runtime_config
+runtime_python stage_deadline symlink_changed symlink_escape symlink_external symlink_loop
+symlink_missing symlink_scope symlink_target inventory_path_type inventory_path_empty
+inventory_path_length inventory_path_character_or_separator inventory_path_dot_component
+boot_overlay_kind model_boot_directory model_boot_metadata model_boot_root
+model_entry_identity model_entry_template model_mountpoint model_write_probe
+archive_bound archive_duplicate archive_hardlink archive_overwrite_symlink
+archive_parent_symlink archive_path archive_special_file cancelled build_deadline
+initrd_path initrd_path_escape initrd_file initrd_file_changed initrd_elf
+initrd_elf_machine initrd_elf_headers initrd_elf_segment initrd_elf_dynamic
+initrd_elf_interpreter initrd_elf_search_path initrd_elf_dynamic_end initrd_elf_strings
+initrd_elf_needed initrd_symlink_loop initrd_parent kernel_feature_BLK_DEV_INITRD kernel_feature_DEVTMPFS
+kernel_feature_EXT4_FS kernel_feature_BLK_DEV_DM kernel_feature_DM_VERITY
+kernel_feature_VIRTIO_PCI kernel_feature_VIRTIO_BLK kernel_feature_SERIAL_8250
+kernel_feature_SERIAL_8250_CONSOLE compiler_proof_scope compiler_proof_profile
+compiler_proof_digest compiler_proof_source space_workload_stage runtime_kernel_binding
+'''.split())
 STAT_FIELDS = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid',
                'st_rdev', 'st_size', 'st_blksize', 'st_blocks', 'st_atime_sec',
                'st_atime_nsec', 'st_mtime_sec', 'st_mtime_nsec', 'st_ctime_sec',
@@ -48,6 +90,39 @@ BOOT = module('protected-resident-model-initrd')
 IMAGE = module('protected-resident-image')
 BUILD = module('protected-resident-model-build')
 require = STAGER.require
+
+
+def assembly_step(observation, step):
+    """Optional entered-only marker; it cannot authorize or replace an operation."""
+    try:
+        if type(observation) is dict and type(step) is str and step in ASSEMBLY_STEPS:
+            observation['step'] = step
+    except Exception:
+        pass
+
+
+def assembly_failure(observation, error, phase):
+    """Project only this controller phase, fixed guards and closed exception classes."""
+    if type(phase) is not str or phase != 'runtime_assembly':
+        return None
+    step = observation.get('step') if type(observation) is dict else None
+    if type(step) is not str or step not in ASSEMBLY_STEPS:
+        step = 'unavailable'
+    predicate = None
+    category = {
+        ValueError: 'invalid_value', OSError: 'io', FileNotFoundError: 'missing_file',
+        FileExistsError: 'existing_path', PermissionError: 'permission_denied',
+        InterruptedError: 'interrupted', TimeoutError: 'timeout',
+        KeyError: 'missing_field', TypeError: 'invalid_type',
+        subprocess.CalledProcessError: 'subprocess_failed',
+        subprocess.TimeoutExpired: 'subprocess_timeout',
+    }.get(type(error), 'unknown')
+    if (type(error) is ValueError and len(error.args) == 1
+            and type(error.args[0]) is str and error.args[0] in ASSEMBLY_PREDICATES):
+        category, predicate = 'guard', error.args[0]
+    return dict(version=1, scope='runtime_assembly', diagnostic_only=True,
+        acceptance_evidence=False, causal_attribution=False, step_semantics='entered_only',
+        step=step, category=category, predicate=predicate)
 
 
 def remaining(deadline, cap=1200):
@@ -315,7 +390,7 @@ def boot_overlay(output):
     return archive
 
 
-def assemble_runtime(runtime_image, exported, output, cleanup, guestfish, deadline):
+def assemble_runtime(runtime_image, exported, output, cleanup, guestfish, deadline, *, observation=None):
     """Install one checked workload and fixed boot files, then read final closure.
 
     Runtime is an offline-configured, unmounted whole ext4 filesystem (32 GiB),
@@ -323,11 +398,14 @@ def assemble_runtime(runtime_image, exported, output, cleanup, guestfish, deadli
     exported executable is invoked here. Returned Paths are private controller
     inputs, not an artifact allowlist.
     """
+    assembly_step(observation, 'cleanup_binding')
     source, tree = exported['source_commit'], exported['source_tree']
     validate_cleanup(cleanup, source, tree)
+    assembly_step(observation, 'build_receipt')
     build_result(exported['build_result'], source, tree)
     # The joined build image may already have been removed to reclaim space.
     # Its canonical path and identity were retained only after the final hash.
+    assembly_step(observation, 'build_identity')
     build_path, build_id = exported['build_image'], exported['build_image_identity']
     require(type(build_id) is tuple and len(build_id) == 2
             and all(type(item) is int and item >= 0 for item in build_id)
@@ -336,20 +414,27 @@ def assemble_runtime(runtime_image, exported, output, cleanup, guestfish, deadli
     runtime_meta = runtime_image.lstat()
     require(runtime_image.resolve(strict=True) != build_path
             and (runtime_meta.st_dev, runtime_meta.st_ino) != build_id, 'separate_runtime_image')
+    assembly_step(observation, 'runtime_image_binding')
     require(file_digest(runtime_image, MAX_ROOT, deadline) == cleanup['runtime_image'], 'runtime_image_binding')
+    assembly_step(observation, 'output_directory')
     new_directory(output)
+    assembly_step(observation, 'workload_stage')
     staged = STAGER.stage_workload(exported['assets'], exported['inventory'], exported['inventory_sha256'],
                                     output / 'workload.tar', source, deadline)
     require(staged['workload_sha256'] == exported['workload_sha256']
             and staged['native_backend_sha256'] == exported['build_result']['export']['native_backend_sha256'],
             'staged_workload_binding')
+    assembly_step(observation, 'boot_overlay')
     overlay = boot_overlay(output)
+    assembly_step(observation, 'runtime_filesystem')
     info = call(guestfish, runtime_image, [['vfs-type', '/dev/sda'], ['blockdev-getsize64', '/dev/sda']],
                 deadline, 'model_stage_runtime').splitlines()
     require(info == ['ext4', str(MAX_ROOT)], 'runtime_filesystem')
+    assembly_step(observation, 'runtime_install')
     require(not call(guestfish, runtime_image, [['mount', '/dev/sda', '/'],
         ['tar-in', output / 'workload.tar', '/'], ['tar-in', overlay, '/'],
         ['sync'], ['umount-all']], deadline, 'model_stage_runtime', readonly=False).strip(), 'runtime_stage_stdout')
+    assembly_step(observation, 'boot_metadata')
     pins = STAGER.parse((HERE / 'protected-resident-image-pins-v1.json').read_bytes())
     release = pins['kernel_release']
     boot_paths = [('/boot/vmlinuz-' + release, 'vmlinuz', 64 * 1024 ** 2),
@@ -361,6 +446,7 @@ def assemble_runtime(runtime_image, exported, output, cleanup, guestfish, deadli
     for (_path, _name, bound), item in zip(boot_paths, metadata):
         require(0 < item['st_size'] <= bound, 'runtime_boot_bound')
         guest_metadata(item, 'file', 0, 0, size=item['st_size'])
+    assembly_step(observation, 'boot_export')
     result = call(guestfish, runtime_image, [['mount-ro', '/dev/sda', '/'],
         *[['download-offset', path, output / name, '0', str(item['st_size'])]
           for (path, name, _bound), item in zip(boot_paths, metadata)],
@@ -368,10 +454,12 @@ def assemble_runtime(runtime_image, exported, output, cleanup, guestfish, deadli
         *[['readlink', '/' + name] for name in ('bin', 'sbin', 'lib', 'lib64')]],
         deadline, 'model_extract_closure').splitlines()
     require(result == ['usr/bin', 'usr/sbin', 'usr/lib', 'usr/lib64'], 'runtime_usr_merge')
+    assembly_step(observation, 'boot_validate')
     boot_inputs = {name: file_digest(output / name, bound, deadline) for _path, name, bound in boot_paths}
     require(all(boot_inputs[name]['bytes'] == item['st_size'] for (_path, name, _bound), item in
                 zip(boot_paths, metadata)), 'runtime_boot_size')
     IMAGE.kernel_config((output / 'kernel.config').read_text())
+    assembly_step(observation, 'root_extract')
     closure = output / 'root-tree'
     closure.mkdir(mode=0o700)
     # Keep the old extractor's 4 GiB /usr cap intact; model files live in /opt.
@@ -382,6 +470,7 @@ def assemble_runtime(runtime_image, exported, output, cleanup, guestfish, deadli
     finally:
         IMAGE.DEADLINE.reset(token)
     remaining(deadline)
+    assembly_step(observation, 'root_validate')
     for name, target in zip(('bin', 'sbin', 'lib', 'lib64'), result):
         (closure / name).symlink_to(target)
     for name in ('proc', 'sys', 'dev', 'run'):
@@ -389,6 +478,7 @@ def assemble_runtime(runtime_image, exported, output, cleanup, guestfish, deadli
         (closure / name).chmod(0o755)
     BOOT.validate_root(closure)
     require((closure / 'usr/lib/modules' / release).is_dir(), 'runtime_kernel_modules')
+    assembly_step(observation, 'runtime_final_binding')
     final = file_digest(runtime_image, MAX_ROOT, deadline)
     return dict(root_tree=closure, kernel=output / 'vmlinuz', kernel_config=output / 'kernel.config',
                 original_initrd=output / 'original-initrd.img', kernel_release=release,

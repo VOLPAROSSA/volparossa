@@ -333,7 +333,8 @@ class CorruptionTransition(Inert):
         self.addCleanup(os.umask, os.umask(0o077))
 
     def execute_case(self, *, channel_present=False, channel_error=None, fsync_error=None,
-                     stop_error=None, start_error=None, negative=None, sealed_changed=False):
+                     stop_error=None, start_error=None, negative=None, sealed_changed=False,
+                     assembly_error=None, diagnostic_error=None):
         """Run the actual controller with tiny public files and inert VM/tool surfaces."""
         pins = R.json.loads((R.HERE / 'protected-resident-image-pins-v1.json').read_bytes())
         source = dict(commit='1' * 40, tree='2' * 40)
@@ -391,8 +392,18 @@ class CorruptionTransition(Inert):
             closure = dict(kernel_release=pins['kernel_release'], kernel=Path('/not-opened'),
                 root_tree=Path('/not-opened'), original_initrd=Path('/not-opened'),
                 staging_receipt=dict(workload_sha256='a' * 64))
+            diagnostic_api = R.module('protected-resident-model-assemble')
+            def assemble(*_args, observation=None):
+                if assembly_error is not None:
+                    diagnostic_api.assembly_step(observation, 'root_validate')
+                    raise assembly_error
+                return closure
+            def project(*args):
+                if diagnostic_error is not None: raise diagnostic_error
+                return diagnostic_api.assembly_failure(*args)
             assembler = types.SimpleNamespace(export_assets=lambda *_args:
-                dict(build_result={'public_fixture_only': True}), assemble_runtime=lambda *_args: closure)
+                dict(build_result={'public_fixture_only': True}), assemble_runtime=assemble,
+                assembly_step=diagnostic_api.assembly_step, assembly_failure=project)
             def build_initrd(*_args):
                 (work / 'model-initrd.img').write_bytes(b'public initrd fixture')
                 return {'public_fixture_only': True}
@@ -524,6 +535,32 @@ class CorruptionTransition(Inert):
         self.assertNotIn('corrupt_construct', events)
         self.assertNotIn('corrupt-boot.json', evidence)
         self.assertFalse(result['model_execution'])
+
+    def test_assembly_failure_keeps_original_fatal_result_and_whole_controller_cleanup(self):
+        result, events, scopes, evidence = self.execute_case(assembly_error=ValueError('initrd_file'))
+        self.assertEqual((result['state'], result['phase'], result['failure']),
+                         ('failed', 'runtime_assembly', 'controller_stage_failed'))
+        diagnostic = result['runtime_assembly_diagnostic']
+        self.assertEqual((diagnostic['step'], diagnostic['predicate']), ('root_validate', 'initrd_file'))
+        self.assertEqual(diagnostic['step_semantics'], 'entered_only')
+        self.assertFalse(diagnostic['acceptance_evidence'] or diagnostic['causal_attribution'])
+        self.assertTrue(result['vm_cleanup_confirmed'] and result['tool_cleanup_confirmed']
+                        and result['scratch_removed'])
+        self.assertFalse(result['model_execution'] or result['host_configuration_checkpoint_accepted'])
+        self.assertEqual([scope.label for scope in scopes], ['build'])
+        self.assertNotIn('model_start', events)
+        self.assertNotIn('workload.json', evidence)
+
+    def test_broken_optional_projection_cannot_change_failure_or_skip_cleanup(self):
+        for error in (RuntimeError('PRIVATE_CANARY'), KeyboardInterrupt('PRIVATE_CANARY')):
+            with self.subTest(error=type(error).__name__):
+                result, _, _, _ = self.execute_case(assembly_error=ValueError('initrd_file'),
+                                                   diagnostic_error=error)
+                self.assertEqual(result['failure'], 'controller_stage_failed')
+                self.assertNotIn('runtime_assembly_diagnostic', result)
+                self.assertTrue(result['vm_cleanup_confirmed'] and result['tool_cleanup_confirmed']
+                                and result['scratch_removed'])
+                self.assertNotIn(b'PRIVATE_CANARY', R.encoded(result))
 
     def test_corruption_sync_failure_never_constructs_negative_scope(self):
         result, events, _, _ = self.execute_case(fsync_error=OSError(errno.EIO, 'private-sync-canary'))
@@ -4643,6 +4680,80 @@ class CommandLifecycle(Inert):
         join.assert_called_once_with(process)
         process.stdout.close.assert_called_once()
         process.stderr.close.assert_called_once()
+
+
+class RuntimeAssemblyStage(Inert):
+    def setUp(self):
+        super().setUp()
+        self.api = R.module('protected-resident-model-assemble')
+        self.work, self.evidence = Path('/synthetic/payload'), Path('/synthetic/evidence')
+        self.exported, self.cleanup, self.fish = object(), object(), object()
+        self.pins = {'kernel_release': 'public-kernel'}
+        self.closure = dict(kernel_release='public-kernel', staging_receipt={'public': 'receipt'})
+
+    def assembler(self, operation):
+        return types.SimpleNamespace(assembly_step=self.api.assembly_step,
+            assembly_failure=self.api.assembly_failure, assemble_runtime=operation)
+
+    def invoke(self, assembler, report):
+        return R.runtime_assembly_stage(assembler, self.work, self.exported, self.cleanup,
+            self.fish, 200, self.pins, report, evidence=self.evidence)
+
+    def test_original_call_order_arguments_deadline_and_success_receipt_are_preserved(self):
+        calls = []
+        def assemble(*args, observation=None):
+            calls.append('assemble')
+            self.assertEqual(args, (self.work / 'runtime-root.raw', self.exported,
+                self.work / 'assembled', self.cleanup, self.fish, 200))
+            self.assertEqual(observation, {'step': 'space_reservation'})
+            return self.closure
+        report = {'phase': 'runtime_assembly', 'state': 'failed', 'model_execution': False}
+        with mock.patch.object(R, 'reserve_space', side_effect=lambda *_: calls.append('reserve')) as reserve, \
+                mock.patch.object(R, 'write_new', side_effect=lambda *_: calls.append('receipt')) as write:
+            self.assertIs(self.invoke(self.assembler(assemble), report), self.closure)
+        reserve.assert_called_once_with(self.work, 21 * R.GIB, 'workload_stage')
+        write.assert_called_once_with(self.evidence / 'workload.json', R.encoded(self.closure['staging_receipt']))
+        self.assertEqual(calls, ['reserve', 'assemble', 'receipt'])
+        self.assertEqual(report, {'phase': 'runtime_assembly', 'state': 'failed', 'model_execution': False})
+
+    def test_original_exception_identity_and_callers_cleanup_survive_phase_bound_observation(self):
+        for phase in ('runtime_assembly', 'immutable_export', 'seal'):
+            with self.subTest(phase=phase):
+                original = R.CleanupUnconfirmed('PRIVATE_CANARY')
+                def fail(*_args, observation=None):
+                    self.api.assembly_step(observation, 'root_validate')
+                    raise original
+                report, cleanup = {'phase': phase}, []
+                with mock.patch.object(R, 'reserve_space'), mock.patch.object(R, 'write_new') as write:
+                    with self.assertRaises(R.CleanupUnconfirmed) as caught:
+                        try:
+                            self.invoke(self.assembler(fail), report)
+                        finally:
+                            cleanup.append('same caller cleanup')
+                self.assertIs(caught.exception, original)
+                self.assertEqual(cleanup, ['same caller cleanup'])
+                write.assert_not_called()
+                self.assertEqual('runtime_assembly_diagnostic' in report, phase == 'runtime_assembly')
+                self.assertNotIn(b'PRIVATE_CANARY', R.encoded(report))
+
+    def test_reservation_kernel_and_receipt_failures_get_the_entered_seam_only(self):
+        for selected, step, predicate in (('reserve', 'space_reservation', 'space_workload_stage'),
+                ('kernel', 'kernel_binding', 'runtime_kernel_binding'), ('receipt', 'receipt_write', None)):
+            with self.subTest(selected=selected):
+                report = {'phase': 'runtime_assembly'}
+                closure = dict(self.closure, kernel_release='wrong' if selected == 'kernel' else 'public-kernel')
+                operation = mock.Mock(return_value=closure)
+                original = (ValueError('space_workload_stage') if selected == 'reserve'
+                            else OSError(errno.EIO, 'PRIVATE_CANARY'))
+                with mock.patch.object(R, 'reserve_space', side_effect=original if selected == 'reserve' else None), \
+                        mock.patch.object(R, 'write_new', side_effect=original if selected == 'receipt' else None):
+                    with self.assertRaises((ValueError, OSError)) as caught:
+                        self.invoke(self.assembler(operation), report)
+                if selected != 'kernel': self.assertIs(caught.exception, original)
+                self.assertEqual(operation.call_count, int(selected != 'reserve'))
+                value = report['runtime_assembly_diagnostic']
+                self.assertEqual((value['step'], value['predicate']), (step, predicate))
+                self.assertNotIn(b'PRIVATE_CANARY', R.encoded(report))
 
 
 if __name__ == '__main__':

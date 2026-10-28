@@ -186,11 +186,11 @@ class Fixture:
         return M.export_assets(self.build, self.root / 'export', self.cleanup, SOURCE, TREE,
                                kwargs.pop('guestfish', self.guestfish), kwargs.pop('deadline', deadline()), **kwargs)
 
-    def assemble(self, exported):
+    def assemble(self, exported, **kwargs):
         fake_pins = types.SimpleNamespace(load_pins=lambda **_kwargs: self.public.pins)
         with mock.patch.object(M.STAGER, 'module', side_effect=lambda name: W.NATIVE if name == 'llama_cpu' else fake_pins):
             return M.assemble_runtime(self.runtime, exported, self.root / 'assembled', self.cleanup,
-                                      self.guestfish, deadline())
+                                      self.guestfish, deadline(), **kwargs)
 
 
 class CleanupTests(unittest.TestCase):
@@ -462,6 +462,66 @@ class ExportTests(unittest.TestCase):
         raw = printed(row()).replace('st_gid: 1000', 'st_uid: 1000')
         with self.assertRaisesRegex(ValueError, 'guest_stat_field'):
             M.stat_rows(raw, 1)
+
+
+class AssemblyDiagnosticTests(unittest.TestCase):
+    def test_exact_closed_predicate_and_step_do_not_imply_completed_assembly(self):
+        observation = {'ignored_private_field': '/private/PRIVATE_CANARY'}
+        M.assembly_step(observation, 'root_validate')
+        value = M.assembly_failure(observation, ValueError('initrd_file'), 'runtime_assembly')
+        self.assertEqual(value, dict(version=1, scope='runtime_assembly', diagnostic_only=True,
+            acceptance_evidence=False, causal_attribution=False, step_semantics='entered_only',
+            step='root_validate', category='guard', predicate='initrd_file'))
+        raw = M.STAGER.encoded(value)
+        self.assertLessEqual(len(raw), 1024)
+        self.assertNotIn(b'PRIVATE_CANARY', raw)
+
+    def test_unknown_subclasses_multiargs_and_private_errors_never_export_text(self):
+        class NoText(ValueError):
+            def __str__(self): raise AssertionError('exception text must not be read')
+        cases = ((ValueError('/private/PRIVATE_CANARY'), 'invalid_value'),
+            (ValueError('initrd_file PRIVATE_CANARY'), 'invalid_value'),
+            (ValueError('initrd_file', '/private/PRIVATE_CANARY'), 'invalid_value'),
+            (NoText('initrd_file'), 'unknown'),
+            (KeyError('/private/PRIVATE_CANARY'), 'missing_field'),
+            (PermissionError(13, 'PRIVATE_CANARY', '/private/path'), 'permission_denied'),
+            (M.subprocess.CalledProcessError(1, ['/private/PRIVATE_CANARY'],
+                output=b'PRIVATE_CANARY', stderr=b'PRIVATE_CANARY'), 'subprocess_failed'))
+        for error, category in cases:
+            with self.subTest(category=category):
+                value = M.assembly_failure({'step': 'workload_stage'}, error, 'runtime_assembly')
+                self.assertEqual(value['category'], category)
+                self.assertIsNone(value['predicate'])
+                self.assertNotIn(b'PRIVATE_CANARY', M.STAGER.encoded(value))
+                self.assertNotIn(b'/private', M.STAGER.encoded(value))
+
+    def test_phase_and_unknown_step_cannot_be_forged_by_other_observations(self):
+        error = ValueError('runtime_image_binding')
+        for phase in ('immutable_export', 'seal', '/private/PRIVATE_CANARY', None, 1):
+            self.assertIsNone(M.assembly_failure({'step': 'runtime_image_binding'}, error, phase))
+        for observation in (None, {}, {'step': '/private/PRIVATE_CANARY'}, {'step': 1}):
+            value = M.assembly_failure(observation, error, 'runtime_assembly')
+            self.assertEqual(value['step'], 'unavailable')
+            self.assertNotIn(b'PRIVATE_CANARY', M.STAGER.encoded(value))
+        observation = {'step': 'root_validate'}
+        M.assembly_step(observation, '/private/PRIVATE_CANARY')
+        self.assertEqual(observation, {'step': 'root_validate'})
+        M.assembly_step(None, 'root_validate')  # An absent optional observer is inert.
+
+    def test_real_root_validator_failure_keeps_its_original_guard_and_entered_step(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(M, 'MAX_ROOT', 16384):
+            fixture = Fixture(directory)
+            exported = fixture.export()
+            observation = {}
+            # Keep the production 64-MiB bound unchanged. A tiny test-only bound
+            # reaches the actual guarded read without creating a large fixture.
+            with mock.patch.object(M.BOOT.BASE, 'MAX_FILE', 0):
+                with self.assertRaisesRegex(ValueError, '^initrd_file$') as caught:
+                    fixture.assemble(exported, observation=observation)
+            value = M.assembly_failure(observation, caught.exception, 'runtime_assembly')
+            self.assertEqual((value['step'], value['predicate']), ('root_validate', 'initrd_file'))
+            self.assertTrue(any(not call[2] for call in fixture.calls))
+            self.assertFalse(value['acceptance_evidence'] or value['causal_attribution'])
 
 
 class AssemblyTests(unittest.TestCase):

@@ -1637,6 +1637,29 @@ def remove_payload(work, parent_identity, payload_identity):
         os.close(parent_fd)
 
 
+def runtime_assembly_stage(assembler, work, exported, cleanup, guestfish, deadline, pins, report, *, evidence):
+    """Keep the original assembly order/budget and rethrow the same primary error."""
+    observation = {}
+    try:
+        assembler.assembly_step(observation, 'space_reservation')
+        reserve_space(work, 21 * GIB, 'workload_stage')
+        closure = assembler.assemble_runtime(work / 'runtime-root.raw', exported, work / 'assembled',
+                                             cleanup, guestfish, deadline, observation=observation)
+        assembler.assembly_step(observation, 'kernel_binding')
+        require(closure['kernel_release'] == pins['kernel_release'], 'runtime_kernel_binding')
+        assembler.assembly_step(observation, 'receipt_write')
+        write_new(evidence / 'workload.json', encoded(closure['staging_receipt']))
+        return closure
+    except BaseException as error:
+        try:
+            value = assembler.assembly_failure(observation, error, report.get('phase'))
+            if value is not None:
+                report['runtime_assembly_diagnostic'] = value
+        except BaseException:
+            pass  # Optional observation cannot replace the original error or its cleanup.
+        raise
+
+
 def execute(args):
     pending = {}
     token = TOOL_PROCESSES.set(pending)
@@ -1812,11 +1835,8 @@ def execute_owned(args, pending):
         # remain; runtime and exported assets have independent validated bindings.
         (work / 'build.qcow2').unlink()
         report['phase'] = 'runtime_assembly'
-        reserve_space(work, 21 * GIB, 'workload_stage')
-        closure = assembler.assemble_runtime(work / 'runtime-root.raw', exported, work / 'assembled',
-                                             cleanup, images.fish, deadline)
-        require(closure['kernel_release'] == pins['kernel_release'], 'runtime_kernel_binding')
-        write_new(evidence / 'workload.json', encoded(closure['staging_receipt']))
+        closure = runtime_assembly_stage(assembler, work, exported, cleanup, images.fish, deadline, pins, report,
+                                         evidence=evidence)
         report['phase'] = 'seal'
         options = ['--no-superblock', '--format=1', '--hash=sha256', '--data-block-size=4096',
                    '--hash-block-size=4096', '--data-blocks=' + str(RUNTIME_BYTES // 4096), '--salt=' + '0' * 64]
