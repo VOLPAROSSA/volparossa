@@ -16,7 +16,7 @@ fn fixture_acquire_history_keeps_codes_for_the_same_rounds_and_resets() {
     let mut observation = Observation::default();
     let mut history = History::default();
     observation.record(Stage::HelperAcquire, Reason::HelperKernel);
-    observation.helper_diagnostic(Some(Code::TransportUnavailable));
+    observation.helper_diagnostic(Some(Code::MptcpConnectPollTimedOut));
     history.record_round(observation.failure());
     observation.reset();
     assert_eq!(observation.failure(), None);
@@ -27,7 +27,7 @@ fn fixture_acquire_history_keeps_codes_for_the_same_rounds_and_resets() {
     assert_eq!(summary.rounds, 2);
     assert_eq!(
         summary.first.helper_diagnostic,
-        Some(Code::TransportUnavailable)
+        Some(Code::MptcpConnectPollTimedOut)
     );
     assert_eq!(
         summary.last.helper_diagnostic,

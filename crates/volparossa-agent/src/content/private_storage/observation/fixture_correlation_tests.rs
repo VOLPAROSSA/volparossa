@@ -44,7 +44,7 @@ fn flow_summary() -> crate::mptcp_transport::acquire_diagnostic::Summary {
         first: Failure {
             stage: Stage::HelperAcquire,
             reason: Reason::HelperKernel,
-            helper_diagnostic: Some(Code::TransportUnavailable),
+            helper_diagnostic: Some(Code::MptcpConnectPollTimedOut),
         },
         last: Failure {
             stage: Stage::HelperAcquire,
