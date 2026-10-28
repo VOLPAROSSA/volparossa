@@ -453,6 +453,16 @@ class CompilerAdapterTests(unittest.TestCase):
 
 
 class BuildAndExportTests(unittest.TestCase):
+    def setUp(self):
+        # These tests use structural ELF bytes, not a linked GNU ELF. Keep their
+        # existing real copy/inventory checks; mock only the new strip command.
+        def strip_only(argv, *_args, **_kwargs):
+            self.assertEqual(argv[:3], [M.CORE_STRIP, '--strip-debug', '--'])
+            self.assertEqual(len(argv), 4)
+            return b''
+        patch = mock.patch.object(M, 'command', side_effect=strip_only)
+        patch.start(); self.addCleanup(patch.stop)
+
     def test_export_failure_labels_are_closed_and_never_stringify_exceptions(self):
         class PrivateError(ValueError):
             def __str__(self):
@@ -513,6 +523,43 @@ class BuildAndExportTests(unittest.TestCase):
                 self.assertEqual(events, operations[:operations.index(failed)+1])
                 self.assertEqual(progress, dict(operation=failed, reason=None))
                 self.assertFalse((output / 'inventory.json').exists())
+
+    def test_packaging_failure_prevents_fixture_and_inventory_export(self):
+        for error in (ValueError('command_failed'), ValueError('core_binary_metadata'),
+                      M.CleanupUnconfirmed('command_cleanup')):
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as directory:
+                core, binary, native, fixture, output, stager = self.export_fixture(directory)
+                progress = dict(reason=None)
+                with mock.patch.object(M, 'load_module', return_value=stager), \
+                        mock.patch.object(M, 'command', side_effect=error), \
+                        mock.patch.object(M, 'asset_inventory') as inventory, \
+                        mock.patch.object(stager, 'verified_metadata') as metadata, \
+                        self.assertRaises(type(error)) as caught:
+                    M.export_assets(core, binary, native, fixture, output, 'f'*40, deadline(), progress)
+                self.assertIs(caught.exception, error)
+                self.assertEqual(progress['operation'], 'core_copy')
+                inventory.assert_not_called()
+                metadata.assert_not_called()
+                self.assertFalse((output / 'inventory.json').exists())
+                self.assertFalse((output / 'assets/server.der').exists())
+                self.assertFalse((output / 'assets/server-key.der').exists())
+
+    def test_oversized_packaged_output_prevents_inventory_export(self):
+        with tempfile.TemporaryDirectory() as directory:
+            core, binary, native, fixture, output, stager = self.export_fixture(directory)
+            def strip(argv, *_args, **_kwargs):
+                with argv[-1].open('r+b') as stream: stream.truncate(M.MAX_BOOT_CORE_BYTES + 1)
+                return b''
+            progress = dict(reason=None)
+            with mock.patch.object(M, 'load_module', return_value=stager), \
+                    mock.patch.object(M, 'command', side_effect=strip), \
+                    mock.patch.object(M, 'asset_inventory') as inventory, \
+                    self.assertRaisesRegex(ValueError, '^core_binary_metadata$'):
+                M.export_assets(core, binary, native, fixture, output, 'f'*40, deadline(), progress)
+            inventory.assert_not_called()
+            self.assertEqual(progress['operation'], 'core_copy')
+            self.assertFalse((output / 'inventory.json').exists())
+            self.assertFalse((output / 'assets/server.der').exists())
 
     def test_export_success_reaches_inventory_write_without_claiming_final_rechecks(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -737,6 +784,175 @@ class BuildAndExportTests(unittest.TestCase):
                 M.copy_core_binary(root / 'symlink', root / 'denied', deadline())
             with self.assertRaisesRegex(ValueError, 'core_binary_metadata'):
                 M.copy_core_binary(put(root / 'short', b'x', mode=0o700), root / 'denied', deadline())
+
+
+class BinaryPackageTests(unittest.TestCase):
+    def fixture(self, directory):
+        root = Path(directory)
+        source = put(root / 'cargo-deps', public_elf() + b'public debug bytes', mode=0o700)
+        alias = root / 'cargo-binary'
+        os.link(source, alias)
+        return source, alias, root / 'exported'
+
+    def test_fixed_tool_original_deadline_independent_copy_and_replaced_inode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, alias, output = self.fixture(directory)
+            original, source_identity = source.read_bytes(), M.identity(source.stat())
+            limit, copied_inode, copy_streams = deadline(), [], []
+            real_fdopen = M.os.fdopen
+            def observe_fdopen(*args, **kwargs):
+                stream = real_fdopen(*args, **kwargs)
+                copy_streams.append(stream)
+                return stream
+            def strip(argv, end, **kwargs):
+                self.assertEqual(argv, ['/usr/bin/x86_64-linux-gnu-strip', '--strip-debug', '--', output])
+                self.assertEqual((end, kwargs), (limit, {'cap': 300}))
+                self.assertTrue(copy_streams)
+                self.assertTrue(all(stream.closed for stream in copy_streams))
+                self.assertEqual(output.stat().st_nlink, 1)
+                self.assertEqual(output.stat().st_mode & 0o7777, 0o700)
+                self.assertNotEqual(output.stat().st_ino, source.stat().st_ino)
+                copied_inode.append(output.stat().st_ino)
+                # GNU strip may replace its privately owned output inode.
+                replacement = put(output.with_name('replacement'), public_elf(), mode=0o700)
+                replacement.replace(output)
+                return b''
+            with mock.patch.object(M.os, 'fdopen', side_effect=observe_fdopen), \
+                    mock.patch.object(M, 'command', side_effect=strip) as run:
+                M.package_core_binary(alias, output, limit)
+            run.assert_called_once()
+            self.assertNotEqual(output.stat().st_ino, copied_inode[0])
+            self.assertEqual(output.read_bytes(), public_elf())
+            self.assertEqual(M.identity(source.stat()), source_identity)
+            self.assertEqual(M.identity(alias.stat()), source_identity)
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(M.file_record(output, limit)['sha256'], hashlib.sha256(public_elf()).hexdigest())
+
+    def test_copy_failure_or_existing_output_never_invokes_tool(self):
+        for kind in ('existing', 'symlink', 'bad-input'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                source, alias, output = self.fixture(directory)
+                if kind == 'existing': put(output, b'original')
+                if kind == 'symlink': output.symlink_to(source)
+                if kind == 'bad-input': alias = put(Path(directory) / 'invalid', b'bad', mode=0o700)
+                with mock.patch.object(M, 'command') as run, self.assertRaises((OSError, ValueError)):
+                    M.package_core_binary(alias, output, deadline())
+                run.assert_not_called()
+                if kind == 'existing': self.assertEqual(output.read_bytes(), b'original')
+                self.assertEqual(source.read_bytes(), public_elf() + b'public debug bytes')
+
+    def test_original_tool_failure_and_cleanup_exception_propagate(self):
+        for error in (ValueError('command_failed'), ValueError('build_deadline'),
+                      M.CleanupUnconfirmed('command_cleanup'), InterruptedError('cancelled')):
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as directory:
+                source, alias, output = self.fixture(directory)
+                original = M.identity(source.stat())
+                with mock.patch.object(M, 'command', side_effect=error), self.assertRaises(type(error)) as caught:
+                    M.package_core_binary(alias, output, deadline())
+                self.assertIs(caught.exception, error)
+                self.assertEqual(M.identity(source.stat()), original)
+
+    def test_post_tool_metadata_and_elf_rejections(self):
+        for kind in ('oversize', 'short', 'mode', 'hardlink', 'symlink', 'directory', 'magic', 'machine', 'type'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                source, alias, output = self.fixture(directory)
+                before = M.identity(source.stat())
+                def strip(*_args, **_kwargs):
+                    if kind == 'oversize':
+                        with output.open('r+b') as stream: stream.truncate(M.MAX_BOOT_CORE_BYTES + 1)
+                    elif kind == 'short': output.write_bytes(public_elf()[:63])
+                    elif kind == 'mode': output.chmod(0o750)
+                    elif kind == 'hardlink': os.link(output, output.with_name('extra-link'))
+                    elif kind in ('symlink', 'directory'):
+                        output.unlink()
+                        if kind == 'symlink': output.symlink_to(source)
+                        else: output.mkdir(mode=0o700)
+                    else:
+                        raw = bytearray(public_elf())
+                        raw[{'magic': 0, 'machine': 18, 'type': 16}[kind]] = 0
+                        output.write_bytes(raw)
+                    return b''
+                with mock.patch.object(M, 'command', side_effect=strip), self.assertRaises((OSError, ValueError)):
+                    M.package_core_binary(alias, output, deadline())
+                self.assertEqual(M.identity(source.stat()), before)
+
+    def test_exact_final_size_boundary_is_inclusive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _source, alias, output = self.fixture(directory)
+            def strip(*_args, **_kwargs):
+                output.write_bytes(public_elf() + b'X' * 64)
+                return b''
+            with mock.patch.object(M, 'MAX_BOOT_CORE_BYTES', 128), \
+                    mock.patch.object(M, 'command', side_effect=strip):
+                M.package_core_binary(alias, output, deadline())
+            self.assertEqual(output.stat().st_size, 128)
+
+    def test_post_tool_owner_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, alias, output = self.fixture(directory)
+            def strip(*_args, **_kwargs):
+                # Change the observed expected owner only after the original
+                # copy's real owner checks, without privileged chown in tests.
+                owner_patch.start()
+                return b''
+            owner_patch = mock.patch.object(M.os, 'getuid', return_value=os.getuid() + 1)
+            try:
+                with mock.patch.object(M, 'command', side_effect=strip), \
+                        self.assertRaisesRegex(ValueError, '^core_binary_metadata$'):
+                    M.package_core_binary(alias, output, deadline())
+            finally:
+                owner_patch.stop()
+
+    def test_deadline_not_renewed_after_tool(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _source, alias, output = self.fixture(directory)
+            limit = deadline()
+            def strip(*_args, **_kwargs):
+                clock.start()
+                return b''
+            clock = mock.patch.object(M.time, 'monotonic_ns', return_value=limit + 1)
+            try:
+                with mock.patch.object(M, 'command', side_effect=strip), \
+                        self.assertRaisesRegex(ValueError, '^build_deadline$'):
+                    M.package_core_binary(alias, output, limit)
+            finally:
+                clock.stop()
+
+    def test_post_open_content_and_path_mutation_fail_closed(self):
+        for kind in ('growth', 'truncation', 'replacement'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                source, alias, output = self.fixture(directory)
+                original = M.identity(source.stat())
+                real_fdopen = M.os.fdopen
+                class MutatingReader:
+                    def __init__(self, stream): self.stream, self.changed = stream, False
+                    def __enter__(self): return self
+                    def __exit__(self, *args): return self.stream.__exit__(*args)
+                    def fileno(self): return self.stream.fileno()
+                    def read(self, count):
+                        raw = self.stream.read(count)
+                        if not self.changed:
+                            self.changed = True
+                            if kind == 'replacement':
+                                put(output.with_name('new-inode'), output.read_bytes(), mode=0o700).replace(output)
+                            else:
+                                with output.open('r+b') as writer:
+                                    writer.truncate(output.stat().st_size + 1 if kind == 'growth' else 64)
+                        return raw
+                def fdopen(fd, mode):
+                    stream = real_fdopen(fd, mode)
+                    return MutatingReader(stream)
+                def strip(*_args, **_kwargs):
+                    reader_patch.start()
+                    return b''
+                reader_patch = mock.patch.object(M.os, 'fdopen', side_effect=fdopen)
+                try:
+                    with mock.patch.object(M, 'command', side_effect=strip), \
+                            self.assertRaisesRegex(ValueError, '^core_binary_changed$'):
+                        M.package_core_binary(alias, output, deadline())
+                finally:
+                    reader_patch.stop()
+                self.assertEqual(M.identity(source.stat()), original)
 
 
 class OrchestrationTests(unittest.TestCase):
