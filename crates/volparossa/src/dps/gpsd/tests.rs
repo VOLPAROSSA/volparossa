@@ -14,7 +14,7 @@ fn now() -> SystemTime {
 
 fn tpv(epoch: SystemTime) -> Value {
     json!({"class":"TPV", "device":"/private/gnss-test-source", "datum":"WGS84", "mode":3,
-        "time":DateTime::<Utc>::from(epoch).to_rfc3339(), "lat":53.80939444444445,
+        "time":DateTime::<Utc>::from(epoch).to_rfc3339(), "lat":53.809_394_444_444_45,
         "lon":2.12955, "altHAE":73.0, "epx":0.001, "epy":0.001, "epv":0.001})
 }
 

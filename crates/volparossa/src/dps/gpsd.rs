@@ -350,7 +350,7 @@ async fn own_child(
     mut cancel: watch::Receiver<bool>,
     deadline: Instant,
     radius: f64,
-) -> Result<Quality> {
+) -> Result<ObservationReport> {
     let mut clock = Clock::new();
     let stdout = child.stdout.take();
     let result = if let Some(stdout) = stdout {
@@ -387,7 +387,7 @@ pub(super) async fn observe(
     endpoint: SocketAddrV4,
     _profile: ProvenanceProfile,
     radius: f64,
-) -> Result<Quality> {
+) -> Result<ObservationReport> {
     options(endpoint, radius)?;
     let deadline = Instant::now() + TOTAL_BUDGET;
     // Register before spawning so the explicit command can always reap its child
@@ -406,7 +406,7 @@ pub(super) async fn observe(
     });
     tokio::select! {
         result = &mut owner => result.map_err(|_| Failure::CleanupUnconfirmed)?,
-        _ = async { tokio::select! { _ = interrupt.recv() => {}, _ = terminate.recv() => {}, _ = hangup.recv() => {} } } => {
+        () = async { tokio::select! { _ = interrupt.recv() => {}, _ = terminate.recv() => {}, _ = hangup.recv() => {} } } => {
             let _ = cancel.0.send(true);
             let result = owner.await.map_err(|_| Failure::CleanupUnconfirmed)?;
             if matches!(result, Err(Failure::CleanupUnconfirmed)) { return Err(Failure::CleanupUnconfirmed); }
@@ -416,7 +416,7 @@ pub(super) async fn observe(
 }
 
 #[derive(Serialize)]
-pub(super) struct Quality {
+pub(super) struct ObservationReport {
     schema_version: u32,
     quality: &'static str,
     candidate_present: bool,
@@ -436,7 +436,7 @@ struct Provenance {
     navigation_authentication: &'static str,
 }
 
-fn assessment(claim: &Claim, radius: f64, now: SystemTime) -> Result<Quality> {
+fn assessment(claim: &Claim, radius: f64, now: SystemTime) -> Result<ObservationReport> {
     if now.duration_since(claim.epoch).map_err(|_| Failure::Time)? > MAX_AGE {
         return Err(Failure::Time);
     }
@@ -457,7 +457,7 @@ fn assessment(claim: &Claim, radius: f64, now: SystemTime) -> Result<Quality> {
         .into_iter()
         .map(limitation)
         .collect::<Result<Vec<_>>>()?;
-    Ok(Quality {
+    Ok(ObservationReport {
         schema_version: 1,
         quality: "SingleClaim",
         candidate_present: true,
