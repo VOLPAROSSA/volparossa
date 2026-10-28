@@ -35,6 +35,8 @@ MODEL = 'qwen3-4b-instruct-2507-v1'
 PROVISION_BYTES = 20 * 1024 ** 3
 MAX_SECONDS = 7200
 MAX_LOG = 16 * 1024 ** 2
+MAX_BOOT_CORE_BYTES = 64 * 1024 ** 2
+CORE_STRIP = '/usr/bin/x86_64-linux-gnu-strip'
 SHA = re.compile(r'[0-9a-f]{64}\Z')
 COMMIT = re.compile(r'[0-9a-f]{40}\Z')
 PACKAGE = re.compile(r'[a-z0-9][a-z0-9+.-]*\Z')
@@ -585,6 +587,36 @@ def copy_core_binary(source, target, deadline):
                 sha256=digest.hexdigest(), executable=True), 'core_binary_copy')
 
 
+def package_core_binary(source, target, deadline):
+    """Strip debug information from an independent export, never Cargo's links.
+
+    The locked build packages were verified before this export stage. GNU strip
+    may replace its output inode; the final single-link/ELF/size/stability check
+    deliberately starts after the tool and its owned process group have joined.
+    The existing final inventory authenticates these resulting bytes.
+    """
+    copy_core_binary(source, target, deadline)
+    command([CORE_STRIP, '--strip-debug', '--', target], deadline, cap=300)
+    remaining(deadline)
+    with os.fdopen(os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as packaged:
+        before = os.fstat(packaged.fileno())
+        require(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid()
+                and before.st_nlink == 1 and stat.S_IMODE(before.st_mode) == 0o700
+                and 64 <= before.st_size <= MAX_BOOT_CORE_BYTES, 'core_binary_metadata')
+        header = packaged.read(64)
+        require(len(header) == 64 and header[:7] == b'\x7fELF\x02\x01\x01'
+                and int.from_bytes(header[16:18], 'little') in (2, 3)
+                and int.from_bytes(header[18:20], 'little') == 62, 'core_binary_elf')
+        count = len(header)
+        while block := packaged.read(min(1024 ** 2, MAX_BOOT_CORE_BYTES - count + 1)):
+            remaining(deadline)
+            count += len(block)
+            require(count <= before.st_size, 'core_binary_changed')
+        require(count == before.st_size and identity(before) == identity(os.fstat(packaged.fileno()))
+                and identity(before) == identity(target.lstat()), 'core_binary_changed')
+    remaining(deadline)
+
+
 def export_assets(core, binary, native, fixture, output, source, deadline, progress=None):
     if progress is not None:
         progress['operation'] = 'declaration'
@@ -608,7 +640,7 @@ def export_assets(core, binary, native, fixture, output, source, deadline, progr
         (native / 'ml/native-backend' / name).rename(backend / name)
     if progress is not None:
         progress['operation'] = 'core_copy'
-    copy_core_binary(binary, assets / 'volparossa', deadline)
+    package_core_binary(binary, assets / 'volparossa', deadline)
     if progress is not None:
         progress['operation'] = 'fixture_copy'
     for name in ('server.der', 'server-key.der'):
