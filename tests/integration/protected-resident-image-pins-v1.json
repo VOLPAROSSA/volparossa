@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "kind": "protected-resident-public-boot-inputs",
+  "debian_image_manifest": "tests/helper/debian13-amd64-image-v1.json",
+  "debian_image_sha512": "184761b0dad0f9ace02f9298050ca96ce3caa39a461a47706d47ff9698b59933918b91b40177fbd4d392f6446af8b4d18ecb94caca988169b19641606bf34003",
+  "kernel_release": "6.12.105+deb13-cloud-amd64",
+  "kernel_package_version": "6.12.105-1",
+  "packages": {
+    "busybox-static": {
+      "version": "1:1.37.0-6+b9",
+      "url": "https://deb.debian.org/debian/pool/main/b/busybox/busybox-static_1.37.0-6+b9_amd64.deb",
+      "bytes": 955316,
+      "sha256": "598a3fd92bdafc34cd81196b2952ad36e910e47a4ecf162f8ce5e8e262598e53"
+    },
+    "cryptsetup-bin": {
+      "version": "2:2.7.5-2",
+      "url": "https://deb.debian.org/debian/pool/main/c/cryptsetup/cryptsetup-bin_2.7.5-2_amd64.deb",
+      "bytes": 503628,
+      "sha256": "b77b192cf1c35f96da02134300bb227ab92c49eec2444268049fa1ce84fb9bc7"
+    },
+    "libcryptsetup12": {
+      "version": "2:2.7.5-2",
+      "url": "https://deb.debian.org/debian/pool/main/c/cryptsetup/libcryptsetup12_2.7.5-2_amd64.deb",
+      "bytes": 254056,
+      "sha256": "84f6596296c346c1c8f6bb16b0d4d485215b7a23a23ff21e9c28e35822d45a7b"
+    }
+  },
+  "verity": {
+    "format": 1,
+    "hash": "sha256",
+    "data_block_size": 4096,
+    "hash_block_size": 4096,
+    "salt": "0000000000000000000000000000000000000000000000000000000000000000",
+    "superblock": false
+  },
+  "independent_production_approval": false,
+  "public_test_inputs_only": true
+}

@@ -1,0 +1,180 @@
+name: Current-main resident composition contracts
+
+on:
+  push:
+    branches: [integration/resident-current-main-20261028]
+  workflow_dispatch:
+    inputs:
+      expected_source:
+        description: Exact reviewed source commit; this workflow performs source checks only
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: resident-current-main-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_BUILD_JOBS: '2'
+  CARGO_TERM_COLOR: never
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  contracts:
+    if: >-
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.ref == 'refs/heads/integration/resident-current-main-20261028' &&
+      (github.event_name == 'push' || inputs.expected_source == github.sha)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind retained source and current dependency composition
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_SHA" = "$GITHUB_WORKFLOW_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          umask 077
+          mkdir resident-current-evidence
+          python3 -B - <<'PY'
+          import hashlib,json,os,pathlib,subprocess,tomllib
+          base='edf569300acbdf5e7715b5192ffbb293235b15ab'
+          old='89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1'
+          feature='8c6eeb264e3da77239cb55af04476ff217f8dc7d'
+          def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
+          def blob(revision,name): return subprocess.check_output(['git','show',revision+':'+name])
+          subprocess.run(['git','merge-base','--is-ancestor',base,'HEAD'],check=True)
+          reconciled={
+            'Cargo.lock':'8033825da23f8a610a9309a642e5ee56c600bb82dc5d1bd5410eb371952c25c2',
+            'THIRD_PARTY_LICENSES.md':'6822c081d55ad7aa835a47687c1bf539c0c218989c2ae2b84ac45ee6769339ea',
+            'crates/volparossa/Cargo.toml':'ecade3e66f373177dc7f744f5e4213cc76316b6022920641c7039c19505c259f',
+            'crates/volparossa/src/compute/resident_guest/session.rs':'9c134ad0932b507d6af2225dd1aecf939d1b0c4a8d34b9864abe9eb7b1a0bfaf',
+            'crates/volparossa/src/compute/supervise.rs':'83b966be6e16154052a3d015c464c6c28638fe374b2f99b2e9579b9cf720abd1',
+            'tests/integration/protected-resident-model-run.py':'522c0830e5205032b636a10fb320f3214077671874df351d9b3310d969fceef6',
+            'tests/integration/test-protected-resident-model-run.py':'2cd9ef7607cae6e474453dc871d58967a116f722fc9693bd2c022117e9872205',
+          }
+          retained=set(git('diff','--name-only',old,feature).splitlines())
+          changed=set(git('diff','--name-only',base,'HEAD').splitlines())
+          assert len(retained)==52 and set(reconciled)<=retained
+          assert changed==retained|{'.github/workflows/resident-current-main.yml'}
+          for name in retained-set(reconciled):
+            assert pathlib.Path(name).read_bytes()==blob(feature,name),name
+          for name,digest in reconciled.items():
+            assert hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()==digest,name
+          before=tomllib.loads(blob(base,'Cargo.lock').decode())
+          after=tomllib.loads(pathlib.Path('Cargo.lock').read_text())
+          assert before.keys()==after.keys() and before['version']==after['version']
+          assert [p for p in before['package'] if p['name']!='volparossa']==[p for p in after['package'] if p['name']!='volparossa']
+          a=[p for p in before['package'] if p['name']=='volparossa']
+          b=[p for p in after['package'] if p['name']=='volparossa']
+          assert len(a)==len(b)==1
+          extra={'prost','rcgen','rustls','tokio-rustls','x509-cert'}
+          assert {k:v for k,v in a[0].items() if k!='dependencies'}=={k:v for k,v in b[0].items() if k!='dependencies'}
+          assert set(b[0]['dependencies'])==set(a[0]['dependencies'])|extra
+          preserved=('Cargo.toml','fuzz/Cargo.toml','fuzz/Cargo.lock','rust-toolchain.toml',
+            'scripts/provision-rust189.py','scripts/rust189-components.json','scripts/cargo-source-policy.py')
+          for name in preserved: assert pathlib.Path(name).read_bytes()==blob(base,name),name
+          receipt=dict(version=1,source_commit=os.environ['GITHUB_SHA'],source_tree=git('rev-parse','HEAD^{tree}'),
+            base_commit=base,retained_feature_commit=feature,
+            retained_exact_files=len(retained-set(reconciled)),reconciled_files=reconciled,
+            source_blobs={n:git('rev-parse','HEAD:'+n) for n in sorted(changed)},
+            preserved_main_blobs={n:git('rev-parse','HEAD:'+n) for n in preserved},
+            non_cli_dependency_records_unchanged=True,cli_dependency_membership_additions=sorted(extra),
+            actual_model_execution=False,private_workload_acceptance=False)
+          pathlib.Path('resident-current-evidence/source.json').write_text(json.dumps(receipt,sort_keys=True)+'\n')
+          PY
+
+      - name: Authenticate the existing exact compiler and public Cargo source policy
+        run: python3 -B scripts/provision-rust189.py runner
+
+      - name: Install the existing reviewed Protobuf on this disposable runner
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sudo apt-get -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update
+          sudo apt-get install --yes --no-install-recommends \
+            protobuf-compiler=3.21.12-8.2ubuntu0.4 \
+            libprotoc32t64=3.21.12-8.2ubuntu0.4 \
+            libprotobuf32t64=3.21.12-8.2ubuntu0.4
+
+      - name: Check formatting and compile the affected crates
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo fetch --locked
+          cargo test --locked --offline -p volparossa-content -p volparossa --no-run \
+            2>&1 | tee resident-current-evidence/build.log
+
+      - name: Verify grants TLS sessions and native supervision
+        run: |
+          set -euo pipefail
+          group() {
+            local label="$1" package="$2" filter="$3"
+            cargo test --locked --offline -p "$package" "$filter" -- --list \
+              2>&1 | tee "resident-current-evidence/$label-inventory.log"
+            timeout --kill-after=5s 180s cargo test --locked --offline -p "$package" "$filter" \
+              2>&1 | tee "resident-current-evidence/$label-test.log"
+          }
+          group grant volparossa-content provider::compute::resident_task::
+          group guest volparossa compute::resident_guest::
+          group resident volparossa compute::supervise::native_session::
+          group local volparossa compute::private_serve::tests::
+          group startup volparossa compute::supervise::tests::public_bubblewrap_stage
+          python3 -B - <<'PY'
+          import json,pathlib,re
+          root=pathlib.Path('resident-current-evidence'); counts={}; names=[]
+          for label,expected in dict(grant=22,guest=42,resident=41,local=30,startup=2).items():
+            inventory=re.findall(r'^(.+): test$',(root/(label+'-inventory.log')).read_text(),re.M)
+            output=(root/(label+'-test.log')).read_text()
+            assert len(inventory)==expected and len(set(inventory))==expected
+            assert f'{expected} passed; 0 failed; 0 ignored;' in output
+            for name in inventory: assert len(re.findall(r'^test '+re.escape(name)+r' \.\.\. ok$',output,re.M))==1
+            counts[label]=expected; names.extend(inventory)
+          assert len(names)==len(set(names))==137
+          (root/'rust-tests.json').write_text(json.dumps(dict(version=1,counts=counts,test_names=sorted(names),model_execution=False),sort_keys=True)+'\n')
+          PY
+
+      - name: Check installer controller host observation and immutable boot contracts
+        run: |
+          set -euo pipefail
+          for suite in protected-resident-model-workload protected-resident-model-build resident-model-debian \
+              protected-resident-model-install protected-resident-model-assemble protected-resident-model-run \
+              protected-resident-model-host-observation protected-resident-model-initrd protected-resident-initrd \
+              protected-resident-image; do
+            timeout --kill-after=5s 180s python3 -B "tests/integration/test-$suite.py" -v \
+              2>&1 | tee "resident-current-evidence/python-$suite.log"
+          done
+
+      - name: Lint the affected packages
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --offline -p volparossa-content -p volparossa --all-targets -- -D warnings \
+            2>&1 | tee resident-current-evidence/clippy.log
+
+      - name: Preserve exact tested source
+        if: always()
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code HEAD
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: resident-current-main-${{ github.run_id }}
+          path: resident-current-evidence/
+          retention-days: 14
+          if-no-files-found: warn
