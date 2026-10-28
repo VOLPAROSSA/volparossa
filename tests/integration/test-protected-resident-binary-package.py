@@ -9,6 +9,7 @@ VOLPAROSSA/model binary is run. Do not include it in local test discovery/runs.
 """
 import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import platform
@@ -39,7 +40,9 @@ class HostedGnuBinaryPackageTests(unittest.TestCase):
             assembly = root / 'public.s'
             assembly.write_text('.text\n.global _start\n_start:\n'
                 'mov $60, %rax\nxor %rdi, %rdi\nsyscall\n'
-                '.section .debug_str,"",@progbits\n'
+                # GNU as -g resets .debug_str to mergeable string flags. Use
+                # a separate nonallocated .debug* section that strip recognizes.
+                '.section .debug_volparossa_public,"",@progbits\n'
                 '.ascii "PUBLIC_RESIDENT_DEBUG_MARKER"\n'
                 '.zero 67108864\n.section .note.GNU-stack,"",@progbits\n')
             limit = time.monotonic_ns() + 120 * 1_000_000_000
@@ -72,6 +75,10 @@ class HostedGnuBinaryPackageTests(unittest.TestCase):
             self.assertEqual(record['sha256'], digest(packaged))
             self.assertNotEqual(record['sha256'], original_hash)
             self.assertTrue(record['executable'])
+            print(json.dumps(dict(version=1, kind='resident-public-debug-strip-smoke',
+                input_bytes=source.stat().st_size, output_bytes=packaged.stat().st_size,
+                source_hardlinks_unchanged=True, public_stub_runs_before_and_after=True,
+                model_execution=False, runtime_acceptance=False), sort_keys=True))
 
 
 if __name__ == '__main__':
