@@ -64,7 +64,16 @@ fn actual_silex_export_packs_and_decodes_without_publication() {
             .content_type,
         "text/html"
     );
-    let mut edited_html = false;
+    // The ordinary UI creates "Studio export"; the pinned Silex exporter maps
+    // that selected page to this path, alongside the original index page.
+    let edited_page = bundle
+        .asset("/studio-export.html")
+        .expect("the actual UI-created page must be exported");
+    assert_eq!(edited_page.content_type, "text/html");
+    assert!(
+        String::from_utf8_lossy(edited_page.bytes)
+            .contains("VOLPAROSSA Studio manual export 20261022")
+    );
     let mut edited_style = false;
     let mut stylesheets = 0;
     for expected in assets {
@@ -80,8 +89,6 @@ fn actual_silex_export_packs_and_decodes_without_publication() {
             .is_some_and(|extension| extension.eq_ignore_ascii_case("html"))
         {
             assert_eq!(asset.content_type, "text/html");
-            edited_html |= String::from_utf8_lossy(asset.bytes)
-                .contains("VOLPAROSSA Studio manual export 20261022");
         }
         if Path::new(path)
             .extension()
@@ -92,7 +99,7 @@ fn actual_silex_export_packs_and_decodes_without_publication() {
             edited_style |= String::from_utf8_lossy(asset.bytes).contains("37px");
         }
     }
-    assert!(edited_html && edited_style && stylesheets > 0);
+    assert!(edited_style && stylesheets > 0);
     // No-clobber remains an actual CLI property at the adapter boundary.
     let retry = Command::new(env!("CARGO_BIN_EXE_volparossa"))
         .args(["content", "site", "pack", "--directory"])
