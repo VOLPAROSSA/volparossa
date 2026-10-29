@@ -305,7 +305,7 @@ jobs:
             cargo build --locked --offline -p volparossa --bin volparossa
             cargo test --locked --offline -p volparossa-agent --test studio_signed_site_recovery --no-run
             cargo test --locked --offline -p volparossa-agent --test studio_signed_site_recovery -- --skip studio_signed_site_recovery_native_preview_and_browser
-            cargo clippy --locked --offline -p volparossa --bin volparossa -- -D warnings
+            cargo clippy --locked --offline -p volparossa --bin volparossa --tests -- -D warnings
             cargo clippy --locked --offline -p volparossa-agent --test studio_signed_site_recovery -- -D warnings
           fi
 
