@@ -1,5 +1,6 @@
 //! Explicit static-site bundles reuse native signatures, names and protected chunk retrieval.
 
+mod preview;
 mod viewer;
 
 use std::{
@@ -25,6 +26,8 @@ pub(crate) enum Command {
     Pack(Pack),
     /// Fetch a named signed website, then expose only its verified assets on a local browser URL.
     Open(Box<Open>),
+    /// Preview exact reviewed local bytes against an independently selected original signed manifest.
+    Preview(Box<preview::Preview>),
 }
 
 #[derive(Debug, Args)]
@@ -86,6 +89,7 @@ pub(super) async fn run(command: Command, socket: &Path) -> Result<()> {
     match command {
         Command::Pack(args) => println!("{}", pack(&args)?),
         Command::Open(args) => viewer::run(*args, socket).await?,
+        Command::Preview(args) => preview::run(*args).await?,
     }
     Ok(())
 }
