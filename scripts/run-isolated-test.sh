@@ -15,22 +15,32 @@ if [ "${1:-}" = --dps-gpsd-command ]; then
         fail 'DPS GPSD backend requires the disposable hosted Linux X64 runner'
     [ "${VOLPAROSSA_TEST_ALLOW_SUDO_NETNS:-0}" = 1 ] || fail 'DPS GPSD backend requires explicit namespace authorization'
     case "${GITHUB_SHA:-}" in ''|*[!0-9a-f]*) fail 'DPS GPSD backend requires an exact source revision' ;; esac
-    [ "${#GITHUB_SHA}" -eq 40 ] && [ "$GITHUB_SHA" = "${GITHUB_WORKFLOW_SHA:-}" ] || fail 'DPS GPSD source and workflow revisions differ'
+    if [ "${#GITHUB_SHA}" -ne 40 ] || [ "$GITHUB_SHA" != "${GITHUB_WORKFLOW_SHA:-}" ]; then
+        fail 'DPS GPSD source and workflow revisions differ'
+    fi
     test_dps_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
     test_dps_core=$2
     test_dps_evidence=$3
     test_dps_receipt=$4
     [ "$test_dps_core" = "$test_dps_root/target/debug/volparossa" ] || fail 'DPS GPSD backend requires the fixed workspace binary'
-    [ -f "$test_dps_core" ] && [ -x "$test_dps_core" ] && [ ! -L "$test_dps_core" ] || fail 'DPS GPSD binary must be a regular executable'
+    if [ ! -f "$test_dps_core" ] || [ ! -x "$test_dps_core" ] || [ -L "$test_dps_core" ]; then
+        fail 'DPS GPSD binary must be a regular executable'
+    fi
     case "${RUNNER_TEMP:-}" in /?*) ;; *) fail 'DPS GPSD backend requires an absolute temporary root' ;; esac
     case "$test_dps_evidence" in "$RUNNER_TEMP"/dps-gpsd-*) ;; *) fail 'DPS GPSD evidence must be in its private runner temporary root' ;; esac
     test_dps_name=${test_dps_evidence#"$RUNNER_TEMP"/}
     case "$test_dps_name" in *[!a-zA-Z0-9_-]*|dps-gpsd-) fail 'DPS GPSD evidence directory name is invalid' ;; esac
-    [ -d "$test_dps_evidence" ] && [ ! -L "$test_dps_evidence" ] || fail 'DPS GPSD evidence directory must be regular'
+    if [ ! -d "$test_dps_evidence" ] || [ -L "$test_dps_evidence" ]; then
+        fail 'DPS GPSD evidence directory must be regular'
+    fi
     [ "$test_dps_receipt" = "$test_dps_evidence/build-receipt.json" ] || fail 'DPS GPSD backend requires its fixed build receipt'
-    [ -f "$test_dps_receipt" ] && [ ! -L "$test_dps_receipt" ] || fail 'DPS GPSD receipt must be a regular file'
+    if [ ! -f "$test_dps_receipt" ] || [ -L "$test_dps_receipt" ]; then
+        fail 'DPS GPSD receipt must be a regular file'
+    fi
     test_dps_script=$test_dps_root/tests/dps/gpsd/prove.py
-    [ -f "$test_dps_script" ] && [ ! -L "$test_dps_script" ] || fail 'DPS GPSD backend requires its fixed proof script'
+    if [ ! -f "$test_dps_script" ] || [ -L "$test_dps_script" ]; then
+        fail 'DPS GPSD backend requires its fixed proof script'
+    fi
     test_dps_parent_ipc=$(/usr/bin/readlink /proc/self/ns/ipc)
     test_dps_parent_pid=$(/usr/bin/readlink /proc/self/ns/pid)
     test_dps_gpsd=yes

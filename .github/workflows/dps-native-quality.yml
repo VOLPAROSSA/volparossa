@@ -10,7 +10,7 @@ on:
         required: true
         type: choice
         default: historical
-        options: [historical, current-compiler, gpsd-adapter]
+        options: [historical, current-compiler, gpsd-preflight, gpsd-adapter]
       core_revision:
         description: Exact reviewed 40-hex Core commit for either explicit current source mode
         required: false
@@ -35,6 +35,51 @@ env:
   CORE_REVISION: ${{ inputs.core_revision }}
 
 jobs:
+  gpsd-preflight:
+    if: >-
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.event_name == 'workflow_dispatch' && inputs.mode == 'gpsd-preflight'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind the exact guard-only source and run the existing bounded contracts
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS:$RUNNER_ENVIRONMENT:$RUNNER_OS:$RUNNER_ARCH" = true:github-hosted:Linux:X64
+          test "$(id -u)" != 0
+          [[ "$CORE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          test "$CORE_REVISION" = "$GITHUB_SHA"
+          test "$GITHUB_SHA" = "$GITHUB_WORKFLOW_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          umask 077
+          output="$RUNNER_TEMP/dps-gpsd-preflight-$GITHUB_RUN_ID"
+          mkdir -m 0700 -- "$output"
+          printf 'DPS_GPSD_PREFLIGHT=%s\n' "$output" >> "$GITHUB_ENV"
+          python3 -B scripts/check-dps-gpsd-source.py > "$output/source.json"
+          sh -n scripts/run-isolated-test.sh
+          shellcheck -s sh scripts/run-isolated-test.sh
+          python3 -B scripts/test-dps-gpsd-wrapper.py
+          python3 -B tests/dps/gpsd/test_proof.py
+          python3 -B scripts/test-cargo-source-policy.py
+          git diff --exit-code HEAD
+          printf '%s\n' '{"schema_version":1,"kind":"guard-only-preflight","checks_passed":true,"native_runtime_acceptance":false,"compiler_or_native_build":false}' > "$output/preflight.json"
+
+      - name: Retain guard-only evidence without a native runtime claim
+        if: always() && env.DPS_GPSD_PREFLIGHT != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dps-gpsd-preflight-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: ${{ env.DPS_GPSD_PREFLIGHT }}/*.json
+
   gpsd-adapter:
     if: >-
       github.repository == 'VOLPAROSSA/volparossa' &&
