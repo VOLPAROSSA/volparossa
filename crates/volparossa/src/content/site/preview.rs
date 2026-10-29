@@ -350,7 +350,7 @@ impl Opened {
             .try_reserve_exact(maximum)
             .map_err(|_| Failure::Bounds)?;
         let mut sha = Sha256::new();
-        let mut buffer = [0u8; 64 * 1024];
+        let mut buffer = vec![0u8; 64 * 1024].into_boxed_slice();
         loop {
             control.check()?;
             let bound = buffer.len().min(maximum - bytes.len());
