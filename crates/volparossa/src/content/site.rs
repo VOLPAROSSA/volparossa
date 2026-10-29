@@ -1,5 +1,6 @@
 //! Explicit static-site bundles reuse native signatures, names and protected chunk retrieval.
 
+mod preparation;
 mod preview;
 mod viewer;
 
@@ -38,6 +39,9 @@ pub(crate) struct Pack {
     /// New private bundle file; publish it with the reported native content type.
     #[arg(long)]
     output: PathBuf,
+    /// Return a bounded review inventory for these exact bytes; grants no publication authority.
+    #[arg(long)]
+    review_receipt: bool,
 }
 
 #[derive(Debug, Args)]
@@ -104,7 +108,12 @@ fn pack(args: &Pack) -> Result<serde_json::Value> {
     let mut assets = Vec::new();
     collect(&root, "", 0, &mut 0, &mut 0, &mut assets)?;
     let count = assets.len();
-    let bytes = SiteBundle::encode(assets)?;
+    let (bytes, receipt) = if args.review_receipt {
+        let (bytes, receipt) = preparation::encode(assets)?;
+        (bytes, Some(receipt))
+    } else {
+        (SiteBundle::encode(assets)?, None)
+    };
     let mut temporary = tempfile::NamedTempFile::new_in(output_parent(&args.output))?;
     temporary.write_all(&bytes)?;
     temporary.as_file().sync_all()?;
@@ -112,6 +121,9 @@ fn pack(args: &Pack) -> Result<serde_json::Value> {
         .persist_noclobber(&args.output)
         .map_err(|error| error.error)?;
     File::open(output_parent(&args.output))?.sync_all()?;
+    if let Some(receipt) = receipt {
+        return Ok(receipt);
+    }
     Ok(serde_json::json!({
         "operation":"site_pack", "assets":count, "bytes":bytes.len(),
         "content_type":SITE_CONTENT_TYPE, "output":args.output,
@@ -276,6 +288,7 @@ mod tests {
         let args = Pack {
             directory,
             output: root.path().join("site.vps"),
+            review_receipt: false,
         };
         let report = pack(&args).unwrap();
         assert_eq!(report["assets"], 3);
@@ -310,6 +323,7 @@ mod tests {
         let args = Pack {
             directory,
             output: root.path().join("site.vps"),
+            review_receipt: false,
         };
         assert!(pack(&args).is_err());
         assert!(!args.output.exists());
@@ -324,7 +338,8 @@ mod tests {
         assert!(
             pack(&Pack {
                 directory: root.path().join("linked-root"),
-                output: args.output
+                output: args.output,
+                review_receipt: false,
             })
             .is_err()
         );

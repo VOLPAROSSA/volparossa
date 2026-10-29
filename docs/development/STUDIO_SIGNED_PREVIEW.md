@@ -17,6 +17,12 @@ The existing loopback HTTP server enforces its request, host, path, method and s
 
 The distinct `local_site_preview_ready` and `local_site_preview_closed` reports identify `local_signed_bundle`. A verified signature and reviewed digest do not authenticate an HTTPS origin, establish publisher name ownership or prove the globally latest revision. This command performs no named lookup or network retrieval, changes no revision floor, grants no Internet policy permission and creates no private named-download spool. Existing `content site open` keeps its named retrieval, role and helper requirements.
 
+## Preparation for native review
+
+An explicit `volparossa content site pack --directory export --output site.bundle --review-receipt` returns a separate schema-1 `site_pack_preparation` receipt. The normal pack receipt stays unchanged when the flag is absent. The review receipt binds the exact bundle SHA-256 and byte count to a canonical inventory of asset paths, content types, sizes and SHA-256 digests. It derives these values from the same immutable assets and encoded bundle that are written to the new private output; the bounded receipt is prepared before persistence and returned after atomic persistence and synchronization complete.
+
+This receipt contains no absolute input/output path, identity or signing secret. It explicitly requires review and grants no native consent, signature, publisher authority, network publication or permission. A future native review controller must independently bind publisher, name, revision, expiry and an explicit user decision before using the existing checked publication command. Editor/MCP requests and this preparation receipt cannot approve publication.
+
 ## Hosted proof
 
 The existing Quality workflow's opt-in `studio_export_pack` accepts `studio_proof_mode`:
