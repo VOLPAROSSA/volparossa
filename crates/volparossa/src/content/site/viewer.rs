@@ -4,6 +4,9 @@
 
 #[path = "http.rs"]
 mod http;
+#[cfg(test)]
+#[path = "preview/viewer_tests.rs"]
+mod preview_tests;
 
 use std::{
     io::{SeekFrom, Write as _},
@@ -49,7 +52,31 @@ pub(super) async fn run(args: Open, socket: &Path) -> Result<()> {
         _ = interrupt.recv() => bail!("site preparation interrupted; private spool discarded"),
         _ = terminate.recv() => bail!("site preparation stopped; private spool discarded"),
     };
-    // Binding follows both complete publisher-authenticated delivery and canonical site decoding.
+    run_prepared(state, Some(directory), interrupt, terminate).await
+}
+
+pub(super) async fn run_local(
+    prepared: super::preview::Prepared,
+    interrupt: Signal,
+    terminate: Signal,
+) -> Result<()> {
+    let state = Site {
+        source: Source::LocalSigned(Box::new(prepared.authority)),
+        bundle: prepared.bundle,
+        deadline: prepared.deadline,
+        expires: prepared.expires,
+        host: String::new(),
+    };
+    run_prepared(state, None, interrupt, terminate).await
+}
+
+async fn run_prepared(
+    state: Site,
+    directory: Option<tempfile::TempDir>,
+    mut interrupt: Signal,
+    mut terminate: Signal,
+) -> Result<()> {
+    // Both typed sources finish publisher authentication and canonical site decoding before binding.
     state.check_live()?;
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
     let mut token = [0_u8; 16];
@@ -63,7 +90,8 @@ pub(super) async fn run(args: Open, socket: &Path) -> Result<()> {
     );
     let state = Arc::new(Site { host, ..state });
     let mut report = state.report();
-    report["operation"] = "native_site_ready".into();
+    let (ready_operation, closed_operation) = state.source.operations();
+    report["operation"] = ready_operation.into();
     report["site_url"] = format!("http://{}/", state.host).into();
     state.check_live()?;
     emit(&report)?;
@@ -82,12 +110,21 @@ pub(super) async fn run(args: Open, socket: &Path) -> Result<()> {
     while tasks.join_next().await.is_some() {}
     drop(tasks);
     drop(state);
-    directory
-        .close()
-        .context("cannot remove private site spool")?;
+    let spool_removed = if let Some(directory) = directory {
+        directory
+            .close()
+            .context("cannot remove private site spool")?;
+        true
+    } else {
+        false
+    };
     let outcome = result?;
-    report["operation"] = "native_site_closed".into();
-    report["private_spool_removed"] = true.into();
+    report["operation"] = closed_operation.into();
+    if spool_removed {
+        report["private_spool_removed"] = true.into();
+    } else {
+        report["source_snapshots_discarded"] = true.into();
+    }
     report["reason"] = outcome.reason.into();
     report["completed_http_requests"] = outcome.completed.into();
     report["asset_body_bytes"] = outcome.bytes.into();
@@ -125,7 +162,7 @@ async fn prepare(args: &Open, socket: &Path, parent: &Path) -> Result<Site> {
         .expires()
         .min(now_seconds()?.saturating_add(args.lifetime_seconds));
     Ok(Site {
-        download,
+        source: Source::Named(Box::new(download)),
         bundle,
         deadline,
         expires,
@@ -133,8 +170,34 @@ async fn prepare(args: &Open, socket: &Path, parent: &Path) -> Result<Site> {
     })
 }
 
+enum Source {
+    Named(Box<VerifiedNamedDownload>),
+    LocalSigned(Box<super::preview::LocalAuthority>),
+}
+
+impl Source {
+    fn check_live(&self) -> Result<()> {
+        match self {
+            Self::Named(download) => download.check_live(),
+            Self::LocalSigned(local) => local.check_live(),
+        }
+    }
+    fn report(&self) -> serde_json::Value {
+        match self {
+            Self::Named(download) => download.report(),
+            Self::LocalSigned(local) => local.report(),
+        }
+    }
+    fn operations(&self) -> (&'static str, &'static str) {
+        match self {
+            Self::Named(_) => ("native_site_ready", "native_site_closed"),
+            Self::LocalSigned(_) => ("local_site_preview_ready", "local_site_preview_closed"),
+        }
+    }
+}
+
 struct Site {
-    download: VerifiedNamedDownload,
+    source: Source,
     bundle: SiteBundle,
     deadline: Instant,
     expires: u64,
@@ -143,7 +206,7 @@ struct Site {
 
 impl Site {
     fn check_live(&self) -> Result<()> {
-        self.download.check_live()?;
+        self.source.check_live()?;
         if Instant::now() >= self.deadline || now_seconds()? >= self.expires {
             bail!("local site lifetime expired");
         }
@@ -151,7 +214,7 @@ impl Site {
     }
 
     fn report(&self) -> serde_json::Value {
-        let mut report = self.download.report();
+        let mut report = self.source.report();
         report["assets"] = self.bundle.asset_count().into();
         report["expires_unix_seconds"] = self.expires.into();
         report["static_only"] = true.into();
