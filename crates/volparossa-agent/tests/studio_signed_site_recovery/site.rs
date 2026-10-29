@@ -68,6 +68,7 @@ pub(super) async fn pack(
             directory.into_os_string(),
             "--output".into(),
             f.path("site.bundle").into_os_string(),
+            "--review-receipt".into(),
         ],
         p,
         work,
@@ -77,16 +78,7 @@ pub(super) async fn pack(
     .await?
     .json()?;
     let bytes = read_private(&f.path("site.bundle"), MAX_BYTES)?;
-    if value["operation"] != "site_pack"
-        || value["network_published"] != false
-        || value["symlinks_followed"] != false
-        || value["content_type"] != SITE_CONTENT_TYPE
-        || value["bytes"].as_u64() != u64::try_from(bytes.len()).ok()
-        || value["assets"].as_u64() != u64::try_from(assets.len()).ok()
-    {
-        return Err("pack_receipt");
-    }
-    verify_assets(&bytes, &assets)?;
+    verify_preparation(&value, &bytes, &assets)?;
     Ok(Packed {
         sha: Sha256::digest(&bytes).into(),
         bytes,
@@ -95,10 +87,14 @@ pub(super) async fn pack(
 }
 
 pub(super) fn verify_assets(bytes: &[u8], assets: &[Value]) -> Result<()> {
+    let bundle = SiteBundle::decode(bytes.to_vec()).map_err(|_| "bundle_shape")?;
+    verify_bundle_assets(&bundle, assets)
+}
+
+fn verify_bundle_assets(bundle: &SiteBundle, assets: &[Value]) -> Result<()> {
     if !(2..=256).contains(&assets.len()) {
         return Err("inventory_count");
     }
-    let bundle = SiteBundle::decode(bytes.to_vec()).map_err(|_| "bundle_shape")?;
     if bundle.asset_count() != assets.len() {
         return Err("bundle_inventory_count");
     }
@@ -123,6 +119,104 @@ pub(super) fn verify_assets(bytes: &[u8], assets: &[Value]) -> Result<()> {
             .any(|w| w == b"VOLPAROSSA Studio manual export 20261022")
     {
         return Err("edited_marker");
+    }
+    Ok(())
+}
+
+fn has_keys(value: &Value, expected: &[&str]) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.len() == expected.len() && expected.iter().all(|key| object.contains_key(*key))
+    })
+}
+
+fn verify_preparation_scope(value: &Value) -> Result<()> {
+    if !has_keys(
+        value,
+        &[
+            "schema_version",
+            "operation",
+            "source",
+            "content_type",
+            "bundle_sha256",
+            "bundle_bytes",
+            "asset_count",
+            "assets",
+            "symlinks_followed",
+            "hidden_entries_excluded",
+            "native_consent_granted",
+            "publication_signed",
+            "network_published",
+            "publisher_authority_granted",
+            "permission_authority_granted",
+            "input_files_modified",
+            "bundle_output_created",
+            "review_required",
+        ],
+    ) || value["schema_version"].as_u64() != Some(1)
+        || value["operation"] != "site_pack_preparation"
+        || value["source"] != "explicit_local_directory"
+        || value["content_type"] != SITE_CONTENT_TYPE
+    {
+        return Err("pack_receipt_shape");
+    }
+    for key in [
+        "symlinks_followed",
+        "native_consent_granted",
+        "publication_signed",
+        "network_published",
+        "publisher_authority_granted",
+        "permission_authority_granted",
+        "input_files_modified",
+    ] {
+        if value[key].as_bool() != Some(false) {
+            return Err("pack_receipt_scope");
+        }
+    }
+    for key in [
+        "hidden_entries_excluded",
+        "bundle_output_created",
+        "review_required",
+    ] {
+        if value[key].as_bool() != Some(true) {
+            return Err("pack_receipt_scope");
+        }
+    }
+    Ok(())
+}
+
+/// Validate actual persisted pack bytes against both the producer receipt and fresh ZIP inventory.
+/// A preparation receipt grants no native consent, signing, publisher or network authority.
+pub(super) fn verify_preparation(value: &Value, bytes: &[u8], assets: &[Value]) -> Result<()> {
+    verify_preparation_scope(value)?;
+    if value["bundle_sha256"] != hex::encode(Sha256::digest(bytes))
+        || value["bundle_bytes"].as_u64() != u64::try_from(bytes.len()).ok()
+        || value["asset_count"].as_u64() != u64::try_from(assets.len()).ok()
+    {
+        return Err("pack_receipt_binding");
+    }
+    let bundle = SiteBundle::decode(bytes.to_vec()).map_err(|_| "bundle_shape")?;
+    verify_bundle_assets(&bundle, assets)?;
+    let rows = value["assets"].as_array().ok_or("pack_receipt_assets")?;
+    if rows.len() != assets.len() {
+        return Err("pack_receipt_assets");
+    }
+    let mut previous = None;
+    for row in rows {
+        if !has_keys(row, &["path", "content_type", "bytes", "sha256"]) {
+            return Err("pack_receipt_asset_shape");
+        }
+        let path = row["path"].as_str().ok_or("pack_receipt_asset_path")?;
+        if previous.is_some_and(|last| last >= path) {
+            return Err("pack_receipt_asset_order");
+        }
+        previous = Some(path);
+        let asset = bundle.asset(path).ok_or("pack_receipt_asset_missing")?;
+        if row["content_type"].as_str() != Some(asset.content_type)
+            || row["bytes"].as_u64() != u64::try_from(asset.bytes.len()).ok()
+            || row["sha256"] != hex::encode(Sha256::digest(asset.bytes))
+        {
+            return Err("pack_receipt_asset_binding");
+        }
     }
     Ok(())
 }

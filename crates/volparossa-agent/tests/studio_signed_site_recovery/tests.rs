@@ -8,7 +8,7 @@ use super::{
     Counts,
     browser::{checked_url, verify_receipt},
     process::CliResult,
-    site::{Packed, verify_assets},
+    site::{Packed, verify_assets, verify_preparation},
 };
 
 fn packed() -> Packed {
@@ -40,6 +40,130 @@ fn packed() -> Packed {
 fn browser(p: &Packed) -> Value {
     json!({"schema":1,"status":"passed","bundle_sha256":hex::encode(p.sha),"bundle_bytes":p.bytes.len(),"asset_count":p.assets.len(),"visible_marker":true,"computed_37px":true,"all_assets_verified":true,"security_headers_preserved":true,"independent_browser":true,"browser_closed":true,"rendered_http_requests":3})
 }
+
+fn preparation(p: &Packed) -> Value {
+    let bundle = SiteBundle::decode(p.bytes.clone()).unwrap();
+    let mut assets = p.assets.clone();
+    for row in &mut assets {
+        let asset = bundle.asset(row["path"].as_str().unwrap()).unwrap();
+        row["content_type"] = json!(asset.content_type);
+    }
+    assets.sort_unstable_by(|left, right| {
+        left["path"]
+            .as_str()
+            .unwrap()
+            .cmp(right["path"].as_str().unwrap())
+    });
+    json!({
+        "schema_version": 1, "operation": "site_pack_preparation", "source": "explicit_local_directory",
+        "content_type": volparossa_content::site::SITE_CONTENT_TYPE,
+        "bundle_sha256": hex::encode(p.sha), "bundle_bytes": p.bytes.len(), "asset_count": assets.len(),
+        "assets": assets, "symlinks_followed": false, "hidden_entries_excluded": true,
+        "native_consent_granted": false, "publication_signed": false, "network_published": false,
+        "publisher_authority_granted": false, "permission_authority_granted": false,
+        "input_files_modified": false, "bundle_output_created": true, "review_required": true,
+    })
+}
+
+#[test]
+fn pack_preparation_requires_closed_non_authorizing_schema_and_refuses_legacy_output() {
+    let p = packed();
+    let value = preparation(&p);
+    assert!(verify_preparation(&value, &p.bytes, &p.assets).is_ok());
+    for key in value.as_object().unwrap().keys() {
+        let mut changed = value.clone();
+        changed.as_object_mut().unwrap().remove(key);
+        assert!(verify_preparation(&changed, &p.bytes, &p.assets).is_err());
+    }
+    for key in ["input", "output", "private_path", "credentials"] {
+        let mut changed = value.clone();
+        changed[key] = json!("/private/not-a-receipt-field");
+        assert!(verify_preparation(&changed, &p.bytes, &p.assets).is_err());
+    }
+    for key in [
+        "symlinks_followed",
+        "native_consent_granted",
+        "publication_signed",
+        "network_published",
+        "publisher_authority_granted",
+        "permission_authority_granted",
+        "input_files_modified",
+        "hidden_entries_excluded",
+        "bundle_output_created",
+        "review_required",
+    ] {
+        for bad in [
+            json!(!value[key].as_bool().unwrap()),
+            json!(0),
+            json!("false"),
+        ] {
+            let mut changed = value.clone();
+            changed[key] = bad;
+            assert!(verify_preparation(&changed, &p.bytes, &p.assets).is_err());
+        }
+    }
+    for (key, bad) in [
+        ("schema_version", json!(true)),
+        ("schema_version", json!(2)),
+        ("operation", json!("site_pack")),
+        ("source", json!("named_download")),
+    ] {
+        let mut changed = value.clone();
+        changed[key] = bad;
+        assert!(verify_preparation(&changed, &p.bytes, &p.assets).is_err());
+    }
+    let legacy = json!({
+        "operation":"site_pack", "assets":p.assets.len(), "bytes":p.bytes.len(),
+        "content_type":volparossa_content::site::SITE_CONTENT_TYPE, "output":"legacy.bundle",
+        "network_published":false, "hidden_entries_excluded":true, "symlinks_followed":false,
+    });
+    assert!(verify_preparation(&legacy, &p.bytes, &p.assets).is_err());
+}
+
+#[test]
+fn pack_preparation_binds_sorted_rows_mime_and_bytes_to_bundle_and_fresh_zip_inventory() {
+    let p = packed();
+    let value = preparation(&p);
+    for (key, bad) in [
+        ("bundle_sha256", json!(hex::encode([0; 32]))),
+        ("bundle_bytes", json!(p.bytes.len() + 1)),
+        ("bundle_bytes", json!(true)),
+        ("asset_count", json!(p.assets.len() + 1)),
+        ("content_type", json!("text/html")),
+    ] {
+        let mut changed = value.clone();
+        changed[key] = bad;
+        assert!(verify_preparation(&changed, &p.bytes, &p.assets).is_err());
+    }
+    for (key, bad) in [
+        ("path", json!("/not-in-bundle")),
+        ("content_type", json!("text/plain")),
+        ("bytes", json!(0)),
+        ("bytes", json!(true)),
+        ("sha256", json!(hex::encode([0; 32]))),
+        ("payload", json!("not permitted")),
+    ] {
+        let mut changed = value.clone();
+        changed["assets"][0][key] = bad;
+        assert!(verify_preparation(&changed, &p.bytes, &p.assets).is_err());
+    }
+    let mut changed = value.clone();
+    changed["assets"].as_array_mut().unwrap().reverse();
+    assert!(verify_preparation(&changed, &p.bytes, &p.assets).is_err());
+    let mut changed = value.clone();
+    changed["assets"][1] = changed["assets"][0].clone();
+    assert!(verify_preparation(&changed, &p.bytes, &p.assets).is_err());
+    let mut changed = value.clone();
+    changed["assets"].as_array_mut().unwrap().pop();
+    assert!(verify_preparation(&changed, &p.bytes, &p.assets).is_err());
+    let mut inventory = p.assets.clone();
+    inventory[0]["sha256"] = json!(hex::encode([0; 32]));
+    assert!(verify_preparation(&value, &p.bytes, &inventory).is_err());
+    let mut bytes = p.bytes.clone();
+    *bytes.last_mut().unwrap() ^= 1;
+    assert!(verify_preparation(&value, &bytes, &p.assets).is_err());
+}
+
 #[test]
 fn exact_observed_counts_refuse_missing_join_and_failure_cleanup() {
     let complete = Counts {
