@@ -18,7 +18,7 @@ struct Fixture {
     args: Preview,
 }
 impl Fixture {
-    fn new(bytes: Vec<u8>, content_type: &str, created: u64, expires: u64) -> Self {
+    fn new(bytes: &[u8], content_type: &str, created: u64, expires: u64) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let signer = SigningKey::from_bytes(&[29; 32]);
         let mut cache = ChunkStore::create(
@@ -30,8 +30,9 @@ impl Fixture {
             },
         )
         .unwrap();
+        let mut reader = bytes;
         let manifest = publish(
-            &mut bytes.as_slice(),
+            &mut reader,
             Publication {
                 length: u64::try_from(bytes.len()).unwrap(),
                 metadata: ContentMetadata {
@@ -48,14 +49,14 @@ impl Fixture {
         drop(cache);
         let input = directory.path().join("input.vps");
         let path = directory.path().join("manifest.pb");
-        owned(&input, &bytes);
+        owned(&input, bytes);
         owned(&path, &manifest.encode());
         Self {
             args: Preview {
                 input,
                 manifest: path,
                 publisher_key: signer.verifying_key(),
-                expected_input_sha256: Sha256::digest(&bytes).into(),
+                expected_input_sha256: Sha256::digest(bytes).into(),
                 lifetime_seconds: 60,
             },
             directory,
@@ -63,7 +64,7 @@ impl Fixture {
     }
     fn site() -> Self {
         let now = now_seconds().unwrap();
-        Self::new(bundle(), SITE_CONTENT_TYPE, now - 1, now + 600)
+        Self::new(&bundle(), SITE_CONTENT_TYPE, now - 1, now + 600)
     }
     fn prepare(self) -> Result<Prepared> {
         prepare_blocking(
@@ -194,7 +195,7 @@ fn changed_signature_noncanonical_manifest_and_wrong_content_type_are_rejected()
     assert!(matches!(fixture.prepare(), Err(Failure::Manifest)));
     let now = now_seconds().unwrap();
     assert!(matches!(
-        Fixture::new(bundle(), "application/octet-stream", now - 1, now + 600).prepare(),
+        Fixture::new(&bundle(), "application/octet-stream", now - 1, now + 600).prepare(),
         Err(Failure::ContentType)
     ));
 }
@@ -203,20 +204,14 @@ fn changed_signature_noncanonical_manifest_and_wrong_content_type_are_rejected()
 fn signed_but_unknown_or_noncanonical_bundle_never_becomes_a_viewer() {
     let now = now_seconds().unwrap();
     assert!(matches!(
-        Fixture::new(
-            b"unknown bundle".to_vec(),
-            SITE_CONTENT_TYPE,
-            now - 1,
-            now + 600
-        )
-        .prepare(),
+        Fixture::new(b"unknown bundle", SITE_CONTENT_TYPE, now - 1, now + 600).prepare(),
         Err(Failure::Bundle)
     ));
     let mut unknown = bundle();
     assert_eq!(unknown[4], 8);
     unknown[5] = 2;
     assert!(matches!(
-        Fixture::new(unknown, SITE_CONTENT_TYPE, now - 1, now + 600).prepare(),
+        Fixture::new(&unknown, SITE_CONTENT_TYPE, now - 1, now + 600).prepare(),
         Err(Failure::Bundle)
     ));
 }
@@ -225,10 +220,10 @@ fn signed_but_unknown_or_noncanonical_bundle_never_becomes_a_viewer() {
 fn original_signed_expiry_and_before_preparation_monotonic_cap_never_restart() {
     let now = now_seconds().unwrap();
     assert!(matches!(
-        Fixture::new(bundle(), SITE_CONTENT_TYPE, now - 20, now - 1).prepare(),
+        Fixture::new(&bundle(), SITE_CONTENT_TYPE, now - 20, now - 1).prepare(),
         Err(Failure::Expired)
     ));
-    let fixture = Fixture::new(bundle(), SITE_CONTENT_TYPE, now - 1, now + 30);
+    let fixture = Fixture::new(&bundle(), SITE_CONTENT_TYPE, now - 1, now + 30);
     let prepared = fixture.prepare().unwrap();
     assert_eq!(prepared.expires, now + 30);
     let fixture = Fixture::site();

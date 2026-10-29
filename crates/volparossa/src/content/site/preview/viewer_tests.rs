@@ -31,7 +31,7 @@ fn local_site() -> Site {
         },
     )
     .unwrap();
-    let signed = publish(
+    let publication = publish(
         &mut bytes.as_slice(),
         Publication {
             length: u64::try_from(bytes.len()).unwrap(),
@@ -53,7 +53,7 @@ fn local_site() -> Site {
     let input = root.path().join("input.vps");
     let manifest = root.path().join("manifest.pb");
     fs::write(&input, &bytes).unwrap();
-    fs::write(&manifest, signed.encode()).unwrap();
+    fs::write(&manifest, publication.encode()).unwrap();
     for file in [&input, &manifest] {
         fs::set_permissions(file, fs::Permissions::from_mode(0o600)).unwrap();
     }
