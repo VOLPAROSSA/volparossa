@@ -62,7 +62,7 @@ pub(super) async fn run() -> Result<Value> {
         return Err("total_deadline");
     }
     stage("complete");
-    Ok(proof(observed, &progress))
+    Ok(proof(&observed, &progress))
 }
 
 async fn operations(
@@ -82,14 +82,14 @@ async fn operations(
     let source_stamp = cache_stamp(&f.path("source-cache"))?;
     stage("agent_import");
     daemon.spawn(f, p, work)?;
-    daemon.ready(f, p, work).await?;
+    daemon.ready(f, work).await?;
     site::handoff(f, p, "import", &manifest, work, total).await?;
     let cache_before = cache_stamp(&f.path("agent-cache"))?;
     stage("crash_join");
     daemon.crash(p, work).await?;
     stage("reopen");
     daemon.spawn(f, p, work)?;
-    daemon.ready(f, p, work).await?;
+    daemon.ready(f, work).await?;
     stage("export");
     site::handoff(f, p, "export", &manifest, work, total).await?;
     if cache_stamp(&f.path("agent-cache"))? != cache_before
@@ -136,7 +136,7 @@ fn bindings(packed: &Packed, manifest: &VerifiedManifest) -> Value {
         "manifest_id":hex::encode(manifest.manifest_id()),"publisher_key":hex::encode(manifest.publisher()),
         "revision":manifest.metadata().revision,"publication_expires_unix_seconds":manifest.validity().expires})
 }
-fn proof(observed: Observed, progress: &Progress) -> Value {
+fn proof(observed: &Observed, progress: &Progress) -> Value {
     json!({"schema":1,"status":"passed","proof_mode":"signed-site-recovery",
         "bindings":observed.bindings,"counts":progress.counts.get(),
         "checks":{"actual_cli_pack":true,"original_signed_publication":true,"roles_off_agent_import":true,

@@ -83,12 +83,7 @@ impl Daemon {
         self.child.as_ref().and_then(Child::id).ok_or("daemon_pid")
     }
 
-    pub(super) async fn ready(
-        &mut self,
-        fixture: &Fixture,
-        progress: &Progress,
-        deadline: Instant,
-    ) -> Result<()> {
+    pub(super) async fn ready(&mut self, fixture: &Fixture, deadline: Instant) -> Result<()> {
         let pid = self.pid()?;
         loop {
             if self

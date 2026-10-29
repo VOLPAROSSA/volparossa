@@ -75,8 +75,8 @@ impl Fixture {
             cli,
             publisher,
             identity_hash,
-            binary_stamp,
             agent_stamp,
+            binary_stamp,
         })
     }
 

@@ -185,13 +185,12 @@ impl Preview {
     async fn stderr_done(&mut self, deadline: Instant) -> Result<Vec<u8>> {
         if let Some(mut task) = self.stderr.take() {
             let result = timeout_at(deadline, &mut task).await;
-            match result {
-                Ok(result) => result.map_err(|_| "preview_stderr_join")?,
-                Err(_) => {
-                    task.abort();
-                    let _ = task.await;
-                    Err("preview_stderr_deadline")
-                }
+            if let Ok(result) = result {
+                result.map_err(|_| "preview_stderr_join")?
+            } else {
+                task.abort();
+                let _ = task.await;
+                Err("preview_stderr_deadline")
             }
         } else {
             Ok(Vec::new())
