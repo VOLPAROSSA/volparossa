@@ -31,6 +31,7 @@ use volparossa_local_control::{
     dps::{
         AssessmentStatus, DPS_SERVICE_VERSION, DpsAssessRequest, FrameKind, PositionFrame,
         PositionObservation, SourceKind,
+        geodetic::{HeightReference, Wgs84GeodeticPosition},
     },
     read_response, write_request,
 };
@@ -496,6 +497,16 @@ async fn exchange(
 }
 
 fn synthetic_request() -> Result<DpsAssessRequest, &'static str> {
+    // The original synthetic equatorial ECEF bytes, now through the real adapter.
+    let [x_metres, y_metres, z_metres] = Wgs84GeodeticPosition {
+        latitude_degrees: 0.0,
+        longitude_degrees: 0.0,
+        height_metres: 0.0,
+        height_reference: HeightReference::Wgs84Ellipsoid,
+    }
+    .to_ecef()
+    .map_err(|_| "fixture_geodetic")?
+    .components_metres();
     let frame = PositionFrame {
         kind: FrameKind::Wgs84Ecef as i32,
         local_frame_id: vec![],
@@ -514,12 +525,53 @@ fn synthetic_request() -> Result<DpsAssessRequest, &'static str> {
             declared_independence_group: vec![3; 16],
             frame: Some(frame),
             source_kind: SourceKind::Gnss as i32,
-            x_metres: 6_378_137.0,
+            x_metres,
+            y_metres,
+            z_metres,
             supplied_radius_metres: 5.0,
             observed_at_unix_ms: u64::try_from(now).map_err(|_| "fixture_clock_bound")?,
             ..Default::default()
         }],
     })
+}
+
+#[test]
+fn dps_daemon_geodetic_builder_preserves_original_wire_claim_and_quality() {
+    let converted = synthetic_request().unwrap();
+    let observed_at_unix_ms = converted.observations[0].observed_at_unix_ms;
+    let original_frame = PositionFrame {
+        kind: FrameKind::Wgs84Ecef as i32,
+        local_frame_id: vec![],
+    };
+    let original = DpsAssessRequest {
+        dps_version: DPS_SERVICE_VERSION,
+        desired_frame: Some(original_frame.clone()),
+        maximum_age_ms: 60_000,
+        observations: vec![PositionObservation {
+            observation_id: vec![1; 16],
+            source_id: vec![2; 16],
+            declared_independence_group: vec![3; 16],
+            frame: Some(original_frame),
+            source_kind: SourceKind::Gnss as i32,
+            x_metres: 6_378_137.0,
+            supplied_radius_metres: 5.0,
+            observed_at_unix_ms,
+            ..Default::default()
+        }],
+    };
+    let envelope = |input| ControlRequest {
+        protocol_version: CONTROL_PROTOCOL_VERSION,
+        request_id: vec![8; 16],
+        operation: Some(Operation::DpsAssess(input)),
+    };
+    assert_eq!(
+        volparossa_local_control::encode_request(&envelope(converted.clone())).unwrap(),
+        volparossa_local_control::encode_request(&envelope(original.clone())).unwrap()
+    );
+    let quality = converted.assess(observed_at_unix_ms).unwrap();
+    quality.validate().unwrap();
+    assert_eq!(quality, original.assess(observed_at_unix_ms).unwrap());
+    assert_eq!(quality.limitations, [0, 1, 2, 3, 4, 5, 6]);
 }
 
 #[test]

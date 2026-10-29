@@ -1,0 +1,142 @@
+{
+  "debian_authentication": {
+    "chain": "installed Debian archive keyring -> trixie InRelease SHA256 -> Sources.xz -> gpsd source stanza -> all source files",
+    "gpgv_exit": 0,
+    "inrelease_sha256": "0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675",
+    "keyring": "/usr/share/keyrings/debian-archive-keyring.gpg",
+    "keyring_sha256": "506b815cbb32d9b6066b4a2aa524071e071761e7e7f68c3ac74f3061ba852017",
+    "release_metadata": [
+      "Origin: Debian",
+      "Label: Debian",
+      "Suite: stable",
+      "Version: 13.7",
+      "Codename: trixie",
+      "Date: Sat, 12 Sep 2026 07:55:41 UTC"
+    ],
+    "sources_xz_sha256": "6002f81f463a2d976d84b34170367cc16da2d60bd0ba9ab9d868d6e1c1a935d9"
+  },
+  "local_evidence_receipt_sha256": "9c6848d38926158e661d6db90bd1b76d11f2c5b3d8e418733fe06d599aee2b51",
+  "schema_version": 1,
+  "series": [
+    {
+      "path": "debian/patches/systemd-documentation.patch",
+      "sha256": "0aaae9a60bfd3b362c89e3b272b1e7040b515b80a4cbba974ba27f38a6b29196"
+    },
+    {
+      "path": "debian/patches/full-systemd-support",
+      "sha256": "20eb49197592d9e8a039b9c13559881bcd0bc3a748b8fe1e7bfb3a0f8658c3de"
+    },
+    {
+      "path": "debian/patches/gpsd_hotplug_rules_disable_generic_serial_converters",
+      "sha256": "28370ed2566e5f82c07cf18691ae834918f757d6f3865e9341e2063e40db4252"
+    },
+    {
+      "path": "debian/patches/ignore-test-xgps_deps_check",
+      "sha256": "3cddc2745c50e057e8cc33bd22dab3c4668c844dee93b8b171d21122ed62fb06"
+    },
+    {
+      "path": "debian/patches/desktop-add-keywords.patch",
+      "sha256": "aeebbe1fc8a5bd5416b680c1dc107e7a698386bb96e2987923db337862c6fced"
+    },
+    {
+      "path": "debian/patches/man-page-typos.patch",
+      "sha256": "2ba0d4db24bc6714422f6b4c69c392d54cd623aa668a2be42cb4bc09138b7f54"
+    },
+    {
+      "path": "debian/patches/build-on-hurd.patch",
+      "sha256": "c36126395d74a46bdc0e09f99f21a5729728805f9a850b1104331aff2d90832c"
+    },
+    {
+      "path": "debian/patches/CVE-2025-67268.patch",
+      "sha256": "00137a35a06e5c9280bc50f2b0d929214025adbbc843e3b8da6205e4b25f93f7"
+    },
+    {
+      "path": "debian/patches/CVE-2025-67269.patch",
+      "sha256": "abbf79367cf3c74efc6704d7946100095b1c36ff0069abc6928e7620f14db77e"
+    },
+    {
+      "path": "debian/patches/CVE-2026-58459.patch",
+      "sha256": "b1de5e80fd45787e9c106b10a5b4386eb0d592ed103a5fed58130f177cf89926"
+    },
+    {
+      "path": "debian/patches/CVE-2026-60122.patch",
+      "sha256": "ea49658ac5a83f262258204a77d557564bcd7cd81bcf80476930b73f0b7817e4"
+    }
+  ],
+  "sources": [
+    {
+      "file": "gpsd_3.25-5+deb13u2.dsc",
+      "sha256": "cdc5d63ddcb4fb495b8669f2e9cb50b372cd34250eb6e4672ca8b9eac340cc27",
+      "size": 3133,
+      "url": "https://deb.debian.org/debian/pool/main/g/gpsd/gpsd_3.25-5+deb13u2.dsc"
+    },
+    {
+      "file": "gpsd_3.25.orig.tar.gz",
+      "sha256": "b368b6a305e3f7a6382d23a0cbfc1d78923060b6b7f54cf7987a73c7b4a9afc2",
+      "size": 5225194,
+      "url": "https://deb.debian.org/debian/pool/main/g/gpsd/gpsd_3.25.orig.tar.gz"
+    },
+    {
+      "file": "gpsd_3.25.orig.tar.gz.asc",
+      "sha256": "86d20ad8c283a40c728d404f43ce4d9bb037435ab0f87fa48e6b692ada48f162",
+      "size": 833,
+      "url": "https://deb.debian.org/debian/pool/main/g/gpsd/gpsd_3.25.orig.tar.gz.asc"
+    },
+    {
+      "file": "gpsd_3.25-5+deb13u2.debian.tar.xz",
+      "sha256": "6ba3944b495ffe9c7dbc70d10fa0eb62a7e522cdc46251c54e11e558e4d9a059",
+      "size": 53692,
+      "url": "https://deb.debian.org/debian/pool/main/g/gpsd/gpsd_3.25-5+deb13u2.debian.tar.xz"
+    }
+  ],
+  "support_authority": "Reviewed exact HTTPS Ubuntu Packages entries; build verifies fixed .deb SHA256 before extraction, no installation. Existing system Python/clang/libc remain runner authority and are recorded, not replaced.",
+  "support_metadata": [
+    {
+      "sha256": "ce57756edcce0a5f7993ceb89057e1510148e04e3b85a066d780e4bc00485c8a",
+      "url": "https://archive.ubuntu.com/ubuntu/dists/noble/universe/binary-amd64/Packages.gz"
+    },
+    {
+      "sha256": "1978c1ac088aebc2141180d72817b5d840a2928540cd6b2509bbfb5df865e894",
+      "url": "https://security.ubuntu.com/ubuntu/dists/noble-security/main/binary-amd64/Packages.gz"
+    }
+  ],
+  "support_packages": [
+    {
+      "architecture": "all",
+      "depends": "python3-pkg-resources, python3:any",
+      "package": "scons",
+      "sha256": "a349e0b0083db0f4aa13e85cd72358502be4fdafac42f59acf48a312eb20957a",
+      "size": 577162,
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/s/scons/scons_4.5.2+dfsg-1_all.deb",
+      "version": "4.5.2+dfsg-1"
+    },
+    {
+      "architecture": "all",
+      "depends": "python3:any",
+      "package": "python3-pkg-resources",
+      "sha256": "13caaa69d5ba8b02e90087d4bcef714c0581e591e820804d15d12f582055147a",
+      "size": 167914,
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/s/setuptools/python3-pkg-resources_68.1.2-2ubuntu1.2_all.deb",
+      "version": "68.1.2-2ubuntu1.2"
+    },
+    {
+      "architecture": "all",
+      "depends": "python3-pkg-resources (= 68.1.2-2ubuntu1.2), python3:any",
+      "package": "python3-setuptools",
+      "sha256": "27ede03d8c5046c30cf1dcdc8835708408d27bdd3561e881b5d66656e6ff23e7",
+      "size": 396614,
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/s/setuptools/python3-setuptools_68.1.2-2ubuntu1.2_all.deb",
+      "version": "68.1.2-2ubuntu1.2"
+    }
+  ],
+  "upstream": {
+    "commit": "8501f01b257b226b9ad34190628e23838babadff",
+    "note": "upstream tag target is informational; Debian archive SHA authenticates tar bytes independently",
+    "tag": "release-3.25",
+    "tag_api_url": "https://gitlab.com/api/v4/projects/gpsd%2Fgpsd/repository/tags/release-3.25",
+    "tag_object": "e6b26911d84b1d6d5295d85d5f2753169eb1144f",
+    "upstream_tag_signature_verified": false,
+    "upstream_tar_detached_signature_verified": false
+  },
+  "version": "3.25-5+deb13u2"
+}

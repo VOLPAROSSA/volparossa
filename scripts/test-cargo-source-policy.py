@@ -235,7 +235,7 @@ class PublicSources(unittest.TestCase):
                     self.assertEqual(lines[index+1].strip(),'export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"',path)
                     self.assertEqual(lines[index+2].strip(),git_export,path)
                     count+=1
-        self.assertEqual(count,19)
+        self.assertEqual(count,20)
         helper=(ROOT/'tests/helper/run-helper-boundary-evidence-vm.sh').read_text()
         self.assertTrue(('python3 -B scripts/provision-rust189.py guest\n'
                          'export CARGO_HOME=/home/volparossa/.local/volparossa-cargo-public-v1\n'+git_export) in helper)

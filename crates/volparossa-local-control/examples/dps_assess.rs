@@ -18,6 +18,7 @@ use volparossa_local_control::{
     dps::{
         AssessmentLimitation, AssessmentStatus, DPS_SERVICE_VERSION, DpsAssessRequest, FrameKind,
         NavigationAuthentication, PositionFrame, PositionObservation, SourceKind,
+        geodetic::{HeightReference, Wgs84GeodeticPosition},
     },
     read_response, write_request,
 };
@@ -34,15 +35,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
         kind: FrameKind::Wgs84Ecef as i32,
         local_frame_id: vec![],
     };
+    // Synthetic ellipsoidal heights preserve the original two ECEF input points.
+    let synthetic = Wgs84GeodeticPosition {
+        latitude_degrees: 0.0,
+        longitude_degrees: 0.0,
+        height_metres: 0.0,
+        height_reference: HeightReference::Wgs84Ellipsoid,
+    };
+    let [first_x, first_y, first_z] = synthetic.to_ecef()?.components_metres();
+    let [second_x, second_y, second_z] = Wgs84GeodeticPosition {
+        height_metres: 2.0,
+        ..synthetic
+    }
+    .to_ecef()?
+    .components_metres();
     let first = PositionObservation {
         observation_id: vec![1; 16],
         source_id: vec![2; 16],
         declared_independence_group: vec![3; 16],
         source_kind: SourceKind::Gnss as i32,
         frame: Some(frame.clone()),
-        x_metres: 6_378_137.0,
-        y_metres: 0.0,
-        z_metres: 0.0,
+        x_metres: first_x,
+        y_metres: first_y,
+        z_metres: first_z,
         supplied_radius_metres: 10.0,
         observed_at_unix_ms: now,
         navigation_authentication: NavigationAuthentication::Unknown as i32,
@@ -52,7 +67,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         source_id: vec![5; 16],
         declared_independence_group: vec![6; 16],
         source_kind: SourceKind::FixedReference as i32,
-        x_metres: first.x_metres + 2.0,
+        x_metres: second_x,
+        y_metres: second_y,
+        z_metres: second_z,
         ..first.clone()
     };
     let request = DpsAssessRequest {

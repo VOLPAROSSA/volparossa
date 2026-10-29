@@ -1156,3 +1156,19 @@ rustls-platform-verifier-android0.1.1 has no published VCS receipt and its
 bounded AAR/JAR inspection found no original license/notice terms. Its
 provenance remains unresolved and the collector continues to reject it. In particular, unavailable upstream source is not license-violation
 proof and is not authorization to skip a package.
+
+### GPSD public Linux adapter fixture — Debian 3.25-5+deb13u2
+
+The opt-in GPSD proof builds the complete pinned Debian GPSD source and its eleven
+quilt patches in a disposable hosted runner. It does not install a system service
+or ship a GPSD source snapshot/binary. `third_party/gpsd/pins.json` records exact
+source/package origins, sizes, SHA256 values, upstream tag/commit metadata and the
+Debian archive authentication chain. Bare upstream 3.25 is not the execution input.
+
+GPSD's default license is **BSD-2-Clause**, with **ISC** and **IBM** exceptions in
+the retained complete Debian inventory. Original upstream `COPYING`, Debian
+copyright and selected original per-file notice blocks are preserved unchanged
+under `third_party/gpsd/`; all original notices remain in the reconstructed source.
+Private SCons/setuptools/pkg-resources build-support packages retain their packaged
+notices. Original VOLPAROSSA proof scripts are GPL-3.0-only; GPSD's licenses remain
+unchanged. This fixture establishes no sensor or physical-accuracy acceptance.

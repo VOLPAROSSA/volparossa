@@ -48,9 +48,60 @@ Golden wire fixtures bind both DPS envelope fields to 64.
 Version 1 compares declared three-dimensional positions in metres: WGS84
 Earth-centred Earth-fixed coordinates or a named local Cartesian frame. WGS84
 is a caller assertion, not verified geography. Local coordinates do not imply a
-geographic anchor. Geodetic conversion, vertical datum conversion and anchor
-validation belong to subsequent explicitly tested adapters. Never compare
+geographic anchor. The bounded forward conversion below supplies ECEF input;
+vertical datum conversion and anchor validation remain separate work. Never compare
 unrelated local origins, epochs or altitude datums as one frame.
+
+`dps::geodetic::Wgs84GeodeticPosition` converts explicitly supplied latitude and
+longitude in degrees plus WGS84 ellipsoidal height in metres into ECEF metres.
+The caller must select `HeightReference::Wgs84Ellipsoid`; unknown and mean-sea-level
+heights are rejected because no geoid model is supplied. Non-finite values,
+out-of-range angles and output exceeding the existing component bound fail closed.
+Debug and error output omit coordinates. The existing synthetic example and daemon
+fixture use this same converter; their positions and assessment scope are unchanged.
+
+The calculation uses the [NGA WGS84 ellipsoid parameters](https://earth-info.nga.mil/index.php?action=wgs84&dir=wgs84)
+and the forward EPSG 9602 formula in
+[IOGP Guidance Note 7-2, September 2019, section 4.1.1](https://www.iogp.org/wp-content/uploads/2019/09/373-07-02.pdf).
+Reference-vector agreement tests numerical conversion, not physical positioning
+accuracy. This helper verifies no datum, realization, epoch, sensor, uncertainty,
+clock or application permission, and performs no datum transformation or sensor
+fusion. It acquires no data, stores no history and changes no wire or native ABI.
+
+### Explicit local GPSD observation
+
+On Linux, an operator may explicitly request one local observation with
+`volparossa dps observe-gpsd --endpoint 127.0.0.1:2947 --profile wgs84-receiver-ellipsoidal --comparison-radius-metres 10`.
+This uses an already available official `gpspipe` client from the operator's PATH;
+it starts no GPSD service and changes no roles, device permissions or host settings.
+The endpoint must be numeric IPv4 loopback with a port above 1024. The command
+neither uses the administrative agent socket nor publishes or retains a position.
+
+The adapter requires three distinct, increasing, complete TPV epochs from one
+device, each declaring `WGS84`, mode 3, latitude, longitude and `altHAE`. Partial
+messages are never merged. Mean-sea-level height cannot substitute for missing
+ellipsoidal height. The explicit profile asserts receiver provenance; a JSON datum
+or height field does not independently verify its physical meaning. Receiver time
+must be no more than five seconds old and cannot be in the future. Observable
+backward wall-clock steps and wall/monotonic divergence over 250 ms are rejected;
+this is not authenticated time. Input is bounded to 32 lines of 10,240 bytes each,
+with eight seconds for collection inside a ten-second operation/cleanup budget.
+
+Only the latest complete fix reaches the existing in-process assessor, as one
+request-local GNSS claim with unknown navigation authentication and unknown radius
+confidence. Output contains `SingleClaim` quality, the seven existing limitations
+and closed provenance fields; it omits coordinates, receiver timestamps, device
+paths and source identifiers. A success requires the owned `gpspipe` child to have
+been joined. Runtime destruction or an unresponsive kernel cannot prove cleanup.
+This provides no sensor fusion, spoofing assurance or physical accuracy guarantee.
+
+The opt-in `gpsd-adapter` route in `dps-native-quality.yml` builds fixed GPSD
+sources with the full Debian security patch series, then exercises public synthetic
+NMEA through real `gpsfake`, PTY, `gpsd`, `gpspipe` and this CLI. Upstream checks
+and AddressSanitizer/UndefinedBehaviorSanitizer execution run only inside disposable
+network, IPC and PID namespaces. Its [source and proof contract](../../tests/dps/gpsd/README.md)
+is separate from historical native ABI evidence, physical receiver acceptance,
+Debian 13 runtime acceptance and app-facing permission/lifecycle integration.
 
 The request selects a frame and carries a bounded batch (at most 32 observations),
 opaque request-local source/correlation identifiers, reported age, source kind,
