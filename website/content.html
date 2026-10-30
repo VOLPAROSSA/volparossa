@@ -1,0 +1,103 @@
+<section class="core-hero" id="overview" aria-labelledby="core-title">
+  {{hero_picture}}
+  <div class="core-hero-copy wrap">
+    <div class="core-hero-text">
+      <p class="eyebrow">VOLPAROSSA CORE</p>
+      <h1 id="core-title">The foundation for shared possibilities.</h1>
+      <p class="core-lead">Connecting devices, sharing resources and building intelligence together.</p>
+      <div class="core-actions"><a class="button primary" href="#layers">Explore the core <span aria-hidden="true">→</span></a><a class="button ghost" href="{{site_url}}/docs/#core">Read the documentation</a></div>
+      <p class="status light">Development preview</p>
+    </div>
+  </div>
+</section>
+
+<section class="core-layers core-paper" id="layers" aria-labelledby="layers-title">
+  <div class="core-heading wrap">
+    <span class="core-ornament" aria-hidden="true">✶</span>
+    <h2 id="layers-title">Five layers. A shared foundation.</h2>
+    <p>Different places. Many participants. A connected whole.</p>
+  </div>
+  <div class="core-harbour">
+    {{layers_picture}}
+    <svg class="core-connections" viewBox="0 0 1600 700" aria-hidden="true" focusable="false" preserveAspectRatio="none">
+      <g fill="none" stroke="#ffdb85" stroke-width="2"><path d="M155 450 Q350 200 605 410 T1155 425 Q1260 260 1450 365"/><path d="M330 555 Q740 230 1010 535 M605 410 Q830 300 1155 425"/></g>
+      <g fill="#ffebba" stroke="#c89139" stroke-width="2"><circle cx="155" cy="450" r="5"/><circle cx="330" cy="555" r="5"/><circle cx="605" cy="410" r="5"/><circle cx="1010" cy="535" r="5"/><circle cx="1155" cy="425" r="5"/><circle cx="1450" cy="365" r="5"/></g>
+    </svg>
+  </div>
+  <div class="core-layer-list wrap">{{layer_details}}</div>
+  <p class="core-boundary wrap">Architecture in development. Individual milestones have been tested; these are not yet five released services. The harbour connections are illustrative.</p>
+</section>
+
+<section class="core-applications core-paper" id="applications" aria-labelledby="applications-title">
+  <div class="core-heading wrap">
+    <span class="core-ornament" aria-hidden="true">✶</span>
+    <h2 id="applications-title">One core. Many applications.</h2>
+    <p>Built on existing projects. Extended through a shared foundation.</p>
+  </div>
+  <div class="core-app-list wrap">{{application_strip}}</div>
+  <p class="core-app-architecture wrap">Designed around one compatible background Core per device, shared by multiple applications. Other participants run their own Core, with their own resources and permissions.</p>
+</section>
+
+<section class="core-intelligence core-dark" id="intelligence" aria-labelledby="intelligence-title">
+  {{intelligence_picture}}
+  <div class="core-feature-wrap wrap">
+    <div class="core-intelligence-copy">
+      <h2 id="intelligence-title">Intelligence beyond a single device.</h2>
+      <p>VOLPAROSSA is being developed to let devices share suitable work, reuse models and learn from measured outcomes. The aim is to make a modest device an entry point to shared capabilities.</p>
+      <p class="status light">In development</p>
+      <a class="core-text-link" href="{{repository}}/blob/main/docs/services/DECENTRALIZED_AGENTS.md">Explore cooperative compute <span aria-hidden="true">↗</span></a>
+      <details class="core-disclosure">
+        <summary>Shared work, separate permissions <span aria-hidden="true">+</span></summary>
+        <p>The design divides suitable tasks and combines their results. Shared learning uses permitted data, with evaluation and correction as part of development. Private prompts, files and results are not automatically shared training material.</p>
+        <p>Confidential execution of private tasks on other participants’ devices remains unfinished. A local coding result does not establish protected distributed execution.</p>
+      </details>
+    </div>
+  </div>
+</section>
+
+<section class="core-dps core-paper" id="dps" aria-labelledby="dps-title">
+  <div class="core-dps-art">
+    {{dps_picture}}
+    <svg class="core-position-rings" viewBox="0 0 1000 900" aria-hidden="true" focusable="false"><g fill="none" stroke="#ffe2a1" stroke-width="2"><ellipse cx="570" cy="650" rx="170" ry="56"/><ellipse cx="570" cy="650" rx="106" ry="35" stroke-dasharray="4 10"/><path d="M420 330 Q680 190 855 400 M570 650 L420 330 M570 650 L855 400" opacity=".65"/></g><g fill="#fff0c4"><circle cx="570" cy="650" r="6"/><circle cx="420" cy="330" r="4"/><circle cx="855" cy="400" r="4"/></g></svg>
+  </div>
+  <div class="core-feature-wrap wrap">
+    <div class="core-dps-copy">
+      <p class="eyebrow">DPS — Decentralized Positioning System</p>
+      <h2 id="dps-title">Find your way, together.</h2>
+      <p class="core-dps-subtitle">Privacy-preserving positioning</p>
+      <p>DPS is being developed to combine satellite signals, nearby devices and local sensors, with explicit permissions and clear uncertainty. The goal is to improve positioning while keeping precise locations and movement history private.</p>
+      <ul class="core-dps-principles">
+        <li>{{sources_icon}}<h3>Multiple sources</h3><p>Explore complementary satellite, local and sensor-based measurements.</p></li>
+        <li>{{uncertainty_icon}}<h3>Visible uncertainty</h3><p>Make confidence, conflicts and unavailable information clear.</p></li>
+        <li>{{permissions_icon}}<h3>Explicit permissions</h3><p>Keep access, sharing and retention under separate permissions.</p></li>
+      </ul>
+      <p class="status">Research &amp; development</p>
+      <div class="core-actions"><a class="button primary" href="{{site_url}}/docs/#dps">Explore DPS <span aria-hidden="true">→</span></a><a class="core-text-link" href="{{repository}}/blob/main/docs/services/DPS.md">DPS source on GitHub <span aria-hidden="true">↗</span></a></div>
+      <details class="core-disclosure">
+        <summary>What the research establishes <span aria-hidden="true">+</span></summary>
+        <p>The current prototype assesses supplied position claims. Real sensor fusion, navigation and measured accuracy remain in development. Relative position does not establish an absolute location, and agreeing or signed claims do not prove geographic truth.</p>
+        <p>Receiving positioning help, accessing sensors, contributing measurements, retaining history and training models each need separate permission. Joining the network does not authorize sharing your precise location or movement history.</p>
+        <p>DPS uses the five Core layers. Privacy is a design goal, not a guarantee of anonymity. This page requests no location or sensor access; the illustrated points are fictional.</p>
+      </details>
+    </div>
+  </div>
+</section>
+
+<section class="core-closing core-paper" id="contribute" aria-labelledby="contribute-title">
+  {{closing_picture}}
+  <div class="core-feature-wrap wrap">
+    <div class="core-closing-copy">
+      <span class="core-ornament" aria-hidden="true">✶</span>
+      <h2 id="contribute-title">Help build the common ground.</h2>
+      <p>Open infrastructure grows through shared effort. Explore the design, test a milestone or help build the next part.</p>
+      <a class="button primary" href="{{repository}}/blob/main/CONTRIBUTING.md">Start contributing <span aria-hidden="true">→</span></a>
+      <div class="core-closing-links"><a href="{{repository}}/blob/main/docs/IMPLEMENTATION_STATUS.md">Explore the evidence <span aria-hidden="true">↗</span></a><a href="{{site_url}}/docs/">Documentation <span aria-hidden="true">→</span></a></div>
+      <p class="core-participation">Participation is voluntary. Joining the network means accepting its resource-sharing responsibilities.</p>
+      <details class="core-disclosure">
+        <summary>What participation means <span aria-hidden="true">+</span></summary>
+        <p>Participation requires explicit activation. Your own device use takes priority. Shared storage calls for a matching usable contribution, including recovery copies and overhead. No payment is required to participate.</p>
+        <p>Participants contribute according to available capabilities. Devices with an independent Internet connection also provide authorized exit service; local-only devices contribute local links and relay capacity.</p>
+      </details>
+    </div>
+  </div>
+</section>

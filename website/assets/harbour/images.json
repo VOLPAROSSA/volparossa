@@ -1,0 +1,238 @@
+{
+  "hero-desktop": [
+    {
+      "file": "hero-desktop-640.webp",
+      "fallback": "hero-desktop-640.jpg",
+      "width": 640,
+      "height": 360,
+      "bytes": 50552,
+      "fallback_bytes": 73959
+    },
+    {
+      "file": "hero-desktop-800.webp",
+      "fallback": "hero-desktop-800.jpg",
+      "width": 800,
+      "height": 450,
+      "bytes": 75430,
+      "fallback_bytes": 112549
+    },
+    {
+      "file": "hero-desktop-960.webp",
+      "fallback": "hero-desktop-960.jpg",
+      "width": 960,
+      "height": 540,
+      "bytes": 101400,
+      "fallback_bytes": 155699
+    },
+    {
+      "file": "hero-desktop-1280.webp",
+      "fallback": "hero-desktop-1280.jpg",
+      "width": 1280,
+      "height": 720,
+      "bytes": 209656,
+      "fallback_bytes": 254720
+    },
+    {
+      "file": "hero-desktop-1672.webp",
+      "fallback": "hero-desktop-1672.jpg",
+      "width": 1672,
+      "height": 941,
+      "bytes": 302008,
+      "fallback_bytes": 392666
+    }
+  ],
+  "hero-mobile": [
+    {
+      "file": "hero-mobile-480.webp",
+      "fallback": "hero-mobile-480.jpg",
+      "width": 480,
+      "height": 600,
+      "bytes": 65946,
+      "fallback_bytes": 95645
+    },
+    {
+      "file": "hero-mobile-800.webp",
+      "fallback": "hero-mobile-800.jpg",
+      "width": 800,
+      "height": 1000,
+      "bytes": 149728,
+      "fallback_bytes": 234543
+    },
+    {
+      "file": "hero-mobile-1122.webp",
+      "fallback": "hero-mobile-1122.jpg",
+      "width": 1122,
+      "height": 1402,
+      "bytes": 239328,
+      "fallback_bytes": 402120
+    }
+  ],
+  "shared-harbour": [
+    {
+      "file": "shared-harbour-640.webp",
+      "fallback": "shared-harbour-640.jpg",
+      "width": 640,
+      "height": 360,
+      "bytes": 67938,
+      "fallback_bytes": 88731
+    },
+    {
+      "file": "shared-harbour-800.webp",
+      "fallback": "shared-harbour-800.jpg",
+      "width": 800,
+      "height": 450,
+      "bytes": 102516,
+      "fallback_bytes": 136501
+    },
+    {
+      "file": "shared-harbour-960.webp",
+      "fallback": "shared-harbour-960.jpg",
+      "width": 960,
+      "height": 540,
+      "bytes": 141082,
+      "fallback_bytes": 190765
+    },
+    {
+      "file": "shared-harbour-1280.webp",
+      "fallback": "shared-harbour-1280.jpg",
+      "width": 1280,
+      "height": 720,
+      "bytes": 286150,
+      "fallback_bytes": 314653
+    },
+    {
+      "file": "shared-harbour-1672.webp",
+      "fallback": "shared-harbour-1672.jpg",
+      "width": 1672,
+      "height": 941,
+      "bytes": 427518,
+      "fallback_bytes": 487751
+    }
+  ],
+  "intelligence": [
+    {
+      "file": "intelligence-640.webp",
+      "fallback": "intelligence-640.jpg",
+      "width": 640,
+      "height": 360,
+      "bytes": 47636,
+      "fallback_bytes": 70790
+    },
+    {
+      "file": "intelligence-800.webp",
+      "fallback": "intelligence-800.jpg",
+      "width": 800,
+      "height": 450,
+      "bytes": 66990,
+      "fallback_bytes": 104171
+    },
+    {
+      "file": "intelligence-960.webp",
+      "fallback": "intelligence-960.jpg",
+      "width": 960,
+      "height": 540,
+      "bytes": 89500,
+      "fallback_bytes": 141618
+    },
+    {
+      "file": "intelligence-1280.webp",
+      "fallback": "intelligence-1280.jpg",
+      "width": 1280,
+      "height": 720,
+      "bytes": 175996,
+      "fallback_bytes": 223917
+    },
+    {
+      "file": "intelligence-1672.webp",
+      "fallback": "intelligence-1672.jpg",
+      "width": 1672,
+      "height": 941,
+      "bytes": 249340,
+      "fallback_bytes": 334747
+    }
+  ],
+  "dps": [
+    {
+      "file": "dps-640.webp",
+      "fallback": "dps-640.jpg",
+      "width": 640,
+      "height": 360,
+      "bytes": 62436,
+      "fallback_bytes": 85090
+    },
+    {
+      "file": "dps-800.webp",
+      "fallback": "dps-800.jpg",
+      "width": 800,
+      "height": 450,
+      "bytes": 90170,
+      "fallback_bytes": 127532
+    },
+    {
+      "file": "dps-960.webp",
+      "fallback": "dps-960.jpg",
+      "width": 960,
+      "height": 540,
+      "bytes": 121512,
+      "fallback_bytes": 175146
+    },
+    {
+      "file": "dps-1280.webp",
+      "fallback": "dps-1280.jpg",
+      "width": 1280,
+      "height": 720,
+      "bytes": 240222,
+      "fallback_bytes": 281720
+    },
+    {
+      "file": "dps-1672.webp",
+      "fallback": "dps-1672.jpg",
+      "width": 1672,
+      "height": 941,
+      "bytes": 353014,
+      "fallback_bytes": 429623
+    }
+  ],
+  "closing": [
+    {
+      "file": "closing-640.webp",
+      "fallback": "closing-640.jpg",
+      "width": 640,
+      "height": 360,
+      "bytes": 62900,
+      "fallback_bytes": 85254
+    },
+    {
+      "file": "closing-800.webp",
+      "fallback": "closing-800.jpg",
+      "width": 800,
+      "height": 450,
+      "bytes": 92414,
+      "fallback_bytes": 129021
+    },
+    {
+      "file": "closing-960.webp",
+      "fallback": "closing-960.jpg",
+      "width": 960,
+      "height": 540,
+      "bytes": 127230,
+      "fallback_bytes": 178593
+    },
+    {
+      "file": "closing-1280.webp",
+      "fallback": "closing-1280.jpg",
+      "width": 1280,
+      "height": 720,
+      "bytes": 250934,
+      "fallback_bytes": 290980
+    },
+    {
+      "file": "closing-1672.webp",
+      "fallback": "closing-1672.jpg",
+      "width": 1672,
+      "height": 940,
+      "bytes": 370646,
+      "fallback_bytes": 446868
+    }
+  ]
+}
