@@ -15,7 +15,7 @@ async function settle(page) {
       scrollTo({top:y, behavior:'instant'});
       await new Promise(r => setTimeout(r, 70));
     }
-    await Promise.all([...document.images].map(i => i.decode().catch(() => {})));
+    await Promise.all([...document.images].filter(i => !i.closest('.core-carousel-card[inert]')).map(i => i.decode().catch(() => {})));
     scrollTo({top:0, behavior:'instant'});
   });
 }
@@ -38,7 +38,7 @@ for (const [name, engine] of [['chromium',chromium],['firefox',firefox]]) {
     await settle(page);
     const dimensions=await overflow(page);
     check(dimensions.scroll <= width, `${name} ${width} overflow: ${JSON.stringify(dimensions)}`);
-    check(await page.locator('img').evaluateAll(xs => xs.every(i => i.complete && i.naturalWidth)),`${name} ${width} image did not load`);
+    check(await page.locator('img').evaluateAll(xs => xs.every(i => i.closest('.core-carousel-card[inert]') || (i.complete && i.naturalWidth))),`${name} ${width} image did not load`);
     check(!errors.length,`${name} ${width}: ${errors.join(', ')}`);
     check(requests.every(u=>new URL(u).origin===new URL(url).origin), 'Unexpected third-party visitor request');
     for(const layer of await page.locator('#layers details').all()) {

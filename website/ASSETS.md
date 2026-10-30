@@ -2,8 +2,9 @@
 
 This page follows the user-selected Golden Harbour concept. Scenery is artistic
 illustration, not evidence of functioning infrastructure or measured positioning.
-All headings, labels, controls, application marks, connections and uncertainty
-rings are separate HTML/SVG elements. No visitor location is used.
+All headings, labels, controls and application marks remain real HTML/SVG.
+Harbour connections are a separate decorative SVG. The refined DPS scene contains
+fixed artistic rings and arcs; they are fictional, with no visitor location or data.
 
 ## Shared identity and upstream marks
 
@@ -18,8 +19,10 @@ OFL notices. The GitHub mark is the official Octicon with its MIT notice in
 `theme/assets/icons/`. Original site code follows the repository GPL-3.0-only
 license. Shared project credits remain at <https://volparossa.org/credits/>.
 
-OpenCode, Immich and OpenCloud SVGs are unchanged originals copied from the shared
-export. Authoritative URLs, exact upstream revisions, hashes and mark conditions
+OpenCode and Immich SVGs remain unchanged originals from the shared export.
+The nine-application carousel adds original upstream icons, including the square
+OpenCloud application icon; see [carousel icon sources](CAROUSEL-ASSETS.md).
+The original OpenCloud wordmark also remains intact in the pinned theme. Authoritative URLs, exact upstream revisions, hashes and mark conditions
 are recorded in [the upstream registry](theme/notices/upstream-sources.json) and
 [the retained asset register](theme/notices/ASSETS.md). Relevant OpenCode, Immich
 and OpenCloud source notices remain in `theme/assets/upstream/` and are also copied
@@ -31,16 +34,18 @@ party was contacted.
 
 ## Artwork
 
-Six clean images were generated with `image_gen.imagegen` on 30 October 2026,
-using the supplied selected reference as direction:
+Six clean images were generated with `image_gen.imagegen` on 30 October 2026.
+Following the owner’s visual review, the four scenes below the hero were
+reconstructed directly against their corresponding areas of the supplied concept.
+Both hero masters, their exports and the social image remain byte-for-byte unchanged:
 
 | Master | Composition | Separate overlay |
 | --- | --- | --- |
 | `artwork/masters/hero-desktop.png` | Sheltered dark quay, fox, workers, radiant harbour and cream sails | HTML title, actions and development badge |
 | `artwork/masters/hero-mobile.png` | Intentionally recomposed portrait with the full fox and quay | HTML reading area above, soft CSS transition |
 | `artwork/masters/shared-harbour.png` | Several equally important inhabited docks | Static decorative SVG connections, five native disclosures |
-| `artwork/masters/intelligence.png` | People collaborating around a physical ship model | HTML content and development limits |
-| `artwork/masters/dps.png` | Coastal navigation table, relief map and brass instrument | Fixed fictional SVG uncertainty rings and points |
+| `artwork/masters/intelligence.png` | Four people collaborating around a golden wireframe ship, matching the concept workshop | HTML content and development limits |
+| `artwork/masters/dps.png` | Chart table, brass instrument, navigator at right and coastal landmarks | Fixed fictional artistic rings/arcs within the scene; HTML research text |
 | `artwork/masters/closing.png` | Welcoming harbour, ships and working quay | HTML invitation and participation explanation |
 
 The exact prompts are in `artwork/prompts/`. `artwork/provenance.json` contains
@@ -51,8 +56,10 @@ are never copied into the site output or loaded by a visitor.
 
 Responsive WebP images with JPEG fallbacks live in `assets/harbour/`. The mobile
 hero is a separate composition. Other mobile scenes show the full image beneath
-their text; wide desktop sections use documented CSS framing and soft paper
-transitions. The five-layer connections are an artistic metaphor, not a transport
+their text; wide desktop sections preserve full scene proportions with soft paper
+transitions. The workshop’s mobile framing removes its empty left reading area
+while retaining the group and wireframe ship. Changed scenery filenames include
+the master hash so browsers request the revised artwork after deployment. The five-layer connections are an artistic metaphor, not a transport
 diagram or a central controlling hub. DPS is research using the five Core layers,
 not a sixth layer or a live map. No motion is needed to understand either image.
 

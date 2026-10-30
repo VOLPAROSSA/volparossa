@@ -95,3 +95,30 @@ before enabling the homepage's Core publication flag. Revert through a normal
 reviewed PR and the same workflow if a rollback is needed.
 
 Original site code is GPL-3.0-only. Preserve third-party notices in `theme/`.
+
+## Concept refinement and application carousel
+
+The second visual review replaces the four scenes below the unchanged hero with
+compositions reconstructed from the selected concept. Regenerate only these
+responsive assets with:
+
+```sh
+python3 website/prepare_images.py --names shared-harbour intelligence dps closing
+```
+
+ Masters, exact prompts and export
+hashes remain in `artwork/`; revised derivative filenames include a master hash.
+
+`applications.py` uses the pinned shared registry for all applications except
+Bank and Citizen. Original icons and notices are documented in
+[CAROUSEL-ASSETS.md](CAROUSEL-ASSETS.md). Local `assets/carousel.css` and
+`assets/carousel.js` progressively enhance the ordinary HTML grid into a
+three/two/one-card carousel with six-second rotation, manual controls and pausing.
+Run its focused browser checks from the repository root:
+
+```sh
+SITE_QA_URL=http://127.0.0.1:8765/volparossa/ CHROME_PATH=/path/to/chromium node website/carousel_check.mjs
+```
+
+[Refinement verification](REFINEMENT-VERIFICATION.md) records this revision’s
+visual review, responsive and carousel checks, and performance.

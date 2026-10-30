@@ -10,6 +10,8 @@ import re
 import shutil
 import tempfile
 
+from applications import render_applications
+
 HERE = Path(__file__).resolve().parent
 THEME = HERE / 'theme'
 CONFIG = json.loads((HERE / 'config.json').read_text())
@@ -61,23 +63,6 @@ def layers():
     return '\n'.join(f'<details class="core-layer"><summary>{icon(key)}<h3>{name}</h3><span class="core-layer-short">{short}</span><span class="core-detail-cue">Explore {name.lower()}</span></summary><div class="core-layer-more"><p>{body}</p><a href="{REPOSITORY}/blob/main/docs/{path}">{name} documentation ↗</a></div></details>' for key, name, short, body, path in rows)
 
 
-def applications():
-    registry = json.loads((THEME / 'data/applications.json').read_text())
-    summaries = {'code': 'Coding workflows and cooperative AI.', 'image': 'Your photos, with a shared storage foundation.', 'cloud': 'Files and collaboration across a shared network.'}
-    marks = {'code': ('opencode.svg', 40, 50), 'image': ('immich.svg', 58, 58), 'cloud': ('opencloud.svg', 108, 64)}
-    output = []
-    for app in registry:
-        key = app['id']
-        if key not in summaries:
-            continue
-        mark, width, height = marks[key]
-        logo = f'<span class="core-app-mark"><img src="{BASE}assets/upstream/{mark}" width="{width}" height="{height}" alt="" loading="lazy"></span>' if CONFIG['upstream_marks'] else ''
-        url = app['publication_url'] if app['published'] else app['repository']
-        destination = 'Application website' if app['published'] else 'Project repository · GitHub ↗'
-        output.append(f'<article class="core-app core-app-{key}"><div class="core-app-brand">{logo}<div><h3>{escape(app["name"])}</h3><a class="core-app-upstream" href="{escape(app["upstream_url"], quote=True)}">Built on {escape(app["upstream"])}</a></div></div><p>{summaries[key]}</p><span class="status">{escape(app["status"])}</span><a class="core-text-link" href="{escape(url, quote=True)}">Explore {escape(app["name"])} <span aria-hidden="true">→</span></a><p class="core-app-destination">{destination}</p></article>')
-    return '\n'.join(output)
-
-
 def build(output, preview=False):
     output = output.resolve()
     repo = HERE.parent
@@ -107,7 +92,7 @@ def build(output, preview=False):
         'social_image': CANONICAL + 'assets/harbour/social.jpg',
         'social_alt': 'A red fox on a sheltered quay overlooking the Golden Harbour at sunset.',
         'github_icon': github,
-        'head_extra': f'<link rel="stylesheet" href="{BASE}assets/core.css">' + ('<meta name="robots" content="noindex, nofollow">' if preview else ''),
+        'head_extra': f'<link rel="stylesheet" href="{BASE}assets/core.css"><link rel="stylesheet" href="{BASE}assets/carousel.css"><script src="{BASE}assets/carousel.js" defer></script>' + ('<meta name="robots" content="noindex, nofollow">' if preview else ''),
         'nav_links': navigation.navigation_links(nav_config['main'], links, 'core', github),
         'footer_links': navigation.navigation_links(nav_config['footer'], links, 'core', github, footer=True),
         'hero_picture': picture('hero-desktop', images, 'hero-mobile', eager=True),
@@ -115,7 +100,7 @@ def build(output, preview=False):
         'intelligence_picture': picture('intelligence', images),
         'dps_picture': picture('dps', images),
         'closing_picture': picture('closing', images),
-        'layer_details': layers(), 'application_strip': applications(),
+        'layer_details': layers(), 'application_strip': render_applications(THEME, BASE, CONFIG['upstream_marks']),
         'sources_icon': icon('sources'), 'uncertainty_icon': icon('uncertainty'), 'permissions_icon': icon('permissions'),
     }
     for name in ('header', 'footer'):

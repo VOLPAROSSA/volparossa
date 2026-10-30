@@ -4,6 +4,13 @@ This is website evidence only. No Core runtime, network participation, sensor,
 model, native installation or financial test was run. The existing Core quality
 gate remains required through the normal PR process.
 
+## Later visual refinement
+
+The owner requested closer scene matching and an automatic carousel of all nine
+non-Bank/Citizen applications. Current results and screenshots are in
+[refinement verification](REFINEMENT-VERIFICATION.md). The following record and
+its original artifacts describe the first publication and are retained unchanged.
+
 ## Checked result
 
 - Python preview and production builds pass the offline site checker: semantic
