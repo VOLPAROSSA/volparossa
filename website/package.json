@@ -1,0 +1,12 @@
+{
+  "name": "volparossa-core-website-qa",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Optional browser verification; production uses a Python-only static build.",
+  "scripts": {"qa": "node browser_check.mjs"},
+  "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
+    "lighthouse": "13.6.0",
+    "playwright": "1.62.1"
+  }
+}

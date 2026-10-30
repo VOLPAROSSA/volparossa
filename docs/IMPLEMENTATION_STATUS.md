@@ -31,6 +31,18 @@ original bytes for offline inspection. Read only evidence relevant to the task.
 
 ## Current integration and active work
 
+### Core project website — 2026-10-30
+
+The bounded Golden Harbour introduction lives in `website/`, with an isolated
+Python static build and project Pages artifact for `/volparossa/`. It imports
+reviewed shared theme v1.0.3 from homepage commit `8114d966f3e9` and preserves
+development/permission boundaries from Core source `edf569300acb`.
+[Website verification](../website/VERIFICATION.md) records responsive Chromium/
+Firefox renders, accessibility, no-JavaScript behavior and performance results.
+This work changes no runtime or project goal and supplies no new Core, DPS,
+network, model or sensor acceptance evidence. Publication follows the existing
+required PR gate and the separate scoped website deployment workflow.
+
 ### F04 — helperacceptatie geslaagd; handmatige integratie — 2026-10-27
 
 De kandidaat voor [PR349](https://github.com/VOLPAROSSA/volparossa/pull/349) bevat de minimale
