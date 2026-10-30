@@ -19,9 +19,12 @@
   </div>
   <div class="core-harbour">
     {{layers_picture}}
-    <svg class="core-connections" viewBox="0 0 1600 700" aria-hidden="true" focusable="false" preserveAspectRatio="none">
-      <g fill="none" stroke="#ffdb85" stroke-width="2"><path d="M155 450 Q350 200 605 410 T1155 425 Q1260 260 1450 365"/><path d="M330 555 Q740 230 1010 535 M605 410 Q830 300 1155 425"/></g>
-      <g fill="#ffebba" stroke="#c89139" stroke-width="2"><circle cx="155" cy="450" r="5"/><circle cx="330" cy="555" r="5"/><circle cx="605" cy="410" r="5"/><circle cx="1010" cy="535" r="5"/><circle cx="1155" cy="425" r="5"/><circle cx="1450" cy="365" r="5"/></g>
+    <svg class="core-connections" viewBox="0 0 2060 763" aria-hidden="true" focusable="false">
+      <defs><filter id="harbour-glow" x="-50%" y="-100%" width="200%" height="300%"><feGaussianBlur stdDeviation="5"/></filter></defs>
+      <g fill="none" stroke="#ffbd50" stroke-width="5" opacity=".8" filter="url(#harbour-glow)"><path d="M130 450 Q370 405 620 545 Q760 405 925 466 Q1390 340 1803 450 M130 450 Q570 180 1410 350 Q1590 340 1803 450 M620 545 Q960 405 1410 350"/></g>
+      <g fill="none" stroke="#ffe3a1" stroke-width="1.7"><path d="M130 450 Q370 405 620 545 Q760 405 925 466 Q1390 340 1803 450 M130 450 Q570 180 1410 350 Q1590 340 1803 450 M620 545 Q960 405 1410 350"/>
+        <ellipse cx="130" cy="450" rx="32" ry="11"/><ellipse cx="620" cy="545" rx="38" ry="14"/><ellipse cx="925" cy="466" rx="35" ry="12"/><ellipse cx="1410" cy="350" rx="28" ry="9"/><ellipse cx="1803" cy="450" rx="38" ry="13"/>
+      </g>
     </svg>
   </div>
   <div class="core-layer-list wrap">{{layer_details}}</div>
@@ -34,7 +37,7 @@
     <h2 id="applications-title">One core. Many applications.</h2>
     <p>Built on existing projects. Extended through a shared foundation.</p>
   </div>
-  <div class="core-app-list wrap">{{application_strip}}</div>
+  {{application_strip}}
   <p class="core-app-architecture wrap">Designed around one compatible background Core per device, shared by multiple applications. Other participants run their own Core, with their own resources and permissions.</p>
 </section>
 
@@ -58,7 +61,7 @@
 <section class="core-dps core-paper" id="dps" aria-labelledby="dps-title">
   <div class="core-dps-art">
     {{dps_picture}}
-    <svg class="core-position-rings" viewBox="0 0 1000 900" aria-hidden="true" focusable="false"><g fill="none" stroke="#ffe2a1" stroke-width="2"><ellipse cx="570" cy="650" rx="170" ry="56"/><ellipse cx="570" cy="650" rx="106" ry="35" stroke-dasharray="4 10"/><path d="M420 330 Q680 190 855 400 M570 650 L420 330 M570 650 L855 400" opacity=".65"/></g><g fill="#fff0c4"><circle cx="570" cy="650" r="6"/><circle cx="420" cy="330" r="4"/><circle cx="855" cy="400" r="4"/></g></svg>
+
   </div>
   <div class="core-feature-wrap wrap">
     <div class="core-dps-copy">

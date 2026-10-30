@@ -32,6 +32,7 @@ class Page(HTMLParser):
         self.headings = []
         self.visible = {}
         self.details = {}
+        self.applications = []
         self.landmarks = []
         self.title = ""
         self.lang = ""
@@ -49,6 +50,8 @@ class Page(HTMLParser):
             self.errors.append("Inline event handler")
         if tag == "script" and (not attrs.get("src") or "defer" not in attrs):
             self.errors.append("Scripts must be local, external and deferred")
+        if tag == "article" and "data-app" in attrs:
+            self.applications.append(attrs["data-app"])
         identifier = attrs.get("id")
         if identifier:
             if identifier in self.ids:
@@ -200,6 +203,8 @@ def check_site(output, preview=False):
     index = pages.get((output / "index.html").resolve())
     if index:
         require(SECTIONS <= index.ids, "Missing required Core sections")
+        expected_apps = {"code", "image", "cloud", "browser", "chat", "mail", "map", "weather", "studio"}
+        require(set(index.applications) == expected_apps and len(index.applications) == 9, "Carousel must include each requested application once, excluding Bank and Citizen")
         require(index.links.get("canonical") == CANONICAL, "Incorrect Core production canonical")
         require(index.metadata.get("og:url") == CANONICAL, "Incorrect Core Open Graph URL")
         require(index.details.get("layers") == 5, "Each of the five layers needs one native disclosure")

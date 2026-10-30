@@ -26,8 +26,8 @@
 .core-ornament::after { transform: rotate(180deg); }
 .core-harbour { position: relative; margin-top: -.8rem; }
 .core-harbour .core-media { mask-image: linear-gradient(transparent, #000 8%, #000 89%, transparent); }
-.core-harbour .core-media img { aspect-ratio: 16/5.6; object-fit: cover; object-position: center 62%; }
-.core-connections { position: absolute; inset: 0; width: 100%; height: 100%; opacity: .75; pointer-events: none; }
+.core-harbour .core-media img { height: auto; }
+.core-connections { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .core-layer-list { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); padding-block: .3rem 1.3rem; }
 .core-layer { min-width: 0; padding: 0 1.3rem; border-left: 1px solid #b38b5a55; }
 .core-layer:first-child { border-left: 0; }
@@ -61,14 +61,15 @@
 .core-app .core-app-destination { font-size: .6rem; color: #68513c; letter-spacing: .05em; text-transform: uppercase; margin-top: .2rem; }
 .core-app-architecture { max-width: 90ch; text-align: center; font-size: .76rem; color: #675646; line-height: 1.8; }
 .core-dark { background: #1c120d; color: var(--paper); }
-.core-intelligence { position: relative; isolation: isolate; display: grid; min-height: 610px; }
-.core-intelligence > .core-media { position: absolute; inset: 0 0 0 23%; z-index: -2; }
-.core-intelligence > .core-media img { width: 100%; height: 100%; object-fit: cover; object-position: center; }
-.core-intelligence::after { content: ''; position: absolute; inset: 0; z-index: -1; background: linear-gradient(90deg, #160e0af7 0%, #160e0ae8 23%, #160e0abf 38%, transparent 65%); }
+.core-intelligence { position: relative; isolation: isolate; display: grid; }
+.core-intelligence > .core-media { grid-area: 1/1; align-self: center; z-index: -2; mask-image: linear-gradient(transparent, #000 5%, #000 95%, transparent); }
+.core-intelligence > .core-media img { width: 100%; height: auto; }
+.core-intelligence::after { content: ''; position: absolute; inset: 0; z-index: -1; background: linear-gradient(90deg, #160e0a88, #160e0a55 27%, transparent 40%); }
 .core-feature-wrap { grid-area: 1/1; position: relative; }
-.core-intelligence-copy { width: 43%; max-width: 36rem; padding-block: 4rem; }
-.core-intelligence h2 { font-size: clamp(2.7rem, 3.6vw, 4.1rem); margin-bottom: 1.3rem; }
-.core-intelligence-copy > p:not(.status) { font-size: .94rem; line-height: 1.85; color: #f4e7d6; }
+.core-intelligence .core-feature-wrap { align-self: center; width: calc(100% - var(--space) * 2); max-width: none; }
+.core-intelligence-copy { width: 32%; max-width: 38rem; padding-block: 3rem; }
+.core-intelligence h2 { font-size: clamp(2.7rem, 3.2vw, 4.1rem); margin-bottom: 1.3rem; }
+.core-intelligence-copy > p:not(.status) { font-size: .9rem; line-height: 1.7; color: #f4e7d6; }
 .core-intelligence .status { display: table; margin: 1.2rem 0; }
 .core-text-link { display: inline-flex; align-items: center; gap: .75rem; font-size: .82rem; padding-block: .4rem; }
 .core-disclosure { border-top: 1px solid #a176444d; margin-top: 1.4rem; }
@@ -80,11 +81,12 @@
 .core-dark .core-disclosure { border-color: #d3b78d66; }
 .core-dark a:focus-visible, .core-dark summary:focus-visible, .core-hero a:focus-visible { outline-color: #ffd48d; }
 .core-dps { position: relative; isolation: isolate; display: grid; min-height: 780px; }
-.core-dps-art { position: absolute; inset: 0 0 0 28%; z-index: -2; mask-image: linear-gradient(90deg, transparent, #000 28%); }
-.core-dps-art .core-media, .core-dps-art img { width: 100%; height: 100%; object-fit: cover; object-position: 64% center; }
-.core-dps::after { content: ''; position: absolute; inset: 0; z-index: -1; background: linear-gradient(90deg, var(--paper) 0%, #f5eddfef 27%, #f5eddfed 40%, #f5eddf99 51%, #f5eddf00 66%); }
+.core-dps-art { grid-area: 1/1; align-self: center; justify-self: end; width: 65%; z-index: -2; mask-image: linear-gradient(90deg, transparent, #000 16%); }
+.core-dps-art .core-media { mask-image: linear-gradient(transparent, #000 9%, #000 91%, transparent); }
+.core-dps-art .core-media, .core-dps-art img { width: 100%; height: auto; }
+.core-dps::after { content: ''; position: absolute; inset: 0; z-index: -1; background: linear-gradient(90deg, var(--paper) 0%, #f5eddf 40%, #f5eddfef 44%, #f5eddf00 56%); }
 .core-position-rings { position: absolute; inset: 0; width: 100%; height: 100%; opacity: .8; pointer-events: none; }
-.core-dps-copy { width: 51%; max-width: 42rem; padding-block: 4rem 3rem; }
+.core-dps-copy { width: 43%; max-width: 42rem; padding-block: 3rem; }
 .core-dps .eyebrow { color: #78451f; letter-spacing: .16em; margin-bottom: 1rem; }
 .core-dps h2 { font-size: clamp(3rem, 4.2vw, 4.8rem); max-width: 13ch; }
 .core-dps-subtitle { font-family: var(--serif); font-size: clamp(1.55rem, 2.3vw, 2.15rem); color: #814818; line-height: 1.25; margin: .8rem 0 1rem; }
@@ -98,9 +100,9 @@
 .core-dps .core-actions { margin-top: 1.1rem; }
 .core-dps .core-text-link { color: #78451f; font-size: .76rem; }
 .core-closing { position: relative; display: grid; isolation: isolate; border-top: 1px solid #b38b5a44; }
-.core-closing > .core-media { position: absolute; inset: 0 0 0 26%; z-index: -2; mask-image: linear-gradient(90deg, transparent, #000 26%); }
-.core-closing > .core-media img { width: 100%; height: 100%; object-fit: cover; object-position: 63% center; }
-.core-closing::after { content: ''; position: absolute; inset: 0; z-index: -1; background: linear-gradient(90deg, var(--paper), #f5eddff5 31%, #f5eddfdd 43%, #f5eddf00 63%); }
+.core-closing > .core-media { grid-area: 1/1; align-self: center; justify-self: end; width: 60%; z-index: -2; mask-image: linear-gradient(90deg, transparent, #000 18%); }
+.core-closing > .core-media img { width: 100%; height: auto; mask-image: linear-gradient(transparent, #000 7%, #000 93%, transparent); }
+.core-closing::after { content: ''; position: absolute; inset: 0; z-index: -1; background: linear-gradient(90deg, var(--paper), #f5eddf 40%, #f5eddfef 46%, #f5eddf00 59%); }
 .core-closing-copy { width: 48%; max-width: 39rem; padding-block: 3rem 2.5rem; }
 .core-closing .core-ornament { justify-content: flex-start; }
 .core-closing h2 { font-size: clamp(2.8rem, 3.7vw, 4.25rem); margin-bottom: 1.2rem; }
@@ -127,7 +129,7 @@
   .core-layer h3 { font-size: 1.65rem; }
   .core-app { padding-inline: 1.25rem; }
   .core-app-cloud .core-app-mark { width: 130px; }
-  .core-intelligence-copy { width: 48%; }
+  .core-intelligence-copy { width: 34%; }
   .core-dps-copy { width: 56%; }
   .core-closing-copy { width: 53%; }
 }
@@ -161,10 +163,10 @@
   .core-intelligence-copy { width: 100%; max-width: none; padding-block: 3rem 1rem; }
   .core-intelligence h2 { max-width: 20ch; }
   .core-intelligence > .core-media { position: relative; inset: auto; mask-image: linear-gradient(transparent, #000 20%); margin-top: -1rem; }
-  .core-intelligence > .core-media img { height: auto; }
+  .core-intelligence > .core-media img { height: auto; aspect-ratio: 1.8; object-fit: cover; object-position: right; }
   .core-dps { display: flex; flex-direction: column; min-height: 0; }
-  .core-dps-art { position: relative; inset: auto; order: 2; mask-image: linear-gradient(transparent, #000 18%); margin-top: -1.5rem; }
-  .core-dps-art .core-media, .core-dps-art img { height: auto; }
+  .core-dps-art { position: relative; inset: auto; width: 100%; order: 2; mask-image: linear-gradient(transparent, #000 18%); margin-top: -1.5rem; }
+  .core-dps-art .core-media, .core-dps-art img { height: auto; mask-image: none; }
   .core-dps::after { display: none; }
   .core-dps-copy { width: 100%; max-width: none; padding-block: 3rem 2rem; }
   .core-dps h2 { max-width: none; }
@@ -172,8 +174,8 @@
   .core-closing { display: flex; flex-direction: column; }
   .core-closing::after { display: none; }
   .core-closing-copy { width: 100%; max-width: none; padding-block: 3rem 1.5rem; }
-  .core-closing > .core-media { position: relative; inset: auto; order: 2; mask-image: linear-gradient(transparent, #000 25%); margin-top: -1.5rem; }
-  .core-closing > .core-media img { height: auto; }
+  .core-closing > .core-media { position: relative; inset: auto; width: 100%; order: 2; mask-image: linear-gradient(transparent, #000 25%); margin-top: -1.5rem; }
+  .core-closing > .core-media img { height: auto; mask-image: none; }
 }
 @media (max-width: 550px) {
   .core-hero-copy { padding-top: 2.3rem; margin-bottom: -2.5rem; }

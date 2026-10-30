@@ -69,170 +69,178 @@
   ],
   "shared-harbour": [
     {
-      "file": "shared-harbour-640.webp",
-      "fallback": "shared-harbour-640.jpg",
+      "file": "shared-harbour-9d67aa2097-640.webp",
+      "fallback": "shared-harbour-9d67aa2097-640.jpg",
       "width": 640,
-      "height": 360,
-      "bytes": 67938,
-      "fallback_bytes": 88731
+      "height": 237,
+      "bytes": 48596,
+      "fallback_bytes": 62599
     },
     {
-      "file": "shared-harbour-800.webp",
-      "fallback": "shared-harbour-800.jpg",
+      "file": "shared-harbour-9d67aa2097-800.webp",
+      "fallback": "shared-harbour-9d67aa2097-800.jpg",
       "width": 800,
-      "height": 450,
-      "bytes": 102516,
-      "fallback_bytes": 136501
+      "height": 296,
+      "bytes": 72494,
+      "fallback_bytes": 94484
     },
     {
-      "file": "shared-harbour-960.webp",
-      "fallback": "shared-harbour-960.jpg",
+      "file": "shared-harbour-9d67aa2097-960.webp",
+      "fallback": "shared-harbour-9d67aa2097-960.jpg",
       "width": 960,
-      "height": 540,
-      "bytes": 141082,
-      "fallback_bytes": 190765
+      "height": 356,
+      "bytes": 99152,
+      "fallback_bytes": 134473
     },
     {
-      "file": "shared-harbour-1280.webp",
-      "fallback": "shared-harbour-1280.jpg",
+      "file": "shared-harbour-9d67aa2097-1280.webp",
+      "fallback": "shared-harbour-9d67aa2097-1280.jpg",
       "width": 1280,
-      "height": 720,
-      "bytes": 286150,
-      "fallback_bytes": 314653
+      "height": 474,
+      "bytes": 205324,
+      "fallback_bytes": 225892
     },
     {
-      "file": "shared-harbour-1672.webp",
-      "fallback": "shared-harbour-1672.jpg",
+      "file": "shared-harbour-9d67aa2097-1672.webp",
+      "fallback": "shared-harbour-9d67aa2097-1672.jpg",
       "width": 1672,
-      "height": 941,
-      "bytes": 427518,
-      "fallback_bytes": 487751
+      "height": 619,
+      "bytes": 314552,
+      "fallback_bytes": 356079
+    },
+    {
+      "file": "shared-harbour-9d67aa2097-2060.webp",
+      "fallback": "shared-harbour-9d67aa2097-2060.jpg",
+      "width": 2060,
+      "height": 763,
+      "bytes": 426502,
+      "fallback_bytes": 498356
     }
   ],
   "intelligence": [
     {
-      "file": "intelligence-640.webp",
-      "fallback": "intelligence-640.jpg",
+      "file": "intelligence-cfa55b31a6-640.webp",
+      "fallback": "intelligence-cfa55b31a6-640.jpg",
       "width": 640,
-      "height": 360,
-      "bytes": 47636,
-      "fallback_bytes": 70790
+      "height": 246,
+      "bytes": 31496,
+      "fallback_bytes": 47854
     },
     {
-      "file": "intelligence-800.webp",
-      "fallback": "intelligence-800.jpg",
+      "file": "intelligence-cfa55b31a6-800.webp",
+      "fallback": "intelligence-cfa55b31a6-800.jpg",
       "width": 800,
-      "height": 450,
-      "bytes": 66990,
-      "fallback_bytes": 104171
+      "height": 308,
+      "bytes": 46316,
+      "fallback_bytes": 71936
     },
     {
-      "file": "intelligence-960.webp",
-      "fallback": "intelligence-960.jpg",
+      "file": "intelligence-cfa55b31a6-960.webp",
+      "fallback": "intelligence-cfa55b31a6-960.jpg",
       "width": 960,
-      "height": 540,
-      "bytes": 89500,
-      "fallback_bytes": 141618
+      "height": 370,
+      "bytes": 62108,
+      "fallback_bytes": 99046
     },
     {
-      "file": "intelligence-1280.webp",
-      "fallback": "intelligence-1280.jpg",
+      "file": "intelligence-cfa55b31a6-1280.webp",
+      "fallback": "intelligence-cfa55b31a6-1280.jpg",
       "width": 1280,
-      "height": 720,
-      "bytes": 175996,
-      "fallback_bytes": 223917
+      "height": 493,
+      "bytes": 128350,
+      "fallback_bytes": 160242
     },
     {
-      "file": "intelligence-1672.webp",
-      "fallback": "intelligence-1672.jpg",
+      "file": "intelligence-cfa55b31a6-1672.webp",
+      "fallback": "intelligence-cfa55b31a6-1672.jpg",
       "width": 1672,
-      "height": 941,
-      "bytes": 249340,
-      "fallback_bytes": 334747
+      "height": 644,
+      "bytes": 186144,
+      "fallback_bytes": 245554
     }
   ],
   "dps": [
     {
-      "file": "dps-640.webp",
-      "fallback": "dps-640.jpg",
+      "file": "dps-ec0cc39c20-640.webp",
+      "fallback": "dps-ec0cc39c20-640.jpg",
       "width": 640,
       "height": 360,
-      "bytes": 62436,
-      "fallback_bytes": 85090
+      "bytes": 52888,
+      "fallback_bytes": 76250
     },
     {
-      "file": "dps-800.webp",
-      "fallback": "dps-800.jpg",
+      "file": "dps-ec0cc39c20-800.webp",
+      "fallback": "dps-ec0cc39c20-800.jpg",
       "width": 800,
       "height": 450,
-      "bytes": 90170,
-      "fallback_bytes": 127532
+      "bytes": 75630,
+      "fallback_bytes": 113440
     },
     {
-      "file": "dps-960.webp",
-      "fallback": "dps-960.jpg",
+      "file": "dps-ec0cc39c20-960.webp",
+      "fallback": "dps-ec0cc39c20-960.jpg",
       "width": 960,
       "height": 540,
-      "bytes": 121512,
-      "fallback_bytes": 175146
+      "bytes": 100596,
+      "fallback_bytes": 153850
     },
     {
-      "file": "dps-1280.webp",
-      "fallback": "dps-1280.jpg",
+      "file": "dps-ec0cc39c20-1280.webp",
+      "fallback": "dps-ec0cc39c20-1280.jpg",
       "width": 1280,
       "height": 720,
-      "bytes": 240222,
-      "fallback_bytes": 281720
+      "bytes": 196940,
+      "fallback_bytes": 244681
     },
     {
-      "file": "dps-1672.webp",
-      "fallback": "dps-1672.jpg",
+      "file": "dps-ec0cc39c20-1672.webp",
+      "fallback": "dps-ec0cc39c20-1672.jpg",
       "width": 1672,
       "height": 941,
-      "bytes": 353014,
-      "fallback_bytes": 429623
+      "bytes": 279432,
+      "fallback_bytes": 369074
     }
   ],
   "closing": [
     {
-      "file": "closing-640.webp",
-      "fallback": "closing-640.jpg",
+      "file": "closing-9b8093f3e1-640.webp",
+      "fallback": "closing-9b8093f3e1-640.jpg",
       "width": 640,
       "height": 360,
-      "bytes": 62900,
-      "fallback_bytes": 85254
+      "bytes": 63032,
+      "fallback_bytes": 85447
     },
     {
-      "file": "closing-800.webp",
-      "fallback": "closing-800.jpg",
+      "file": "closing-9b8093f3e1-800.webp",
+      "fallback": "closing-9b8093f3e1-800.jpg",
       "width": 800,
       "height": 450,
-      "bytes": 92414,
-      "fallback_bytes": 129021
+      "bytes": 92694,
+      "fallback_bytes": 129249
     },
     {
-      "file": "closing-960.webp",
-      "fallback": "closing-960.jpg",
+      "file": "closing-9b8093f3e1-960.webp",
+      "fallback": "closing-9b8093f3e1-960.jpg",
       "width": 960,
       "height": 540,
-      "bytes": 127230,
-      "fallback_bytes": 178593
+      "bytes": 127122,
+      "fallback_bytes": 178279
     },
     {
-      "file": "closing-1280.webp",
-      "fallback": "closing-1280.jpg",
+      "file": "closing-9b8093f3e1-1280.webp",
+      "fallback": "closing-9b8093f3e1-1280.jpg",
       "width": 1280,
       "height": 720,
       "bytes": 250934,
-      "fallback_bytes": 290980
+      "fallback_bytes": 289480
     },
     {
-      "file": "closing-1672.webp",
-      "fallback": "closing-1672.jpg",
+      "file": "closing-9b8093f3e1-1672.webp",
+      "fallback": "closing-9b8093f3e1-1672.jpg",
       "width": 1672,
-      "height": 940,
-      "bytes": 370646,
-      "fallback_bytes": 446868
+      "height": 941,
+      "bytes": 369756,
+      "fallback_bytes": 442546
     }
   ]
 }

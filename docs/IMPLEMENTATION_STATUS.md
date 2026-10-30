@@ -42,6 +42,10 @@ Firefox renders, accessibility, no-JavaScript behavior and performance results.
 This work changes no runtime or project goal and supplies no new Core, DPS,
 network, model or sensor acceptance evidence. Publication follows the existing
 required PR gate and the separate scoped website deployment workflow.
+The owner’s subsequent visual refinement restores the four concept scenes below
+the unchanged hero and adds an accessible rotating nine-application strip,
+excluding Bank/Citizen; [bounded website evidence](../website/REFINEMENT-VERIFICATION.md)
+records the responsive renders, original icons and interaction checks.
 
 ### F04 — helperacceptatie geslaagd; handmatige integratie — 2026-10-27
 
