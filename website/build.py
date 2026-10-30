@@ -26,13 +26,15 @@ def render(source, values):
 
 
 def icon(name):
+    upstream = {'compute': 'settings', 'sources': 'satellite'}
+    if name in upstream:
+        svg = (HERE / 'assets/icons/lucide' / f'{upstream[name]}.svg').read_text()
+        return re.sub(r'<svg\b[^>]*>', '<svg class="core-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">', svg, count=1)
     shapes = {
         'network': '<circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><path d="m10.5 7.5-4 8.8m7-8.8 4 8.8M8 19h8"/>',
         'cache': '<ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v14c0 4 14 4 14 0V5M5 12c0 4 14 4 14 0"/>',
         'storage': '<path d="m12 2 9 5v10l-9 5-9-5V7Zm0 10v10M3 7l9 5 9-5"/>',
-        'compute': '<path d="m9 3 1-2h4l1 2 2 1 3-1 2 3-1 3 1 2 2 1v4l-2 1-1 2 1 3-3 2-3-1-2 1-1 2h-4l-1-2-2-1-3 1-2-3 1-3-1-2-2-1v-4l2-1 1-2-1-3 3-2 3 1Z" transform="translate(2 0) scale(.83)"/><circle cx="12" cy="12" r="3.5"/>',
         'transactions': '<rect x="5" y="2" width="14" height="20" rx="1"/><path d="M9 7h1m3 0h3M9 12h1m3 0h3M9 17h7"/>',
-        'sources': '<path d="m10 8 6 6-4 4-6-6Zm-3 3L2 6l4-4 5 5m2 5 5 5 4-4-5-5M4 17a6 6 0 0 1 6 6M4 21a2 2 0 0 1 2 2M17 3l4 4m-7-2 5 5"/>',
         'uncertainty': '<circle cx="12" cy="12" r="9" stroke-dasharray="1.5 4"/><circle cx="12" cy="12" r="2"/>',
         'permissions': '<path d="m12 2 8 4v6c0 5-8 10-8 10S4 17 4 12V6Z"/><path d="m8 12 3 3 5-6"/>',
     }

@@ -1,0 +1,90 @@
+[
+  {
+    "browser": "chromium",
+    "width": 17.912704467773438,
+    "icon": "compute",
+    "x": 3.0436484813690186,
+    "y": 2.0174238681793213,
+    "height": 19.96415138244629,
+    "stroke": "rgb(140, 75, 36)",
+    "strokeWidth": "1.5px",
+    "hidden": "true"
+  },
+  {
+    "browser": "chromium",
+    "width": 18.000873565673828,
+    "icon": "satellite",
+    "x": 3,
+    "y": 2.9991273880004883,
+    "height": 18.000873565673828,
+    "stroke": "rgb(140, 75, 36)",
+    "strokeWidth": "1.5px",
+    "hidden": "true"
+  },
+  {
+    "browser": "chromium",
+    "width": 17.912704467773438,
+    "icon": "compute",
+    "x": 3.0436484813690186,
+    "y": 2.0174238681793213,
+    "height": 19.96415138244629,
+    "stroke": "rgb(140, 75, 36)",
+    "strokeWidth": "1.5px",
+    "hidden": "true"
+  },
+  {
+    "browser": "chromium",
+    "width": 18.000873565673828,
+    "icon": "satellite",
+    "x": 3,
+    "y": 2.9991273880004883,
+    "height": 18.000873565673828,
+    "stroke": "rgb(140, 75, 36)",
+    "strokeWidth": "1.5px",
+    "hidden": "true"
+  },
+  {
+    "browser": "firefox",
+    "width": 17.913131713867188,
+    "icon": "compute",
+    "x": 3.043433666229248,
+    "y": 2.0174238681793213,
+    "height": 19.96415138244629,
+    "stroke": "rgb(140, 75, 36)",
+    "strokeWidth": "1.5px",
+    "hidden": "true"
+  },
+  {
+    "browser": "firefox",
+    "width": 18.000873565673828,
+    "icon": "satellite",
+    "x": 3,
+    "y": 2.9991273880004883,
+    "height": 18.000873565673828,
+    "stroke": "rgb(140, 75, 36)",
+    "strokeWidth": "1.5px",
+    "hidden": "true"
+  },
+  {
+    "browser": "firefox",
+    "width": 17.913131713867188,
+    "icon": "compute",
+    "x": 3.043433666229248,
+    "y": 2.0174238681793213,
+    "height": 19.96415138244629,
+    "stroke": "rgb(140, 75, 36)",
+    "strokeWidth": "1.5px",
+    "hidden": "true"
+  },
+  {
+    "browser": "firefox",
+    "width": 18.000873565673828,
+    "icon": "satellite",
+    "x": 3,
+    "y": 2.9991273880004883,
+    "height": 18.000873565673828,
+    "stroke": "rgb(140, 75, 36)",
+    "strokeWidth": "1.5px",
+    "hidden": "true"
+  }
+]
