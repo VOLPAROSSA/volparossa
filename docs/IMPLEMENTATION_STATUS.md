@@ -46,6 +46,8 @@ The owner’s subsequent visual refinement restores the four concept scenes belo
 the unchanged hero and adds an accessible rotating nine-application strip,
 excluding Bank/Citizen; [bounded website evidence](../website/REFINEMENT-VERIFICATION.md)
 records the responsive renders, original icons and interaction checks.
+The final [Compute/satellite icon correction](../website/ICON-VERIFICATION.md)
+replaces malformed custom geometry while preserving the page composition.
 
 ### F04 — helperacceptatie geslaagd; handmatige integratie — 2026-10-27
 
