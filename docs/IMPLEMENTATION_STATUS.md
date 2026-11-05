@@ -49,10 +49,12 @@ records the responsive renders, original icons and interaction checks.
 The final [Compute/satellite icon correction](../website/ICON-VERIFICATION.md)
 replaces malformed custom geometry while preserving the page composition.
 
-### F04 — helperacceptatie geslaagd; handmatige integratie — 2026-10-27
+### F04 — helperacceptatie en integratie geslaagd — 2026-10-27
 
-De kandidaat voor [PR349](https://github.com/VOLPAROSSA/volparossa/pull/349) bevat de minimale
-beveiligingsroute en de gerichte helpercorrecties. De oorspronkelijke
+[PR349](https://github.com/VOLPAROSSA/volparossa/pull/349) is op 27 oktober 2026
+gemerged als `edf569300acbdf5e7715b5192ffbb293235b15ab` en bevat de minimale
+beveiligingsroute en de gerichte helpercorrecties. De mergegegevens zijn op
+5 november 2026 opnieuw gecontroleerd; dit is geen nieuwe runtimeproef. De oorspronkelijke
 [F04-evidence en failures](https://github.com/VOLPAROSSA/volparossa/blob/ff2df276bc50a395dbcfa2d11b515c51fe0ee340/docs/IMPLEMENTATION_STATUS.md)
 blijven behouden; PR347 is historische basis, geen afzonderlijke integratiekandidaat.
 
@@ -79,10 +81,10 @@ livecontracttest en gerichte syntax/ShellCheck/diffcontroles slagen. Onafhankeli
 bron- en resultaatreview bevestigt de afbakening. Eerdere Quality40487291792,
 CodeQL40487286993, dependency/RustSec- en zbus/crypto/DPS-native-evidence blijven
 hergebruikt voor hun gecontroleerd gelijke inputs; dit is geen herhaalde audit.
-De integratiekandidaat behoudt actuele main-documentatie en doorloopt de
-[bestaande PR-controles](https://github.com/VOLPAROSSA/volparossa/pull/349/checks).
-Integratie en administratieve F04-afsluiting blijven aan handmatige maintainermerge
-gebonden. Geen automatische merge of productieactivatie.
+De geïntegreerde kandidaat behoudt de destijds actuele main-documentatie;
+de [bestaande PR-controles](https://github.com/VOLPAROSSA/volparossa/pull/349/checks)
+blijven bij hun geteste bron horen. De handmatige integratie is voltooid.
+Dit bewijst geen nieuwe runtimecompositie en activeert geen productiefunctionaliteit.
 
 ### Development workflow — 2026-10-26
 
