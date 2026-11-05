@@ -86,6 +86,55 @@ fn fixture_v2_cli_closed_summary_is_not_a_raw_code_or_provider_match() {
 }
 
 #[test]
+fn fixture_cli_keeps_request_local_poll_timeout_before_cleanup_failure() {
+    use volparossa_local_control::PrivateStorageFlowAcquireFailure;
+    let first = StorageFixtureAcquireFailure {
+        failure: Some(PrivateStorageFlowAcquireFailure {
+            stage: PrivateStorageFlowAcquireStage::HelperAcquire as i32,
+            reason: PrivateStorageFlowAcquireReason::HelperKernel as i32,
+        }),
+        helper_diagnostic: Some(StorageFixtureHelperDiagnostic::MptcpConnectPollTimedOut as i32),
+    };
+    let last = StorageFixtureAcquireFailure {
+        failure: Some(PrivateStorageFlowAcquireFailure {
+            reason: PrivateStorageFlowAcquireReason::HelperCleanupIncomplete as i32,
+            ..first.failure.unwrap()
+        }),
+        helper_diagnostic: Some(StorageFixtureHelperDiagnostic::CleanupIncomplete as i32),
+    };
+    let mut response = snapshot();
+    response.version = 2;
+    response.records[0] = StorageFixtureCorrelationRecord {
+        request_observation: None,
+        role: Role::Client as i32,
+        fingerprint: None,
+        phase: Phase::FlowAcquire as i32,
+        terminal: Terminal::OperationError as i32,
+        flow_acquire: Some(StorageFixtureAcquireSummary {
+            rounds: 2,
+            first: Some(first),
+            last: Some(last),
+        }),
+    };
+    let mut value = input("clients");
+    value["version"] = json!(2);
+    let projected = project(&response, &parse(&value).unwrap()).unwrap();
+    let summary = &projected["records"][0]["flow_acquire"];
+    assert_eq!(
+        summary["first"]["helper_diagnostic"],
+        "mptcp_connect_poll_timed_out"
+    );
+    assert_eq!(summary["first"]["reason"], "helper_kernel");
+    assert_eq!(summary["last"]["helper_diagnostic"], "cleanup_incomplete");
+    assert_eq!(projected["acceptance_evidence"], false);
+    assert!(
+        !String::from_utf8(render(&projected).unwrap())
+            .unwrap()
+            .contains("MPTCP_CONNECT_POLL_TIMED_OUT")
+    );
+}
+
+#[test]
 fn fixture_v2_cli_rejects_downgrade_and_unknown_enum_before_rendering() {
     let mut value = input("providers");
     value["version"] = json!(2);

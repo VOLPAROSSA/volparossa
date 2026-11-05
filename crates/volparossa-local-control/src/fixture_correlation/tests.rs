@@ -74,7 +74,7 @@ fn fixture_v2_summary_is_closed_bounded_and_unknown_differs_from_absent() {
             value
         );
     }
-    for code in [-1, 9, i32::MAX] {
+    for code in [-1, 10, i32::MAX] {
         let mut value = valid;
         value.first.as_mut().unwrap().helper_diagnostic = Some(code);
         assert!(value.validate().is_err());
@@ -94,6 +94,57 @@ fn fixture_v2_summary_is_closed_bounded_and_unknown_differs_from_absent() {
     assert_ne!(valid.encode_to_vec(), absent.encode_to_vec());
     absent.first.as_mut().unwrap().failure = None;
     assert!(absent.validate().is_err());
+}
+
+#[test]
+fn fixture_mptcp_connect_poll_timeout_is_only_a_kernel_acquire_failure() {
+    use crate::{
+        PrivateStorageFlowAcquireReason as Reason, PrivateStorageFlowAcquireStage as Stage,
+    };
+
+    let mut value = acquire_summary();
+    value.rounds = 2;
+    let first = value.first.as_mut().unwrap();
+    first.helper_diagnostic = Some(StorageFixtureHelperDiagnostic::MptcpConnectPollTimedOut as i32);
+    first.failure.as_mut().unwrap().reason = Reason::HelperKernel as i32;
+    value.validate().unwrap();
+    assert_eq!(
+        StorageFixtureAcquireSummary::decode(value.encode_to_vec().as_slice()).unwrap(),
+        value
+    );
+    for reason in [
+        Reason::HelperCapacity,
+        Reason::HelperUnavailable,
+        Reason::HelperNotFound,
+        Reason::HelperCleanupIncomplete,
+        Reason::HelperOtherRejection,
+        Reason::HelperTimeout,
+    ] {
+        let mut wrong = value;
+        wrong
+            .first
+            .as_mut()
+            .unwrap()
+            .failure
+            .as_mut()
+            .unwrap()
+            .reason = reason as i32;
+        assert!(wrong.validate().is_err());
+    }
+    let mut wrong = value;
+    wrong
+        .first
+        .as_mut()
+        .unwrap()
+        .failure
+        .as_mut()
+        .unwrap()
+        .stage = Stage::RetirementDrain as i32;
+    assert!(wrong.validate().is_err());
+    assert_eq!(
+        serde_json::to_string(&StorageFixtureHelperDiagnostic::MptcpConnectPollTimedOut).unwrap(),
+        "\"mptcp_connect_poll_timed_out\""
+    );
 }
 
 #[test]
