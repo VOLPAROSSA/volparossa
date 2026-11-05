@@ -57,14 +57,18 @@ if [ "$test_backend" = studio-nonroot ]; then
     fi
     case "${RUNNER_TEMP:-}" in /?*) ;; *) fail 'Studio nonroot backend requires absolute runner temporary root' ;; esac
     case "$2" in
-        "$RUNNER_TEMP"/studio-export-*/fixture/runtime.py) ;;
+        "$RUNNER_TEMP"/studio-export-*/fixture/runtime.py|"$RUNNER_TEMP"/studio-export-*/fixture/viewer_runtime.py) ;;
         *) fail 'Studio nonroot backend requires its temporary runtime script' ;;
     esac
     test_studio_directory=${2#"$RUNNER_TEMP"/}
-    test_studio_directory=${test_studio_directory%/fixture/runtime.py}
+    test_studio_directory=${test_studio_directory%/fixture/*}
     case "$test_studio_directory" in
         *[!a-zA-Z0-9_-]*|studio-export-) fail 'Studio nonroot temporary directory is invalid' ;;
     esac
+    if [ ! -d "$RUNNER_TEMP/$test_studio_directory" ] || [ -L "$RUNNER_TEMP/$test_studio_directory" ] ||
+       [ ! -d "$RUNNER_TEMP/$test_studio_directory/fixture" ] || [ -L "$RUNNER_TEMP/$test_studio_directory/fixture" ]; then
+        fail 'Studio nonroot runtime directories must be real directories'
+    fi
     if [ ! -f "$2" ] || [ -L "$2" ]; then
         fail 'Studio nonroot runtime script must be a regular file'
     fi

@@ -10,6 +10,7 @@ use std::{
 };
 
 use ed25519_dalek::VerifyingKey;
+use sha2::{Digest as _, Sha256};
 use tokio::{io::AsyncReadExt as _, net::UnixListener};
 use volparossa_content::{
     CHUNK_BYTES, ChunkStore, SignedManifest,
@@ -34,6 +35,9 @@ enum Fault {
 }
 
 const PASSWORD: &[u8] = b"explicit public contribution process fixture";
+const PUBLISHER_MISMATCH: &str =
+    "Error: content publisher does not match the expected publisher key";
+const INPUT_MISMATCH: &str = "Error: content input does not match the expected SHA-256";
 
 fn create_identity(root: &Path) -> VerifyingKey {
     fs::write(root.join("passphrase"), PASSWORD).unwrap();
@@ -100,6 +104,12 @@ pub(super) async fn scenario() {
             args.extend([
                 "--expected-publisher-key".into(),
                 hex::encode(key.as_bytes()),
+            ]);
+        }
+        if matches!(fault, Fault::None) {
+            args.extend([
+                "--expected-input-sha256".into(),
+                hex::encode(Sha256::digest(&bytes)),
             ]);
         }
         let output = exchange(case.path(), args, &key, fault).await;
@@ -219,22 +229,97 @@ pub(super) async fn publisher_binding_scenario() {
             "--expected-publisher-key".into(),
             hex::encode(key.as_bytes()),
         ]);
-        rejected_before_side_effects(case, args.clone(), "publisher mismatch").await;
+        rejected_before_side_effects(case, args.clone(), PUBLISHER_MISMATCH).await;
         if reuse {
             // A cache open would fail with its busy-lock error before reaching the pin check.
             let locked = ChunkStore::open(&case.join("user-cache"), cache_limits()).unwrap();
-            rejected_before_side_effects(case, args.clone(), "publisher mismatch").await;
+            rejected_before_side_effects(case, args.clone(), PUBLISHER_MISMATCH).await;
             drop(locked);
         }
         for malformed in ["00".to_owned(), "x".repeat(64)] {
             *args.last_mut().unwrap() = malformed;
-            rejected_before_side_effects(case, args.clone(), "invalid value").await;
+            rejected_before_side_effects(case, args.clone(), "--expected-publisher-key").await;
         }
     }
     assert_eq!(
         fs::read(identity.path().join("identity.key")).unwrap(),
         encrypted_identity
     );
+}
+
+pub(super) async fn input_binding_scenario() {
+    let identity = tempfile::tempdir().unwrap();
+    let key = create_identity(identity.path());
+    let encrypted_identity = fs::read(identity.path().join("identity.key")).unwrap();
+    let original = [0x41; 80];
+    let existing = tempfile::tempdir_in(identity.path()).unwrap();
+    matching_reviewed_input(existing.path(), identity.path(), &key, &original).await;
+    let empty = tempfile::tempdir_in(identity.path()).unwrap();
+    matching_reviewed_input(empty.path(), identity.path(), &key, &[]).await;
+    let fresh = tempfile::tempdir_in(identity.path()).unwrap();
+    for (case, reuse) in [(fresh.path(), false), (existing.path(), true)] {
+        fs::write(case.join("input.bin"), [0x42; 80]).unwrap();
+        let mut args = arguments(identity.path(), true);
+        let manifest = args.iter().position(|arg| arg == "--manifest").unwrap() + 1;
+        args[manifest] = "rejected.pb".into();
+        let passphrase = args
+            .iter()
+            .position(|arg| arg == "--passphrase-file")
+            .unwrap()
+            + 1;
+        // Missing credentials prove that a wrong digest is rejected before signer unlock.
+        args[passphrase] = "must-not-read-passphrase".into();
+        args.extend(["--quota-bytes".into(), "80".into()]);
+        if reuse {
+            args.push("--reuse-cache".into());
+        }
+        args.extend([
+            "--expected-publisher-key".into(),
+            hex::encode(key.as_bytes()),
+            "--expected-input-sha256".into(),
+            hex::encode(Sha256::digest(original)),
+        ]);
+        rejected_before_side_effects(case, args.clone(), INPUT_MISMATCH).await;
+        if reuse {
+            let locked = ChunkStore::open(&case.join("user-cache"), cache_limits()).unwrap();
+            rejected_before_side_effects(case, args.clone(), INPUT_MISMATCH).await;
+            drop(locked);
+        }
+        for malformed in ["00".to_owned(), "x".repeat(64), "0".repeat(65)] {
+            *args.last_mut().unwrap() = malformed;
+            rejected_before_side_effects(case, args.clone(), "--expected-input-sha256").await;
+        }
+    }
+    assert_eq!(
+        fs::read(identity.path().join("identity.key")).unwrap(),
+        encrypted_identity
+    );
+}
+
+async fn matching_reviewed_input(root: &Path, identity: &Path, key: &VerifyingKey, bytes: &[u8]) {
+    fs::write(root.join("input.bin"), bytes).unwrap();
+    let expected: [u8; 32] = Sha256::digest(bytes).into();
+    let mut args = arguments(identity, false);
+    args.extend([
+        "--expected-publisher-key".into(),
+        hex::encode(key.as_bytes()),
+        "--expected-input-sha256".into(),
+        hex::encode(expected),
+    ]);
+    let report = successful(&invoke(root, args).await);
+    assert_eq!(report["publisher_key_hex"], hex::encode(key.as_bytes()));
+    assert_eq!(report["network_publication"], false);
+    assert_eq!(report["bytes"], bytes.len());
+    let encoded = fs::read(root.join("manifest.pb")).unwrap();
+    let verified = SignedManifest::decode(&encoded)
+        .unwrap()
+        .verify(key, now())
+        .unwrap();
+    assert_eq!(verified.object_sha256(), &expected);
+    let mut store = ChunkStore::open(&root.join("user-cache"), cache_limits()).unwrap();
+    let mut output = Vec::new();
+    reassemble(&verified, &mut [&mut store], now(), &mut output).unwrap();
+    assert_eq!(output, bytes);
 }
 
 async fn rejected_before_side_effects(root: &Path, args: Vec<String>, reason: &str) {
@@ -247,13 +332,10 @@ async fn rejected_before_side_effects(root: &Path, args: Vec<String>, reason: &s
     };
     assert!(!output.status.success() && output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if reason == "publisher mismatch" {
-        assert_eq!(
-            stderr.trim(),
-            "Error: content publisher does not match the expected publisher key"
-        );
+    if reason.starts_with("Error: ") {
+        assert_eq!(stderr.trim(), reason);
     } else {
-        assert!(stderr.contains(reason) && stderr.contains("--expected-publisher-key"));
+        assert!(stderr.contains("invalid value") && stderr.contains(reason));
     }
     assert!(
         tokio::time::timeout(Duration::from_millis(100), listener.accept())
