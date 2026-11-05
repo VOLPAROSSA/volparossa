@@ -108,7 +108,7 @@ is removed; behavioral tests and production paths are unchanged.
 | Workstream | Recorded checkpoint; next boundary |
 | --- | --- |
 | Network | Original v1 A01–A15 passes on `482e33d0`, run 34047766913; expanded DICN and warm/mixed-link acceptance remain separate. |
-| Storage / Image / Cloud | Components pass; full consumer restore/deletion and zero remote usage remain open after catalog/retention failures. |
+| Storage / Image / Cloud | Current core maintenance, repeated restore, all-copy deletion and zero provider usage pass; the following Cloud deposit times out while reading its challenge length. Full consumer cleanup and joined upload remain open. |
 | Protected Compute | Strict host gate fails in 39868428738 despite public answers/corruption/cleanup; later feature run 39876860833 has successful public-job metadata. Receipt-level host/configuration acceptance, main composition and private workloads remain separate. |
 | Studio | Real local edit/style/preview/export/Core packing passes in 39869460125; production publication, independent hosting, shared AI and dynamic execution remain open. |
 | DPS / Map | Synthetic daemon, quality C ABI and bounded debug JNI slice pass; real sensors, fusion, accuracy/integrity evaluation, navigation and location authority remain open. |
@@ -122,9 +122,10 @@ is removed; behavioral tests and production paths are unchanged.
 Choose complete executable slices by shared dependency, demonstrated failure and
 system value; these priorities impose no fixed application/model/agent order.
 
-1. **Storage:** drive the required ordinary renewal rotation without weakening
-   retention authority; then exercise catalog restore and finish Image/Cloud
-   publish, repair, restore, deletion and confirmed zero remote usage.
+1. **Storage:** diagnose the Cloud deposit challenge-read deadline with bounded
+   connection observations; then complete Image/Cloud publish, repair, restore,
+   deletion and confirmed zero remote usage before the joined upload trial.
+   Preserve finite retention authority and the passing core maintenance baseline.
 2. **Protected model:** use the retained connect diagnostic and strict host gate
    to prove two public turns, corruption rejection and complete cleanup on one
    source; join separately authorized private execution only with its own proof.
@@ -164,7 +165,7 @@ system value; these priorities impose no fixed application/model/agent order.
   analyses and 66 Node tests pass. These source results do not prove catalog
   restoration. Failure snapshots are bounded/sequential, not per-request cause
   evidence; empty saturated rings do not prove absence of failures.
-- **Latest actual and follow-up:** Alpha 39864473079 fails
+- **October failure and follow-up:** Alpha 39864473079 fails
   `private-storage-maintenance-core-restart`, specifically
   `baseline_custody/reconcile_progress/pending_handoff` with
   `replacement_retention_insufficient`. The retention guard correctly prevents
@@ -182,18 +183,50 @@ system value; these priorities impose no fixed application/model/agent order.
   establish the underlying failure substage, rotation convergence, catalog
   restoration or independent remote cleanup.
 
-The central continuation on 5 November reapplies PR339's bounded ordinary
-rotation fixture to current main. It also keeps version-4 failure diagnostics
-compact through export and revalidation, and records only the validated closed
-diagnostic in job logs. The original run's seven-day artifacts have expired;
-its retained logs do not establish the failure substage. A fresh source-bound
-trial [42113671903](https://github.com/VOLPAROSSA/volparossa/actions/runs/42113671903)
-on `e50af83d` stops before Storage: the guest compiler source policy rejects its
-environment. Alpha's SSH caller now drops only the two transport metadata
-variables already removed by the helper VM; credentials/configuration remain
-rejected. This caller correction still needs a new actual trial. Historical consumer
-profile 10 pins remain unchanged, so that trial cannot accept the later
-Image/Cloud draft heads by implication.
+The central continuation [PR371](https://github.com/VOLPAROSSA/volparossa/pull/371)
+integrates as `ba6ab458429f5ac50cdc8c3538e6d24f44aad916`. It restores PR339's
+bounded ordinary rotation fixture and keeps validated failure diagnostics compact
+through export and durable job logging. Initial actual
+[42113671903](https://github.com/VOLPAROSSA/volparossa/actions/runs/42113671903)
+at `e50af83d` fails before Storage because the compiler policy rejects inherited
+SSH transport metadata. The caller now removes only `SSH_CLIENT` and
+`SSH_CONNECTION`; credential/configuration rejection remains enforced.
+
+**Latest actual:** [42116076218](https://github.com/VOLPAROSSA/volparossa/actions/runs/42116076218)
+tests `3af3cce1082cd76ea8a0e348e280d85f8fbc6771`, whose Quality and CodeQL pass.
+Core maintenance completes through cursor 9, including restart/repair, two
+restores, deletion of all eleven copies and independently observed zero usage
+at all three providers. This run needs no extra reconciliation turns and does
+not demonstrate the optional extra-turn branch. Cloud then fails deposit:
+fragment 1/copy 0 append returns `CONTENT_UNAVAILABLE` after an operation
+deadline in `challenge_read_verify/length_read` (90–120 seconds). Provider A
+retains 1,198,718 committed bytes; B 998,931 committed plus 199,787 reserved;
+C 799,148 committed. Host comparison and local cleanup pass; complete consumer
+acceptance and remote cleanup do not. The saved v3 request correlation belongs
+to a successful Image reserve, so it cannot establish this Cloud failure's cause.
+The retained ZIP digest is
+`e245ce06890e56728825c4e89a8b124e985589c644da72229ff642be10460330`.
+Historical consumer profile 10 pins remain unchanged: this actual does not accept
+the later Image/Cloud draft heads.
+
+Cumulative [PR279](https://github.com/VOLPAROSSA/volparossa/pull/279) remains a
+draft. At `fb835b136ed4`, all 21 Storage source suites, workspace tests,
+separate-feature checks and both isolated TLS-close tests pass; the TLS receipt
+binds tree `fc598b13bf38bd916309ba3aa670f147cb74ce5b` and confirms unchanged
+host state. [Quality 42116351790](https://github.com/VOLPAROSSA/volparossa/actions/runs/42116351790)
+is nevertheless cancelled at the 45-minute job limit during its final integration
+harness. No aggregate pass is inferred. Source contracts took 7m18s and a cold
+audit-tool build 7m07s. The draft now separates source checks and compilation
+within the existing workflow; its required final check fails unless both jobs
+succeed, including cancellation and skipped-dependency cases.
+
+The next diagnostic reuses the bounded v2 TLS-prefix observer only around Cloud
+deposit, with a final snapshot before application cleanup and priority for failed
+connections. Its close budget fits inside the existing handshake; an unavailable
+observer cannot replace the application outcome. No app pin, operation deadline,
+authority or public diagnostic schema changes. Fragment/request binding and
+causal attribution remain explicitly false. This fixture follow-up needs hosted
+contracts and a fresh exact-source actual; it is not a transport fix or acceptance.
 
 [Full Storage evidence and original failures](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#execution-priorities-and-next-milestones)
 retain exact pins, artifacts and receipts. Automatic upload branch PR279 still

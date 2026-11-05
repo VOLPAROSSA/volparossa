@@ -291,22 +291,17 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  quality:
-    name: ${{ github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus) && 'Quality gates skipped for opt-in proof' || 'Unprivileged quality gates' }}
+  storage-contracts:
+    name: Storage source contracts
     if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus)) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
-
+    timeout-minutes: 15
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
-
-      - name: Verify complete committed goal preservation and fresh-export controls
-        run: |
-          python3 -B scripts/verify-goal-preservation.py --git-revision "$(git rev-parse HEAD)"
-          python3 -B scripts/test-goal-preservation.py
 
       - name: Check Storage consumer diagnostic profiles without network access
         run: |
@@ -352,6 +347,25 @@ jobs:
           run_contract python3 -B tests/integration/test-storage-provider-usage-snapshot.py
 
           test "$storage_contract_failures" -eq 0
+
+  quality-build:
+    name: Build and integration tests
+    needs: storage-contracts
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus)) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify complete committed goal preservation and fresh-export controls
+        run: |
+          python3 -B scripts/verify-goal-preservation.py --git-revision "$(git rev-parse HEAD)"
+          python3 -B scripts/test-goal-preservation.py
 
       - name: Install pinned Rust toolchain
         run: |
@@ -760,3 +774,20 @@ jobs:
           # helper enforces a closed inventory and a 128 MiB payload limit.
           path: ${{ steps.audit-cache.outputs.path }}
           key: ${{ steps.audit-cache.outputs.key }}
+
+  quality:
+    name: ${{ github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus) && 'Quality gates skipped for opt-in proof' || 'Unprivileged quality gates' }}
+    needs: [storage-contracts, quality-build]
+    # Always report the required result, including failed, skipped or cancelled
+    # prerequisites. Only this small gate is unconditional; builds stay cancellable.
+    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus)) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require every Quality prerequisite to succeed
+        env:
+          STORAGE_CONTRACTS_RESULT: ${{ needs.storage-contracts.result }}
+          QUALITY_BUILD_RESULT: ${{ needs.quality-build.result }}
+        run: |
+          test "$STORAGE_CONTRACTS_RESULT" = success
+          test "$QUALITY_BUILD_RESULT" = success

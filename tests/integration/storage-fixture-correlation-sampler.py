@@ -276,17 +276,19 @@ def validate(value):
 
 
 class Samples:
-    def __init__(self, phase, version=1):
+    def __init__(self, phase, version=1, deadline=None):
         require(phase in PHASES)
         require(type(version) is int and version in (1, 2))
         self.version = version
+        self.deadline = deadline
         self.phase, self.rows, self.cursor, self.rounds = phase, {}, 0, 0
         self.armed = self.disarmed = False
         self.joined = True
         self.failed = self.incomplete = False
 
     def checked(self, binary, control, action, epoch, fingerprints, stopped):
-        state, value, joined = query(binary, control, action, epoch, fingerprints, stopped, self.version)
+        options = {} if self.deadline is None else dict(deadline=self.deadline)
+        state, value, joined = query(binary, control, action, epoch, fingerprints, stopped, self.version, **options)
         self.joined &= joined
         expected = dict(arm='armed', clients='observed', providers='observed', disarm='disarmed')[action]
         if state != expected or not joined or value['version'] != self.version:
@@ -318,7 +320,7 @@ class Samples:
             self.rows.pop(key, None)
             self.incomplete = True
 
-    def round(self, binary, controls, epoch, stopped):
+    def round(self, binary, controls, epoch, stopped, *, terminal_first=False):
         if self.rounds >= MAX_ROUNDS:
             self.incomplete = True
             return
@@ -326,9 +328,14 @@ class Samples:
         clients = self.checked(binary, controls[0], 'clients', epoch, [], stopped)
         if clients is None: return
         records = clients['records']
+        if terminal_first:
+            # A failed connection may become terminal only after the owner
+            # returns. Do not spend the final bounded batch on older successes.
+            records = sorted(records, key=lambda row: 2 if row['terminal'] == 'complete'
+                else 1 if row['terminal'] == 'active' else 0)
         fingerprints = list(dict.fromkeys(row['fingerprint'] for row in records if row['fingerprint'] is not None))
         # Rotate bounded batches; never query more than eight fingerprints per provider.
-        batch = (fingerprints[self.cursor:] + fingerprints[:self.cursor])[:8]
+        batch = (fingerprints if terminal_first else fingerprints[self.cursor:] + fingerprints[:self.cursor])[:8]
         self.cursor = (self.cursor + len(batch)) % max(1, len(fingerprints))
         if len(batch) < len(fingerprints): self.incomplete = True
         providers = []
@@ -388,11 +395,11 @@ def controls_for(work):
 
 
 @contextmanager
-def capture(binary, work, root, phase):
+def capture(binary, work, root, phase, *, deadline=None, publish_report=True):
     """All observer failures are optional; always yield the original consumer."""
-    samples, stopped = Samples(phase, version=2), threading.Event()
+    samples, stopped = Samples(phase, version=2, deadline=deadline), threading.Event()
+    deadline = min(deadline if deadline is not None else float('inf'), time.monotonic() + MAX_SECONDS)
     epoch, controls, attempted, thread = None, (), [], None
-    deadline = time.monotonic() + MAX_SECONDS
 
     def observe():
         try:
@@ -424,7 +431,7 @@ def capture(binary, work, root, phase):
         except Exception:
             samples.failed = samples.incomplete = True
             samples.joined = False  # An unexpected query failure is not a proven child join.
-        yield
+        yield samples
     finally:
         stopped.set()
         if thread is not None and thread.ident is not None: thread.join()
@@ -433,7 +440,7 @@ def capture(binary, work, root, phase):
             # before disarming. It has the same bounded private query budget.
             finishing = threading.Event()
             if samples.armed and time.monotonic() < deadline:
-                samples.round(binary, controls, epoch, finishing)
+                samples.round(binary, controls, epoch, finishing, terminal_first=True)
         except Exception:
             samples.failed = samples.incomplete = True
             samples.joined = False
@@ -447,8 +454,9 @@ def capture(binary, work, root, phase):
                 disarmed.append(False)
         samples.disarmed = len(disarmed) == 4 and all(disarmed)
         epoch = None  # No durable secret or Python zeroization claim.
-        try: publish(root, phase, samples.report())
-        except Exception: pass
+        if publish_report:
+            try: publish(root, phase, samples.report())
+            except Exception: pass
 
 
 def read_file(path, phase, owner):
@@ -633,12 +641,13 @@ def ipc_write(channel, value, stopped, deadline):
 
 
 class RequestCapture:
-    def __init__(self, binary, work, root, deadline):
+    def __init__(self, binary, work, root, deadline, cloud_window=False):
         self.binary, self.work, self.root, self.deadline = binary, work, root, deadline
+        self.cloud_window = cloud_window
         self.parent, self.child = socket.socketpair()
         self.parent.setblocking(False)
         self.stopped = threading.Event()
-        self.value = request_report()
+        self.value = Samples('publish', version=2).report() if cloud_window else request_report()
         self.thread = threading.Thread(target=self.observe, name='storage-exact-request-observer')
 
     def checked(self, control, action, epoch, target=None, fingerprints=None):
@@ -680,6 +689,9 @@ class RequestCapture:
         self.value.update(reason=None, record=row)
 
     def observe(self):
+        if self.cloud_window:
+            self.observe_cloud_window()
+            return
         attempted, epoch = [], None
         try:
             self.value['reason'] = 'binding'
@@ -722,13 +734,50 @@ class RequestCapture:
             except Exception: pass
             self.parent.close()
 
+    def observe_cloud_window(self):
+        # Reuse the bounded v2 TLS-prefix observer. This window identifies the
+        # application operation, never a fragment, signed request or failure cause.
+        samples = None
+        try:
+            incoming = ipc_read(self.parent, self.stopped, self.deadline)
+            exact(incoming, ('version', 'app', 'operation'))
+            require(type(incoming['version']) is int and incoming['version'] == 2
+                and incoming['app'] == 'cloud' and incoming['operation'] == 'deposit')
+            with capture(self.binary, self.work, self.root, 'publish', deadline=self.deadline,
+                    publish_report=False) as samples:
+                try:
+                    ipc_write(self.parent, dict(version=2, state='armed' if samples.armed else 'unavailable'),
+                        self.stopped, self.deadline)
+                    final = ipc_read(self.parent, self.stopped, self.deadline)
+                    exact(final, ('version', 'outcome'))
+                    require(type(final['version']) is int and final['version'] == 2
+                        and final['outcome'] in ('complete', 'failed'))
+                finally:
+                    # Leave room inside Node's existing 30-second close wait
+                    # for bounded child termination/reap after query expiry.
+                    samples.deadline = min(self.deadline, time.monotonic() + 20)
+            self.value = samples.report()
+        except Exception:
+            if samples is not None:
+                samples.failed = samples.incomplete = True
+                self.value = samples.report()
+        finally:
+            # capture() has joined the sampler, finished its final snapshot and
+            # attempted every disarm before the application may close.
+            try: ipc_write(self.parent, dict(version=2, state='closed'), self.stopped, self.deadline)
+            except Exception:
+                # The owner may already have moved to cleanup. Do not retain
+                # phase pairs whose pre-cleanup window was not acknowledged.
+                self.value.update(sampling_failed=True, incomplete=True, records=[])
+            self.parent.close()
+
 
 @contextmanager
-def capture_request(binary, work, root, deadline):
+def capture_request(binary, work, root, deadline, *, cloud_window=False):
     observer = None
     try:
         try:
-            observer = RequestCapture(binary, work, root, deadline)
+            observer = RequestCapture(binary, work, root, deadline, cloud_window)
             observer.thread.start()
         except Exception:
             if observer is not None:
@@ -741,7 +790,8 @@ def capture_request(binary, work, root, deadline):
             observer.child.close()
             if observer.thread.ident is not None: observer.thread.join()
             observer.parent.close()
-        try: publish(root, 'publish', observer.value if observer else request_report('ipc'))
+        fallback = Samples('publish', version=2).report() if cloud_window else request_report('ipc')
+        try: publish(root, 'publish', observer.value if observer else fallback)
         except Exception: pass
 
 

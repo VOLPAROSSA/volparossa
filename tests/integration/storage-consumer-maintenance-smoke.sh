@@ -9,7 +9,7 @@ private_storage_consumer_private() {
     case $consumer_profile_version in 7|8|9|10) ;; *) fail CONSUMER_PROFILE_INVALID; return 1 ;; esac
     set -- "$@" --profile-version "$consumer_profile_version" --network-version 2
     case $1:${storage_fixture_correlation:-no}:$consumer_profile_version in
-        publish:yes:10) set -- "$@" --fixture-request-stage ;;
+        publish:yes:10) set -- "$@" --fixture-cloud-window ;;
         publish:yes:9|exercise:yes:9|finish:yes:9) set -- "$@" --fixture-correlation ;;
     esac
     STORAGE_PROOF_BASELINE_MS=${provider_baseline_ms:-0} \

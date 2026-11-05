@@ -217,6 +217,32 @@ class Contracts(unittest.TestCase):
 
 
 class FixtureV2(unittest.TestCase):
+    def test_final_batch_prioritizes_new_failure_after_many_complete_connections(self):
+        completed = [row(fingerprint=f'{index:064x}', phase='closing', terminal='complete') for index in range(12)]
+        failed = row(fingerprint='ef' * 32, terminal='operation_error')
+        active = row(fingerprint='de' * 32)
+        records = [*completed, active, failed]
+        provider = row('provider', fingerprint=failed['fingerprint'], phase='selector_read', terminal='operation_error')
+        original = query_fixture({str(CONTROLS[2]): [provider]}, records)
+        batches = []
+        def query(*args):
+            if args[2] == 'providers': batches.append(args[4])
+            return original(*args)
+        samples = M['Samples']('publish', version=2)
+        samples.cursor = 8  # Historical rotation cannot select the final window.
+        with patch.dict(G, query=query):
+            samples.round('/core', CONTROLS, EPOCH, threading.Event(), terminal_first=True)
+        self.assertEqual(len(batches), 3)
+        for batch in batches:
+            self.assertEqual(len(batch), 8)
+            self.assertEqual(batch[:2], [failed['fingerprint'], active['fingerprint']])
+        value = samples.report()
+        self.assertTrue(value['incomplete'])  # The eight-fingerprint bound still applies.
+        self.assertIn(dict(client_phase='client_challenge', client_terminal='operation_error', match_status='matched',
+            provider_role='b', provider_phase='selector_read', provider_terminal='operation_error', flow_acquire=None),
+            value['records'])
+        self.assertFalse(value['fragment_copy_binding'])
+
     @staticmethod
     def summary():
         first = dict(stage='helper_acquire', reason='helper_kernel', helper_diagnostic='transport_unavailable')
@@ -676,7 +702,7 @@ storage_fixture_correlation=$3
 timeout() { printf '%s\\n' "$@"; }
 private_storage_consumer_private "$4" /fixed/owner
 '''
-        for profile in ('7', '8', '9'):
+        for profile in ('7', '8', '9', '10'):
             for enabled in ('yes', 'no'):
                 for phase in ('prepare', 'publish', 'exercise', 'finish', 'cleanup'):
                     result = subprocess.run(['sh', '-eu', '-c', script, 'inert',
@@ -687,6 +713,9 @@ private_storage_consumer_private "$4" /fixed/owner
                     self.assertIn('--reuid=123', args); self.assertIn('--groups=125', args)
                     self.assertEqual('--fixture-correlation' in args,
                         profile == '9' and enabled == 'yes' and phase in M['PHASES'])
+                    self.assertEqual('--fixture-cloud-window' in args,
+                        profile == '10' and enabled == 'yes' and phase == 'publish')
+                    self.assertNotIn('--fixture-request-stage', args)
 
     def test_maintenance_export_omits_absent_or_private_payload_and_keeps_valid_diagnostic(self):
         for raw, expected in ((None, False), (b'PRIVATE', False),
