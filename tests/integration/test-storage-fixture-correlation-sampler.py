@@ -646,12 +646,12 @@ private_storage_consumer_phase publish
                     self.assertEqual(target.exists(), valid)
                     self.assertNotIn(b'PRIVATE', result.stdout + result.stderr)
 
-    def test_real_phase_capture_is_only_opted_current_profile_and_closes_last(self):
+    def test_phase_capture_covers_early_failure_and_cleanup_only_when_opted(self):
         smoke = runpy.run_path(str(HERE / 'storage-consumer-maintenance-smoke.py'))
         scope = smoke['phase'].__globals__
         root = Path('/fixed/work/u/m'); work = root.parents[1]
-        original_error = ValueError('original_node_failure')
-        for profile in range(1, 10):
+        original_error = ValueError('original_image_failure')
+        for profile in range(1, 11):
             for network in (1, 2):
                 for enabled in (False, True):
                     events = []
@@ -665,7 +665,10 @@ private_storage_consumer_phase publish
                         events.append('flow')
                         try: yield
                         finally: events.append('joined')
-                    def node(*_): raise original_error
+                    def node(*_):
+                        events.append('image_publish')
+                        try: raise original_error
+                        finally: events.append('owner_cleanup')
                     original_loader = runpy.run_path
                     def load(path):
                         module = original_loader(path)
@@ -686,9 +689,12 @@ private_storage_consumer_phase publish
                             smoke['phase'](root, 'publish', work / 'runtime-exit/control/agent.sock',
                                 work / 'client-fixtures/private-storage-user', 'a' * 64, time.monotonic() + 1)
                         self.assertIs(caught.exception, original_error)
-                    expected = enabled and profile == 9 and network == 2
+                    expected = enabled and profile in (9, 10) and network == 2
                     self.assertEqual('arm' in events, expected)
-                    if expected: self.assertEqual((events[0], events[-1]), ('arm', 'disarm'))
+                    if expected:
+                        self.assertEqual((events[0], events[-1]), ('arm', 'disarm'))
+                        self.assertLess(events.index('arm'), events.index('image_publish'))
+                        self.assertLess(events.index('owner_cleanup'), events.index('disarm'))
 
     def test_flag_is_explicit_current_profile_only_without_privilege_or_budget_change(self):
         script = '''
@@ -712,9 +718,8 @@ private_storage_consumer_private "$4" /fixed/owner
                     self.assertEqual(args[:4], ['--signal=TERM', '--kill-after=30s', '2400s', 'setpriv'])
                     self.assertIn('--reuid=123', args); self.assertIn('--groups=125', args)
                     self.assertEqual('--fixture-correlation' in args,
-                        profile == '9' and enabled == 'yes' and phase in M['PHASES'])
-                    self.assertEqual('--fixture-cloud-window' in args,
-                        profile == '10' and enabled == 'yes' and phase == 'publish')
+                        enabled == 'yes' and ((profile == '9' and phase in M['PHASES'])
+                            or (profile == '10' and phase == 'publish')))
                     self.assertNotIn('--fixture-request-stage', args)
 
     def test_maintenance_export_omits_absent_or_private_payload_and_keeps_valid_diagnostic(self):

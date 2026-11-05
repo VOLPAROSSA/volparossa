@@ -276,19 +276,17 @@ def validate(value):
 
 
 class Samples:
-    def __init__(self, phase, version=1, deadline=None):
+    def __init__(self, phase, version=1):
         require(phase in PHASES)
         require(type(version) is int and version in (1, 2))
         self.version = version
-        self.deadline = deadline
         self.phase, self.rows, self.cursor, self.rounds = phase, {}, 0, 0
         self.armed = self.disarmed = False
         self.joined = True
         self.failed = self.incomplete = False
 
     def checked(self, binary, control, action, epoch, fingerprints, stopped):
-        options = {} if self.deadline is None else dict(deadline=self.deadline)
-        state, value, joined = query(binary, control, action, epoch, fingerprints, stopped, self.version, **options)
+        state, value, joined = query(binary, control, action, epoch, fingerprints, stopped, self.version)
         self.joined &= joined
         expected = dict(arm='armed', clients='observed', providers='observed', disarm='disarmed')[action]
         if state != expected or not joined or value['version'] != self.version:
@@ -395,11 +393,11 @@ def controls_for(work):
 
 
 @contextmanager
-def capture(binary, work, root, phase, *, deadline=None, publish_report=True):
+def capture(binary, work, root, phase):
     """All observer failures are optional; always yield the original consumer."""
-    samples, stopped = Samples(phase, version=2, deadline=deadline), threading.Event()
-    deadline = min(deadline if deadline is not None else float('inf'), time.monotonic() + MAX_SECONDS)
+    samples, stopped = Samples(phase, version=2), threading.Event()
     epoch, controls, attempted, thread = None, (), [], None
+    deadline = time.monotonic() + MAX_SECONDS
 
     def observe():
         try:
@@ -431,7 +429,7 @@ def capture(binary, work, root, phase, *, deadline=None, publish_report=True):
         except Exception:
             samples.failed = samples.incomplete = True
             samples.joined = False  # An unexpected query failure is not a proven child join.
-        yield samples
+        yield
     finally:
         stopped.set()
         if thread is not None and thread.ident is not None: thread.join()
@@ -454,9 +452,8 @@ def capture(binary, work, root, phase, *, deadline=None, publish_report=True):
                 disarmed.append(False)
         samples.disarmed = len(disarmed) == 4 and all(disarmed)
         epoch = None  # No durable secret or Python zeroization claim.
-        if publish_report:
-            try: publish(root, phase, samples.report())
-            except Exception: pass
+        try: publish(root, phase, samples.report())
+        except Exception: pass
 
 
 def read_file(path, phase, owner):
@@ -641,13 +638,12 @@ def ipc_write(channel, value, stopped, deadline):
 
 
 class RequestCapture:
-    def __init__(self, binary, work, root, deadline, cloud_window=False):
+    def __init__(self, binary, work, root, deadline):
         self.binary, self.work, self.root, self.deadline = binary, work, root, deadline
-        self.cloud_window = cloud_window
         self.parent, self.child = socket.socketpair()
         self.parent.setblocking(False)
         self.stopped = threading.Event()
-        self.value = Samples('publish', version=2).report() if cloud_window else request_report()
+        self.value = request_report()
         self.thread = threading.Thread(target=self.observe, name='storage-exact-request-observer')
 
     def checked(self, control, action, epoch, target=None, fingerprints=None):
@@ -689,9 +685,6 @@ class RequestCapture:
         self.value.update(reason=None, record=row)
 
     def observe(self):
-        if self.cloud_window:
-            self.observe_cloud_window()
-            return
         attempted, epoch = [], None
         try:
             self.value['reason'] = 'binding'
@@ -734,50 +727,13 @@ class RequestCapture:
             except Exception: pass
             self.parent.close()
 
-    def observe_cloud_window(self):
-        # Reuse the bounded v2 TLS-prefix observer. This window identifies the
-        # application operation, never a fragment, signed request or failure cause.
-        samples = None
-        try:
-            incoming = ipc_read(self.parent, self.stopped, self.deadline)
-            exact(incoming, ('version', 'app', 'operation'))
-            require(type(incoming['version']) is int and incoming['version'] == 2
-                and incoming['app'] == 'cloud' and incoming['operation'] == 'deposit')
-            with capture(self.binary, self.work, self.root, 'publish', deadline=self.deadline,
-                    publish_report=False) as samples:
-                try:
-                    ipc_write(self.parent, dict(version=2, state='armed' if samples.armed else 'unavailable'),
-                        self.stopped, self.deadline)
-                    final = ipc_read(self.parent, self.stopped, self.deadline)
-                    exact(final, ('version', 'outcome'))
-                    require(type(final['version']) is int and final['version'] == 2
-                        and final['outcome'] in ('complete', 'failed'))
-                finally:
-                    # Leave room inside Node's existing 30-second close wait
-                    # for bounded child termination/reap after query expiry.
-                    samples.deadline = min(self.deadline, time.monotonic() + 20)
-            self.value = samples.report()
-        except Exception:
-            if samples is not None:
-                samples.failed = samples.incomplete = True
-                self.value = samples.report()
-        finally:
-            # capture() has joined the sampler, finished its final snapshot and
-            # attempted every disarm before the application may close.
-            try: ipc_write(self.parent, dict(version=2, state='closed'), self.stopped, self.deadline)
-            except Exception:
-                # The owner may already have moved to cleanup. Do not retain
-                # phase pairs whose pre-cleanup window was not acknowledged.
-                self.value.update(sampling_failed=True, incomplete=True, records=[])
-            self.parent.close()
-
 
 @contextmanager
-def capture_request(binary, work, root, deadline, *, cloud_window=False):
+def capture_request(binary, work, root, deadline):
     observer = None
     try:
         try:
-            observer = RequestCapture(binary, work, root, deadline, cloud_window)
+            observer = RequestCapture(binary, work, root, deadline)
             observer.thread.start()
         except Exception:
             if observer is not None:
@@ -790,8 +746,7 @@ def capture_request(binary, work, root, deadline, *, cloud_window=False):
             observer.child.close()
             if observer.thread.ident is not None: observer.thread.join()
             observer.parent.close()
-        fallback = Samples('publish', version=2).report() if cloud_window else request_report('ipc')
-        try: publish(root, 'publish', observer.value if observer else fallback)
+        try: publish(root, 'publish', observer.value if observer else request_report('ipc'))
         except Exception: pass
 
 

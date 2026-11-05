@@ -383,8 +383,6 @@ export function requestStageOutcome(error) {
 export async function withRequestStage(ctx, app, config, operation,
   channelFactory = fd => new Socket({ fd, readable: true, writable: true })) {
   if (!Number.isSafeInteger(ctx.requestStageFd) || ctx.profileVersion !== 10) return operation();
-  const cloudWindow = ctx.cloudWindow === true, version = cloudWindow ? 2 : 3;
-  if (cloudWindow && ctx.stage !== 'cloud_publish') return operation();
   let channel, read, finish, stop;
   try {
     channel = channelFactory(ctx.requestStageFd);
@@ -410,7 +408,7 @@ export async function withRequestStage(ctx, app, config, operation,
           check(bytes.at(-1) === 10 && bytes.indexOf(10) === bytes.length - 1, 'configuration');
           const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
           bytes = Buffer.alloc(0);
-          check(closedKeys(value, ['version', 'state']) && value.version === version, 'configuration');
+          check(closedKeys(value, ['version', 'state']) && value.version === 3, 'configuration');
           resolve(value.state);
         } catch { reject(new Error('diagnostic_unavailable')); }
       };
@@ -418,13 +416,13 @@ export async function withRequestStage(ctx, app, config, operation,
     });
     finish = async outcome => {
       try {
-        channel.write(`${JSON.stringify({ version, outcome })}\n`);
+        channel.write(`${JSON.stringify({ version: 3, outcome })}\n`);
         check(await read(30000) === 'closed', 'configuration');
       }
       catch { /* Diagnostic unavailability never replaces the operation result. */ }
       finally { ctx.signal.removeEventListener('abort', stop); channel.destroy(); }
     };
-    const target = cloudWindow ? { version: 2, app: 'cloud', operation: 'deposit' } : requestStageTarget(
+    const target = requestStageTarget(
       await json(join(app, 'archive/fragment-0002/copy-0/archive.json')),
       await json(join(app, 'archive/fragments.json')), config);
     channel.write(`${JSON.stringify(target)}\n`);
@@ -444,7 +442,7 @@ export async function withRequestStage(ctx, app, config, operation,
     let primary;
     try { primary = consumerFailureReport(ctx, 'publish', error); }
     catch { primary = consumerFailureReport(ctx, 'publish', undefined); }
-    if (finish) await finish(cloudWindow ? 'failed' : requestStageOutcome(error));
+    if (finish) await finish(requestStageOutcome(error));
     throw new RequestStageFailure(primary, error);
   }
 }
@@ -1009,7 +1007,7 @@ export async function publish(ctx, m) {
           requirePublishComplete(value, name, operation, ctx.profileVersion, c.challengeReadDiagnosticsV10 === true);
           return value;
         };
-        const value = name === (ctx.cloudWindow === true ? 'cloud' : 'image') && operation === 'deposit'
+        const value = name === 'image' && operation === 'deposit'
           ? await withRequestStage(ctx, app, c, execute) : await execute();
         if (operation === 'deposit') deposited = validateStorage(value, r.cipher_bytes, 'published');
       }
@@ -1174,7 +1172,6 @@ export async function main(argv) {
   const requestFd = process.env.STORAGE_PROOF_REQUEST_STAGE_FD;
   if (phase === 'publish' && profileVersion === 10 && /^[0-9]{1,5}$/u.test(requestFd ?? '') && Number(requestFd) >= 3) {
     ctx.requestStageFd = Number(requestFd);
-    ctx.cloudWindow = process.env.STORAGE_PROOF_CLOUD_WINDOW === '1';
   }
   try {
     await absent(join(root, `storage-consumer-${phase}.json`));

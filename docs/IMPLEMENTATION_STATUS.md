@@ -192,7 +192,7 @@ at `e50af83d` fails before Storage because the compiler policy rejects inherited
 SSH transport metadata. The caller now removes only `SSH_CLIENT` and
 `SSH_CONNECTION`; credential/configuration rejection remains enforced.
 
-**Latest actual:** [42116076218](https://github.com/VOLPAROSSA/volparossa/actions/runs/42116076218)
+**Main baseline:** [42116076218](https://github.com/VOLPAROSSA/volparossa/actions/runs/42116076218)
 tests `3af3cce1082cd76ea8a0e348e280d85f8fbc6771`, whose Quality and CodeQL pass.
 Core maintenance completes through cursor 9, including restart/repair, two
 restores, deletion of all eleven copies and independently observed zero usage
@@ -220,13 +220,36 @@ audit-tool build 7m07s. The draft now separates source checks and compilation
 within the existing workflow; its required final check fails unless both jobs
 succeed, including cancellation and skipped-dependency cases.
 
-The next diagnostic reuses the bounded v2 TLS-prefix observer only around Cloud
-deposit, with a final snapshot before application cleanup and priority for failed
-connections. Its close budget fits inside the existing handshake; an unavailable
-observer cannot replace the application outcome. No app pin, operation deadline,
-authority or public diagnostic schema changes. Fragment/request binding and
-causal attribution remain explicitly false. This fixture follow-up needs hosted
-contracts and a fresh exact-source actual; it is not a transport fix or acceptance.
+At `3682669226d49f7f3b71eca3e93205a74ca3d2a5`,
+[Quality 42124657171](https://github.com/VOLPAROSSA/volparossa/actions/runs/42124657171)
+passes all 21 source suites, the complete build/test job and the required final
+gate. [CodeQL 42124650437](https://github.com/VOLPAROSSA/volparossa/actions/runs/42124650437)
+also passes. The tested PR merge tree matches source tree
+`3648c76038e528511fb455da9f139638a8e07c6a`.
+
+**Latest actual:** [42125726739](https://github.com/VOLPAROSSA/volparossa/actions/runs/42125726739)
+at that source again passes Core maintenance, two restores, eleven-copy deletion
+and independent zero usage. Image then fails deposit before Cloud starts:
+fragment 2/copy 0 FINALIZE reaches its ten-second TLS handshake deadline; the
+following copy 1 RESERVE returns `helper_acquire/helper_cleanup_incomplete`.
+The latter is a new helper Acquire rejection after the local retirement-drain
+boundary, not proof that the prior flow failed retirement. Consumer providers
+retain nonzero usage. Host comparison and local cleanup pass; full consumer
+acceptance and remote cleanup remain unproved. The Cloud-only observer correctly
+remains unarmed. The retained ZIP digest is
+`c9de63735843fe498bba8f713ba918629eccff593c0e72bd6653af54db8abcdf`.
+
+The follow-up removes that separate Cloud mode and uses the existing bounded
+v2 observer around profile 10's whole publish phase, from before Image through
+owner cleanup. Failed or cancelled connections take priority within the existing
+bounded final batch; helper diagnostics can distinguish existing rejection branches.
+Historical Image v3 request capture remains available. Optional observation
+cannot replace the application outcome. No app pin, operation deadline,
+authority or public diagnostic schema changes. The v2 records do not bind an
+application or request; `fragment_copy_binding` and `causal_attribution` remain
+false. This simpler fixture needs
+hosted contracts and a fresh exact-source actual; it is not a transport fix or
+acceptance.
 
 [Full Storage evidence and original failures](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#execution-priorities-and-next-milestones)
 retain exact pins, artifacts and receipts. Automatic upload branch PR279 still

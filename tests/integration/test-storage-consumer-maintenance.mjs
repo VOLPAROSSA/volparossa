@@ -87,66 +87,6 @@ test('request-stage observes only the exact failed reserve and freezes failure b
   } finally { await rm(root, { recursive: true }); }
 });
 
-test('Cloud connection window closes before application cleanup and preserves the original outcome', async () => {
-  for (const failed of [false, true]) for (const unavailable of [false, true]) {
-    const events = [], cancel = new AbortController();
-    const ctx = { requestStageFd: 3, cloudWindow: true, profileVersion: 10, provision: 'a'.repeat(64),
-      stage: 'cloud_publish', signal: cancel.signal, deadline: performance.now() + 1000 };
-    class Channel extends EventEmitter {
-      write(raw) {
-        const value = JSON.parse(raw);
-        assert.doesNotMatch(raw, /private|archive_id|provider_key|fingerprint|fragment/u);
-        if (Object.hasOwn(value, 'app')) {
-          assert.deepEqual(value, { version: 2, app: 'cloud', operation: 'deposit' });
-          events.push('arm_cloud');
-          queueMicrotask(() => this.emit('data', Buffer.from(JSON.stringify({ version: 2,
-            state: unavailable ? 'unavailable' : 'armed' }) + '\n')));
-        } else {
-          assert.deepEqual(value, { version: 2, outcome: failed ? 'failed' : 'complete' });
-          events.push('snapshot_and_disarm');
-          queueMicrotask(() => this.emit('data', Buffer.from('{"version":2,"state":"closed"}\n')));
-        }
-        return true;
-      }
-      destroy() { this.emit('close'); }
-    }
-    const result = { application_result: true };
-    const task = withPublishCore(ctx, 'cloud', { close: async () => events.push('core_close') },
-      () => withRequestStage(ctx, '/private/cloud', {}, async () => {
-        events.push('cloud_deposit');
-        if (failed) throw new Error('/private/original-error');
-        return result;
-      }, () => new Channel()));
-    if (failed) await assert.rejects(task, error => {
-      const report = consumerFailureReport(ctx, 'publish', error);
-      assert.equal(report.stage, 'cloud_publish');
-      assert.equal(report.code, 'application_failed');
-      assert.deepEqual(report.publish_cleanup, { app: 'cloud', state: 'complete' });
-      assert.doesNotMatch(JSON.stringify(report), /private|original-error/u);
-      return true;
-    });
-    else assert.equal(await task, result);
-    assert.deepEqual(events, ['arm_cloud', 'cloud_deposit', 'snapshot_and_disarm', 'core_close']);
-  }
-});
-
-test('Cloud window cannot arm for Image and an unavailable channel cannot replace application failure', async () => {
-  const cancel = new AbortController(), primary = new Error('private-primary');
-  const ctx = { requestStageFd: 3, cloudWindow: true, profileVersion: 10, provision: 'a'.repeat(64),
-    stage: 'image_publish', signal: cancel.signal, deadline: performance.now() + 1000 };
-  await assert.rejects(withRequestStage(ctx, '/private/image', {}, async () => { throw primary; },
-    () => assert.fail('Image must not arm the Cloud window')), error => error === primary);
-  ctx.stage = 'cloud_publish';
-  await assert.rejects(withRequestStage(ctx, '/private/cloud', {}, async () => { throw primary; },
-    () => { throw new Error('private-observer-failure'); }), error => {
-      const report = consumerFailureReport(ctx, 'publish', error);
-      assert.equal(report.stage, 'cloud_publish');
-      assert.equal(report.code, 'application_failed');
-      assert.doesNotMatch(JSON.stringify(report), /private/u);
-      return true;
-    });
-});
-
 const hash = value => createHash('sha256').update(value).digest('hex');
 const keys = [1, 2, 3].map(v => Buffer.alloc(32, v).toString('hex'));
 const copy = (key, charge = 'committed') => ({ provider_key: [...Buffer.from(key, 'hex')], charge });

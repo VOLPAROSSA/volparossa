@@ -24,7 +24,6 @@ ACTIVITY = runpy.run_path(str(HERE / 'storage-provider-activity-sampler.py'))
 CORRELATION = runpy.run_path(str(HERE / 'storage-fixture-correlation-sampler.py'))
 FIXTURE_CORRELATION = False
 REQUEST_STAGE = False
-CLOUD_WINDOW = False
 PROVISIONER = runpy.run_path(str(HERE / 'storage-consumer-maintenance-provision.py'))
 NODE = Path('/opt/volparossa-node/bin/node')
 PROVISION = Path('/opt/volparossa-storage-consumers/provision.json')
@@ -556,8 +555,6 @@ def run_child(command, deadline, *, limit=MAX_REPORT, request_stage=None):
         descriptor = request_stage.child.fileno()
         require(descriptor >= 3, 'fixture_request_stage')
         environment['STORAGE_PROOF_REQUEST_STAGE_FD'] = str(descriptor)
-        if request_stage.cloud_window:
-            environment['STORAGE_PROOF_CLOUD_WINDOW'] = '1'
         inherited['pass_fds'] = (descriptor,)
     process = subprocess.Popen(list(map(str, command)), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, start_new_session=True, env=environment, **inherited)
@@ -754,9 +751,8 @@ def phase(root, selected, exit_socket, flow_root, provision, deadline):
     cloud = private_json(root / 'cloud/storage.json')
     require(image['coreBinary'] == cloud['coreBinary'] and image['controlSocket'] == cloud['controlSocket'], 'shared_core')
     binary, client = validate_locations(root, image['coreBinary'], image['controlSocket'])
-    if REQUEST_STAGE or CLOUD_WINDOW:
-        with CORRELATION['capture_request'](binary, root.parents[1], root, deadline,
-                cloud_window=CLOUD_WINDOW) as observer:
+    if REQUEST_STAGE:
+        with CORRELATION['capture_request'](binary, root.parents[1], root, deadline) as observer:
             return phase_with_core(root, selected, exit_socket, flow_root, provision, deadline, binary, client,
                 request_stage=observer)
     correlation = CORRELATION['capture'](binary, root.parents[1], root, selected) if (
@@ -888,12 +884,9 @@ def cleanup(root):
 
 
 def main(arguments):
-    global PROFILE_VERSION, NETWORK_VERSION, FIXTURE_CORRELATION, REQUEST_STAGE, CLOUD_WINDOW
+    global PROFILE_VERSION, NETWORK_VERSION, FIXTURE_CORRELATION, REQUEST_STAGE
     PROFILE_VERSION = 1
     NETWORK_VERSION = 1
-    CLOUD_WINDOW = bool(arguments and arguments[-1] == '--fixture-cloud-window')
-    if CLOUD_WINDOW:
-        arguments = arguments[:-1]
     REQUEST_STAGE = bool(arguments and arguments[-1] == '--fixture-request-stage')
     if REQUEST_STAGE:
         arguments = arguments[:-1]
@@ -910,8 +903,6 @@ def main(arguments):
         and arguments and arguments[0] in CORRELATION['PHASES']), 'fixture_correlation_scope')
     require(not REQUEST_STAGE or (not FIXTURE_CORRELATION and PROFILE_VERSION == 10
         and NETWORK_VERSION == 2 and arguments and arguments[0] == 'publish'), 'fixture_request_stage_scope')
-    require(not CLOUD_WINDOW or (not REQUEST_STAGE and not FIXTURE_CORRELATION and PROFILE_VERSION == 10
-        and NETWORK_VERSION == 2 and arguments and arguments[0] == 'publish'), 'fixture_cloud_window_scope')
     if len(arguments) == 2 and arguments[0] == 'flow-minimum':
         require(arguments[1] in FLOW_MINIMUM, 'phase')
         print(FLOW_MINIMUM[arguments[1]])
