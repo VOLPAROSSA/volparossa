@@ -641,6 +641,14 @@ jobs:
             else
               printf '%s\n' 'No complete protected owner maintenance proof was published.' >>"$GITHUB_STEP_SUMMARY"
             fi
+            failure="$VOLPAROSSA_ALPHA_OUTPUT/private-storage-maintenance-lifecycle-failure.json"
+            if test -f "$failure"; then
+              # Keep only the bounded, closed diagnostic in durable job logs.
+              # Artifact expiry must not erase the failure boundary; this is not acceptance.
+              printf 'Maintenance lifecycle diagnostic at %s:\n' "$GITHUB_SHA"
+              python3 -B tests/integration/private-storage-maintenance-smoke.py lifecycle-failure "$failure" \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
             exit 0
           fi
           if test "$VOLPAROSSA_ALPHA_SCENARIO" = private-storage-handoff; then
